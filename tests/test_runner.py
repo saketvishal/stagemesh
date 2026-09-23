@@ -109,6 +109,27 @@ def test_ready_task_dispatches_one_builder():
         assert execution.prompt_hash
 
 
+def test_runner_reload_keeps_live_executor_and_replaces_it_when_idle():
+    old_executor = FakeExecutor()
+    runner = _runner(
+        config=RunnerConfig(
+            workers=(WorkerConfig("builder-a", "BUILDER", adapter="fake"),),
+            result_dir=os.getenv("BUILD_COORDINATOR_RESULT_DIR"),
+        ),
+        executors={"builder-a": old_executor},
+    )
+    updated = RunnerConfig(
+        workers=(WorkerConfig("builder-a", "BUILDER", adapter="subprocess", command=("new-worker",)),),
+        result_dir=os.getenv("BUILD_COORDINATOR_RESULT_DIR"),
+    )
+
+    runner.reload_config(updated, live_worker_ids={"builder-a"})
+    assert runner._executors["builder-a"] is old_executor
+
+    runner.reload_config(updated, live_worker_ids=set())
+    assert "builder-a" not in runner._executors
+
+
 def test_worker_saturation_is_backpressure_not_configuration_escalation():
     with SessionLocal() as session:
         for task_id in ("SAT-1", "SAT-2", "SAT-3", "SAT-4", "SAT-5"):

@@ -9,6 +9,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -686,3 +687,65 @@ def test_configured_concurrency_is_the_parallelism_limit(tmp_path, registry, lim
     assert all(t["state"] == "DONE" for t in payload["final"]["tasks"])
     assert payload["peak_parallel_builders"] == limit
     assert len({e["worker_id"] for e in payload["final"]["executions"]}) == limit
+
+
+def test_continue_reloads_project_yaml_between_cycles(tmp_path, registry, monkeypatch, capsys):
+    root, _ = make_project_repo(
+        tmp_path,
+        {},
+        concurrency=1,
+        workers={"builder": {"adapter": "fake"}, "reviewer": {"adapter": "fake"}},
+        extra={},
+    )
+    monkeypatch.setenv("STAGEMESH_PROJECT_REGISTRY", str(registry))
+    monkeypatch.setenv("STAGEMESH_POLL_SECONDS", "0")
+    monkeypatch.delenv("BUILD_COORDINATOR_DATABASE_URL", raising=False)
+    monkeypatch.delenv("BUILD_COORDINATOR_RUNNER_CONFIG", raising=False)
+
+    reload_builder_counts: list[int] = []
+
+    class ReloadProbeRunner:
+        def __init__(self, _session_factory, config):
+            self.config = config
+            self.cycles = 0
+
+        def reload_config(self, config, *, live_worker_ids=None):
+            self.config = config
+            reload_builder_counts.append(sum(1 for worker in config.workers if worker.role == "BUILDER"))
+
+        def run_once(self):
+            self.cycles += 1
+            if self.cycles == 1:
+                project = yaml.safe_load((root / ".stagemesh" / "project.yaml").read_text(encoding="utf-8"))
+                project["execution"]["concurrency"] = 3
+                (root / ".stagemesh" / "project.yaml").write_text(
+                    yaml.safe_dump(project),
+                    encoding="utf-8",
+                )
+            return SimpleNamespace(
+                launched=[],
+                observed=[],
+                recovered=[],
+                escalations=[],
+            )
+
+    import build_coordinator.project.commands as commands
+
+    monkeypatch.setattr(commands, "BuildRunner", ReloadProbeRunner)
+    commands.handle_continue(
+        SimpleNamespace(
+            target=[],
+            project_dir=str(root),
+            no_sync=True,
+            github=False,
+            dry_run=False,
+            max_cycles=2,
+            timeout=None,
+            once=False,
+            all_projects=False,
+        )
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert reload_builder_counts == [1, 3]
+    assert payload["project"]["concurrency"] == 3
