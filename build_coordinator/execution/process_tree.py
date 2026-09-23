@@ -82,8 +82,22 @@ def _terminate_posix(pid: int, *, grace_seconds: float) -> None:
                 return
         deadline = time.time() + grace_seconds
         while time.time() < deadline:
+            # Reap zombie if it happens to be our child
+            try:
+                reaped, _ = os.waitpid(pid, os.WNOHANG)
+                if reaped == pid:
+                    return
+            except OSError:
+                pass
             try:
                 os.kill(pid, 0)
+            except OSError:
+                return
+            # On Linux, check if process transitioned to zombie
+            try:
+                with open(f"/proc/{pid}/stat", "r") as f:
+                    if f.read().split()[2] == "Z":
+                        return
             except OSError:
                 return
             time.sleep(0.05)

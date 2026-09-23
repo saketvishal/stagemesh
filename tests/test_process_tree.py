@@ -13,14 +13,43 @@ from build_coordinator.execution.subprocess_executor import SubprocessExecutor
 def _alive(pid: int) -> bool:
     if sys.platform == "win32":
         import ctypes
+        from ctypes import wintypes
 
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        handle = kernel32.OpenProcess(0x100000, False, pid)
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        STILL_ACTIVE = 259
+        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
         if not handle:
             return False
-        kernel32.CloseHandle(handle)
-        return True
+        try:
+            exit_code = wintypes.DWORD()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                return False
+            return exit_code.value == STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
     try:
+        # Reap zombie if it happens to be our direct child
+        try:
+            reaped, _ = os.waitpid(pid, os.WNOHANG)
+            if reaped == pid:
+                return False
+        except OSError:
+            pass
+
+        # Check /proc/<pid>/status for zombie on Linux
+        proc_status = Path(f"/proc/{pid}/status")
+        if proc_status.is_file():
+            try:
+                for line in proc_status.read_text(encoding="utf-8").splitlines():
+                    if line.startswith("State:"):
+                        state = line.split(":", 1)[1].strip()
+                        if state.startswith("Z"):
+                            return False
+                        break
+            except OSError:
+                return False
+
         os.kill(pid, 0)
         return True
     except OSError:
@@ -45,7 +74,7 @@ def _write_tree_scripts(pid_dir: Path) -> Path:
         "(pid_dir / 'child.pid').write_text(str(os.getpid()), encoding='utf-8')\n"
         "gc = pid_dir / 'grandchild.py'\n"
         "import subprocess\n"
-        "subprocess.Popen([sys.executable, str(gc), str(pid_dir)])\n"
+        "subprocess.Popen([sys.executable, str(gc), str(pid_dir)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
         "time.sleep(60)\n",
         encoding="utf-8",
     )
@@ -57,7 +86,7 @@ def _write_tree_scripts(pid_dir: Path) -> Path:
         "(pid_dir / 'worker.pid').write_text(str(os.getpid()), encoding='utf-8')\n"
         "child = pid_dir / 'child.py'\n"
         "import subprocess\n"
-        "subprocess.Popen([sys.executable, str(child), str(pid_dir)])\n"
+        "subprocess.Popen([sys.executable, str(child), str(pid_dir)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
         "time.sleep(60)\n",
         encoding="utf-8",
     )
@@ -68,7 +97,7 @@ def test_terminate_kills_worker_child_and_grandchild(tmp_path: Path):
     pid_dir = tmp_path / "pids"
     pid_dir.mkdir()
     worker = _write_tree_scripts(pid_dir)
-    unrelated_proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    unrelated_proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     unrelated = unrelated_proc.pid
     executor = SubprocessExecutor([sys.executable, str(worker), str(pid_dir)])
     handle = executor.launch(

@@ -94,10 +94,18 @@ def test_stale_coordinator_database_without_schema_version_fails_closed(tmp_path
 
 def test_sqlite_and_postgresql_urls_select_matching_dialects():
     sqlite = engine_from_url("sqlite:///:memory:")
-    postgres = engine_from_url("postgresql+psycopg://user:pass@localhost:5432/coord")
     assert sqlite.dialect.name == "sqlite"
-    assert postgres.dialect.name == "postgresql"
     sqlite.dispose()
+
+    try:
+        import psycopg  # noqa: F401
+    except ImportError:
+        import pytest
+
+        pytest.skip("psycopg is not installed")
+
+    postgres = engine_from_url("postgresql+psycopg://user:pass@localhost:5432/coord")
+    assert postgres.dialect.name == "postgresql"
     postgres.dispose()
 
 

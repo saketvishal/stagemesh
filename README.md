@@ -5,10 +5,10 @@ Durable engineering execution across AI agents, models, and runtimes.
 StageMesh is a provider-neutral coordinator for autonomous multi-agent software
 engineering workflows.
 
-> **Status: v0.1-alpha release candidate.**
+> **Status: v0.1.0-alpha (Public Alpha)**
 >
-> Publication still requires an explicit human approval decision after final
-> independent verification. This repository is not yet public.
+> StageMesh is published under the Apache 2.0 license. This first public alpha
+> establishes durable engineering orchestration across AI agents, models, and runtimes.
 
 ---
 
@@ -17,7 +17,7 @@ engineering workflows.
 For this first alpha, the Python distribution, import package, config paths,
 and CLI remain `build-coordinator` / `build_coordinator`. The public project
 name is StageMesh; the compatibility names are retained to avoid unnecessary
-breakage during the release-candidate review.
+breakage during early alpha adoption.
 
 ---
 

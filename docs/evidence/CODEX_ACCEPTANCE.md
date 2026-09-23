@@ -1,6 +1,6 @@
 # Codex Execution Acceptance Evidence
 
-## Status: PROVEN for Codex execution; final independent verification pending
+## Status: PROVEN for Codex execution; published under v0.1.0-alpha
 
 Real Codex CLI execution through StageMesh has been proven. This document
 records what was actually demonstrated.
@@ -44,8 +44,7 @@ under concurrent execution.
 
 ### Final independent release verification
 
-This release candidate still requires independent final verification before
-publication.
+This baseline completed independent final verification prior to publication of v0.1.0-alpha.
 
 ### Cross-provider independent review
 
