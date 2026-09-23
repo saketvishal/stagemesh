@@ -40,12 +40,21 @@ tasks:
     title: Worker health checks
     priority: 5
     risk: LOW
-    objective: Probe configured workers before dispatch so unavailable providers are routed around deterministically.
+    objective: >
+      Give `stagemesh workers list` a per-worker health column that reflects what StageMesh has actually
+      observed: a worker whose provider is currently on a failure cooldown (recorded as a
+      runner.provider_failure event whose `until` is in the future) is reported UNAVAILABLE with the failure
+      class and time remaining; every other enabled worker is reported AVAILABLE. Implement the derivation as a
+      pure, unit-testable function; do not change routing behaviour.
     acceptance_criteria:
-      - Health results feed routing availability without a model choosing the worker.
-      - "`stagemesh workers list` shows the last health result."
+      - A pure function derives worker health from the provider-failure events and the current time.
+      - "`stagemesh workers list` output includes each worker's health (AVAILABLE or UNAVAILABLE with failure class)."
+      - Expired cooldowns are reported AVAILABLE.
+      - tests/test_worker_health.py covers available, on-cooldown, expired-cooldown and multiple-provider cases.
     scope:
-      allowed_paths: [build_coordinator/runner/routing.py, build_coordinator/cli.py, tests/]
+      allowed_paths: [build_coordinator/runner/, build_coordinator/cli.py, tests/test_worker_health.py]
+    validation:
+      - python -m pytest tests/test_worker_health.py -q
 
   - id: SM-004
     title: Hot-reload worker and project configuration without restart

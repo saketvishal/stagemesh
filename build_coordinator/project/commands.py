@@ -42,7 +42,7 @@ from build_coordinator.project.runtime import (
 from build_coordinator.project.state_migration import migrate_state, sqlite_path_from_url
 from build_coordinator.runner import BuildRunner
 from build_coordinator.runner.upstream import retry_pending_pushes
-from build_coordinator.service import list_available_tasks
+from build_coordinator.service import ensure_state, list_available_tasks, set_mode
 
 _LIVE_EXECUTION = ("LAUNCHED", "RUNNING")
 _BUILD_ROLES = ("BUILDER", "REMEDIATION")
@@ -94,7 +94,7 @@ def add_continue_command(sub: argparse._SubParsersAction) -> None:
     p.add_argument("--dry-run", action="store_true", help="plan only: no writes, no execution")
     p.add_argument("--once", action="store_true", help="run a single orchestration cycle")
     p.add_argument("--max-cycles", type=int, default=2000)
-    p.add_argument("--timeout", type=float, default=None, help="wall-clock limit in seconds")
+    p.add_argument("--timeout", type=float, default=None, help="stop starting new work after this many seconds and let in-flight work finish")
     p.add_argument("--no-sync", action="store_true", help="skip project backlog synchronization")
     p.add_argument("--github", action="store_true", help="also run the optional GitHub task-source adapter")
     p.add_argument("--all", action="store_true", dest="all_projects", help="coordinate every registered project (default outside a project)")
@@ -306,7 +306,16 @@ def handle_continue(args: argparse.Namespace) -> None:
     cycles: list[dict[str, Any]] = []
     peak_parallel = 0
     idle_cycles = 0
+    drained_from: str | None = None
     for number in range(1, max(1, args.max_cycles) + 1):
+        if args.timeout is not None and drained_from is None and time.monotonic() - started > args.timeout:
+            with lifecycle.session() as session:
+                state = ensure_state(session)
+                drained_from = state.mode
+                if drained_from == "RUNNING":
+                    set_mode(session, "DRAINING")
+                session.commit()
+            print(f"[{project.project_id}] time budget reached: finishing in-flight work, starting nothing new", file=sys.stderr, flush=True)
         if project.push_upstream and (number == 1 or number % 10 == 0):
             with lifecycle.session() as session:
                 retry_pending_pushes(
@@ -350,9 +359,11 @@ def handle_continue(args: argparse.Namespace) -> None:
                 break
         else:
             idle_cycles = 0
-        if args.timeout is not None and time.monotonic() - started > args.timeout:
-            break
         time.sleep(config.poll_seconds)
+    if drained_from == "RUNNING":
+        with lifecycle.session() as session:
+            set_mode(session, "RUNNING")
+            session.commit()
 
     with lifecycle.session() as session:
         final = project_status(session, project)
