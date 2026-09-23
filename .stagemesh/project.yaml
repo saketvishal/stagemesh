@@ -8,38 +8,16 @@ aliases: [stagemesh, build-coordinator]
 
 repository:
   main_ref: main
-  remote_name: origin
 
 state_dir: .build-coordinator
 
 execution:
   concurrency: 1
-  reviewers: 1
+  reviewers: 2                 # TWO_REVIEWERS tasks need two distinct reviewers
   default_review_policy: INDEPENDENT
 
-workers:
-  builder:
-    provider: local-agent
-    adapter: subprocess
-    command: [python, -P, examples/stdin_print_cli_wrapper.py]
-    timeout_seconds: 3600
-    env:
-      BUILD_COORDINATOR_PRINT_CLI: {source: environment, variable: STAGEMESH_AGENT_CLI}
-  reviewer:
-    provider: local-agent
-    adapter: subprocess
-    command: [python, -P, examples/stdin_print_cli_wrapper.py]
-    timeout_seconds: 1800
-    env:
-      BUILD_COORDINATOR_PRINT_CLI: {source: environment, variable: STAGEMESH_AGENT_CLI}
-  integration:
-    provider: local-agent
-    adapter: subprocess
-    command: [python, -P, examples/stdin_print_cli_wrapper.py]
-    timeout_seconds: 1800
-    env:
-      BUILD_COORDINATOR_PRINT_CLI: {source: environment, variable: STAGEMESH_AGENT_CLI}
-
+# Agents come from the machine's verified runtimes (`stagemesh agent setup`).
+# Integration is local (no upstream) unless `upstream:` is configured.
 task_sources:
   github:
     enabled: false
