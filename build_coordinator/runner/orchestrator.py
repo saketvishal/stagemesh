@@ -70,6 +70,7 @@ from build_coordinator.runner.models import (
 )
 from build_coordinator.runner.routing import (
     ProviderConfig,
+    RETRYABLE_PROVIDER_FAILURES,
     RoutingDecision,
     StageRequirement,
     approving_reviewers,
@@ -635,13 +636,34 @@ class BuildRunner:
         """A worker that died, or a provider that failed, must not strand the task.
 
         The execution is recorded as LOST so ownership is released through the
-        normal recovery path (checkpoints and evidence stay), a replacement worker
-        resumes the task, and a failing provider is routed around for a cooldown.
-        Repeated failures escalate instead of looping."""
+        normal recovery path (checkpoints and evidence stay) and a replacement
+        worker resumes the task. Transient provider failures (RATE_LIMITED,
+        UNAVAILABLE, NETWORK_FAILURE, per the routing taxonomy's
+        RETRYABLE_PROVIDER_FAILURES) and worker deaths are retried: the failing
+        provider is routed around for a bounded, exponentially growing cooldown
+        (see `_retry_backoff_seconds`) instead of being relaunched every poll
+        cycle, while other workers/providers remain free to pick the task up
+        immediately. Attempts are bounded and each one is recorded on its own
+        execution row; once exhausted the task escalates with a typed reason and
+        the checkpoint is preserved instead of looping forever."""
         failure = str(merged.get("provider_failure") or "").upper()
         died = observation.exit_code not in (None, 0) and not merged.get("schema_version")
         if not failure and not died:
             return False
+        retryable = died or failure in RETRYABLE_PROVIDER_FAILURES
+        attempts = session.scalar(
+            select(func.count())
+            .select_from(BuildRunnerExecution)
+            .where(BuildRunnerExecution.task_id == execution.task_id)
+            .where(BuildRunnerExecution.role == execution.role)
+            .where(BuildRunnerExecution.status.in_(("LOST", "FAILED")))
+        ) or 0
+        exhausted = attempts + 1 >= self._config.max_execution_attempts
+        backoff_seconds = (
+            _retry_backoff_seconds(failure or "WORKER_EXIT", attempts)
+            if retryable
+            else _COOLDOWN_SECONDS.get(failure, 300)
+        )
         if failure:
             record_event(
                 session,
@@ -653,26 +675,35 @@ class BuildRunner:
                         "provider": execution.provider,
                         "worker_id": execution.worker_id,
                         "failure": failure,
-                        "until": (_now() + timedelta(seconds=_COOLDOWN_SECONDS.get(failure, 300))).isoformat(),
+                        "until": (_now() + timedelta(seconds=backoff_seconds)).isoformat(),
                         "detail": str(merged.get("detail") or "")[:300],
                     },
                 ),
             )
-        attempts = session.scalar(
-            select(func.count())
-            .select_from(BuildRunnerExecution)
-            .where(BuildRunnerExecution.task_id == execution.task_id)
-            .where(BuildRunnerExecution.role == execution.role)
-            .where(BuildRunnerExecution.status.in_(("LOST", "FAILED")))
-        ) or 0
         execution.status = "LOST"
         execution.completed_at = _now()
         execution.result_data = {
             **(execution.result_data or {}),
             **merged,
             "reconciliation_state": "WORKER_EXITED" if died else "PROVIDER_FAILED",
+            "retry_attempt": attempts + 1,
+            "retryable_failure": retryable,
+            "retry_backoff_seconds": backoff_seconds if retryable else None,
         }
-        if attempts + 1 >= self._config.max_execution_attempts:
+        if execution.claim_id:
+            try:
+                checkpoint(
+                    session,
+                    execution.claim_id,
+                    worker_id=execution.worker_id,
+                    data=CheckpointInput(
+                        current_step=f"{execution.role.lower()} execution lost after {failure or 'worker exit'}",
+                        known_failures=[f"{failure or 'WORKER_EXITED'} (attempt {attempts + 1})"],
+                    ),
+                )
+            except CoordinatorPolicyError:
+                pass
+        if exhausted:
             self._block_task(session, execution.task_id, "EXECUTION_RETRY_LIMIT_REACHED")
         return True
 
@@ -1563,6 +1594,17 @@ _COOLDOWN_SECONDS = {
     "UNAVAILABLE": 300,
     "EXECUTION_FAILURE": 60,
 }
+_RETRY_BACKOFF_CAP_SECONDS = 3600
+
+
+def _retry_backoff_seconds(failure: str, attempt: int) -> int:
+    """Bounded exponential backoff before a retryable failure is relaunched.
+
+    `attempt` is the number of prior LOST/FAILED executions for this task and
+    role (0 for the first retry), so each successive retry waits longer, up to
+    `_RETRY_BACKOFF_CAP_SECONDS`."""
+    base = _COOLDOWN_SECONDS.get(failure, 300)
+    return min(base * (2 ** max(attempt, 0)), _RETRY_BACKOFF_CAP_SECONDS)
 
 
 def _task_definition(task: BuildTask) -> dict:
