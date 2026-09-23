@@ -398,6 +398,70 @@ def test_failed_process_does_not_mark_task_done():
         assert session.get(BuildTask, "RUN-FAIL").state == "CLAIMED"
 
 
+def test_retryable_failure_relaunches_after_backoff_then_escalates_when_exhausted(monkeypatch):
+    """RATE_LIMITED is retryable per the routing taxonomy (SM-002): each failure
+    is retried with no human gate, the backoff grows and is bounded per attempt,
+    every attempt is recorded on its own execution row with a checkpoint, and
+    once max_execution_attempts is exhausted the task escalates with a typed
+    reason instead of looping forever."""
+    clock = {"now": utcnow()}
+    monkeypatch.setattr(orchestrator_module, "_now", lambda: clock["now"])
+
+    def rate_limited():
+        return ExecutionObservation(
+            "FAILED",
+            exit_code=1,
+            result_data={"provider_failure": "RATE_LIMITED", "schema_version": 1},
+        )
+
+    executors = {"builder-a": FakeExecutor([rate_limited(), rate_limited(), rate_limited()])}
+    config = _config()
+    assert config.max_execution_attempts == 3
+    with SessionLocal() as session:
+        upsert_task(session, _task("RUN-RETRY"))
+        session.commit()
+
+    runner = _runner(config, executors=executors)
+    backoffs = []
+    for expected_attempt in (1, 2, 3):
+        runner.run_once()  # launches a fresh attempt once eligible again
+        runner.run_once()  # observes the RATE_LIMITED failure
+        with SessionLocal() as session:
+            executions = session.scalars(
+                select(BuildRunnerExecution)
+                .where(BuildRunnerExecution.task_id == "RUN-RETRY")
+                .order_by(BuildRunnerExecution.launched_at)
+            ).all()
+            assert len(executions) == expected_attempt, "each attempt is its own execution row"
+            latest = executions[-1]
+            assert latest.status == "LOST"
+            assert latest.result_data["retry_attempt"] == expected_attempt
+            assert latest.result_data["retryable_failure"] is True
+            checkpoint_row = session.scalars(
+                select(BuildTaskCheckpoint)
+                .where(BuildTaskCheckpoint.task_id == "RUN-RETRY")
+                .order_by(BuildTaskCheckpoint.created_at)
+            ).all()[-1]
+            assert f"attempt {expected_attempt}" in checkpoint_row.known_failures[0]
+            task = session.get(BuildTask, "RUN-RETRY")
+            if expected_attempt < 3:
+                assert task.state != "BLOCKED", "not exhausted yet: no human gate"
+            backoffs.append(latest.result_data["retry_backoff_seconds"])
+        clock["now"] = clock["now"] + timedelta(seconds=backoffs[-1] + 1)
+
+    assert backoffs == [600, 1200, 2400], "backoff grows per attempt and stays bounded"
+    with SessionLocal() as session:
+        task = session.get(BuildTask, "RUN-RETRY")
+        assert task.state == "BLOCKED"
+        blocked_event = session.scalars(
+            select(BuildTaskEvent)
+            .where(BuildTaskEvent.task_id == "RUN-RETRY")
+            .where(BuildTaskEvent.event_type == "task.transitioned")
+            .where(BuildTaskEvent.to_state == "BLOCKED")
+        ).all()[-1]
+        assert blocked_event.event_data["reason"] == "EXECUTION_RETRY_LIMIT_REACHED"
+
+
 def test_lost_execution_releases_active_claim_to_stale_with_checkpoint():
     executors = {"builder-a": FakeExecutor([ExecutionObservation("LOST")])}
     with SessionLocal() as session:

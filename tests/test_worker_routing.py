@@ -23,6 +23,8 @@ from build_coordinator.runner.routing import (
     CAP_CODE_REVIEW,
     CAP_CODING,
     CAP_SCM_OPERATOR,
+    PROVIDER_FAILURES,
+    RETRYABLE_PROVIDER_FAILURES,
     ProviderConfig,
     StageRequirement,
     route_worker,
@@ -355,3 +357,11 @@ def test_routing_explanation_can_include_stage_ineligible_workers():
 
     reasons = {candidate.worker_id: candidate.reasons for candidate in decision.candidates}
     assert "stage_not_allowed" in reasons["reviewer-1"]
+
+
+def test_retryable_provider_failures_are_a_subset_of_the_routing_taxonomy():
+    assert RETRYABLE_PROVIDER_FAILURES == {"RATE_LIMITED", "UNAVAILABLE", "NETWORK_FAILURE"}
+    assert RETRYABLE_PROVIDER_FAILURES <= PROVIDER_FAILURES
+    # Failures that need a credential fix, quota reset, or investigation are
+    # deliberately excluded from automatic retry.
+    assert not RETRYABLE_PROVIDER_FAILURES & {"AUTH_FAILURE", "QUOTA_EXHAUSTED", "EXECUTION_FAILURE"}
