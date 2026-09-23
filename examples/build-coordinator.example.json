@@ -1,0 +1,15 @@
+﻿{
+  "control_repo_root": "/path/to/your-repo",
+  "database_url": "sqlite:////path/to/.build-coordinator/coordinator.sqlite3",
+  "data_dir": "/path/to/.build-coordinator",
+  "max_active_builders": 2,
+  "project_roots": {
+    "my-project": "."
+  },
+  "worktrees": {
+    "builder-a": "/path/to/worktree-a",
+    "builder-b": "/path/to/worktree-b",
+    "reviewer-1": "/path/to/worktree-a",
+    "integration-1": "/path/to/your-repo"
+  }
+}

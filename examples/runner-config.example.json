@@ -1,0 +1,43 @@
+﻿{
+  "poll_seconds": 5,
+  "max_remediation_cycles": 2,
+  "auto_push_allowed": false,
+  "main_ref": "main",
+  "remote_name": "origin",
+  "allowed_workspace_roots": [
+    "/path/to/worktree-a",
+    "/path/to/worktree-b"
+  ],
+  "workers": [
+    {
+      "worker_id": "builder-a",
+      "role": "BUILDER",
+      "provider": "local",
+      "adapter": "subprocess",
+      "command": ["your-agent-cli", "--print"],
+      "worktree_path": "/path/to/worktree-a",
+      "branch_name": "feature/example-builder-a",
+      "timeout_seconds": 3600
+    },
+    {
+      "worker_id": "reviewer-1",
+      "role": "REVIEWER",
+      "provider": "local",
+      "adapter": "subprocess",
+      "command": ["your-agent-cli", "--print"],
+      "worktree_path": "/path/to/worktree-a",
+      "branch_name": "feature/example-builder-a",
+      "timeout_seconds": 1800
+    },
+    {
+      "worker_id": "integration-1",
+      "role": "INTEGRATION",
+      "provider": "local",
+      "adapter": "subprocess",
+      "command": ["your-agent-cli", "--print"],
+      "worktree_path": "/path/to/your-repo",
+      "branch_name": "feature/example-builder-a",
+      "timeout_seconds": 1800
+    }
+  ]
+}

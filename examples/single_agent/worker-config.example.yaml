@@ -1,0 +1,51 @@
+﻿poll_seconds: 5
+max_remediation_cycles: 2
+auto_push_allowed: false
+main_ref: main
+remote_name: origin
+
+routing:
+  policy_id: deterministic-v1
+  version: "1"
+  fallback_on: [UNAVAILABLE, RATE_LIMITED, QUOTA_EXHAUSTED, NETWORK_FAILURE, EXECUTION_FAILURE]
+  no_fallback_on: [AUTH_FAILURE]
+
+providers:
+  local:
+    enabled: true
+    availability: AVAILABLE
+
+runtimes:
+  local-cli:
+    enabled: true
+    harness: subprocess
+    availability: AVAILABLE
+
+stages:
+  planning:
+    capabilities: [ADVANCED_REASONING]
+  implementation:
+    capabilities: [CODING]
+  remediation:
+    capabilities: [CODING]
+  review:
+    capabilities: [CODE_REVIEW]
+  integration:
+    capabilities: [SCM_OPERATOR]
+    permissions: [SCM_WRITE]
+
+workers:
+  - id: agent-1
+    enabled: true
+    role: BUILDER
+    runtime: local-cli
+    provider: local
+    adapter: subprocess
+    capabilities: [CODING, CODE_REVIEW, SCM_OPERATOR, ADVANCED_REASONING]
+    stages: [planning, implementation, remediation, review, integration]
+    permissions: [SCM_WRITE]
+    max_concurrency: 1
+    worktree_path: /path/to/your-repo
+    branch_name: feature/task-branch
+    command: ["your-agent-cli", "--print"]
+    timeout_seconds: 3600

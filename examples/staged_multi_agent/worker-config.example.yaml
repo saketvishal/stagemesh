@@ -1,0 +1,113 @@
+﻿poll_seconds: 5
+max_remediation_cycles: 2
+auto_push_allowed: false
+main_ref: main
+remote_name: origin
+allowed_workspace_roots:
+  - /path/to/worktree-a
+  - /path/to/worktree-b
+
+routing:
+  policy_id: deterministic-v1
+  version: "1"
+  fallback_on: [UNAVAILABLE, RATE_LIMITED, QUOTA_EXHAUSTED, NETWORK_FAILURE, EXECUTION_FAILURE]
+  no_fallback_on: [AUTH_FAILURE]
+
+providers:
+  provider-a:
+    enabled: true
+    availability: AVAILABLE
+  provider-b:
+    enabled: true
+    availability: AVAILABLE
+
+runtimes:
+  cli-a:
+    enabled: true
+    harness: subprocess
+    availability: AVAILABLE
+  cli-b:
+    enabled: true
+    harness: subprocess
+    availability: AVAILABLE
+
+models:
+  fast-coder:
+    provider: provider-a
+    capabilities: [FAST, CODING]
+  careful-reviewer:
+    provider: provider-b
+    capabilities: [ADVANCED_REASONING, CODE_REVIEW, SECURITY_REVIEW]
+
+stages:
+  planning:
+    capabilities: [ADVANCED_REASONING]
+  implementation:
+    capabilities: [CODING]
+  remediation:
+    capabilities: [CODING]
+  review:
+    capabilities: [CODE_REVIEW]
+  integration:
+    capabilities: [SCM_OPERATOR]
+    permissions: [SCM_WRITE]
+
+workers:
+  - id: builder-a
+    enabled: true
+    role: BUILDER
+    runtime: cli-a
+    provider: provider-a
+    model: fast-coder
+    adapter: subprocess
+    capabilities: [FAST, CODING]
+    stages: [implementation, remediation]
+    max_concurrency: 1
+    worktree_path: /path/to/worktree-a
+    branch_name: feature/builder-a-branch
+    command: ["your-builder-cli", "--print"]
+    timeout_seconds: 3600
+
+  - id: builder-b
+    enabled: true
+    role: BUILDER
+    runtime: cli-a
+    provider: provider-a
+    model: fast-coder
+    adapter: subprocess
+    capabilities: [FAST, CODING]
+    stages: [implementation, remediation]
+    max_concurrency: 1
+    worktree_path: /path/to/worktree-b
+    branch_name: feature/builder-b-branch
+    command: ["your-builder-cli", "--print"]
+    timeout_seconds: 3600
+
+  - id: reviewer-1
+    enabled: true
+    role: REVIEWER
+    runtime: cli-b
+    provider: provider-b
+    model: careful-reviewer
+    adapter: subprocess
+    capabilities: [ADVANCED_REASONING, CODE_REVIEW, SECURITY_REVIEW]
+    stages: [review]
+    max_concurrency: 1
+    worktree_path: /path/to/worktree-a
+    command: ["your-reviewer-cli", "--print"]
+    timeout_seconds: 1800
+
+  - id: integration-1
+    enabled: true
+    role: INTEGRATION
+    runtime: cli-b
+    provider: provider-b
+    model: careful-reviewer
+    adapter: subprocess
+    capabilities: [SCM_OPERATOR]
+    permissions: [SCM_WRITE]
+    stages: [integration]
+    max_concurrency: 1
+    worktree_path: /path/to/your-repo
+    command: ["your-reviewer-cli", "--print"]
+    timeout_seconds: 1800
