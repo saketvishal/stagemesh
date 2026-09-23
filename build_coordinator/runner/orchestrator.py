@@ -141,6 +141,9 @@ class BuildRunner:
         self._session_factory = session_factory
         self._config = config
         self._executors = executors or {}
+        self._executor_workers: dict[str, WorkerConfig] = {
+            w.worker_id: w for w in self._config.workers if w.worker_id in self._executors
+        }
         self._git = git if git is not None else RealGit()
         self._settings = get_settings()
         self._task_source = task_source
@@ -158,11 +161,13 @@ class BuildRunner:
         for worker_id, executor in list(self._executors.items()):
             if worker_id in live_worker_ids:
                 continue
-            if previous.get(worker_id) != current.get(worker_id):
+            active_worker = self._executor_workers.get(worker_id) or previous.get(worker_id)
+            if active_worker != current.get(worker_id):
                 terminate = getattr(executor, "terminate_all", None)
                 if callable(terminate):
                     terminate()
                 self._executors.pop(worker_id, None)
+                self._executor_workers.pop(worker_id, None)
         self._config = config
         self._settings = get_settings()
 
@@ -754,9 +759,14 @@ class BuildRunner:
         available = list_available_tasks(session)
         priorities = task_priorities(session, [task.task_id for task in available])
         available.sort(key=lambda task: (priorities.get(task.task_id, 100), task.task_id))
+        has_unlaunched_p0 = False
         for task in available:
             if is_planner_task(task):
                 continue
+            task_priority = priorities.get(task.task_id, 100)
+            if task_priority > 0 and has_unlaunched_p0:
+                # Lower-priority work does not jump ahead while executable P0 work exists
+                break
             if task.state == "REWORK_REQUIRED":
                 prompt_builder = RemediationPromptBuilder()
                 role = "REMEDIATION"
@@ -768,9 +778,13 @@ class BuildRunner:
             )
             if availability == "slots_occupied":
                 result.capacity_full = True
+                if task_priority == 0:
+                    has_unlaunched_p0 = True
                 continue
             if worker is None:
                 result.escalations.append(f"{task.task_id}:EXTERNAL_EXECUTOR_CONFIGURATION_REQUIRED")
+                if task_priority == 0:
+                    has_unlaunched_p0 = True
                 continue
             try:
                 if self._config.task_branches and worker.worktree_path:
@@ -1360,6 +1374,7 @@ class BuildRunner:
         else:
             raise CoordinatorPolicyError(f"Unknown executor adapter: {worker.adapter}")
         self._executors[worker.worker_id] = executor
+        self._executor_workers[worker.worker_id] = worker
         return executor
 
     def _executor_for_execution(self, execution: BuildRunnerExecution) -> WorkerExecutor:
@@ -1391,6 +1406,8 @@ class BuildRunner:
                 else {},
             )
             self._executors[execution.worker_id] = executor
+            if worker is not None:
+                self._executor_workers[execution.worker_id] = worker
             return executor
         raise CoordinatorPolicyError(
             f"Cannot reconcile executor adapter after restart: {execution.adapter}"
