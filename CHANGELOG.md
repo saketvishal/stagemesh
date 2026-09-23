@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+- Project-owned backlogs: `.stagemesh/project.yaml` and `.stagemesh/tasks/`
+  are the canonical, version-controlled backlog; task sync into the durable
+  queue is deterministic and idempotent and never touches runtime state.
+  See `docs/PROJECTS.md`.
+- Generic `stagemesh` entry point: `stagemesh "Continue <project> development."`
+  resolves the project by name from any directory and runs it in parallel up to
+  its concurrency limit with managed per-task worktrees.
+- GitHub is now strictly an optional adapter; the product-specific demo
+  `continue` command was removed.
+- Fixes found by the first multi-task project run: review and integration use
+  the task's feature branch rather than the reviewing worker's; reviewer,
+  integration and planner executions count against worker slots; concurrent
+  `git fetch` ref-lock races are retried; worktree provisioning errors are no
+  longer masked.
+- `stagemesh project migrate-state`: explicit, backup-first migration for
+  durable state written by an older coordinator.
+
 ## v0.1-alpha release candidate
 
 > Publication requires explicit human approval after final independent
@@ -22,7 +41,7 @@ to avoid unnecessary compatibility breakage before public release.
 - Builder capacity enforcement (configurable, concurrency-safe)
 - Migration-capable task serialization (one active migration at a time)
 - Independent reviewer separation (implementer cannot review their own work)
-- Two-reviewer policy support
+- Two-reviewer policy accepted (one review is performed; enforcement is tracked as SM-011)
 - Checkpoint / resume: replacement workers continue without redoing completed work
 - Structured JSON result contract: coordinator never trusts free-form stdout
 - Provider-neutral worker configuration (provider / model / runtime / capabilities / stages)

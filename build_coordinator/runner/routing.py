@@ -13,7 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from build_coordinator.claims import last_implementation_worker
-from build_coordinator.models import BuildTaskClaim
+from build_coordinator.models import BuildRunnerExecution, BuildTaskClaim
 
 CAP_CHEAP = "CHEAP"
 CAP_FAST = "FAST"
@@ -428,6 +428,15 @@ def _active_implementation_counts(session: Session | None) -> dict[str, int]:
     ).all()
     counts: dict[str, int] = {}
     for worker_id in rows:
+        counts[worker_id] = counts.get(worker_id, 0) + 1
+    # Reviewer, integration and planner workers hold no IMPLEMENTATION claim;
+    # their live executions occupy the worker's slots the same way.
+    live = session.scalars(
+        select(BuildRunnerExecution.worker_id)
+        .where(BuildRunnerExecution.status.in_(("LAUNCHED", "RUNNING")))
+        .where(BuildRunnerExecution.role.in_(("REVIEWER", "INTEGRATION", "PLANNER")))
+    ).all()
+    for worker_id in live:
         counts[worker_id] = counts.get(worker_id, 0) + 1
     return counts
 

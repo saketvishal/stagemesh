@@ -192,6 +192,9 @@ class RunnerConfig:
     result_dir: str | None = None
     main_ref: str = "main"
     remote_name: str = "origin"
+    # When true every builder task gets its own branch, started from main_ref,
+    # in the worker's managed worktree instead of reusing one branch per worker.
+    task_branches: bool = False
 
     @classmethod
     def default(cls, *, dry_run: bool = False) -> "RunnerConfig":

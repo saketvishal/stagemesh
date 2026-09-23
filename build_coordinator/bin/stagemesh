@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Location-independent launcher for the StageMesh CLI.
+#
+# Resolves the repository root from THIS SCRIPT'S OWN location, never from
+# the caller's current directory. Add this folder to PATH once and
+# `stagemesh <command>` (or: stagemesh "Continue <project> development.") then works from any directory.
+#
+# IMPORTANT: `python -m` normally prepends the CURRENT WORKING DIRECTORY to
+# sys.path[0]. If the caller's cwd happens to contain its own
+# tooling/build_coordinator/ (e.g. another worktree), that stale
+# checkout would shadow the intended controller checkout on PYTHONPATH. The
+# `-P` flag (Python 3.11+) disables that automatic cwd/script-dir prepend,
+# so only the repo root placed on PYTHONPATH below can supply the module --
+# cwd can never win.
+set -euo pipefail
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+REPO_ROOT="$(cd -- "$SCRIPT_DIR/../.." >/dev/null 2>&1 && pwd)"
+
+if [ -n "${PYTHONPATH:-}" ]; then
+    export PYTHONPATH="$REPO_ROOT:$PYTHONPATH"
+else
+    export PYTHONPATH="$REPO_ROOT"
+fi
+
+exec python -P -m build_coordinator "$@"
