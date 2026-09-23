@@ -1,0 +1,68 @@
+# Known StageMesh product gaps, tracked as ordinary development tasks.
+# TWO_REVIEWERS enforcement is SM-011 (v0.2-roadmap.yaml).
+tasks:
+  - id: SM-012
+    title: Validate real coding-agent execution end to end
+    priority: 5
+    risk: HIGH
+    review: INDEPENDENT
+    objective: >
+      Every parallel run so far used a scripted stand-in worker. Prove the
+      subprocess adapter with a real coding-agent CLI in managed worktrees:
+      prompt delivery, structured result file, commits on the task branch,
+      review and integration.
+    requirements:
+      - Use only the worker templates in project.yaml plus operator environment; no per-run manual worktree or worker choice.
+      - Record durable evidence of each real execution (provider, runtime, exit code, result file).
+    acceptance_criteria:
+      - One builder, one independent reviewer and one integration execution complete with a real agent on a scratch repository.
+      - A malformed or missing result file is reported as a typed failure, not silently accepted.
+    scope:
+      allowed_paths: [examples/, docs/, tests/]
+
+  - id: SM-013
+    title: Deterministic execution of task validation commands
+    priority: 5
+    risk: HIGH
+    review: INDEPENDENT
+    objective: >
+      A task's validation entries are handed to agents as prose. StageMesh
+      itself must run them: after a builder succeeds, run each command in the
+      task workspace and gate the VALIDATING stage on the results.
+    requirements:
+      - Run commands as argument arrays with a timeout and no shell interpolation; capture exit code and a bounded output tail as durable evidence.
+      - A failing command sends the task to REWORK_REQUIRED with the failure recorded; a task with no commands is unchanged.
+      - Commands come only from synchronized project definitions, never from executor output.
+    acceptance_criteria:
+      - A task with a failing validation command never reaches REVIEW_READY.
+      - Validation evidence is visible in `stagemesh project status`.
+    scope:
+      allowed_paths: [build_coordinator/runner/, build_coordinator/project/, tests/]
+    validation:
+      - python -m pytest tests/test_runner.py tests/test_project_backlog.py -q
+
+  - id: SM-014
+    title: Clean up task branches and worktrees after integration
+    priority: 25
+    dependencies: [SM-001]
+    risk: MEDIUM
+    review: INDEPENDENT
+    objective: Remove merged task branches (local and remote-tracking) and stale stashes once a task is DONE, without touching resumable work.
+    acceptance_criteria:
+      - Only branches whose reviewed SHA is contained in main_ref are deleted.
+      - A task that is not DONE keeps its branch and worktree state.
+    scope:
+      allowed_paths: [build_coordinator/runner/, tests/]
+
+  - id: SM-015
+    title: Additional provider and runtime validation
+    priority: 60
+    dependencies: [SM-003, SM-012]
+    risk: MEDIUM
+    review: INDEPENDENT
+    objective: Exercise a second provider/runtime through the same project mechanism and confirm routing fallbacks behave as configured.
+    acceptance_criteria:
+      - A task is routed to a fallback provider when the first is unavailable, with the routing decision audited.
+      - Reviewer and builder providers can differ and the reviewer is never the builder worker.
+    scope:
+      allowed_paths: [build_coordinator/runner/, examples/, tests/]
