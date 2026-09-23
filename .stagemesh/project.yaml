@@ -12,7 +12,7 @@ repository:
 state_dir: .build-coordinator
 
 execution:
-  concurrency: 1
+  concurrency: 2
   reviewers: 2                 # TWO_REVIEWERS tasks need two distinct reviewers
   default_review_policy: INDEPENDENT
 

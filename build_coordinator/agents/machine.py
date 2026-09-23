@@ -89,12 +89,37 @@ def ready_runtime_ids() -> list[str]:
     ]
 
 
+def available_runtime_ids() -> list[str]:
+    """Headless runtimes installed on this machine that can participate in the worker pool."""
+    ready = ready_runtime_ids()
+    known = {row["runtime_id"]: row for row in known_statuses()}
+    # Always include ready runtimes first
+    result = list(ready)
+    # Then include other installed headless runtimes as fallback workers
+    for rid, profile in PROFILES.items():
+        if not profile.headless or rid in result:
+            continue
+        row = known.get(rid, {})
+        state = row.get("state")
+        if state not in {"NOT_INSTALLED", "NOT_HEADLESS", DISABLED}:
+            result.append(rid)
+    # If no runtimes are ready, include any installed headless runtime so templates exist
+    if not result:
+        for rid, profile in PROFILES.items():
+            if profile.headless and profile.executable():
+                result.append(rid)
+    return result
+
+
 def worker_command(runtime_id: str) -> list[str]:
     return [sys.executable, "-m", "build_coordinator.agents.wrapper", "--runtime", runtime_id]
 
 
 def runtime_template(runtime_id: str, main_ref: str, *, timeout_seconds: int = 3600, model: str | None = None) -> dict[str, Any]:
     profile = PROFILES[runtime_id]
+    known = {row["runtime_id"]: row for row in known_statuses()}
+    status = known.get(runtime_id, {})
+    is_ready = status.get("state") == READY
     return {
         "name": runtime_id,
         "provider": profile.provider,
@@ -104,5 +129,63 @@ def runtime_template(runtime_id: str, main_ref: str, *, timeout_seconds: int = 3
         "capabilities": list(profile.capabilities),
         "timeout_seconds": timeout_seconds,
         "model": model,
+        "preference": 100 if is_ready else 200,
         "env": {"STAGEMESH_MAIN_REF": main_ref, "STAGEMESH_AGENT_TIMEOUT": str(timeout_seconds - 300)},
     }
+
+
+def machine_providers() -> dict[str, Any]:
+    """Build ProviderConfig mappings for all discovered machine runtimes."""
+    from build_coordinator.runner.routing import ProviderConfig
+
+    providers: dict[str, ProviderConfig] = {}
+    known = {row["runtime_id"]: row for row in known_statuses()}
+    for profile in PROFILES.values():
+        row = known.get(profile.runtime_id, {})
+        state = row.get("state", "NOT_INSTALLED")
+        if not profile.headless or state == "NOT_HEADLESS":
+            providers[profile.provider] = ProviderConfig(
+                provider_id=profile.provider,
+                enabled=False,
+                availability="NOT_HEADLESS",
+                consumption_mode="DISABLED",
+                metadata={"reason": row.get("detail", "GUI only; not headless")},
+            )
+        elif state == DISABLED:
+            providers[profile.provider] = ProviderConfig(
+                provider_id=profile.provider,
+                enabled=False,
+                availability="AVAILABLE",
+                consumption_mode="DISABLED",
+            )
+        elif state == READY:
+            providers[profile.provider] = ProviderConfig(
+                provider_id=profile.provider,
+                enabled=True,
+                availability="AVAILABLE",
+                consumption_mode="ACTIVE",
+            )
+        elif state in {"QUOTA_EXHAUSTED", "RATE_LIMITED"}:
+            providers[profile.provider] = ProviderConfig(
+                provider_id=profile.provider,
+                enabled=True,
+                availability=state,
+                consumption_mode="FALLBACK",
+                metadata={"reason": row.get("detail", "")},
+            )
+        elif state in {"NOT_AUTHENTICATED", "AUTHENTICATED", "HEADLESS_FAILED"}:
+            providers[profile.provider] = ProviderConfig(
+                provider_id=profile.provider,
+                enabled=True,
+                availability=state,
+                consumption_mode="FALLBACK",
+                metadata={"reason": row.get("detail", "")},
+            )
+        else:
+            providers[profile.provider] = ProviderConfig(
+                provider_id=profile.provider,
+                enabled=False,
+                availability="NOT_INSTALLED",
+                consumption_mode="DISABLED",
+            )
+    return providers

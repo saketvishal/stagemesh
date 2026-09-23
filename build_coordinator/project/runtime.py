@@ -163,8 +163,11 @@ def build_runner_config(project: ProjectDefinition, *, dry_run: bool = False) ->
         workers.append(
             _expand_template(project, "planner", "planner-1", planner, dry_run=dry_run, isolated=False)
         )
+    from build_coordinator.agents.machine import machine_providers
+
     return RunnerConfig(
         workers=tuple(workers),
+        providers=machine_providers(),
         poll_seconds=float(os.getenv("STAGEMESH_POLL_SECONDS", "2")),
         auto_push_allowed=os.getenv("BUILD_COORDINATOR_AUTO_PUSH_ALLOWED", "false").lower() == "true",
         allowed_workspace_roots=roots,
@@ -189,19 +192,21 @@ def _project_routing_policy():
 
 
 def _machine_templates(project: ProjectDefinition) -> list[dict[str, Any]]:
-    from build_coordinator.agents.machine import ready_runtime_ids, runtime_template
+    from build_coordinator.agents.machine import available_runtime_ids, runtime_template
 
-    return [runtime_template(rid, project.main_ref) for rid in ready_runtime_ids()]
+    return [runtime_template(rid, project.main_ref) for rid in available_runtime_ids()]
 
 
 def _with_project_defaults(
     config: RunnerConfig, project: ProjectDefinition, roots: tuple[str, ...]
 ) -> RunnerConfig:
     import dataclasses
+    from build_coordinator.agents.machine import machine_providers
 
     return dataclasses.replace(
         config,
         allowed_workspace_roots=config.allowed_workspace_roots or roots,
+        providers=config.providers or machine_providers(),
         result_dir=config.result_dir or str(project.state_dir / "results"),
         task_branches=True,
         remote_name=None,

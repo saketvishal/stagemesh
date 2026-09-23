@@ -781,6 +781,11 @@ class BuildRunner:
                 if task_priority == 0:
                     has_unlaunched_p0 = True
                 continue
+            if availability in {"providers_unavailable", "provider_backoff"}:
+                result.capacity_full = True
+                if task_priority == 0:
+                    has_unlaunched_p0 = True
+                continue
             if worker is None:
                 result.escalations.append(f"{task.task_id}:EXTERNAL_EXECUTOR_CONFIGURATION_REQUIRED")
                 if task_priority == 0:
@@ -973,6 +978,9 @@ class BuildRunner:
                 "REVIEWER", task_id=task.task_id, session=session
             )
             if availability == "slots_occupied":
+                result.capacity_full = True
+                continue
+            if availability in {"providers_unavailable", "provider_backoff"}:
                 result.capacity_full = True
                 continue
             if worker is None:
@@ -1301,8 +1309,41 @@ class BuildRunner:
             provider = data.get("provider")
             if provider and until > now:
                 current = providers.get(provider) or ProviderConfig(provider)
-                providers[provider] = dataclasses.replace(current, availability=str(data.get("failure")))
+                providers[provider] = dataclasses.replace(
+                    current,
+                    availability=str(data.get("failure")),
+                    consumption_mode="FALLBACK",
+                )
         return providers
+
+    def diagnostics(self, session: Session | None = None) -> dict[str, Any]:
+        """Summary of worker pool, providers, capabilities, availability, and concurrency."""
+        effective_providers = self._effective_providers(session)
+        worker_summary = []
+        for w in self._config.workers:
+            p = effective_providers.get(w.provider)
+            worker_summary.append({
+                "worker_id": w.worker_id,
+                "role": w.role,
+                "adapter": w.adapter,
+                "provider": w.provider,
+                "runtime": w.runtime,
+                "capabilities": list(w.capabilities),
+                "consumption_mode": p.consumption_mode if p else "ACTIVE",
+                "availability": p.availability if p else "AVAILABLE",
+                "reason_unavailable": (p.metadata.get("reason") or "") if p and p.availability != "AVAILABLE" else None,
+            })
+        configured_builders = [w for w in self._config.workers if w.role == "BUILDER"]
+        executable_builders = [
+            w["worker_id"] for w in worker_summary
+            if w["role"] == "BUILDER" and w["adapter"] != "unconfigured" and w["availability"] == "AVAILABLE"
+        ]
+        return {
+            "workers": worker_summary,
+            "configured_concurrency": sum(1 for w in configured_builders),
+            "executable_builders": executable_builders,
+            "has_configured_builders": any(w.adapter != "unconfigured" for w in configured_builders),
+        }
 
     def _select_worker(
         self,
