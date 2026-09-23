@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from uuid import UUID
 
@@ -52,6 +53,7 @@ from build_coordinator.objectives import (
 from build_coordinator.runner import BuildRunner
 from build_coordinator.runner.models import RunnerConfig
 from build_coordinator.runner.routing import StageRequirement, route_worker
+from build_coordinator.runner.worker_health import derive_worker_health
 from build_coordinator.types import ObjectiveSpec, PlannedChildTask, StructuredContractError, TaskSpec
 
 
@@ -514,6 +516,14 @@ def _list(args: argparse.Namespace, session) -> None:
 
 def _workers_list(args: argparse.Namespace, session) -> None:
     config = RunnerConfig.default(dry_run=True)
+    events = session.scalars(
+        select(BuildTaskEvent).where(BuildTaskEvent.event_type == "runner.provider_failure")
+    ).all()
+    health = derive_worker_health(
+        config.workers,
+        (row.event_data or {} for row in events),
+        now=datetime.now(timezone.utc),
+    )
     _print(
         [
             {
@@ -525,6 +535,7 @@ def _workers_list(args: argparse.Namespace, session) -> None:
                 "capabilities": list(worker.capability_names()),
                 "stages": list(worker.stage_names()),
                 "max_concurrency": worker.max_concurrency,
+                "health": health[worker.worker_id].to_public_dict(),
             }
             for worker in config.workers
         ]
