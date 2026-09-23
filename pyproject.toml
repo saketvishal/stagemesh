@@ -3,9 +3,9 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "build-coordinator"
-version = "0.1.0a1"
-description = "Provider-neutral coordinator for autonomous multi-agent software engineering workflows"
+name = "stagemesh"
+version = "0.2.0a1"
+description = "StageMesh: provider-neutral, project-owned, multi-agent software engineering coordinator"
 readme = "README.md"
 license = {text = "Apache-2.0"}
 requires-python = ">=3.11"

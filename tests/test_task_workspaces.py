@@ -95,9 +95,11 @@ def test_resumed_task_keeps_its_commits_even_on_a_different_worker(repo, tmp_pat
     moved = prepare_task_workspace(
         two, repo, branch_name="stagemesh/T-9", base_ref="main", resume=True, allowed_roots=roots
     )
-    assert git(moved, "rev-parse", "HEAD") == work
+    assert subprocess.run(["git", "merge-base", "--is-ancestor", work, "HEAD"], cwd=str(moved)).returncode == 0
     assert (moved / "work.txt").exists()
-    assert "stagemesh: preserved before stagemesh/T-9" in git(repo, "stash", "list")
+    assert (moved / "dirty.txt").read_text(encoding="utf-8") == "uncommitted"  # carried as a WIP commit
+    assert "recovered work-in-progress" in git(moved, "log", "-1", "--format=%s")
+    assert git(repo, "stash", "list") == ""
     assert git(one, "rev-parse", "--abbrev-ref", "HEAD") == "HEAD"  # branch freed, never deleted
 
 

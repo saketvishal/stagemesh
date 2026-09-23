@@ -150,13 +150,73 @@ re-attaches to its existing branch. Uncommitted leftovers are stashed, never
 discarded, so one task's commits cannot leak into another task's integration.
 Reviewer and integration workers get managed worktrees too.
 
-## Known gaps
+## Global mode and the registry
 
-- `TWO_REVIEWERS` is accepted and requires review, but the runner performs a
-  single review, exactly as for `INDEPENDENT` (backlog task `SM-011`). Use
-  `INDEPENDENT` until it is enforced.
-- Task branches and their worktrees are not garbage-collected after
-  integration.
-- Concurrency is bounded per worker role (builders by `execution.concurrency`,
-  reviewers by `execution.reviewers`, one integrator); it is not adaptive to
-  provider rate limits (`SM-002`, `SM-003`).
+`stagemesh project add <path>` records a project root in a per-user registry
+(`~/.build-coordinator/projects.json`, or `$STAGEMESH_HOME`); `list` and
+`remove <name|path>` manage it. The registry is discovery metadata plus optional
+machine-local execution environment (`--path-prepend <dir>`, `--env K=V`, e.g. a
+virtualenv); it is never the backlog. `stagemesh continue` outside any project
+starts one process per registered project, so state, workspaces and failures never
+cross projects and a broken or blocked project does not stop the others.
+
+## Agents
+
+`stagemesh agent setup` probes every known runtime (Codex CLI, Claude Code, ...)
+and marks it READY only if it completed a real headless task; installed-but-not-
+logged-in, and GUI-only tools (with the evidence), are reported as such and are
+never used. Results live in the user's StageMesh home; no credentials are stored,
+agent CLIs keep their own sessions. With no `workers:` in `project.yaml`,
+StageMesh builds each project's worker pool from the verified runtimes and routes
+each stage by capability and policy (`CODING`, `CODE_REVIEW`, ...), balancing across
+providers and auditing every decision. `workers:` may still list explicit templates
+(`runtime: codex`, or a custom `command:`) when a project needs to constrain them.
+A runtime that fails (auth, rate limit, quota, network) is routed around for a
+cooldown and its task resumes on another; when nothing is eligible the task waits and
+`stagemesh doctor` says why.
+
+Agents work in the task worktree and are told not to commit: StageMesh commits their
+changes and derives the result (commits, files) from git, so a self-report is never
+the lifecycle result. Reviewers run read-only and return a structured verdict.
+
+## Lifecycle guarantees
+
+* **Validation** - a task's `validation:` commands are run by StageMesh itself in the
+  task workspace after the builder finishes (no shell, timeout, captured output as
+  durable evidence). Failure sends the task to rework; only a pass proceeds to review.
+* **Review** - `INDEPENDENT` never lets the implementer review; `TWO_REVIEWERS` needs
+  two distinct reviewers' approvals of the same implementation. A rejected review goes
+  rework -> validation -> re-review automatically.
+* **Integration** - deterministic and runner-owned: the reviewed commit is merged into
+  `main_ref` in StageMesh's own worktree and the branch advanced safely. A `main_ref`
+  checked out by a human is only fast-forwarded when clean; conflicts and dirty checkouts
+  become typed `HUMAN_ACTION_REQUIRED` states.
+* **Upstream** - local-only by default. `upstream: {remote: origin, push: true}` makes
+  push part of integration: a task is DONE only after a successful push. A failed push
+  is durable (task BLOCKED `UPSTREAM_PUSH_FAILED`, merge kept) and is retried on every
+  `continue` or with `stagemesh project retry-push`.
+* **Recovery** - a worker process that dies, or a provider that fails, releases its claim;
+  another worker resumes from the task branch (uncommitted progress becomes a
+  work-in-progress commit) instead of restarting. Repeated failure escalates.
+* **Cleanup** - after a verified integration the task branch is deleted; unfinished,
+  blocked or dirty workspaces are kept.
+
+`delivered_by:` on a task definition closes work that landed outside StageMesh, with an
+audit trail (events attributed to the sync, no invented execution evidence).
+
+## Diagnostics and upkeep
+
+`stagemesh doctor [project]` checks installation, agents, registration, discovery, the
+backlog, git/worktrees, durable-state schema, concurrency and upstream, with a next step
+for each problem. `stagemesh upgrade` runs `pip install --upgrade stagemesh`; durable
+state is only migrated by the explicit `project migrate-state`. `stagemesh --version`.
+
+## Known limitations
+
+- Validation runs inside the coordination loop, so a long suite delays dispatch of other
+  work in the same project (`SM-017`).
+- Fresh workspaces have no installed dependencies; dependency-heavy validation needs
+  workspace setup commands (`SM-016`).
+- GUI-only agent tools (for example Antigravity IDE) have no headless mode and are not used.
+- Concurrency is per role and not adaptive to provider rate limits beyond the failure
+  cooldown.

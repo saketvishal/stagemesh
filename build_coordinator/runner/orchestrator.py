@@ -7,7 +7,7 @@ import dataclasses
 import hashlib
 import time
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from sqlalchemy import func, select
@@ -69,14 +69,19 @@ from build_coordinator.runner.models import (
     WorkerConfig,
 )
 from build_coordinator.runner.routing import (
+    ProviderConfig,
     RoutingDecision,
     StageRequirement,
+    approving_reviewers,
     reviewer_exclusions,
     role_to_stage,
     route_worker,
 )
 from build_coordinator.project.backlog import task_priorities
+from build_coordinator.execution.git_integrator import GitIntegrationExecutor
+from build_coordinator.runner.validation import run_validation
 from build_coordinator.runner.worktree import (
+    cleanup_task_branch,
     WorktreeValidationError,
     ensure_worktree,
     prepare_task_workspace,
@@ -347,6 +352,8 @@ class BuildRunner:
             elif execution.role == "PLANNER":
                 self._planner_succeeded(session, execution, result, parsed)
             return
+        if observation.status == "FAILED" and self._recoverable_failure(session, execution, merged, observation):
+            return
         if observation.status == "FAILED":
             execution.status = "FAILED"
             execution.human_escalation_type = observation.human_escalation_type
@@ -409,12 +416,79 @@ class BuildRunner:
         transition_task(session, execution.task_id, "IN_PROGRESS", actor="runner")
         transition_task(session, execution.task_id, "VALIDATING", actor="runner")
         task = session.get(BuildTask, execution.task_id)
+        if not self._validation_gate(session, task, execution, result):
+            return
         transition_task(
             session,
             execution.task_id,
             "REVIEW_READY" if task and task.review_policy != "NONE" else "DONE",
             actor="runner",
         )
+
+    def _validation_gate(
+        self,
+        session: Session,
+        task: BuildTask | None,
+        execution: BuildRunnerExecution,
+        result: RunnerCycleResult,
+    ) -> bool:
+        """Run the task's validation commands in its workspace; the outcome, not
+        an agent's claim, decides whether the task may proceed."""
+        commands = list(task.required_validation or []) if task else []
+        if not commands or not self._config.run_validation:
+            return True
+        cwd = execution.worktree_path or self._git_cwd_for_execution(execution)
+        outcome = run_validation(
+            commands,
+            cwd,
+            timeout_seconds=self._config.validation_timeout_seconds,
+        )
+        record_event(
+            session,
+            EventInput(
+                task_id=execution.task_id,
+                event_type="runner.validation",
+                actor="runner",
+                claim_id=execution.claim_id,
+                event_data={
+                    "passed": outcome.passed,
+                    "workspace": str(cwd),
+                    "execution_id": execution.execution_id,
+                    "results": outcome.results,
+                },
+            ),
+        )
+        if execution.claim_id:
+            checkpoint(
+                session,
+                execution.claim_id,
+                worker_id=execution.worker_id,
+                data=CheckpointInput(
+                    current_step="runner validation " + ("passed" if outcome.passed else "failed"),
+                    last_successful_tests=[r["command"] for r in outcome.results if r["exit_code"] == 0],
+                    known_failures=outcome.failure_summary(),
+                ),
+            )
+        if outcome.passed:
+            return True
+        if self._remediation_cycles(session, execution.task_id) >= self._config.max_remediation_cycles:
+            result.escalations.append(f"{execution.task_id}:REMEDIATION_LIMIT_REACHED")
+            transition_task(
+                session, execution.task_id, "REWORK_REQUIRED", actor="runner", reason="deterministic validation failed"
+            )
+            self._block_task(session, execution.task_id, "REMEDIATION_LIMIT_REACHED")
+            return False
+        transition_task(
+            session,
+            execution.task_id,
+            "REWORK_REQUIRED",
+            actor="runner",
+            reason="deterministic validation failed",
+        )
+        return False
+
+    def _git_cwd_for_execution(self, execution: BuildRunnerExecution) -> str:
+        return str(self._settings.repo_root)
 
     def _review_succeeded(
         self,
@@ -449,6 +523,28 @@ class BuildRunner:
                     blockers=[] if eligible else list(verdict.findings),
                 ),
             )
+        if eligible and self._needs_second_reviewer(session, execution):
+            record_event(
+                session,
+                EventInput(
+                    task_id=execution.task_id,
+                    event_type="runner.review_approval_recorded",
+                    actor="runner",
+                    event_data={
+                        "reviewer": execution.worker_id,
+                        "reviewed_feature_sha": execution.reviewed_feature_sha,
+                        "approvals": sorted(approving_reviewers(session, execution.task_id)),
+                    },
+                ),
+            )
+            transition_task(
+                session,
+                execution.task_id,
+                "REVIEW_READY",
+                actor="runner",
+                reason="TWO_REVIEWERS: awaiting a second independent approval",
+            )
+            return
         if eligible:
             release_active_claims(session, execution.task_id, completed=True)
             task = session.get(BuildTask, execution.task_id)
@@ -483,6 +579,12 @@ class BuildRunner:
         result.escalations.append(f"{execution.task_id}:COORDINATOR_INVARIANT_FAILURE")
         self._block_task(session, execution.task_id, "COORDINATOR_INVARIANT_FAILURE")
 
+    def _needs_second_reviewer(self, session: Session, execution: BuildRunnerExecution) -> bool:
+        task = session.get(BuildTask, execution.task_id)
+        if task is None or task.review_policy != "TWO_REVIEWERS":
+            return False
+        return len(approving_reviewers(session, execution.task_id)) < 2
+
     def _integration_succeeded(
         self,
         session: Session,
@@ -491,6 +593,23 @@ class BuildRunner:
         parsed,
     ) -> None:
         integrator = parsed.integrator if parsed is not None else None
+        if execution.adapter == "builtin-git":
+            if integrator is None or integrator.push_status not in {"PUSHED", "NOT_REQUIRED"}:
+                result.escalations.append(f"{execution.task_id}:UPSTREAM_PUSH_FAILED")
+                self._block_task(session, execution.task_id, "UPSTREAM_PUSH_FAILED")
+                return
+            transition_task(session, execution.task_id, "DONE", actor="runner", reason="integration completed")
+            record_event(
+                session,
+                EventInput(
+                    task_id=execution.task_id,
+                    event_type="runner.integration_completed",
+                    actor="runner",
+                    event_data=execution.result_data,
+                ),
+            )
+            self._cleanup_integrated_task(session, execution)
+            return
         if not self._config.auto_push_allowed:
             result.escalations.append(f"{execution.task_id}:REMOTE_PUSH_APPROVAL_REQUIRED")
             self._block_task(session, execution.task_id, "REMOTE_PUSH_APPROVAL_REQUIRED")
@@ -503,6 +622,79 @@ class BuildRunner:
                 event_type="runner.integration_completed",
                 actor="runner",
                 event_data=execution.result_data,
+            ),
+        )
+
+    def _recoverable_failure(
+        self,
+        session: Session,
+        execution: BuildRunnerExecution,
+        merged: dict,
+        observation: ExecutionObservation,
+    ) -> bool:
+        """A worker that died, or a provider that failed, must not strand the task.
+
+        The execution is recorded as LOST so ownership is released through the
+        normal recovery path (checkpoints and evidence stay), a replacement worker
+        resumes the task, and a failing provider is routed around for a cooldown.
+        Repeated failures escalate instead of looping."""
+        failure = str(merged.get("provider_failure") or "").upper()
+        died = observation.exit_code not in (None, 0) and not merged.get("schema_version")
+        if not failure and not died:
+            return False
+        if failure:
+            record_event(
+                session,
+                EventInput(
+                    task_id=execution.task_id,
+                    event_type="runner.provider_failure",
+                    actor="runner",
+                    event_data={
+                        "provider": execution.provider,
+                        "worker_id": execution.worker_id,
+                        "failure": failure,
+                        "until": (_now() + timedelta(seconds=_COOLDOWN_SECONDS.get(failure, 300))).isoformat(),
+                        "detail": str(merged.get("detail") or "")[:300],
+                    },
+                ),
+            )
+        attempts = session.scalar(
+            select(func.count())
+            .select_from(BuildRunnerExecution)
+            .where(BuildRunnerExecution.task_id == execution.task_id)
+            .where(BuildRunnerExecution.role == execution.role)
+            .where(BuildRunnerExecution.status.in_(("LOST", "FAILED")))
+        ) or 0
+        execution.status = "LOST"
+        execution.completed_at = _now()
+        execution.result_data = {
+            **(execution.result_data or {}),
+            **merged,
+            "reconciliation_state": "WORKER_EXITED" if died else "PROVIDER_FAILED",
+        }
+        if attempts + 1 >= self._config.max_execution_attempts:
+            self._block_task(session, execution.task_id, "EXECUTION_RETRY_LIMIT_REACHED")
+        return True
+
+    def _cleanup_integrated_task(self, session: Session, execution: BuildRunnerExecution) -> None:
+        if not self._config.cleanup_branches:
+            return
+        task = session.get(BuildTask, execution.task_id)
+        if task is None or not task.branch_name:
+            return
+        removed, detail = cleanup_task_branch(
+            self._settings.repo_root,
+            task.branch_name,
+            main_ref=self._config.main_ref,
+            reviewed_sha=execution.reviewed_feature_sha,
+        )
+        record_event(
+            session,
+            EventInput(
+                task_id=execution.task_id,
+                event_type="runner.workspace_cleaned" if removed else "runner.cleanup_skipped",
+                actor="runner",
+                event_data={"branch": task.branch_name, "detail": detail},
             ),
         )
 
@@ -563,7 +755,7 @@ class BuildRunner:
             except CoordinatorPolicyError:
                 continue
             context = get_resume_context(session, task.task_id)
-            prompt = prompt_builder.build(context)
+            prompt = prompt_builder.build(context, extra={"task_definition": _task_definition(task)})
             self._launch(
                 session,
                 result,
@@ -753,7 +945,11 @@ class BuildRunner:
                 continue
             prompt = ReviewerPromptBuilder().build(
                 get_resume_context(session, task.task_id),
-                extra={"reviewed_feature_sha": reviewed_sha, "sha_source": "runner-owned-git"},
+                extra={
+                    "reviewed_feature_sha": reviewed_sha,
+                    "sha_source": "runner-owned-git",
+                    "task_definition": _task_definition(task),
+                },
             )
             self._launch(
                 session,
@@ -1020,6 +1216,28 @@ class BuildRunner:
                     "process_tree_reaped": True,
                 }
 
+    def _effective_providers(self, session: Session | None) -> dict:
+        """Configured providers, with any provider that recently failed marked
+        unavailable so routing deterministically falls back to other runtimes."""
+        providers = dict(self._config.providers)
+        if session is None:
+            return providers
+        now = _now()
+        rows = session.scalars(
+            select(BuildTaskEvent).where(BuildTaskEvent.event_type == "runner.provider_failure")
+        ).all()
+        for row in sorted(rows, key=lambda r: (r.event_data or {}).get("until", "")):
+            data = row.event_data or {}
+            try:
+                until = datetime.fromisoformat(str(data.get("until")))
+            except ValueError:
+                continue
+            provider = data.get("provider")
+            if provider and until > now:
+                current = providers.get(provider) or ProviderConfig(provider)
+                providers[provider] = dataclasses.replace(current, availability=str(data.get("failure")))
+        return providers
+
     def _select_worker(
         self,
         role: str,
@@ -1045,7 +1263,7 @@ class BuildRunner:
             workers,
             stage=stage,
             stage_requirement=requirement,
-            providers=self._config.providers,
+            providers=self._effective_providers(session),
             runtimes=self._config.runtimes,
             routing_policy=self._config.routing_policy,
             session=session,
@@ -1068,6 +1286,13 @@ class BuildRunner:
         worker, _availability, _decision = self._select_worker(role, task_id=task_id, session=session)
         return worker
 
+    def _git_integrator(self) -> GitIntegrationExecutor:
+        return GitIntegrationExecutor(
+            main_ref=self._config.main_ref,
+            upstream_remote=self._config.upstream_remote,
+            push=self._config.push_upstream,
+        )
+
     def _executor_for_worker(self, worker: WorkerConfig) -> WorkerExecutor:
         if worker.worker_id in self._executors:
             return self._executors[worker.worker_id]
@@ -1078,6 +1303,8 @@ class BuildRunner:
                 list(worker.command),
                 log_dir=self._log_dir(),
             )
+        elif worker.adapter == "builtin-git":
+            executor = self._git_integrator()
         else:
             raise CoordinatorPolicyError(f"Unknown executor adapter: {worker.adapter}")
         self._executors[worker.worker_id] = executor
@@ -1091,6 +1318,11 @@ class BuildRunner:
             return executor
         if execution.adapter == "fake":
             executor = FakeExecutor()
+            self._executors[execution.worker_id] = executor
+            return executor
+        if execution.adapter == "builtin-git":
+            executor = self._git_integrator()
+            executor.remember_result_path(execution.execution_id, execution.result_path)
             self._executors[execution.worker_id] = executor
             return executor
         if execution.adapter == "subprocess":
@@ -1321,6 +1553,31 @@ class BuildRunner:
             .where(BuildRunnerExecution.role == "REMEDIATION")
             .where(BuildRunnerExecution.status.in_(("LAUNCHED", "RUNNING", "SUCCEEDED")))
         ) or 0
+
+
+_COOLDOWN_SECONDS = {
+    "AUTH_FAILURE": 900,
+    "RATE_LIMITED": 600,
+    "QUOTA_EXHAUSTED": 1800,
+    "NETWORK_FAILURE": 120,
+    "UNAVAILABLE": 300,
+    "EXECUTION_FAILURE": 60,
+}
+
+
+def _task_definition(task: BuildTask) -> dict:
+    """What the task asks for, in the words of its version-controlled definition."""
+    return {
+        "task_id": task.task_id,
+        "title": task.title,
+        "description": task.description,
+        "acceptance_criteria": list(task.acceptance_criteria or []),
+        "required_validation": list(task.required_validation or []),
+        "permitted_scope": list(task.permitted_scope or []),
+        "implementation_notes": task.implementation_notes,
+        "review_policy": task.review_policy,
+        "risk_level": task.risk_level,
+    }
 
 
 def _sanitize_observation(observation: ExecutionObservation) -> ExecutionObservation:

@@ -73,6 +73,7 @@ def write_project(
     concurrency: int = 3,
     tasks: dict | None = None,
     extra: dict | None = None,
+    workers: dict | None = None,
 ) -> Path:
     (root / ".stagemesh" / "tasks").mkdir(parents=True, exist_ok=True)
     worker = {
@@ -87,20 +88,13 @@ def write_project(
         "name": name,
         "aliases": [project_id],
         "execution": {"concurrency": concurrency, "reviewers": 1, "default_review_policy": "INDEPENDENT"},
-        "workers": {"builder": worker, "reviewer": worker, "integration": worker},
+        "workers": workers or {"builder": worker, "reviewer": worker},
         **(extra or {}),
     }
     (root / ".stagemesh" / "project.yaml").write_text(yaml.safe_dump(definition), encoding="utf-8")
     if tasks is not None:
         (root / ".stagemesh" / "tasks" / "backlog.yaml").write_text(task_yaml(**tasks), encoding="utf-8")
     return root
-
-
-@pytest.fixture
-def registry(tmp_path, monkeypatch):
-    path = tmp_path / "registry" / "projects.json"
-    monkeypatch.setenv("STAGEMESH_PROJECT_REGISTRY", str(path))
-    return path
 
 
 @pytest.fixture
@@ -404,11 +398,13 @@ E2E_ENV_DROP = (
 
 
 def make_project_repo(tmp_path: Path, tasks: dict, **kwargs) -> tuple[Path, Path]:
-    origin = tmp_path / "origin.git"
+    subdir = kwargs.pop("subdir", "repo")
+    origin = tmp_path / ("origin.git" if subdir == "repo" else f"{subdir}-origin.git")
     subprocess.run(["git", "init", "--bare", "-b", "main", str(origin)], check=True, capture_output=True)
-    root = tmp_path / "repo"
+    root = tmp_path / subdir
     root.mkdir()
     git(root, "init", "-b", "main")
+    kwargs.setdefault("extra", {"upstream": {"remote": "origin", "push": True}})
     write_project(root, tasks=tasks, **kwargs)
     (root / ".gitignore").write_text(".build-coordinator/\n", encoding="utf-8")
     (root / "README.md").write_text("fixture\n", encoding="utf-8")
@@ -557,7 +553,8 @@ def test_continue_recovers_crashed_execution_and_finishes(tmp_path, registry):
     payload = json.loads(run.stdout)
     final = {t["task_id"]: t["state"] for t in payload["final"]["tasks"]}
     statuses = [(e["task_id"], e["role"], e["status"]) for e in payload["final"]["executions"]]
-    assert ("R-1", "BUILDER", "FAILED") in statuses
+    assert ("R-1", "BUILDER", "LOST") in statuses  # crash is recovered, not stranded
+    assert final["R-1"] == "DONE"
     assert final["R-2"] in {"DONE", "BLOCKED", "REWORK_REQUIRED"}
     assert any(e for e in statuses if e[0] == "R-2" and e[1] == "REVIEWER")
 

@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- 0.2.0a1: distribution renamed `stagemesh` (`pip install stagemesh`, `stagemesh` command;
+  the Python module stays `build_coordinator`).
+- Global invocation, registry (`project add/list/remove`, machine-local environment),
+  `init`, `agent setup`, `doctor`, `upgrade`, `--version`.
+- Real coding-agent runtimes (Codex CLI, Claude Code) through a built-in headless wrapper
+  with capability routing, provider-failure isolation and cooldown; results derived from git.
+- Deterministic validation gate, TWO_REVIEWERS enforcement, deterministic runner-owned
+  integration with optional upstream push (durable, retryable), branch cleanup, worker-death
+  recovery with WIP checkpoint commits, `delivered_by` reconciliation.
+
 - Project-owned backlogs: `.stagemesh/project.yaml` and `.stagemesh/tasks/`
   are the canonical, version-controlled backlog; task sync into the durable
   queue is deterministic and idempotent and never touches runtime state.
