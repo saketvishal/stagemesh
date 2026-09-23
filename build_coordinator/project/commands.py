@@ -308,6 +308,17 @@ def handle_continue(args: argparse.Namespace) -> None:
     idle_cycles = 0
     drained_from: str | None = None
     for number in range(1, max(1, args.max_cycles) + 1):
+        project = resolve_project(None, path=project.root)
+        apply_project_environment(project)
+        config = build_runner_config(project, dry_run=False)
+        with lifecycle.session() as session:
+            live_worker_ids = {
+                row.worker_id
+                for row in session.scalars(
+                    select(BuildRunnerExecution).where(BuildRunnerExecution.status.in_(_LIVE_EXECUTION))
+                )
+            }
+        runner.reload_config(config, live_worker_ids=live_worker_ids)
         if args.timeout is not None and drained_from is None and time.monotonic() - started > args.timeout:
             with lifecycle.session() as session:
                 state = ensure_state(session)
