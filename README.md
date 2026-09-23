@@ -110,6 +110,7 @@ See [docs/SETUP.md](docs/SETUP.md) for full installation and configuration.
 
 - [Architecture](docs/ARCHITECTURE.md) - concepts, data flow, key principles
 - [Setup](docs/SETUP.md) - installation, configuration, first run
+- [Project-owned backlogs](docs/PROJECTS.md) - `.stagemesh/` project definitions, `stagemesh continue`, parallel execution
 - [Security & Trust Boundaries](SECURITY.md) - what the coordinator trusts and why
 - [Roadmap](docs/ROADMAP.md) - v0.1-alpha roadmap and what comes next
 - [Contributing](CONTRIBUTING.md) - how to contribute

@@ -37,6 +37,7 @@ dev = [
 
 [project.scripts]
 build-coordinator = "build_coordinator.cli:main"
+stagemesh = "build_coordinator.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["build_coordinator"]

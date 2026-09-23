@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import dataclasses
+
 import hashlib
 import time
 from dataclasses import dataclass, field
@@ -73,7 +75,14 @@ from build_coordinator.runner.routing import (
     role_to_stage,
     route_worker,
 )
-from build_coordinator.runner.worktree import WorktreeValidationError, validate_worktree_path
+from build_coordinator.project.backlog import task_priorities
+from build_coordinator.runner.worktree import (
+    WorktreeValidationError,
+    ensure_worktree,
+    prepare_task_workspace,
+    task_branch_name,
+    validate_worktree_path,
+)
 from build_coordinator.service import (
     ClaimRequest,
     checkpoint,
@@ -121,12 +130,14 @@ class BuildRunner:
         *,
         executors: dict[str, WorkerExecutor] | None = None,
         git: GitBackend | None = None,
+        task_source: Any = None,
     ) -> None:
         self._session_factory = session_factory
         self._config = config
         self._executors = executors or {}
         self._git = git if git is not None else RealGit()
         self._settings = get_settings()
+        self._task_source = task_source
 
     def run_forever(self) -> None:
         while True:
@@ -144,6 +155,15 @@ class BuildRunner:
     def _run_once(self, session: Session) -> RunnerCycleResult:
         state = ensure_state(session)
         result = RunnerCycleResult(mode=state.mode)
+        if self._task_source is not None and state.mode != "PAUSED":
+            try:
+                self._task_source.discover_tasks(session)
+            except Exception as exc:
+                record_event(
+                    session,
+                    event_type="runner.task_source_sync_error",
+                    payload={"error": str(exc)},
+                )
         recovered_tasks = recover_expired(session, actor="runner")
         result.recovered = [task.task_id for task in recovered_tasks]
         reconcile_stale_executions(session)
@@ -487,7 +507,10 @@ class BuildRunner:
         )
 
     def _dispatch_builders(self, session: Session, result: RunnerCycleResult) -> None:
-        for task in list_available_tasks(session):
+        available = list_available_tasks(session)
+        priorities = task_priorities(session, [task.task_id for task in available])
+        available.sort(key=lambda task: (priorities.get(task.task_id, 100), task.task_id))
+        for task in available:
             if is_planner_task(task):
                 continue
             if task.state == "REWORK_REQUIRED":
@@ -506,7 +529,10 @@ class BuildRunner:
                 result.escalations.append(f"{task.task_id}:EXTERNAL_EXECUTOR_CONFIGURATION_REQUIRED")
                 continue
             try:
-                self._validate_worker_worktree(worker)
+                if self._config.task_branches and worker.worktree_path:
+                    worker = self._prepare_task_worker(worker, task)
+                else:
+                    self._validate_worker_worktree(worker)
             except WorktreeValidationError as exc:
                 result.escalations.append(f"{task.task_id}:COORDINATOR_INVARIANT_FAILURE")
                 self._block_task(session, task.task_id, "COORDINATOR_INVARIANT_FAILURE")
@@ -719,7 +745,7 @@ class BuildRunner:
                         task.task_id,
                         worker_id=worker.worker_id,
                         provider=worker.provider,
-                        branch_name=worker.branch_name or task.branch_name,
+                        branch_name=task.branch_name or worker.branch_name,
                         worktree_path=worker.worktree_path,
                     ),
                 )
@@ -808,7 +834,7 @@ class BuildRunner:
                 assessment = assess_mechanical_merge(
                     self._git,
                     cwd=self._git_cwd(worker, task),
-                    branch_name=worker.branch_name or task.branch_name or row.branch_name or "HEAD",
+                    branch_name=task.branch_name or row.branch_name or worker.branch_name or "HEAD",
                     reviewed_feature_sha=reviewed_sha,
                     remote=self._config.remote_name,
                     main_ref=self._config.main_ref,
@@ -840,7 +866,7 @@ class BuildRunner:
                         row.task_id,
                         worker_id=worker.worker_id,
                         provider=worker.provider,
-                        branch_name=worker.branch_name or task.branch_name,
+                        branch_name=task.branch_name or worker.branch_name,
                         worktree_path=worker.worktree_path,
                     ),
                 )
@@ -1097,7 +1123,7 @@ class BuildRunner:
             return capture_feature_sha(
                 self._git,
                 cwd=self._git_cwd(worker, task),
-                branch_name=worker.branch_name or task.branch_name,
+                branch_name=task.branch_name or worker.branch_name,
                 remote=self._config.remote_name,
             )
         except GitSafetyError as exc:
@@ -1116,14 +1142,42 @@ class BuildRunner:
             )
             return None
 
+    def _prepare_task_worker(self, worker: WorkerConfig, task: BuildTask) -> WorkerConfig:
+        resume = task.state in {"REWORK_REQUIRED", "STALE", "RESUMABLE"} and bool(task.branch_name)
+        branch = task.branch_name if resume else task_branch_name(task.task_id)
+        prepare_task_workspace(
+            worker.worktree_path,
+            repo_root=self._settings.repo_root,
+            branch_name=branch,
+            base_ref=self._config.main_ref,
+            remote=self._config.remote_name,
+            resume=resume,
+            allowed_roots=self._config.allowed_workspace_roots,
+        )
+        return dataclasses.replace(worker, branch_name=branch)
+
     def _validate_worker_worktree(self, worker: WorkerConfig) -> None:
         if not worker.worktree_path:
             return
-        validate_worktree_path(
-            worker.worktree_path,
-            allowed_roots=self._config.allowed_workspace_roots,
-            require_git=worker.adapter == "subprocess",
-        )
+        try:
+            ensure_worktree(
+                worker.worktree_path,
+                repo_root=self._settings.repo_root,
+                branch_name=worker.branch_name,
+                base_sha=self._config.main_ref,
+                allowed_roots=self._config.allowed_workspace_roots,
+            )
+        except WorktreeValidationError as provisioning_error:
+            try:
+                validate_worktree_path(
+                    worker.worktree_path,
+                    allowed_roots=self._config.allowed_workspace_roots,
+                    require_git=worker.adapter == "subprocess",
+                )
+            except WorktreeValidationError as validation_error:
+                raise WorktreeValidationError(
+                    f"{validation_error} (automatic provisioning failed: {provisioning_error})"
+                ) from validation_error
 
     def _git_cwd(self, worker: WorkerConfig, task: BuildTask | None = None) -> str:
         if worker.worktree_path:

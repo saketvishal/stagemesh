@@ -15,6 +15,7 @@ from build_coordinator.coordinator_config import (
     load_coordinator_config,
 )
 from build_coordinator.policy import CoordinatorPolicyError
+from build_coordinator.project.commands import add_continue_command, add_project_commands
 from build_coordinator.db import DatabaseSchemaError, SessionLocal, configure_process_database
 from build_coordinator.service import (
     CheckpointInput,
@@ -55,9 +56,21 @@ from build_coordinator.types import ObjectiveSpec, PlannedChildTask, StructuredC
 
 
 def main() -> None:
+    import sys
+
+    from build_coordinator.project.commands import handle_continue, handle_project, normalize_argv
+    from build_coordinator.project.definition import ProjectError
+
+    sys.argv = normalize_argv(sys.argv)
     parser = _build_parser()
     args = parser.parse_args()
     try:
+        if args.command == "project":
+            handle_project(args)
+            return
+        if args.command == "continue":
+            handle_continue(args)
+            return
         lifecycle = configure_process_database()
         lifecycle.initialize_schema()
         with lifecycle.session() as session:
@@ -68,14 +81,17 @@ def main() -> None:
         CoordinatorConfigError,
         DatabaseSchemaError,
         StructuredContractError,
+        ProjectError,
     ) as exc:
         raise SystemExit(str(exc)) from exc
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="build-coordinator")
+    parser = argparse.ArgumentParser(prog="stagemesh")
     sub = parser.add_subparsers(dest="command", required=True)
     _add_simple_commands(sub)
+    add_continue_command(sub)
+    add_project_commands(sub)
     _add_run_commands(sub)
     _add_claim_commands(sub)
     _add_checkpoint_commands(sub)
@@ -653,6 +669,8 @@ def _claim_request(args: argparse.Namespace) -> ClaimRequest:
         worktree_path=args.worktree,
         lease_seconds=args.lease_seconds,
     )
+
+
 
 
 def _print(payload) -> None:

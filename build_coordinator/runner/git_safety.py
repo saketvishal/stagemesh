@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import fnmatch
 import subprocess
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
@@ -49,9 +50,18 @@ class RealGit:
     """Subprocess Git backend. Never uses shell interpolation."""
 
     def fetch_prune(self, cwd: str | Path, remote: str = "origin") -> None:
-        result = _git(cwd, "fetch", remote, "--prune")
-        if result.returncode != 0:
-            raise GitSafetyError(_git_error("fetch --prune", result))
+        # Sibling worktrees share one ref store; concurrent fetches can lose a
+        # ref-lock race although nothing is wrong. Retry only that case.
+        for attempt in range(_FETCH_ATTEMPTS):
+            result = _git(cwd, "fetch", remote, "--prune")
+            if result.returncode == 0:
+                return
+            detail = (result.stderr or "") + (result.stdout or "")
+            if attempt + 1 < _FETCH_ATTEMPTS and _is_ref_lock_contention(detail):
+                time.sleep(0.2 * (attempt + 1))
+                continue
+            break
+        raise GitSafetyError(_git_error("fetch --prune", result))
 
     def rev_parse(self, cwd: str | Path, ref: str) -> str:
         result = _git(cwd, "rev-parse", ref)
@@ -198,6 +208,14 @@ def capture_feature_sha(
     if branch_name:
         return git.rev_parse(cwd, f"{remote}/{branch_name}")
     return git.rev_parse(cwd, "HEAD")
+
+
+_FETCH_ATTEMPTS = 5
+
+
+def _is_ref_lock_contention(detail: str) -> bool:
+    lowered = detail.lower()
+    return "cannot lock ref" in lowered or ("unable to" in lowered and ".lock" in lowered)
 
 
 def _git(cwd: str | Path, *args: str) -> subprocess.CompletedProcess[str]:
