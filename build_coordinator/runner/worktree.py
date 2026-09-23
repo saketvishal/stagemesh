@@ -83,6 +83,8 @@ def ensure_worktree(
 
     cmd = [
         "git",
+        "-c",
+        "core.longpaths=true",
         "worktree",
         "add",
         "-B",
@@ -114,7 +116,10 @@ def task_branch_name(task_id: str) -> str:
 
 
 def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(["git", *args], cwd=str(cwd), capture_output=True, text=True, check=False)
+    # core.longpaths lets Windows check out repositories whose tracked paths are long.
+    return subprocess.run(
+        ["git", "-c", "core.longpaths=true", *args], cwd=str(cwd), capture_output=True, text=True, check=False
+    )
 
 
 def _ref_exists(cwd: Path, ref: str) -> bool:

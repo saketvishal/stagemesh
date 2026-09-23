@@ -3,7 +3,7 @@
 tasks:
   - id: SM-012
     title: Validate real coding-agent execution end to end
-    priority: 5
+    priority: 30
     risk: HIGH
     review: INDEPENDENT
     objective: >

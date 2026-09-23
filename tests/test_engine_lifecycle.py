@@ -171,3 +171,21 @@ def test_agent_process_death_is_recovered_by_a_replacement_worker(tmp_path, regi
     kinds = [s[2] for s in statuses(payload) if s[1] == "BUILDER"]
     assert kinds == ["LOST", "SUCCEEDED"]
     assert [d for *_x, d in events(root, "X-1", "claim.recovered_from_lost_execution")]
+
+
+def test_time_budget_stops_new_work_but_finishes_in_flight_work_and_restores_running(tmp_path, registry):
+    root, _ = make_project_repo(tmp_path, {f"B-{i}": {"review": "NONE"} for i in range(1, 6)}, concurrency=1)
+    register_project(root)
+    proc = stagemesh(
+        ["continue", "fixture", "--timeout", "3"], cwd=tmp_path, registry=registry, extra_env={"SCRIPTED_WORKER_DELAY": "2"}
+    )
+    assert proc.returncode == 0, proc.stderr
+    payload = json.loads(proc.stdout)
+    done = [t for t in payload["final"]["tasks"] if t["state"] == "DONE"]
+    ready = [t for t in payload["final"]["tasks"] if t["state"] == "READY"]
+    assert done and ready, "some work finished, some deliberately not started"
+    assert not [e for e in payload["final"]["executions"] if e["status"] in ("LAUNCHED", "RUNNING")]
+    import sqlite3
+
+    with sqlite3.connect(root / ".build-coordinator" / "coordinator.sqlite3") as db:
+        assert db.execute("select mode from build_coordinator_state").fetchone()[0] == "RUNNING"
