@@ -50,9 +50,12 @@ class ProjectDefinition:
     main_ref: str = "main"
     remote_name: str = "origin"
     state_dir: Path = Path(".build-coordinator")
-    worker_templates: dict[str, dict[str, Any]] = field(default_factory=dict)
+    worker_templates: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     runner_config: Path | None = None
     task_sources: dict[str, dict[str, Any]] = field(default_factory=dict)
+    upstream_remote: str | None = None
+    push_upstream: bool = False
+    validation_timeout_seconds: float = 900.0
 
     @property
     def definition_dir(self) -> Path:
@@ -88,6 +91,7 @@ class ProjectDefinition:
             "reviewers": self.reviewers,
             "default_review_policy": self.default_review_policy,
             "main_ref": self.main_ref,
+            "upstream": {"remote": self.upstream_remote, "push": self.push_upstream},
             "worker_templates": sorted(self.worker_templates),
             "task_sources": sorted(self.task_sources),
         }
@@ -193,13 +197,26 @@ def load_project(root: str | Path) -> ProjectDefinition:
         problems.append("`repository` must be a mapping")
         repository = {}
 
+    upstream = data.get("upstream") or {}
+    if not isinstance(upstream, dict):
+        problems.append("`upstream` must be a mapping")
+        upstream = {}
+    upstream_remote = str(upstream["remote"]).strip() if upstream.get("remote") else None
+    push_upstream = bool(upstream.get("push", False))
+    if push_upstream and not upstream_remote:
+        problems.append("`upstream.push` needs `upstream.remote`")
+    timeout = execution.get("validation_timeout_seconds", 900)
+    if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or timeout <= 0:
+        problems.append("`execution.validation_timeout_seconds` must be a positive number")
+        timeout = 900
+
     raw_state = str(data.get("state_dir") or ".build-coordinator")
     state_dir = Path(raw_state).expanduser()
     if not state_dir.is_absolute():
         state_dir = root_path / state_dir
     state_dir = state_dir.resolve()
 
-    templates: dict[str, dict[str, Any]] = {}
+    templates: dict[str, list[dict[str, Any]]] = {}
     workers = data.get("workers") or {}
     if not isinstance(workers, dict):
         problems.append("`workers` must be a mapping of role -> worker template")
@@ -207,10 +224,12 @@ def load_project(root: str | Path) -> ProjectDefinition:
     for role, template in workers.items():
         if role not in _WORKER_ROLES:
             problems.append(f"unknown worker role {role!r}; expected one of {_WORKER_ROLES}")
-        elif not isinstance(template, dict):
-            problems.append(f"`workers.{role}` must be a mapping")
         else:
-            templates[role] = dict(template)
+            entries = template if isinstance(template, list) else [template]
+            if not entries or not all(isinstance(entry, dict) for entry in entries):
+                problems.append(f"`workers.{role}` must be a mapping or a list of mappings")
+            else:
+                templates[role] = [dict(entry) for entry in entries]
 
     runner_config = data.get("runner_config")
     runner_path: Path | None = None
@@ -243,6 +262,9 @@ def load_project(root: str | Path) -> ProjectDefinition:
         worker_templates=templates,
         runner_config=runner_path,
         task_sources={str(k): dict(v or {}) for k, v in sources.items()},
+        upstream_remote=upstream_remote,
+        push_upstream=push_upstream,
+        validation_timeout_seconds=float(timeout),
     )
 
 
@@ -250,10 +272,35 @@ def registry_path() -> Path:
     configured = os.getenv(REGISTRY_ENV)
     if configured:
         return Path(configured).expanduser()
-    return DEFAULT_REGISTRY_PATH
+    home = os.getenv("STAGEMESH_HOME")
+    return (Path(home).expanduser() if home else Path.home() / ".build-coordinator") / "projects.json"
 
 
-def registered_roots() -> list[Path]:
+def unregister_project(query: str | Path) -> list[Path]:
+    """Remove registry entries matching a project name/alias or a path."""
+    wanted = _fold(str(query))
+    keep: list[str] = []
+    removed: list[Path] = []
+    for root in registered_roots():
+        matches = _fold(str(root)) == wanted or str(root).lower() == str(query).lower()
+        if not matches:
+            try:
+                matches = wanted in load_project(root).names()
+            except ProjectError:
+                matches = False
+        (removed if matches else keep).append(root)
+    if not removed:
+        raise ProjectError(f"no registered project matches {query!r}")
+    _write_registry([row for row in _registry_entries() if Path(row["path"]) in {Path(k) for k in keep}])
+    return removed
+
+
+def _registry_entries() -> list[dict[str, Any]]:
+    """Registry rows: `{"path": ..., "env": {...}, "path_prepend": [...]}`.
+
+    Older registries stored bare path strings; both forms are read. This file is
+    per-user discovery metadata plus machine-local execution environment (for
+    example a virtualenv's bin directory); it is never the project backlog."""
     path = registry_path()
     if not path.is_file():
         return []
@@ -261,29 +308,69 @@ def registered_roots() -> list[Path]:
         data = json.loads(path.read_text(encoding="utf-8-sig"))
     except (OSError, json.JSONDecodeError) as exc:
         raise ProjectError(f"project registry {path} is unreadable: {exc}") from exc
-    return [Path(str(item)) for item in data.get("projects", [])]
+    rows = []
+    for item in data.get("projects", []):
+        row = {"path": str(item)} if isinstance(item, str) else dict(item)
+        row.setdefault("env", {})
+        row.setdefault("path_prepend", [])
+        rows.append(row)
+    return rows
+
+
+def _write_registry(rows: list[dict[str, Any]]) -> None:
+    path = registry_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    compact = [
+        row["path"] if not row.get("env") and not row.get("path_prepend") else row
+        for row in sorted(rows, key=lambda r: r["path"])
+    ]
+    path.write_text(json.dumps({"projects": compact}, indent=2) + "\n", encoding="utf-8")
+
+
+def registered_roots() -> list[Path]:
+    return [Path(row["path"]) for row in _registry_entries()]
+
+
+def machine_environment(root: str | Path) -> dict[str, Any]:
+    """Machine-local env a registered project should run with (empty if none)."""
+    for row in _registry_entries():
+        if Path(row["path"]) == Path(root):
+            return {"env": dict(row["env"]), "path_prepend": list(row["path_prepend"])}
+    return {"env": {}, "path_prepend": []}
+
+
+def set_machine_environment(
+    root: str | Path, *, env: dict[str, str] | None = None, path_prepend: list[str] | None = None
+) -> None:
+    rows = _registry_entries()
+    for row in rows:
+        if Path(row["path"]) == Path(root):
+            row["env"].update(env or {})
+            for entry in path_prepend or []:
+                if entry not in row["path_prepend"]:
+                    row["path_prepend"].append(entry)
+            _write_registry(rows)
+            return
+    raise ProjectError(f"{root} is not registered")
 
 
 def register_project(root: str | Path) -> ProjectDefinition:
     project = load_project(root)
-    roots = [str(p) for p in registered_roots()]
-    entry = str(project.root)
-    others = []
-    for existing in roots:
+    rows = _registry_entries()
+    kept = []
+    for row in rows:
         try:
-            other = load_project(existing)
+            other = load_project(row["path"])
         except ProjectError:
-            others.append(existing)
+            kept.append(row)
             continue
-        if other.project_id == project.project_id and other.root != project.root:
-            continue
-        if other.root != project.root:
-            others.append(existing)
-    path = registry_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps({"projects": sorted({*others, entry})}, indent=2) + "\n", encoding="utf-8"
-    )
+        if other.root == project.root:
+            kept.append(row)  # already registered: keep its machine-local settings
+        elif other.project_id != project.project_id:
+            kept.append(row)
+    if not any(Path(r["path"]) == project.root for r in kept):
+        kept.append({"path": str(project.root), "env": {}, "path_prepend": []})
+    _write_registry(kept)
     return project
 
 

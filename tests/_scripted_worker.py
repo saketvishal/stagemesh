@@ -64,6 +64,16 @@ def main() -> int:
     }.items():
         os.environ.setdefault(key, value)
 
+    provider = os.environ.get("SCRIPTED_WORKER_PROVIDER", "")
+    if provider and provider in os.environ.get("SCRIPTED_WORKER_FAIL_PROVIDERS", "").split(","):
+        result_path.parent.mkdir(parents=True, exist_ok=True)
+        result_path.write_text(
+            json.dumps({**base, "status": "FAILED", "provider_failure": "RATE_LIMITED", "detail": f"{provider} is rate limited"}),
+            encoding="utf-8",
+        )
+        trace({"role": role, "task_id": task_id, "provider": provider, "outcome": "provider_failure"})
+        return 1
+
     if role in ("BUILDER", "REMEDIATION"):
         time.sleep(float(os.environ.get("SCRIPTED_WORKER_DELAY", "0.5")))
         if os.environ.get("SCRIPTED_WORKER_CRASH") == task_id and first_time("crash", task_id):
@@ -73,17 +83,19 @@ def main() -> int:
         target.parent.mkdir(exist_ok=True)
         target.write_text(f"work for {task_id} by execution {execution_id}\n", encoding="utf-8")
         git("add", str(target))
+        if role == "REMEDIATION":
+            Path("fixed.txt").write_text("fixed", encoding="utf-8")
+            git("add", "fixed.txt")
         git("commit", "-m", f"scripted work for {task_id}")
         branch = git("rev-parse", "--abbrev-ref", "HEAD")
         sha = git("rev-parse", "HEAD")
-        git("push", "--force", "origin", f"HEAD:refs/heads/{branch}")
         payload = {
             **base,
             "status": "SUCCEEDED",
             "feature_sha": sha,
             "files_changed": [target.as_posix()],
             "commits_created": [sha],
-            "tests": ["scripted-validation: passed"],
+            "tests": ["scripted-validation: passed"],  # self-report; StageMesh must not trust it
             "scope_expansion_required": False,
             "blockers": [],
         }

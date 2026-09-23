@@ -297,6 +297,8 @@ def route_worker(
     excluded_workers: set[str] | None = None,
 ) -> RoutingDecision:
     excluded_workers = excluded_workers or set()
+    workers = list(workers)
+    all_workers = workers
     active_by_worker = _active_implementation_counts(session)
     candidates: list[CandidateExplanation] = []
     eligible: list[WorkerLike] = []
@@ -342,11 +344,16 @@ def route_worker(
             candidates=tuple(candidates),
             routing_policy=routing_policy,
         )
+    provider_load = {
+        provider: sum(active_by_worker.get(w.worker_id, 0) for w in all_workers if w.provider == provider)
+        for provider in {w.provider for w in all_workers}
+    }
     selected = sorted(
         eligible,
         key=lambda worker: (
             0 if worker.worker_id in stage_requirement.preferred_workers else 1,
             worker.preference,
+            provider_load.get(worker.provider, 0),
             active_by_worker.get(worker.worker_id, 0),
             worker.worker_id,
         ),
@@ -365,8 +372,45 @@ def route_worker(
 def reviewer_exclusions(session: Session | None, task_id: str | None) -> set[str]:
     if session is None or not task_id:
         return set()
+    excluded = set(approving_reviewers(session, task_id))
     implementer = last_implementation_worker(session, task_id)
-    return {implementer} if implementer else set()
+    if implementer:
+        excluded.add(implementer)
+    return excluded
+
+
+def approving_reviewers(session: Session, task_id: str) -> set[str]:
+    """Distinct workers that approved the task's current implementation."""
+    since = session.scalar(
+        select(BuildTaskClaim.claimed_at)
+        .where(BuildTaskClaim.task_id == task_id)
+        .where(BuildTaskClaim.claim_type == "IMPLEMENTATION")
+        .order_by(BuildTaskClaim.claimed_at.desc())
+        .limit(1)
+    )
+    rows = session.scalars(
+        select(BuildRunnerExecution)
+        .where(BuildRunnerExecution.task_id == task_id)
+        .where(BuildRunnerExecution.role == "REVIEWER")
+        .where(BuildRunnerExecution.status == "SUCCEEDED")
+    ).all()
+    approvers: set[str] = set()
+    for row in rows:
+        if since is not None and row.launched_at is not None and _naive(row.launched_at) < _naive(since):
+            continue
+        data = row.result_data or {}
+        review = data.get("review") if isinstance(data.get("review"), dict) else data
+        if (
+            str(review.get("verdict", "")).upper() in {"GREEN", "GREEN_WITH_NOTES"}
+            and review.get("ready_for_integration") is True
+            and not review.get("required_remediation")
+        ):
+            approvers.add(row.worker_id)
+    return approvers
+
+
+def _naive(value):
+    return value.replace(tzinfo=None) if getattr(value, "tzinfo", None) else value
 
 
 def _candidate_reasons(

@@ -60,6 +60,7 @@ class _PromptBuilder:
         payload = {
             "global_build_policy": GLOBAL_BUILD_POLICY,
             "role_policy": self.role_policy,
+            "task_definition": extra.get("task_definition"),
             "task_envelope": envelope,
             "resume_context": extra,
             "result_file_contract": extra.get("result_file_contract")

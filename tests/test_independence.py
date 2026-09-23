@@ -56,7 +56,7 @@ def test_own_project_is_discoverable_from_wherever_the_repo_lives(tmp_path):
     definitions = load_backlog(project)
     ids = {d.task_id for d in definitions}
     assert {"SM-011", "SM-012", "SM-013", "SM-014", "SM-015"} <= ids
-    assert all(d.review_policy in {"NONE", "SELF", "INDEPENDENT"} for d in definitions), "only enforced policies"
+    assert project.reviewers >= 2 or not any(d.review_policy == "TWO_REVIEWERS" for d in definitions)
 
 
 def test_runtime_state_is_ignored_by_git():

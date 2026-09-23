@@ -33,6 +33,10 @@ HUMAN_ESCALATION_TYPES = (
     "TEST_FAILURE_REQUIRES_JUDGMENT",
     "COORDINATOR_INVARIANT_FAILURE",
     "REVIEWED_SHA_CHANGED",
+    "UPSTREAM_PUSH_FAILED",
+    "WORKING_CHECKOUT_DIRTY",
+    "AGENT_AUTHENTICATION_REQUIRED",
+    "EXECUTION_RETRY_LIMIT_REACHED",
 )
 
 REVIEW_VERDICT_VALUES = (
@@ -191,7 +195,13 @@ class RunnerConfig:
     allowed_workspace_roots: tuple[str, ...] = ()
     result_dir: str | None = None
     main_ref: str = "main"
-    remote_name: str = "origin"
+    remote_name: str | None = "origin"
+    upstream_remote: str | None = None
+    push_upstream: bool = False
+    run_validation: bool = True
+    validation_timeout_seconds: float = 900.0
+    max_execution_attempts: int = 3
+    cleanup_branches: bool = False
     # When true every builder task gets its own branch, started from main_ref,
     # in the worker's managed worktree instead of reusing one branch per worker.
     task_branches: bool = False

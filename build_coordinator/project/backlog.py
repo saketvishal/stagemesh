@@ -28,7 +28,7 @@ from build_coordinator.project.definition import (
     ProjectError,
     read_yaml,
 )
-from build_coordinator.service import upsert_task
+from build_coordinator.service import transition_task, upsert_task
 from build_coordinator.task_source.base import SyncResult
 from build_coordinator.types import EventInput, TaskSpec
 
@@ -53,6 +53,7 @@ _KNOWN_KEYS = frozenset(
         "program",
         "migration_allowed",
         "ownership",
+        "delivered_by",
     }
 )
 # Definition refreshes are only applied while the task has no live or
@@ -87,6 +88,7 @@ class TaskDefinition:
     migration_allowed: bool
     ownership: dict[str, Any] | None
     source: str = ""
+    delivered_by: str | None = None
 
     def description(self) -> str:
         parts = [self.objective.strip()]
@@ -126,6 +128,7 @@ class TaskDefinition:
                 "program_key": self.program_key,
                 "migration_allowed": self.migration_allowed,
                 "ownership": self.ownership,
+                "delivered_by": self.delivered_by,
             },
             "priority": self.priority,
         }
@@ -203,6 +206,7 @@ def _definition_from_mapping(
         migration_allowed=bool(data.get("migration_allowed", False)),
         ownership=ownership,
         source=source,
+        delivered_by=str(data.get("delivered_by")).strip() if data.get("delivered_by") else None,
     )
     if task_id in definition.dependencies:
         local.append("a task cannot depend on itself")
@@ -362,7 +366,28 @@ def sync_backlog(
                 )
             )
             continue
+        if definition.review_policy == "TWO_REVIEWERS" and project.reviewers < 2:
+            report.results.append(
+                SyncResult(
+                    definition.task_id,
+                    definition.title,
+                    "ERROR",
+                    definition.source,
+                    "review TWO_REVIEWERS needs execution.reviewers >= 2 in project.yaml",
+                )
+            )
+            continue
         digest = definition.content_hash()
+        if definition.delivered_by and (task is None or task.state == "READY"):
+            if not dry_run:
+                if task is None:
+                    upsert_task(session, definition.to_spec())
+                    session.flush()
+                _reconcile_delivered(session, definition, digest, project)
+            report.results.append(
+                SyncResult(definition.task_id, definition.title, "RECONCILED", definition.source, f"delivered outside StageMesh: {definition.delivered_by}")
+            )
+            continue
         if task is None:
             if not dry_run:
                 upsert_task(session, definition.to_spec())
@@ -426,6 +451,16 @@ def sync_backlog(
         session.flush()
     report.results.sort(key=lambda r: (r.task_id, r.action))
     return report
+
+
+def _reconcile_delivered(session: Session, definition: TaskDefinition, digest: str, project: ProjectDefinition) -> None:
+    """Close a task whose work landed outside StageMesh, without pretending it ran
+    through the lifecycle: every step is attributed to the sync and carries the
+    delivering reference, and no execution or review evidence is invented."""
+    reason = f"DELIVERED_OUTSIDE_STAGEMESH: {definition.delivered_by}"
+    _record(session, definition, digest, "RECONCILED", project)
+    for state in ("CLAIMED", "IN_PROGRESS", "VALIDATING", "DONE"):
+        transition_task(session, definition.task_id, state, actor="project-sync", reason=reason)
 
 
 def _record(

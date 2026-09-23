@@ -170,12 +170,13 @@ def assess_mechanical_merge(
     cwd: str | Path,
     branch_name: str,
     reviewed_feature_sha: str,
-    remote: str = "origin",
+    remote: str | None = "origin",
     main_ref: str = "main",
 ) -> MechanicalMergeAssessment:
-    git.fetch_prune(cwd, remote)
-    current_main_sha = git.rev_parse(cwd, f"{remote}/{main_ref}")
-    feature_ref = f"{remote}/{branch_name}"
+    if remote:
+        git.fetch_prune(cwd, remote)
+    current_main_sha = git.rev_parse(cwd, f"{remote}/{main_ref}" if remote else main_ref)
+    feature_ref = f"{remote}/{branch_name}" if remote else branch_name
     feature_remote_sha = git.rev_parse(cwd, feature_ref)
     merge_base = git.merge_base(cwd, current_main_sha, feature_remote_sha)
     reviewed_sha_matches = feature_remote_sha == reviewed_feature_sha
@@ -191,7 +192,7 @@ def assess_mechanical_merge(
         reviewed_sha_matches=reviewed_sha_matches,
         conflict=bool(conflict_paths),
         conflict_paths=conflict_paths,
-        remote_name=remote,
+        remote_name=remote or "",
         main_ref=main_ref,
         feature_ref=feature_ref,
     )
@@ -202,11 +203,12 @@ def capture_feature_sha(
     *,
     cwd: str | Path,
     branch_name: str | None,
-    remote: str = "origin",
+    remote: str | None = "origin",
 ) -> str:
-    git.fetch_prune(cwd, remote)
+    if remote:
+        git.fetch_prune(cwd, remote)
     if branch_name:
-        return git.rev_parse(cwd, f"{remote}/{branch_name}")
+        return git.rev_parse(cwd, f"{remote}/{branch_name}" if remote else branch_name)
     return git.rev_parse(cwd, "HEAD")
 
 

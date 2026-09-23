@@ -133,10 +133,45 @@ def _checked_out_elsewhere(cwd: Path, branch: str) -> Path | None:
     return None
 
 
-def _preserve(tree: Path, reason: str) -> None:
-    """Never discard work: stash anything uncommitted."""
-    if _git(tree, "status", "--porcelain").stdout.strip():
-        _git(tree, "stash", "push", "--include-untracked", "-m", f"stagemesh: preserved before {reason}")
+_IDENTITY = ("-c", "user.name=StageMesh", "-c", "user.email=stagemesh@localhost")
+
+
+def _current_branch(tree: Path) -> str:
+    return _git(tree, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+
+
+def _preserve(tree: Path, reason: str, *, resume_branch: str | None = None) -> None:
+    """Never discard work. A resumed task's uncommitted progress becomes a
+    work-in-progress commit on its own branch so the next worker continues from
+    it; anything else is stashed."""
+    if not _git(tree, "status", "--porcelain").stdout.strip():
+        return
+    if resume_branch and _current_branch(tree) == resume_branch:
+        _git(tree, "add", "-A")
+        _git(tree, *_IDENTITY, "commit", "-m", "stagemesh: recovered work-in-progress checkpoint")
+        return
+    _git(tree, "stash", "push", "--include-untracked", "-m", f"stagemesh: preserved before {reason}")
+
+
+def cleanup_task_branch(
+    repo_root: str | Path, branch: str, *, main_ref: str, reviewed_sha: str | None
+) -> tuple[bool, str]:
+    """Delete an integrated task branch. Refuses unless the reviewed commit is
+    already contained in `main_ref`, and never touches a dirty worktree."""
+    root = Path(repo_root)
+    if not branch.startswith("stagemesh/") or not _ref_exists(root, branch):
+        return False, "not a StageMesh task branch"
+    tip = _git(root, "rev-parse", branch).stdout.strip()
+    contained = _git(root, "merge-base", "--is-ancestor", reviewed_sha or tip, main_ref).returncode == 0
+    if not contained:
+        return False, f"{branch} is not fully integrated into {main_ref}"
+    holder = _checked_out_elsewhere(root, branch)
+    if holder is not None:
+        if _git(holder, "status", "--porcelain").stdout.strip():
+            return False, f"{branch} is checked out with uncommitted changes at {holder}"
+        _git(holder, "checkout", "--detach")
+    result = _git(root, "branch", "-D", branch)
+    return result.returncode == 0, (result.stderr or result.stdout).strip()
 
 
 def prepare_task_workspace(
@@ -145,7 +180,7 @@ def prepare_task_workspace(
     *,
     branch_name: str,
     base_ref: str,
-    remote: str = "origin",
+    remote: str | None = "origin",
     resume: bool = False,
     allowed_roots: tuple[str, ...] = (),
 ) -> Path:
@@ -166,20 +201,22 @@ def prepare_task_workspace(
     if workspace is None:
         raise WorktreeValidationError("a task workspace path is required")
 
-    _git(workspace, "fetch", remote, "--prune")
-    _preserve(workspace, branch_name)
+    if remote:
+        _git(workspace, "fetch", remote, "--prune")
+    resume_branch = branch_name if resume else None
+    _preserve(workspace, branch_name, resume_branch=resume_branch)
     holder = _checked_out_elsewhere(workspace, branch_name)
     if holder is not None:
-        _preserve(holder, branch_name)
+        _preserve(holder, branch_name, resume_branch=resume_branch)
         _git(holder, "checkout", "--detach")
 
     remote_branch = f"{remote}/{branch_name}"
     if resume and _ref_exists(workspace, branch_name):
         command = ["checkout", branch_name]
-    elif resume and _ref_exists(workspace, remote_branch):
+    elif resume and remote and _ref_exists(workspace, remote_branch):
         command = ["checkout", "-B", branch_name, remote_branch]
     else:
-        base = f"{remote}/{base_ref}" if _ref_exists(workspace, f"{remote}/{base_ref}") else base_ref
+        base = f"{remote}/{base_ref}" if remote and _ref_exists(workspace, f"{remote}/{base_ref}") else base_ref
         if not _ref_exists(workspace, base):
             base = "HEAD"
         command = ["checkout", "-B", branch_name, base]

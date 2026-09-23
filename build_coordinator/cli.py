@@ -59,12 +59,16 @@ def main() -> None:
     import sys
 
     from build_coordinator.project.commands import handle_continue, handle_project, normalize_argv
+    from build_coordinator.project.extras import EXTRA_COMMANDS, handle_extra
     from build_coordinator.project.definition import ProjectError
 
     sys.argv = normalize_argv(sys.argv)
     parser = _build_parser()
     args = parser.parse_args()
     try:
+        if args.command in EXTRA_COMMANDS:
+            handle_extra(args)
+            return
         if args.command == "project":
             handle_project(args)
             return
@@ -87,11 +91,16 @@ def main() -> None:
 
 
 def _build_parser() -> argparse.ArgumentParser:
+    from build_coordinator import __version__
+    from build_coordinator.project.extras import add_extra_commands
+
     parser = argparse.ArgumentParser(prog="stagemesh")
+    parser.add_argument("--version", action="version", version=f"stagemesh {__version__}")
     sub = parser.add_subparsers(dest="command", required=True)
     _add_simple_commands(sub)
     add_continue_command(sub)
     add_project_commands(sub)
+    add_extra_commands(sub)
     _add_run_commands(sub)
     _add_claim_commands(sub)
     _add_checkpoint_commands(sub)
