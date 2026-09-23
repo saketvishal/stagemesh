@@ -233,3 +233,67 @@ def test_delivered_outside_stagemesh_is_reconciled_with_an_audit_trail(tmp_path,
         rows = db.execute("select event_data from build_task_events where task_id='O-2' and to_state is not null").fetchall()
     reasons = [json.loads(d).get("reason") for (d,) in rows]
     assert reasons and all(r and r.startswith("DELIVERED_OUTSIDE_STAGEMESH") for r in reasons)
+
+
+def test_wrapper_safe_output_handles_non_ascii_unicode_under_narrow_encoding(monkeypatch):
+    from build_coordinator.agents.wrapper import _safe_write_stdout_tail
+    import io
+
+    sample = "Ran test -> \u2192 with emoji \U0001f680 and unicode \u4e2d\u6587"
+
+    # 1. When sys.stdout has a binary buffer
+    raw_buffer = io.BytesIO()
+    text_wrapper = io.TextIOWrapper(raw_buffer, encoding="cp1252", errors="strict")
+    monkeypatch.setattr(sys, "stdout", text_wrapper)
+    _safe_write_stdout_tail(sample)
+    raw_buffer.seek(0)
+    written = raw_buffer.read().decode("utf-8", errors="replace")
+    assert "Ran test -> \u2192" in written
+
+    # 2. When sys.stdout has NO binary buffer and strict cp1252 encoding
+    class StrictNarrowWriter:
+        def __init__(self, encoding="cp1252"):
+            self.encoding = encoding
+            self.data = ""
+
+        def write(self, s):
+            s.encode(self.encoding, errors="strict")
+            self.data += s
+
+        def flush(self):
+            pass
+
+    narrow = StrictNarrowWriter(encoding="cp1252")
+    monkeypatch.setattr(sys, "stdout", narrow)
+    _safe_write_stdout_tail(sample)
+    assert "Ran test" in narrow.data
+
+
+def test_wrapper_main_survives_non_ascii_output_without_crashing_or_losing_result(monkeypatch, tmp_path):
+    import io
+    from build_coordinator.agents import wrapper
+
+    result_path = tmp_path / "result.json"
+    monkeypatch.setenv("BUILD_COORDINATOR_ROLE", "REVIEWER")
+    monkeypatch.setenv("BUILD_COORDINATOR_RESULT_PATH", str(result_path))
+    monkeypatch.setenv("BUILD_COORDINATOR_EXECUTION_ID", "exec-test-123")
+    monkeypatch.setenv("BUILD_COORDINATOR_TASK_ID", "SM-TEST")
+    monkeypatch.setattr(sys, "stdin", io.StringIO("{}"))
+
+    unicode_output = '''Review passed: -> \u2192
+```json
+{"verdict": "GREEN", "findings": [], "required_remediation": [], "ready_for_integration": true}
+```'''
+    monkeypatch.setattr(wrapper, "run_agent", lambda *a, **kw: (0, unicode_output))
+
+    raw_buffer = io.BytesIO()
+    text_wrapper = io.TextIOWrapper(raw_buffer, encoding="cp1252", errors="strict")
+    monkeypatch.setattr(sys, "stdout", text_wrapper)
+
+    code = wrapper.main(["--runtime", "codex"])
+    assert code == 0
+    assert result_path.is_file()
+    payload = json.loads(result_path.read_text(encoding="utf-8"))
+    assert payload["status"] == "SUCCEEDED"
+    assert payload["verdict"] == "GREEN"
+    assert payload["execution_id"] == "exec-test-123"
