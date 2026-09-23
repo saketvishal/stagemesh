@@ -34,6 +34,11 @@ PROVIDER_FAILURES = frozenset(
         "EXECUTION_FAILURE",
     }
 )
+# Transient provider failures worth an automatic, bounded retry with backoff.
+# The remaining PROVIDER_FAILURES values (AUTH_FAILURE, QUOTA_EXHAUSTED,
+# EXECUTION_FAILURE) are not blindly retried here: they typically need a
+# credential fix, a quota reset, or investigation rather than a short wait.
+RETRYABLE_PROVIDER_FAILURES = frozenset({"RATE_LIMITED", "UNAVAILABLE", "NETWORK_FAILURE"})
 DEFAULT_FALLBACK_ON = ("UNAVAILABLE", "RATE_LIMITED", "QUOTA_EXHAUSTED", "NETWORK_FAILURE", "EXECUTION_FAILURE")
 DEFAULT_NO_FALLBACK_ON = ("AUTH_FAILURE",)
 
