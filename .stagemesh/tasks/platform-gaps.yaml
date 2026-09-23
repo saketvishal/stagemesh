@@ -116,3 +116,26 @@ tasks:
       - With one provider, review proceeds as today.
     scope:
       allowed_paths: [build_coordinator/runner/routing.py, tests/]
+
+  - id: SM-019
+    title: Agent wrapper non-ASCII Unicode console output safety
+    priority: 10
+    risk: LOW
+    review: INDEPENDENT
+    objective: >
+      Under Windows cp1252 consoles, agent output containing non-ASCII Unicode
+      characters (e.g. arrows, emoji, UTF-8 symbols) caused print() in wrapper.py
+      to raise UnicodeEncodeError, losing successful agent executions. The wrapper
+      must safely handle arbitrary Unicode output without crashing or corrupting
+      the agent result contract.
+    requirements:
+      - Safely write stdout tail using binary buffer or replacement fallback under narrow console encodings.
+      - Add regression test coverage for narrow console encodings.
+    acceptance_criteria:
+      - The agent wrapper never crashes on arbitrary Unicode characters under narrow console encodings.
+      - Result file and exit codes are written reliably regardless of console encoding.
+      - Regression tests verify non-ASCII console output safety.
+    scope:
+      allowed_paths: [build_coordinator/agents/, tests/]
+    validation:
+      - pytest tests/test_global_and_onboarding.py -k test_wrapper -q
