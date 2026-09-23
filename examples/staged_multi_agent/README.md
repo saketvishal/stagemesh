@@ -1,4 +1,4 @@
-﻿# Staged Multi-Agent Example
+# Staged Multi-Agent Example
 
 Two separate agents: one for building (implementation + remediation) and one
 for independent code review. This is the recommended setup for enforcing

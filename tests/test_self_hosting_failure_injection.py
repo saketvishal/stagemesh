@@ -44,9 +44,7 @@ from build_coordinator.types import TaskSpec
 
 @pytest.fixture(autouse=True)
 def isolate_runner_artifacts(tmp_path, monkeypatch):
-    monkeypatch.setenv("BUILD_COORDINATOR_Q_RECORDS_DIR", str(tmp_path / "q"))
     monkeypatch.setenv("BUILD_COORDINATOR_RESULT_DIR", str(tmp_path / "r"))
-    (tmp_path / "q").mkdir()
     (tmp_path / "r").mkdir()
 
 
@@ -88,7 +86,6 @@ def _config(*workers: WorkerConfig, **kwargs):
             WorkerConfig("reviewer-1", "REVIEWER", adapter="fake"),
             WorkerConfig("integration-1", "INTEGRATION", adapter="fake"),
         ),
-        q_records_dir=os.getenv("BUILD_COORDINATOR_Q_RECORDS_DIR"),
         result_dir=os.getenv("BUILD_COORDINATOR_RESULT_DIR"),
         **kwargs,
     )

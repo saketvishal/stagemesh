@@ -26,8 +26,8 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 _LOCATION_ENV_VARS = (
-    "CAVENTRA_REPO_ROOT",
-    "CAVENTRA_BUILD_CONFIG",
+    "LEGACY_PRODUCT_REPO_ROOT",
+    "LEGACY_PRODUCT_BUILD_CONFIG",
     "BUILD_COORDINATOR_DATA_DIR",
     "BUILD_COORDINATOR_DATABASE_URL",
     "BUILD_COORDINATOR_MAX_ACTIVE_BUILDERS",
@@ -38,7 +38,6 @@ _LOCATION_ENV_VARS = (
     "BUILD_COORDINATOR_RUNNER_CONFIG",
     "BUILD_COORDINATOR_ALLOWED_WORKSPACE_ROOTS",
     "BUILD_COORDINATOR_AUTO_PUSH_ALLOWED",
-    "BUILD_COORDINATOR_Q_RECORDS_DIR",
     "BUILD_COORDINATOR_RESULT_DIR",
 )
 
@@ -71,8 +70,6 @@ def routed_workspace(tmp_path: Path):
     db_path = tmp_path / "coordinator-data" / "coordinator.sqlite3"
     db_path.parent.mkdir(parents=True)
 
-    q_records_dir = tmp_path / "q-records"
-    q_records_dir.mkdir()
     result_dir = tmp_path / "results"
     result_dir.mkdir()
 
@@ -92,7 +89,6 @@ def routed_workspace(tmp_path: Path):
         "config_path": config_path,
         "db_path": db_path,
         "builder_a_worktree": builder_a_worktree,
-        "q_records_dir": q_records_dir,
         "result_dir": result_dir,
     }
 
@@ -125,7 +121,6 @@ def test_objective_run_routes_queued_task_to_configured_worktree_from_unrelated_
     assert create_result.returncode == 0, create_result.stderr
 
     env_extra = {
-        "BUILD_COORDINATOR_Q_RECORDS_DIR": str(routed_workspace["q_records_dir"]),
         "BUILD_COORDINATOR_RESULT_DIR": str(routed_workspace["result_dir"]),
     }
     env = dict(os.environ)

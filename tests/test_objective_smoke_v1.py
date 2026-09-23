@@ -43,11 +43,8 @@ from build_coordinator.types import ObjectiveSpec, PlannedChildTask
 
 @pytest.fixture(autouse=True)
 def isolate_runner_artifacts(tmp_path, monkeypatch):
-    q_dir = tmp_path / "q-records"
-    q_dir.mkdir()
     result_dir = tmp_path / "results"
     result_dir.mkdir()
-    monkeypatch.setenv("BUILD_COORDINATOR_Q_RECORDS_DIR", str(q_dir))
     monkeypatch.setenv("BUILD_COORDINATOR_RESULT_DIR", str(result_dir))
 
 
@@ -82,7 +79,6 @@ def _config():
             WorkerConfig("integration-1", "INTEGRATION", adapter="fake"),
         ),
         auto_push_allowed=False,  # remote main stays human-gated, per the ticket
-        q_records_dir=os.getenv("BUILD_COORDINATOR_Q_RECORDS_DIR"),
         result_dir=os.getenv("BUILD_COORDINATOR_RESULT_DIR"),
     )
 
@@ -95,7 +91,7 @@ def test_one_objective_two_parallel_builders_followups_and_human_gate_stop():
             ObjectiveSpec(
                 objective_id=objective_id,
                 goal=(
-                    "Evaluate the best document-intelligence stack for Caventra using our "
+                    "Evaluate the best document-intelligence stack for the product using our "
                     "benchmark. Use available builders in parallel."
                 ),
                 child_tasks=(

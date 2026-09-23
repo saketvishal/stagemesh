@@ -1,4 +1,4 @@
-﻿name: CI
+name: CI
 
 on:
   push:
@@ -8,10 +8,12 @@ on:
 
 jobs:
   test:
-    name: Test (Python ${{ matrix.python-version }})
-    runs-on: ubuntu-latest
+    name: Test (${{ matrix.os }}, Python ${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
+        os: [ubuntu-latest, windows-latest]
         python-version: ["3.11", "3.12"]
 
     steps:
@@ -29,18 +31,23 @@ jobs:
         run: pytest tests/ -v --tb=short
 
       - name: Run OSS boundary scan
+        shell: python
         run: |
-          python -c "
           from build_coordinator.oss_boundary import evaluate_boundary, format_failure
+
           allowed, unexpected = evaluate_boundary()
           if unexpected:
               raise SystemExit(format_failure(unexpected))
-          print(f'Boundary clean. {len(allowed)} documented exceptions (must be 0 for OSS).')
-          assert len(allowed) == 0, f'DOCUMENTED_EXCEPTIONS not empty: {allowed}'
-          "
+          print(f"Boundary clean. {len(allowed)} documented exceptions (must be 0 for OSS).")
+          assert len(allowed) == 0, f"DOCUMENTED_EXCEPTIONS not empty: {allowed}"
 
       - name: Import smoke check
+        shell: python
         run: |
-          python -c "import build_coordinator.cli; print('CLI import: OK')"
-          python -c "from build_coordinator.runner.routing import route_worker; print('routing import: OK')"
-          python -c "from build_coordinator.execution.fake import FakeExecutor; print('FakeExecutor import: OK')"
+          import build_coordinator.cli
+          from build_coordinator.runner.routing import route_worker
+          from build_coordinator.execution.fake import FakeExecutor
+
+          print("CLI import: OK")
+          print("routing import: OK")
+          print("FakeExecutor import: OK")

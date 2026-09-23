@@ -1,6 +1,6 @@
-﻿# Contributing
+# Contributing
 
-Thank you for your interest in contributing to the Build Coordinator.
+Thank you for your interest in contributing to StageMesh.
 
 ## Before you start
 
@@ -11,7 +11,7 @@ Before investing significant effort, open an issue to discuss your proposed chan
 
 ```bash
 git clone <repo-url>
-cd build-coordinator
+cd <repo-directory>
 
 # Install with development dependencies
 pip install -e ".[dev]"
@@ -37,31 +37,31 @@ print(f'Boundary clean. {len(allowed)} documented exceptions.')
 All contributions must include appropriate tests. The test suite must remain
 fully green before any change is considered.
 
-The coordinator has several categories of tests:
+StageMesh has several categories of tests:
 - **Unit tests**: individual service functions, routing, config parsing
-- **Integration tests**: multi-step lifecycle flows against a real (SQLite) DB
+- **Integration tests**: multi-step lifecycle flows against a real SQLite database
 - **Boundary tests**: automated scans for private-IP coupling and forbidden imports
 
 Do not delete or weaken tests to make a change pass.
 
 ## Architectural constraints
 
-The coordinator is designed around a small number of firm principles:
+StageMesh is designed around a small number of firm principles:
 
-1. **Stages belong to the coordinator** — the coordinator owns the task lifecycle.
+1. **Stages belong to the coordinator** - the coordinator owns the task lifecycle.
    Agents are executors that receive prompts and write structured results.
 
-2. **Routing is deterministic** — worker selection is based on configured
+2. **Routing is deterministic** - worker selection is based on configured
    capabilities, never on a model inference result.
 
-3. **Secrets never enter persistent state** — config may reference env vars or
+3. **Secrets never enter persistent state** - config may reference env vars or
    credential helpers; secrets must not appear in databases, checkpoints, events,
    logs, results, or config files.
 
-4. **Human gates are blocking** — automation can prepare, but cannot approve.
+4. **Human gates are blocking** - automation can prepare, but cannot approve.
    Human escalation types are explicit and durable.
 
-5. **Structured results only** — the coordinator never trusts free-form stdout.
+5. **Structured results only** - the coordinator never trusts free-form stdout.
    Workers write a JSON result file to a runner-generated path.
 
 Changes that violate these principles will not be accepted regardless of other merit.
@@ -85,5 +85,5 @@ Changes that violate these principles will not be accepted regardless of other m
 
 ## License
 
-By contributing, you agree that your contributions will be licensed under
-the Apache-2.0 license.
+By contributing, you agree that your contributions will be licensed under the
+Apache-2.0 license.

@@ -5,7 +5,7 @@ to or mutate an operator's real, canonical coordinator database.
 `BUILD_COORDINATOR_DATABASE_URL` before any coordinator module binds its
 engine. This test proves that protection actually holds by simulating a
 real operator machine: a fake `$HOME` with a real
-`.caventra/build-coordinator.json` pointing at a "canary" database that
+`.build-coordinator/config.json` pointing at a "canary" database that
 already has data in it, then running the coordinator test suite as a
 genuine subprocess against that fake home, and asserting the canary
 database is byte-for-byte untouched and never received the coordinator's
@@ -92,12 +92,12 @@ def test_running_coordinator_tests_never_touches_operator_canary_db(tmp_path: Pa
 
     env, basetemp = _isolated_nested_pytest_env(tmp_path)
     # Simulate a real operator machine: the default coordinator config path
-    # (~/.caventra/build-coordinator.json) resolves to the canary config
+    # (~/.build-coordinator/config.json) resolves to the canary config
     # above via a redirected home directory. Deliberately do NOT set
-    # BUILD_COORDINATOR_DATABASE_URL or CAVENTRA_BUILD_CONFIG here -- the
+    # BUILD_COORDINATOR_DATABASE_URL or BUILD_COORDINATOR_CONFIG here -- the
     # protection under test is conftest.py's own, unconditional override,
     # not anything this test's own env setup provides.
-    for var in ("BUILD_COORDINATOR_DATABASE_URL", "BUILD_COORDINATOR_CONFIG", "BUILD_COORDINATOR_REPO_ROOT", "CAVENTRA_BUILD_CONFIG", "CAVENTRA_REPO_ROOT"):
+    for var in ("BUILD_COORDINATOR_DATABASE_URL", "BUILD_COORDINATOR_CONFIG", "BUILD_COORDINATOR_REPO_ROOT"):
         env.pop(var, None)
     env["HOME"] = str(fake_home)
     env["USERPROFILE"] = str(fake_home)

@@ -1,20 +1,20 @@
 """Prove the operator CLI resolves workspace location from coordinator
 config, not from the process's current working directory.
 
-This exercises `caventra-build objective create/run/status` as real
+This exercises `build-coordinator objective create/run/status` as real
 subprocesses (not in-process calls) so the test actually crosses a fresh
 Python interpreter's module-import boundary the way an operator invocation
 would, from three different working directories:
 
 1. the repository root itself,
-2. a directory standing in for "another Caventra worktree" (its own git
+2. a directory standing in for another unrelated worktree (its own git
    checkout, unrelated to the control repo the coordinator is configured
    against), and
-3. a directory with no relationship to Caventra at all.
+3. a directory with no relationship to the control repo at all.
 
 The CLI must behave identically in all three cases: the resolved control
 repo root, worktrees, and database always come from the coordinator config
-file (`CAVENTRA_BUILD_CONFIG`), never from `os.getcwd()`.
+file (`BUILD_COORDINATOR_CONFIG`), never from `os.getcwd()`.
 """
 
 from __future__ import annotations
@@ -33,8 +33,6 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # coordinator config file under test. Stripped from the child environment so
 # a developer's own shell configuration can't mask a cwd dependency.
 _LOCATION_ENV_VARS = (
-    "CAVENTRA_REPO_ROOT",
-    "CAVENTRA_BUILD_CONFIG",
     "BUILD_COORDINATOR_DATA_DIR",
     "BUILD_COORDINATOR_DATABASE_URL",
     "BUILD_COORDINATOR_MAX_ACTIVE_BUILDERS",
@@ -45,7 +43,6 @@ _LOCATION_ENV_VARS = (
     "BUILD_COORDINATOR_RUNNER_CONFIG",
     "BUILD_COORDINATOR_ALLOWED_WORKSPACE_ROOTS",
     "BUILD_COORDINATOR_AUTO_PUSH_ALLOWED",
-    "BUILD_COORDINATOR_Q_RECORDS_DIR",
     "BUILD_COORDINATOR_RESULT_DIR",
 )
 
@@ -75,7 +72,7 @@ def _run_cli(
     for var in _LOCATION_ENV_VARS:
         env.pop(var, None)
     env["BUILD_COORDINATOR_CONFIG"] = str(config_path)
-    # Simulate an installed/on-PATH `caventra-build`: the module is
+    # Simulate an installed/on-PATH `build-coordinator`: the module is
     # importable via PYTHONPATH alone, independent of `cwd`.
     existing = env.get("PYTHONPATH")
     env["PYTHONPATH"] = str(REPO_ROOT) + (os.pathsep + existing if existing else "")
@@ -124,7 +121,7 @@ if __name__ == "__main__":
 
 @pytest.fixture
 def another_worktree(tmp_path: Path) -> Path:
-    """A directory that looks like a Caventra worktree but is not the
+    """A directory that looks like a separate worktree but is not the
     control repo the coordinator is configured against, and -- critically
     -- contains its OWN stale tooling/build_coordinator/cli.py. If cwd ever
     won a shadowing race against the repo root on PYTHONPATH, invoking the
@@ -146,7 +143,7 @@ def another_worktree(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def unrelated_directory(tmp_path: Path) -> Path:
-    """A directory with no relationship to Caventra whatsoever."""
+    """A directory with no relationship to the control repo whatsoever."""
     unrelated = tmp_path / "totally-unrelated"
     unrelated.mkdir()
     return unrelated
@@ -156,14 +153,14 @@ def _invocation_dirs(coordinator_workspace, another_worktree, unrelated_director
     control_repo_root, _config_path = coordinator_workspace
     return {
         "repository_root": control_repo_root,
-        "another_caventra_worktree": another_worktree,
+        "another_worktree": another_worktree,
         "unrelated_directory": unrelated_directory,
     }
 
 
 @pytest.mark.parametrize(
     "invocation_dir_key",
-    ["repository_root", "another_caventra_worktree", "unrelated_directory"],
+    ["repository_root", "another_worktree", "unrelated_directory"],
 )
 def test_objective_status_resolves_workspace_regardless_of_cwd(
     coordinator_workspace, another_worktree, unrelated_directory, invocation_dir_key

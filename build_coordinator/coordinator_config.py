@@ -16,7 +16,6 @@ Resolution order (highest priority first):
    `build_coordinator.runner.models` for the specific variable
    names) -- kept for CI and test isolation.
 2. The coordinator config file, located by `BUILD_COORDINATOR_CONFIG` if set,
-   or the deprecated alias `CAVENTRA_BUILD_CONFIG` for backward compatibility,
    otherwise the fixed per-user path `~/.build-coordinator/config.json`.
 3. Built-in defaults.
 
@@ -54,7 +53,6 @@ from pathlib import Path
 
 
 DEFAULT_CONFIG_PATH = Path.home() / ".build-coordinator" / "config.json"
-LEGACY_DEFAULT_CONFIG_PATH = Path.home() / ".build-coordinator" / "config.json"
 
 
 class CoordinatorConfigError(ValueError):
@@ -111,17 +109,13 @@ def config_file_path() -> Path | None:
 
     Returns None when no config file is configured or present -- callers
     should treat that as "use built-in defaults", not an error. An
-    explicitly-set `BUILD_COORDINATOR_CONFIG` (or legacy `CAVENTRA_BUILD_CONFIG`)
-    that is invalid raises `CoordinatorConfigError` instead of returning None
-    (fail closed).
+    explicitly-set `BUILD_COORDINATOR_CONFIG` that is invalid raises
+    `CoordinatorConfigError` instead of returning None (fail closed).
     """
     if os.getenv("BUILD_COORDINATOR_CONFIG"):
         return _explicit_config_path()
     if DEFAULT_CONFIG_PATH.is_file():
         return DEFAULT_CONFIG_PATH
-    if DEFAULT_CONFIG_PATH == (Path.home() / ".build-coordinator" / "config.json"):
-        if LEGACY_DEFAULT_CONFIG_PATH.is_file():
-            return LEGACY_DEFAULT_CONFIG_PATH
     return None
 
 

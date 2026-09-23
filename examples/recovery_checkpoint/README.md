@@ -1,4 +1,4 @@
-﻿# Recovery and Checkpointing
+# Recovery and Checkpointing
 
 ## How it works
 

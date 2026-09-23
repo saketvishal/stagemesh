@@ -189,7 +189,6 @@ class RunnerConfig:
     max_remediation_cycles: int = 2
     auto_push_allowed: bool = False
     allowed_workspace_roots: tuple[str, ...] = ()
-    q_records_dir: str | None = None
     result_dir: str | None = None
     main_ref: str = "main"
     remote_name: str = "origin"
@@ -229,7 +228,6 @@ class RunnerConfig:
             auto_push_allowed=os.getenv("BUILD_COORDINATOR_AUTO_PUSH_ALLOWED", "false").lower()
             == "true",
             allowed_workspace_roots=allowed_roots,
-            q_records_dir=os.getenv("BUILD_COORDINATOR_Q_RECORDS_DIR"),
             result_dir=os.getenv("BUILD_COORDINATOR_RESULT_DIR"),
         )
 
@@ -327,7 +325,6 @@ class RunnerConfig:
             max_remediation_cycles=int(data.get("max_remediation_cycles", 2)),
             auto_push_allowed=bool(data.get("auto_push_allowed", False)),
             allowed_workspace_roots=allowed_roots,
-            q_records_dir=data.get("q_records_dir") or os.getenv("BUILD_COORDINATOR_Q_RECORDS_DIR"),
             result_dir=data.get("result_dir") or os.getenv("BUILD_COORDINATOR_RESULT_DIR"),
             main_ref=str(data.get("main_ref") or "main"),
             remote_name=str(data.get("remote_name") or "origin"),

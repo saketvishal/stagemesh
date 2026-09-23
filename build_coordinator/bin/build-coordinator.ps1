@@ -8,8 +8,8 @@
 # Canonical workspace paths (control repo, builder/reviewer worktrees,
 # coordinator database) come from the coordinator config file -- see
 # tooling/build_coordinator/examples/build-coordinator.example.json --
-# located via $env:BUILD_COORDINATOR_CONFIG (or legacy $env:CAVENTRA_BUILD_CONFIG)
-# or the default ~/.build-coordinator/config.json.
+# located via $env:BUILD_COORDINATOR_CONFIG or the default
+# ~/.build-coordinator/config.json.
 # This launcher only makes the CLI module importable; it does not choose workspace paths itself.
 #
 # IMPORTANT: `python -m` normally prepends the CURRENT WORKING DIRECTORY to

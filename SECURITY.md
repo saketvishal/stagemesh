@@ -1,4 +1,4 @@
-﻿# Security and Trust Boundaries
+# Security and Trust Boundaries
 
 ## What the coordinator trusts
 

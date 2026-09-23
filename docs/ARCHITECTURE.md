@@ -1,4 +1,4 @@
-﻿# Architecture
+# Architecture
 
 ## Core principle
 
@@ -147,7 +147,7 @@ The coordinator requires a SQL database (SQLite or PostgreSQL). SQLite is
 the default for single-machine use. PostgreSQL is recommended for
 production multi-machine deployments.
 
-Schema is initialized by `build_coordinator.cli ensure-state` or
+Schema is initialized by `build_coordinator.cli status` or
 equivalently `build_coordinator.db.initialize_schema()`.
 
 ## Result contract
@@ -178,7 +178,7 @@ Your product extensions
         ↑
   (extension interfaces)
         ↑
-  Build Coordinator (this package)
+  StageMesh (this package)
 ```
 
 Product-specific capabilities (custom integration artifacts, domain seed data,

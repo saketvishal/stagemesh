@@ -1,26 +1,37 @@
-﻿# Build Coordinator
+# StageMesh
 
-A provider-neutral, product-neutral coordinator for autonomous multi-agent
-software engineering workflows.
+Durable engineering execution across AI agents, models, and runtimes.
 
-> **Status: v0.1-alpha — preparation complete, pending final acceptance gate.**
+StageMesh is a provider-neutral coordinator for autonomous multi-agent software
+engineering workflows.
+
+> **Status: v0.1-alpha release candidate.**
 >
-> Publication requires an explicit human approval decision. This repository
-> is not yet public.
+> Publication still requires an explicit human approval decision after final
+> independent verification. This repository is not yet public.
+
+---
+
+## Package and CLI name
+
+For this first alpha, the Python distribution, import package, config paths,
+and CLI remain `build-coordinator` / `build_coordinator`. The public project
+name is StageMesh; the compatibility names are retained to avoid unnecessary
+breakage during the release-candidate review.
 
 ---
 
 ## What it is
 
-The Build Coordinator is infrastructure for running AI coding agents on
-structured engineering tasks. It:
+StageMesh is infrastructure for running AI coding agents on structured
+engineering tasks. It:
 
 - Persists task state, dependencies, leases, checkpoints, review claims, and events
 - Enforces independent-reviewer separation (the agent that built cannot review)
 - Routes tasks to the right agent based on capability, not by asking an LLM to decide
 - Recovers tasks whose agents disappeared without losing progress
-- Accepts structured result JSON from agents — never free-form stdout
-- Keeps stages (planning → implementation → review → integration) strictly separated
+- Accepts structured result JSON from agents, never free-form stdout
+- Keeps stages (planning -> implementation -> review -> integration) strictly separated
 - Escalates to a human when a decision genuinely requires one
 
 **Stages belong to the coordinator. Agents are replaceable executors.**
@@ -30,7 +41,9 @@ structured engineering tasks. It:
 ## What is proven (v0.1-alpha)
 
 > [!IMPORTANT]
-> Only claims backed by real execution evidence appear below.
+> Only claims backed by execution evidence appear below. StageMesh does not claim
+> `SELF_HOSTING_PROVEN`, and cross-provider independent final verification is
+> still pending.
 
 | Capability | Status |
 |---|---|
@@ -42,11 +55,11 @@ structured engineering tasks. It:
 | Checkpoint / resume (worker replacement) | **IMPLEMENTED AND PROVEN** |
 | Provider-neutral worker configuration | **IMPLEMENTED AND PROVEN** |
 | Capability-based stage routing | **IMPLEMENTED AND PROVEN** |
-| Autonomous objective lifecycle (plan → execute → review → integrate) | **IMPLEMENTED AND PROVEN** |
+| Autonomous objective lifecycle (plan -> execute -> review -> integrate) | **IMPLEMENTED AND PROVEN** |
 | Location-independent CLI | **IMPLEMENTED AND PROVEN** |
 | SQLite and PostgreSQL support | **IMPLEMENTED AND PROVEN** |
-| Codex CLI worker execution (OpenAI) | **IMPLEMENTED AND PROVEN** — authenticated Codex CLI, direct smoke, coordinator→Codex execution, structured result ingestion, concurrent worker launches |
-| Cross-provider independent review | **IMPLEMENTED — FINAL ACCEPTANCE PENDING** |
+| Codex CLI worker execution (OpenAI) | **IMPLEMENTED AND PROVEN** - authenticated Codex CLI, direct smoke, coordinator-to-Codex execution, structured result ingestion, concurrent worker launches |
+| Cross-provider independent review | **IMPLEMENTED; FINAL INDEPENDENT VERIFICATION PENDING** |
 
 ---
 
@@ -76,10 +89,10 @@ cp examples/single_agent/worker-config.example.yaml runner-config.yaml
 
 # 4. Start the database
 BUILD_COORDINATOR_DATABASE_URL=sqlite:///./coordinator.sqlite3 \
-  python -m build_coordinator.cli ensure-state
+  python -m build_coordinator.cli status
 
 # 5. Create a task
-python -m build_coordinator.cli upsert --task-id TASK-001 \
+python -m build_coordinator.cli objective create TASK-001 \
   --title "Add a README section" \
   --description "Add an installation section to README.md" \
   --review-policy INDEPENDENT
@@ -95,16 +108,16 @@ See [docs/SETUP.md](docs/SETUP.md) for full installation and configuration.
 
 ## Documentation
 
-- [Architecture](docs/ARCHITECTURE.md) — concepts, data flow, key principles
-- [Setup](docs/SETUP.md) — installation, configuration, first run
-- [Security & Trust Boundaries](SECURITY.md) — what the coordinator trusts and why
-- [Roadmap](docs/ROADMAP.md) — v0.1-alpha roadmap and what comes next
-- [Contributing](CONTRIBUTING.md) — how to contribute
-- [Examples](examples/README.md) — configuration examples
+- [Architecture](docs/ARCHITECTURE.md) - concepts, data flow, key principles
+- [Setup](docs/SETUP.md) - installation, configuration, first run
+- [Security & Trust Boundaries](SECURITY.md) - what the coordinator trusts and why
+- [Roadmap](docs/ROADMAP.md) - v0.1-alpha roadmap and what comes next
+- [Contributing](CONTRIBUTING.md) - how to contribute
+- [Examples](examples/README.md) - configuration examples
 
 ## Evidence
 
-- [Codex Acceptance](docs/evidence/CODEX_ACCEPTANCE.md) — what has actually been proven
+- [Codex Acceptance](docs/evidence/CODEX_ACCEPTANCE.md) - what has actually been proven
 
 ---
 
@@ -118,8 +131,7 @@ See [docs/SETUP.md](docs/SETUP.md) for full installation and configuration.
 | **Objective** | A high-level goal decomposed by a planner agent into a set of child tasks |
 | **Stage** | A phase of work (planning, implementation, remediation, review, integration) |
 | **Worker** | A configured agent profile: provider + runtime + model + capabilities + stages |
-| **Routing** | Deterministic selection of an eligible worker for a stage — no LLM makes this choice |
-| **Q Record** | (Extension point) A structured integration record; not part of the generic coordinator |
+| **Routing** | Deterministic selection of an eligible worker for a stage; no LLM makes this choice |
 
 ---
 

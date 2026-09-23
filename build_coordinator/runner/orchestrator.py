@@ -848,19 +848,7 @@ class BuildRunner:
                 continue
             except IntegrityError:
                 continue
-            q_outcome = None
-            try:
-                context = get_resume_context(session, row.task_id)
-            except QRecordError as exc:
-                record_event(
-                    session,
-                    EventInput(
-                        task_id=row.task_id,
-                        actor="runner",
-                        event_data={"error": str(exc)},
-                    ),
-                )
-                continue
+            context = get_resume_context(session, row.task_id)
             extra = {
                 "reviewed_feature_sha": reviewed_sha,
                 "current_main_sha": assessment.current_main_sha,
@@ -870,7 +858,7 @@ class BuildRunner:
                 "auto_push_allowed": self._config.auto_push_allowed,                "mechanical_conflict": False,
             }
             prompt = IntegrationPromptBuilder().build(
-                get_resume_context(session, row.task_id),
+                context,
                 extra=extra,
             )
             self._launch(
@@ -883,7 +871,7 @@ class BuildRunner:
                 prompt,
                 reviewed_feature_sha=reviewed_sha,
                 extra_result={
-                    "q_record_path": str(q_outcome.path) if q_outcome else None,                    "current_main_sha": assessment.current_main_sha,
+                    "current_main_sha": assessment.current_main_sha,
                     "merge_base": assessment.merge_base,
                     "reviewed_feature_sha": reviewed_sha,
                 },

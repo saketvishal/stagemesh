@@ -37,11 +37,8 @@ from build_coordinator.types import ObjectiveSpec, PlannedChildTask
 
 @pytest.fixture(autouse=True)
 def isolate_runner_artifacts(tmp_path, monkeypatch):
-    q_dir = tmp_path / "q-records"
-    q_dir.mkdir()
     result_dir = tmp_path / "results"
     result_dir.mkdir()
-    monkeypatch.setenv("BUILD_COORDINATOR_Q_RECORDS_DIR", str(q_dir))
     monkeypatch.setenv("BUILD_COORDINATOR_RESULT_DIR", str(result_dir))
 
 
@@ -92,7 +89,6 @@ def _config(*, builder_worktrees=None, remediation_cycles=2, auto_push=False):
         ),
         max_remediation_cycles=remediation_cycles,
         auto_push_allowed=auto_push,
-        q_records_dir=os.getenv("BUILD_COORDINATOR_Q_RECORDS_DIR"),
         result_dir=os.getenv("BUILD_COORDINATOR_RESULT_DIR"),
     )
 

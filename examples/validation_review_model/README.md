@@ -1,8 +1,8 @@
-﻿# Validation and Review Model
+# Validation and Review Model
 
 ## Overview
 
-The Build Coordinator enforces a strict review model designed to prevent
+StageMesh enforces a strict review model designed to prevent
 conflicts of interest and ensure code quality before integration.
 
 ## Review policies

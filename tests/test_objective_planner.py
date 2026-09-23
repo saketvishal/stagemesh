@@ -47,11 +47,8 @@ from build_coordinator.types import (
 
 @pytest.fixture(autouse=True)
 def isolate_runner_artifacts(tmp_path, monkeypatch):
-    q_dir = tmp_path / "q-records"
-    q_dir.mkdir()
     result_dir = tmp_path / "results"
     result_dir.mkdir()
-    monkeypatch.setenv("BUILD_COORDINATOR_Q_RECORDS_DIR", str(q_dir))
     monkeypatch.setenv("BUILD_COORDINATOR_RESULT_DIR", str(result_dir))
 
 
@@ -94,7 +91,7 @@ def _plan(*task_ids, **kwargs):
 def _spec(objective_id="OBJ-PLAN", *, child_tasks=()):
     return ObjectiveSpec(
         objective_id=objective_id,
-        goal="Evaluate the best document-intelligence stack for Caventra using our benchmark.",
+        goal="Evaluate the best document-intelligence stack for the product using our benchmark.",
         child_tasks=tuple(child_tasks),
     )
 
@@ -109,7 +106,6 @@ def _config(*, auto_push=False, planner_adapter="fake"):
             WorkerConfig("integration-1", "INTEGRATION", adapter="fake"),
         ),
         auto_push_allowed=auto_push,
-        q_records_dir=os.getenv("BUILD_COORDINATOR_Q_RECORDS_DIR"),
         result_dir=os.getenv("BUILD_COORDINATOR_RESULT_DIR"),
     )
 
@@ -244,7 +240,7 @@ def test_unknown_task_field_fails_closed():
         "tasks": [
             {
                 **_valid_plan_payload()["tasks"][0],
-                "worktree": "C:/caventra-dev-a",
+                "worktree": "C:/example-dev-a",
             }
         ]
     }

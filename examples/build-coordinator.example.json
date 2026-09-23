@@ -1,4 +1,4 @@
-﻿{
+{
   "control_repo_root": "/path/to/your-repo",
   "database_url": "sqlite:////path/to/.build-coordinator/coordinator.sqlite3",
   "data_dir": "/path/to/.build-coordinator",

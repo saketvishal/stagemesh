@@ -17,8 +17,10 @@ from build_coordinator.models import (
     BuildTaskEvent,
 )
 from build_coordinator.runner import BuildRunner
+import build_coordinator.runner.orchestrator as orchestrator_module
 from build_coordinator.runner.git_safety import FakeGit
 from build_coordinator.runner.models import RunnerConfig, WorkerConfig
+from build_coordinator.policy import CoordinatorPolicyError
 from build_coordinator.service import (
     ClaimRequest,
     TaskSpec,
@@ -33,11 +35,8 @@ from build_coordinator.service import (
 
 @pytest.fixture(autouse=True)
 def isolate_runner_artifacts(tmp_path, monkeypatch):
-    q_dir = tmp_path / "q-records"
-    q_dir.mkdir()
     result_dir = tmp_path / "results"
     result_dir.mkdir()
-    monkeypatch.setenv("BUILD_COORDINATOR_Q_RECORDS_DIR", str(q_dir))
     monkeypatch.setenv("BUILD_COORDINATOR_RESULT_DIR", str(result_dir))
 
 
@@ -81,7 +80,6 @@ def _config(*, auto_push=False, remediation_cycles=2):
         ),
         max_remediation_cycles=remediation_cycles,
         auto_push_allowed=auto_push,
-        q_records_dir=os.getenv("BUILD_COORDINATOR_Q_RECORDS_DIR"),
         result_dir=os.getenv("BUILD_COORDINATOR_RESULT_DIR"),
     )
 
@@ -119,7 +117,6 @@ def test_worker_saturation_is_backpressure_not_configuration_escalation():
 
     config = RunnerConfig(
         workers=(WorkerConfig("builder-only", "BUILDER", adapter="fake"),),
-        q_records_dir=os.getenv("BUILD_COORDINATOR_Q_RECORDS_DIR"),
         result_dir=os.getenv("BUILD_COORDINATOR_RESULT_DIR"),
     )
     result = _runner(config=config).run_once()
@@ -255,9 +252,46 @@ def test_green_with_notes_without_remediation_is_integration_eligible():
     _runner(executors=executors).run_once()
 
     with SessionLocal() as session:
-        assert session.scalar(
+        execution = session.scalar(
             select(BuildRunnerExecution).where(BuildRunnerExecution.role == "INTEGRATION")
         )
+        assert execution is not None
+        assert execution.result_data is not None
+
+
+def test_integration_resume_context_failure_preserves_policy_error(monkeypatch):
+    executors = {
+        "reviewer-1": FakeExecutor(
+            [
+                ExecutionObservation(
+                    "SUCCEEDED",
+                    result_data={
+                        "review": {
+                            "verdict": "GREEN",
+                            "ready_for_integration": True,
+                        }
+                    },
+                )
+            ]
+        )
+    }
+    with SessionLocal() as session:
+        upsert_task(session, _task("RUN-CONTEXT-FAIL"))
+        claim_task(session, ClaimRequest("RUN-CONTEXT-FAIL", worker_id="builder-a"))
+        transition_task(session, "RUN-CONTEXT-FAIL", "IN_PROGRESS")
+        transition_task(session, "RUN-CONTEXT-FAIL", "VALIDATING")
+        transition_task(session, "RUN-CONTEXT-FAIL", "REVIEW_READY")
+        session.commit()
+
+    runner = _runner(executors=executors)
+    runner.run_once()
+
+    def fail_resume_context(session, task_id):
+        raise CoordinatorPolicyError("resume context unavailable")
+
+    monkeypatch.setattr(orchestrator_module, "get_resume_context", fail_resume_context)
+    with pytest.raises(CoordinatorPolicyError, match="resume context unavailable"):
+        runner.run_once()
 
 
 def test_remediation_required_routes_to_rework_and_findings_are_checkpointed():

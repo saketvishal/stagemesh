@@ -103,8 +103,6 @@ class IntegratorResult:
     current_main_sha: str | None = None
     merge_base: str | None = None
     merge_commit_sha: str | None = None
-    q_record_path: str | None = None
-    q_record_created: bool = False
     tests: TestsSummary = field(default_factory=TestsSummary)
     push_status: str | None = None
     final_main_sha: str | None = None
@@ -451,16 +449,12 @@ def _parse_reviewer(data: dict[str, Any], *, captured_sha: str | None) -> Review
 
 def _parse_integrator(data: dict[str, Any]) -> IntegratorResult:
     tests = _parse_tests(data.get("tests") or data.get("results"))
-    q_record_created = bool(data.get("q_record_created", False))
-    q_record_path = _optional_str(data.get("q_record_path"))
     return IntegratorResult(
         feature_sha=_optional_str(data.get("feature_sha")),
         reviewed_feature_sha=_optional_str(data.get("reviewed_feature_sha")),
         current_main_sha=_optional_str(data.get("current_main_sha")),
         merge_base=_optional_str(data.get("merge_base")),
         merge_commit_sha=_optional_str(data.get("merge_commit_sha")),
-        q_record_path=q_record_path,
-        q_record_created=q_record_created,
         tests=tests,
         push_status=_optional_str(data.get("push_status")),
         final_main_sha=_optional_str(data.get("final_main_sha")),
@@ -564,8 +558,6 @@ def _persisted_payload(
                 "current_main_sha": integrator.current_main_sha,
                 "merge_base": integrator.merge_base,
                 "merge_commit_sha": integrator.merge_commit_sha,
-                "q_record_path": integrator.q_record_path,
-                "q_record_created": integrator.q_record_created,
                 "tests": list(integrator.tests.items),
                 "push_status": integrator.push_status,
                 "final_main_sha": integrator.final_main_sha,

@@ -1,4 +1,4 @@
-﻿poll_seconds: 5
+poll_seconds: 5
 max_remediation_cycles: 2
 auto_push_allowed: false
 main_ref: main

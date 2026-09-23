@@ -49,7 +49,7 @@ def test_missing_explicit_config_fails_closed_rather_than_choosing_a_default(mon
 
 
 def test_relative_explicit_config_fails_closed_instead_of_resolving_against_cwd(monkeypatch, tmp_path):
-    """A relative CAVENTRA_BUILD_CONFIG would resolve against the caller's
+    """A relative BUILD_COORDINATOR_CONFIG would resolve against the caller's
     cwd -- exactly the dependency this feature exists to remove. It must be
     rejected outright, not silently interpreted."""
     from build_coordinator.coordinator_config import config_file_path

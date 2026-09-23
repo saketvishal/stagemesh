@@ -1,8 +1,8 @@
-﻿# Roadmap
+# Roadmap
 
 ## v0.1-alpha (current)
 
-The initial standalone release of the Build Coordinator. All items below are
+The initial standalone release of StageMesh. All items below are
 **IMPLEMENTED AND PROVEN** unless marked otherwise.
 
 ### Core infrastructure (complete)
@@ -31,12 +31,12 @@ The initial standalone release of the Build Coordinator. All items below are
 - [x] Launcher scripts for Linux/macOS/Windows
 
 ### Pending final acceptance
-- [ ] Cross-provider independent review (Claude / Antigravity headless)
-  — *blocked by provider availability, not by implementation*
+- [ ] Final independent release verification
+- [ ] Cross-provider independent review execution when provider runtimes are available
 
 ---
 
-## v0.2 (planned — not yet started)
+## v0.2 (planned; not yet started)
 
 > Items below are **ROADMAP only**. Nothing below has been implemented.
 
@@ -46,7 +46,7 @@ The initial standalone release of the Build Coordinator. All items below are
 - [ ] Transient failure backoff and retry
 
 ### Expanded provider support
-- [ ] Additional Codex runtime adapters
+- [ ] Additional runtime adapters
 - [ ] Formal multi-provider acceptance matrix
 
 ### Observability
@@ -75,10 +75,10 @@ consuming product layers:
 
 ## Publication gate
 
-Publication requires an explicit human approval decision. The remaining
-blocker before v0.1-alpha publication is:
+Publication requires an explicit human approval decision. The remaining blockers
+before v0.1-alpha publication are:
 
-1. Cross-provider independent review acceptance (one or more providers)
+1. Final independent release verification
 2. Human approval gate
 
-The coordinator will not be published automatically when acceptance completes.
+StageMesh will not be published automatically when acceptance completes.

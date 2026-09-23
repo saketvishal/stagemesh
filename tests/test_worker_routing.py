@@ -60,7 +60,6 @@ def _task(task_id: str) -> TaskSpec:
 def _config(tmp_path: Path, workers: tuple[WorkerConfig, ...]) -> RunnerConfig:
     return RunnerConfig(
         workers=workers,
-        q_records_dir=str(tmp_path / "q"),
         result_dir=str(tmp_path / "results"),
     )
 
@@ -209,7 +208,6 @@ def test_cross_provider_resume_state_can_route_to_different_eligible_worker(tmp_
     config = RunnerConfig(
         workers=config.workers,
         providers={"xai": ProviderConfig("xai", availability="QUOTA_EXHAUSTED")},
-        q_records_dir=config.q_records_dir,
         result_dir=config.result_dir,
     )
 
@@ -224,7 +222,6 @@ def test_cross_provider_resume_state_can_route_to_different_eligible_worker(tmp_
 
 
 def test_runner_audit_event_records_routing_without_secrets(tmp_path: Path):
-    os.environ["BUILD_COORDINATOR_Q_RECORDS_DIR"] = str(tmp_path / "q")
     os.environ["BUILD_COORDINATOR_RESULT_DIR"] = str(tmp_path / "results")
     with SessionLocal() as session:
         upsert_task(session, _task("AUDIT-ROUTE"))

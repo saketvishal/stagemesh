@@ -1,14 +1,14 @@
-﻿# Examples
+# Examples
 
-This directory contains configuration examples for the Build Coordinator.
+This directory contains configuration examples for StageMesh.
 
 All examples use generic placeholder paths. Replace `/path/to/your-repo`,
 `/path/to/worktree-a`, etc. with real paths on your machine.
 
-> **Note on agent CLIs**: The coordinator is provider-neutral. The `command`
-> field in each worker definition is an operator-controlled trusted list.
-> Replace `["codex", "exec", "--json"]` or any other CLI shown here with
-> whatever agent executable you have installed.
+> **Note on agent CLIs**: StageMesh is provider-neutral. The `command` field in
+> each worker definition is an operator-controlled trusted list. Replace
+> `["codex", "exec", "--json"]` or any other CLI shown here with whatever agent
+> executable you have installed.
 
 ---
 
@@ -23,9 +23,9 @@ All examples use generic placeholder paths. Replace `/path/to/your-repo`,
 
 ## Other files
 
-- `build-coordinator.example.json` — coordinator config file template
-- `runner-config.example.json` — legacy JSON runner config (still supported)
-- `stdin_print_cli_wrapper.py` — adapter for agent CLIs that read from stdin
+- `build-coordinator.example.json` - coordinator config file template
+- `runner-config.example.json` - legacy JSON runner config (still supported)
+- `stdin_print_cli_wrapper.py` - adapter for agent CLIs that read from stdin
 
 ---
 

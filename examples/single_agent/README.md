@@ -1,4 +1,4 @@
-﻿# Single Agent Example
+# Single Agent Example
 
 The simplest setup: one agent handles all roles (planning, building, reviewing, integrating).
 Suitable for solo development or initial experimentation.
@@ -34,9 +34,8 @@ cp examples/single_agent/worker-config.example.yaml runner-config.yaml
 export BUILD_COORDINATOR_DATABASE_URL=sqlite:///./coordinator.sqlite3
 export BUILD_COORDINATOR_RUNNER_CONFIG=runner-config.yaml
 
-python -m build_coordinator.cli ensure-state
-python -m build_coordinator.cli upsert \
-  --task-id TASK-001 \
+python -m build_coordinator.cli status
+python -m build_coordinator.cli objective create TASK-001 \
   --title "My first task" \
   --description "Implement a simple feature" \
   --review-policy SELF

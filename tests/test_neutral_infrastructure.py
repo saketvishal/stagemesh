@@ -29,7 +29,6 @@ def test_build_coordinator_config_env_var_takes_precedence(monkeypatch, tmp_path
 
 def test_repo_root_env_precedence(monkeypatch, tmp_path):
     monkeypatch.delenv("BUILD_COORDINATOR_CONFIG", raising=False)
-    monkeypatch.delenv("CAVENTRA_BUILD_CONFIG", raising=False)
 
     primary_root = tmp_path / "primary_root"
     primary_root.mkdir()
@@ -45,7 +44,6 @@ def test_repo_root_env_precedence(monkeypatch, tmp_path):
 
 def test_legacy_repo_root_fallback(monkeypatch, tmp_path):
     monkeypatch.delenv("BUILD_COORDINATOR_CONFIG", raising=False)
-    monkeypatch.delenv("CAVENTRA_BUILD_CONFIG", raising=False)
     monkeypatch.delenv("BUILD_COORDINATOR_REPO_ROOT", raising=False)
     monkeypatch.delenv("REPO_ROOT", raising=False)
 
