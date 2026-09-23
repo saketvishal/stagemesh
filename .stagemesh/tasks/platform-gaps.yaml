@@ -21,6 +21,7 @@ tasks:
       allowed_paths: [examples/, docs/, tests/]
 
   - id: SM-013
+    delivered_by: "StageMesh 0.2.0a1: deterministic validation gate (runner/validation.py, orchestrator._validation_gate; tests/test_engine_lifecycle.py::test_validation_*)"
     title: Deterministic execution of task validation commands
     priority: 5
     risk: HIGH
@@ -42,6 +43,7 @@ tasks:
       - python -m pytest tests/test_runner.py tests/test_project_backlog.py -q
 
   - id: SM-014
+    delivered_by: "StageMesh 0.2.0a1: integrated task branch cleanup (runner/worktree.py cleanup_task_branch; tests/test_engine_lifecycle.py::test_integrated_task_branches_*)"
     title: Clean up task branches and worktrees after integration
     priority: 25
     dependencies: [SM-001]
@@ -66,3 +68,51 @@ tasks:
       - Reviewer and builder providers can differ and the reviewer is never the builder worker.
     scope:
       allowed_paths: [build_coordinator/runner/, examples/, tests/]
+
+  - id: SM-016
+    title: Workspace setup commands for dependency-heavy projects
+    priority: 20
+    risk: MEDIUM
+    review: INDEPENDENT
+    objective: >
+      Fresh isolated worktrees have no installed dependencies (node_modules, virtualenvs), so
+      validation commands for such projects cannot run. Add an optional `execution.setup` list to
+      project.yaml: commands StageMesh runs (no shell, with timeout and captured evidence) in a
+      task workspace after it is prepared and before the agent starts.
+    acceptance_criteria:
+      - A project with `execution.setup` has the commands run once per prepared workspace, with durable evidence.
+      - A failing setup command blocks that task with a typed reason instead of launching the agent.
+      - Projects without `execution.setup` behave exactly as before.
+    scope:
+      allowed_paths: [build_coordinator/project/, build_coordinator/runner/, tests/, docs/]
+
+  - id: SM-017
+    title: Run validation commands without blocking the coordination loop
+    priority: 30
+    dependencies: [SM-016]
+    risk: MEDIUM
+    review: INDEPENDENT
+    objective: >
+      Validation currently runs inside the runner cycle, so a long test suite delays dispatch and
+      observation of other workers. Run validation as a tracked background execution with the same
+      evidence and lifecycle gating.
+    acceptance_criteria:
+      - Other tasks are dispatched and observed while one task's validation is running.
+      - A coordinator restart during validation re-runs it instead of losing or trusting it.
+    scope:
+      allowed_paths: [build_coordinator/runner/, tests/]
+
+  - id: SM-018
+    title: Prefer a different provider for independent review
+    priority: 40
+    risk: LOW
+    review: INDEPENDENT
+    objective: >
+      Independent review already excludes the implementing worker. When several providers are
+      available, also prefer a reviewer from a different provider than the builder, without
+      blocking when only one provider exists.
+    acceptance_criteria:
+      - With two providers, review of a task built on one is routed to the other, and the routing audit says why.
+      - With one provider, review proceeds as today.
+    scope:
+      allowed_paths: [build_coordinator/runner/routing.py, tests/]

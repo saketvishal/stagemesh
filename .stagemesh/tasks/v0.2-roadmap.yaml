@@ -3,6 +3,7 @@
 # the StageMesh queue. Publication is a human-approval gate and is not a task.
 tasks:
   - id: SM-001
+    delivered_by: "StageMesh 0.2.0a1: per-task branches/workspaces from main_ref (runner/worktree.py prepare_task_workspace; tests/test_task_workspaces.py, tests/test_project_backlog.py)"
     title: Refresh isolated worktrees from current main before each task
     priority: 10
     risk: MEDIUM
@@ -37,7 +38,7 @@ tasks:
 
   - id: SM-003
     title: Worker health checks
-    priority: 20
+    priority: 5
     risk: LOW
     objective: Probe configured workers before dispatch so unavailable providers are routed around deterministically.
     acceptance_criteria:
@@ -117,7 +118,7 @@ tasks:
     priority: 70
     dependencies: [SM-003, SM-011, SM-012]
     risk: MEDIUM
-    review: INDEPENDENT  # switch to TWO_REVIEWERS once SM-011 enforces it
+    review: TWO_REVIEWERS
     objective: Define and run an acceptance matrix that exercises builders, reviewers and integration across multiple providers.
     acceptance_criteria:
       - Independent review by a different provider than the builder is demonstrated where runtimes are available.
@@ -126,6 +127,7 @@ tasks:
       allowed_paths: [docs/, tests/, examples/]
 
   - id: SM-011
+    delivered_by: "StageMesh 0.2.0a1: TWO_REVIEWERS enforced (runner/orchestrator.py _needs_second_reviewer, routing.approving_reviewers; tests/test_engine_lifecycle.py::test_two_reviewers_*)"
     title: Enforce the TWO_REVIEWERS review policy
     priority: 15
     risk: MEDIUM
