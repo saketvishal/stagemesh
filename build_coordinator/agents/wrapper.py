@@ -211,7 +211,34 @@ def run_agent(cmd: list[str], prompt: str, *, cwd: str, timeout: float, env: dic
         tree.close()
 
 
+def _safe_write_stdout_tail(output: str, max_chars: int = 4000) -> None:
+    tail = output[-max_chars:] if max_chars else output
+    buf = getattr(sys.stdout, "buffer", None)
+    if buf is not None:
+        try:
+            buf.write(tail.encode("utf-8", errors="replace") + b"\n")
+            buf.flush()
+            return
+        except Exception:
+            pass
+    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+    try:
+        sys.stdout.write(tail + "\n")
+    except UnicodeEncodeError:
+        sys.stdout.write(tail.encode(encoding, errors="replace").decode(encoding, errors="replace") + "\n")
+    try:
+        sys.stdout.flush()
+    except Exception:
+        pass
+
+
 def main(argv: list[str] | None = None) -> int:
+    if hasattr(sys.stdout, "reconfigure"):
+        try:
+            sys.stdout.reconfigure(errors="replace")
+        except Exception:
+            pass
+
     parser = argparse.ArgumentParser(prog="stagemesh-agent")
     parser.add_argument("--runtime", required=True)
     args = parser.parse_args(argv)
@@ -251,7 +278,9 @@ def main(argv: list[str] | None = None) -> int:
         final = output
         if Path(last_message).is_file():
             final = Path(last_message).read_text(encoding="utf-8", errors="replace")
-    print(output[-4000:])
+    # Agent output is arbitrary Unicode; a narrow console encoding (cp1252) must never crash the wrapper
+    # after the agent has finished, so write bytes with replacement.
+    _safe_write_stdout_tail(output, max_chars=4000)
 
     if code != 0:
         failure = "EXECUTION_FAILURE" if code == 124 else classify_failure(output)
