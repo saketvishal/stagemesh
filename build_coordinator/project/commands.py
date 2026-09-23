@@ -301,6 +301,15 @@ def handle_continue(args: argparse.Namespace) -> None:
             return
 
     config = build_runner_config(project, dry_run=False)
+    if not any(w.role == "BUILDER" and w.adapter != "unconfigured" for w in config.workers):
+        print(
+            f"[{project.project_id}] EXTERNAL_EXECUTOR_CONFIGURATION_REQUIRED: "
+            f"No executable builders are configured for {project.project_id}. "
+            f"Run 'stagemesh agent setup' to verify installed agent runtimes.",
+            file=sys.stderr,
+            flush=True,
+        )
+        return
     runner = BuildRunner(SessionLocal, config)
     started = time.monotonic()
     cycles: list[dict[str, Any]] = []
@@ -516,10 +525,14 @@ def _dry_run_plan(
         if deps_done:
             ranked[definition.task_id] = (definition.priority, definition.task_id)
     ordered = [task_id for _, task_id in sorted(ranked.values())]
+    runner_config = build_runner_config(project, dry_run=True)
+    runner = BuildRunner(lambda: session, runner_config)
+    diag = runner.diagnostics(session)
     return {
         "dry_run": True,
         "project": project.summary(),
         "backlog_sync": sync_payload,
+        "diagnostics": diag,
         "eligible_now": ordered,
         "would_run_in_parallel": ordered[: project.concurrency],
         "generated_at": datetime.now(UTC).isoformat(),

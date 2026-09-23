@@ -85,6 +85,7 @@ class ProviderConfig:
     provider_id: str
     enabled: bool = True
     availability: str = "AVAILABLE"
+    consumption_mode: str = "ACTIVE"  # ACTIVE, FALLBACK, DISABLED
     auth: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -95,6 +96,7 @@ class ProviderConfig:
             provider_id=provider_id,
             enabled=bool(row.get("enabled", True)),
             availability=str(row.get("availability", "AVAILABLE")).upper(),
+            consumption_mode=str(row.get("consumption_mode", "ACTIVE")).upper(),
             auth=dict(row.get("auth") or {}),
             metadata=dict(row.get("metadata") or {}),
         )
@@ -104,6 +106,7 @@ class ProviderConfig:
             "provider_id": self.provider_id,
             "enabled": self.enabled,
             "availability": self.availability,
+            "consumption_mode": self.consumption_mode,
             "auth": _public_refs(self.auth),
             "metadata": self.metadata,
         }
@@ -337,9 +340,17 @@ def route_worker(
             routing_policy=routing_policy,
         )
     if not eligible:
-        availability = "slots_occupied" if any(
-            "max_concurrency_reached" in candidate.reasons for candidate in candidates
-        ) else "no_eligible"
+        has_provider_issue = any(
+            any(r.startswith("provider_") for r in candidate.reasons)
+            for candidate in candidates
+        )
+        has_slots_issue = any("max_concurrency_reached" in candidate.reasons for candidate in candidates)
+        if has_slots_issue:
+            availability = "slots_occupied"
+        elif has_provider_issue:
+            availability = "providers_unavailable"
+        else:
+            availability = "no_eligible"
         return RoutingDecision(
             stage=stage,
             required_capabilities=stage_requirement.capabilities,
@@ -357,6 +368,7 @@ def route_worker(
         eligible,
         key=lambda worker: (
             0 if worker.worker_id in stage_requirement.preferred_workers else 1,
+            0 if (providers.get(worker.provider) and providers[worker.provider].consumption_mode == "ACTIVE") else 1,
             worker.preference,
             provider_load.get(worker.provider, 0),
             active_by_worker.get(worker.worker_id, 0),
@@ -452,7 +464,7 @@ def _candidate_reasons(
         reasons.append(f"pinned_model:{requirement.pinned_model}")
     provider = providers.get(worker.provider)
     if provider is not None:
-        if not provider.enabled:
+        if not provider.enabled or provider.consumption_mode == "DISABLED":
             reasons.append("provider_disabled")
         elif provider.availability != "AVAILABLE":
             reasons.append(f"provider_{provider.availability}")

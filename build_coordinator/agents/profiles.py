@@ -84,6 +84,14 @@ class RuntimeProfile:
             if model:
                 cmd += ["--model", model]
             return cmd
+        if self.runtime_id == "grok":
+            mode = "default" if role == "REVIEWER" else "acceptEdits"
+            cmd = [exe, "-p", "-", "--cwd", cwd, "--output-format", "plain", "--permission-mode", mode]
+            if role != "REVIEWER":
+                cmd.append("--always-approve")
+            if model:
+                cmd += ["-m", model]
+            return cmd
         raise ValueError(f"runtime {self.runtime_id!r} has no headless command")
 
 
@@ -92,7 +100,7 @@ PROFILES: dict[str, RuntimeProfile] = {
         runtime_id="codex",
         provider="openai",
         display="OpenAI Codex CLI",
-        executables=("codex",),
+        executables=("codex", "codex.exe", "codex.cmd"),
         capabilities=("CODING", "ADVANCED_REASONING", "CODE_REVIEW", "SECURITY_REVIEW"),
         auth_args=("login", "status"),
         auth_ok_markers=("logged in",),
@@ -101,7 +109,7 @@ PROFILES: dict[str, RuntimeProfile] = {
         runtime_id="claude",
         provider="anthropic",
         display="Claude Code",
-        executables=("claude",),
+        executables=("claude", "claude.exe"),
         capabilities=("CODING", "ADVANCED_REASONING", "CODE_REVIEW", "SECURITY_REVIEW", "ARCHITECTURE"),
         auth_args=("auth", "status"),
         auth_ok_markers=('"loggedin": true',),
@@ -110,11 +118,19 @@ PROFILES: dict[str, RuntimeProfile] = {
         runtime_id="antigravity",
         provider="google",
         display="Antigravity IDE",
-        executables=("antigravity-ide", "antigravity"),
+        executables=("antigravity-ide", "antigravity-ide.cmd", "antigravity"),
         capabilities=("CODING",),
         headless=False,
         help_args=("chat", "--help"),
-        notes="GUI IDE; `chat` opens a window and returns immediately",
+        notes="GUI IDE; `chat` opens an interactive window and returns immediately without headless execution",
+    ),
+    "grok": RuntimeProfile(
+        runtime_id="grok",
+        provider="xai",
+        display="xAI Grok Build CLI",
+        executables=("grok", "grok.exe"),
+        capabilities=("CODING", "ADVANCED_REASONING", "CODE_REVIEW"),
+        notes="Grok Build CLI; supports headless execution via -p",
     ),
 }
 
@@ -218,8 +234,15 @@ def probe_runtime(profile: RuntimeProfile, *, live: bool = True, timeout: float 
         status.state = READY
         status.detail = f"headless probe answered in {elapsed}s"
     else:
-        status.state = HEADLESS_FAILED
-        status.detail = f"headless probe failed (exit {code}): {out[-200:]}"
+        from build_coordinator.agents.wrapper import classify_failure
+
+        failure_type = classify_failure(out)
+        status.evidence["failure_type"] = failure_type
+        if failure_type in {"QUOTA_EXHAUSTED", "RATE_LIMITED", "AUTH_FAILURE"}:
+            status.state = failure_type
+        else:
+            status.state = HEADLESS_FAILED
+        status.detail = f"headless probe failed ({failure_type}, exit {code}): {out[-200:]}"
     return status
 
 

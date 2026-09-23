@@ -71,7 +71,7 @@ class GitHubTaskSource(TaskSource):
             for label in self.labels:
                 cmd.extend(["--label", label])
         try:
-            res = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            res = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", check=True)
             return json.loads(res.stdout)
         except Exception as exc:
             logger.warning("Failed to fetch GitHub issues from %s: %s", self.repo, exc)
@@ -257,12 +257,18 @@ class GitHubTaskSource(TaskSource):
 
     def _parse_dependencies(self, body: str) -> list[str]:
         deps: list[str] = []
-        # 1. Range patterns: "Run after issues #55–#61", "depends on issues #55-#61", "#55 to #61"
+        if not body:
+            return deps
+        normalized = body.replace("\u2013", "-").replace("\u2014", "-").replace("\u2212", "-")
+        normalized = normalized.replace("â€“", "-").replace("&ndash;", "-").replace("&mdash;", "-")
+
+        # 1. Range patterns: "Run after issues #55-#61", "depends on issues #55-#61", "#55 to #61"
         range_patterns = [
-            r"(?:run after|depends on|blocked by)\s+(?:issues?\s+)?#?(\d+)\s*(?:[\-\u2013\u2014]|\.\.|\bto\b|\bthrough\b)\s*#?(\d+)",
+            r"(?:run after|depends on|blocked by)\s+(?:issues?\s+)?#?(\d+)\s*(?:[\-]|\.\.|\bto\b|\bthrough\b)\s*#?(\d+)",
+            r"(?:issues?\s+)#?(\d+)\s*(?:[\-]|\.\.|\bto\b|\bthrough\b)\s*#?(\d+)",
         ]
         for pattern in range_patterns:
-            for m in re.finditer(pattern, body, re.IGNORECASE):
+            for m in re.finditer(pattern, normalized, re.IGNORECASE):
                 start = int(m.group(1))
                 end = int(m.group(2))
                 if start <= end and (end - start) < 1000:
@@ -272,7 +278,7 @@ class GitHubTaskSource(TaskSource):
                             deps.append(dep_id)
 
         # 2. Lists and single references: "depends on:", "blocked by:", "run after:"
-        list_matches = re.finditer(r"(?:depends on|blocked by|run after)[:\s]+([^\r\n]+)", body, re.IGNORECASE)
+        list_matches = re.finditer(r"(?:depends on|blocked by|run after)[:\s]+([^\r\n]+)", normalized, re.IGNORECASE)
         for dep_match in list_matches:
             raw_line = dep_match.group(1)
             # Truncate at sentence or markdown terminator so subsequent text is excluded

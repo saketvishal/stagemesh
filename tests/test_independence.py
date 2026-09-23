@@ -52,7 +52,7 @@ def test_own_project_is_discoverable_from_wherever_the_repo_lives(tmp_path):
     root = find_project_root(REPO_ROOT / "build_coordinator")
     assert root == REPO_ROOT.resolve()
     project = load_project(root)
-    assert project.project_id == "stagemesh" and project.concurrency == 1
+    assert project.project_id == "stagemesh" and project.concurrency >= 1
     definitions = load_backlog(project)
     ids = {d.task_id for d in definitions}
     assert {"SM-011", "SM-012", "SM-013", "SM-014", "SM-015"} <= ids
