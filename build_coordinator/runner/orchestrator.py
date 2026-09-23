@@ -145,6 +145,27 @@ class BuildRunner:
         self._settings = get_settings()
         self._task_source = task_source
 
+    def reload_config(
+        self,
+        config: RunnerConfig,
+        *,
+        live_worker_ids: set[str] | frozenset[str] | None = None,
+    ) -> None:
+        """Apply fresh routing/worker settings without disturbing live runs."""
+        live_worker_ids = live_worker_ids or set()
+        previous = {worker.worker_id: worker for worker in self._config.workers}
+        current = {worker.worker_id: worker for worker in config.workers}
+        for worker_id, executor in list(self._executors.items()):
+            if worker_id in live_worker_ids:
+                continue
+            if previous.get(worker_id) != current.get(worker_id):
+                terminate = getattr(executor, "terminate_all", None)
+                if callable(terminate):
+                    terminate()
+                self._executors.pop(worker_id, None)
+        self._config = config
+        self._settings = get_settings()
+
     def run_forever(self) -> None:
         while True:
             result = self.run_once()
