@@ -20,5 +20,5 @@ execution:
 # Integration is local (no upstream) unless `upstream:` is configured.
 task_sources:
   github:
-    enabled: false
+    enabled: true
     repo: saketvishal/stagemesh
