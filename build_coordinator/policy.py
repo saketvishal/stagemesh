@@ -16,7 +16,10 @@ VALID_TRANSITIONS: dict[str, frozenset[str]] = {
     "REVIEWING": frozenset(
         {"DONE", "REWORK_REQUIRED", "BLOCKED", "FAILED", "REVIEW_READY", "INTEGRATING"}
     ),
-    "INTEGRATING": frozenset({"DONE", "BLOCKED", "FAILED", "REVIEW_READY", "REVIEWING"}),
+    "INTEGRATING": frozenset(
+        {"DONE", "BLOCKED", "FAILED", "REVIEW_READY", "REVIEWING", "AWAITING_EXTERNAL_CI"}
+    ),
+    "AWAITING_EXTERNAL_CI": frozenset({"DONE", "REWORK_REQUIRED", "BLOCKED"}),
     "REWORK_REQUIRED": frozenset({"CLAIMED", "BLOCKED", "FAILED"}),
     "BLOCKED": frozenset({"READY", "RESUMABLE", "FAILED", "REVIEW_READY"}),
     "FAILED": frozenset({"RESUMABLE", "READY"}),
