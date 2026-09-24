@@ -20,7 +20,7 @@ VALID_TRANSITIONS: dict[str, frozenset[str]] = {
     "REWORK_REQUIRED": frozenset({"CLAIMED", "BLOCKED", "FAILED"}),
     "BLOCKED": frozenset({"READY", "RESUMABLE", "FAILED", "REVIEW_READY"}),
     "FAILED": frozenset({"RESUMABLE", "READY"}),
-    "STALE": frozenset({"RESUMABLE", "CLAIMED", "FAILED"}),
+    "STALE": frozenset({"RESUMABLE", "CLAIMED", "FAILED", "READY", "BLOCKED"}),
     "RESUMABLE": frozenset({"CLAIMED", "BLOCKED", "FAILED"}),
     "DONE": frozenset(),
 }

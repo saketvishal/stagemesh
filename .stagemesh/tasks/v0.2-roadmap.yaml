@@ -1,0 +1,157 @@
+# Remaining StageMesh development work (docs/ROADMAP.md v0.2 plus gaps found while
+# bootstrapping project-owned backlogs). Definitions only; runtime state lives in
+# the StageMesh queue. Publication is a human-approval gate and is not a task.
+tasks:
+  - id: SM-001
+    delivered_by: "StageMesh 0.2.0a1: per-task branches/workspaces from main_ref (runner/worktree.py prepare_task_workspace; tests/test_task_workspaces.py, tests/test_project_backlog.py)"
+    title: Refresh isolated worktrees from current main before each task
+    priority: 10
+    risk: MEDIUM
+    objective: >
+      Managed worktrees are provisioned once per worker and then reused, so a
+      later task on the same worker can start from a stale base after other
+      tasks integrate. Give every task a workspace based on the current main ref.
+    requirements:
+      - Reset or re-provision the worker worktree from main_ref at claim time when it has no uncommitted or unreviewed work.
+      - Never discard a worktree that holds a checkpointed or resumable task.
+    acceptance_criteria:
+      - A second task on the same worker starts from the latest main_ref commit.
+      - A resumable task keeps its worktree and commits.
+    scope:
+      allowed_paths: [build_coordinator/runner/worktree.py, build_coordinator/runner/orchestrator.py, tests/]
+    validation:
+      - python -m pytest tests/test_worktree_auto_provision.py tests/test_runner.py -q
+
+  - id: SM-002
+    title: Transient provider failure backoff and retry
+    priority: 20
+    risk: MEDIUM
+    objective: Retry executions that fail with transient provider errors using bounded backoff instead of blocking the task.
+    requirements:
+      - Classify RATE_LIMITED, UNAVAILABLE and NETWORK_FAILURE as retryable using the existing routing failure taxonomy.
+      - Bound attempts and record each attempt in the execution history.
+    acceptance_criteria:
+      - A retryable failure re-launches after a backoff without a human gate.
+      - Exhausted retries escalate with a typed reason and preserve the checkpoint.
+    scope:
+      allowed_paths: [build_coordinator/runner/, build_coordinator/execution/, tests/]
+
+  - id: SM-003
+    title: Worker health checks
+    priority: 5
+    risk: LOW
+    objective: >
+      Give `stagemesh workers list` a per-worker health column that reflects what StageMesh has actually
+      observed: a worker whose provider is currently on a failure cooldown (recorded as a
+      runner.provider_failure event whose `until` is in the future) is reported UNAVAILABLE with the failure
+      class and time remaining; every other enabled worker is reported AVAILABLE. Implement the derivation as a
+      pure, unit-testable function; do not change routing behaviour.
+    acceptance_criteria:
+      - A pure function derives worker health from the provider-failure events and the current time.
+      - "`stagemesh workers list` output includes each worker's health (AVAILABLE or UNAVAILABLE with failure class)."
+      - Expired cooldowns are reported AVAILABLE.
+      - tests/test_worker_health.py covers available, on-cooldown, expired-cooldown and multiple-provider cases.
+    scope:
+      allowed_paths: [build_coordinator/runner/, build_coordinator/cli.py, tests/test_worker_health.py]
+    validation:
+      - python -m pytest tests/test_worker_health.py -q
+
+  - id: SM-004
+    title: Hot-reload worker and project configuration without restart
+    priority: 30
+    risk: LOW
+    objective: "Apply changes to worker templates and the project concurrency limit to a running `stagemesh continue` loop."
+    acceptance_criteria:
+      - A changed .stagemesh/project.yaml is picked up between cycles.
+      - In-flight executions are never interrupted by a reload.
+    scope:
+      allowed_paths: [build_coordinator/project/, build_coordinator/runner/, tests/]
+
+  - id: SM-005
+    title: Structured event streaming
+    priority: 30
+    risk: LOW
+    objective: Stream durable coordinator events as structured records to a consumer.
+    acceptance_criteria:
+      - Events are emitted in order with stable identifiers and are resumable from a cursor.
+    scope:
+      allowed_paths: [build_coordinator/events.py, build_coordinator/cli.py, tests/]
+
+  - id: SM-006
+    title: Coordinator metrics endpoint
+    priority: 40
+    dependencies: [SM-005]
+    risk: LOW
+    objective: Expose queue depth, claim latency, execution outcomes and worker utilisation as metrics.
+    acceptance_criteria:
+      - Metrics are derived from durable state and events, not in-memory counters.
+    scope:
+      allowed_paths: [build_coordinator/, tests/]
+
+  - id: SM-007
+    title: Windows Task Scheduler unattended startup
+    priority: 40
+    dependencies: [SM-002]
+    risk: MEDIUM
+    objective: "Provide an installable unattended `stagemesh continue` entry for Windows Task Scheduler."
+    acceptance_criteria:
+      - Installing and removing the scheduled task is idempotent and documented.
+      - The unattended run resumes recovered work after a reboot.
+    scope:
+      allowed_paths: [build_coordinator/bin/, docs/, tests/]
+
+  - id: SM-008
+    title: GitHub label provisioning for the optional task-source adapter
+    priority: 50
+    risk: LOW
+    objective: "Create the stagemesh:* lifecycle labels the GitHub adapter applies, when the adapter is enabled."
+    acceptance_criteria:
+      - Label creation is idempotent and only runs when the GitHub adapter is enabled.
+      - Local project backlog execution never depends on it.
+    scope:
+      allowed_paths: [build_coordinator/task_source/, tests/]
+
+  - id: SM-009
+    title: Azure DevOps task-source adapter
+    priority: 60
+    risk: MEDIUM
+    objective: Add an optional Azure DevOps import/export adapter behind the TaskSource interface.
+    acceptance_criteria:
+      - The adapter never becomes the authoritative backlog and is disabled by default.
+      - Outbound sync propagates lifecycle state and evidence only.
+    scope:
+      allowed_paths: [build_coordinator/task_source/, tests/]
+
+  - id: SM-010
+    title: Formal multi-provider acceptance matrix
+    priority: 70
+    dependencies: [SM-003, SM-011, SM-012]
+    risk: MEDIUM
+    review: TWO_REVIEWERS
+    objective: Define and run an acceptance matrix that exercises builders, reviewers and integration across multiple providers.
+    acceptance_criteria:
+      - Independent review by a different provider than the builder is demonstrated where runtimes are available.
+      - Results are recorded as durable review evidence.
+    scope:
+      allowed_paths: [docs/, tests/, examples/]
+
+  - id: SM-011
+    delivered_by: "StageMesh 0.2.0a1: TWO_REVIEWERS enforced (runner/orchestrator.py _needs_second_reviewer, routing.approving_reviewers; tests/test_engine_lifecycle.py::test_two_reviewers_*)"
+    title: Enforce the TWO_REVIEWERS review policy
+    priority: 15
+    risk: MEDIUM
+    objective: >
+      TWO_REVIEWERS is accepted as a review policy and requires review, but the
+      runner performs a single review and then treats the task as integration
+      eligible. Enforce the policy as declared.
+    requirements:
+      - Require two independent review verdicts from two distinct reviewer workers, neither of which built the task, before a task is integration eligible.
+      - Any REMEDIATION_REQUIRED verdict returns the task to rework and discards prior approvals for the changed SHA.
+    acceptance_criteria:
+      - A TWO_REVIEWERS task is not integration eligible after one GREEN verdict.
+      - Two GREEN verdicts on the same reviewed SHA from distinct reviewers make it eligible.
+      - Project loading rejects a TWO_REVIEWERS task when fewer than two reviewer workers are configured.
+    scope:
+      allowed_paths: [build_coordinator/runner/orchestrator.py, build_coordinator/claims.py, build_coordinator/project/, tests/]
+    validation:
+      - python -m pytest tests/test_runner.py tests/test_worker_routing.py -q
