@@ -180,6 +180,9 @@ def build_runner_config(project: ProjectDefinition, *, dry_run: bool = False) ->
         cleanup_branches=True,
         task_branches=True,
         routing_policy=_project_routing_policy(),
+        external_ci_enabled=project.external_ci_enabled,
+        external_ci_repo=project.external_ci_repo,
+        external_ci_max_consecutive_errors=project.external_ci_max_consecutive_errors,
     )
 
 
