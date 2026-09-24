@@ -1,246 +1,221 @@
 # Setup Guide
 
-This guide sets up StageMesh v0.1-alpha from source. For this alpha, the
-installable package, CLI, Python module, and environment variables remain named
-`build-coordinator` / `build_coordinator`.
+This guide sets up the current StageMesh public alpha from source.
+
+The public CLI is `stagemesh`. The Python import package and some compatibility environment/configuration names still use `build_coordinator` during the alpha period.
 
 ## Prerequisites
 
 - Python 3.11 or later
 - Git
-- Optional: PostgreSQL 14+ for production use; SQLite works out of the box
+- At least one supported coding-agent CLI if you want real agent execution
+- Optional: PostgreSQL 14+; SQLite works out of the box
 
-## Installation
-
-### From source
-
-```bash
-git clone <repo-url>
-cd <repo-directory>
-pip install -e ".[dev]"
-```
-
-### Verify installation
+## Install from source
 
 ```bash
-python -m build_coordinator.cli --help
-build-coordinator --help
+git clone https://github.com/saketvishal/stagemesh.git
+cd stagemesh
+python -m pip install -e .
 ```
 
----
-
-## Configuration
-
-The coordinator reads configuration from two sources.
-
-### 1. Coordinator config file
-
-This file controls workspace paths and the database location. The default path
-is `~/.build-coordinator/config.json`.
-
-```json
-{
-  "control_repo_root": "/path/to/your-repo",
-  "database_url": "sqlite:////path/to/coordinator.sqlite3",
-  "data_dir": "/path/to/.build-coordinator",
-  "max_active_builders": 2,
-  "project_roots": {
-    "my-project": "."
-  },
-  "worktrees": {
-    "builder-a": "/path/to/worktree-a",
-    "builder-b": "/path/to/worktree-b",
-    "reviewer-1": "/path/to/worktree-a",
-    "integration-1": "/path/to/your-repo"
-  }
-}
-```
-
-Override the config file path with:
+For development:
 
 ```bash
-export BUILD_COORDINATOR_CONFIG=/absolute/path/to/config.json
+python -m pip install -e ".[dev,postgres]"
 ```
 
-PowerShell:
-
-```powershell
-$env:BUILD_COORDINATOR_CONFIG = "C:\absolute\path\to\config.json"
-```
-
-### 2. Runner config file
-
-This YAML or JSON file controls worker definitions: what agents to launch for
-each role and stage. Set it with:
+Verify:
 
 ```bash
-export BUILD_COORDINATOR_RUNNER_CONFIG=/path/to/runner-config.yaml
+stagemesh --help
 ```
 
-PowerShell:
+## Initialize a project
 
-```powershell
-$env:BUILD_COORDINATOR_RUNNER_CONFIG = "C:\path\to\runner-config.yaml"
-```
-
-See [examples/](../examples/) for complete runner config examples.
-
-### Environment variable overrides
-
-| Variable | Description |
-|---|---|
-| `BUILD_COORDINATOR_DATABASE_URL` | SQLAlchemy database URL |
-| `BUILD_COORDINATOR_REPO_ROOT` | Repository root path |
-| `BUILD_COORDINATOR_DATA_DIR` | Data directory path |
-| `BUILD_COORDINATOR_MAX_ACTIVE_BUILDERS` | Maximum concurrent builders |
-| `BUILD_COORDINATOR_RUNNER_CONFIG` | Runner config file path |
-| `BUILD_COORDINATOR_CONFIG` | Coordinator config file path |
-| `BUILD_COORDINATOR_AUTO_PUSH_ALLOWED` | Allow automatic git push |
-
----
-
-## Database setup
-
-### SQLite
+From a git repository you want StageMesh to coordinate:
 
 ```bash
-export BUILD_COORDINATOR_DATABASE_URL=sqlite:///./coordinator.sqlite3
-python -m build_coordinator.cli status
+cd /path/to/my-project
+stagemesh init
 ```
 
-PowerShell:
+This creates the project-owned `.stagemesh/` definition and registers the repository unless `--no-register` is used.
 
-```powershell
-$env:BUILD_COORDINATOR_DATABASE_URL = "sqlite:///./coordinator.sqlite3"
-python -m build_coordinator.cli status
-```
+The project owns version-controlled intent such as task/objective definitions and concurrency configuration. Runtime lifecycle state remains in the git-ignored StageMesh state directory.
 
-### PostgreSQL
+See [PROJECTS.md](PROJECTS.md).
+
+## Verify coding-agent runtimes
 
 ```bash
-createdb build_coordinator
-export BUILD_COORDINATOR_DATABASE_URL=postgresql://localhost/build_coordinator
-python -m build_coordinator.cli status
+stagemesh agent setup
 ```
 
----
+StageMesh discovers installed coding-agent CLIs and performs a small real headless verification for each candidate runtime.
 
-## Adding the CLI to PATH
-
-Installing with `pip install -e .` exposes the `build-coordinator` console
-script in the active Python environment. You can also use the repository
-launchers directly.
-
-### Linux / macOS
+Inspect what was found:
 
 ```bash
-export PATH="$PATH:/path/to/repo/build_coordinator/bin"
-build-coordinator --help
-build-coordinator status
-build-coordinator list
+stagemesh agent list
 ```
 
-### Windows PowerShell
+If a runtime needs authentication, authenticate with that runtime's own CLI and run `stagemesh agent setup` again.
 
-```powershell
-$env:PATH += ";C:\path\to\repo\build_coordinator\bin"
-build-coordinator --help
-build-coordinator status
-build-coordinator list
-```
-
-Or use the launcher directly:
-
-```powershell
-C:\path\to\repo\build_coordinator\bin\build-coordinator.ps1 status
-```
-
----
-
-## First run
-
-### 1. Initialize the database
+## Diagnose the installation
 
 ```bash
-export BUILD_COORDINATOR_DATABASE_URL=sqlite:///./coordinator.sqlite3
-python -m build_coordinator.cli status
+stagemesh doctor
 ```
 
-### 2. Create a task
+`doctor` checks project discovery, durable state, and verified coding-agent runtimes and reports what needs attention.
+
+For machine-readable output:
 
 ```bash
-python -m build_coordinator.cli objective create TASK-001 \
-  --title "Add installation docs" \
-  --description "Write a clear installation guide in README.md" \
-  --review-policy INDEPENDENT
+stagemesh doctor --json
 ```
 
-### 3. Configure a worker
+## Run StageMesh
+
+Inside a StageMesh project:
 
 ```bash
-cp examples/single_agent/worker-config.example.yaml runner-config.yaml
-# Edit runner-config.yaml so the worker command points at your agent executable.
-
-export BUILD_COORDINATOR_RUNNER_CONFIG=runner-config.yaml
-python -m build_coordinator.cli run --once --dry-run
+stagemesh continue
 ```
 
-`--dry-run` uses configured fake workers and validates the runner path without
-launching external subprocess workers.
-
-### 4. Check status
+For a registered project by name:
 
 ```bash
-python -m build_coordinator.cli status
-python -m build_coordinator.cli list
+stagemesh continue my-project
 ```
 
-### 5. Run continuously
+To target one imported task while debugging or hardening a specific issue:
 
 ```bash
-python -m build_coordinator.cli run
+stagemesh continue --task GH-123
 ```
 
----
+From outside a project, `stagemesh continue --all` coordinates registered projects independently.
+
+## Project registration and machine-local environment
+
+Useful commands:
+
+```bash
+stagemesh project list
+stagemesh project show
+stagemesh project register /path/to/project
+stagemesh project add /path/to/project
+stagemesh project status
+```
+
+Machine-specific PATH/environment configuration can be attached during registration without committing it to the project:
+
+```bash
+stagemesh project add /path/to/project --path-prepend /path/to/venv/bin
+```
+
+On Windows PowerShell, use the virtualenv `Scripts` directory.
+
+## Project configuration
+
+A minimal `.stagemesh/project.yaml` looks like:
+
+```yaml
+schema_version: 1
+id: my-project
+name: My Project
+
+repository:
+  main_ref: main
+
+state_dir: .build-coordinator
+
+execution:
+  concurrency: 2
+  reviewers: 1
+  default_review_policy: INDEPENDENT
+```
+
+Optional task-source adapters such as GitHub can be enabled in the same file. See [PROJECTS.md](PROJECTS.md) for the full model.
+
+## Legacy/direct coordinator configuration
+
+StageMesh still supports lower-level coordinator and runner configuration for compatibility and advanced use cases. Those surfaces use names such as:
+
+- `BUILD_COORDINATOR_CONFIG`
+- `BUILD_COORDINATOR_RUNNER_CONFIG`
+- `BUILD_COORDINATOR_DATABASE_URL`
+- `BUILD_COORDINATOR_DATA_DIR`
+- `BUILD_COORDINATOR_AUTO_PUSH_ALLOWED`
+
+New users should prefer the project-owned `.stagemesh/` workflow unless they have a specific reason to configure the lower-level runner directly.
+
+Examples remain under [../examples/](../examples/).
+
+## Database support
+
+SQLite is the default local path for project state.
+
+PostgreSQL support is available with the optional dependency:
+
+```bash
+python -m pip install -e ".[postgres]"
+```
+
+Durable state migrations are explicit. StageMesh does not silently migrate project state during upgrade.
+
+Useful commands:
+
+```bash
+stagemesh project migrate-state
+stagemesh doctor
+```
 
 ## Useful commands
 
 ```bash
-python -m build_coordinator.cli workers list
-python -m build_coordinator.cli routing explain --stage implementation
-python -m build_coordinator.cli recover-expired
-python -m build_coordinator.cli objective status
+stagemesh project status
+stagemesh workers list
+stagemesh routing explain --stage implementation
+stagemesh recover-expired
+stagemesh objective status
 ```
-
----
 
 ## Troubleshooting
 
-### "CoordinatorConfigError: BUILD_COORDINATOR_CONFIG must be an absolute path"
+### A coding agent is not selected
 
-The `BUILD_COORDINATOR_CONFIG` environment variable must be an absolute path.
-Use:
-
-```bash
-export BUILD_COORDINATOR_CONFIG=$(realpath ./config.json)
-```
-
-### "DatabaseSchemaError"
-
-The schema has not been initialized. Run:
+Run:
 
 ```bash
-python -m build_coordinator.cli status
+stagemesh agent list
+stagemesh doctor
 ```
 
-### Worker not launching
+Check whether the runtime is verified, enabled, authenticated, and currently healthy.
 
-1. Check that `BUILD_COORDINATOR_RUNNER_CONFIG` points to a valid file.
-2. Verify that each subprocess worker `worktree_path` exists and is a git repository.
-3. Run `python -m build_coordinator.cli run --once --dry-run` to verify config parsing.
-4. Check the execution logs in `data_dir/execution-logs/`.
+### A task is blocked
 
-### "EXTERNAL_EXECUTOR_CONFIGURATION_REQUIRED"
+Run:
 
-The worker has `adapter: unconfigured`. Update the runner config to set a real
-`command` and `adapter: subprocess`.
+```bash
+stagemesh project status
+```
+
+StageMesh reports typed reasons such as provider failure, merge conflict, review-environment failure, retry exhaustion, or coordinator invariant failure. Do not erase durable state just to force progress.
+
+### State schema needs migration
+
+Run the explicit migration review path:
+
+```bash
+stagemesh project migrate-state
+```
+
+Apply only after reviewing the reported migration.
+
+### Security or credential issue
+
+Do not post credentials or private source in a public issue. Follow [../SECURITY.md](../SECURITY.md).
