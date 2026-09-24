@@ -22,6 +22,7 @@ htmlcov/
 .tox/
 *.db
 *.sqlite3
+tmp/
 
 # Coordinator runtime data
 .build-coordinator/

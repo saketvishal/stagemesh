@@ -37,6 +37,7 @@ GENERATED_ARTIFACT_EXCLUDES = (
     ":(exclude,glob)**/*.pyc",
     ":(exclude,glob)**/.pytest_cache/**",
     ":(exclude,glob)**/node_modules/**",
+    ":(exclude,glob)**/tmp/**",
 )
 DEFAULT_TIMEOUT_SECONDS = 3000
 
