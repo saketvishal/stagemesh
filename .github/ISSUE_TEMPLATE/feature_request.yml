@@ -1,7 +1,6 @@
 name: Feature request
 description: Propose a StageMesh capability or architectural improvement
 title: "[Feature] "
-labels: ["type:feature"]
 body:
   - type: textarea
     id: problem
