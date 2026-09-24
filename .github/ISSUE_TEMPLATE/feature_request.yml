@@ -1,0 +1,34 @@
+name: Feature request
+description: Propose a StageMesh capability or architectural improvement
+title: "[Feature] "
+labels: ["type:feature"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem to solve
+      description: Describe the engineering problem, not only the desired UI or implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome
+      description: What should become possible or safer?
+    validations:
+      required: true
+  - type: textarea
+    id: invariants
+    attributes:
+      label: Safety / lifecycle invariants
+      description: Which StageMesh properties must remain true (exact-SHA review, independent review, restart safety, provider neutrality, etc.)?
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Real-world evidence or example
+      description: Optional sanitized scenario that motivates the request.
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: Deterministic outcomes that would prove the feature works.
