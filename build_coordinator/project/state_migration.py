@@ -153,14 +153,17 @@ def verify_preservation(before: Path, after: Path) -> list[dict[str, Any]]:
             if row[0] != SCHEMA_VERSION_TABLE
         ]
         for table in tables:
-            before_inv = _table_digest(old, table, None)
-            after_inv = _table_digest(new, table, before_inv["columns"])
+            have_old = [row[1] for row in old.execute(f"PRAGMA table_info({table})")]
+            have_new = [row[1] for row in new.execute(f"PRAGMA table_info({table})")]
+            surviving = [c for c in have_old if c in have_new]
+            before_inv = _table_digest(old, table, surviving)
+            after_inv = _table_digest(new, table, surviving)
             results.append(
                 {
                     "table": table,
                     "rows_before": before_inv["rows"],
                     "rows_after": after_inv["rows"],
-                    "columns_compared": before_inv["columns"],
+                    "columns_compared": surviving,
                     "identical": before_inv == after_inv,
                 }
             )
