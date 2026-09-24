@@ -34,9 +34,11 @@ class FakeGitHubClient:
 
 @pytest.fixture(autouse=True)
 def clean_db():
+    engine.dispose()
     Base.metadata.drop_all(bind=engine)
     initialize_schema()
     yield
+    engine.dispose()
 
 
 def _make_project(task_sources: dict) -> ProjectDefinition:
