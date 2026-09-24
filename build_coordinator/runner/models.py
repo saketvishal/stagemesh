@@ -215,6 +215,13 @@ class RunnerConfig:
     # When true every builder task gets its own branch, started from main_ref,
     # in the worker's managed worktree instead of reusing one branch per worker.
     task_branches: bool = False
+    # #65: opt-in, work-conserving scheduling while external (e.g. GitHub
+    # Actions) CI is pending on an integrated push. Strictly additive:
+    # when False (the default), INTEGRATING -> DONE behaves exactly as it
+    # did before this was added.
+    external_ci_enabled: bool = False
+    external_ci_repo: str | None = None
+    external_ci_max_consecutive_errors: int = 5
 
     @classmethod
     def default(cls, *, dry_run: bool = False) -> "RunnerConfig":
@@ -359,6 +366,11 @@ class RunnerConfig:
             max_execution_attempts=int(data.get("max_execution_attempts", 3)),
             cleanup_branches=bool(data.get("cleanup_branches", False)),
             task_branches=bool(data.get("task_branches", False)),
+            external_ci_enabled=bool((data.get("external_ci") or {}).get("enabled", False)),
+            external_ci_repo=(data.get("external_ci") or {}).get("repo"),
+            external_ci_max_consecutive_errors=int(
+                (data.get("external_ci") or {}).get("max_consecutive_errors", 5)
+            ),
         )
 
     def public_summary(self) -> dict[str, Any]:
@@ -369,6 +381,11 @@ class RunnerConfig:
             "models": {key: value.to_public_dict() for key, value in self.models.items()},
             "stages": {key: value.to_public_dict() for key, value in self.stage_requirements.items()},
             "workers": [worker.public_summary() for worker in self.workers],
+            "external_ci": {
+                "enabled": self.external_ci_enabled,
+                "repo": self.external_ci_repo,
+                "max_consecutive_errors": self.external_ci_max_consecutive_errors,
+            },
         }
 
 

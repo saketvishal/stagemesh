@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Work-conserving scheduling while external CI is pending (#65): opt-in via
+  `execution.external_ci` in `.stagemesh/project.yaml`. A task whose
+  integration pushed a SHA moves to a new `AWAITING_EXTERNAL_CI` state
+  instead of `DONE`; that state holds no builder/reviewer/integration
+  capacity, so independent READY work keeps being scheduled while a
+  per-cycle reconciliation step polls the exact pushed SHA's GitHub Actions
+  check-runs (via `gh`) and resolves the task to `DONE` on success,
+  `REWORK_REQUIRED` on failure, or `BLOCKED` after repeated unreachable
+  polls. Disabled by default; existing projects are unaffected until they
+  opt in. See `docs/design/CI_WORK_CONSERVING_SCHEDULING.md`.
 - 0.2.0a1: distribution renamed `stagemesh` (`pip install stagemesh`, `stagemesh` command;
   the Python module stays `build_coordinator`).
 - Global invocation, registry (`project add/list/remove`, machine-local environment),

@@ -84,6 +84,7 @@ from build_coordinator.runner.routing import (
 )
 from build_coordinator.project.backlog import task_priorities
 from build_coordinator.execution.git_integrator import GitIntegrationExecutor
+from build_coordinator.runner.ci_reconciliation import reconcile_awaiting_ci
 from build_coordinator.runner.validation import run_validation
 from build_coordinator.runner.worktree import (
     cleanup_task_branch,
@@ -226,10 +227,27 @@ class BuildRunner:
             self._dispatch_planners(session, result)
             self._dispatch_builders(session, result)
         self._dispatch_integration(session, result)
+        self._reconcile_awaiting_external_ci(session, result)
         self._reconcile_objectives(session, result)
         if self._task_source is not None:
             self._sync_outbound(session, result)
         return result
+
+    def _reconcile_awaiting_external_ci(self, session: Session, result: RunnerCycleResult) -> None:
+        """#65: non-blocking. A PENDING observation here leaves tasks in
+        AWAITING_EXTERNAL_CI (which holds no worker capacity) and simply
+        returns, so the rest of this cycle -- and the next -- keeps
+        dispatching other independent READY work normally."""
+        if not self._config.external_ci_enabled or not self._config.external_ci_repo:
+            return
+        outcomes = reconcile_awaiting_ci(
+            session,
+            repo=self._config.external_ci_repo,
+            max_consecutive_errors=self._config.external_ci_max_consecutive_errors,
+        )
+        for outcome in outcomes:
+            if outcome["status"] in {"DONE", "SUCCESS"}:
+                result.observed.append(outcome["task_id"])
 
     def _target_allows(self, task_id: str) -> bool:
         return not self._target_task_ids or task_id in self._target_task_ids
@@ -818,7 +836,27 @@ class BuildRunner:
                 result.escalations.append(f"{execution.task_id}:UPSTREAM_PUSH_FAILED")
                 self._block_task(session, execution.task_id, "UPSTREAM_PUSH_FAILED")
                 return
-            transition_task(session, execution.task_id, "DONE", actor="runner", reason="integration completed")
+            self._complete_or_await_ci(session, execution)
+            self._cleanup_integrated_task(session, execution)
+            return
+        if not self._config.auto_push_allowed:
+            result.escalations.append(f"{execution.task_id}:REMOTE_PUSH_APPROVAL_REQUIRED")
+            self._block_task(session, execution.task_id, "REMOTE_PUSH_APPROVAL_REQUIRED")
+            return
+        self._complete_or_await_ci(session, execution)
+
+    def _complete_or_await_ci(self, session: Session, execution: BuildRunnerExecution) -> None:
+        """#65: when external_ci is enabled and this integration actually
+        pushed a SHA, move to AWAITING_EXTERNAL_CI instead of DONE so a
+        later cycle's reconciliation (not this worker slot) confirms CI
+        before the task is considered done. Strictly additive: disabled by
+        default, and a push with no recorded SHA still goes straight to
+        DONE as before (nothing to reconcile against)."""
+        has_sha = bool((execution.result_data or {}).get("merge_commit_sha"))
+        if self._config.external_ci_enabled and self._config.external_ci_repo and has_sha:
+            transition_task(
+                session, execution.task_id, "AWAITING_EXTERNAL_CI", actor="runner", reason="awaiting external CI"
+            )
             record_event(
                 session,
                 EventInput(
@@ -828,11 +866,6 @@ class BuildRunner:
                     event_data=execution.result_data,
                 ),
             )
-            self._cleanup_integrated_task(session, execution)
-            return
-        if not self._config.auto_push_allowed:
-            result.escalations.append(f"{execution.task_id}:REMOTE_PUSH_APPROVAL_REQUIRED")
-            self._block_task(session, execution.task_id, "REMOTE_PUSH_APPROVAL_REQUIRED")
             return
         transition_task(session, execution.task_id, "DONE", actor="runner", reason="integration completed")
         record_event(
