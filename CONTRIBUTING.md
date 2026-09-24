@@ -2,25 +2,29 @@
 
 Thank you for your interest in contributing to StageMesh.
 
-## Before you start
-
-This project is in **v0.1-alpha** and the core architecture is still settling.
-Before investing significant effort, open an issue to discuss your proposed change.
+StageMesh is in public alpha and the architecture is still evolving. For substantial changes, open an issue first so scope, invariants, and acceptance criteria are clear.
 
 ## Development setup
 
 ```bash
-git clone <repo-url>
-cd <repo-directory>
-
-# Install with development dependencies
-pip install -e ".[dev]"
-
-# Run tests
-pytest tests/ -v
+git clone https://github.com/saketvishal/stagemesh.git
+cd stagemesh
+python -m pip install -e ".[dev,postgres]"
 ```
 
-## Running the boundary scanner
+Run focused tests while developing:
+
+```bash
+pytest tests/test_relevant_area.py -v
+```
+
+Expand to dependent/contract tests when the change crosses module boundaries. Run the broader suite when justified by the repository validation policy or before release-level acceptance.
+
+Do not weaken or delete tests merely to make a change pass.
+
+## OSS boundary scanner
+
+StageMesh includes a boundary scan intended to catch private-product coupling and forbidden content:
 
 ```bash
 python -c "
@@ -32,58 +36,60 @@ print(f'Boundary clean. {len(allowed)} documented exceptions.')
 "
 ```
 
-## Test requirements
-
-All contributions must include appropriate tests. The test suite must remain
-fully green before any change is considered.
-
-StageMesh has several categories of tests:
-- **Unit tests**: individual service functions, routing, config parsing
-- **Integration tests**: multi-step lifecycle flows against a real SQLite database
-- **Boundary tests**: automated scans for private-IP coupling and forbidden imports
-
-Do not delete or weaken tests to make a change pass.
-
 ## Architectural constraints
 
-StageMesh is designed around a small number of firm principles:
+StageMesh is built around firm invariants:
 
-1. **Stages belong to the coordinator** - the coordinator owns the task lifecycle.
-   Agents are executors that receive prompts and write structured results.
+1. **Stages belong to StageMesh.** Agents and execution runtimes are replaceable infrastructure.
+2. **Evidence advances the lifecycle.** Free-form agent confidence is not task authority.
+3. **Routing is deterministic.** Worker selection follows configured capability, stage, permissions, provider health, and policy.
+4. **Exact-SHA review matters.** Approval for one SHA cannot authorize another SHA.
+5. **Independent review remains independent.** Builder/reviewer separation must not be bypassed.
+6. **Provider/runtime failures are distinct from task failures.** Do not corrupt implementation/remediation accounting with infrastructure availability failures.
+7. **Recovery is durable.** Preserve leases, checkpoints, events, git state, and restart/idempotency behavior.
+8. **Secrets/private product data never enter public state.** Do not commit credentials, private source, Caventra-specific logic, or proprietary domain behavior.
+9. **Git/integration safety fails closed.** Never bypass merge, SHA-drift, worktree, or review checks just to make automation progress.
 
-2. **Routing is deterministic** - worker selection is based on configured
-   capabilities, never on a model inference result.
+See [AGENTS.md](AGENTS.md) and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
-3. **Secrets never enter persistent state** - config may reference env vars or
-   credential helpers; secrets must not appear in databases, checkpoints, events,
-   logs, results, or config files.
+## Test expectations
 
-4. **Human gates are blocking** - automation can prepare, but cannot approve.
-   Human escalation types are explicit and durable.
+StageMesh uses several categories of tests:
 
-5. **Structured results only** - the coordinator never trusts free-form stdout.
-   Workers write a JSON result file to a runner-generated path.
+- unit tests for deterministic functions and parsers;
+- contract tests across lifecycle/module boundaries;
+- integration tests for multi-step coordinator behavior;
+- provider/runtime tests for execution and failover semantics;
+- boundary/security tests for OSS/private separation and trust invariants.
 
-Changes that violate these principles will not be accepted regardless of other merit.
+During implementation, prefer the smallest test set that proves the changed behavior. Expand when risk or dependency impact requires it. Release-level acceptance should include the broad validation required by the release checklist.
 
 ## Submitting changes
 
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes with tests
-4. Ensure `pytest tests/ -v` passes completely
-5. Ensure the boundary scanner reports clean
-6. Open a pull request with a clear description of what changed and why
+1. Fork or branch the repository.
+2. Open/associate an issue for non-trivial work.
+3. Make a bounded change with appropriate tests.
+4. Run focused and dependent validation.
+5. Run the OSS boundary scanner when relevant.
+6. Update public documentation if behavior/contracts changed.
+7. Open a pull request using the repository template.
+
+Pull requests should explain the lifecycle/architecture impact and include deterministic validation evidence.
 
 ## Code style
 
 - Python 3.11+
-- Use `from __future__ import annotations` in all modules
-- Prefer `dataclasses.dataclass(frozen=True)` for value objects
-- Keep functions focused; avoid large functions
-- Add docstrings to public API functions and classes
+- Use `from __future__ import annotations` in modules where the codebase convention requires it.
+- Prefer explicit typed data/contracts over implicit dict conventions where practical.
+- Keep deterministic policy/routing logic separate from agent/model reasoning.
+- Keep functions focused and add docstrings to public API functions/classes.
+
+## Conduct and security
+
+Participation is subject to [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
+
+Report vulnerabilities through the private path described in [SECURITY.md](SECURITY.md). Do not open a public issue containing credentials, exploit details, private source, or sensitive project data.
 
 ## License
 
-By contributing, you agree that your contributions will be licensed under the
-Apache-2.0 license.
+By contributing, you agree that your contributions will be licensed under the Apache-2.0 license.
