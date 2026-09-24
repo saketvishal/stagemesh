@@ -515,6 +515,93 @@ def test_continue_needs_no_github_and_dry_run_is_readonly(tmp_path, registry):
     assert json.loads(status.stdout)["tasks"] == []
 
 
+def test_continue_dry_run_with_task_filters_before_claimable_plan(tmp_path, registry):
+    root, _ = make_project_repo(
+        tmp_path,
+        {
+            "P0-OTHER": {"priority": 0},
+            "TARGET": {"priority": 100},
+            "BLOCKED": {"dependencies": ["TARGET"]},
+        },
+    )
+    register_project(root)
+
+    plan = stagemesh(["continue", "fixture", "--dry-run", "--task", "TARGET"], cwd=tmp_path, registry=registry)
+
+    assert plan.returncode == 0, plan.stderr
+    payload = json.loads(plan.stdout)
+    assert payload["eligible_now"] == ["TARGET"]
+    assert payload["would_run_in_parallel"] == ["TARGET"]
+    assert payload["target_tasks"] == [
+        {"task_id": "TARGET", "exists": True, "state": "READY", "claimable_now": True, "reason": "claimable"}
+    ]
+
+
+def test_continue_with_missing_target_reports_diagnostic_and_claims_nothing(tmp_path, registry):
+    root, _ = make_project_repo(tmp_path, {"OTHER": {}})
+    register_project(root)
+
+    run = stagemesh(["continue", "fixture", "--task", "MISSING", "--once"], cwd=tmp_path, registry=registry)
+
+    assert run.returncode == 0, run.stderr
+    payload = json.loads(run.stdout)
+    assert payload["target_tasks"] == [
+        {"task_id": "MISSING", "exists": False, "claimable_now": False, "reason": "task_not_found"}
+    ]
+    assert payload["cycles"][0]["launched"] == []
+    final = {t["task_id"]: t["state"] for t in payload["final"]["tasks"]}
+    assert final == {"OTHER": "READY"}
+
+
+def test_continue_with_blocked_target_reports_dependency_and_claims_nothing(tmp_path, registry):
+    root, _ = make_project_repo(tmp_path, {"DEP": {}, "TARGET": {"dependencies": ["DEP"]}, "OTHER": {}})
+    register_project(root)
+
+    run = stagemesh(["continue", "fixture", "--task", "TARGET", "--once"], cwd=tmp_path, registry=registry)
+
+    assert run.returncode == 0, run.stderr
+    payload = json.loads(run.stdout)
+    assert payload["target_tasks"] == [
+        {
+            "task_id": "TARGET",
+            "exists": True,
+            "state": "READY",
+            "claimable_now": False,
+            "reason": "blocked_by_dependencies:DEP",
+        }
+    ]
+    assert payload["cycles"][0]["launched"] == []
+    final = {t["task_id"]: t["state"] for t in payload["final"]["tasks"]}
+    assert final == {"DEP": "READY", "OTHER": "READY", "TARGET": "READY"}
+
+
+def test_continue_with_task_runs_only_selected_task_through_lifecycle(tmp_path, registry):
+    root, origin = make_project_repo(
+        tmp_path,
+        {
+            "P0-OTHER": {"priority": 0},
+            "TARGET": {"priority": 100},
+        },
+        concurrency=2,
+    )
+    register_project(root)
+
+    run = stagemesh(["continue", "fixture", "--task", "TARGET"], cwd=tmp_path, registry=registry)
+
+    assert run.returncode == 0, run.stderr
+    payload = json.loads(run.stdout)
+    final = {t["task_id"]: t["state"] for t in payload["final"]["tasks"]}
+    assert final == {"P0-OTHER": "READY", "TARGET": "DONE"}
+    touched = {e["task_id"] for e in payload["final"]["executions"]}
+    assert touched == {"TARGET"}
+    assert [e["role"] for e in payload["final"]["executions"]] == ["BUILDER", "REVIEWER", "INTEGRATION"]
+    assert payload["target_tasks"][0]["task_id"] == "TARGET"
+    git(root, "fetch", "origin")
+    main_files = git(root, "ls-tree", "-r", "--name-only", "origin/main")
+    assert "stagemesh-scripted/TARGET.txt" in main_files
+    assert "stagemesh-scripted/P0-OTHER.txt" not in main_files
+
+
 def test_github_adapter_is_optional_and_never_blocks_local_execution(tmp_path, registry):
     root, _ = make_project_repo(
         tmp_path,
@@ -705,7 +792,7 @@ def test_continue_reloads_project_yaml_between_cycles(tmp_path, registry, monkey
     reload_builder_counts: list[int] = []
 
     class ReloadProbeRunner:
-        def __init__(self, _session_factory, config):
+        def __init__(self, _session_factory, config, **_kwargs):
             self.config = config
             self.cycles = 0
 
@@ -739,6 +826,7 @@ def test_continue_reloads_project_yaml_between_cycles(tmp_path, registry, monkey
             no_sync=True,
             github=False,
             dry_run=False,
+            task_id=None,
             max_cycles=2,
             timeout=None,
             once=False,

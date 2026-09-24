@@ -137,6 +137,7 @@ class BuildRunner:
         executors: dict[str, WorkerExecutor] | None = None,
         git: GitBackend | None = None,
         task_source: Any = None,
+        target_task_ids: set[str] | frozenset[str] | tuple[str, ...] | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._config = config
@@ -147,6 +148,7 @@ class BuildRunner:
         self._git = git if git is not None else RealGit()
         self._settings = get_settings()
         self._task_source = task_source
+        self._target_task_ids = frozenset(str(task_id) for task_id in (target_task_ids or ()))
 
     def reload_config(
         self,
@@ -217,6 +219,9 @@ class BuildRunner:
         self._dispatch_integration(session, result)
         self._reconcile_objectives(session, result)
         return result
+
+    def _target_allows(self, task_id: str) -> bool:
+        return not self._target_task_ids or task_id in self._target_task_ids
 
     def _reconcile_objectives(self, session: Session, result: RunnerCycleResult) -> None:
         for summary in run_objective_cycle(session):
@@ -757,6 +762,8 @@ class BuildRunner:
 
     def _dispatch_builders(self, session: Session, result: RunnerCycleResult) -> None:
         available = list_available_tasks(session)
+        if self._target_task_ids:
+            available = [task for task in available if self._target_allows(task.task_id)]
         priorities = task_priorities(session, [task.task_id for task in available])
         available.sort(key=lambda task: (priorities.get(task.task_id, 100), task.task_id))
         has_unlaunched_p0 = False
@@ -883,6 +890,8 @@ class BuildRunner:
             transition_task(session, execution.task_id, "DONE", actor="runner", reason="planner plan applied")
 
     def _dispatch_planners(self, session: Session, result: RunnerCycleResult) -> None:
+        if self._target_task_ids:
+            return
         worker, availability, decision = self._select_worker("PLANNER", session=session)
         if availability == "slots_occupied":
             result.capacity_full = True
@@ -974,6 +983,8 @@ class BuildRunner:
             select(BuildTask).where(BuildTask.state == "REVIEW_READY").order_by(BuildTask.task_id)
         ).all()
         for task in tasks:
+            if not self._target_allows(task.task_id):
+                continue
             worker, availability, decision = self._select_worker(
                 "REVIEWER", task_id=task.task_id, session=session
             )
@@ -1046,6 +1057,8 @@ class BuildRunner:
         ).all()
         seen_tasks: set[str] = set()
         for row in rows:
+            if not self._target_allows(row.task_id):
+                continue
             if row.task_id in seen_tasks:
                 continue
             seen_tasks.add(row.task_id)

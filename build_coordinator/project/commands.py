@@ -98,6 +98,7 @@ def add_continue_command(sub: argparse._SubParsersAction) -> None:
     p.add_argument("--no-sync", action="store_true", help="skip project backlog synchronization")
     p.add_argument("--github", action="store_true", help="also run the optional GitHub task-source adapter")
     p.add_argument("--all", action="store_true", dest="all_projects", help="coordinate every registered project (default outside a project)")
+    p.add_argument("--task", dest="task_id", help="run only this explicit task id; unrelated backlog is not claimable")
 
 
 def normalize_argv(argv: list[str]) -> list[str]:
@@ -279,6 +280,7 @@ def handle_continue(args: argparse.Namespace) -> None:
     if _is_global_mode(args):
         handle_global_continue(args)
         return
+    target_task_ids = _target_task_ids(args)
     project = _project_from_args(args)
     definitions = [] if args.no_sync else load_backlog(project)
     lifecycle = _open(project)
@@ -297,7 +299,7 @@ def handle_continue(args: argparse.Namespace) -> None:
                 adapter_payload = [{"action": "ERROR", "details": str(exc)}]
         session.commit()
         if args.dry_run:
-            _print(_dry_run_plan(session, project, definitions, sync_payload))
+            _print(_dry_run_plan(session, project, definitions, sync_payload, target_task_ids=target_task_ids))
             return
 
     config = build_runner_config(project, dry_run=False)
@@ -310,7 +312,7 @@ def handle_continue(args: argparse.Namespace) -> None:
             flush=True,
         )
         return
-    runner = BuildRunner(SessionLocal, config)
+    runner = BuildRunner(SessionLocal, config, target_task_ids=target_task_ids)
     started = time.monotonic()
     cycles: list[dict[str, Any]] = []
     peak_parallel = 0
@@ -387,9 +389,13 @@ def handle_continue(args: argparse.Namespace) -> None:
 
     with lifecycle.session() as session:
         final = project_status(session, project)
+        target_diagnostics = [
+            _target_task_diagnostic(session, task_id) for task_id in sorted(target_task_ids)
+        ]
     _print(
         {
             "project": project.summary(),
+            "target_tasks": target_diagnostics,
             "backlog_sync": sync_payload,
             "task_source_adapters": adapter_payload,
             "cycles_run": len(cycles),
@@ -424,6 +430,8 @@ def handle_global_continue(args: argparse.Namespace) -> None:
             "(or run `stagemesh init` inside a repository)"
         )
     flags = [flag for flag, on in (("--dry-run", args.dry_run), ("--once", args.once), ("--no-sync", args.no_sync), ("--github", args.github)) if on]
+    if getattr(args, "task_id", None):
+        flags += ["--task", args.task_id]
     flags += ["--max-cycles", str(args.max_cycles)] + (["--timeout", str(args.timeout)] if args.timeout is not None else [])
     env = {k: v for k, v in os.environ.items() if not k.startswith("BUILD_COORDINATOR_")}
     for key in ("BUILD_COORDINATOR_AUTO_PUSH_ALLOWED", "BUILD_COORDINATOR_RUNNER_CONFIG"):
@@ -509,6 +517,8 @@ def _dry_run_plan(
     project: ProjectDefinition,
     definitions: list[TaskDefinition],
     sync_payload: dict[str, Any] | None,
+    *,
+    target_task_ids: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
     ranked: dict[str, tuple[int, str]] = {}
     declared = {d.task_id: d for d in definitions}
@@ -525,17 +535,76 @@ def _dry_run_plan(
         if deps_done:
             ranked[definition.task_id] = (definition.priority, definition.task_id)
     ordered = [task_id for _, task_id in sorted(ranked.values())]
+    if target_task_ids:
+        ordered = [task_id for task_id in ordered if task_id in target_task_ids]
     runner_config = build_runner_config(project, dry_run=True)
-    runner = BuildRunner(lambda: session, runner_config)
+    runner = BuildRunner(lambda: session, runner_config, target_task_ids=target_task_ids)
     diag = runner.diagnostics(session)
     return {
         "dry_run": True,
         "project": project.summary(),
+        "target_tasks": [
+            _target_task_diagnostic(session, task_id, declared=declared) for task_id in sorted(target_task_ids)
+        ],
         "backlog_sync": sync_payload,
         "diagnostics": diag,
         "eligible_now": ordered,
         "would_run_in_parallel": ordered[: project.concurrency],
         "generated_at": datetime.now(UTC).isoformat(),
+    }
+
+
+def _target_task_ids(args: argparse.Namespace) -> frozenset[str]:
+    task_id = getattr(args, "task_id", None)
+    return frozenset([str(task_id)]) if task_id else frozenset()
+
+
+def _target_task_diagnostic(
+    session, task_id: str, *, declared: dict[str, TaskDefinition] | None = None
+) -> dict[str, Any]:
+    task = session.get(BuildTask, task_id)
+    if task is None:
+        definition = (declared or {}).get(task_id)
+        if definition is not None:
+            unmet = [
+                dep
+                for dep in definition.dependencies
+                if (dep_task := session.get(BuildTask, dep)) is None or dep_task.state != "DONE"
+            ]
+            claimable = not unmet
+            return {
+                "task_id": task_id,
+                "exists": True,
+                "state": "READY",
+                "claimable_now": claimable,
+                "reason": "claimable"
+                if claimable
+                else f"blocked_by_dependencies:{','.join(unmet)}",
+            }
+        return {
+            "task_id": task_id,
+            "exists": False,
+            "claimable_now": False,
+            "reason": "task_not_found",
+        }
+    available = {item.task_id for item in list_available_tasks(session)}
+    if task.task_id in available:
+        reason = "claimable"
+    elif task.state != "READY":
+        reason = f"state:{task.state}"
+    else:
+        unmet = [
+            dep
+            for dep in (task.dependencies or [])
+            if (dep_task := session.get(BuildTask, dep)) is None or dep_task.state != "DONE"
+        ]
+        reason = f"blocked_by_dependencies:{','.join(unmet)}" if unmet else "not_claimable"
+    return {
+        "task_id": task.task_id,
+        "exists": True,
+        "state": task.state,
+        "claimable_now": task.task_id in available,
+        "reason": reason,
     }
 
 
