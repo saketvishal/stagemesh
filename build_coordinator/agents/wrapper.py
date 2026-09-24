@@ -190,8 +190,15 @@ def render_prompt(role: str, raw: str, *, base_ref: str, reviewed_sha: str | Non
 
 
 def parse_verdict(text: str) -> dict[str, Any] | None:
+    fenced = re.findall(r"```(?:json)?\s*(.*?)\s*```", text, flags=re.DOTALL)
+    candidates: list[str] = []
+    for block in fenced[::-1]:
+        stripped = block.strip()
+        if stripped.startswith("{") and stripped.endswith("}"):
+            candidates.append(stripped)
     blocks = re.findall(r"```(?:json)?\s*(\{.*?\})\s*```", text, flags=re.DOTALL)
-    candidates = blocks[::-1] or re.findall(r"(\{[^{}]*\"verdict\"[^{}]*\})", text, flags=re.DOTALL)[::-1]
+    candidates.extend(blocks[::-1])
+    candidates.extend(re.findall(r"(\{[^{}]*\"verdict\"[^{}]*\})", text, flags=re.DOTALL)[::-1])
     for candidate in candidates:
         try:
             data = json.loads(candidate)
@@ -211,11 +218,23 @@ def write_result(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
-def run_agent(cmd: list[str], prompt: str, *, cwd: str, timeout: float, env: dict[str, str]) -> tuple[int, str]:
+_UNSET = object()
+
+
+def run_agent(
+    cmd: list[str],
+    prompt: str | None = None,
+    *,
+    cwd: str,
+    timeout: float,
+    env: dict[str, str],
+    stdin: Any = _UNSET,
+) -> tuple[int, str]:
+    input_text = prompt if stdin is _UNSET else stdin
     proc = subprocess.Popen(
         cmd,
         cwd=cwd,
-        stdin=subprocess.PIPE,
+        stdin=subprocess.PIPE if input_text is not None else subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
@@ -226,7 +245,7 @@ def run_agent(cmd: list[str], prompt: str, *, cwd: str, timeout: float, env: dic
     )
     tree = attach_started_process(proc.pid)
     try:
-        out, _ = proc.communicate(prompt, timeout=timeout)
+        out, _ = proc.communicate(input_text, timeout=timeout)
         return proc.returncode, out or ""
     except subprocess.TimeoutExpired:
         tree.terminate()
@@ -297,10 +316,14 @@ def main(argv: list[str] | None = None) -> int:
     env = {**os.environ, **trusted_git_env(cwd)}
     with tempfile.TemporaryDirectory(prefix="stagemesh-agent-") as scratch:
         last_message = str(Path(scratch) / "last-message.txt")
-        cmd = profile.command(
-            role_key, cwd, model=os.environ.get("STAGEMESH_AGENT_MODEL") or None, last_message=last_message
+        cmd, agent_stdin = profile.build_invocation(
+            role_key,
+            cwd,
+            prompt,
+            model=os.environ.get("STAGEMESH_AGENT_MODEL") or None,
+            last_message=last_message,
         )
-        code, output = run_agent(cmd, prompt, cwd=cwd, timeout=timeout, env=env)
+        code, output = run_agent(cmd, cwd=cwd, timeout=timeout, env=env, stdin=agent_stdin)
         final = output
         if Path(last_message).is_file():
             final = Path(last_message).read_text(encoding="utf-8", errors="replace")
