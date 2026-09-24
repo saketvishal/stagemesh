@@ -89,7 +89,12 @@ class ReviewerPromptBuilder(_PromptBuilder):
         "runner-captured SHA supplied in this prompt. Your worktree is "
         "StageMesh-managed and may not be on the feature branch: inspect the "
         "code at that SHA (for example `git checkout --detach <sha>` in your "
-        "own worktree) and never commit."
+        "own worktree) and never commit. "
+        "If verification cannot be completed because review infrastructure, "
+        "environment, or required tooling is unavailable, emit verdict "
+        "REVIEW_ENVIRONMENT_BLOCKED with diagnostic findings instead of requesting "
+        "source-code remediation. Use REMEDIATION_REQUIRED only when the implementation "
+        "itself violates requirements."
     )
 
 

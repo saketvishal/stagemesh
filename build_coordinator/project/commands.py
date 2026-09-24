@@ -322,7 +322,7 @@ def handle_continue(args: argparse.Namespace) -> None:
             flush=True,
         )
         return
-    runner = BuildRunner(SessionLocal, config, target_task_ids=target_task_ids)
+    runner = BuildRunner(SessionLocal, config, task_source=task_source, target_task_ids=target_task_ids)
     started = time.monotonic()
     cycles: list[dict[str, Any]] = []
     peak_parallel = 0
