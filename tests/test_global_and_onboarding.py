@@ -198,6 +198,40 @@ def test_wrapper_prompt_carries_the_task_and_never_asks_agents_to_self_report_li
     assert "abc123" in reviewer and "git diff main...HEAD" in reviewer and "must not modify" in reviewer
 
 
+def test_reviewer_prompt_surfaces_open_findings_and_requires_dispositions():
+    raw = json.dumps(
+        {
+            "task_definition": {"task_id": "T-1", "title": "Do it", "description": "Make X.", "acceptance_criteria": ["X works"]},
+            "task_envelope": {},
+            "resume_context": {
+                "open_findings_from_prior_review": [
+                    {"id": "abc123", "description": "missing null check", "attempts": 1, "first_seen_cycle": "review-cycle:e1"}
+                ]
+            },
+        }
+    )
+    reviewer = render_prompt("REVIEWER", raw, base_ref="main", reviewed_sha="abc123")
+    assert "id=abc123" in reviewer and "missing null check" in reviewer
+    assert "finding_dispositions" in reviewer
+    assert "RESOLVED" in reviewer and "STILL_OPEN" in reviewer
+
+
+def test_remediation_prompt_surfaces_open_findings_from_registry():
+    raw = json.dumps(
+        {
+            "task_definition": {"task_id": "T-1", "title": "Do it", "description": "Make X.", "acceptance_criteria": ["X works"]},
+            "task_envelope": {},
+            "resume_context": {
+                "open_findings": [
+                    {"id": "abc123", "description": "missing null check", "attempts": 2, "first_seen_cycle": "review-cycle:e1"}
+                ]
+            },
+        }
+    )
+    remediation = render_prompt("REMEDIATION", raw, base_ref="main", reviewed_sha=None)
+    assert "id=abc123" in remediation and "missing null check" in remediation
+
+
 def test_reviewer_verdict_parsing_is_strict():
     good = 'analysis\n```json\n{"verdict": "GREEN", "findings": [], "required_remediation": [], "ready_for_integration": true}\n```'
     assert parse_verdict(good)["verdict"] == "GREEN"

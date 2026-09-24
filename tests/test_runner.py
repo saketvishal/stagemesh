@@ -551,6 +551,253 @@ def test_rework_loop_count_is_bounded():
     assert "RUN-LIMIT:REMEDIATION_LIMIT_REACHED" in result.escalations
 
 
+def test_same_finding_repeated_verbatim_still_converges_to_escalation():
+    """A reviewer restating the exact same unresolved defect across cycles
+    still escalates once its own attempt budget is exhausted (finding-aware
+    convergence must not regress the case raw-cycle counting already
+    handled correctly)."""
+    task_id = "RUN-SAME-FINDING"
+    executors = {
+        "reviewer-1": FakeExecutor(
+            [
+                ExecutionObservation(
+                    "SUCCEEDED",
+                    result_data={
+                        "review": {
+                            "verdict": "REMEDIATION_REQUIRED",
+                            "findings": ["same defect"],
+                            "required_remediation": ["fix it"],
+                        }
+                    },
+                ),
+                ExecutionObservation(
+                    "SUCCEEDED",
+                    result_data={
+                        "review": {
+                            "verdict": "REMEDIATION_REQUIRED",
+                            "findings": ["same defect"],
+                            "required_remediation": ["fix it"],
+                        }
+                    },
+                ),
+                ExecutionObservation(
+                    "SUCCEEDED",
+                    result_data={
+                        "review": {
+                            "verdict": "REMEDIATION_REQUIRED",
+                            "findings": ["same defect"],
+                            "required_remediation": ["fix it"],
+                        }
+                    },
+                ),
+            ]
+        ),
+        "builder-a": FakeExecutor(
+            [
+                ExecutionObservation("SUCCEEDED", result_data={"feature_sha": "remediated-sha-1"}),
+                ExecutionObservation("SUCCEEDED", result_data={"feature_sha": "remediated-sha-2"}),
+            ]
+        ),
+    }
+    with SessionLocal() as session:
+        upsert_task(session, TaskSpec(**{**_task(task_id).__dict__, "required_validation": []}))
+        claim_task(session, ClaimRequest(task_id, worker_id="builder-a"))
+        transition_task(session, task_id, "IN_PROGRESS")
+        transition_task(session, task_id, "VALIDATING")
+        transition_task(session, task_id, "REVIEW_READY")
+        session.commit()
+
+    runner = _runner(config=_config(remediation_cycles=2), executors=executors)
+    runner.run_once()  # launch review 1
+    runner.run_once()  # review 1 -> REWORK_REQUIRED -> launch remediation 1
+    runner.run_once()  # remediation 1 -> VALIDATING -> REVIEW_READY -> launch review 2
+    result = runner.run_once()  # review 2 -> REWORK_REQUIRED again -> launch remediation 2
+    assert f"{task_id}:REMEDIATION_LIMIT_REACHED" not in result.escalations
+    runner.run_once()  # remediation 2 -> REVIEW_READY -> launch review 3
+    result = runner.run_once()  # review 3 -> escalate
+
+    assert f"{task_id}:REMEDIATION_LIMIT_REACHED" in result.escalations
+    with SessionLocal() as session:
+        assert session.get(BuildTask, task_id).state == "BLOCKED"
+        event = session.scalar(
+            select(BuildTaskEvent)
+            .where(BuildTaskEvent.task_id == task_id)
+            .where(BuildTaskEvent.event_type == "runner.remediation_limit_reached")
+        )
+        assert event is not None
+        open_findings = event.event_data["open_findings"]
+        assert len(open_findings) == 1
+        assert open_findings[0]["description"] == "same defect"
+        assert open_findings[0]["attempts"] == 3
+
+
+def test_new_finding_after_resolution_gets_its_own_budget_not_raw_count():
+    """A finding that is fixed (and so drops out of the reviewer's findings)
+    must not consume the remediation budget of an unrelated finding
+    introduced afterward: convergence must be driven by which findings are
+    actually still open, not by how many remediation cycles have run in
+    total."""
+    task_id = "RUN-FRESH-FINDING"
+    executors = {
+        "reviewer-1": FakeExecutor(
+            [
+                ExecutionObservation(
+                    "SUCCEEDED",
+                    result_data={
+                        "review": {
+                            "verdict": "REMEDIATION_REQUIRED",
+                            "findings": ["defect A"],
+                            "required_remediation": ["fix A"],
+                        }
+                    },
+                ),
+                ExecutionObservation(
+                    "SUCCEEDED",
+                    result_data={
+                        "review": {
+                            "verdict": "REMEDIATION_REQUIRED",
+                            "findings": ["defect B"],
+                            "required_remediation": ["fix B"],
+                        }
+                    },
+                ),
+                ExecutionObservation(
+                    "SUCCEEDED",
+                    result_data={
+                        "review": {
+                            "verdict": "REMEDIATION_REQUIRED",
+                            "findings": ["defect B"],
+                            "required_remediation": ["fix B"],
+                        }
+                    },
+                ),
+                ExecutionObservation(
+                    "SUCCEEDED",
+                    result_data={
+                        "review": {
+                            "verdict": "REMEDIATION_REQUIRED",
+                            "findings": ["defect B"],
+                            "required_remediation": ["fix B"],
+                        }
+                    },
+                ),
+            ]
+        ),
+        "builder-a": FakeExecutor(
+            [
+                ExecutionObservation("SUCCEEDED", result_data={"feature_sha": "remediated-sha-1"}),
+                ExecutionObservation("SUCCEEDED", result_data={"feature_sha": "remediated-sha-2"}),
+                ExecutionObservation("SUCCEEDED", result_data={"feature_sha": "remediated-sha-3"}),
+            ]
+        ),
+    }
+    with SessionLocal() as session:
+        upsert_task(session, TaskSpec(**{**_task(task_id).__dict__, "required_validation": []}))
+        claim_task(session, ClaimRequest(task_id, worker_id="builder-a"))
+        transition_task(session, task_id, "IN_PROGRESS")
+        transition_task(session, task_id, "VALIDATING")
+        transition_task(session, task_id, "REVIEW_READY")
+        session.commit()
+
+    runner = _runner(config=_config(remediation_cycles=2), executors=executors)
+    runner.run_once()  # launch review 1
+    runner.run_once()  # review 1 (defect A) -> REWORK_REQUIRED -> launch remediation 1
+    runner.run_once()  # remediation 1 -> REVIEW_READY -> launch review 2
+    result = runner.run_once()  # review 2 (defect B, A resolved) -> must NOT escalate yet
+
+    assert f"{task_id}:REMEDIATION_LIMIT_REACHED" not in result.escalations
+    with SessionLocal() as session:
+        assert session.get(BuildTask, task_id).state == "CLAIMED"
+        # raw remediation cycle count already equals the cap here, but the
+        # task keeps going because "defect B" has only been reported once
+        assert runner._remediation_cycles(session, task_id) >= 2
+
+    runner.run_once()  # remediation 2 -> REVIEW_READY -> launch review 3
+    result = runner.run_once()  # review 3 (defect B again) -> still within its own budget
+    assert f"{task_id}:REMEDIATION_LIMIT_REACHED" not in result.escalations
+    runner.run_once()  # remediation 3 -> REVIEW_READY -> launch review 4
+    result = runner.run_once()  # review 4 (defect B again) -> escalate
+
+    assert f"{task_id}:REMEDIATION_LIMIT_REACHED" in result.escalations
+    with SessionLocal() as session:
+        assert session.get(BuildTask, task_id).state == "BLOCKED"
+        event = session.scalar(
+            select(BuildTaskEvent)
+            .where(BuildTaskEvent.task_id == task_id)
+            .where(BuildTaskEvent.event_type == "runner.remediation_limit_reached")
+        )
+        assert event is not None
+        open_findings = event.event_data["open_findings"]
+        assert len(open_findings) == 1
+        assert open_findings[0]["description"] == "defect B"
+
+
+def test_findings_omitted_after_being_tracked_still_hits_the_raw_cap():
+    """A reviewer that stops restating findings (but keeps returning
+    REMEDIATION_REQUIRED with an empty `findings` array) must not be able to
+    stall convergence forever: since there is no finding signal to reconcile,
+    the raw remediation-cycle cap remains the safety net for those cycles."""
+    task_id = "RUN-OMITTED-FINDINGS"
+    empty_findings_review = ExecutionObservation(
+        "SUCCEEDED",
+        result_data={
+            "review": {
+                "verdict": "REMEDIATION_REQUIRED",
+                "findings": [],
+                "required_remediation": ["still broken, unspecified"],
+            }
+        },
+    )
+    executors = {
+        "reviewer-1": FakeExecutor(
+            [
+                ExecutionObservation(
+                    "SUCCEEDED",
+                    result_data={
+                        "review": {
+                            "verdict": "REMEDIATION_REQUIRED",
+                            "findings": ["defect A"],
+                            "required_remediation": ["fix A"],
+                        }
+                    },
+                ),
+                empty_findings_review,
+                empty_findings_review,
+            ]
+        ),
+        "builder-a": FakeExecutor(
+            [
+                ExecutionObservation("SUCCEEDED", result_data={"feature_sha": "remediated-sha-1"}),
+                ExecutionObservation("SUCCEEDED", result_data={"feature_sha": "remediated-sha-2"}),
+            ]
+        ),
+    }
+    with SessionLocal() as session:
+        upsert_task(session, TaskSpec(**{**_task(task_id).__dict__, "required_validation": []}))
+        claim_task(session, ClaimRequest(task_id, worker_id="builder-a"))
+        transition_task(session, task_id, "IN_PROGRESS")
+        transition_task(session, task_id, "VALIDATING")
+        transition_task(session, task_id, "REVIEW_READY")
+        session.commit()
+
+    runner = _runner(config=_config(remediation_cycles=2), executors=executors)
+    runner.run_once()  # launch review 1
+    runner.run_once()  # review 1 (defect A) -> REWORK_REQUIRED -> launch remediation 1
+    runner.run_once()  # remediation 1 -> REVIEW_READY -> launch review 2
+    result = runner.run_once()  # review 2 (no findings restated; raw count 1 < cap 2)
+
+    assert f"{task_id}:REMEDIATION_LIMIT_REACHED" not in result.escalations
+    with SessionLocal() as session:
+        assert session.get(BuildTask, task_id).state == "CLAIMED"
+
+    runner.run_once()  # remediation 2 -> REVIEW_READY -> launch review 3
+    result = runner.run_once()  # review 3 (no findings restated; raw count 2 >= cap 2)
+
+    assert f"{task_id}:REMEDIATION_LIMIT_REACHED" in result.escalations
+    with SessionLocal() as session:
+        assert session.get(BuildTask, task_id).state == "BLOCKED"
+
+
 def test_stale_builder_can_be_recovered_and_resumed_without_duplicate_launch():
     with SessionLocal() as session:
         upsert_task(session, _task("RUN-STALE"))

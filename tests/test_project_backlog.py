@@ -386,6 +386,48 @@ def test_legacy_state_is_refused_then_migrated_with_backup_and_history_kept(tmp_
         assert backup.execute("SELECT state FROM build_tasks").fetchone() == ("REVIEWING",)
 
 
+def test_versioned_schema_1_database_migrates_finding_registry_column(tmp_path):
+    """A previously-versioned (schema version 1, pre-finding_registry)
+    database is not silently treated as up to date: plan_migration must
+    report the column add, and the database must load after migrating."""
+    path = tmp_path / "v1.sqlite3"
+    lifecycle = DatabaseLifecycle(f"sqlite:///{path.as_posix()}", data_dir=tmp_path)
+    lifecycle.initialize_schema()
+    lifecycle.dispose()
+
+    connection = sqlite3.connect(str(path))
+    connection.execute("ALTER TABLE build_tasks DROP COLUMN finding_registry")
+    connection.execute("UPDATE build_coordinator_schema_version SET version = 1 WHERE singleton_id = 1")
+    connection.commit()
+    connection.close()
+
+    report = plan_migration(path)
+    assert report.needed
+    build_tasks_change = next(t for t in report.tables if t["table"] == "build_tasks")
+    assert "finding_registry" in build_tasks_change["columns_added"]
+
+    applied = migrate_state(path, apply=True)
+    assert applied.applied and Path(applied.backup).is_file()
+    assert applied.preservation and all(r["identical"] for r in applied.preservation)
+    assert not plan_migration(path).needed
+
+    lifecycle = DatabaseLifecycle(f"sqlite:///{path.as_posix()}", data_dir=tmp_path)
+    lifecycle.initialize_schema()
+    with lifecycle.session() as db:
+        task = BuildTask(
+            task_id="POST-MIGRATION-1",
+            title="t",
+            description="d",
+            acceptance_criteria=[],
+            dependencies=[],
+        )
+        db.add(task)
+        db.commit()
+        reloaded = db.get(BuildTask, "POST-MIGRATION-1")
+        assert reloaded.finding_registry == {}
+    lifecycle.dispose()
+
+
 # ---------------------------------------------------------------- end to end
 
 E2E_ENV_DROP = (

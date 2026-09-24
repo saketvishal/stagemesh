@@ -66,6 +66,11 @@ from build_coordinator.runner.git_safety import (
     assess_mechanical_merge,
     capture_feature_sha,
 )
+from build_coordinator.runner.findings import (
+    escalation_evidence as finding_escalation_evidence,
+    open_findings,
+    reconcile_findings,
+)
 from build_coordinator.runner.models import (
     ReviewVerdict,
     ReviewVerdictContradiction,
@@ -714,6 +719,8 @@ class BuildRunner:
             result.escalations.append(f"{execution.task_id}:COORDINATOR_INVARIANT_FAILURE")
             self._block_task(session, execution.task_id, "COORDINATOR_INVARIANT_FAILURE")
             return
+        registry = self._reconcile_review_findings(session, execution, verdict)
+        blockers = [entry["description"] for entry in open_findings(registry)] if registry.get("entries") else list(verdict.findings)
         if execution.claim_id:
             checkpoint(
                 session,
@@ -724,7 +731,7 @@ class BuildRunner:
                     completed_work=["independent review completed"],
                     remaining_work=list(verdict.required_remediation),
                     decisions=list(verdict.architecture_notes),
-                    blockers=[] if eligible else list(verdict.findings),
+                    blockers=[] if eligible else blockers,
                 ),
             )
         if eligible and self._needs_second_reviewer(session, execution):
@@ -767,10 +774,7 @@ class BuildRunner:
             )
             return
         if verdict.verdict == "REMEDIATION_REQUIRED":
-            cycles = self._remediation_cycles(session, execution.task_id)
-            if cycles >= self._config.max_remediation_cycles:
-                result.escalations.append(f"{execution.task_id}:REMEDIATION_LIMIT_REACHED")
-                self._block_task(session, execution.task_id, "REMEDIATION_LIMIT_REACHED")
+            if self._remediation_limit_reached(session, execution, verdict, result):
                 return
             transition_task(
                 session,
@@ -1055,7 +1059,10 @@ class BuildRunner:
             except CoordinatorPolicyError:
                 continue
             context = get_resume_context(session, task.task_id)
-            prompt = prompt_builder.build(context, extra={"task_definition": _task_definition(task)})
+            extra: dict[str, Any] = {"task_definition": _task_definition(task)}
+            if role == "REMEDIATION":
+                extra["open_findings"] = finding_escalation_evidence(task.finding_registry or {})
+            prompt = prompt_builder.build(context, extra=extra)
             self._launch(
                 session,
                 result,
@@ -1263,6 +1270,9 @@ class BuildRunner:
                     "reviewed_feature_sha": reviewed_sha,
                     "sha_source": "runner-owned-git",
                     "task_definition": _task_definition(task),
+                    "open_findings_from_prior_review": finding_escalation_evidence(
+                        task.finding_registry or {}
+                    ),
                 },
             )
             self._launch(
@@ -2137,6 +2147,92 @@ class BuildRunner:
                 transition_task(session, task_id, "BLOCKED", actor="runner", reason=reason)
             except CoordinatorPolicyError:
                 pass
+
+    def _reconcile_review_findings(
+        self,
+        session: Session,
+        execution: BuildRunnerExecution,
+        verdict: ReviewVerdict,
+    ) -> dict:
+        """Reconciles this review's findings into the task's durable finding
+        registry (content/fuzzy-fingerprinted, so repeated/reworded findings
+        reconcile to the same entry and findings not restated are presumed
+        resolved). Idempotent per `execution.execution_id`, so replayed or
+        duplicate review results are safe to reprocess. A cycle that carries
+        no finding signal at all (empty `findings` and no
+        `finding_dispositions`) is not treated as evidence that previously
+        open findings were resolved -- the registry is left untouched, so a
+        reviewer that stops restating findings cannot silently resolve them."""
+        task = session.get(BuildTask, execution.task_id)
+        prior_registry = dict(task.finding_registry or {}) if task is not None else {}
+        has_finding_signal = bool(verdict.findings) or bool(verdict.finding_dispositions)
+        if not has_finding_signal:
+            return prior_registry
+        registry = reconcile_findings(
+            prior_registry,
+            findings=list(verdict.findings),
+            finding_dispositions=list(verdict.finding_dispositions),
+            execution_id=execution.execution_id,
+            cycle_label=f"review-cycle:{execution.execution_id}",
+            reviewer_id=execution.worker_id,
+        )
+        if task is not None:
+            task.finding_registry = registry
+        return registry
+
+    def _remediation_limit_reached(
+        self,
+        session: Session,
+        execution: BuildRunnerExecution,
+        verdict: ReviewVerdict,
+        result: RunnerCycleResult,
+    ) -> bool:
+        """Finding-aware convergence gate for REMEDIATION_REQUIRED verdicts.
+
+        Escalation is driven by a substantive finding remaining STILL_OPEN
+        across `max_remediation_cycles` reports of its own, not by the raw
+        count of remediation executions on the task -- an unrelated finding
+        introduced later must not inherit an already-exhausted budget, and a
+        finding that keeps getting fixed and replaced by new ones must not
+        stall convergence. The raw remediation-cycle cap is used only as a
+        backstop when the registry has no tracked entries, or this cycle
+        carried no finding signal at all (the reviewer never populated
+        structured findings/dispositions this cycle, so nothing was
+        reconciled and there is nothing finding-aware to gate this cycle
+        on)."""
+        task_id = execution.task_id
+        has_finding_signal = bool(verdict.findings) or bool(verdict.finding_dispositions)
+        registry = self._reconcile_review_findings(session, execution, verdict)
+        if registry.get("entries") and has_finding_signal:
+            open_entries = open_findings(registry)
+            # `attempts` counts how many times a finding has been *reported*
+            # STILL_OPEN, so its first report (before any remediation has
+            # run against it) counts as 1. Escalate once max_remediation_cycles
+            # remediation attempts have completed without resolving it, i.e.
+            # once it has been reported open again after that many attempts.
+            limit_reached = any(
+                int(entry.get("attempts") or 0) > self._config.max_remediation_cycles
+                for entry in open_entries
+            )
+        else:
+            limit_reached = (
+                self._remediation_cycles(session, task_id) >= self._config.max_remediation_cycles
+            )
+        evidence = finding_escalation_evidence(registry)
+        if not limit_reached:
+            return False
+        result.escalations.append(f"{task_id}:REMEDIATION_LIMIT_REACHED")
+        record_event(
+            session,
+            EventInput(
+                task_id=task_id,
+                event_type="runner.remediation_limit_reached",
+                actor="runner",
+                event_data={"open_findings": evidence},
+            ),
+        )
+        self._block_task(session, task_id, "REMEDIATION_LIMIT_REACHED")
+        return True
 
     def _remediation_cycles(self, session: Session, task_id: str) -> int:
         return session.scalar(
