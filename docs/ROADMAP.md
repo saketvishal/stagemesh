@@ -1,6 +1,6 @@
 # Roadmap
 
-## v0.1-alpha (current)
+## v0.1-alpha (shipped)
 
 The initial standalone release of StageMesh. All items below are
 **IMPLEMENTED AND PROVEN** unless marked otherwise.
@@ -36,9 +36,18 @@ The initial standalone release of StageMesh. All items below are
 
 ---
 
-## v0.2 (planned; not yet started)
+## v0.2.0a1 (current)
 
-> Items below are **ROADMAP only**. Nothing below has been implemented.
+Self-hosting bootstrap repair, multi-provider routing, and project-owned
+backlog work landed since v0.1-alpha. Items marked complete are
+**IMPLEMENTED AND PROVEN**; the rest remain open.
+
+### Self-hosting and multi-provider routing (complete)
+- [x] StageMesh runs against its own backlog (self-hosting)
+- [x] Multi-provider routing (Codex, Claude) with honest capability declarations
+- [x] Generic dependency parsing for task backlogs (range/list expansion)
+- [x] P0 priority scheduling that overrides ordinary backlog ordering
+- [x] Windows process-tree termination (Job Objects) for reliable worker cleanup
 
 ### Watcher / unattended operation
 - [ ] Windows Task Scheduler integration (unattended startup)
@@ -46,7 +55,7 @@ The initial standalone release of StageMesh. All items below are
 - [ ] Transient failure backoff and retry
 
 ### Expanded provider support
-- [ ] Additional runtime adapters
+- [ ] Additional runtime adapters (Antigravity, Grok) beyond command-layer stubs
 - [ ] Formal multi-provider acceptance matrix
 
 ### Observability
@@ -56,6 +65,9 @@ The initial standalone release of StageMesh. All items below are
 ### Configuration
 - [ ] Hot-reload worker config without restart
 - [ ] Worker health checks
+
+### CI utilization
+- [ ] Work-conserving scheduling during external CI wait (tracked in #65)
 
 ---
 
@@ -76,7 +88,7 @@ consuming product layers:
 ## Publication gate
 
 Publication requires an explicit human approval decision. The remaining blockers
-before v0.1-alpha publication are:
+before a v0.2 stable publication are:
 
 1. Final independent release verification
 2. Human approval gate
