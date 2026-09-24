@@ -65,6 +65,11 @@ from build_coordinator.runner.git_safety import (
     assess_mechanical_merge,
     capture_feature_sha,
 )
+from build_coordinator.runner.findings import (
+    escalation_evidence as finding_escalation_evidence,
+    open_findings,
+    reconcile_findings,
+)
 from build_coordinator.runner.models import (
     ReviewVerdict,
     ReviewVerdictContradiction,
@@ -766,10 +771,7 @@ class BuildRunner:
             )
             return
         if verdict.verdict == "REMEDIATION_REQUIRED":
-            cycles = self._remediation_cycles(session, execution.task_id)
-            if cycles >= self._config.max_remediation_cycles:
-                result.escalations.append(f"{execution.task_id}:REMEDIATION_LIMIT_REACHED")
-                self._block_task(session, execution.task_id, "REMEDIATION_LIMIT_REACHED")
+            if self._remediation_limit_reached(session, execution, verdict, result):
                 return
             transition_task(
                 session,
@@ -1262,6 +1264,9 @@ class BuildRunner:
                     "reviewed_feature_sha": reviewed_sha,
                     "sha_source": "runner-owned-git",
                     "task_definition": _task_definition(task),
+                    "open_findings_from_prior_review": finding_escalation_evidence(
+                        task.finding_registry or {}
+                    ),
                 },
             )
             self._launch(
@@ -1959,6 +1964,79 @@ class BuildRunner:
                 transition_task(session, task_id, "BLOCKED", actor="runner", reason=reason)
             except CoordinatorPolicyError:
                 pass
+
+    def _remediation_limit_reached(
+        self,
+        session: Session,
+        execution: BuildRunnerExecution,
+        verdict: ReviewVerdict,
+        result: RunnerCycleResult,
+    ) -> bool:
+        """Finding-aware convergence gate for REMEDIATION_REQUIRED verdicts.
+
+        Reconciles this review's findings into the task's durable finding
+        registry (content-fingerprinted, so repeated/reworded findings
+        reconcile to the same entry and findings not restated are presumed
+        resolved). Escalation is driven by a substantive finding remaining
+        STILL_OPEN across `max_remediation_cycles` reports, not by the raw
+        count of remediation executions.
+
+        When the reviewer never populates structured `findings` (no entries
+        tracked in or added to the registry), there is nothing to reconcile
+        against, so this falls back to the legacy raw remediation-cycle cap
+        as a safety net. Likewise, a cycle that carries no finding signal at
+        all (empty `findings` and no `finding_dispositions`) is not treated
+        as evidence that previously open findings were resolved -- the
+        registry is left untouched and the raw cap alone gates that cycle,
+        so a reviewer that stops restating findings cannot silently bypass
+        convergence forever."""
+        task_id = execution.task_id
+        task = session.get(BuildTask, task_id)
+        prior_registry = dict(task.finding_registry or {}) if task is not None else {}
+        has_finding_signal = bool(verdict.findings) or bool(verdict.finding_dispositions)
+        if has_finding_signal:
+            registry = reconcile_findings(
+                prior_registry,
+                findings=list(verdict.findings),
+                finding_dispositions=list(verdict.finding_dispositions),
+                execution_id=execution.execution_id,
+                cycle_label=f"review-cycle:{execution.execution_id}",
+            )
+            if task is not None:
+                task.finding_registry = registry
+        else:
+            registry = prior_registry
+        if registry.get("entries") and has_finding_signal:
+            open_entries = open_findings(registry)
+            # `attempts` counts how many times a finding has been *reported*
+            # STILL_OPEN, so its first report (before any remediation has
+            # run against it) counts as 1. Escalate once max_remediation_cycles
+            # remediation attempts have completed without resolving it, i.e.
+            # once it has been reported open again after that many attempts.
+            limit_reached = any(
+                int(entry.get("attempts") or 0) > self._config.max_remediation_cycles
+                for entry in open_entries
+            )
+            evidence = finding_escalation_evidence(registry)
+        else:
+            limit_reached = (
+                self._remediation_cycles(session, task_id) >= self._config.max_remediation_cycles
+            )
+            evidence = finding_escalation_evidence(registry)
+        if not limit_reached:
+            return False
+        result.escalations.append(f"{task_id}:REMEDIATION_LIMIT_REACHED")
+        record_event(
+            session,
+            EventInput(
+                task_id=task_id,
+                event_type="runner.remediation_limit_reached",
+                actor="runner",
+                event_data={"open_findings": evidence},
+            ),
+        )
+        self._block_task(session, task_id, "REMEDIATION_LIMIT_REACHED")
+        return True
 
     def _remediation_cycles(self, session: Session, task_id: str) -> int:
         return session.scalar(
