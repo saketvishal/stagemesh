@@ -341,6 +341,13 @@ class RunnerConfig:
             result_dir=data.get("result_dir") or os.getenv("BUILD_COORDINATOR_RESULT_DIR"),
             main_ref=str(data.get("main_ref") or "main"),
             remote_name=str(data.get("remote_name") or "origin"),
+            upstream_remote=data.get("upstream_remote"),
+            push_upstream=bool(data.get("push_upstream", False)),
+            run_validation=bool(data.get("run_validation", True)),
+            validation_timeout_seconds=float(data.get("validation_timeout_seconds", 900.0)),
+            max_execution_attempts=int(data.get("max_execution_attempts", 3)),
+            cleanup_branches=bool(data.get("cleanup_branches", False)),
+            task_branches=bool(data.get("task_branches", False)),
         )
 
     def public_summary(self) -> dict[str, Any]:
