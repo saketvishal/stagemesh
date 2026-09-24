@@ -1,0 +1,402 @@
+{
+  "project": {
+    "project_id": "demo",
+    "name": "Failure Recovery Demo",
+    "aliases": [
+      "demo"
+    ],
+    "root": "C:\\Users\\saket\\AppData\\Local\\Temp\\stagemesh-demo-znicaflj\\project",
+    "project_file": "C:\\Users\\saket\\AppData\\Local\\Temp\\stagemesh-demo-znicaflj\\project\\.stagemesh\\project.yaml",
+    "tasks_dir": "C:\\Users\\saket\\AppData\\Local\\Temp\\stagemesh-demo-znicaflj\\project\\.stagemesh\\tasks",
+    "state_dir": "C:\\Users\\saket\\AppData\\Local\\Temp\\stagemesh-demo-znicaflj\\project\\.build-coordinator",
+    "concurrency": 1,
+    "reviewers": 1,
+    "default_review_policy": "INDEPENDENT",
+    "main_ref": "main",
+    "upstream": {
+      "remote": "origin",
+      "push": true
+    },
+    "worker_templates": [
+      "builder",
+      "reviewer"
+    ],
+    "task_sources": []
+  },
+  "target_tasks": [],
+  "backlog_sync": {
+    "project_id": "demo",
+    "dry_run": false,
+    "counts": {
+      "CREATED": 1
+    },
+    "tasks": [
+      {
+        "task_id": "DEMO-1",
+        "title": "Demo task: prove crash recovery",
+        "action": "CREATED",
+        "source_ref": ".stagemesh/tasks/backlog.yaml",
+        "details": "queued as READY"
+      }
+    ]
+  },
+  "task_source_adapters": [],
+  "cycles_run": 11,
+  "peak_parallel_builders": 1,
+  "cycles": [
+    {
+      "cycle": 1,
+      "launched": [
+        {
+          "execution_id": "0a00e02a-45b4-4010-9c2d-71facc1d41fa",
+          "task_id": "DEMO-1",
+          "role": "BUILDER",
+          "worker_id": "builder-1",
+          "provider": "scripted",
+          "worktree_path": "C:\\Users\\saket\\AppData\\Local\\Temp\\stagemesh-demo-znicaflj\\project\\.build-coordinator\\worktrees\\builder-1"
+        }
+      ],
+      "observed": [],
+      "recovered": [],
+      "escalations": [],
+      "live_builders": 1,
+      "live_executions": 1
+    },
+    {
+      "cycle": 2,
+      "launched": [],
+      "observed": [
+        "0a00e02a-45b4-4010-9c2d-71facc1d41fa"
+      ],
+      "recovered": [],
+      "escalations": [],
+      "live_builders": 1,
+      "live_executions": 1
+    },
+    {
+      "cycle": 3,
+      "launched": [],
+      "observed": [
+        "0a00e02a-45b4-4010-9c2d-71facc1d41fa"
+      ],
+      "recovered": [],
+      "escalations": [],
+      "live_builders": 1,
+      "live_executions": 1
+    },
+    {
+      "cycle": 4,
+      "launched": [
+        {
+          "execution_id": "119c3170-76eb-470f-889a-eb0e849ec391",
+          "task_id": "DEMO-1",
+          "role": "BUILDER",
+          "worker_id": "builder-1",
+          "provider": "scripted",
+          "worktree_path": "C:\\Users\\saket\\AppData\\Local\\Temp\\stagemesh-demo-znicaflj\\project\\.build-coordinator\\worktrees\\builder-1"
+        }
+      ],
+      "observed": [
+        "0a00e02a-45b4-4010-9c2d-71facc1d41fa"
+      ],
+      "recovered": [
+        "DEMO-1"
+      ],
+      "escalations": [],
+      "live_builders": 1,
+      "live_executions": 1
+    },
+    {
+      "cycle": 5,
+      "launched": [],
+      "observed": [
+        "119c3170-76eb-470f-889a-eb0e849ec391"
+      ],
+      "recovered": [],
+      "escalations": [],
+      "live_builders": 1,
+      "live_executions": 1
+    },
+    {
+      "cycle": 6,
+      "launched": [],
+      "observed": [
+        "119c3170-76eb-470f-889a-eb0e849ec391"
+      ],
+      "recovered": [],
+      "escalations": [],
+      "live_builders": 1,
+      "live_executions": 1
+    },
+    {
+      "cycle": 7,
+      "launched": [],
+      "observed": [
+        "119c3170-76eb-470f-889a-eb0e849ec391"
+      ],
+      "recovered": [],
+      "escalations": [],
+      "live_builders": 1,
+      "live_executions": 1
+    },
+    {
+      "cycle": 8,
+      "launched": [
+        {
+          "execution_id": "ee73d357-1070-4e79-97df-f4231a8b6d85",
+          "task_id": "DEMO-1",
+          "role": "REVIEWER",
+          "worker_id": "reviewer-1",
+          "provider": "scripted",
+          "worktree_path": "C:\\Users\\saket\\AppData\\Local\\Temp\\stagemesh-demo-znicaflj\\project\\.build-coordinator\\worktrees\\reviewer-1"
+        }
+      ],
+      "observed": [
+        "119c3170-76eb-470f-889a-eb0e849ec391"
+      ],
+      "recovered": [],
+      "escalations": [],
+      "live_builders": 0,
+      "live_executions": 1
+    },
+    {
+      "cycle": 9,
+      "launched": [
+        {
+          "execution_id": "92845ba4-125c-403b-b416-c397a687ec29",
+          "task_id": "DEMO-1",
+          "role": "INTEGRATION",
+          "worker_id": "integration-1",
+          "provider": "stagemesh",
+          "worktree_path": "C:\\Users\\saket\\AppData\\Local\\Temp\\stagemesh-demo-znicaflj\\project\\.build-coordinator\\worktrees\\integration-1"
+        }
+      ],
+      "observed": [
+        "ee73d357-1070-4e79-97df-f4231a8b6d85"
+      ],
+      "recovered": [],
+      "escalations": [],
+      "live_builders": 0,
+      "live_executions": 1
+    },
+    {
+      "cycle": 10,
+      "launched": [],
+      "observed": [
+        "92845ba4-125c-403b-b416-c397a687ec29"
+      ],
+      "recovered": [],
+      "escalations": [],
+      "live_builders": 0,
+      "live_executions": 0
+    },
+    {
+      "cycle": 11,
+      "launched": [],
+      "observed": [],
+      "recovered": [],
+      "escalations": [],
+      "live_builders": 0,
+      "live_executions": 0
+    }
+  ],
+  "final": {
+    "project_id": "demo",
+    "state_dir": "C:\\Users\\saket\\AppData\\Local\\Temp\\stagemesh-demo-znicaflj\\project\\.build-coordinator",
+    "concurrency": 1,
+    "tasks_by_state": {
+      "DONE": 1
+    },
+    "blocked": [],
+    "tasks": [
+      {
+        "task_id": "DEMO-1",
+        "state": "DONE",
+        "priority": 100,
+        "review_policy": "INDEPENDENT",
+        "dependencies": [],
+        "claimable_now": false
+      }
+    ],
+    "executions": [
+      {
+        "execution_id": "0a00e02a-45b4-4010-9c2d-71facc1d41fa",
+        "task_id": "DEMO-1",
+        "role": "BUILDER",
+        "worker_id": "builder-1",
+        "provider": "scripted",
+        "worktree_path": "C:\\Users\\saket\\AppData\\Local\\Temp\\stagemesh-demo-znicaflj\\project\\.build-coordinator\\worktrees\\builder-1",
+        "status": "LOST",
+        "escalation": null,
+        "routing": {
+          "stage": "implementation",
+          "required_capabilities": [
+            "CODING"
+          ],
+          "required_permissions": [],
+          "selected_worker": "builder-1",
+          "selected_provider": "scripted",
+          "selected_runtime": "local",
+          "selected_model": null,
+          "routing_policy": {
+            "policy_id": "deterministic-v1",
+            "version": "1",
+            "fallback_on": [
+              "UNAVAILABLE",
+              "RATE_LIMITED",
+              "QUOTA_EXHAUSTED",
+              "NETWORK_FAILURE",
+              "EXECUTION_FAILURE",
+              "AUTH_FAILURE"
+            ],
+            "no_fallback_on": []
+          },
+          "availability": "selected",
+          "candidates": [
+            {
+              "worker_id": "builder-1",
+              "eligible": true,
+              "reasons": [
+                "eligible"
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "execution_id": "119c3170-76eb-470f-889a-eb0e849ec391",
+        "task_id": "DEMO-1",
+        "role": "BUILDER",
+        "worker_id": "builder-1",
+        "provider": "scripted",
+        "worktree_path": "C:\\Users\\saket\\AppData\\Local\\Temp\\stagemesh-demo-znicaflj\\project\\.build-coordinator\\worktrees\\builder-1",
+        "status": "SUCCEEDED",
+        "escalation": null,
+        "routing": {
+          "stage": "implementation",
+          "required_capabilities": [
+            "CODING"
+          ],
+          "required_permissions": [],
+          "selected_worker": "builder-1",
+          "selected_provider": "scripted",
+          "selected_runtime": "local",
+          "selected_model": null,
+          "routing_policy": {
+            "policy_id": "deterministic-v1",
+            "version": "1",
+            "fallback_on": [
+              "UNAVAILABLE",
+              "RATE_LIMITED",
+              "QUOTA_EXHAUSTED",
+              "NETWORK_FAILURE",
+              "EXECUTION_FAILURE",
+              "AUTH_FAILURE"
+            ],
+            "no_fallback_on": []
+          },
+          "availability": "selected",
+          "candidates": [
+            {
+              "worker_id": "builder-1",
+              "eligible": true,
+              "reasons": [
+                "eligible"
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "execution_id": "ee73d357-1070-4e79-97df-f4231a8b6d85",
+        "task_id": "DEMO-1",
+        "role": "REVIEWER",
+        "worker_id": "reviewer-1",
+        "provider": "scripted",
+        "worktree_path": "C:\\Users\\saket\\AppData\\Local\\Temp\\stagemesh-demo-znicaflj\\project\\.build-coordinator\\worktrees\\reviewer-1",
+        "status": "SUCCEEDED",
+        "escalation": null,
+        "routing": {
+          "stage": "review",
+          "required_capabilities": [
+            "CODE_REVIEW"
+          ],
+          "required_permissions": [],
+          "selected_worker": "reviewer-1",
+          "selected_provider": "scripted",
+          "selected_runtime": "local",
+          "selected_model": null,
+          "routing_policy": {
+            "policy_id": "deterministic-v1",
+            "version": "1",
+            "fallback_on": [
+              "UNAVAILABLE",
+              "RATE_LIMITED",
+              "QUOTA_EXHAUSTED",
+              "NETWORK_FAILURE",
+              "EXECUTION_FAILURE",
+              "AUTH_FAILURE"
+            ],
+            "no_fallback_on": []
+          },
+          "availability": "selected",
+          "candidates": [
+            {
+              "worker_id": "reviewer-1",
+              "eligible": true,
+              "reasons": [
+                "eligible"
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "execution_id": "92845ba4-125c-403b-b416-c397a687ec29",
+        "task_id": "DEMO-1",
+        "role": "INTEGRATION",
+        "worker_id": "integration-1",
+        "provider": "stagemesh",
+        "worktree_path": "C:\\Users\\saket\\AppData\\Local\\Temp\\stagemesh-demo-znicaflj\\project\\.build-coordinator\\worktrees\\integration-1",
+        "status": "SUCCEEDED",
+        "escalation": null,
+        "routing": {
+          "stage": "integration",
+          "required_capabilities": [
+            "SCM_OPERATOR"
+          ],
+          "required_permissions": [
+            "SCM_WRITE"
+          ],
+          "selected_worker": "integration-1",
+          "selected_provider": "stagemesh",
+          "selected_runtime": "local",
+          "selected_model": null,
+          "routing_policy": {
+            "policy_id": "deterministic-v1",
+            "version": "1",
+            "fallback_on": [
+              "UNAVAILABLE",
+              "RATE_LIMITED",
+              "QUOTA_EXHAUSTED",
+              "NETWORK_FAILURE",
+              "EXECUTION_FAILURE",
+              "AUTH_FAILURE"
+            ],
+            "no_fallback_on": []
+          },
+          "availability": "selected",
+          "candidates": [
+            {
+              "worker_id": "integration-1",
+              "eligible": true,
+              "reasons": [
+                "eligible"
+              ]
+            }
+          ]
+        }
+      }
+    ]
+  }
+}
