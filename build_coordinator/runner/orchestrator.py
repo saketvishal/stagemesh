@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 
 import hashlib
+import subprocess
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -214,7 +215,7 @@ class BuildRunner:
         for task in recover_lost_execution_claims(session, actor="runner"):
             if task.task_id not in result.recovered:
                 result.recovered.append(task.task_id)
-        self._recover_reviewed_sha_drift(session, result)
+        self._recover_diagnosed_blockers(session, result)
         result.observed = self._reconcile_active(session, result)
         for task in recover_lost_execution_claims(session, actor="runner"):
             if task.task_id not in result.recovered:
@@ -1926,12 +1927,189 @@ class BuildRunner:
             result.recovered.append(task_id)
         self._release_sha_drift_conflict_gate(session, task)
 
-    def _recover_reviewed_sha_drift(self, session: Session, result: RunnerCycleResult) -> None:
+    def _release_blocker_gate(self, session: Session, task: BuildTask, reason: str) -> None:
+        if not task.objective_id:
+            return
+        try:
+            for gate in open_gates(session, task.objective_id):
+                if gate.source_task_id == task.task_id:
+                    resolve_gate(
+                        session,
+                        gate.gate_id,
+                        resolved_by="runner",
+                        resolution_note=f"automatic recovery of {reason}",
+                    )
+        except Exception:
+            pass
+
+    def _recover_diagnosed_blockers(self, session: Session, result: RunnerCycleResult) -> None:
         blocked = session.scalars(select(BuildTask).where(BuildTask.state == "BLOCKED")).all()
         for task in blocked:
-            if self._latest_block_reason(session, task.task_id) != "REVIEWED_SHA_CHANGED":
+            if not self._target_allows(task.task_id):
                 continue
-            self._request_rereview(session, task.task_id, result, reason="REVIEWED_SHA_CHANGED")
+            reason = self._latest_block_reason(session, task.task_id)
+            if not reason:
+                continue
+
+            if reason == "WORKING_CHECKOUT_DIRTY":
+                # Check whether the main working checkout or holder worktree is now clean
+                repo_root = Path(self._settings.repo_root)
+                proc = subprocess.run(
+                    ["git", "status", "--porcelain"],
+                    cwd=str(repo_root),
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                if proc.returncode == 0 and not proc.stdout.strip():
+                    # The checkout is clean! Check if the task was already approved for integration
+                    has_approved_review = False
+                    rows = session.scalars(
+                        select(BuildRunnerExecution)
+                        .where(BuildRunnerExecution.task_id == task.task_id)
+                        .where(BuildRunnerExecution.role == "REVIEWER")
+                        .where(BuildRunnerExecution.status == "SUCCEEDED")
+                        .order_by(BuildRunnerExecution.completed_at.desc())
+                    ).all()
+                    for r in rows:
+                        data = r.result_data or {}
+                        review = data.get("review") if isinstance(data.get("review"), dict) else data
+                        v = str(review.get("verdict", "")).upper()
+                        if v in ("GREEN", "GREEN_WITH_NOTES") and review.get("ready_for_integration", True):
+                            has_approved_review = True
+                            break
+
+                    target_state = "REVIEWING" if has_approved_review else "READY"
+                    try:
+                        transition_task(
+                            session,
+                            task.task_id,
+                            target_state,
+                            actor="runner",
+                            reason=f"working checkout is clean; automatically resuming to {target_state}",
+                        )
+                        record_event(
+                            session,
+                            EventInput(
+                                task_id=task.task_id,
+                                event_type="runner.blocker_recovered",
+                                actor="runner",
+                                event_data={
+                                    "reason": "WORKING_CHECKOUT_DIRTY",
+                                    "resumed_to": target_state,
+                                },
+                            ),
+                        )
+                        if task.task_id not in result.recovered:
+                            result.recovered.append(task.task_id)
+                        self._release_blocker_gate(session, task, "WORKING_CHECKOUT_DIRTY")
+                    except CoordinatorPolicyError:
+                        pass
+
+            elif reason == "REVIEWED_SHA_CHANGED":
+                self._request_rereview(session, task.task_id, result, reason="REVIEWED_SHA_CHANGED")
+
+            elif reason == "REVIEW_ENVIRONMENT_BLOCKED":
+                attempts = self._review_environment_attempts(session, task.task_id)
+                if attempts < self._config.max_review_environment_attempts:
+                    try:
+                        transition_task(
+                            session,
+                            task.task_id,
+                            "REVIEW_READY",
+                            actor="runner",
+                            reason="adaptive recovery: retrying review after review environment blocked",
+                        )
+                        record_event(
+                            session,
+                            EventInput(
+                                task_id=task.task_id,
+                                event_type="runner.blocker_recovered",
+                                actor="runner",
+                                event_data={
+                                    "reason": "REVIEW_ENVIRONMENT_BLOCKED",
+                                    "resumed_to": "REVIEW_READY",
+                                },
+                            ),
+                        )
+                        if task.task_id not in result.recovered:
+                            result.recovered.append(task.task_id)
+                        self._release_blocker_gate(session, task, "REVIEW_ENVIRONMENT_BLOCKED")
+                    except CoordinatorPolicyError:
+                        pass
+
+            elif reason == "UPSTREAM_PUSH_FAILED":
+                if not self._config.auto_push_allowed or not getattr(self._config, "push_upstream", True):
+                    try:
+                        transition_task(
+                            session,
+                            task.task_id,
+                            "DONE",
+                            actor="runner",
+                            reason="upstream push not required; task completed locally",
+                        )
+                        record_event(
+                            session,
+                            EventInput(
+                                task_id=task.task_id,
+                                event_type="runner.blocker_recovered",
+                                actor="runner",
+                                event_data={
+                                    "reason": "UPSTREAM_PUSH_FAILED",
+                                    "resumed_to": "DONE",
+                                },
+                            ),
+                        )
+                        if task.task_id not in result.recovered:
+                            result.recovered.append(task.task_id)
+                        self._release_blocker_gate(session, task, "UPSTREAM_PUSH_FAILED")
+                    except CoordinatorPolicyError:
+                        pass
+
+            elif reason == "MERGE_CONFLICT":
+                reviewed_sha = session.scalar(
+                    select(BuildRunnerExecution.reviewed_feature_sha)
+                    .where(BuildRunnerExecution.task_id == task.task_id)
+                    .where(BuildRunnerExecution.role == "REVIEWER")
+                    .where(BuildRunnerExecution.status == "SUCCEEDED")
+                    .order_by(BuildRunnerExecution.completed_at.desc())
+                    .limit(1)
+                )
+                if reviewed_sha:
+                    try:
+                        assessment = assess_mechanical_merge(
+                            self._git,
+                            cwd=str(self._settings.repo_root),
+                            branch_name=task.branch_name or "HEAD",
+                            reviewed_feature_sha=reviewed_sha,
+                            remote=self._config.remote_name,
+                            main_ref=self._config.main_ref,
+                        )
+                        if not assessment.conflict:
+                            transition_task(
+                                session,
+                                task.task_id,
+                                "REVIEW_READY",
+                                actor="runner",
+                                reason="merge conflict resolved on main; re-reviewing feature branch",
+                            )
+                            record_event(
+                                session,
+                                EventInput(
+                                    task_id=task.task_id,
+                                    event_type="runner.blocker_recovered",
+                                    actor="runner",
+                                    event_data={
+                                        "reason": "MERGE_CONFLICT",
+                                        "resumed_to": "REVIEW_READY",
+                                    },
+                                ),
+                            )
+                            if task.task_id not in result.recovered:
+                                result.recovered.append(task.task_id)
+                            self._release_blocker_gate(session, task, "MERGE_CONFLICT")
+                    except Exception:
+                        pass
 
 
     def _temp_dir(self) -> Path:

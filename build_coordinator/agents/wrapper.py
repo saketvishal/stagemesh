@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from build_coordinator.agents.profiles import PROFILES
+from build_coordinator.runner.git_safety import resolve_git_identity, resolve_git_identity_args
 from build_coordinator.execution.process_tree import attach_started_process, popen_kwargs
 
 RESULT_SCHEMA_VERSION = 1
@@ -116,6 +117,11 @@ def trusted_git_env(cwd: str) -> dict[str, str]:
     for index, path in enumerate(trusted):
         env[f"GIT_CONFIG_KEY_{index}"] = "safe.directory"
         env[f"GIT_CONFIG_VALUE_{index}"] = path
+    name, email = resolve_git_identity(cwd)
+    env["GIT_AUTHOR_NAME"] = name
+    env["GIT_AUTHOR_EMAIL"] = email
+    env["GIT_COMMITTER_NAME"] = name
+    env["GIT_COMMITTER_EMAIL"] = email
     return env
 
 
@@ -366,10 +372,11 @@ def main(argv: list[str] | None = None) -> int:
     # builder / remediation: derive the result from git, not from the agent
     if git(cwd, "status", "--porcelain"):
         git(cwd, "add", "-A", "--", ".", *GENERATED_ARTIFACT_EXCLUDES)
+        identity_args = resolve_git_identity_args(cwd)
         subprocess.run(
             [
-                "git", "-c", "user.name=StageMesh", "-c", "user.email=stagemesh@localhost",
-                "commit", "-q", "-m", f"{identity['task_id']}: agent changes ({args.runtime})",
+                "git", *identity_args,
+                "commit", "-q", "-m", f"{identity['task_id']}: implement changes",
             ],
             cwd=cwd,
             capture_output=True,

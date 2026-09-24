@@ -8,6 +8,7 @@ executed as argument arrays with shell=False.
 from __future__ import annotations
 
 import fnmatch
+import os
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -249,3 +250,94 @@ def _parse_legacy_merge_tree_conflicts(output: str) -> tuple[str, ...]:
         elif "<<<<<<<" in line and current and current not in conflicts:
             conflicts.append(current)
     return tuple(conflicts)
+
+
+_DISALLOWED_IDENTITIES = frozenset({
+    "stagemesh",
+    "claude",
+    "codex",
+    "grok",
+    "anthropic",
+    "openai",
+    "xai",
+})
+
+
+def _is_disallowed_identity(val: str) -> bool:
+    if not val:
+        return True
+    lowered = val.lower().strip()
+    for disallowed in _DISALLOWED_IDENTITIES:
+        if disallowed in lowered:
+            return True
+    return False
+
+
+def resolve_git_identity(cwd: str | Path | None = None) -> tuple[str, str]:
+    """Resolve (user.name, user.email) using configured operator/repository Git identity,
+    falling back to environment variables or operator defaults.
+    Guarantees AI providers and StageMesh do not appear as commit authors/contributors."""
+    name = ""
+    email = ""
+
+    # 1. Standard Git author/committer environment overrides
+    for env_name in ("GIT_AUTHOR_NAME", "GIT_COMMITTER_NAME"):
+        val = (os.environ.get(env_name) or "").strip()
+        if val and not _is_disallowed_identity(val):
+            name = val
+            break
+    for env_email in ("GIT_AUTHOR_EMAIL", "GIT_COMMITTER_EMAIL"):
+        val = (os.environ.get(env_email) or "").strip()
+        if val and not _is_disallowed_identity(val):
+            email = val
+            break
+
+    # 2. Git config in cwd / global
+    if not name or not email:
+        try:
+            res_name = subprocess.run(
+                ["git", "config", "user.name"],
+                cwd=str(cwd) if cwd else None,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if res_name.returncode == 0:
+                candidate = res_name.stdout.strip()
+                if candidate and not _is_disallowed_identity(candidate):
+                    if not name:
+                        name = candidate
+        except Exception:
+            pass
+
+        try:
+            res_email = subprocess.run(
+                ["git", "config", "user.email"],
+                cwd=str(cwd) if cwd else None,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if res_email.returncode == 0:
+                candidate = res_email.stdout.strip()
+                if candidate and not _is_disallowed_identity(candidate):
+                    if not email:
+                        email = candidate
+        except Exception:
+            pass
+
+    # 3. Fallbacks - operator login
+    if not name:
+        login = os.environ.get("USERNAME") or os.environ.get("USER") or "Operator"
+        name = login if not _is_disallowed_identity(login) else "Operator"
+    if not email:
+        login = os.environ.get("USERNAME") or os.environ.get("USER") or "operator"
+        email = f"{login.lower()}@localhost"
+
+    return name, email
+
+
+def resolve_git_identity_args(cwd: str | Path | None = None) -> tuple[str, str, str, str]:
+    name, email = resolve_git_identity(cwd)
+    return ("-c", f"user.name={name}", "-c", f"user.email={email}")
+

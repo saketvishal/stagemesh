@@ -115,7 +115,7 @@ tasks:
       - Missing labels never prevent local task execution, validation, review, integration, or durable coordinator progress.
       - If label provisioning fails because of permissions, network, or GitHub API failure, record durable outbound-sync evidence and retry later without corrupting task state.
       - DONE synchronization does not remain permanently stuck merely because stagemesh:done was initially absent.
-      - Regression coverage includes the observed Caventra scenario: DONE task, stagemesh:done absent, StageMesh provisions the label, applies it, closes the issue, and requires no manual intervention.
+      - "Regression coverage includes the observed Caventra scenario: DONE task, stagemesh:done absent, StageMesh provisions the label, applies it, closes the issue, and requires no manual intervention."
       - Local project backlog execution never depends on GitHub label provisioning.
     scope:
       allowed_paths: [build_coordinator/task_source/, tests/]

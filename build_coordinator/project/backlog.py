@@ -142,8 +142,18 @@ def _str_list(value: Any, where: str, problems: list[str]) -> tuple[str, ...]:
         return ()
     if isinstance(value, str):
         return (value.strip(),) if value.strip() else ()
-    if isinstance(value, list) and all(isinstance(item, (str, int, float)) for item in value):
-        return tuple(str(item).strip() for item in value if str(item).strip())
+    if isinstance(value, list):
+        out = []
+        for item in value:
+            if isinstance(item, (str, int, float)):
+                out.append(str(item).strip())
+            elif isinstance(item, dict) and len(item) == 1:
+                k, v = next(iter(item.items()))
+                out.append(f"{k}: {v}".strip())
+            else:
+                problems.append(f"{where} must be a list of strings")
+                return ()
+        return tuple(s for s in out if s)
     problems.append(f"{where} must be a list of strings")
     return ()
 

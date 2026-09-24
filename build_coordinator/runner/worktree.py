@@ -138,7 +138,7 @@ def _checked_out_elsewhere(cwd: Path, branch: str) -> Path | None:
     return None
 
 
-_IDENTITY = ("-c", "user.name=StageMesh", "-c", "user.email=stagemesh@localhost")
+from build_coordinator.runner.git_safety import resolve_git_identity_args
 
 
 def _current_branch(tree: Path) -> str:
@@ -153,7 +153,8 @@ def _preserve(tree: Path, reason: str, *, resume_branch: str | None = None) -> N
         return
     if resume_branch and _current_branch(tree) == resume_branch:
         _git(tree, "add", "-A")
-        _git(tree, *_IDENTITY, "commit", "-m", "stagemesh: recovered work-in-progress checkpoint")
+        identity_args = resolve_git_identity_args(tree)
+        _git(tree, *identity_args, "commit", "-m", "stagemesh: recovered work-in-progress checkpoint")
         return
     _git(tree, "stash", "push", "--include-untracked", "-m", f"stagemesh: preserved before {reason}")
 
