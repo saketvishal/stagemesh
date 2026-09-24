@@ -40,6 +40,7 @@ CLOSED_FINDING_STATUSES = frozenset({STATUS_RESOLVED, STATUS_INVALID, STATUS_NOT
 
 _HISTORY_LIMIT = 20
 _PROCESSED_EXECUTION_LIMIT = 50
+_FUZZY_MATCH_THRESHOLD = 0.5
 
 
 def finding_fingerprint(description: str) -> str:
@@ -51,9 +52,92 @@ def finding_fingerprint(description: str) -> str:
     return digest[:16]
 
 
+def _significant_tokens(description: str) -> set[str]:
+    normalized = re.sub(r"[^a-z0-9]+", " ", description.lower())
+    return {token for token in normalized.split() if len(token) > 2}
+
+
+def _fuzzy_match(
+    description: str,
+    entries: dict[str, dict[str, Any]],
+    *,
+    exclude: set[str],
+) -> str | None:
+    """Best-match an unrecognized finding against existing registry entries
+    by significant-token overlap, so a same underlying issue restated with
+    materially different wording still reconciles to the existing entry
+    instead of spawning an unrelated duplicate."""
+    tokens = _significant_tokens(description)
+    # Require at least two significant tokens, and at least two of them in
+    # common, so a single shared generic word (e.g. both descriptions
+    # mentioning "defect") cannot alone collapse two unrelated findings into
+    # one entry.
+    if len(tokens) < 2:
+        return None
+    best_id: str | None = None
+    best_score = 0.0
+    for finding_id, entry in entries.items():
+        if finding_id in exclude:
+            continue
+        other = _significant_tokens(str(entry.get("description") or ""))
+        if len(other) < 2:
+            continue
+        overlap = tokens & other
+        if len(overlap) < 2:
+            continue
+        score = len(overlap) / len(tokens | other)
+        if score >= _FUZZY_MATCH_THRESHOLD and score > best_score:
+            best_score = score
+            best_id = finding_id
+    return best_id
+
+
 def _normalize_status(raw: Any) -> str:
     status = str(raw or "").strip().upper()
     return status if status in FINDING_STATUS_VALUES else STATUS_STILL_OPEN
+
+
+def _status_category(status: str) -> str:
+    return "OPEN" if status == STATUS_STILL_OPEN else "CLOSED"
+
+
+def _apply_reviewer_classification(
+    entry: dict[str, Any],
+    *,
+    reviewer_id: str | None,
+    status: str,
+    reason: str,
+    execution_id: str | None,
+    cycle_label: str,
+) -> tuple[str, bool]:
+    """Record which reviewer classified this finding which way, and resolve
+    disagreement deterministically: if a different reviewer already
+    classified this same finding into the opposite category (open vs
+    closed), the finding stays STILL_OPEN (the conservative tie-break) and
+    both classifications are recorded on the entry for human review instead
+    of one silently overwriting the other."""
+    if not reviewer_id:
+        return status, False
+    reviewer_history = dict(entry.get("reviewer_history") or {})
+    conflicting = {
+        rid: rec
+        for rid, rec in reviewer_history.items()
+        if rid != reviewer_id and _status_category(rec.get("status")) != _status_category(status)
+    }
+    disagreed = bool(conflicting)
+    if disagreed:
+        entry["disagreement"] = {
+            "reviewers": {
+                reviewer_id: {"status": status, "reason": reason, "execution_id": execution_id},
+                **conflicting,
+            },
+            "resolved_status": STATUS_STILL_OPEN,
+            "cycle": cycle_label,
+        }
+        status = STATUS_STILL_OPEN
+    reviewer_history[reviewer_id] = {"status": status, "reason": reason, "execution_id": execution_id}
+    entry["reviewer_history"] = reviewer_history
+    return status, disagreed
 
 
 def reconcile_findings(
@@ -63,6 +147,7 @@ def reconcile_findings(
     finding_dispositions: list[dict[str, Any]] | None,
     execution_id: str | None,
     cycle_label: str,
+    reviewer_id: str | None = None,
 ) -> dict[str, Any]:
     """Merge one review cycle's findings/dispositions into the durable
     per-task finding registry. Idempotent: reprocessing the same
@@ -86,8 +171,14 @@ def reconcile_findings(
     current: dict[str, str] = {}
     for raw in findings or ():
         description = str(raw).strip()
-        if description:
-            current[finding_fingerprint(description)] = description
+        if not description:
+            continue
+        fingerprint = finding_fingerprint(description)
+        if fingerprint in entries or fingerprint in current:
+            finding_id = fingerprint
+        else:
+            finding_id = _fuzzy_match(description, entries, exclude=set(current)) or fingerprint
+        current[finding_id] = description
 
     def _append_history(entry: dict[str, Any], *, status: str, reason: str = "", reopened: bool = False) -> None:
         history = list(entry.get("history") or [])[-(_HISTORY_LIMIT - 1) :]
@@ -117,15 +208,27 @@ def reconcile_findings(
             status = _normalize_status(override.get("status"))
             reason = str(override.get("reason") or override.get("notes") or "").strip()
             was_closed = entry.get("status") in CLOSED_FINDING_STATUSES
+            status, disagreed = _apply_reviewer_classification(
+                entry,
+                reviewer_id=reviewer_id,
+                status=status,
+                reason=reason,
+                execution_id=execution_id,
+                cycle_label=cycle_label,
+            )
             if status == STATUS_STILL_OPEN:
-                if was_closed and not reason:
+                if was_closed and not reason and not disagreed:
                     # no evidence supplied to reopen a closed finding
                     continue
                 entry["status"] = STATUS_STILL_OPEN
-                if was_closed:
-                    entry["attempts"] = int(entry.get("attempts") or 0) + 1
+                entry["attempts"] = int(entry.get("attempts") or 0) + 1
                 entry["last_seen_cycle"] = cycle_label
-                _append_history(entry, status=STATUS_STILL_OPEN, reason=reason, reopened=was_closed)
+                _append_history(
+                    entry,
+                    status=STATUS_STILL_OPEN,
+                    reason=reason or ("reviewer disagreement" if disagreed else ""),
+                    reopened=was_closed,
+                )
                 continue
             entry["status"] = status
             entry["resolution_reason"] = reason
@@ -158,10 +261,36 @@ def reconcile_findings(
         if override is not None and _normalize_status(override.get("status")) in CLOSED_FINDING_STATUSES:
             status = _normalize_status(override.get("status"))
             reason = str(override.get("reason") or override.get("notes") or "").strip()
+            status, disagreed = _apply_reviewer_classification(
+                entry,
+                reviewer_id=reviewer_id,
+                status=status,
+                reason=reason,
+                execution_id=execution_id,
+                cycle_label=cycle_label,
+            )
             entry["status"] = status
-            entry["resolution_reason"] = reason
+            if status == STATUS_STILL_OPEN:
+                entry["attempts"] = int(entry.get("attempts") or 0) + 1
+                if disagreed:
+                    reason = reason or "reviewer disagreement"
+            else:
+                entry["resolution_reason"] = reason
         else:
             reason = str((override or {}).get("reason") or (override or {}).get("notes") or "").strip()
+            if was_closed and not reason:
+                # restating a closed finding's text alone is not evidence
+                # sufficient to reopen it -- the reviewer must supply a
+                # new reason to reopen.
+                entry["description"] = description
+                entry["last_seen_cycle"] = cycle_label
+                _append_history(
+                    entry,
+                    status=entry["status"],
+                    reason="restated without a new reason; remains closed",
+                )
+                entries[finding_id] = entry
+                continue
             entry["status"] = STATUS_STILL_OPEN
             entry["attempts"] = int(entry.get("attempts") or 0) + 1
         entry["description"] = description
@@ -190,6 +319,8 @@ def escalation_evidence(registry: dict[str, Any] | None) -> list[dict[str, Any]]
             "description": entry.get("description"),
             "attempts": entry.get("attempts"),
             "first_seen_cycle": entry.get("first_seen_cycle"),
+            "history": entry.get("history"),
+            "disagreement": entry.get("disagreement"),
         }
         for entry in open_findings(registry)
     ]

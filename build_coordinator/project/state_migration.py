@@ -147,6 +147,10 @@ def verify_preservation(before: Path, after: Path) -> list[dict[str, Any]]:
             for row in old.execute(
                 "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
             )
+            # the schema version row is expected to change (bump) as part of
+            # migrating a database that already had one; it is metadata about
+            # the migration, not durable task history to preserve verbatim.
+            if row[0] != SCHEMA_VERSION_TABLE
         ]
         for table in tables:
             before_inv = _table_digest(old, table, None)
@@ -179,7 +183,12 @@ def plan_migration(path: Path) -> MigrationReport:
             for row in connection.execute("SELECT name, sql FROM sqlite_master WHERE type = 'table'")
         }
         if SCHEMA_VERSION_TABLE in present:
-            return report
+            stored_version = connection.execute(
+                f"SELECT version FROM {SCHEMA_VERSION_TABLE} WHERE singleton_id = 1"
+            ).fetchone()
+            stored_version = stored_version[0] if stored_version else None
+            if stored_version == CURRENT_SCHEMA_VERSION:
+                return report
         for table in Base.metadata.sorted_tables:
             if table.name not in present:
                 continue
