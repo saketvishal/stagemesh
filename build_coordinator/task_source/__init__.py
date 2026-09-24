@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from build_coordinator.task_source.base import SyncResult, TaskSource, TaskSourceConfig
@@ -22,12 +23,18 @@ def get_task_source(config: dict[str, Any] | TaskSourceConfig | None = None) -> 
             options=config.get("options", {}),
         )
     else:
-        return None
+        raise TypeError(f"expected TaskSourceConfig or dict, got {type(config).__name__}")
 
     if cfg.source_type.lower() == "github":
+        repo = cfg.repo or os.getenv("BUILD_COORDINATOR_GITHUB_REPO")
+        if not repo:
+            raise ValueError(
+                "missing repository identity: 'repo' must be specified in task_sources.github "
+                "or BUILD_COORDINATOR_GITHUB_REPO environment variable"
+            )
         return GitHubTaskSource(
-            repo=cfg.repo,
+            repo=repo,
             labels=cfg.labels,
             dry_run=cfg.dry_run,
         )
-    return None
+    raise ValueError(f"unsupported task source type: '{cfg.source_type}'")
