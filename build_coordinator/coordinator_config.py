@@ -69,6 +69,7 @@ class CoordinatorConfig:
     max_active_builders: int | None = None
     project_roots: dict[str, str] = field(default_factory=dict)
     worktrees: dict[str, str] = field(default_factory=dict)
+    task_source: dict[str, object] = field(default_factory=dict)
     source_path: Path | None = None
 
     def as_dict(self) -> dict[str, object]:
@@ -79,6 +80,7 @@ class CoordinatorConfig:
             "max_active_builders": self.max_active_builders,
             "project_roots": dict(self.project_roots),
             "worktrees": dict(self.worktrees),
+            "task_source": dict(self.task_source),
             "source_path": str(self.source_path) if self.source_path else None,
         }
 
@@ -146,6 +148,7 @@ def load_coordinator_config() -> CoordinatorConfig:
     control_repo_root = data.get("control_repo_root")
     data_dir = data.get("data_dir")
     worktrees = dict(data.get("worktrees") or {})
+    task_source = dict(data.get("task_source") or {})
     return CoordinatorConfig(
         control_repo_root=(
             _resolve_workspace_path(control_repo_root, base_dir=base_dir)
@@ -160,5 +163,6 @@ def load_coordinator_config() -> CoordinatorConfig:
             str(worker_id): str(_resolve_workspace_path(str(worktree_path), base_dir=base_dir))
             for worker_id, worktree_path in worktrees.items()
         },
+        task_source=task_source,
         source_path=path,
     )

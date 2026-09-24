@@ -68,18 +68,27 @@ def attach_started_process(pid: int) -> ProcessTree:
 
 
 def _terminate_posix(pid: int, *, grace_seconds: float) -> None:
+    if pid <= 1 or pid == os.getpid():
+        return
+    current_pgid = None
+    try:
+        current_pgid = os.getpgrp()
+    except Exception:
+        pass
     try:
         pgid = os.getpgid(pid)
     except OSError:
-        pgid = pid
+        pgid = None
     for sig in (signal.SIGTERM, signal.SIGKILL):
-        try:
-            os.killpg(pgid, sig)
-        except OSError:
+        if pgid is not None and pgid > 1 and pgid != current_pgid:
             try:
-                os.kill(pid, sig)
+                os.killpg(pgid, sig)
             except OSError:
-                return
+                pass
+        try:
+            os.kill(pid, sig)
+        except OSError:
+            return
         deadline = time.time() + grace_seconds
         while time.time() < deadline:
             # Reap zombie if it happens to be our child

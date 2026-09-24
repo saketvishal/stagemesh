@@ -13,7 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from build_coordinator.claims import last_implementation_worker
-from build_coordinator.models import BuildTaskClaim
+from build_coordinator.models import BuildRunnerExecution, BuildTaskClaim
 
 CAP_CHEAP = "CHEAP"
 CAP_FAST = "FAST"
@@ -34,6 +34,11 @@ PROVIDER_FAILURES = frozenset(
         "EXECUTION_FAILURE",
     }
 )
+# Transient provider failures worth an automatic, bounded retry with backoff.
+# The remaining PROVIDER_FAILURES values (AUTH_FAILURE, QUOTA_EXHAUSTED,
+# EXECUTION_FAILURE) are not blindly retried here: they typically need a
+# credential fix, a quota reset, or investigation rather than a short wait.
+RETRYABLE_PROVIDER_FAILURES = frozenset({"RATE_LIMITED", "UNAVAILABLE", "NETWORK_FAILURE"})
 DEFAULT_FALLBACK_ON = ("UNAVAILABLE", "RATE_LIMITED", "QUOTA_EXHAUSTED", "NETWORK_FAILURE", "EXECUTION_FAILURE")
 DEFAULT_NO_FALLBACK_ON = ("AUTH_FAILURE",)
 
@@ -80,6 +85,7 @@ class ProviderConfig:
     provider_id: str
     enabled: bool = True
     availability: str = "AVAILABLE"
+    consumption_mode: str = "ACTIVE"  # ACTIVE, FALLBACK, DISABLED
     auth: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -90,6 +96,7 @@ class ProviderConfig:
             provider_id=provider_id,
             enabled=bool(row.get("enabled", True)),
             availability=str(row.get("availability", "AVAILABLE")).upper(),
+            consumption_mode=str(row.get("consumption_mode", "ACTIVE")).upper(),
             auth=dict(row.get("auth") or {}),
             metadata=dict(row.get("metadata") or {}),
         )
@@ -99,6 +106,7 @@ class ProviderConfig:
             "provider_id": self.provider_id,
             "enabled": self.enabled,
             "availability": self.availability,
+            "consumption_mode": self.consumption_mode,
             "auth": _public_refs(self.auth),
             "metadata": self.metadata,
         }
@@ -297,6 +305,8 @@ def route_worker(
     excluded_workers: set[str] | None = None,
 ) -> RoutingDecision:
     excluded_workers = excluded_workers or set()
+    workers = list(workers)
+    all_workers = workers
     active_by_worker = _active_implementation_counts(session)
     candidates: list[CandidateExplanation] = []
     eligible: list[WorkerLike] = []
@@ -330,9 +340,17 @@ def route_worker(
             routing_policy=routing_policy,
         )
     if not eligible:
-        availability = "slots_occupied" if any(
-            "max_concurrency_reached" in candidate.reasons for candidate in candidates
-        ) else "no_eligible"
+        has_provider_issue = any(
+            any(r.startswith("provider_") for r in candidate.reasons)
+            for candidate in candidates
+        )
+        has_slots_issue = any("max_concurrency_reached" in candidate.reasons for candidate in candidates)
+        if has_slots_issue:
+            availability = "slots_occupied"
+        elif has_provider_issue:
+            availability = "providers_unavailable"
+        else:
+            availability = "no_eligible"
         return RoutingDecision(
             stage=stage,
             required_capabilities=stage_requirement.capabilities,
@@ -342,11 +360,17 @@ def route_worker(
             candidates=tuple(candidates),
             routing_policy=routing_policy,
         )
+    provider_load = {
+        provider: sum(active_by_worker.get(w.worker_id, 0) for w in all_workers if w.provider == provider)
+        for provider in {w.provider for w in all_workers}
+    }
     selected = sorted(
         eligible,
         key=lambda worker: (
             0 if worker.worker_id in stage_requirement.preferred_workers else 1,
+            0 if (providers.get(worker.provider) and providers[worker.provider].consumption_mode == "ACTIVE") else 1,
             worker.preference,
+            provider_load.get(worker.provider, 0),
             active_by_worker.get(worker.worker_id, 0),
             worker.worker_id,
         ),
@@ -365,8 +389,45 @@ def route_worker(
 def reviewer_exclusions(session: Session | None, task_id: str | None) -> set[str]:
     if session is None or not task_id:
         return set()
+    excluded = set(approving_reviewers(session, task_id))
     implementer = last_implementation_worker(session, task_id)
-    return {implementer} if implementer else set()
+    if implementer:
+        excluded.add(implementer)
+    return excluded
+
+
+def approving_reviewers(session: Session, task_id: str) -> set[str]:
+    """Distinct workers that approved the task's current implementation."""
+    since = session.scalar(
+        select(BuildTaskClaim.claimed_at)
+        .where(BuildTaskClaim.task_id == task_id)
+        .where(BuildTaskClaim.claim_type == "IMPLEMENTATION")
+        .order_by(BuildTaskClaim.claimed_at.desc())
+        .limit(1)
+    )
+    rows = session.scalars(
+        select(BuildRunnerExecution)
+        .where(BuildRunnerExecution.task_id == task_id)
+        .where(BuildRunnerExecution.role == "REVIEWER")
+        .where(BuildRunnerExecution.status == "SUCCEEDED")
+    ).all()
+    approvers: set[str] = set()
+    for row in rows:
+        if since is not None and row.launched_at is not None and _naive(row.launched_at) < _naive(since):
+            continue
+        data = row.result_data or {}
+        review = data.get("review") if isinstance(data.get("review"), dict) else data
+        if (
+            str(review.get("verdict", "")).upper() in {"GREEN", "GREEN_WITH_NOTES"}
+            and review.get("ready_for_integration") is True
+            and not review.get("required_remediation")
+        ):
+            approvers.add(row.worker_id)
+    return approvers
+
+
+def _naive(value):
+    return value.replace(tzinfo=None) if getattr(value, "tzinfo", None) else value
 
 
 def _candidate_reasons(
@@ -403,7 +464,7 @@ def _candidate_reasons(
         reasons.append(f"pinned_model:{requirement.pinned_model}")
     provider = providers.get(worker.provider)
     if provider is not None:
-        if not provider.enabled:
+        if not provider.enabled or provider.consumption_mode == "DISABLED":
             reasons.append("provider_disabled")
         elif provider.availability != "AVAILABLE":
             reasons.append(f"provider_{provider.availability}")
@@ -428,6 +489,15 @@ def _active_implementation_counts(session: Session | None) -> dict[str, int]:
     ).all()
     counts: dict[str, int] = {}
     for worker_id in rows:
+        counts[worker_id] = counts.get(worker_id, 0) + 1
+    # Reviewer, integration and planner workers hold no IMPLEMENTATION claim;
+    # their live executions occupy the worker's slots the same way.
+    live = session.scalars(
+        select(BuildRunnerExecution.worker_id)
+        .where(BuildRunnerExecution.status.in_(("LAUNCHED", "RUNNING")))
+        .where(BuildRunnerExecution.role.in_(("REVIEWER", "INTEGRATION", "PLANNER")))
+    ).all()
+    for worker_id in live:
         counts[worker_id] = counts.get(worker_id, 0) + 1
     return counts
 
