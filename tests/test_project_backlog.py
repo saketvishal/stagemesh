@@ -609,11 +609,28 @@ def test_github_adapter_is_optional_and_never_blocks_local_execution(tmp_path, r
         extra={"task_sources": {"github": {"enabled": True, "repo": "nobody/nothing"}}},
     )
     register_project(root)
-    without_gh = os.pathsep.join(
-        entry
-        for entry in os.environ["PATH"].split(os.pathsep)
-        if not any((Path(entry) / name).exists() for name in ("gh", "gh.exe", "gh.cmd"))
-    )
+    filtered_entries = []
+    shim_dir = tmp_path / "bin_without_gh"
+    for entry in os.environ["PATH"].split(os.pathsep):
+        entry_path = Path(entry)
+        has_gh = any((entry_path / name).exists() for name in ("gh", "gh.exe", "gh.cmd"))
+        if not has_gh:
+            filtered_entries.append(entry)
+        elif hasattr(os, "symlink"):
+            shim_dir.mkdir(exist_ok=True)
+            try:
+                for item in entry_path.iterdir():
+                    if item.name not in ("gh", "gh.exe", "gh.cmd"):
+                        target_file = shim_dir / item.name
+                        if not target_file.exists():
+                            try:
+                                os.symlink(item, target_file)
+                            except OSError:
+                                pass
+                filtered_entries.append(str(shim_dir))
+            except OSError:
+                pass
+    without_gh = os.pathsep.join(filtered_entries)
     run = stagemesh(["continue", "fixture"], cwd=tmp_path, registry=registry, extra_env={"PATH": without_gh})
     assert run.returncode == 0, run.stderr
     payload = json.loads(run.stdout)
