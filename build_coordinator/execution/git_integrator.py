@@ -28,6 +28,7 @@ from build_coordinator.execution.base import (
     ExecutionObservation,
 )
 from build_coordinator.execution.results import RESULT_SCHEMA_VERSION, load_result_file
+from build_coordinator.runner.git_safety import resolve_git_identity_args
 
 
 class IntegrationStop(Exception):
@@ -179,9 +180,10 @@ class GitIntegrationExecutor:
 
         merge_base = _out(wt, "merge-base", before, sha)
         _out(wt, "checkout", "--detach", before)
+        identity_args = resolve_git_identity_args(wt)
         merge = _git(
             wt,
-            "-c", "user.name=StageMesh", "-c", "user.email=stagemesh@localhost",
+            *identity_args,
             "merge", "--no-ff", "-m", f"Integrate {launch.task_id}", sha,
         )
         if merge.returncode != 0:

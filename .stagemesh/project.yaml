@@ -18,7 +18,7 @@ execution:
 
 upstream:
   remote: origin
-  push: true
+  push: false
 
 task_sources:
   github:

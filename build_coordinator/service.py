@@ -347,7 +347,7 @@ def claim_integration(
     if state.mode == "PAUSED":
         raise CoordinatorPolicyError(f"Coordinator mode prevents new claims: {state.mode}")
     task = locked_task(session, request.task_id)
-    if task.state != "REVIEWING":
+    if task.state not in ("REVIEWING", "REVIEW_READY"):
         raise CoordinatorPolicyError(
             f"Task is not integration-claimable: {request.task_id}"
         )
