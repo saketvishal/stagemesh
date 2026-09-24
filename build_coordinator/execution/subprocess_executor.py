@@ -58,8 +58,10 @@ class SubprocessExecutor:
             self._temp_dir = Path(temp_dir)
         elif self._log_dir is not None:
             self._temp_dir = self._log_dir.parent / "tmp"
+        elif "BUILD_COORDINATOR_DATA_DIR" in os.environ:
+            self._temp_dir = Path(os.environ["BUILD_COORDINATOR_DATA_DIR"]) / "tmp"
         else:
-            self._temp_dir = Path(".stagemesh") / "tmp"
+            self._temp_dir = Path(".build-coordinator") / "tmp"
 
     def _prepare_temp_dir(self, worker_id: str, execution_id: str) -> Path:
         target = self._temp_dir / worker_id / execution_id
