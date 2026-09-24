@@ -47,10 +47,10 @@ def test_no_machine_specific_absolute_paths_are_embedded():
 
 def test_own_project_is_discoverable_from_wherever_the_repo_lives(tmp_path):
     from build_coordinator.project.backlog import load_backlog
-    from build_coordinator.project.definition import find_project_root, load_project
+    from build_coordinator.project.definition import _canonical_root, find_project_root, load_project
 
     root = find_project_root(REPO_ROOT / "build_coordinator")
-    assert root == REPO_ROOT.resolve()
+    assert root == _canonical_root(REPO_ROOT).resolve()
     project = load_project(root)
     assert project.project_id == "stagemesh" and project.concurrency >= 1
     definitions = load_backlog(project)

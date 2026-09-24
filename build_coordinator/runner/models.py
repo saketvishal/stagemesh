@@ -30,6 +30,7 @@ HUMAN_ESCALATION_TYPES = (
     "SECURITY_POLICY_BLOCK",
     "EXTERNAL_EXECUTOR_CONFIGURATION_REQUIRED",
     "REMEDIATION_LIMIT_REACHED",
+    "REVIEW_ENVIRONMENT_BLOCKED",
     "TEST_FAILURE_REQUIRES_JUDGMENT",
     "COORDINATOR_INVARIANT_FAILURE",
     "REVIEWED_SHA_CHANGED",
@@ -43,6 +44,7 @@ REVIEW_VERDICT_VALUES = (
     "GREEN",
     "GREEN_WITH_NOTES",
     "REMEDIATION_REQUIRED",
+    "REVIEW_ENVIRONMENT_BLOCKED",
 )
 ELIGIBLE_REVIEW_VERDICTS = frozenset({"GREEN", "GREEN_WITH_NOTES"})
 KNOWN_REVIEW_VERDICTS = frozenset(REVIEW_VERDICT_VALUES)
@@ -76,6 +78,12 @@ def review_verdict_instructions() -> str:
         "required_remediation = []\n\n"
         "REMEDIATION_REQUIRED:\n"
         "ready_for_integration = false\n"
+        "Use when implementation violates requirements.\n\n"
+        "REVIEW_ENVIRONMENT_BLOCKED:\n"
+        "ready_for_integration = false\n"
+        "required_remediation = []\n"
+        "Use when verification cannot be completed because review infrastructure, environment, or required tooling is unavailable.\n"
+        "Do NOT request source-code remediation for review environment or tooling failures.\n"
     )
 
 
@@ -89,6 +97,7 @@ def review_verdict_contract() -> dict[str, Any]:
             "GREEN": {"ready_for_integration": True, "required_remediation": []},
             "GREEN_WITH_NOTES": {"ready_for_integration": True, "required_remediation": []},
             "REMEDIATION_REQUIRED": {"ready_for_integration": False},
+            "REVIEW_ENVIRONMENT_BLOCKED": {"ready_for_integration": False, "required_remediation": []},
         },
         "instructions": review_verdict_instructions(),
     }
@@ -191,6 +200,7 @@ class RunnerConfig:
     routing_policy: RoutingPolicy = field(default_factory=RoutingPolicy)
     poll_seconds: float = 5.0
     max_remediation_cycles: int = 2
+    max_review_environment_attempts: int = 2
     auto_push_allowed: bool = False
     allowed_workspace_roots: tuple[str, ...] = ()
     result_dir: str | None = None
@@ -343,6 +353,7 @@ class RunnerConfig:
             routing_policy=routing_policy,
             poll_seconds=float(data.get("poll_seconds", 5.0)),
             max_remediation_cycles=int(data.get("max_remediation_cycles", 2)),
+            max_review_environment_attempts=int(data.get("max_review_environment_attempts", 2)),
             auto_push_allowed=bool(data.get("auto_push_allowed", False)),
             allowed_workspace_roots=allowed_roots,
             result_dir=data.get("result_dir") or os.getenv("BUILD_COORDINATOR_RESULT_DIR"),
@@ -423,6 +434,15 @@ class ReviewVerdict:
             raise ReviewVerdictContradiction(
                 "REMEDIATION_REQUIRED with ready_for_integration true is contradictory"
             )
+        if self.verdict == "REVIEW_ENVIRONMENT_BLOCKED":
+            if self.ready_for_integration:
+                raise ReviewVerdictContradiction(
+                    "REVIEW_ENVIRONMENT_BLOCKED with ready_for_integration true is contradictory"
+                )
+            if self.required_remediation:
+                raise ReviewVerdictContradiction(
+                    "REVIEW_ENVIRONMENT_BLOCKED with required_remediation is contradictory"
+                )
 
     def integration_eligible(self) -> bool:
         self.validate_consistency()

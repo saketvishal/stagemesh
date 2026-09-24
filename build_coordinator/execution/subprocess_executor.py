@@ -44,6 +44,7 @@ class SubprocessExecutor:
         *,
         log_dir: str | Path | None = None,
         result_paths: dict[str, str] | None = None,
+        temp_dir: str | Path | None = None,
     ) -> None:
         if not command:
             raise ValueError("subprocess executor command must be non-empty")
@@ -53,6 +54,25 @@ class SubprocessExecutor:
         self._result_paths: dict[str, str] = dict(result_paths or {})
         self._log_handles: dict[str, tuple] = {}
         self._log_dir = Path(log_dir) if log_dir else None
+        if temp_dir is not None:
+            self._temp_dir = Path(temp_dir)
+        elif self._log_dir is not None:
+            self._temp_dir = self._log_dir.parent / "tmp"
+        else:
+            self._temp_dir = Path(".stagemesh") / "tmp"
+
+    def _prepare_temp_dir(self, worker_id: str, execution_id: str) -> Path:
+        target = self._temp_dir / worker_id / execution_id
+        target.mkdir(parents=True, exist_ok=True)
+        probe = target / f".probe_{execution_id}.tmp"
+        try:
+            probe.write_text("ok", encoding="utf-8")
+            probe.unlink(missing_ok=True)
+        except OSError as exc:
+            raise RuntimeError(
+                f"Managed execution temp directory is not writable: {target}"
+            ) from exc
+        return target
 
     def remember_result_path(self, execution_id: str, result_path: str | None) -> None:
         if result_path:
@@ -65,6 +85,11 @@ class SubprocessExecutor:
             self._result_paths[execution_id] = result_path
             Path(result_path).parent.mkdir(parents=True, exist_ok=True)
         env = os.environ.copy()
+        managed_temp = self._prepare_temp_dir(launch.worker_id, execution_id)
+        temp_str = str(managed_temp.resolve())
+        env["TEMP"] = temp_str
+        env["TMP"] = temp_str
+        env["TMPDIR"] = temp_str
         env.update(launch.extra_env)
         if result_path:
             env.update(
