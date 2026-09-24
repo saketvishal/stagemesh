@@ -73,9 +73,15 @@ class GitHubTaskSource(TaskSource):
         try:
             res = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", check=True)
             return json.loads(res.stdout)
+        except FileNotFoundError:
+            raise RuntimeError("GitHub CLI ('gh') is not installed or not found on PATH")
+        except subprocess.CalledProcessError as exc:
+            err = (exc.stderr or exc.stdout or str(exc)).strip()
+            if "not logged in" in err.lower() or "authentication" in err.lower() or "auth login" in err.lower():
+                raise RuntimeError(f"authentication unavailable for GitHub repository {self.repo}: {err}")
+            raise RuntimeError(f"failed to fetch GitHub issues from {self.repo}: {err}")
         except Exception as exc:
-            logger.warning("Failed to fetch GitHub issues from %s: %s", self.repo, exc)
-            return []
+            raise RuntimeError(f"failed to fetch GitHub issues from {self.repo}: {exc}")
 
     def _sync_issue(self, session, issue: dict[str, Any]) -> SyncResult | None:
         number = issue["number"]
@@ -96,8 +102,19 @@ class GitHubTaskSource(TaskSource):
         deps = self._parse_dependencies(body)
 
         if is_objective:
-            return self._sync_objective(session, task_id, title, body, ac, url)
-        return self._sync_task(session, task_id, title, body, ac, deps, labels, url)
+            self._sync_objective(session, task_id, title, body, ac, url)
+
+        return self._sync_task(
+            session,
+            task_id,
+            title,
+            body,
+            ac,
+            deps,
+            labels,
+            url,
+            objective_id=task_id if is_objective else None,
+        )
 
     def _sync_task(
         self,
@@ -109,30 +126,53 @@ class GitHubTaskSource(TaskSource):
         deps: list[str],
         labels: list[str],
         url: str,
+        objective_id: str | None = None,
     ) -> SyncResult:
         existing = session.get(BuildTask, task_id)
-        action = "UPDATED" if existing is not None else "CREATED"
         review_policy = "SELF" if any("review:self" in l.lower() for l in labels) else "INDEPENDENT"
         risk_level = "HIGH" if any("risk:high" in l.lower() for l in labels) else "MEDIUM"
         priority = self._parse_priority(labels, body)
+        criteria = ac or ["Satisfy all requirements stated in issue."]
+
+        if existing is not None:
+            unchanged = (
+                existing.title == title
+                and existing.description == body[:2000]
+                and existing.dependencies == deps
+                and existing.acceptance_criteria == criteria
+                and existing.review_policy == review_policy
+                and existing.risk_level == risk_level
+            )
+            action = "SKIPPED" if unchanged else "UPDATED"
+        else:
+            action = "CREATED"
 
         spec = TaskSpec(
             task_id=task_id,
             title=title,
             description=body[:2000],
-            acceptance_criteria=ac or ["Satisfy all requirements stated in issue."],
+            acceptance_criteria=criteria,
             dependencies=deps,
             risk_level=risk_level,
             review_policy=review_policy,
         )
         task = upsert_task(session, spec)
-        self._record_sync_event(session, task.task_id, priority, url, action)
+        if objective_id:
+            task.objective_id = objective_id
+        session.flush()
+        if action != "SKIPPED":
+            self._record_sync_event(session, task.task_id, priority, url, action)
+        details = (
+            f"in sync ({task.state})"
+            if action == "SKIPPED"
+            else f"Synced from GitHub issue as {task.state} (priority: {priority})"
+        )
         return SyncResult(
             task_id=task.task_id,
             title=task.title,
             action=action,
             source_ref=url,
-            details=f"Synced from GitHub issue as {task.state} (priority: {priority})",
+            details=details,
         )
 
     def _record_sync_event(
@@ -204,6 +244,10 @@ class GitHubTaskSource(TaskSource):
                 elif num == 2:
                     return 50
                 return num
+        if any("status:queued" in l.lower() for l in labels) or any("objective" in l.lower() for l in labels) or "## Objective" in body:
+            if re.search(r"\b(?:primary|alpha|v1 internal alpha)\b", body, re.IGNORECASE):
+                return 10
+            return 20
         return 100
 
     def _sync_objective(
@@ -214,29 +258,19 @@ class GitHubTaskSource(TaskSource):
         body: str,
         ac: list[str],
         url: str,
-    ) -> SyncResult:
+    ) -> BuildObjective:
         existing = session.get(BuildObjective, objective_id)
         if existing is not None:
-            return SyncResult(
-                task_id=objective_id,
-                title=title,
-                action="SKIPPED",
-                source_ref=url,
-                details="Objective already exists in durable queue",
-            )
-        spec = ObjectiveSpec(
+            return existing
+        obj = BuildObjective(
             objective_id=objective_id,
             goal=f"{title}: {body[:500]}",
-            completion_criteria=tuple(ac) if ac else (),
+            completion_criteria=list(ac) if ac else [],
+            state="PLANNING",
         )
-        obj = create_objective(session, spec)
-        return SyncResult(
-            task_id=obj.objective_id,
-            title=title,
-            action="CREATED",
-            source_ref=url,
-            details="Created objective from GitHub issue",
-        )
+        session.add(obj)
+        session.flush()
+        return obj
 
     def _parse_acceptance_criteria(self, body: str) -> list[str]:
         ac: list[str] = []

@@ -240,10 +240,15 @@ def load_project(root: str | Path) -> ProjectDefinition:
         if not runner_path.is_file():
             problems.append(f"`runner_config` file does not exist: {runner_path}")
 
-    sources = data.get("task_sources") or {}
-    if not isinstance(sources, dict):
-        problems.append("`task_sources` must be a mapping")
-        sources = {}
+    raw_sources = data.get("task_sources")
+    sources: dict[str, dict[str, Any]] = {}
+    if raw_sources is not None:
+        if isinstance(raw_sources, list):
+            sources = {str(item): {"enabled": True} for item in raw_sources}
+        elif isinstance(raw_sources, dict):
+            sources = {str(k): dict(v or {}) for k, v in raw_sources.items()}
+        else:
+            problems.append("`task_sources` must be a mapping or list of names")
 
     if problems:
         raise ProjectError(f"invalid project definition {project_file}: " + "; ".join(problems))

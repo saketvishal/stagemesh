@@ -286,21 +286,31 @@ def handle_continue(args: argparse.Namespace) -> None:
     lifecycle = _open(project)
 
     sync_payload: dict[str, Any] | None = None
-    adapter_payload: list[dict[str, Any]] = []
-    task_source = _optional_task_source(project, force=args.github, dry_run=args.dry_run)
+    task_source, initial_diagnostics = _optional_task_source(project, force=args.github, dry_run=args.dry_run)
+    adapter_payload: list[dict[str, Any]] = list(initial_diagnostics)
     with lifecycle.session() as session:
         if not args.no_sync:
             report = sync_backlog(session, project, definitions, dry_run=args.dry_run)
             sync_payload = report.as_dict()
         if task_source is not None:
             try:
-                adapter_payload = [r.as_dict() for r in task_source.discover_tasks(session)]
+                adapter_payload.extend([r.as_dict() for r in task_source.discover_tasks(session)])
             except Exception as exc:  # optional adapter: never blocks local execution
-                adapter_payload = [{"action": "ERROR", "details": str(exc)}]
-        session.commit()
+                adapter_payload.append({"source": "github", "action": "ERROR", "details": str(exc)})
         if args.dry_run:
-            _print(_dry_run_plan(session, project, definitions, sync_payload, target_task_ids=target_task_ids))
+            _print(
+                _dry_run_plan(
+                    session,
+                    project,
+                    definitions,
+                    sync_payload,
+                    target_task_ids=target_task_ids,
+                    adapter_payload=adapter_payload,
+                )
+            )
+            session.rollback()
             return
+        session.commit()
 
     config = build_runner_config(project, dry_run=False)
     if not any(w.role == "BUILDER" and w.adapter != "unconfigured" for w in config.workers):
@@ -488,15 +498,75 @@ def _summarize_run(detail: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _optional_task_source(project: ProjectDefinition, *, force: bool, dry_run: bool):
-    github = project.task_sources.get("github")
-    if github is None and not force:
-        return None
-    if github is not None and not github.get("enabled", False) and not force:
-        return None
+def _detect_repo_from_git(root: Path) -> str | None:
+    try:
+        proc = subprocess.run(
+            ["git", "config", "--get", "remote.origin.url"],
+            cwd=str(root),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if proc.returncode == 0 and proc.stdout.strip():
+            url = proc.stdout.strip()
+            m = re.search(r"github\.com[:/]([^/]+/[^/.]+?)(?:\.git)?$", url)
+            if m:
+                return m.group(1)
+    except Exception:
+        pass
+    return None
+
+
+def _optional_task_source(
+    project: ProjectDefinition, *, force: bool, dry_run: bool
+) -> tuple[Any | None, list[dict[str, Any]]]:
     from build_coordinator.task_source import get_task_source
 
-    return get_task_source({"type": "github", **(github or {}), "dry_run": dry_run})
+    diagnostics: list[dict[str, Any]] = []
+    github = project.task_sources.get("github")
+
+    for src_name in project.task_sources:
+        if src_name != "github":
+            diagnostics.append({
+                "source": src_name,
+                "action": "ERROR",
+                "details": f"unsupported task source: '{src_name}'",
+            })
+
+    if github is None and not force:
+        return None, diagnostics
+
+    if github is not None and not github.get("enabled", False) and not force:
+        diagnostics.append({
+            "source": "github",
+            "action": "DISABLED",
+            "details": "task source 'github' is disabled in project configuration (enabled: false)",
+        })
+        return None, diagnostics
+
+    cfg = dict(github or {})
+    if not cfg.get("repo") and not os.getenv("BUILD_COORDINATOR_GITHUB_REPO"):
+        detected_repo = _detect_repo_from_git(project.root)
+        if detected_repo:
+            cfg["repo"] = detected_repo
+        else:
+            diagnostics.append({
+                "source": "github",
+                "action": "ERROR",
+                "details": "missing repo identity: 'repo' must be specified in task_sources.github or detectable from git remote",
+            })
+            return None, diagnostics
+
+    try:
+        source = get_task_source({"type": "github", **cfg, "dry_run": dry_run})
+        return source, diagnostics
+    except Exception as exc:
+        diagnostics.append({
+            "source": "github",
+            "action": "ERROR",
+            "details": f"adapter construction failure: {exc}",
+        })
+        return None, diagnostics
 
 
 def _execution_row(execution: BuildRunnerExecution | None) -> dict[str, Any]:
@@ -519,6 +589,7 @@ def _dry_run_plan(
     sync_payload: dict[str, Any] | None,
     *,
     target_task_ids: frozenset[str] = frozenset(),
+    adapter_payload: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     ranked: dict[str, tuple[int, str]] = {}
     declared = {d.task_id: d for d in definitions}
@@ -547,6 +618,7 @@ def _dry_run_plan(
             _target_task_diagnostic(session, task_id, declared=declared) for task_id in sorted(target_task_ids)
         ],
         "backlog_sync": sync_payload,
+        "task_source_adapters": adapter_payload if adapter_payload is not None else [],
         "diagnostics": diag,
         "eligible_now": ordered,
         "would_run_in_parallel": ordered[: project.concurrency],
