@@ -56,6 +56,9 @@ class ProjectDefinition:
     upstream_remote: str | None = None
     push_upstream: bool = False
     validation_timeout_seconds: float = 900.0
+    external_ci_enabled: bool = False
+    external_ci_repo: str | None = None
+    external_ci_max_consecutive_errors: int = 5
 
     @property
     def definition_dir(self) -> Path:
@@ -210,6 +213,23 @@ def load_project(root: str | Path) -> ProjectDefinition:
         problems.append("`execution.validation_timeout_seconds` must be a positive number")
         timeout = 900
 
+    external_ci = execution.get("external_ci") or {}
+    if not isinstance(external_ci, dict):
+        problems.append("`execution.external_ci` must be a mapping")
+        external_ci = {}
+    external_ci_enabled = bool(external_ci.get("enabled", False))
+    external_ci_repo = str(external_ci["repo"]).strip() if external_ci.get("repo") else None
+    if external_ci_enabled and not external_ci_repo:
+        problems.append("`execution.external_ci.enabled` needs `execution.external_ci.repo`")
+    external_ci_max_errors = external_ci.get("max_consecutive_errors", 5)
+    if (
+        not isinstance(external_ci_max_errors, int)
+        or isinstance(external_ci_max_errors, bool)
+        or external_ci_max_errors < 1
+    ):
+        problems.append("`execution.external_ci.max_consecutive_errors` must be a positive integer")
+        external_ci_max_errors = 5
+
     raw_state = str(data.get("state_dir") or ".build-coordinator")
     state_dir = Path(raw_state).expanduser()
     if not state_dir.is_absolute():
@@ -270,6 +290,9 @@ def load_project(root: str | Path) -> ProjectDefinition:
         upstream_remote=upstream_remote,
         push_upstream=push_upstream,
         validation_timeout_seconds=float(timeout),
+        external_ci_enabled=external_ci_enabled,
+        external_ci_repo=external_ci_repo,
+        external_ci_max_consecutive_errors=int(external_ci_max_errors),
     )
 
 

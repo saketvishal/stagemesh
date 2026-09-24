@@ -21,6 +21,7 @@ TASK_STATES = (
     "REVIEW_READY",
     "REVIEWING",
     "INTEGRATING",
+    "AWAITING_EXTERNAL_CI",
     "REWORK_REQUIRED",
     "BLOCKED",
     "FAILED",
@@ -70,7 +71,8 @@ class BuildTask(Base):
     __table_args__ = (
         CheckConstraint(
             "state IN ('READY','CLAIMED','IN_PROGRESS','WAITING_FOR_INPUT','VALIDATING','REVIEW_READY',"
-            "'REVIEWING','INTEGRATING','REWORK_REQUIRED','BLOCKED','FAILED','STALE','RESUMABLE','DONE')",
+            "'REVIEWING','INTEGRATING','AWAITING_EXTERNAL_CI','REWORK_REQUIRED','BLOCKED','FAILED','STALE',"
+            "'RESUMABLE','DONE')",
             name="chk_build_tasks_state",
         ),
         CheckConstraint(
