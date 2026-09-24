@@ -13,11 +13,19 @@ import re
 import subprocess
 from typing import Any
 
-from build_coordinator.models import BuildObjective, BuildTask
+from sqlalchemy import select
+
+from build_coordinator.events import record_event
+from build_coordinator.models import (
+    BuildObjective,
+    BuildObjectiveEvent,
+    BuildTask,
+    BuildTaskEvent,
+)
 from build_coordinator.objectives import create_objective
 from build_coordinator.service import upsert_task
 from build_coordinator.task_source.base import SyncResult, TaskSource
-from build_coordinator.types import ObjectiveSpec, TaskSpec
+from build_coordinator.types import EventInput, ObjectiveSpec, TaskSpec
 
 logger = logging.getLogger(__name__)
 
@@ -269,6 +277,14 @@ class GitHubTaskSource(TaskSource):
             state="PLANNING",
         )
         session.add(obj)
+        session.add(
+            BuildObjectiveEvent(
+                objective_id=objective_id,
+                event_type="objective.synced_from_source",
+                actor="github-sync",
+                event_data={"source": url, "title": title},
+            )
+        )
         session.flush()
         return obj
 
@@ -329,6 +345,287 @@ class GitHubTaskSource(TaskSource):
 
         return deps
 
+    def _resolve_issue_number(self, session, entity_id: str, is_objective: bool = False) -> int | None:
+        # 1. Exact GH-<digits> pattern
+        m = re.match(r"^GH-(\d+)$", entity_id)
+        if m:
+            return int(m.group(1))
+
+        # 2. Check sync events in database
+        if not is_objective:
+            events = session.scalars(
+                select(BuildTaskEvent)
+                .where(
+                    BuildTaskEvent.task_id == entity_id,
+                    BuildTaskEvent.actor == "github-sync",
+                )
+                .order_by(BuildTaskEvent.created_at.asc())
+            ).all()
+            for ev in events:
+                src = (ev.event_data or {}).get("source", "")
+                sm = re.search(r"/issues/(\d+)$", src)
+                if sm:
+                    return int(sm.group(1))
+        else:
+            obj_events = session.scalars(
+                select(BuildObjectiveEvent)
+                .where(
+                    BuildObjectiveEvent.objective_id == entity_id,
+                    BuildObjectiveEvent.actor == "github-sync",
+                )
+                .order_by(BuildObjectiveEvent.created_at.asc())
+            ).all()
+            for ev in obj_events:
+                src = (ev.event_data or {}).get("source", "")
+                sm = re.search(r"/issues/(\d+)$", src)
+                if sm:
+                    return int(sm.group(1))
+            events = session.scalars(
+                select(BuildTaskEvent)
+                .where(
+                    BuildTaskEvent.task_id == entity_id,
+                    BuildTaskEvent.actor == "github-sync",
+                )
+                .order_by(BuildTaskEvent.created_at.asc())
+            ).all()
+            for ev in events:
+                src = (ev.event_data or {}).get("source", "")
+                sm = re.search(r"/issues/(\d+)$", src)
+                if sm:
+                    return int(sm.group(1))
+
+        return None
+
+    def _is_outbound_synced(self, session, entity_id: str, state: str, is_objective: bool = False) -> bool:
+        if is_objective:
+            events = session.scalars(
+                select(BuildObjectiveEvent).where(
+                    BuildObjectiveEvent.objective_id == entity_id,
+                    BuildObjectiveEvent.event_type == "objective.outbound_synced",
+                )
+            ).all()
+            return any((e.event_data or {}).get("state") == state for e in events)
+        else:
+            events = session.scalars(
+                select(BuildTaskEvent).where(
+                    BuildTaskEvent.task_id == entity_id,
+                    BuildTaskEvent.event_type == "task.outbound_synced",
+                )
+            ).all()
+            return any((e.event_data or {}).get("state") == state for e in events)
+
+    def _record_outbound_synced(
+        self,
+        session,
+        entity_id: str,
+        issue_number: int,
+        state: str,
+        is_objective: bool = False,
+    ) -> None:
+        if is_objective:
+            session.add(
+                BuildObjectiveEvent(
+                    objective_id=entity_id,
+                    event_type="objective.outbound_synced",
+                    actor="github-sync",
+                    event_data={"state": state, "issue_number": issue_number},
+                )
+            )
+        else:
+            record_event(
+                session,
+                EventInput(
+                    task_id=entity_id,
+                    event_type="task.outbound_synced",
+                    actor="github-sync",
+                    event_data={"state": state, "issue_number": issue_number},
+                ),
+            )
+        session.flush()
+
+    def _record_outbound_failed(
+        self,
+        session,
+        entity_id: str,
+        issue_number: int | None,
+        error: str,
+        action: str,
+        is_objective: bool = False,
+    ) -> None:
+        if is_objective:
+            session.add(
+                BuildObjectiveEvent(
+                    objective_id=entity_id,
+                    event_type="objective.outbound_sync_failed",
+                    actor="github-sync",
+                    event_data={"error": error, "issue_number": issue_number, "action": action},
+                )
+            )
+        else:
+            record_event(
+                session,
+                EventInput(
+                    task_id=entity_id,
+                    event_type="task.outbound_sync_failed",
+                    actor="github-sync",
+                    event_data={"error": error, "issue_number": issue_number, "action": action},
+                ),
+            )
+        session.flush()
+
+    def _execute_outbound(
+        self,
+        session,
+        entity_id: str,
+        issue_number: int,
+        comment_body: str,
+        label: str,
+        should_close: bool,
+        is_objective: bool = False,
+    ) -> bool:
+        if not self.repo or self.dry_run:
+            self._record_outbound_synced(
+                session,
+                entity_id,
+                issue_number,
+                state="DONE" if should_close else label,
+                is_objective=is_objective,
+            )
+            return True
+
+        if self._client is not None:
+            try:
+                is_closed = hasattr(self._client, "closed") and str(issue_number) in [
+                    str(c) for c in self._client.closed
+                ]
+                already_commented = False
+                if hasattr(self._client, "comments"):
+                    for c in self._client.comments:
+                        if str(c.get("number")) == str(issue_number) and (
+                            "Lifecycle Update" in c.get("body", "")
+                            or "Objective Completed" in c.get("body", "")
+                        ):
+                            already_commented = True
+                            break
+                if not already_commented:
+                    self._client.add_comment(repo=self.repo, number=str(issue_number), body=comment_body)
+
+                if hasattr(self._client, "add_label"):
+                    self._client.add_label(repo=self.repo, number=str(issue_number), label=label)
+
+                if should_close and not is_closed:
+                    self._client.close_issue(repo=self.repo, number=str(issue_number))
+
+                self._record_outbound_synced(
+                    session,
+                    entity_id,
+                    issue_number,
+                    state="DONE" if should_close else label,
+                    is_objective=is_objective,
+                )
+                return True
+            except Exception as exc:
+                err = str(exc)
+                logger.warning("Failed to sync outbound to GitHub via client for #%s: %s", issue_number, err)
+                self._record_outbound_failed(
+                    session,
+                    entity_id,
+                    issue_number,
+                    error=err,
+                    action="client_sync",
+                    is_objective=is_objective,
+                )
+                return False
+
+        try:
+            # 1. gh issue comment
+            proc_comment = subprocess.run(
+                ["gh", "issue", "comment", str(issue_number), "--repo", self.repo, "--body", comment_body],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+            )
+            if proc_comment.returncode != 0:
+                err = (proc_comment.stderr or proc_comment.stdout or "gh issue comment failed").strip()
+                logger.warning("Failed to comment on GitHub issue #%s: %s", issue_number, err)
+                self._record_outbound_failed(
+                    session,
+                    entity_id,
+                    issue_number,
+                    error=err,
+                    action="gh_comment",
+                    is_objective=is_objective,
+                )
+                return False
+
+            # 2. gh issue edit --add-label
+            proc_label = subprocess.run(
+                ["gh", "issue", "edit", str(issue_number), "--repo", self.repo, "--add-label", label],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+            )
+            if proc_label.returncode != 0:
+                err = (proc_label.stderr or proc_label.stdout or "gh issue edit --add-label failed").strip()
+                logger.warning("Failed to add label to GitHub issue #%s: %s", issue_number, err)
+                self._record_outbound_failed(
+                    session,
+                    entity_id,
+                    issue_number,
+                    error=err,
+                    action="gh_label",
+                    is_objective=is_objective,
+                )
+                return False
+
+            # 3. gh issue close
+            if should_close:
+                proc_close = subprocess.run(
+                    ["gh", "issue", "close", str(issue_number), "--repo", self.repo],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    check=False,
+                )
+                if proc_close.returncode != 0:
+                    err = (proc_close.stderr or proc_close.stdout or "gh issue close failed").strip()
+                    logger.warning("Failed to close GitHub issue #%s: %s", issue_number, err)
+                    self._record_outbound_failed(
+                        session,
+                        entity_id,
+                        issue_number,
+                        error=err,
+                        action="gh_close",
+                        is_objective=is_objective,
+                    )
+                    return False
+
+            self._record_outbound_synced(
+                session,
+                entity_id,
+                issue_number,
+                state="DONE" if should_close else label,
+                is_objective=is_objective,
+            )
+            return True
+        except Exception as exc:
+            err = str(exc)
+            logger.warning("Subprocess exception syncing outbound to GitHub issue #%s: %s", issue_number, err)
+            self._record_outbound_failed(
+                session,
+                entity_id,
+                issue_number,
+                error=err,
+                action="subprocess_exception",
+                is_objective=is_objective,
+            )
+            return False
+
     def sync_outbound(
         self,
         session,
@@ -346,44 +643,79 @@ class GitHubTaskSource(TaskSource):
         }
         self._outbound_events.append(event_record)
 
-        if not self.repo or self.dry_run:
+        # Objective Safety Distinction:
+        # If task_id corresponds to a BuildObjective, do NOT close or label stagemesh:done
+        # at the task level! The objective issue is only closed when BuildObjective reaches COMPLETED.
+        if session.get(BuildObjective, task_id) is not None:
             return True
 
-        num_match = re.search(r"(\d+)$", task_id)
-        if not num_match:
-            return False
-        issue_number = num_match.group(1)
+        # Check source identity: Only GitHub-originating tasks can update GitHub!
+        issue_number = self._resolve_issue_number(session, task_id, is_objective=False)
+        if issue_number is None:
+            return True
+
+        # Check idempotency: already synced for this state?
+        if self._is_outbound_synced(session, task_id, state, is_objective=False):
+            return True
 
         comment_body = self._format_status_comment(task_id, state, evidence)
+        label = f"stagemesh:{state.lower()}"
+        should_close = (state == "DONE")
 
-        if self._client is not None:
-            self._client.add_comment(repo=self.repo, number=issue_number, body=comment_body)
-            if state == "DONE":
-                self._client.close_issue(repo=self.repo, number=issue_number)
+        return self._execute_outbound(
+            session,
+            task_id,
+            issue_number,
+            comment_body=comment_body,
+            label=label,
+            should_close=should_close,
+            is_objective=False,
+        )
+
+    def sync_objective_outbound(
+        self,
+        session,
+        objective_id: str,
+        state: str,
+        *,
+        evidence: dict[str, Any] | None = None,
+    ) -> bool:
+        """Propagate objective completion state and evidence back to GitHub."""
+        evidence = evidence or {}
+        event_record = {
+            "objective_id": objective_id,
+            "state": state,
+            "evidence": evidence,
+        }
+        self._outbound_events.append(event_record)
+
+        # Only sync when objective is actually COMPLETED
+        obj = session.get(BuildObjective, objective_id)
+        if obj is None or obj.state != "COMPLETED":
             return True
 
-        try:
-            subprocess.run(
-                ["gh", "issue", "comment", str(issue_number), "--repo", self.repo, "--body", comment_body],
-                capture_output=True,
-                check=False,
-            )
-            label = f"stagemesh:{state.lower()}"
-            subprocess.run(
-                ["gh", "issue", "edit", str(issue_number), "--repo", self.repo, "--add-label", label],
-                capture_output=True,
-                check=False,
-            )
-            if state == "DONE":
-                subprocess.run(
-                    ["gh", "issue", "close", str(issue_number), "--repo", self.repo],
-                    capture_output=True,
-                    check=False,
-                )
+        # Resolve issue number
+        issue_number = self._resolve_issue_number(session, objective_id, is_objective=True)
+        if issue_number is None:
             return True
-        except Exception as exc:
-            logger.warning("Failed to sync outbound status to GitHub issue #%s: %s", issue_number, exc)
-            return False
+
+        # Idempotency check
+        if self._is_outbound_synced(session, objective_id, state, is_objective=True):
+            return True
+
+        comment_body = self._format_objective_status_comment(objective_id, state, evidence)
+        label = "stagemesh:done"
+        should_close = True
+
+        return self._execute_outbound(
+            session,
+            objective_id,
+            issue_number,
+            comment_body=comment_body,
+            label=label,
+            should_close=should_close,
+            is_objective=True,
+        )
 
     def _format_status_comment(self, task_id: str, state: str, evidence: dict[str, Any]) -> str:
         lines = [
@@ -402,4 +734,19 @@ class GitHubTaskSource(TaskSource):
             lines.append(f"- **Review Verdict**: `{evidence['review_verdict']}`")
         if "summary" in evidence:
             lines.append(f"- **Summary**: {evidence['summary']}")
+        return "\n".join(lines)
+
+    def _format_objective_status_comment(self, objective_id: str, state: str, evidence: dict[str, Any]) -> str:
+        lines = [
+            f"### StageMesh Objective Completed: `{state}`",
+            "",
+            f"- **Objective ID**: `{objective_id}`",
+            f"- **State**: `{state}`",
+        ]
+        if "goal" in evidence:
+            lines.append(f"- **Goal**: {evidence['goal']}")
+        if "completion_criteria" in evidence and evidence["completion_criteria"]:
+            lines.append("- **Satisfied Criteria**:")
+            for item in evidence["completion_criteria"]:
+                lines.append(f"  - [x] {item}")
         return "\n".join(lines)
