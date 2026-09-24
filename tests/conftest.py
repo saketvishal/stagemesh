@@ -1,3 +1,11 @@
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+_ROOT = str(Path(__file__).parent.parent.resolve())
+if sys.path[0] != _ROOT:
+    sys.path.insert(0, _ROOT)
+
 """Test-suite-wide database isolation.
 
 The process-default database is unbound until `configure_process_database`
@@ -11,7 +19,6 @@ an operator's shell can't reintroduce a dependency on real coordinator config
 during the test run.
 """
 
-from __future__ import annotations
 
 import os
 import tempfile
