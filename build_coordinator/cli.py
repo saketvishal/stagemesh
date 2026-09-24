@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from uuid import UUID
 
@@ -15,6 +16,7 @@ from build_coordinator.coordinator_config import (
     load_coordinator_config,
 )
 from build_coordinator.policy import CoordinatorPolicyError
+from build_coordinator.project.commands import add_continue_command, add_project_commands
 from build_coordinator.db import DatabaseSchemaError, SessionLocal, configure_process_database
 from build_coordinator.service import (
     CheckpointInput,
@@ -51,13 +53,30 @@ from build_coordinator.objectives import (
 from build_coordinator.runner import BuildRunner
 from build_coordinator.runner.models import RunnerConfig
 from build_coordinator.runner.routing import StageRequirement, route_worker
+from build_coordinator.runner.worker_health import derive_worker_health
 from build_coordinator.types import ObjectiveSpec, PlannedChildTask, StructuredContractError, TaskSpec
 
 
 def main() -> None:
+    import sys
+
+    from build_coordinator.project.commands import handle_continue, handle_project, normalize_argv
+    from build_coordinator.project.extras import EXTRA_COMMANDS, handle_extra
+    from build_coordinator.project.definition import ProjectError
+
+    sys.argv = normalize_argv(sys.argv)
     parser = _build_parser()
     args = parser.parse_args()
     try:
+        if args.command in EXTRA_COMMANDS:
+            handle_extra(args)
+            return
+        if args.command == "project":
+            handle_project(args)
+            return
+        if args.command == "continue":
+            handle_continue(args)
+            return
         lifecycle = configure_process_database()
         lifecycle.initialize_schema()
         with lifecycle.session() as session:
@@ -68,14 +87,22 @@ def main() -> None:
         CoordinatorConfigError,
         DatabaseSchemaError,
         StructuredContractError,
+        ProjectError,
     ) as exc:
         raise SystemExit(str(exc)) from exc
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="build-coordinator")
+    from build_coordinator import __version__
+    from build_coordinator.project.extras import add_extra_commands
+
+    parser = argparse.ArgumentParser(prog="stagemesh")
+    parser.add_argument("--version", action="version", version=f"stagemesh {__version__}")
     sub = parser.add_subparsers(dest="command", required=True)
     _add_simple_commands(sub)
+    add_continue_command(sub)
+    add_project_commands(sub)
+    add_extra_commands(sub)
     _add_run_commands(sub)
     _add_claim_commands(sub)
     _add_checkpoint_commands(sub)
@@ -489,6 +516,14 @@ def _list(args: argparse.Namespace, session) -> None:
 
 def _workers_list(args: argparse.Namespace, session) -> None:
     config = RunnerConfig.default(dry_run=True)
+    events = session.scalars(
+        select(BuildTaskEvent).where(BuildTaskEvent.event_type == "runner.provider_failure")
+    ).all()
+    health = derive_worker_health(
+        config.workers,
+        (row.event_data or {} for row in events),
+        now=datetime.now(timezone.utc),
+    )
     _print(
         [
             {
@@ -500,6 +535,7 @@ def _workers_list(args: argparse.Namespace, session) -> None:
                 "capabilities": list(worker.capability_names()),
                 "stages": list(worker.stage_names()),
                 "max_concurrency": worker.max_concurrency,
+                "health": health[worker.worker_id].to_public_dict(),
             }
             for worker in config.workers
         ]
@@ -653,6 +689,8 @@ def _claim_request(args: argparse.Namespace) -> ClaimRequest:
         worktree_path=args.worktree,
         lease_seconds=args.lease_seconds,
     )
+
+
 
 
 def _print(payload) -> None:

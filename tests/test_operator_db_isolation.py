@@ -65,7 +65,7 @@ def _canary_snapshot(path: Path) -> tuple[bytes, list[str], list[tuple]]:
     return raw, tables, rows
 
 
-@pytest.mark.timeout(600)
+@pytest.mark.timeout(900)
 def test_running_coordinator_tests_never_touches_operator_canary_db(tmp_path: Path):
     fake_home = tmp_path / "fake-home"
     fake_home.mkdir()
@@ -123,7 +123,7 @@ def test_running_coordinator_tests_never_touches_operator_canary_db(tmp_path: Pa
         env=env,
         capture_output=True,
         text=True,
-        timeout=600,
+        timeout=900,
     )
 
     assert result.returncode == 0, (

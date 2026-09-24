@@ -30,3 +30,13 @@ configure_process_database(
     database_url=os.environ["BUILD_COORDINATOR_DATABASE_URL"],
     data_dir=_TEST_DATA_DIR,
 )
+
+
+import pytest  # noqa: E402
+
+
+@pytest.fixture
+def registry(tmp_path, monkeypatch):
+    path = tmp_path / "registry" / "projects.json"
+    monkeypatch.setenv("STAGEMESH_PROJECT_REGISTRY", str(path))
+    return path

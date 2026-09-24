@@ -75,32 +75,20 @@ engineering tasks. It:
 ## Quick start
 
 ```bash
-# 1. Install
-pip install -e .
-
-# 2. Create a coordinator config
-mkdir -p ~/.build-coordinator
-cp examples/build-coordinator.example.json ~/.build-coordinator/config.json
-# Edit config.json with your repo root and worktree paths
-
-# 3. Create a runner config
-cp examples/single_agent/worker-config.example.yaml runner-config.yaml
-# Edit runner-config.yaml with your agent command
-
-# 4. Start the database
-BUILD_COORDINATOR_DATABASE_URL=sqlite:///./coordinator.sqlite3 \
-  python -m build_coordinator.cli status
-
-# 5. Create a task
-python -m build_coordinator.cli objective create TASK-001 \
-  --title "Add a README section" \
-  --description "Add an installation section to README.md" \
-  --review-policy INDEPENDENT
-
-# 6. Run the coordinator
-BUILD_COORDINATOR_RUNNER_CONFIG=runner-config.yaml \
-  python -m build_coordinator.cli run
+pip install stagemesh
+cd my-git-repo
+stagemesh init          # makes the repo a StageMesh project and registers it
+stagemesh agent setup   # finds installed coding agents and verifies each with a real headless run
+stagemesh doctor        # what works, what does not, and what to do next
+stagemesh continue      # works the project's .stagemesh/ backlog with real agents
 ```
+
+Run `stagemesh continue` from any directory: inside a project it works that
+project; anywhere else it coordinates every registered project at once, each in
+its own process and workspaces, up to that project's configured concurrency.
+`stagemesh "Continue <project> development."` works too. Workers, worktrees,
+branches, providers and execution directories are chosen by StageMesh's queue
+and capability routing, never by you. See [docs/PROJECTS.md](docs/PROJECTS.md).
 
 See [docs/SETUP.md](docs/SETUP.md) for full installation and configuration.
 
@@ -110,6 +98,7 @@ See [docs/SETUP.md](docs/SETUP.md) for full installation and configuration.
 
 - [Architecture](docs/ARCHITECTURE.md) - concepts, data flow, key principles
 - [Setup](docs/SETUP.md) - installation, configuration, first run
+- [Project-owned backlogs](docs/PROJECTS.md) - `.stagemesh/` project definitions, `stagemesh continue`, parallel execution
 - [Security & Trust Boundaries](SECURITY.md) - what the coordinator trusts and why
 - [Roadmap](docs/ROADMAP.md) - v0.1-alpha roadmap and what comes next
 - [Contributing](CONTRIBUTING.md) - how to contribute
