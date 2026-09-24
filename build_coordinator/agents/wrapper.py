@@ -151,11 +151,12 @@ def render_prompt(role: str, raw: str, *, base_ref: str, reviewed_sha: str | Non
             "tests, scope creep, security problems and unrelated changes.\n"
             + (f"\nStageMesh separately runs these validation commands, so you need not:\n{_bullets(validation)}\n" if validation else "")
             + "\nEnd your reply with ONE fenced ```json block, exactly this shape:\n"
-            '{"verdict": "GREEN" | "GREEN_WITH_NOTES" | "REMEDIATION_REQUIRED", "findings": [...], '
+            '{"verdict": "GREEN" | "GREEN_WITH_NOTES" | "REMEDIATION_REQUIRED" | "REVIEW_ENVIRONMENT_BLOCKED", "findings": [...], '
             '"required_remediation": [...], "architecture_notes": [...], "ready_for_integration": true|false}\n'
             "Rules: GREEN / GREEN_WITH_NOTES need ready_for_integration=true and an empty required_remediation; "
-            "REMEDIATION_REQUIRED needs ready_for_integration=false and concrete required_remediation items. "
-            "Do not approve work you could not verify.\n"
+            "REMEDIATION_REQUIRED needs ready_for_integration=false and concrete required_remediation items; "
+            "REVIEW_ENVIRONMENT_BLOCKED needs ready_for_integration=false, empty required_remediation, and findings explaining the environment or tooling failure. "
+            "Do not request source-code remediation for review environment or tooling failures. Do not approve work you could not verify.\n"
         )
 
     prior = []
