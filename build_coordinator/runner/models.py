@@ -83,7 +83,14 @@ def review_verdict_instructions() -> str:
         "ready_for_integration = false\n"
         "required_remediation = []\n"
         "Use when verification cannot be completed because review infrastructure, environment, or required tooling is unavailable.\n"
-        "Do NOT request source-code remediation for review environment or tooling failures.\n"
+        "Do NOT request source-code remediation for review environment or tooling failures.\n\n"
+        "finding_dispositions (optional array): when re-reviewing a task, "
+        "resume_context.open_findings_from_prior_review (if present) lists prior findings with their durable ids. "
+        "Classify each one you were shown as one of RESOLVED, STILL_OPEN, INVALID, or "
+        "NOT_APPLICABLE, e.g. [{\"id\": \"<finding id>\", \"status\": \"RESOLVED\", \"reason\": \"...\"}]. "
+        "A prior finding you do not restate in `findings` and do not classify here is presumed resolved. "
+        "To keep such a finding open anyway, or to reopen one already resolved, include it here with "
+        "status STILL_OPEN and a reason.\n"
     )
 
 
@@ -396,6 +403,12 @@ class ReviewVerdict:
     required_remediation: tuple[str, ...] = ()
     architecture_notes: tuple[str, ...] = ()
     ready_for_integration: bool = False
+    # Optional, additive: explicit per-finding classification against the
+    # durable finding registry (see build_coordinator.runner.findings). Each
+    # entry is {"id": <finding fingerprint>, "status": RESOLVED|STILL_OPEN|
+    # INVALID|NOT_APPLICABLE, "reason": <str>}. When absent, findings not
+    # restated in `findings` are presumed resolved automatically.
+    finding_dispositions: tuple[dict[str, Any], ...] = ()
 
     @classmethod
     def from_mapping(cls, data: dict[str, Any]) -> "ReviewVerdict":
@@ -405,6 +418,9 @@ class ReviewVerdict:
             required_remediation=tuple(data.get("required_remediation") or ()),
             architecture_notes=tuple(data.get("architecture_notes") or ()),
             ready_for_integration=bool(data.get("ready_for_integration", False)),
+            finding_dispositions=tuple(
+                item for item in (data.get("finding_dispositions") or ()) if isinstance(item, dict)
+            ),
         )
 
     def to_mapping(self) -> dict[str, Any]:
@@ -414,6 +430,7 @@ class ReviewVerdict:
             "required_remediation": list(self.required_remediation),
             "architecture_notes": list(self.architecture_notes),
             "ready_for_integration": self.ready_for_integration,
+            "finding_dispositions": [dict(item) for item in self.finding_dispositions],
         }
 
     def validate_consistency(self) -> None:
