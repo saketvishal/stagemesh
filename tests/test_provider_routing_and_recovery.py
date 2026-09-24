@@ -139,6 +139,100 @@ def test_executor_discovery_all_four_providers():
     assert PROFILES["claude"].headless is True
     assert PROFILES["antigravity"].headless is False
     assert PROFILES["grok"].headless is True
+    assert PROFILES["grok"].prompt_transport == "arg"
+    assert PROFILES["codex"].prompt_transport == "stdin"
+    assert PROFILES["claude"].prompt_transport == "stdin"
+
+
+def test_grok_prompt_transport_and_builder_command():
+    profile = PROFILES["grok"]
+    assert profile.prompt_transport == "arg"
+    prompt = "Implement feature X in this worktree"
+    cwd = "C:/fake/worktree"
+    cmd, stdin = profile.build_invocation("BUILDER", cwd, prompt)
+
+    assert stdin is None
+    assert "--no-auto-update" in cmd
+    assert "-p" in cmd
+    p_idx = cmd.index("-p")
+    assert cmd[p_idx + 1] == prompt
+    assert cmd[p_idx + 1] != "-"
+    assert "--cwd" in cmd
+    cwd_idx = cmd.index("--cwd")
+    assert cmd[cwd_idx + 1] == cwd
+    assert "--output-format" in cmd
+    assert cmd[cmd.index("--output-format") + 1] == "plain"
+    assert "--permission-mode" in cmd
+    assert cmd[cmd.index("--permission-mode") + 1] == "auto"
+    assert "--always-approve" in cmd
+    assert "--allow" in cmd
+    assert cmd[cmd.index("--allow") + 1] == "*"
+
+
+def test_grok_reviewer_command_and_permissions():
+    profile = PROFILES["grok"]
+    prompt = "Review commit abc123"
+    cwd = "C:/fake/worktree"
+    cmd, stdin = profile.build_invocation("REVIEWER", cwd, prompt)
+
+    assert stdin is None
+    assert "--no-auto-update" in cmd
+    assert "-p" in cmd
+    p_idx = cmd.index("-p")
+    assert cmd[p_idx + 1] == prompt
+    assert cmd[p_idx + 1] != "-"
+    assert "--permission-mode" in cmd
+    assert cmd[cmd.index("--permission-mode") + 1] == "auto"
+    assert "--deny" in cmd
+    assert cmd[cmd.index("--deny") + 1] == "Edit,Write"
+    assert "--always-approve" not in cmd
+
+
+def test_grok_model_override():
+    profile = PROFILES["grok"]
+    cmd = profile.command("BUILDER", "C:/fake", prompt="test", model="grok-beta")
+    assert "-m" in cmd
+    assert cmd[cmd.index("-m") + 1] == "grok-beta"
+
+
+def test_codex_and_claude_stdin_prompt_transport():
+    codex = PROFILES["codex"]
+    claude = PROFILES["claude"]
+    assert codex.prompt_transport == "stdin"
+    assert claude.prompt_transport == "stdin"
+
+    cmd, stdin = codex.build_invocation("BUILDER", "C:/fake", "do codex task")
+    assert stdin == "do codex task"
+    assert cmd[-1] == "-"
+
+    cmd, stdin = claude.build_invocation("BUILDER", "C:/fake", "do claude task")
+    assert stdin == "do claude task"
+    assert "-p" in cmd
+
+
+def test_grok_reviewer_verdict_parsing():
+    from build_coordinator.agents.wrapper import parse_verdict
+    grok_output = """
+I have completed the review of commit 4220f3b224a6.
+Here is the structured assessment:
+
+```json
+{
+  "verdict": "GREEN",
+  "findings": [],
+  "required_remediation": [],
+  "architecture_notes": ["Good separation of concerns"],
+  "ready_for_integration": true
+}
+```
+
+Everything looks solid.
+"""
+    parsed = parse_verdict(grok_output)
+    assert parsed is not None
+    assert parsed["verdict"] == "GREEN"
+    assert parsed["ready_for_integration"] is True
+    assert parsed["architecture_notes"] == ["Good separation of concerns"]
 
 
 # 4. Provider-neutral candidate generation
