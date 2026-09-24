@@ -55,6 +55,7 @@ from build_coordinator.types import (
 
 @pytest.fixture(autouse=True)
 def clean_build_coordinator():
+    engine.dispose()
     Base.metadata.drop_all(bind=engine)
     initialize_schema()
     with SessionLocal() as session:
@@ -73,6 +74,7 @@ def clean_build_coordinator():
             session.execute(delete(model))
         session.commit()
     yield
+    engine.dispose()
 
 
 def _child(task_id, *, parent=None, dependencies=(), risk="MEDIUM", reason="OBJECTIVE_PLAN"):
