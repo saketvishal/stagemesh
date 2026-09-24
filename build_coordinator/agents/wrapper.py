@@ -129,6 +129,18 @@ def _bullets(items: Any) -> str:
     return "\n".join(f"  - {item}" for item in (items or [])) or "  (none)"
 
 
+def _finding_bullets(entries: Any) -> str:
+    lines = []
+    for entry in entries or ():
+        if not isinstance(entry, dict):
+            continue
+        lines.append(
+            f"  - id={entry.get('id')} attempts={entry.get('attempts')} "
+            f"first_seen={entry.get('first_seen_cycle')}: {entry.get('description')}"
+        )
+    return "\n".join(lines) or "  (none)"
+
+
 def render_prompt(role: str, raw: str, *, base_ref: str, reviewed_sha: str | None) -> str:
     try:
         payload = json.loads(raw)
@@ -136,6 +148,7 @@ def render_prompt(role: str, raw: str, *, base_ref: str, reviewed_sha: str | Non
         return raw
     definition = payload.get("task_definition") or {}
     envelope = payload.get("task_envelope") or {}
+    resume_context = payload.get("resume_context") or {}
     title = definition.get("title") or envelope.get("title") or ""
     head = (
         f"TASK {definition.get('task_id') or envelope.get('task_id')}: {title}\n\n"
@@ -149,6 +162,18 @@ def render_prompt(role: str, raw: str, *, base_ref: str, reviewed_sha: str | Non
     validation = definition.get("required_validation") or []
 
     if role == "REVIEWER":
+        prior_findings = resume_context.get("open_findings_from_prior_review") or []
+        disposition_section = ""
+        if prior_findings:
+            disposition_section = (
+                "\nThese findings from prior review cycles are still tracked as open on this task:\n"
+                f"{_finding_bullets(prior_findings)}\n"
+                "For EVERY one of those ids, include an entry in `finding_dispositions` classifying it as "
+                "RESOLVED, STILL_OPEN, INVALID, or NOT_APPLICABLE, with a `reason` when you change its prior "
+                "status (for example when marking it RESOLVED, or when reopening one you previously closed). "
+                "Do not silently drop an id -- an id missing from `finding_dispositions` and not restated in "
+                "`findings` is treated as resolved.\n"
+            )
         return (
             "You are an independent code reviewer. You did not write this change and you must not modify anything.\n\n"
             + head
@@ -157,8 +182,10 @@ def render_prompt(role: str, raw: str, *, base_ref: str, reviewed_sha: str | Non
             "objective and every acceptance criterion; look for correctness bugs, missing requirements, missing or weak "
             "tests, scope creep, security problems and unrelated changes.\n"
             + (f"\nStageMesh separately runs these validation commands, so you need not:\n{_bullets(validation)}\n" if validation else "")
+            + disposition_section
             + "\nEnd your reply with ONE fenced ```json block, exactly this shape:\n"
             '{"verdict": "GREEN" | "GREEN_WITH_NOTES" | "REMEDIATION_REQUIRED" | "REVIEW_ENVIRONMENT_BLOCKED", "findings": [...], '
+            '"finding_dispositions": [{"id": "...", "status": "RESOLVED"|"STILL_OPEN"|"INVALID"|"NOT_APPLICABLE", "reason": "..."}, ...], '
             '"required_remediation": [...], "architecture_notes": [...], "ready_for_integration": true|false}\n'
             "Rules: GREEN / GREEN_WITH_NOTES need ready_for_integration=true and an empty required_remediation; "
             "REMEDIATION_REQUIRED needs ready_for_integration=false and concrete required_remediation items; "
@@ -166,6 +193,7 @@ def render_prompt(role: str, raw: str, *, base_ref: str, reviewed_sha: str | Non
             "Do not request source-code remediation for review environment or tooling failures. Do not approve work you could not verify.\n"
         )
 
+    open_findings = resume_context.get("open_findings") or []
     prior = []
     for label, key in (
         ("Failures from earlier attempts (validation output / review findings)", "known_failures"),
@@ -176,6 +204,8 @@ def render_prompt(role: str, raw: str, *, base_ref: str, reviewed_sha: str | Non
         values = envelope.get(key) or []
         if values:
             prior.append(f"{label}:\n{_bullets(values)}")
+    if open_findings:
+        prior.append(f"Open findings to remediate (do not re-fix already-resolved findings):\n{_finding_bullets(open_findings)}")
     resume = ("\nThis is a continuation of earlier work on this branch.\n" + "\n".join(prior) + "\n") if prior else ""
     return (
         "You are a senior software engineer working autonomously in an isolated git worktree (the current directory).\n\n"
@@ -362,6 +392,9 @@ def main(argv: list[str] | None = None) -> int:
                 "reviewed_feature_sha": reviewed,
                 "verdict": str(verdict["verdict"]).upper(),
                 "findings": list(verdict.get("findings") or []),
+                "finding_dispositions": [
+                    item for item in (verdict.get("finding_dispositions") or []) if isinstance(item, dict)
+                ],
                 "required_remediation": list(verdict.get("required_remediation") or []),
                 "architecture_notes": list(verdict.get("architecture_notes") or []),
                 "ready_for_integration": bool(verdict.get("ready_for_integration")),

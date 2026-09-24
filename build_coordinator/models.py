@@ -120,6 +120,10 @@ class BuildTask(Base):
     ownership_scope: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     state: Mapped[str] = mapped_column(String(24), nullable=False, default="READY")
     waiting_input: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    # Durable, content-fingerprinted registry of reviewer findings across
+    # review/remediation cycles (see build_coordinator.runner.findings). Lets
+    # convergence decisions be finding-aware instead of raw-cycle-count-aware.
+    finding_registry: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     branch_name: Mapped[str | None] = mapped_column(String(240), nullable=True)
     worktree_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     current_claim_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
