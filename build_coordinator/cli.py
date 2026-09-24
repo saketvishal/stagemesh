@@ -199,6 +199,10 @@ def _add_transition_commands(sub) -> None:
     answer.add_argument("task_id")
     answer.add_argument("--response", required=True)
 
+    recover_rev = sub.add_parser("recover-review-environment")
+    recover_rev.add_argument("task_id")
+    recover_rev.add_argument("--reason", default="operator recovery: review environment failure")
+
 
 def _add_objective_commands(sub) -> None:
     """`objective` is the operator-facing surface: create/run/status work
@@ -303,6 +307,7 @@ def _run(args: argparse.Namespace, session) -> None:
         "recover-expired": _recover_expired,
         "request-input": _request_input,
         "provide-input": _provide_input,
+        "recover-review-environment": _recover_review_environment,
         "run": _runner,
     }
     handlers[args.command](args, session)
@@ -382,6 +387,20 @@ def _objective_create_goal(args: argparse.Namespace, session) -> None:
     )
     objective = create_objective(session, spec)
     _print(_objective_summary(session, objective))
+
+
+def _latest_block_reason(session, task_id: str) -> str | None:
+    event = session.scalar(
+        select(BuildTaskEvent)
+        .where(BuildTaskEvent.task_id == task_id)
+        .where(BuildTaskEvent.event_type == "task.transitioned")
+        .where(BuildTaskEvent.to_state == "BLOCKED")
+        .order_by(BuildTaskEvent.created_at.desc())
+        .limit(1)
+    )
+    if event is None:
+        return None
+    return (event.event_data or {}).get("reason")
 
 
 def _objective_summary(session, objective: BuildObjective) -> dict:
@@ -503,6 +522,14 @@ def _status(args: argparse.Namespace, session) -> None:
             ],
             "last_event": events.event_type if events else None,
             "objectives": [_objective_summary(session, objective) for objective in list_objectives(session)],
+            "blocked_tasks": [
+                {
+                    "task_id": t.task_id,
+                    "reason": _latest_block_reason(session, t.task_id),
+                }
+                for t in tasks
+                if t.state == "BLOCKED"
+            ],
         }
     )
 
@@ -643,6 +670,17 @@ def _request_input(args: argparse.Namespace, session) -> None:
 def _provide_input(args: argparse.Namespace, session) -> None:
     task = provide_task_input(session, args.task_id, args.response, actor="cli")
     _print({"task_id": task.task_id, "state": task.state, "waiting_input": task.waiting_input})
+
+
+def _recover_review_environment(args: argparse.Namespace, session) -> None:
+    from build_coordinator.service import recover_review_environment_blocked
+
+    task = recover_review_environment_blocked(
+        session,
+        args.task_id,
+        reason=args.reason,
+    )
+    _print({"task_id": task.task_id, "state": task.state, "recovered": True})
 
 
 def _runner(args: argparse.Namespace, session) -> None:

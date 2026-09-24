@@ -33,6 +33,7 @@ from build_coordinator.models import (
     BuildRunnerExecution,
     BuildTask,
     BuildTaskCheckpoint,
+    BuildTaskClaim,
     BuildTaskEvent,
     new_uuid,
 )
@@ -71,6 +72,7 @@ from build_coordinator.runner.models import (
     WorkerConfig,
 )
 from build_coordinator.runner.routing import (
+    _naive,
     ProviderConfig,
     RETRYABLE_PROVIDER_FAILURES,
     RoutingDecision,
@@ -759,6 +761,41 @@ class BuildRunner:
                 reason="structured review requires remediation",
             )
             return
+        if verdict.verdict == "REVIEW_ENVIRONMENT_BLOCKED":
+            release_active_claims(session, execution.task_id, completed=False)
+            task = session.get(BuildTask, execution.task_id)
+            if task is not None:
+                task.current_claim_id = None
+                task.lease_expires_at = None
+                task.last_heartbeat_at = None
+            record_event(
+                session,
+                EventInput(
+                    task_id=execution.task_id,
+                    event_type="runner.review_environment_blocked",
+                    actor="runner",
+                    event_data={
+                        "reviewer": execution.worker_id,
+                        "reviewed_feature_sha": execution.reviewed_feature_sha,
+                        "verdict": verdict.verdict,
+                        "findings": list(verdict.findings),
+                        "architecture_notes": list(verdict.architecture_notes),
+                    },
+                ),
+            )
+            attempts = self._review_environment_attempts(session, execution.task_id)
+            if attempts >= self._config.max_review_environment_attempts:
+                result.escalations.append(f"{execution.task_id}:REVIEW_ENVIRONMENT_BLOCKED")
+                self._block_task(session, execution.task_id, "REVIEW_ENVIRONMENT_BLOCKED")
+                return
+            transition_task(
+                session,
+                execution.task_id,
+                "REVIEW_READY",
+                actor="runner",
+                reason=f"review environment blocked on {execution.worker_id}; retrying review",
+            )
+            return
         result.escalations.append(f"{execution.task_id}:COORDINATOR_INVARIANT_FAILURE")
         self._block_task(session, execution.task_id, "COORDINATOR_INVARIANT_FAILURE")
 
@@ -1137,7 +1174,10 @@ class BuildRunner:
             if not self._target_allows(task.task_id):
                 continue
             worker, availability, decision = self._select_worker(
-                "REVIEWER", task_id=task.task_id, session=session
+                "REVIEWER",
+                task_id=task.task_id,
+                session=session,
+                deprioritized_workers=self._environment_blocked_reviewers(session, task.task_id),
             )
             if availability == "slots_occupied":
                 result.capacity_full = True
@@ -1146,6 +1186,10 @@ class BuildRunner:
                 result.capacity_full = True
                 continue
             if worker is None:
+                if self._review_environment_attempts(session, task.task_id) > 0:
+                    result.escalations.append(f"{task.task_id}:REVIEW_ENVIRONMENT_BLOCKED")
+                    self._block_task(session, task.task_id, "REVIEW_ENVIRONMENT_BLOCKED")
+                    continue
                 result.escalations.append(f"{task.task_id}:EXTERNAL_EXECUTOR_CONFIGURATION_REQUIRED")
                 continue
             try:
@@ -1515,6 +1559,7 @@ class BuildRunner:
         *,
         task_id: str | None = None,
         session: Session | None = None,
+        deprioritized_workers: set[str] | None = None,
     ) -> tuple[WorkerConfig | None, str, RoutingDecision]:
         """Return (worker, availability, deterministic routing decision).
 
@@ -1540,6 +1585,7 @@ class BuildRunner:
             session=session,
             task_id=task_id,
             excluded_workers=reviewer_exclusions(session, task_id) if role == "REVIEWER" else set(),
+            deprioritized_workers=deprioritized_workers,
         )
         worker = next(
             (candidate for candidate in workers if candidate.worker_id == decision.selected_worker_id),
@@ -1573,6 +1619,7 @@ class BuildRunner:
             executor = SubprocessExecutor(
                 list(worker.command),
                 log_dir=self._log_dir(),
+                temp_dir=self._temp_dir(),
             )
         elif worker.adapter == "builtin-git":
             executor = self._git_integrator()
@@ -1606,6 +1653,7 @@ class BuildRunner:
             executor = SubprocessExecutor(
                 command,
                 log_dir=self._log_dir(),
+                temp_dir=self._temp_dir(),
                 result_paths={execution.execution_id: execution.result_path}
                 if execution.result_path
                 else {},
@@ -1710,13 +1758,68 @@ class BuildRunner:
         return live is not None
 
     def _review_cycles(self, session: Session, task_id: str) -> int:
-        return session.scalar(
-            select(func.count())
-            .select_from(BuildRunnerExecution)
+        rows = session.scalars(
+            select(BuildRunnerExecution)
             .where(BuildRunnerExecution.task_id == task_id)
             .where(BuildRunnerExecution.role == "REVIEWER")
             .where(BuildRunnerExecution.status.in_(("LAUNCHED", "RUNNING", "SUCCEEDED")))
-        ) or 0
+        ).all()
+        count = 0
+        for row in rows:
+            data = row.result_data or {}
+            review = data.get("review") if isinstance(data.get("review"), dict) else data
+            if str(review.get("verdict", "")).upper() == "REVIEW_ENVIRONMENT_BLOCKED":
+                continue
+            count += 1
+        return count
+
+    def _review_environment_attempts(self, session: Session, task_id: str) -> int:
+        since = session.scalar(
+            select(BuildTaskClaim.claimed_at)
+            .where(BuildTaskClaim.task_id == task_id)
+            .where(BuildTaskClaim.claim_type.in_(("IMPLEMENTATION", "REMEDIATION")))
+            .order_by(BuildTaskClaim.claimed_at.desc())
+            .limit(1)
+        )
+        rows = session.scalars(
+            select(BuildRunnerExecution)
+            .where(BuildRunnerExecution.task_id == task_id)
+            .where(BuildRunnerExecution.role == "REVIEWER")
+            .where(BuildRunnerExecution.status == "SUCCEEDED")
+        ).all()
+        count = 0
+        for row in rows:
+            if since is not None and row.launched_at is not None and _naive(row.launched_at) < _naive(since):
+                continue
+            data = row.result_data or {}
+            review = data.get("review") if isinstance(data.get("review"), dict) else data
+            if str(review.get("verdict", "")).upper() == "REVIEW_ENVIRONMENT_BLOCKED":
+                count += 1
+        return count
+
+    def _environment_blocked_reviewers(self, session: Session, task_id: str) -> set[str]:
+        since = session.scalar(
+            select(BuildTaskClaim.claimed_at)
+            .where(BuildTaskClaim.task_id == task_id)
+            .where(BuildTaskClaim.claim_type.in_(("IMPLEMENTATION", "REMEDIATION")))
+            .order_by(BuildTaskClaim.claimed_at.desc())
+            .limit(1)
+        )
+        rows = session.scalars(
+            select(BuildRunnerExecution)
+            .where(BuildRunnerExecution.task_id == task_id)
+            .where(BuildRunnerExecution.role == "REVIEWER")
+            .where(BuildRunnerExecution.status == "SUCCEEDED")
+        ).all()
+        blocked: set[str] = set()
+        for row in rows:
+            if since is not None and row.launched_at is not None and _naive(row.launched_at) < _naive(since):
+                continue
+            data = row.result_data or {}
+            review = data.get("review") if isinstance(data.get("review"), dict) else data
+            if str(review.get("verdict", "")).upper() == "REVIEW_ENVIRONMENT_BLOCKED":
+                blocked.add(row.worker_id)
+        return blocked
 
     def _latest_block_reason(self, session: Session, task_id: str) -> str | None:
         event = session.scalar(
@@ -1797,6 +1900,11 @@ class BuildRunner:
                 continue
             self._request_rereview(session, task.task_id, result, reason="REVIEWED_SHA_CHANGED")
 
+
+    def _temp_dir(self) -> Path:
+        path = Path(self._settings.data_dir) / "tmp"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
 
     def _result_dir(self) -> Path:
         if self._config.result_dir:
