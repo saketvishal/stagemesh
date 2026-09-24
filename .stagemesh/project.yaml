@@ -16,9 +16,12 @@ execution:
   reviewers: 2                 # TWO_REVIEWERS tasks need two distinct reviewers
   default_review_policy: INDEPENDENT
 
-# Agents come from the machine's verified runtimes (`stagemesh agent setup`).
-# Integration is local (no upstream) unless `upstream:` is configured.
+upstream:
+  remote: origin
+  push: true
+
 task_sources:
   github:
     enabled: true
     repo: saketvishal/stagemesh
+
