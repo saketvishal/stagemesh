@@ -56,6 +56,7 @@ class ProjectDefinition:
     upstream_remote: str | None = None
     push_upstream: bool = False
     validation_timeout_seconds: float = 900.0
+    setup_commands: tuple[str, ...] = ()
     external_ci_enabled: bool = False
     external_ci_repo: str | None = None
     external_ci_max_consecutive_errors: int = 5
@@ -96,6 +97,7 @@ class ProjectDefinition:
             "main_ref": self.main_ref,
             "upstream": {"remote": self.upstream_remote, "push": self.push_upstream},
             "worker_templates": sorted(self.worker_templates),
+            "setup_commands": list(self.setup_commands),
             "task_sources": sorted(self.task_sources),
         }
 
@@ -213,6 +215,14 @@ def load_project(root: str | Path) -> ProjectDefinition:
         problems.append("`execution.validation_timeout_seconds` must be a positive number")
         timeout = 900
 
+    raw_setup = execution.get("setup")
+    setup_commands: tuple[str, ...] = ()
+    if raw_setup is not None:
+        if not isinstance(raw_setup, list) or not all(isinstance(item, str) and item.strip() for item in raw_setup):
+            problems.append("`execution.setup` must be a list of non-empty command strings")
+        else:
+            setup_commands = tuple(item.strip() for item in raw_setup)
+
     external_ci = execution.get("external_ci") or {}
     if not isinstance(external_ci, dict):
         problems.append("`execution.external_ci` must be a mapping")
@@ -290,6 +300,7 @@ def load_project(root: str | Path) -> ProjectDefinition:
         upstream_remote=upstream_remote,
         push_upstream=push_upstream,
         validation_timeout_seconds=float(timeout),
+        setup_commands=setup_commands,
         external_ci_enabled=external_ci_enabled,
         external_ci_repo=external_ci_repo,
         external_ci_max_consecutive_errors=int(external_ci_max_errors),
