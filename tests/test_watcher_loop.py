@@ -90,7 +90,7 @@ def _init_repo(path) -> None:
 
     subprocess.run(
 
-        ["git", "-C", str(path), "remote", "add", "origin", "https://github.com/saketvishal/caventra-orchestrator.git"],
+        ["git", "-C", str(path), "remote", "add", "origin", "https://github.com/saketvishal/stagemesh-orchestrator.git"],
 
         check=True,
 
@@ -122,7 +122,7 @@ def authorized_repo(tmp_path, monkeypatch):
 
                     {
 
-                        "slug": "caventra-orchestrator",
+                        "slug": "stagemesh-orchestrator",
 
                         "control_repo_root": str(repo_root),
 
@@ -142,7 +142,7 @@ def authorized_repo(tmp_path, monkeypatch):
 
     monkeypatch.setenv("BUILD_COORDINATOR_CONFIG", str(config_path))
 
-    return auth.authorize("caventra-orchestrator")
+    return auth.authorize("stagemesh-orchestrator")
 
 
 
@@ -194,7 +194,7 @@ def test_run_foreground_cycle_delegates_to_build_runner(authorized_repo):
 
         SessionLocal,
 
-        repository_slug="caventra-orchestrator",
+        repository_slug="stagemesh-orchestrator",
 
         logger=logger,
 
@@ -262,7 +262,7 @@ def test_run_foreground_cycle_does_not_duplicate_after_simulated_restart(authori
 
         SessionLocal,
 
-        repository_slug="caventra-orchestrator",
+        repository_slug="stagemesh-orchestrator",
 
         logger=logger,
 
@@ -312,7 +312,7 @@ def test_run_foreground_cycle_does_not_duplicate_after_simulated_restart(authori
 
         SessionLocal,
 
-        repository_slug="caventra-orchestrator",
+        repository_slug="stagemesh-orchestrator",
 
         logger=logger,
 
@@ -370,13 +370,13 @@ def test_repeated_watcher_cycles_ingest_github_issue_without_self_locking(author
 
             body="Acceptance test issue",
 
-            labels=("caventra:objective",),
+            labels=("build:objective",),
 
             author="saketvishal",
 
             state="OPEN",
 
-            html_url="https://github.com/saketvishal/caventra-orchestrator/issues/6",
+            html_url="https://github.com/saketvishal/stagemesh-orchestrator/issues/6",
 
         )
 
@@ -396,7 +396,7 @@ def test_repeated_watcher_cycles_ingest_github_issue_without_self_locking(author
 
         SessionLocal,
 
-        repository_slug="caventra-orchestrator",
+        repository_slug="stagemesh-orchestrator",
 
         logger=logger,
 
@@ -416,7 +416,7 @@ def test_repeated_watcher_cycles_ingest_github_issue_without_self_locking(author
 
         SessionLocal,
 
-        repository_slug="caventra-orchestrator",
+        repository_slug="stagemesh-orchestrator",
 
         logger=logger,
 
@@ -434,7 +434,7 @@ def test_repeated_watcher_cycles_ingest_github_issue_without_self_locking(author
 
     with SessionLocal() as session:
 
-        objective = session.get(BuildObjective, "GH-caventra-orchestrator-6")
+        objective = session.get(BuildObjective, "GH-stagemesh-orchestrator-6")
 
         assert objective is not None
 
@@ -468,13 +468,13 @@ def test_stale_lock_recovery_runs_github_ingestion(authorized_repo, tmp_path, mo
 
             body="Acceptance test issue",
 
-            labels=("caventra:objective",),
+            labels=("build:objective",),
 
             author="saketvishal",
 
             state="OPEN",
 
-            html_url="https://github.com/saketvishal/caventra-orchestrator/issues/6",
+            html_url="https://github.com/saketvishal/stagemesh-orchestrator/issues/6",
 
         )
 
@@ -494,7 +494,7 @@ def test_stale_lock_recovery_runs_github_ingestion(authorized_repo, tmp_path, mo
 
         SessionLocal,
 
-        repository_slug="caventra-orchestrator",
+        repository_slug="stagemesh-orchestrator",
 
         logger=logger,
 
@@ -528,7 +528,7 @@ def test_stale_lock_recovery_runs_github_ingestion(authorized_repo, tmp_path, mo
 
         SessionLocal,
 
-        repository_slug="caventra-orchestrator",
+        repository_slug="stagemesh-orchestrator",
 
         logger=logger,
 
@@ -546,7 +546,7 @@ def test_stale_lock_recovery_runs_github_ingestion(authorized_repo, tmp_path, mo
 
     with SessionLocal() as session:
 
-        objective = session.get(BuildObjective, "GH-caventra-orchestrator-6")
+        objective = session.get(BuildObjective, "GH-stagemesh-orchestrator-6")
 
         record = session.get(BuildWatcherRecord, first.task_name)
 
