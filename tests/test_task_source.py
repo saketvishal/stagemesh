@@ -7,6 +7,7 @@ from pathlib import Path
 
 from build_coordinator.db import Base, SessionLocal, engine, initialize_schema
 from build_coordinator.models import BuildObjective, BuildTask
+from build_coordinator.planner import planner_task_id
 from build_coordinator.task_source.base import TaskSourceConfig
 from build_coordinator.task_source.github import GitHubTaskSource
 
@@ -95,6 +96,10 @@ def test_github_task_source_syncs_objective():
         obj = session.get(BuildObjective, "GH-201")
         assert obj is not None
         assert "High-level Migration Objective" in obj.goal
+        assert session.get(BuildTask, "GH-201") is None
+        planner = session.get(BuildTask, planner_task_id("GH-201"))
+        assert planner is not None
+        assert planner.objective_id == "GH-201"
 
 
 def test_github_task_source_sync_outbound():

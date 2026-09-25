@@ -22,7 +22,7 @@ from build_coordinator.models import (
     BuildTask,
     BuildTaskEvent,
 )
-from build_coordinator.objectives import create_objective
+from build_coordinator.objectives import create_objective, get_planner_task
 from build_coordinator.service import upsert_task
 from build_coordinator.task_source.base import SyncResult, TaskSource
 from build_coordinator.types import EventInput, ObjectiveSpec, TaskSpec
@@ -174,7 +174,18 @@ class GitHubTaskSource(TaskSource):
         deps = self._parse_dependencies(body)
 
         if is_objective:
-            self._sync_objective(session, task_id, title, body, ac, url)
+            was_current = self._objective_sync_is_current(session, task_id, title, body, ac, deps)
+            existed = session.get(BuildObjective, task_id) is not None
+            self._sync_objective(session, task_id, title, body, ac, deps, url)
+            if not self._objective_direct_execution_enabled(labels, body):
+                action = "SKIPPED" if was_current else ("UPDATED" if existed else "CREATED")
+                return SyncResult(
+                    task_id=task_id,
+                    title=title,
+                    action=action,
+                    source_ref=url,
+                    details="Synced from GitHub issue as authoritative objective; no root implementation task created",
+                )
 
         return self._sync_task(
             session,
@@ -187,6 +198,13 @@ class GitHubTaskSource(TaskSource):
             url,
             objective_id=task_id if is_objective else None,
         )
+
+    @staticmethod
+    def _objective_direct_execution_enabled(labels: list[str], body: str) -> bool:
+        explicit_labels = {"stagemesh:direct-execution", "objective:direct-execution"}
+        if any(label.strip().lower() in explicit_labels for label in labels):
+            return True
+        return re.search(r"<!--\s*objective_direct_execution:\s*true\s*-->", body, re.IGNORECASE) is not None
 
     def _sync_task(
         self,
@@ -329,28 +347,97 @@ class GitHubTaskSource(TaskSource):
         title: str,
         body: str,
         ac: list[str],
+        deps: list[str],
         url: str,
     ) -> BuildObjective:
         existing = session.get(BuildObjective, objective_id)
         if existing is not None:
+            historical_task = session.get(BuildTask, objective_id)
+            authoritative_deps = list(deps)
+            if not authoritative_deps and historical_task is not None and historical_task.dependencies:
+                authoritative_deps = list(historical_task.dependencies)
+            existing.goal = f"{title}: {body[:500]}"
+            existing.completion_criteria = list(ac) if ac else []
+            existing.dependencies = authoritative_deps
+            self._reconcile_historical_objective_task(session, existing, authoritative_deps, url)
+            planner = get_planner_task(session, objective_id)
+            if planner is not None:
+                planner.dependencies = authoritative_deps
             return existing
-        obj = BuildObjective(
-            objective_id=objective_id,
-            goal=f"{title}: {body[:500]}",
-            completion_criteria=list(ac) if ac else [],
-            state="PLANNING",
+        obj = create_objective(
+            session,
+            ObjectiveSpec(
+                objective_id=objective_id,
+                goal=f"{title}: {body[:500]}",
+                completion_criteria=tuple(ac) if ac else (),
+                dependencies=tuple(deps),
+            ),
         )
-        session.add(obj)
         session.add(
             BuildObjectiveEvent(
                 objective_id=objective_id,
                 event_type="objective.synced_from_source",
                 actor="github-sync",
-                event_data={"source": url, "title": title},
+                event_data={"source": url, "title": title, "dependencies": list(deps)},
             )
         )
+        planner = get_planner_task(session, objective_id)
+        if planner is not None:
+            planner.dependencies = list(deps)
         session.flush()
         return obj
+
+    def _objective_sync_is_current(
+        self,
+        session,
+        objective_id: str,
+        title: str,
+        body: str,
+        ac: list[str],
+        deps: list[str],
+    ) -> bool:
+        obj = session.get(BuildObjective, objective_id)
+        if obj is None:
+            return False
+        return (
+            obj.goal == f"{title}: {body[:500]}"
+            and obj.completion_criteria == (list(ac) if ac else [])
+            and obj.dependencies == list(deps)
+        )
+
+    def _reconcile_historical_objective_task(
+        self,
+        session,
+        objective: BuildObjective,
+        deps: list[str],
+        url: str,
+    ) -> None:
+        task = session.get(BuildTask, objective.objective_id)
+        if task is None:
+            return
+        if not objective.dependencies and task.dependencies:
+            objective.dependencies = list(task.dependencies)
+        if task.reason_created == "OBJECTIVE_ROOT_COMPAT":
+            task.dependencies = list(deps)
+            return
+        task.reason_created = "OBJECTIVE_ROOT_COMPAT"
+        task.objective_id = objective.objective_id
+        task.dependencies = list(deps)
+        if task.state in {"READY", "RESUMABLE", "STALE"}:
+            task.state = "STALE"
+        session.add(
+            BuildObjectiveEvent(
+                objective_id=objective.objective_id,
+                event_type="objective.historical_root_task_reconciled",
+                actor="github-sync",
+                event_data={
+                    "task_id": task.task_id,
+                    "task_state": task.state,
+                    "dependencies": list(task.dependencies),
+                    "source": url,
+                },
+            )
+        )
 
     def _parse_acceptance_criteria(self, body: str) -> list[str]:
         ac: list[str] = []
