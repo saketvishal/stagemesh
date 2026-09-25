@@ -37,6 +37,7 @@ from build_coordinator.policy import CoordinatorPolicyError
 from build_coordinator.service import upsert_task, utcnow
 from build_coordinator.planner import planner_task_id
 from build_coordinator.types import (
+    OBJECTIVE_ROOT_COMPAT_REASON,
     PLANNER_TASK_REASON,
     FindingSpec,
     ObjectivePlan,
@@ -163,8 +164,19 @@ def is_planner_task(task: BuildTask) -> bool:
     return task.reason_created == PLANNER_TASK_REASON
 
 
+def is_objective_root_compat_task(task: BuildTask) -> bool:
+    """A quarantined historical dual-record root task, kept for audit
+    history but never claimable and never part of the objective's work
+    set for completion or resume decisions."""
+    return task.reason_created == OBJECTIVE_ROOT_COMPAT_REASON
+
+
 def objective_work_tasks(session: Session, objective_id: str) -> list[BuildTask]:
-    return [task for task in objective_tasks(session, objective_id) if not is_planner_task(task)]
+    return [
+        task
+        for task in objective_tasks(session, objective_id)
+        if not is_planner_task(task) and not is_objective_root_compat_task(task)
+    ]
 
 
 def get_planner_task(session: Session, objective_id: str) -> BuildTask | None:
@@ -949,7 +961,11 @@ def _reassess_completion(
         objective.state = "HUMAN_GATE"
         return
 
-    tasks = [task for task in task_by_id.values() if not is_planner_task(task)]
+    tasks = [
+        task
+        for task in task_by_id.values()
+        if not is_planner_task(task) and not is_objective_root_compat_task(task)
+    ]
     if not tasks:
         return  # PLANNING with no applied plan yet -- nothing to reassess
 

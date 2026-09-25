@@ -73,18 +73,18 @@ class DatabaseLifecycle:
         tables = set(inspector.get_table_names())
         if not tables:
             return
-        if SCHEMA_VERSION_TABLE not in tables:
-            coordinator_tables = {
-                table.name for table in Base.metadata.sorted_tables if table.name in tables
-            }
-            if coordinator_tables:
-                raise DatabaseSchemaError(
-                    "Build Coordinator database has coordinator tables but no "
-                    f"{SCHEMA_VERSION_TABLE} metadata. It may be from an older "
-                    "incompatible coordinator version. Refusing to operate without "
-                    "an explicit migration or intentional disposable DB recreation."
-                )
+        coordinator_tables = {
+            table.name for table in Base.metadata.sorted_tables if table.name in tables
+        }
+        if not coordinator_tables:
             return
+        if SCHEMA_VERSION_TABLE not in tables:
+            raise DatabaseSchemaError(
+                "Build Coordinator database has coordinator tables but no "
+                f"{SCHEMA_VERSION_TABLE} metadata. It may be from an older "
+                "incompatible coordinator version. Refusing to operate without "
+                "an explicit migration or intentional disposable DB recreation."
+            )
         with self.engine.connect() as connection:
             version = connection.execute(
                 text(

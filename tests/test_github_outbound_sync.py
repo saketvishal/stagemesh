@@ -42,9 +42,12 @@ from build_coordinator.models import (
     BuildTaskEvent,
 )
 from build_coordinator.runner.models import RunnerConfig, WorkerConfig
+from build_coordinator.objectives import apply_validated_plan, reconcile_objective
+from build_coordinator.planner import planner_task_id
 from build_coordinator.runner.orchestrator import BuildRunner
+from build_coordinator.service import upsert_task
 from build_coordinator.task_source.github import GitHubTaskSource
-from build_coordinator.types import EventInput
+from build_coordinator.types import EventInput, ObjectivePlan, PlannedChildTask, TaskSpec
 
 
 class MockGitHubClient:
@@ -506,16 +509,41 @@ def test_13_objective_task_done_does_not_prematurely_close_objective_issue():
         source.discover_tasks(session)
         session.commit()
 
-    # Both BuildObjective and BuildTask exist for GH-42
+    # A BuildObjective exists for GH-42, but no ordinary root BuildTask with
+    # the same id is created -- an objective issue must not be claimable as
+    # an implementation task.
     with SessionLocal() as session:
         obj = session.get(BuildObjective, "GH-42")
-        task = session.get(BuildTask, "GH-42")
         assert obj is not None
         assert obj.state == "PLANNING"
-        assert task is not None
+        assert session.get(BuildTask, "GH-42") is None
 
-        # Simulate planner / root task reaching DONE, but objective is still ACTIVE
-        task.state = "DONE"
+        # Simulate one bounded child task (carrying objective ownership)
+        # reaching DONE while a sibling child is still outstanding, so the
+        # objective as a whole is not authoritatively complete.
+        upsert_task(
+            session,
+            TaskSpec(
+                task_id="GH-42-A",
+                title="Child task A",
+                description="bounded child work",
+                acceptance_criteria=["done"],
+            ),
+        )
+        upsert_task(
+            session,
+            TaskSpec(
+                task_id="GH-42-B",
+                title="Child task B",
+                description="bounded child work still outstanding",
+                acceptance_criteria=["done"],
+            ),
+        )
+        child_a = session.get(BuildTask, "GH-42-A")
+        child_a.objective_id = "GH-42"
+        child_a.state = "DONE"
+        child_b = session.get(BuildTask, "GH-42-B")
+        child_b.objective_id = "GH-42"
         obj.state = "ACTIVE"
         session.commit()
 
@@ -572,6 +600,100 @@ def test_14_completed_objective_does_close_objective_issue():
             )
         ).all()
         assert len(events) == 1
+
+
+def test_14b_planned_child_completion_reaches_objective_completed_and_closes_issue():
+    """A GitHub objective's planner-produced child task carries objective
+    ownership; when it reaches DONE and satisfies the authoritative
+    completion criteria, the BuildObjective (not the child task) is what
+    closes the source issue -- and the GH-75 dependency gate must already
+    have cleared before planning could begin."""
+    client = MockGitHubClient(
+        [
+            {
+                "number": 75,
+                "title": "Prerequisite work",
+                "body": "Ordinary implementation issue.",
+                "labels": [],
+                "url": "https://github.com/example/repo/issues/75",
+            },
+            {
+                "number": 71,
+                "title": "Broad architecture/modularity + validation program",
+                "body": "## Objective\nBroad program.\n\nDepends on: GH-75",
+                "labels": [{"name": "objective"}],
+                "url": "https://github.com/example/repo/issues/71",
+            },
+        ]
+    )
+    source = GitHubTaskSource(repo="example/repo", client=client)
+
+    with SessionLocal() as session:
+        source.discover_tasks(session)
+        session.commit()
+
+    with SessionLocal() as session:
+        objective = session.get(BuildObjective, "GH-71")
+        assert objective.dependencies == ["GH-75"]
+        # Still blocked: GH-75 is not authoritatively DONE yet.
+        planner = session.get(BuildTask, planner_task_id("GH-71"))
+        from build_coordinator.claims import task_is_claimable, utcnow
+
+        assert task_is_claimable(session, planner, utcnow()) is False
+
+        for state in ("CLAIMED", "IN_PROGRESS", "VALIDATING", "DONE"):
+            reason = "completed" if state == "DONE" else None
+            kwargs = {"reason": reason} if reason else {}
+            from build_coordinator.service import transition_task
+
+            transition_task(session, "GH-75", state, actor="builder", **kwargs)
+        session.commit()
+
+    with SessionLocal() as session:
+        objective = session.get(BuildObjective, "GH-71")
+        planner = session.get(BuildTask, planner_task_id("GH-71"))
+        from build_coordinator.claims import task_is_claimable, utcnow
+
+        assert task_is_claimable(session, planner, utcnow()) is True
+
+        # Planning/decomposition creates a bounded child task under the
+        # objective -- this is the ordinary path to executable work, never
+        # the root issue itself.
+        plan = ObjectivePlan(
+            tasks=(
+                PlannedChildTask(
+                    task_id="GH-71-A",
+                    title="Bounded module split",
+                    description="Split module A per plan",
+                    acceptance_criteria=("Module boundary documented",),
+                ),
+            ),
+            source="EXPLICIT_INPUT",
+        )
+        apply_validated_plan(session, objective, plan)
+        session.commit()
+
+    with SessionLocal() as session:
+        child = session.get(BuildTask, "GH-71-A")
+        assert child.objective_id == "GH-71"
+        child.state = "DONE"
+        session.commit()
+
+    with SessionLocal() as session:
+        objective = session.get(BuildObjective, "GH-71")
+        summary = reconcile_objective(session, objective)
+        session.commit()
+        assert summary.completed is True
+        assert session.get(BuildObjective, "GH-71").state == "COMPLETED"
+
+    config = RunnerConfig.default()
+    runner = BuildRunner(SessionLocal, config, task_source=source)
+    cycle = runner.run_once()
+
+    assert "GH-71" in cycle.outbound_synced
+    assert "71" in client.closed
+    objective_comment = next(c["body"] for c in client.comments if c["number"] == "71")
+    assert "### StageMesh Objective Completed: `COMPLETED`" in objective_comment
 
 
 def test_15_subprocess_gh_cli_error_handling_and_returncode_inspection(monkeypatch):
