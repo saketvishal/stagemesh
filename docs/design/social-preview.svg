@@ -1,0 +1,53 @@
+<svg width="1280" height="640" viewBox="0 0 1280 640" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0B0F1A"/>
+      <stop offset="100%" stop-color="#151B2E"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#5B8CFF"/>
+      <stop offset="100%" stop-color="#7CF5D4"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1280" height="640" fill="url(#bg)"/>
+
+  <!-- Stage-machine motif: a horizontal pipeline of discrete, connected stages -->
+  <g stroke="#3A4360" stroke-width="2">
+    <line x1="140" y1="470" x2="1140" y2="470"/>
+  </g>
+  <g>
+    <!-- Stage nodes: plan -> implement -> review -> integrate -->
+    <g transform="translate(140,430)">
+      <rect width="140" height="80" rx="12" fill="#1B2338" stroke="#3A4360" stroke-width="2"/>
+      <text x="70" y="46" font-family="Segoe UI, Arial, sans-serif" font-size="20" fill="#9FB0D9" text-anchor="middle">Plan</text>
+    </g>
+    <g transform="translate(380,430)">
+      <rect width="140" height="80" rx="12" fill="#1B2338" stroke="#5B8CFF" stroke-width="3"/>
+      <text x="70" y="46" font-family="Segoe UI, Arial, sans-serif" font-size="20" fill="#D7E1FF" text-anchor="middle">Implement</text>
+    </g>
+    <g transform="translate(620,430)">
+      <rect width="140" height="80" rx="12" fill="#1B2338" stroke="#7CF5D4" stroke-width="3"/>
+      <text x="70" y="46" font-family="Segoe UI, Arial, sans-serif" font-size="20" fill="#D6FFF3" text-anchor="middle">Review</text>
+    </g>
+    <g transform="translate(860,430)">
+      <rect width="140" height="80" rx="12" fill="#1B2338" stroke="#3A4360" stroke-width="2"/>
+      <text x="70" y="46" font-family="Segoe UI, Arial, sans-serif" font-size="20" fill="#9FB0D9" text-anchor="middle">Integrate</text>
+    </g>
+    <!-- connectors -->
+    <line x1="280" y1="470" x2="380" y2="470" stroke="url(#accent)" stroke-width="3"/>
+    <line x1="520" y1="470" x2="620" y2="470" stroke="url(#accent)" stroke-width="3"/>
+    <line x1="760" y1="470" x2="860" y2="470" stroke="#3A4360" stroke-width="3"/>
+  </g>
+
+  <!-- Wordmark -->
+  <text x="140" y="200" font-family="Segoe UI, Arial, sans-serif" font-size="88" font-weight="700" fill="#F4F7FF">StageMesh</text>
+
+  <!-- Tagline -->
+  <text x="140" y="260" font-family="Segoe UI, Arial, sans-serif" font-size="30" fill="#9FB0D9">
+    A control plane for multi-agent software engineering
+  </text>
+  <text x="140" y="300" font-family="Segoe UI, Arial, sans-serif" font-size="26" fill="#6C7BA3">
+    Durable stages · Independent review · Recovery
+  </text>
+</svg>
