@@ -85,6 +85,7 @@ def add_project_commands(sub: argparse._SubParsersAction) -> None:
     )
     common(migrate)
     migrate.add_argument("--apply", action="store_true", help="perform the migration (default: report only)")
+    migrate.add_argument("--all", action="store_true", dest="all_projects", help="inventory/migrate every registered project")
 
 
 def add_continue_command(sub: argparse._SubParsersAction) -> None:
@@ -140,8 +141,8 @@ def _open(project: ProjectDefinition):
         lifecycle.initialize_schema()
     except DatabaseSchemaError as exc:
         raise ProjectError(
-            f"{exc} Run `stagemesh project migrate-state {project.project_id}` to review an "
-            "explicit, backup-first migration of this project's durable history."
+            f"{exc} Run `stagemesh project migrate-state --all` to review an "
+            "explicit, backup-first migration of registered durable history."
         ) from exc
     return lifecycle
 
@@ -166,6 +167,9 @@ def handle_project(args: argparse.Namespace) -> None:
             pairs = dict(item.split("=", 1) for item in args.env)
             set_machine_environment(project.root, env=pairs, path_prepend=[str(Path(p).resolve()) for p in args.path_prepend])
         _print({"registered": project.summary(), "registry": str(registry_path()), "machine_environment": machine_environment(project.root)})
+        return
+    if command == "migrate-state" and args.all_projects:
+        _print(_migrate_registered_projects(apply=args.apply))
         return
     project = _project_from_args(args)
     if command == "show":
@@ -192,24 +196,7 @@ def handle_project(args: argparse.Namespace) -> None:
         from build_coordinator.config import get_settings
 
         db_path = sqlite_path_from_url(get_settings().database_url)
-        report = migrate_state(db_path, apply=args.apply)
-        if report.refused and "live execution" in report.refused:
-            # The old schema cannot be opened under the current models to run normal
-            # stale-execution recovery, and migration refuses while any execution row
-            # looks live. Reconcile directly against the old schema first, using the
-            # same durable claim-lease evidence the post-migration recovery path uses,
-            # so genuinely orphaned rows don't deadlock migration forever.
-            reconciliation = reconcile_stale_executions(db_path, apply=args.apply)
-            if args.apply and reconciliation.applied and not reconciliation.refused:
-                report = migrate_state(db_path, apply=True)
-            _print(
-                {
-                    "migration": report.as_dict(),
-                    "stale_execution_reconciliation": reconciliation.as_dict(),
-                }
-            )
-            return
-        _print(report.as_dict())
+        _print(_migrate_database(db_path, apply=args.apply))
         return
     lifecycle = _open(project)
     with lifecycle.session() as session:
@@ -229,6 +216,48 @@ def _definition_summary(definition: TaskDefinition) -> dict[str, Any]:
         "review": definition.review_policy,
         "dependencies": list(definition.dependencies),
         "source": definition.source,
+    }
+
+
+def _migrate_database(db_path: Path, *, apply: bool) -> dict[str, Any]:
+    report = migrate_state(db_path, apply=apply)
+    reconciliation = None
+    if report.refused and "live execution" in report.refused:
+        reconciliation = reconcile_stale_executions(db_path, apply=apply)
+        if apply and reconciliation.applied and not reconciliation.refused:
+            report = migrate_state(db_path, apply=True)
+    return {
+        "migration": report.as_dict(),
+        "stale_execution_reconciliation": reconciliation.as_dict() if reconciliation else report.stale_execution_reconciliation,
+        "outcome": "refused" if report.refused else "applied" if report.applied else "ready" if not report.needed else "planned",
+    }
+
+
+def _migrate_registered_projects(*, apply: bool) -> dict[str, Any]:
+    projects = registered_projects()
+    results: dict[str, Any] = {}
+    for project in projects:
+        try:
+            require_git_repo(project)
+            apply_project_environment(project)
+            from build_coordinator.config import get_settings
+
+            db_path = sqlite_path_from_url(get_settings().database_url)
+            results[project.project_id] = {
+                "project": project.summary(),
+                **_migrate_database(db_path, apply=apply),
+            }
+        except Exception as exc:
+            results[project.project_id] = {
+                "project": project.summary(),
+                "outcome": "error",
+                "error": str(exc),
+            }
+    return {
+        "mode": "global",
+        "apply": apply,
+        "target_schema_version": __import__("build_coordinator.db", fromlist=["CURRENT_SCHEMA_VERSION"]).CURRENT_SCHEMA_VERSION,
+        "projects": results,
     }
 
 
@@ -685,6 +714,18 @@ def _target_task_diagnostic(
         reason = "claimable"
     elif task.state != "READY":
         reason = f"state:{task.state}"
+        latest = session.scalars(
+            select(BuildTaskEvent)
+            .where(BuildTaskEvent.task_id == task.task_id)
+            .where(BuildTaskEvent.to_state == "BLOCKED")
+            .order_by(BuildTaskEvent.created_at.desc())
+        ).first()
+        latest_reason = (latest.event_data or {}).get("reason") if latest else None
+        if task.state == "BLOCKED" and latest_reason == "EXECUTION_RETRY_LIMIT_REACHED":
+            reason = (
+                "retry_exhausted: run `stagemesh recover-execution-retry "
+                f"{task.task_id}` to open a new bounded retry generation"
+            )
     else:
         unmet = [
             dep

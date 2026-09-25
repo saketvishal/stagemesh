@@ -15,7 +15,7 @@ import pytest
 import yaml
 from sqlalchemy import select
 
-from build_coordinator.db import DatabaseLifecycle
+from build_coordinator.db import DatabaseLifecycle, DatabaseSchemaError
 from build_coordinator.models import BuildRunnerExecution, BuildTask, BuildTaskClaim, BuildTaskEvent
 from build_coordinator.project.backlog import BacklogError, load_backlog, sync_backlog, task_priorities
 from build_coordinator.project.definition import (
@@ -572,6 +572,60 @@ def test_versioned_schema_1_database_migrates_finding_registry_column(tmp_path):
         reloaded = db.get(BuildTask, "POST-MIGRATION-1")
         assert reloaded.finding_registry == {}
     lifecycle.dispose()
+
+
+def test_matching_version_with_missing_required_table_repairs_backup_first(tmp_path):
+    path = tmp_path / "missing-table.sqlite3"
+    lifecycle = DatabaseLifecycle(f"sqlite:///{path.as_posix()}", data_dir=tmp_path)
+    lifecycle.initialize_schema()
+    with lifecycle.session() as session:
+        upsert_task(
+            session,
+            SimpleNamespace(
+                task_id="KEEP-1",
+                title="Keep",
+                description="preserve me",
+                acceptance_criteria=[],
+                dependencies=[],
+                risk_level="MEDIUM",
+                review_policy="SELF",
+                permitted_scope=[],
+                required_validation=[],
+                implementation_notes=None,
+                program_key=None,
+                base_sha=None,
+                migration_allowed=False,
+                ownership_scope=None,
+            ),
+        )
+        session.commit()
+    lifecycle.dispose()
+
+    connection = sqlite3.connect(str(path))
+    connection.execute("DROP TABLE build_runner_executions")
+    connection.commit()
+    connection.close()
+
+    broken = DatabaseLifecycle(f"sqlite:///{path.as_posix()}", data_dir=tmp_path)
+    with pytest.raises(DatabaseSchemaError):
+        broken.initialize_schema()
+    broken.dispose()
+
+    report = plan_migration(path)
+    assert report.needed
+    assert {"table": "build_runner_executions", "action": "CREATE"} <= report.tables[0].items()
+
+    applied = migrate_state(path, apply=True)
+    assert applied.applied and Path(applied.backup).is_file()
+    assert all(row["identical"] for row in applied.preservation)
+    assert not plan_migration(path).needed
+
+    repaired = DatabaseLifecycle(f"sqlite:///{path.as_posix()}", data_dir=tmp_path)
+    repaired.initialize_schema()
+    with repaired.session() as session:
+        assert session.get(BuildTask, "KEEP-1").description == "preserve me"
+        assert session.query(BuildRunnerExecution).count() == 0
+    repaired.dispose()
 
 
 # ---------------------------------------------------------------- end to end

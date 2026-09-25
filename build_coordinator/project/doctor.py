@@ -28,6 +28,7 @@ from build_coordinator.project.definition import (
     registry_path,
     load_project,
 )
+from build_coordinator.project.state_migration import plan_migration
 
 OK, WARN, FAIL, INFO = "OK", "WARN", "FAIL", "INFO"
 
@@ -165,11 +166,16 @@ def check_project(project: ProjectDefinition) -> list[Check]:
             with sqlite3.connect(f"file:{db}?mode=ro", uri=True) as conn:
                 tables = {r[0] for r in conn.execute("select name from sqlite_master where type='table'")}
                 if "build_coordinator_schema_version" not in tables:
-                    checks.append(Check(area, "durable state", FAIL, "database predates schema versioning", f"run `stagemesh project migrate-state {project.project_id} --apply` (backs up first)"))
+                    checks.append(Check(area, "durable state", FAIL, "database predates schema versioning", "run `stagemesh project migrate-state --all --apply` (backs up first)"))
                 else:
                     counts = dict(conn.execute("select state, count(*) from build_tasks group by state").fetchall())
                     version = conn.execute("select version from build_coordinator_schema_version").fetchone()[0]
-                    checks.append(Check(area, "durable state", OK, f"schema v{version}; tasks {counts or 'none'}"))
+                    migration = plan_migration(db)
+                    if migration.needed:
+                        changes = ", ".join(f"{item['action']} {item['table']}" for item in migration.tables[:5])
+                        checks.append(Check(area, "durable state", FAIL, f"schema v{version} requires migration/repair: {changes or 'version stamp'}", "run `stagemesh project migrate-state --all --apply` (backs up first)"))
+                    else:
+                        checks.append(Check(area, "durable state", OK, f"schema v{version}; tasks {counts or 'none'}"))
                     blocked = conn.execute(
                         "select task_id, event_data from build_task_events e where to_state='BLOCKED' and rowid = "
                         "(select max(rowid) from build_task_events where task_id=e.task_id) and task_id in "
