@@ -6,10 +6,11 @@ import pytest
 from pathlib import Path
 
 from build_coordinator.db import Base, SessionLocal, engine, initialize_schema
-from build_coordinator.models import BuildObjective, BuildTask
+from build_coordinator.models import BuildObjective, BuildObjectiveEvent, BuildTask
 from build_coordinator.project.commands import _optional_task_source
 from build_coordinator.project.definition import ProjectDefinition
 from build_coordinator.claims import task_is_claimable, utcnow
+from build_coordinator.planner import planner_task_id
 from build_coordinator.service import upsert_task, transition_task, list_available_tasks
 from build_coordinator.task_source import get_task_source
 from build_coordinator.task_source.github import GitHubTaskSource
@@ -163,72 +164,71 @@ def test_github_sync_ingests_objective_issues_and_preserves_dependencies():
     assert synced_ids == {"GH-4", "GH-40", "GH-41", "GH-42"}
 
     with SessionLocal() as session:
-        t4 = session.get(BuildTask, "GH-4")
-        t40 = session.get(BuildTask, "GH-40")
-        t41 = session.get(BuildTask, "GH-41")
-        t42 = session.get(BuildTask, "GH-42")
+        assert session.get(BuildTask, "GH-4") is None
+        assert session.get(BuildTask, "GH-40") is None
+        assert session.get(BuildTask, "GH-41") is None
+        assert session.get(BuildTask, "GH-42") is None
 
-        assert t4 is not None
-        assert t40 is not None
-        assert t41 is not None
-        assert t42 is not None
-
-        # BuildObjective records also exist
-        assert session.get(BuildObjective, "GH-4") is not None
-        assert session.get(BuildObjective, "GH-40") is not None
-        assert session.get(BuildObjective, "GH-41") is not None
-        assert session.get(BuildObjective, "GH-42") is not None
-        assert session.get(BuildTask, "GH-4:PLAN") is not None
-        assert session.get(BuildTask, "GH-40:PLAN") is not None
+        obj4 = session.get(BuildObjective, "GH-4")
+        obj40 = session.get(BuildObjective, "GH-40")
+        obj41 = session.get(BuildObjective, "GH-41")
+        obj42 = session.get(BuildObjective, "GH-42")
+        assert obj4 is not None
+        assert obj40 is not None
+        assert obj41 is not None
+        assert obj42 is not None
 
         # Dependency relationships
-        assert t4.dependencies == []
-        assert t40.dependencies == ["GH-4"]
-        assert t41.dependencies == ["GH-4"]
-        assert t42.dependencies == ["GH-40", "GH-41"]
+        assert obj4.dependencies == []
+        assert obj40.dependencies == ["GH-4"]
+        assert obj41.dependencies == ["GH-4"]
+        assert obj42.dependencies == ["GH-40", "GH-41"]
 
-        # Claimability: only GH-4 is claimable
+        # Claimability: only the root objective planner is claimable, never the root issue.
         now = utcnow()
-        assert task_is_claimable(session, t4, now) is True
-        assert task_is_claimable(session, t40, now) is False
-        assert task_is_claimable(session, t41, now) is False
-        assert task_is_claimable(session, t42, now) is False
+        p4 = session.get(BuildTask, planner_task_id("GH-4"))
+        p40 = session.get(BuildTask, planner_task_id("GH-40"))
+        p41 = session.get(BuildTask, planner_task_id("GH-41"))
+        p42 = session.get(BuildTask, planner_task_id("GH-42"))
+        assert p4 is not None
+        assert p40 is not None
+        assert p41 is not None
+        assert p42 is not None
+        assert task_is_claimable(session, p4, now) is True
+        assert task_is_claimable(session, p40, now) is False
+        assert task_is_claimable(session, p41, now) is False
+        assert task_is_claimable(session, p42, now) is False
 
         available_ids = {t.task_id for t in list_available_tasks(session)}
-        assert "GH-4" in available_ids
-        assert "GH-40" not in available_ids
-        assert "GH-41" not in available_ids
-        assert "GH-42" not in available_ids
+        assert "GH-4" not in available_ids
+        assert planner_task_id("GH-4") in available_ids
+        assert planner_task_id("GH-40") not in available_ids
+        assert planner_task_id("GH-41") not in available_ids
+        assert planner_task_id("GH-42") not in available_ids
 
-        # Transition GH-4 to DONE -> GH-40 and GH-41 become claimable, GH-42 still not claimable
-        transition_task(session, "GH-4", "CLAIMED", actor="builder")
-        transition_task(session, "GH-4", "IN_PROGRESS", actor="builder")
-        transition_task(session, "GH-4", "VALIDATING", actor="builder")
-        transition_task(session, "GH-4", "DONE", actor="integration", reason="completed")
+        # Completing GH-4 authoritatively unlocks GH-40/GH-41 planning, not via a root task.
+        obj4.state = "COMPLETED"
         session.commit()
 
     with SessionLocal() as session:
-        t40 = session.get(BuildTask, "GH-40")
-        t41 = session.get(BuildTask, "GH-41")
-        t42 = session.get(BuildTask, "GH-42")
+        p40 = session.get(BuildTask, planner_task_id("GH-40"))
+        p41 = session.get(BuildTask, planner_task_id("GH-41"))
+        p42 = session.get(BuildTask, planner_task_id("GH-42"))
         now = utcnow()
 
-        assert task_is_claimable(session, t40, now) is True
-        assert task_is_claimable(session, t41, now) is True
-        assert task_is_claimable(session, t42, now) is False
+        assert task_is_claimable(session, p40, now) is True
+        assert task_is_claimable(session, p41, now) is True
+        assert task_is_claimable(session, p42, now) is False
 
-        # Complete GH-40 and GH-41 -> GH-42 becomes claimable
-        for tid in ("GH-40", "GH-41"):
-            transition_task(session, tid, "CLAIMED", actor="builder")
-            transition_task(session, tid, "IN_PROGRESS", actor="builder")
-            transition_task(session, tid, "VALIDATING", actor="builder")
-            transition_task(session, tid, "DONE", actor="integration", reason="completed")
+        # Complete GH-40 and GH-41 objectives -> GH-42 becomes eligible.
+        session.get(BuildObjective, "GH-40").state = "COMPLETED"
+        session.get(BuildObjective, "GH-41").state = "COMPLETED"
         session.commit()
 
     with SessionLocal() as session:
-        t42 = session.get(BuildTask, "GH-42")
+        p42 = session.get(BuildTask, planner_task_id("GH-42"))
         now = utcnow()
-        assert task_is_claimable(session, t42, now) is True
+        assert task_is_claimable(session, p42, now) is True
 
 
 def test_repeated_sync_is_idempotent_and_preserves_local_state():
@@ -267,10 +267,11 @@ def test_repeated_sync_is_idempotent_and_preserves_local_state():
         session.commit()
     assert first_results[0].action == "CREATED"
 
-    # Transition GH-4 to IN_PROGRESS
+    # Transition the planner task to IN_PROGRESS
     with SessionLocal() as session:
-        transition_task(session, "GH-4", "CLAIMED", actor="builder")
-        transition_task(session, "GH-4", "IN_PROGRESS", actor="builder")
+        planner_id = planner_task_id("GH-4")
+        transition_task(session, planner_id, "CLAIMED", actor="planner")
+        transition_task(session, planner_id, "IN_PROGRESS", actor="planner")
         session.commit()
 
     # Second sync (must be idempotent)
@@ -278,15 +279,210 @@ def test_repeated_sync_is_idempotent_and_preserves_local_state():
         second_results = source.discover_tasks(session)
         session.commit()
     assert second_results[0].action == "SKIPPED"
-    assert "in sync (IN_PROGRESS)" in second_results[0].details
+    assert "authoritative objective" in second_results[0].details
 
-    # Verify GH-4 state was preserved and NOT reset to READY
+    # Verify no root task was created and planner state was preserved.
     with SessionLocal() as session:
-        t4 = session.get(BuildTask, "GH-4")
-        assert t4.state == "IN_PROGRESS"
+        assert session.get(BuildTask, "GH-4") is None
+        planner = session.get(BuildTask, planner_task_id("GH-4"))
+        assert planner.state == "IN_PROGRESS"
 
         # Verify unrelated local work was completely untouched
         local = session.get(BuildTask, "SM-122-01")
         assert local is not None
         assert local.state == "BLOCKED"
         assert local.title == "SM-122: Progressive Guidance frontend route and page"
+
+
+def test_objective_direct_execution_requires_explicit_opt_in():
+    issue = {
+        "number": 71,
+        "title": "Broad architecture objective",
+        "body": "## Objective\nDo broad architecture work.\n\nDepends on: GH-75",
+        "labels": [{"name": "objective"}],
+        "url": "https://github.com/example/repo/issues/71",
+    }
+    source = GitHubTaskSource(repo="example/repo", client=FakeGitHubClient([issue]))
+
+    with SessionLocal() as session:
+        source.discover_tasks(session)
+        session.commit()
+
+    with SessionLocal() as session:
+        assert session.get(BuildObjective, "GH-71") is not None
+        assert session.get(BuildTask, "GH-71") is None
+
+    issue["labels"].append({"name": "stagemesh:direct-execution"})
+    source = GitHubTaskSource(repo="example/repo", client=FakeGitHubClient([issue]))
+    with SessionLocal() as session:
+        source.discover_tasks(session)
+        session.commit()
+
+    with SessionLocal() as session:
+        task = session.get(BuildTask, "GH-71")
+        assert task is not None
+        assert task.objective_id == "GH-71"
+        assert task.dependencies == ["GH-75"]
+
+
+def test_historical_objective_root_task_is_reconciled_without_losing_dependencies():
+    with SessionLocal() as session:
+        obj = BuildObjective(
+            objective_id="GH-71",
+            goal="historical objective",
+            completion_criteria=[],
+            state="PLANNING",
+        )
+        session.add(obj)
+        upsert_task(
+            session,
+            TaskSpec(
+                task_id="GH-71",
+                title="Historical synthetic root",
+                description="old behavior",
+                acceptance_criteria=["ok"],
+                dependencies=["GH-75"],
+            ),
+        )
+        session.commit()
+
+    source = GitHubTaskSource(
+        repo="example/repo",
+        client=FakeGitHubClient(
+            [
+                {
+                    "number": 71,
+                    "title": "Broad architecture objective",
+                    "body": "## Objective\nNo dependency text in this rewritten body.",
+                    "labels": [{"name": "objective"}],
+                    "url": "https://github.com/example/repo/issues/71",
+                }
+            ]
+        ),
+    )
+    with SessionLocal() as session:
+        source.discover_tasks(session)
+        session.commit()
+
+    with SessionLocal() as session:
+        obj = session.get(BuildObjective, "GH-71")
+        task = session.get(BuildTask, "GH-71")
+        assert obj.dependencies == ["GH-75"]
+        assert task.state == "STALE"
+        assert task.reason_created == "OBJECTIVE_ROOT_COMPAT"
+        assert task_is_claimable(session, task, utcnow()) is False
+        assert "GH-71" not in {t.task_id for t in list_available_tasks(session)}
+        event = session.query(BuildObjectiveEvent).filter_by(
+            objective_id="GH-71",
+            event_type="objective.historical_root_task_reconciled",
+        ).one()
+        assert event.event_data["dependencies"] == ["GH-75"]
+
+
+def test_direct_execution_opt_in_revives_historical_objective_root_task():
+    with SessionLocal() as session:
+        session.add(
+            BuildObjective(
+                objective_id="GH-71",
+                goal="historical objective",
+                completion_criteria=[],
+                dependencies=["GH-75"],
+                state="PLANNING",
+            )
+        )
+        upsert_task(
+            session,
+            TaskSpec(
+                task_id="GH-75",
+                title="Prerequisite",
+                description="already complete",
+                acceptance_criteria=["done"],
+            ),
+        ).state = "DONE"
+        historical = upsert_task(
+            session,
+            TaskSpec(
+                task_id="GH-71",
+                title="Historical synthetic root",
+                description="old behavior",
+                acceptance_criteria=["ok"],
+                dependencies=["GH-75"],
+            ),
+        )
+        historical.reason_created = "OBJECTIVE_ROOT_COMPAT"
+        historical.objective_id = "GH-71"
+        historical.state = "STALE"
+        session.commit()
+
+    source = GitHubTaskSource(
+        repo="example/repo",
+        client=FakeGitHubClient(
+            [
+                {
+                    "number": 71,
+                    "title": "Broad architecture objective",
+                    "body": "## Objective\nNo dependency text in this rewritten body.",
+                    "labels": [{"name": "objective"}, {"name": "stagemesh:direct-execution"}],
+                    "url": "https://github.com/example/repo/issues/71",
+                }
+            ]
+        ),
+    )
+    with SessionLocal() as session:
+        source.discover_tasks(session)
+        session.commit()
+
+    with SessionLocal() as session:
+        obj = session.get(BuildObjective, "GH-71")
+        task = session.get(BuildTask, "GH-71")
+        assert obj.dependencies == ["GH-75"]
+        assert task.objective_id == "GH-71"
+        assert task.dependencies == ["GH-75"]
+        assert task.reason_created == "GITHUB_SOURCE"
+        assert task.state == "READY"
+        assert task_is_claimable(session, task, utcnow()) is True
+
+
+def test_gh_71_objective_waits_for_gh_75_authoritative_completion_after_reimport():
+    issues = [
+        {
+            "number": 75,
+            "title": "Do not dispatch objectives as tasks",
+            "body": "Ordinary implementation issue.",
+            "labels": [],
+            "url": "https://github.com/example/repo/issues/75",
+        },
+        {
+            "number": 71,
+            "title": "Architecture/modularity validation program",
+            "body": "## Objective\nBroad program.\n\nDepends on: GH-75",
+            "labels": [{"name": "objective"}],
+            "url": "https://github.com/example/repo/issues/71",
+        },
+    ]
+    source = GitHubTaskSource(repo="example/repo", client=FakeGitHubClient(issues))
+
+    with SessionLocal() as session:
+        source.discover_tasks(session)
+        session.commit()
+
+    with SessionLocal() as session:
+        objective = session.get(BuildObjective, "GH-71")
+        planner = session.get(BuildTask, planner_task_id("GH-71"))
+        assert objective.dependencies == ["GH-75"]
+        assert session.get(BuildTask, "GH-71") is None
+        assert task_is_claimable(session, planner, utcnow()) is False
+        transition_task(session, "GH-75", "CLAIMED", actor="builder")
+        transition_task(session, "GH-75", "IN_PROGRESS", actor="builder")
+        transition_task(session, "GH-75", "VALIDATING", actor="builder")
+        transition_task(session, "GH-75", "DONE", actor="integration", reason="completed")
+        session.commit()
+
+    source = GitHubTaskSource(repo="example/repo", client=FakeGitHubClient(issues))
+    with SessionLocal() as session:
+        source.discover_tasks(session)
+        session.commit()
+
+    with SessionLocal() as session:
+        assert session.get(BuildObjective, "GH-71").dependencies == ["GH-75"]
+        assert task_is_claimable(session, session.get(BuildTask, planner_task_id("GH-71")), utcnow()) is True
