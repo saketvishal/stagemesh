@@ -69,6 +69,13 @@ BLOCKED_REASON_TO_GATE_TYPE = {
     "EXTERNAL_EXECUTOR_CONFIGURATION_REQUIRED": "CREDENTIAL_REQUIRED",
     "COORDINATOR_INVARIANT_FAILURE": "UNRESOLVABLE_CONFLICT",
     "REVIEWED_SHA_CHANGED": "UNRESOLVABLE_CONFLICT",
+    "WORKING_CHECKOUT_DIRTY": "UNRESOLVABLE_CONFLICT",
+    "GIT_SAFETY_FAILURE": "UNRESOLVABLE_CONFLICT",
+    "WORKTREE_INVALID": "UNRESOLVABLE_CONFLICT",
+    "NO_CHANGES_PRODUCED": "UNRESOLVABLE_CONFLICT",
+    "BUILDER_BLOCKER": "UNRESOLVABLE_CONFLICT",
+    "MISSING_REVIEWED_SHA": "UNRESOLVABLE_CONFLICT",
+    "BRANCH_MOVED_CONCURRENTLY": "UNRESOLVABLE_CONFLICT",
 }
 
 
@@ -441,7 +448,7 @@ def _apply_plan(
         _create_planned_task(session, objective, item, plan_id=plan.plan_id)
 
 
-def _check_for_cycles(planned: list[PlannedChildTask]) -> None:
+def check_for_cycles(planned: list[PlannedChildTask]) -> None:
     graph = {item.task_id: set(item.dependencies) for item in planned}
 
     visiting: set[str] = set()
@@ -462,6 +469,9 @@ def _check_for_cycles(planned: list[PlannedChildTask]) -> None:
 
     for task_id in graph:
         visit(task_id, [])
+
+
+_check_for_cycles = check_for_cycles
 
 
 def _create_planned_task(

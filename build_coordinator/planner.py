@@ -55,12 +55,15 @@ def parse_planner_plan(data: Any, *, source: str = "PLANNER") -> ObjectivePlan:
 def enforce_planner_policy(plan: ObjectivePlan) -> None:
     """Planner output may request typed human gates; it may not authorize
     them, choose worktrees, weaken review, or push main."""
+    from build_coordinator.objectives import check_for_cycles
+
     for task in plan.tasks:
         if task.review_policy not in PLANNER_ALLOWED_REVIEW_POLICIES:
             raise StructuredContractError(
                 f"planner cannot set review_policy={task.review_policy!r} on {task.task_id}; "
                 "independent review remains required"
             )
+    check_for_cycles(list(plan.tasks))
     # requested_human_gates are already type-checked by ObjectivePlan.
     # Opening them is a stop, not an authorization.
 

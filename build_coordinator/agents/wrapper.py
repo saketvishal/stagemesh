@@ -42,6 +42,11 @@ GENERATED_ARTIFACT_EXCLUDES = (
 )
 DEFAULT_TIMEOUT_SECONDS = 3000
 
+_SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"(?i)\b(bearer)\s+([a-z0-9._~+/=-]{12,})"),
+    re.compile(r"(?i)\b(api[_-]?key|token|secret|password)\b\s*[:=]\s*([^\s,;]+)"),
+)
+
 _FAILURE_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
     (
         "AUTH_FAILURE",
@@ -74,13 +79,27 @@ _FAILURE_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
     (
         "RATE_LIMITED",
         (
-            "rate limit",
-            "session limit",
-            "429",
+            "rate limit exceeded",
+            "rate limited",
+            "rate_limit_exceeded",
+            "http 429",
+            "status 429",
+            "429 too many requests",
             "too many requests",
+            "session limit",
+        ),
+    ),
+    (
+        "UNAVAILABLE",
+        (
             "overloaded",
-            "try again later",
-            "resets ",
+            "temporarily unavailable",
+            "service unavailable",
+            "capacity",
+            "provider unavailable",
+            "server busy",
+            "status 503",
+            "http 503",
         ),
     ),
     (
@@ -96,6 +115,13 @@ def classify_failure(output: str) -> str:
         if any(needle in lowered for needle in needles):
             return failure
     return "EXECUTION_FAILURE"
+
+
+def sanitize_diagnostic(text: str, *, max_chars: int = 300) -> str:
+    detail = text[-max_chars:]
+    for pattern in _SECRET_PATTERNS:
+        detail = pattern.sub(r"\1 <redacted>", detail)
+    return detail
 
 
 def git(cwd: str, *args: str) -> str:
@@ -372,7 +398,7 @@ def main(argv: list[str] | None = None) -> int:
         failure = "EXECUTION_FAILURE" if code == 124 else classify_failure(output)
         write_result(
             result_path,
-            {**identity, "status": "FAILED", "provider_failure": failure, "detail": output[-300:], "runtime": args.runtime},
+            {**identity, "status": "FAILED", "provider_failure": failure, "detail": sanitize_diagnostic(output), "runtime": args.runtime},
         )
         return 1
 

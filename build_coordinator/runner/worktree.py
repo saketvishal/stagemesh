@@ -100,6 +100,19 @@ def ensure_worktree(
         check=False,
     )
     if res.returncode != 0:
+        # Prune stale worktrees and detach conflicting branch checkout if any, then retry once
+        subprocess.run(["git", "worktree", "prune"], cwd=str(repo_root_path), capture_output=True, text=True, check=False)
+        holder = _checked_out_elsewhere(repo_root_path, branch)
+        if holder is not None and holder != resolved:
+            _git(holder, "checkout", "--detach")
+        res = subprocess.run(
+            cmd,
+            cwd=str(repo_root_path),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    if res.returncode != 0:
         raise WorktreeValidationError(
             f"failed to automatically provision worktree at {resolved}: {res.stderr.strip() or res.stdout.strip()}"
         )
@@ -156,6 +169,14 @@ def _preserve(tree: Path, reason: str, *, resume_branch: str | None = None) -> N
         identity_args = resolve_git_identity_args(tree)
         _git(tree, *identity_args, "commit", "-m", "stagemesh: recovered work-in-progress checkpoint")
         return
+    if resume_branch:
+        _git(tree, "add", "-A")
+        identity_args = resolve_git_identity_args(tree)
+        res = _git(tree, *identity_args, "commit", "-m", "stagemesh: recovered work-in-progress checkpoint")
+        if res.returncode == 0:
+            commit_sha = _git(tree, "rev-parse", "HEAD").stdout.strip()
+            _git(tree, "update-ref", f"refs/heads/{resume_branch}", commit_sha)
+            return
     _git(tree, "stash", "push", "--include-untracked", "-m", f"stagemesh: preserved before {reason}")
 
 
@@ -254,3 +275,112 @@ def _is_under(path: Path, root: str) -> bool:
         return True
     except ValueError:
         return False
+
+
+def attribute_displaced_work(paths: list[str]) -> str:
+    """Determine the task lineage owning displaced work. Defaults to GH-45 (recovery/worktree lifecycle)."""
+    for p in paths:
+        lowered = p.lower()
+        if "gh-" in lowered or "sm-" in lowered:
+            match = re.search(r"((?:gh|sm)-\d+)", lowered)
+            if match:
+                return match.group(1).upper()
+        if any(k in lowered for k in ("recovery", "worktree", "command", "config", "awareness")):
+            return "GH-45"
+    return "GH-45"
+
+
+def is_stagemesh_owned_path(path: str) -> bool:
+    """Check whether a modified/untracked path belongs to StageMesh task scope."""
+    norm = path.replace("\\", "/").lower()
+    return (
+        norm.startswith("build_coordinator/")
+        or norm.startswith("tests/")
+        or norm.startswith("docs/")
+        or norm.startswith(".stagemesh/")
+        or norm.startswith("scripts/")
+        or norm in ("pyproject.toml", "uv.lock", "readme.md", ".gitignore", "changelog.md")
+    )
+
+
+def reconcile_displaced_task_work(
+    repo_root: str | Path,
+    *,
+    task_id: str | None = None,
+    session: Any = None,
+) -> bool:
+    """Safely reconcile StageMesh-owned changes found in the wrong checkout
+    (e.g. canonical repo) into their proper task branch lineage without losing work
+    and without mutating canonical main."""
+    root = Path(repo_root)
+    status_proc = _git(root, "status", "--porcelain")
+    if status_proc.returncode != 0 or not status_proc.stdout.strip():
+        return True
+
+    lines = [line.strip() for line in status_proc.stdout.splitlines() if line.strip()]
+    paths: list[str] = []
+    for line in lines:
+        parts = line[3:].split(" -> ")
+        paths.append(parts[-1].strip())
+
+    # Only reconcile if all changes are StageMesh-owned
+    if not all(is_stagemesh_owned_path(p) for p in paths):
+        return False
+
+    owner_task = task_id or attribute_displaced_work(paths)
+    branch = task_branch_name(owner_task)
+
+    # 1. Stage all changes
+    add_proc = _git(root, "add", "-A", "--", ".")
+    if add_proc.returncode != 0:
+        return False
+
+    # 2. Write tree object
+    tree_proc = _git(root, "write-tree")
+    if tree_proc.returncode != 0 or not tree_proc.stdout.strip():
+        return False
+    tree_sha = tree_proc.stdout.strip()
+
+    # 3. Get parent commit (HEAD of branch if exists, otherwise HEAD of main)
+    parent_sha = None
+    if _ref_exists(root, branch):
+        parent_sha = _git(root, "rev-parse", branch).stdout.strip()
+    if not parent_sha:
+        parent_sha = _git(root, "rev-parse", "HEAD").stdout.strip()
+
+    # 4. Commit tree using operator identity
+    identity_args = resolve_git_identity_args(root)
+    commit_cmd = ["commit-tree", tree_sha, "-m", f"{owner_task}: reconcile displaced task work into task lineage"]
+    if parent_sha:
+        commit_cmd.extend(["-p", parent_sha])
+    commit_proc = _git(root, *identity_args, *commit_cmd)
+    if commit_proc.returncode != 0 or not commit_proc.stdout.strip():
+        return False
+    commit_sha = commit_proc.stdout.strip()
+
+    # 5. Update the task branch ref to the new commit
+    ref_proc = _git(root, "update-ref", f"refs/heads/{branch}", commit_sha)
+    if ref_proc.returncode != 0:
+        return False
+
+    # 6. Now that the changes are safely and permanently recorded on refs/heads/{branch},
+    # clean the working tree so canonical checkout is clean
+    _git(root, "reset", "--hard", "HEAD")
+    _git(root, "clean", "-fd")
+
+    # Verify root is now clean
+    final_status = _git(root, "status", "--porcelain").stdout.strip()
+    return final_status == ""
+
+
+def preserve_unknown_operator_work(repo_root: str | Path, reason: str = "operation") -> str | None:
+    """Safely preserve unknown operator-created dirty files into a stash so they are never lost."""
+    root = Path(repo_root)
+    status = _git(root, "status", "--porcelain").stdout.strip()
+    if not status:
+        return None
+    stash_msg = f"stagemesh: preserved operator work before {reason}"
+    proc = _git(root, "stash", "push", "--include-untracked", "-m", stash_msg)
+    if proc.returncode == 0:
+        return stash_msg
+    return None
