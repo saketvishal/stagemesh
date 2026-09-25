@@ -477,6 +477,11 @@ def test_stale_execution_deadlock_reconciles_then_migrates_then_resumes(tmp_path
 
     migration = migrate_state(path, apply=True)
     assert migration.refused and "1 live execution" in migration.refused
+    assert "appear stale/orphaned" in migration.refused
+    assert migration.stale_execution_reconciliation is not None
+    assert [
+        e["execution_id"] for e in migration.stale_execution_reconciliation["reconciled"]
+    ] == ["EXEC-1"]
     assert migration.backup is None
 
     plan = plan_stale_execution_reconciliation(path)

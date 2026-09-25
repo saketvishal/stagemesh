@@ -41,6 +41,7 @@ class MigrationReport:
     backup: str | None = None
     tables: list[dict[str, Any]] = field(default_factory=list)
     refused: str | None = None
+    stale_execution_reconciliation: dict[str, Any] | None = None
     preservation: list[dict[str, Any]] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
@@ -50,6 +51,7 @@ class MigrationReport:
             "applied": self.applied,
             "backup": self.backup,
             "refused": self.refused,
+            "stale_execution_reconciliation": self.stale_execution_reconciliation,
             "tables": self.tables,
             "preservation": self.preservation,
         }
@@ -403,7 +405,20 @@ def plan_migration(path: Path) -> MigrationReport:
                 "SELECT COUNT(*) FROM build_runner_executions WHERE status IN (?, ?)", _LIVE
             ).fetchone()[0]
         if live:
-            report.refused = f"{live} live execution(s); wait for them to finish before migrating"
+            stale_report = plan_stale_execution_reconciliation(path)
+            report.stale_execution_reconciliation = stale_report.as_dict()
+            if stale_report.refused:
+                report.refused = (
+                    f"{live} live execution(s); {stale_report.refused}"
+                )
+            elif stale_report.reconciled:
+                report.refused = (
+                    f"{live} live execution(s); {len(stale_report.reconciled)} appear stale/orphaned. "
+                    "Run `stagemesh project migrate-state --apply` to take a backup, mark exactly "
+                    "those stale execution row(s) LOST, and retry migration."
+                )
+            else:
+                report.refused = f"{live} live execution(s); wait for them to finish before migrating"
         return report
     finally:
         connection.close()
