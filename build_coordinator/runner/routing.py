@@ -389,18 +389,28 @@ def route_worker(
     )
 
 
-def reviewer_exclusions(session: Session | None, task_id: str | None) -> set[str]:
+def reviewer_exclusions(
+    session: Session | None,
+    task_id: str | None,
+    *,
+    reviewed_feature_sha: str | None = None,
+) -> set[str]:
     if session is None or not task_id:
         return set()
-    excluded = set(approving_reviewers(session, task_id))
+    excluded = set(approving_reviewers(session, task_id, reviewed_feature_sha=reviewed_feature_sha))
     implementer = last_implementation_worker(session, task_id)
     if implementer:
         excluded.add(implementer)
     return excluded
 
 
-def approving_reviewers(session: Session, task_id: str) -> set[str]:
-    """Distinct workers that approved the task's current implementation."""
+def approving_reviewers(
+    session: Session,
+    task_id: str,
+    *,
+    reviewed_feature_sha: str | None = None,
+) -> set[str]:
+    """Distinct workers that approved this task at the requested feature SHA."""
     since = session.scalar(
         select(BuildTaskClaim.claimed_at)
         .where(BuildTaskClaim.task_id == task_id)
@@ -417,6 +427,8 @@ def approving_reviewers(session: Session, task_id: str) -> set[str]:
     approvers: set[str] = set()
     for row in rows:
         if since is not None and row.launched_at is not None and _naive(row.launched_at) < _naive(since):
+            continue
+        if reviewed_feature_sha and row.reviewed_feature_sha != reviewed_feature_sha:
             continue
         data = row.result_data or {}
         review = data.get("review") if isinstance(data.get("review"), dict) else data
