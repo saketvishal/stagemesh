@@ -111,6 +111,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_objective_commands(sub)
     _add_worker_commands(sub)
     _add_routing_commands(sub)
+    _add_watcher_commands(sub)
     return parser
 
 
@@ -755,6 +756,214 @@ def _claim_request(args: argparse.Namespace) -> ClaimRequest:
 
 def _print(payload) -> None:
     print(json.dumps(payload, indent=2))
+
+
+def _add_watcher_commands(sub) -> None:
+    watcher = sub.add_parser("watcher")
+    watcher_sub = watcher.add_subparsers(dest="watcher_command", required=True)
+
+    for name in ("install", "uninstall", "start", "stop", "status"):
+        p = watcher_sub.add_parser(name)
+        p.add_argument("--repo", help="authorized repository slug; required unless exactly one is configured")
+
+    run = watcher_sub.add_parser("run")
+    run.add_argument("--repo", help="authorized repository slug; required unless exactly one is configured")
+    run.add_argument("--foreground", action="store_true", help="required; the watcher only ever runs in the foreground")
+    run.add_argument("--once", action="store_true", help="run exactly one cycle instead of looping")
+
+    labels = watcher_sub.add_parser("provision-labels")
+    labels.add_argument("--repo", help="authorized repository slug; required unless exactly one is configured")
+    labels.add_argument("--dry-run", action="store_true")
+
+
+def _watcher_resolve_repo_slug(args: argparse.Namespace):
+    from build_coordinator.watcher.authorization import load_authorized_repositories
+
+    if args.repo:
+        return args.repo
+    configured = load_authorized_repositories()
+    if len(configured) == 1:
+        return configured[0].slug
+    raise SystemExit(
+        "watcher: --repo is required (0 or more than 1 authorized_repositories configured); "
+        f"configured slugs: {[repo.slug for repo in configured]}"
+    )
+
+
+def _watcher(args: argparse.Namespace, session) -> None:
+    handlers = {
+        "install": _watcher_install,
+        "uninstall": _watcher_uninstall,
+        "start": _watcher_start,
+        "stop": _watcher_stop,
+        "status": _watcher_status,
+        "run": _watcher_run,
+        "provision-labels": _watcher_provision_labels,
+    }
+    handlers[args.watcher_command](args, session)
+
+
+def _watcher_task_definition(repo, *, task_name: str):
+    import sys
+
+    from build_coordinator.watcher.windows_task_scheduler import TaskDefinition
+
+    return TaskDefinition(
+        task_name=task_name,
+        command=sys.executable,
+        arguments=f"-m build_coordinator.cli watcher run --foreground --repo {repo.slug}",
+        working_directory=str(repo.control_repo_root),
+    )
+
+
+def _watcher_install(args: argparse.Namespace, session) -> None:
+    from build_coordinator.watcher.authorization import authorize
+    from build_coordinator.watcher.labels import provision_labels
+    from build_coordinator.watcher.windows_task_scheduler import SchtasksAdapter, stable_task_name
+
+    repo = authorize(_watcher_resolve_repo_slug(args))
+    task_name = stable_task_name(str(repo.control_repo_root), repo.slug)
+    adapter = SchtasksAdapter()
+    adapter.create_or_update(_watcher_task_definition(repo, task_name=task_name))
+    label_result = provision_labels(repo) if repo.labels else None
+    _print(
+        {
+            "task_name": task_name,
+            "repository_slug": repo.slug,
+            "installed": True,
+            "labels_created": list(label_result.created) if label_result else [],
+            "labels_updated": list(label_result.updated) if label_result else [],
+        }
+    )
+
+
+def _watcher_uninstall(args: argparse.Namespace, session) -> None:
+    from build_coordinator.watcher.authorization import authorize
+    from build_coordinator.watcher.windows_task_scheduler import SchtasksAdapter, stable_task_name
+
+    repo = authorize(_watcher_resolve_repo_slug(args))
+    task_name = stable_task_name(str(repo.control_repo_root), repo.slug)
+    SchtasksAdapter().delete(task_name)
+    _print({"task_name": task_name, "repository_slug": repo.slug, "installed": False})
+
+
+def _watcher_start(args: argparse.Namespace, session) -> None:
+    from build_coordinator.watcher.authorization import authorize
+    from build_coordinator.watcher.windows_task_scheduler import SchtasksAdapter, stable_task_name
+
+    repo = authorize(_watcher_resolve_repo_slug(args))
+    task_name = stable_task_name(str(repo.control_repo_root), repo.slug)
+    adapter = SchtasksAdapter()
+    if not adapter.task_exists(task_name):
+        raise SystemExit(f"watcher start: task {task_name!r} is not installed; run 'watcher install' first")
+    if not adapter.is_running(task_name):
+        adapter.run(task_name)
+    _print({"task_name": task_name, "repository_slug": repo.slug, "started": True})
+
+
+def _watcher_stop(args: argparse.Namespace, session) -> None:
+    from build_coordinator.watcher import lock as watcher_lock
+    from build_coordinator.watcher.authorization import authorize
+    from build_coordinator.watcher.windows_task_scheduler import stable_task_name
+
+    repo = authorize(_watcher_resolve_repo_slug(args))
+    task_name = stable_task_name(str(repo.control_repo_root), repo.slug)
+    record = watcher_lock.request_stop(session, task_name)
+    session.commit()
+    _print({"task_name": task_name, "repository_slug": repo.slug, "stop_requested": record is not None})
+
+
+def _watcher_status(args: argparse.Namespace, session) -> None:
+    from build_coordinator.models import BuildWatcherRecord
+    from build_coordinator.runner.models import RunnerConfig
+    from build_coordinator.watcher import lock as watcher_lock
+    from build_coordinator.watcher.authorization import authorize
+    from build_coordinator.watcher.windows_task_scheduler import SchtasksAdapter, stable_task_name
+
+    repo = authorize(_watcher_resolve_repo_slug(args))
+    task_name = stable_task_name(str(repo.control_repo_root), repo.slug)
+    adapter = SchtasksAdapter()
+    record = session.get(BuildWatcherRecord, task_name)
+    scheduler_status = adapter.query_status(task_name)
+    installed = scheduler_status.installed
+    scheduler_running = scheduler_status.running
+    process_alive = watcher_lock.query_pid_liveness(record.process_id) if record and record.process_id else False
+    poll_seconds = RunnerConfig.default().poll_seconds
+    running_health = _watcher_running_health(
+        scheduler_running=scheduler_running,
+        process_alive=process_alive,
+        heartbeat_at=record.heartbeat_at if record else None,
+        poll_seconds=poll_seconds,
+    )
+    _print(
+        {
+            "installed": installed,
+            "running": running_health["running"],
+            "scheduler_running": scheduler_running,
+            "scheduler_state": scheduler_status.state,
+            "scheduler_error": scheduler_status.error,
+            "watcher_process_alive": process_alive,
+            "watcher_heartbeat_healthy": running_health["heartbeat_healthy"],
+            "heartbeat_stale_after_seconds": running_health["heartbeat_stale_after_seconds"],
+            "task_name": task_name,
+            "control_repo_root": str(repo.control_repo_root),
+            "database_url": get_settings().database_url,
+            "data_dir": str(get_settings().data_dir),
+            "authorized_repository_slug": repo.slug,
+            "watcher_pid": record.process_id if record else None,
+            "watcher_started_at": record.started_at.isoformat() if record and record.started_at else None,
+            "last_cycle_at": record.last_cycle_at.isoformat() if record and record.last_cycle_at else None,
+            "last_cycle_summary": record.last_cycle_summary if record else {},
+            "last_error_type": record.last_error_type if record else None,
+            "restart_count": record.restart_count if record else 0,
+            "backoff_until": record.backoff_until.isoformat() if record and record.backoff_until else None,
+            "stop_requested": record.stop_requested if record else False,
+        }
+    )
+
+
+def _watcher_running_health(
+    *,
+    scheduler_running: bool | None,
+    process_alive: bool | None,
+    heartbeat_at,
+    poll_seconds: float,
+    now: datetime | None = None,
+) -> dict:
+    from datetime import UTC, datetime, timedelta
+    heartbeat_stale_after = timedelta(seconds=max(30.0, poll_seconds * 3))
+    if heartbeat_at is not None and heartbeat_at.tzinfo is None:
+        heartbeat_at = heartbeat_at.replace(tzinfo=UTC)
+    now = now or datetime.now(UTC)
+    heartbeat_healthy = bool(heartbeat_at and now - heartbeat_at <= heartbeat_stale_after)
+    return {
+        "running": heartbeat_healthy and scheduler_running is not False and process_alive is not False,
+        "heartbeat_healthy": heartbeat_healthy,
+        "heartbeat_stale_after_seconds": heartbeat_stale_after.total_seconds(),
+    }
+
+
+def _watcher_run(args: argparse.Namespace, session) -> None:
+    if not args.foreground:
+        raise SystemExit("watcher run: --foreground is required (the watcher never runs detached from this command)")
+    from build_coordinator.watcher.loop import run_foreground
+    from build_coordinator.watcher.safe_logging import WatcherLogger
+
+    session.commit()
+    repo_slug = _watcher_resolve_repo_slug(args)
+    logger = WatcherLogger(get_settings().data_dir)
+    run_foreground(SessionLocal, repository_slug=repo_slug, logger=logger, once=args.once)
+    _print({"watcher": "stopped" if not args.once else "cycle_complete"})
+
+
+def _watcher_provision_labels(args: argparse.Namespace, session) -> None:
+    from build_coordinator.watcher.authorization import authorize
+    from build_coordinator.watcher.labels import provision_labels
+
+    repo = authorize(_watcher_resolve_repo_slug(args))
+    result = provision_labels(repo, dry_run=args.dry_run)
+    _print({"created": list(result.created), "updated": list(result.updated), "unchanged": list(result.unchanged)})
+
 
 
 if __name__ == "__main__":

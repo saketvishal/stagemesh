@@ -441,6 +441,7 @@ class ObjectiveSpec:
 
     objective_id: str
     goal: str
+    repo: str | None = None
     constraints: tuple[str, ...] = ()
     allowed_scope: tuple[str, ...] = ()
     prohibited_scope: tuple[str, ...] = ()
