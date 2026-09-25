@@ -57,3 +57,17 @@ class TaskSource(ABC):
         evidence: dict[str, Any] | None = None,
     ) -> bool:
         """Propagate coordinator lifecycle state and evidence back to the external task source."""
+    def sync_objective_outbound(
+        self,
+        session,
+        objective_id: str,
+        state: str,
+        *,
+        evidence: dict[str, Any] | None = None,
+    ) -> bool:
+        """Propagate objective lifecycle state and evidence back to the external task source.
+
+        Default implementation is a no-op returning True.
+        """
+        return True
+
