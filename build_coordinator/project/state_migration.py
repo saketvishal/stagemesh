@@ -121,6 +121,8 @@ def _process_is_alive(process_id: Any) -> bool:
         return _windows_process_is_alive(pid)
     try:
         os.kill(pid, 0)
+    except PermissionError:
+        return True
     except OSError:
         return False
     try:
@@ -141,11 +143,16 @@ def _windows_process_is_alive(pid: int) -> bool:
     kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
     handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
     if not handle:
+        # ERROR_ACCESS_DENIED means the process exists but is not queryable.
+        if ctypes.get_last_error() == 5:
+            return True
         return False
     try:
         exit_code = wintypes.DWORD()
         kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
         if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+            if ctypes.get_last_error() == 5:
+                return True
             return False
         return exit_code.value == STILL_ACTIVE
     finally:

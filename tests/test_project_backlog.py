@@ -33,6 +33,7 @@ from build_coordinator.project.state_migration import (
     plan_stale_execution_reconciliation,
     reconcile_stale_executions,
 )
+import build_coordinator.project.state_migration as state_migration
 from build_coordinator.service import transition_task, upsert_task
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -500,6 +501,33 @@ def test_migration_refuses_for_genuinely_live_recorded_process_with_expired_leas
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait(timeout=5)
+
+
+def test_migration_refuses_when_recorded_process_probe_is_permission_denied(tmp_path, monkeypatch):
+    path = tmp_path / "legacy.sqlite3"
+    legacy_database(path, execution="stale", process_id="4242")
+
+    def inaccessible_process(pid, signal):
+        assert (pid, signal) == (4242, 0)
+        raise PermissionError("process exists but cannot be signaled")
+
+    monkeypatch.setattr(state_migration.sys, "platform", "linux")
+    monkeypatch.setattr(state_migration.os, "kill", inaccessible_process)
+
+    plan = plan_stale_execution_reconciliation(path)
+    assert plan.live_examined == 1
+    assert plan.refused and "live process evidence" in plan.refused
+    assert [e["execution_id"] for e in plan.genuinely_live] == ["EXEC-1"]
+    assert plan.genuinely_live[0]["process_alive"] is True
+
+    reconciled = reconcile_stale_executions(path, apply=True)
+    assert not reconciled.applied and reconciled.backup is None
+    assert reconciled.refused
+
+    with sqlite3.connect(str(path)) as connection:
+        assert connection.execute(
+            "SELECT status FROM build_runner_executions WHERE execution_id = 'EXEC-1'"
+        ).fetchone() == ("RUNNING",)
 
 
 def test_stale_execution_deadlock_reconciles_then_migrates_then_resumes(tmp_path, session):
