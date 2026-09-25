@@ -49,6 +49,7 @@ class RuntimeProfile:
     auth_ok_markers: tuple[str, ...] = ()
     help_args: tuple[str, ...] = ("--help",)
     notes: str = ""
+    prompt_transport: str = "stdin"
 
     def executable(self) -> str | None:
         for name in self.executables:
@@ -57,8 +58,16 @@ class RuntimeProfile:
                 return found
         return None
 
-    def command(self, role: str, cwd: str, *, model: str | None = None, last_message: str | None = None) -> list[str]:
-        """argv for a headless run; the prompt is supplied on stdin."""
+    def command(
+        self,
+        role: str,
+        cwd: str,
+        *,
+        prompt: str | None = None,
+        model: str | None = None,
+        last_message: str | None = None,
+    ) -> list[str]:
+        """argv for a headless run."""
         exe = self.executable() or self.executables[0]
         if self.runtime_id == "codex":
             sandbox = "read-only" if role == "REVIEWER" else "workspace-write"
@@ -85,14 +94,52 @@ class RuntimeProfile:
                 cmd += ["--model", model]
             return cmd
         if self.runtime_id == "grok":
-            mode = "default" if role == "REVIEWER" else "acceptEdits"
-            cmd = [exe, "-p", "-", "--cwd", cwd, "--output-format", "plain", "--permission-mode", mode]
-            if role != "REVIEWER":
+            prompt_str = "" if prompt is None else prompt
+            cmd = [
+                exe,
+                "--no-auto-update",
+                "-p",
+                prompt_str,
+                "--cwd",
+                cwd,
+                "--output-format",
+                "plain",
+                "--permission-mode",
+                "auto",
+            ]
+            if role == "REVIEWER":
+                cmd.extend(["--deny", "Edit,Write"])
+            else:
                 cmd.append("--always-approve")
+                cmd.extend(["--allow", "*"])
             if model:
                 cmd += ["-m", model]
             return cmd
         raise ValueError(f"runtime {self.runtime_id!r} has no headless command")
+
+    def stdin_payload(self, prompt: str) -> str | None:
+        """Return the stdin content to supply for this runtime.
+
+        For stdin-transport runtimes (codex, claude), this is the prompt itself.
+        For arg-transport runtimes (grok), the prompt is passed on argv, so stdin is empty.
+        """
+        if self.prompt_transport in {"arg", "cli_arg"}:
+            return None
+        return prompt
+
+    def build_invocation(
+        self,
+        role: str,
+        cwd: str,
+        prompt: str,
+        *,
+        model: str | None = None,
+        last_message: str | None = None,
+    ) -> tuple[list[str], str | None]:
+        """Return (argv, stdin) for driving this runtime."""
+        cmd = self.command(role, cwd, prompt=prompt, model=model, last_message=last_message)
+        stdin = self.stdin_payload(prompt)
+        return cmd, stdin
 
 
 PROFILES: dict[str, RuntimeProfile] = {
@@ -131,6 +178,7 @@ PROFILES: dict[str, RuntimeProfile] = {
         executables=("grok", "grok.exe"),
         capabilities=("CODING", "ADVANCED_REASONING", "CODE_REVIEW"),
         notes="Grok Build CLI; supports headless execution via -p",
+        prompt_transport="arg",
     ),
 }
 
@@ -226,8 +274,8 @@ def probe_runtime(profile: RuntimeProfile, *, live: bool = True, timeout: float 
     with tempfile.TemporaryDirectory(prefix="stagemesh-probe-") as scratch:
         subprocess.run(["git", "init", "-q"], cwd=scratch, capture_output=True)
         started = time.monotonic()
-        cmd = profile.command("REVIEWER", scratch)
-        code, out = _run(cmd, timeout=timeout, cwd=scratch, stdin=PROBE_PROMPT)
+        cmd, stdin = profile.build_invocation("REVIEWER", scratch, PROBE_PROMPT)
+        code, out = _run(cmd, timeout=timeout, cwd=scratch, stdin=stdin)
         elapsed = round(time.monotonic() - started, 1)
     status.evidence = {"live_probe_seconds": elapsed, "exit_code": code}
     if code == 0 and "READY" in out:
