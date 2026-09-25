@@ -444,6 +444,7 @@ class ObjectiveSpec:
     allowed_scope: tuple[str, ...] = ()
     prohibited_scope: tuple[str, ...] = ()
     completion_criteria: tuple[str, ...] = ()
+    dependencies: tuple[str, ...] = ()
     human_gate_policy: dict[str, Any] = field(default_factory=dict)
     parallelism: int = 2
     main_push_policy: str = "HUMAN_GATED"

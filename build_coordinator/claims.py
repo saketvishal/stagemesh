@@ -21,6 +21,7 @@ from build_coordinator.types import (
     TaskOwnershipScope,
 )
 from build_coordinator.models import (
+    BuildObjective,
     BuildCoordinatorState,
     BuildTask,
     BuildTaskClaim,
@@ -135,6 +136,11 @@ def task_is_claimable(
     if task.state not in CLAIMABLE_STATES:
         return False
     for dep in task.dependencies:
+        objective_dependency = session.get(BuildObjective, dep)
+        if objective_dependency is not None:
+            if objective_dependency.state != "COMPLETED":
+                return False
+            continue
         dependency = session.get(BuildTask, dep)
         if dependency is None or dependency.state != "DONE":
             return False

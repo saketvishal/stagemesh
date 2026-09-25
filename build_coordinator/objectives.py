@@ -133,6 +133,24 @@ def list_objectives(session: Session) -> list[BuildObjective]:
     return list(session.scalars(select(BuildObjective).order_by(BuildObjective.created_at)).all())
 
 
+def objective_dependencies_satisfied(session: Session, objective: BuildObjective) -> bool:
+    """Authoritative dependency gate for objective planning.
+
+    A dependency is complete when a BuildObjective with that id is COMPLETED,
+    or, for ordinary task prerequisites, when the BuildTask is DONE.
+    """
+    for dep_id in objective.dependencies or []:
+        dep_objective = session.get(BuildObjective, dep_id)
+        if dep_objective is not None:
+            if dep_objective.state != "COMPLETED":
+                return False
+            continue
+        dep_task = session.get(BuildTask, dep_id)
+        if dep_task is None or dep_task.state != "DONE":
+            return False
+    return True
+
+
 def objective_tasks(session: Session, objective_id: str) -> list[BuildTask]:
     return list(
         session.scalars(
@@ -188,6 +206,7 @@ def create_objective(session: Session, spec: ObjectiveSpec) -> BuildObjective:
         allowed_scope=list(spec.allowed_scope),
         prohibited_scope=list(spec.prohibited_scope),
         completion_criteria=list(spec.completion_criteria),
+        dependencies=list(spec.dependencies),
         human_gate_policy=dict(spec.human_gate_policy),
         parallelism=spec.parallelism,
         main_push_policy=spec.main_push_policy,
