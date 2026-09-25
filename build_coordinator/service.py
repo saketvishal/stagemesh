@@ -82,6 +82,7 @@ __all__ = [
     "recover_lost_execution_claims",
     "request_task_input",
     "reconcile_stale_executions",
+    "recover_review_environment_blocked",
     "release_active_claims",
     "set_mode",
     "transition_task",
@@ -487,6 +488,45 @@ def get_resume_context(session: Session, task_id: str) -> ResumeContext:
         current_claim_type=current_claim.claim_type if current_claim else None,
         waiting_input=dict(task.waiting_input or {}),
     )
+
+
+def recover_review_environment_blocked(
+    session: Session,
+    task_id: str,
+    *,
+    actor: str = "operator",
+    reason: str | None = None,
+) -> BuildTask:
+    """Safely recover a task blocked by review environment failure back to REVIEW_READY.
+
+    Preserves all prior events, executions, checkpoints, evidence, and feature SHA.
+    """
+    task = locked_task(session, task_id)
+    if task.state != "BLOCKED":
+        raise CoordinatorPolicyError(
+            f"Cannot recover task {task_id}: state is {task.state}, expected BLOCKED"
+        )
+    recovered_task = transition_task(
+        session,
+        task_id,
+        "REVIEW_READY",
+        actor=actor,
+        reason=reason or "operator recovery: review environment failure",
+    )
+    record_event(
+        session,
+        EventInput(
+            task_id=task_id,
+            event_type="runner.review_environment_recovered",
+            actor=actor,
+            event_data={
+                "prior_state": "BLOCKED",
+                "target_state": "REVIEW_READY",
+                "reason": reason or "operator recovery: review environment failure",
+            },
+        ),
+    )
+    return recovered_task
 
 
 def transition_task(
