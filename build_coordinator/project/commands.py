@@ -387,17 +387,7 @@ def handle_continue(args: argparse.Namespace) -> None:
     drained_from: str | None = None
     last_escalations: dict[str, str] = {}
     for number in range(1, max(1, args.max_cycles) + 1):
-        project = resolve_project(None, path=project.root)
-        apply_project_environment(project)
-        config = build_runner_config(project, dry_run=False)
-        with lifecycle.session() as session:
-            live_worker_ids = {
-                row.worker_id
-                for row in session.scalars(
-                    select(BuildRunnerExecution).where(BuildRunnerExecution.status.in_(_LIVE_EXECUTION))
-                )
-            }
-        runner.reload_config(config, live_worker_ids=live_worker_ids)
+        project, config = _reload_project_runtime(project, lifecycle, runner)
         if args.timeout is not None and drained_from is None and time.monotonic() - started > args.timeout:
             with lifecycle.session() as session:
                 state = ensure_state(session)
@@ -477,6 +467,26 @@ def handle_continue(args: argparse.Namespace) -> None:
         _print(payload)
     else:
         print(_continue_human_summary(project, cycles, final, last_escalations), flush=True)
+
+
+def _reload_project_runtime(
+    project: ProjectDefinition,
+    lifecycle,
+    runner: BuildRunner,
+) -> tuple[ProjectDefinition, Any]:
+    """Refresh project.yaml-derived runtime state between cycles only."""
+    project = resolve_project(None, path=project.root)
+    apply_project_environment(project)
+    config = build_runner_config(project, dry_run=False)
+    with lifecycle.session() as session:
+        live_worker_ids = {
+            row.worker_id
+            for row in session.scalars(
+                select(BuildRunnerExecution).where(BuildRunnerExecution.status.in_(_LIVE_EXECUTION))
+            )
+        }
+    runner.reload_config(config, live_worker_ids=live_worker_ids)
+    return project, config
 
 
 _ESCALATION_LABELS = {

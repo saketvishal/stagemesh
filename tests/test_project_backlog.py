@@ -1180,26 +1180,62 @@ def test_continue_reloads_project_yaml_between_cycles(tmp_path, registry, monkey
     monkeypatch.delenv("BUILD_COORDINATOR_DATABASE_URL", raising=False)
     monkeypatch.delenv("BUILD_COORDINATOR_RUNNER_CONFIG", raising=False)
 
-    reload_builder_counts: list[int] = []
+    reload_snapshots: list[dict[str, object]] = []
 
     class ReloadProbeRunner:
         def __init__(self, _session_factory, config, **_kwargs):
+            self.session_factory = _session_factory
             self.config = config
             self.cycles = 0
 
         def reload_config(self, config, *, live_worker_ids=None):
             self.config = config
-            reload_builder_counts.append(sum(1 for worker in config.workers if worker.role == "BUILDER"))
+            builders = [worker for worker in config.workers if worker.role == "BUILDER"]
+            reload_snapshots.append(
+                {
+                    "builder_count": len(builders),
+                    "builder_adapters": [worker.adapter for worker in builders],
+                    "builder_commands": [worker.command for worker in builders],
+                    "live_worker_ids": sorted(live_worker_ids or ()),
+                }
+            )
 
         def run_once(self):
             self.cycles += 1
             if self.cycles == 1:
                 project = yaml.safe_load((root / ".stagemesh" / "project.yaml").read_text(encoding="utf-8"))
                 project["execution"]["concurrency"] = 3
+                project["workers"]["builder"] = {
+                    "adapter": "subprocess",
+                    "provider": "new-runtime",
+                    "command": ["new-worker"],
+                }
                 (root / ".stagemesh" / "project.yaml").write_text(
                     yaml.safe_dump(project),
                     encoding="utf-8",
                 )
+                with self.session_factory() as session:
+                    session.add(
+                        BuildTask(
+                            task_id="LIVE-1",
+                            title="Live task",
+                            description="Already running",
+                            acceptance_criteria=["still running"],
+                            state="IN_PROGRESS",
+                        )
+                    )
+                    session.add(
+                        BuildRunnerExecution(
+                            execution_id="live-exec-1",
+                            task_id="LIVE-1",
+                            role="BUILDER",
+                            worker_id="builder-1",
+                            provider="old-runtime",
+                            adapter="fake",
+                            status="RUNNING",
+                        )
+                    )
+                    session.commit()
             return SimpleNamespace(
                 launched=[],
                 observed=[],
@@ -1227,7 +1263,20 @@ def test_continue_reloads_project_yaml_between_cycles(tmp_path, registry, monkey
     )
 
     payload = json.loads(capsys.readouterr().out)
-    assert reload_builder_counts == [1, 3]
+    assert reload_snapshots == [
+        {
+            "builder_count": 1,
+            "builder_adapters": ["fake"],
+            "builder_commands": [()],
+            "live_worker_ids": [],
+        },
+        {
+            "builder_count": 3,
+            "builder_adapters": ["subprocess", "subprocess", "subprocess"],
+            "builder_commands": [("new-worker",), ("new-worker",), ("new-worker",)],
+            "live_worker_ids": ["builder-1"],
+        },
+    ]
     assert payload["project"]["concurrency"] == 3
 
 
