@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from datetime import timedelta
 
@@ -213,6 +214,49 @@ def test_stale_review_for_pre_recovery_sha_is_not_accepted_for_integration():
         ).all()
         assert integrations == []
         assert task.state == "REVIEW_READY"
+
+
+def test_merge_conflict_recovery_dispatch_records_worker_provider_and_prompt_context():
+    executor = FakeExecutor()
+    runner = _runner(executors={"builder-a": executor})
+    with SessionLocal() as session:
+        upsert_task(session, _task("GH-78"))
+        task = session.get(BuildTask, "GH-78")
+        task.state = "REWORK_REQUIRED"
+        task.branch_name = "stagemesh/GH-78"
+        task.waiting_input = {
+            "conflict_recovery": {
+                "conflict_type": "MERGE_CONFLICT",
+                "original_reviewed_sha": "feature-b1",
+                "task_sha": "feature-b1",
+                "current_main_sha": "main-2",
+                "conflicting_current_main_sha": "main-2",
+                "merge_base": "base-1",
+                "conflict_paths": ["src/app.py"],
+                "attempts": 1,
+                "max_attempts": 2,
+            }
+        }
+        session.commit()
+
+    result = runner.run_once()
+
+    assert len(result.launched) == 1
+    assert executor.launches
+    prompt = json.loads(executor.launches[0].prompt)
+    conflict = prompt["resume_context"]["conflict_recovery"]
+    assert conflict["original_reviewed_sha"] == "feature-b1"
+    assert conflict["conflicting_current_main_sha"] == "main-2"
+    assert conflict["conflict_paths"] == ["src/app.py"]
+    assert conflict["recovery_worker"] == "builder-a"
+    assert conflict["recovery_provider"] == "local"
+    assert "feature SHA changes" in prompt["role_policy"]
+    assert "independent review of the exact conflict-resolved SHA" in prompt["role_policy"]
+    with SessionLocal() as session:
+        task = session.get(BuildTask, "GH-78")
+        stored = task.waiting_input["conflict_recovery"]
+        assert stored["recovery_worker"] == "builder-a"
+        assert stored["recovery_provider"] == "local"
 
 
 def test_ready_task_dispatches_one_builder():

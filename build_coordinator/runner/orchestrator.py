@@ -1498,7 +1498,26 @@ class BuildRunner:
                 extra["open_findings"] = finding_escalation_evidence(task.finding_registry or {})
                 waiting = task.waiting_input if isinstance(task.waiting_input, dict) else {}
                 if isinstance(waiting.get("conflict_recovery"), dict):
-                    extra["conflict_recovery"] = waiting["conflict_recovery"]
+                    conflict_recovery = dict(waiting["conflict_recovery"])
+                    conflict_recovery.update(
+                        {
+                            "recovery_worker": worker.worker_id,
+                            "recovery_provider": worker.provider,
+                        }
+                    )
+                    waiting = dict(waiting)
+                    waiting["conflict_recovery"] = conflict_recovery
+                    task.waiting_input = waiting
+                    extra["conflict_recovery"] = conflict_recovery
+                    record_event(
+                        session,
+                        EventInput(
+                            task_id=task.task_id,
+                            event_type="runner.merge_conflict_recovery_worker_selected",
+                            actor="runner",
+                            event_data=conflict_recovery,
+                        ),
+                    )
             prompt = prompt_builder.build(context, extra=extra)
             self._launch(
                 session,
