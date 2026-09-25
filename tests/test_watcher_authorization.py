@@ -54,7 +54,7 @@ def test_authorize_passes_for_matching_slug_and_remote(tmp_path, monkeypatch):
 
     subprocess.run(
 
-        ["git", "-C", str(repo_root), "remote", "add", "origin", "https://github.com/saketvishal/caventra-orchestrator.git"],
+        ["git", "-C", str(repo_root), "remote", "add", "origin", "https://github.com/saketvishal/stagemesh-orchestrator.git"],
 
         check=True,
 
@@ -66,7 +66,7 @@ def test_authorize_passes_for_matching_slug_and_remote(tmp_path, monkeypatch):
 
         tmp_path,
 
-        [{"slug": "caventra-orchestrator", "control_repo_root": str(repo_root)}],
+        [{"slug": "stagemesh-orchestrator", "control_repo_root": str(repo_root)}],
 
     )
 
@@ -74,9 +74,9 @@ def test_authorize_passes_for_matching_slug_and_remote(tmp_path, monkeypatch):
 
 
 
-    repo = auth.authorize("caventra-orchestrator")
+    repo = auth.authorize("stagemesh-orchestrator")
 
-    assert repo.slug == "saketvishal/caventra-orchestrator"
+    assert repo.slug == "saketvishal/stagemesh-orchestrator"
 
     assert repo.control_repo_root == repo_root
 
@@ -94,7 +94,7 @@ def test_git_remote_probe_is_scoped_to_configured_safe_directory(monkeypatch):
 
         calls.append(args)
 
-        return subprocess.CompletedProcess(args, 0, stdout="https://github.com/saketvishal/caventra-orchestrator.git\n")
+        return subprocess.CompletedProcess(args, 0, stdout="https://github.com/saketvishal/stagemesh-orchestrator.git\n")
 
 
 
@@ -102,13 +102,13 @@ def test_git_remote_probe_is_scoped_to_configured_safe_directory(monkeypatch):
 
 
 
-    repo_root = Path("C:/caventra-orchestrator")
+    repo_root = Path("C:/stagemesh-orchestrator")
 
     remote = auth._git_remote_url(repo_root, "origin")
 
 
 
-    assert remote == "https://github.com/saketvishal/caventra-orchestrator.git"
+    assert remote == "https://github.com/saketvishal/stagemesh-orchestrator.git"
 
     assert calls == [
 
@@ -146,7 +146,7 @@ def test_authorize_fails_closed_on_remote_mismatch(tmp_path, monkeypatch):
 
     subprocess.run(
 
-        ["git", "-C", str(repo_root), "remote", "add", "origin", "https://github.com/saketvishal/caventra.git"],
+        ["git", "-C", str(repo_root), "remote", "add", "origin", "https://github.com/saketvishal/stagemesh.git"],
 
         check=True,
 
@@ -158,7 +158,7 @@ def test_authorize_fails_closed_on_remote_mismatch(tmp_path, monkeypatch):
 
         tmp_path,
 
-        [{"slug": "caventra-orchestrator", "control_repo_root": str(repo_root)}],
+        [{"slug": "stagemesh-orchestrator", "control_repo_root": str(repo_root)}],
 
     )
 
@@ -168,7 +168,7 @@ def test_authorize_fails_closed_on_remote_mismatch(tmp_path, monkeypatch):
 
     with pytest.raises(auth.RepositoryAuthorizationError, match="does not resolve"):
 
-        auth.authorize("caventra-orchestrator")
+        auth.authorize("stagemesh-orchestrator")
 
 
 
@@ -184,7 +184,7 @@ def test_authorize_fails_closed_on_non_git_path(tmp_path, monkeypatch):
 
         tmp_path,
 
-        [{"slug": "caventra-orchestrator", "control_repo_root": str(not_a_repo)}],
+        [{"slug": "stagemesh-orchestrator", "control_repo_root": str(not_a_repo)}],
 
     )
 
@@ -194,7 +194,7 @@ def test_authorize_fails_closed_on_non_git_path(tmp_path, monkeypatch):
 
     with pytest.raises(auth.RepositoryAuthorizationError, match="not a git worktree"):
 
-        auth.authorize("caventra-orchestrator")
+        auth.authorize("stagemesh-orchestrator")
 
 
 
@@ -206,7 +206,7 @@ def test_authorize_fails_closed_on_missing_path(tmp_path, monkeypatch):
 
         tmp_path,
 
-        [{"slug": "caventra-orchestrator", "control_repo_root": str(tmp_path / "does-not-exist")}],
+        [{"slug": "stagemesh-orchestrator", "control_repo_root": str(tmp_path / "does-not-exist")}],
 
     )
 
@@ -216,7 +216,7 @@ def test_authorize_fails_closed_on_missing_path(tmp_path, monkeypatch):
 
     with pytest.raises(auth.RepositoryAuthorizationError, match="does not exist"):
 
-        auth.authorize("caventra-orchestrator")
+        auth.authorize("stagemesh-orchestrator")
 
 
 
@@ -232,7 +232,7 @@ def test_authorize_fails_closed_when_repo_not_configured(tmp_path, monkeypatch):
 
     with pytest.raises(auth.RepositoryAuthorizationError, match="not in the operator"):
 
-        auth.authorize("caventra-orchestrator")
+        auth.authorize("stagemesh-orchestrator")
 
 
 
@@ -274,5 +274,5 @@ def test_explicit_relative_config_path_fails_closed(monkeypatch):
 
     with pytest.raises(CoordinatorConfigError):
 
-        auth.authorize("caventra-orchestrator")
+        auth.authorize("stagemesh-orchestrator")
 
