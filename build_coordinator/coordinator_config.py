@@ -86,8 +86,8 @@ class CoordinatorConfig:
 
 
 def _explicit_config_path() -> Path:
-    env_name = "BUILD_COORDINATOR_CONFIG"
-    configured = os.getenv("BUILD_COORDINATOR_CONFIG", "")
+    env_name = "CAVENTRA_BUILD_CONFIG" if os.getenv("CAVENTRA_BUILD_CONFIG") else "BUILD_COORDINATOR_CONFIG"
+    configured = os.getenv(env_name, "")
     raw = Path(configured)
     if not raw.is_absolute():
         raise CoordinatorConfigError(
@@ -100,7 +100,7 @@ def _explicit_config_path() -> Path:
     if not resolved.is_file():
         raise CoordinatorConfigError(
             f"{env_name} is set to {resolved}, but that file does "
-            f"not exist. Fix the path or unset {env_name} to fall "
+            "not exist. Fix the path or unset {env_name} to fall "
             "back to the default config location."
         )
     return resolved
@@ -111,10 +111,10 @@ def config_file_path() -> Path | None:
 
     Returns None when no config file is configured or present -- callers
     should treat that as "use built-in defaults", not an error. An
-    explicitly-set `BUILD_COORDINATOR_CONFIG` that is invalid raises
+    explicitly-set `BUILD_COORDINATOR_CONFIG` or `CAVENTRA_BUILD_CONFIG` that is invalid raises
     `CoordinatorConfigError` instead of returning None (fail closed).
     """
-    if os.getenv("BUILD_COORDINATOR_CONFIG"):
+    if os.getenv("CAVENTRA_BUILD_CONFIG") or os.getenv("BUILD_COORDINATOR_CONFIG"):
         return _explicit_config_path()
     if DEFAULT_CONFIG_PATH.is_file():
         return DEFAULT_CONFIG_PATH
