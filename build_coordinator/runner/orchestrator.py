@@ -141,6 +141,7 @@ from build_coordinator.service import (
     release_active_claims,
     request_task_input,
     transition_task,
+    _task_branch_has_real_work,
 )
 from build_coordinator.types import CheckpointInput, EventInput
 
@@ -770,18 +771,28 @@ class BuildRunner:
                 extra_data={"blockers": blocker_list},
             )
             return
+        feature_sha = builder.feature_sha if builder else execution.result_data.get("feature_sha")
         task = session.get(BuildTask, execution.task_id)
+        assigned_branch = execution.branch_name or (task.branch_name if task else None)
+        if assigned_branch and not feature_sha:
+            result.escalations.append(f"{execution.task_id}:BUILDER_COMMIT_CONTRACT")
+            self._block_task(
+                session,
+                execution.task_id,
+                "BUILDER_COMMIT_CONTRACT",
+                invariant="BUILDER_COMMIT_CONTRACT",
+                execution=execution,
+                error="Builder result for an assigned task branch did not provide a reviewable feature commit",
+                recovery_classification="REWORK_REQUIRED",
+            )
+            return
         conflict_rec = (
             (task.waiting_input or {}).get("conflict_recovery")
             if task is not None and isinstance(task.waiting_input, dict)
             else None
         )
         if conflict_rec and isinstance(conflict_rec, dict):
-            resolved_sha = (
-                builder.feature_sha
-                if builder and builder.feature_sha
-                else execution.result_data.get("feature_sha")
-            )
+            resolved_sha = feature_sha
             original_sha = str(conflict_rec.get("task_sha") or "")
             if not resolved_sha or resolved_sha == original_sha:
                 result.escalations.append(f"{execution.task_id}:MERGE_CONFLICT_RECOVERY_FAILED")
@@ -830,7 +841,7 @@ class BuildRunner:
                 worker_id=execution.worker_id,
                 data=CheckpointInput(
                     current_step="runner observed builder success",
-                    current_head_sha=builder.feature_sha if builder else execution.result_data.get("feature_sha"),
+                    current_head_sha=feature_sha,
                     completed_work=["external builder process completed"],
                     files_changed=list(builder.files_changed) if builder else execution.result_data.get("files_changed") or [],
                     commits_created=list(builder.commits_created) if builder else execution.result_data.get("commits_created") or [],
@@ -1459,6 +1470,19 @@ class BuildRunner:
                         event_type="runner.worktree_invalid",
                         actor="runner",
                         event_data={"error": str(exc)},
+                    ),
+                )
+                continue
+            except CoordinatorPolicyError as exc:
+                result.scheduling_reasons[task.task_id] = "branch_collision"
+                record_task_withheld(session, task.task_id, "branch_collision", task.objective_id)
+                record_event(
+                    session,
+                    EventInput(
+                        task_id=task.task_id,
+                        event_type="runner.branch_collision",
+                        actor="runner",
+                        event_data={"error": str(exc), "branch": task.branch_name or task_branch_name(task.task_id)},
                     ),
                 )
                 continue
@@ -2307,6 +2331,7 @@ class BuildRunner:
     def _prepare_task_worker(self, worker: WorkerConfig, task: BuildTask) -> WorkerConfig:
         resume = task.state in {"REWORK_REQUIRED", "STALE", "RESUMABLE"} and bool(task.branch_name)
         branch = task.branch_name if resume else task_branch_name(task.task_id)
+        self._require_no_cross_objective_branch_collision_before_prepare(task, branch)
         if self._config.use_clone_pool and self._config.clone_pool_root:
             clone_path = ensure_repo_clone(
                 self._config.clone_pool_root,
@@ -2340,6 +2365,26 @@ class BuildRunner:
             identity_args = resolve_git_identity_args(wt)
             _git(wt, *identity_args, "merge", "--no-ff", "-m", f"Merge {main_ref} into {branch}", f"refs/heads/{main_ref}")
         return dataclasses.replace(worker, branch_name=branch)
+
+    def _require_no_cross_objective_branch_collision_before_prepare(
+        self, task: BuildTask, branch: str
+    ) -> None:
+        """Fail before workspace preparation can reset a colliding task branch."""
+        with self._session_factory() as session:
+            owner = session.scalar(
+                select(BuildTask)
+                .where(BuildTask.task_id != task.task_id)
+                .where(BuildTask.branch_name == branch)
+                .where(BuildTask.state.notin_(("DONE", "FAILED", "STALE")))
+                .limit(1)
+            )
+            if owner is None or owner.objective_id == task.objective_id:
+                return
+            owner_task_id = owner.task_id
+        if _task_branch_has_real_work(branch):
+            raise CoordinatorPolicyError(
+                f"Branch {branch} already belongs to task {owner_task_id}; refusing cross-objective collision"
+            )
 
     def _validate_worker_worktree(self, worker: WorkerConfig) -> None:
         if not worker.worktree_path:
