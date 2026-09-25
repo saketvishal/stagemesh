@@ -379,6 +379,70 @@ def test_historical_objective_root_task_is_reconciled_without_losing_dependencie
         assert event.event_data["dependencies"] == ["GH-75"]
 
 
+def test_direct_execution_opt_in_revives_historical_objective_root_task():
+    with SessionLocal() as session:
+        session.add(
+            BuildObjective(
+                objective_id="GH-71",
+                goal="historical objective",
+                completion_criteria=[],
+                dependencies=["GH-75"],
+                state="PLANNING",
+            )
+        )
+        upsert_task(
+            session,
+            TaskSpec(
+                task_id="GH-75",
+                title="Prerequisite",
+                description="already complete",
+                acceptance_criteria=["done"],
+            ),
+        ).state = "DONE"
+        historical = upsert_task(
+            session,
+            TaskSpec(
+                task_id="GH-71",
+                title="Historical synthetic root",
+                description="old behavior",
+                acceptance_criteria=["ok"],
+                dependencies=["GH-75"],
+            ),
+        )
+        historical.reason_created = "OBJECTIVE_ROOT_COMPAT"
+        historical.objective_id = "GH-71"
+        historical.state = "STALE"
+        session.commit()
+
+    source = GitHubTaskSource(
+        repo="example/repo",
+        client=FakeGitHubClient(
+            [
+                {
+                    "number": 71,
+                    "title": "Broad architecture objective",
+                    "body": "## Objective\nNo dependency text in this rewritten body.",
+                    "labels": [{"name": "objective"}, {"name": "stagemesh:direct-execution"}],
+                    "url": "https://github.com/example/repo/issues/71",
+                }
+            ]
+        ),
+    )
+    with SessionLocal() as session:
+        source.discover_tasks(session)
+        session.commit()
+
+    with SessionLocal() as session:
+        obj = session.get(BuildObjective, "GH-71")
+        task = session.get(BuildTask, "GH-71")
+        assert obj.dependencies == ["GH-75"]
+        assert task.objective_id == "GH-71"
+        assert task.dependencies == ["GH-75"]
+        assert task.reason_created == "GITHUB_SOURCE"
+        assert task.state == "READY"
+        assert task_is_claimable(session, task, utcnow()) is True
+
+
 def test_gh_71_objective_waits_for_gh_75_authoritative_completion_after_reimport():
     issues = [
         {
