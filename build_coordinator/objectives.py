@@ -37,6 +37,7 @@ from build_coordinator.policy import CoordinatorPolicyError
 from build_coordinator.service import upsert_task, utcnow
 from build_coordinator.planner import planner_task_id
 from build_coordinator.types import (
+    OBJECTIVE_ROOT_COMPAT_REASON,
     PLANNER_TASK_REASON,
     FindingSpec,
     ObjectivePlan,
@@ -140,6 +141,24 @@ def list_objectives(session: Session) -> list[BuildObjective]:
     return list(session.scalars(select(BuildObjective).order_by(BuildObjective.created_at)).all())
 
 
+def objective_dependencies_satisfied(session: Session, objective: BuildObjective) -> bool:
+    """Authoritative dependency gate for objective planning.
+
+    A dependency is complete when a BuildObjective with that id is COMPLETED,
+    or, for ordinary task prerequisites, when the BuildTask is DONE.
+    """
+    for dep_id in objective.dependencies or []:
+        dep_objective = session.get(BuildObjective, dep_id)
+        if dep_objective is not None:
+            if dep_objective.state != "COMPLETED":
+                return False
+            continue
+        dep_task = session.get(BuildTask, dep_id)
+        if dep_task is None or dep_task.state != "DONE":
+            return False
+    return True
+
+
 def objective_tasks(session: Session, objective_id: str) -> list[BuildTask]:
     return list(
         session.scalars(
@@ -152,8 +171,19 @@ def is_planner_task(task: BuildTask) -> bool:
     return task.reason_created == PLANNER_TASK_REASON
 
 
+def is_objective_root_compat_task(task: BuildTask) -> bool:
+    """A quarantined historical dual-record root task, kept for audit
+    history but never claimable and never part of the objective's work
+    set for completion or resume decisions."""
+    return task.reason_created == OBJECTIVE_ROOT_COMPAT_REASON
+
+
 def objective_work_tasks(session: Session, objective_id: str) -> list[BuildTask]:
-    return [task for task in objective_tasks(session, objective_id) if not is_planner_task(task)]
+    return [
+        task
+        for task in objective_tasks(session, objective_id)
+        if not is_planner_task(task) and not is_objective_root_compat_task(task)
+    ]
 
 
 def get_planner_task(session: Session, objective_id: str) -> BuildTask | None:
@@ -195,6 +225,7 @@ def create_objective(session: Session, spec: ObjectiveSpec) -> BuildObjective:
         allowed_scope=list(spec.allowed_scope),
         prohibited_scope=list(spec.prohibited_scope),
         completion_criteria=list(spec.completion_criteria),
+        dependencies=list(spec.dependencies),
         human_gate_policy=dict(spec.human_gate_policy),
         parallelism=spec.parallelism,
         main_push_policy=spec.main_push_policy,
@@ -940,7 +971,11 @@ def _reassess_completion(
         objective.state = "HUMAN_GATE"
         return
 
-    tasks = [task for task in task_by_id.values() if not is_planner_task(task)]
+    tasks = [
+        task
+        for task in task_by_id.values()
+        if not is_planner_task(task) and not is_objective_root_compat_task(task)
+    ]
     if not tasks:
         return  # PLANNING with no applied plan yet -- nothing to reassess
 

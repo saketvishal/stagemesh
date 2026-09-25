@@ -5,8 +5,11 @@ from __future__ import annotations
 import pytest
 from pathlib import Path
 
+from build_coordinator.claims import task_is_claimable
 from build_coordinator.db import Base, SessionLocal, engine, initialize_schema
 from build_coordinator.models import BuildObjective, BuildTask
+from build_coordinator.planner import planner_task_id
+from build_coordinator.service import utcnow
 from build_coordinator.task_source.base import TaskSourceConfig
 from build_coordinator.task_source.github import GitHubTaskSource
 
@@ -95,6 +98,82 @@ def test_github_task_source_syncs_objective():
         obj = session.get(BuildObjective, "GH-201")
         assert obj is not None
         assert "High-level Migration Objective" in obj.goal
+        assert session.get(BuildTask, "GH-201") is None
+        planner = session.get(BuildTask, planner_task_id("GH-201"))
+        assert planner is not None
+        assert planner.objective_id == "GH-201"
+
+
+def test_github_objective_reimport_reconciles_legacy_root_and_creates_planner():
+    client = FakeGitHubClient(
+        [
+            {
+                "number": 71,
+                "title": "Architecture and validation program",
+                "body": "## Objective\nDecompose broad architecture work.\n\nDepends on: #75",
+                "labels": [{"name": "objective"}],
+                "url": "https://github.com/example/repo/issues/71",
+            }
+        ]
+    )
+    source = GitHubTaskSource(repo="example/repo", client=client)
+
+    with SessionLocal() as session:
+        session.add(
+            BuildObjective(
+                objective_id="GH-71",
+                goal="legacy objective",
+                constraints=[],
+                allowed_scope=[],
+                prohibited_scope=[],
+                completion_criteria=[],
+                dependencies=[],
+                human_gate_policy={},
+                parallelism=1,
+                main_push_policy="NEVER",
+                state="PLANNING",
+                max_auto_created_tasks=20,
+                max_child_depth=1,
+            )
+        )
+        session.add(
+            BuildTask(
+                task_id="GH-71",
+                title="Legacy synthetic objective task",
+                description="Old imports created this as an executable root task.",
+                acceptance_criteria=[],
+                dependencies=["GH-75"],
+                state="READY",
+            )
+        )
+        session.commit()
+
+    with SessionLocal() as session:
+        results = source.discover_tasks(session)
+        session.commit()
+
+    assert len(results) == 1
+    assert results[0].task_id == "GH-71"
+
+    with SessionLocal() as session:
+        objective = session.get(BuildObjective, "GH-71")
+        root = session.get(BuildTask, "GH-71")
+        planner = session.get(BuildTask, planner_task_id("GH-71"))
+
+        assert objective is not None
+        assert objective.dependencies == ["GH-75"]
+
+        assert root is not None
+        assert root.reason_created == "OBJECTIVE_ROOT_COMPAT"
+        assert root.objective_id == "GH-71"
+        assert root.dependencies == ["GH-75"]
+        assert root.state == "STALE"
+        assert not task_is_claimable(session, root, utcnow())
+
+        assert planner is not None
+        assert planner.objective_id == "GH-71"
+        assert planner.reason_created == "OBJECTIVE_PLANNER"
+        assert planner.dependencies == ["GH-75"]
 
 
 def test_github_task_source_sync_outbound():
