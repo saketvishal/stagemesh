@@ -16,15 +16,18 @@ When it lands, this section should link to that artifact rather than duplicating
 the walkthrough.
 
 ```bash
-python -m pip install stagemesh
+git clone <repo-url>
+cd <repo-directory>
+pip install -e ".[dev]"
 stagemesh --version
-stagemesh doctor --json
 ```
 
-Until the `stagemesh` project is published on PyPI and the brand-new environment
-smoke is recorded in [PyPI Release Evidence](docs/evidence/PYPI_RELEASE.md),
-treat the install command above as the verified release path, not as a claim that
-PyPI publication is already complete.
+This from-source install is the path exercised by this repository's own test
+suite and is the verified alpha install path today. PyPI publication
+(`python -m pip install stagemesh`) is gated by the release checklist; see
+[PyPI Release Evidence](docs/evidence/PYPI_RELEASE.md) for the current
+publication status and the brand-new environment smoke that will be recorded
+once the package is published.
 
 Once installed, initialize a repository and let the coordinator own execution:
 
