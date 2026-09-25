@@ -124,6 +124,7 @@ class BuildTask(Base):
     # review/remediation cycles (see build_coordinator.runner.findings). Lets
     # convergence decisions be finding-aware instead of raw-cycle-count-aware.
     finding_registry: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    retry_generation: Mapped[int] = mapped_column(nullable=False, default=0)
     branch_name: Mapped[str | None] = mapped_column(String(240), nullable=True)
     worktree_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     current_claim_id: Mapped[str | None] = mapped_column(String(36), nullable=True)

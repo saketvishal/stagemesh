@@ -24,6 +24,8 @@ from pathlib import Path
 from typing import Any
 
 from sqlalchemy.dialects import sqlite as sqlite_dialect
+from sqlalchemy import inspect
+from sqlalchemy.engine import Engine
 from sqlalchemy.schema import CreateIndex, CreateTable, Table
 
 from build_coordinator import models  # noqa: F401  (registers every table on Base.metadata)
@@ -266,6 +268,11 @@ def _same_ddl(actual: str | None, table: Table) -> bool:
     return _normal(actual).replace('"', "") == _normal(_model_ddl(table)).replace('"', "")
 
 
+def _missing_indexes(connection: sqlite3.Connection, table: Table) -> list[str]:
+    present = {row[1] for row in connection.execute(f"PRAGMA index_list({table.name})")}
+    return [index.name for index in table.indexes if index.name not in present]
+
+
 def _schema_differences(connection: sqlite3.Connection) -> list[str]:
     present = {
         row[0]: row[1]
@@ -274,8 +281,28 @@ def _schema_differences(connection: sqlite3.Connection) -> list[str]:
     return [
         table.name
         for table in Base.metadata.sorted_tables
-        if table.name in present and not _same_ddl(present[table.name], table)
+        if table.name in present and (not _same_ddl(present[table.name], table) or _missing_indexes(connection, table))
     ]
+
+
+def schema_repair_items(engine: Engine) -> list[dict[str, Any]]:
+    """Physical schema compatibility checks for already-versioned databases."""
+    inspector = inspect(engine)
+    present = set(inspector.get_table_names())
+    items: list[dict[str, Any]] = []
+    for table in Base.metadata.sorted_tables:
+        if table.name not in present:
+            items.append({"table": table.name, "action": "CREATE"})
+    if items:
+        return items
+    if engine.dialect.name == "sqlite":
+        dbapi = engine.raw_connection()
+        try:
+            for table in _schema_differences(dbapi):
+                items.append({"table": table, "action": "REBUILD"})
+        finally:
+            dbapi.close()
+    return items
 
 
 def _default_for(column) -> Any:
@@ -375,17 +402,26 @@ def plan_migration(path: Path) -> MigrationReport:
             row[0]: row[1]
             for row in connection.execute("SELECT name, sql FROM sqlite_master WHERE type = 'table'")
         }
+        stored_version = None
         if SCHEMA_VERSION_TABLE in present:
             stored_version = connection.execute(
                 f"SELECT version FROM {SCHEMA_VERSION_TABLE} WHERE singleton_id = 1"
             ).fetchone()
             stored_version = stored_version[0] if stored_version else None
-            if stored_version == CURRENT_SCHEMA_VERSION:
-                return report
         for table in Base.metadata.sorted_tables:
             if table.name not in present:
+                report.tables.append(
+                    {
+                        "table": table.name,
+                        "action": "CREATE",
+                        "columns_added": [column.name for column in table.columns],
+                        "columns_dropped": [],
+                        "rows": 0,
+                    }
+                )
                 continue
-            if _same_ddl(present[table.name], table):
+            missing_indexes = _missing_indexes(connection, table)
+            if _same_ddl(present[table.name], table) and not missing_indexes:
                 continue
             have = [row[1] for row in connection.execute(f"PRAGMA table_info({table.name})")]
             want = [column.name for column in table.columns]
@@ -395,10 +431,11 @@ def plan_migration(path: Path) -> MigrationReport:
                     "action": "REBUILD",
                     "columns_added": [c for c in want if c not in have],
                     "columns_dropped": [c for c in have if c not in want],
+                    "indexes_added": missing_indexes,
                     "rows": connection.execute(f"SELECT COUNT(*) FROM {table.name}").fetchone()[0],
                 }
             )
-        report.needed = True
+        report.needed = bool(report.tables) or stored_version != CURRENT_SCHEMA_VERSION
         live = 0
         if "build_runner_executions" in present:
             live = connection.execute(
@@ -451,7 +488,11 @@ def migrate_state(path: Path, *, apply: bool) -> MigrationReport:
             for table in Base.metadata.sorted_tables:
                 if table.name not in rebuilt:
                     continue
-                _rebuild(connection, table)
+                action = next(item["action"] for item in report.tables if item["table"] == table.name)
+                if action == "CREATE":
+                    _create_table(connection, table)
+                else:
+                    _rebuild(connection, table)
             leftover = _schema_differences(connection)
             if leftover:
                 raise ProjectError(f"schema still differs from the current models after rebuild: {leftover}")
@@ -505,5 +546,11 @@ def _rebuild(connection: sqlite3.Connection, table: Table) -> None:
     )
     connection.execute(f"DROP TABLE {table.name}")
     connection.execute(f"ALTER TABLE {staging} RENAME TO {table.name}")
+    for index in table.indexes:
+        connection.execute(str(CreateIndex(index).compile(dialect=sqlite_dialect.dialect())))
+
+
+def _create_table(connection: sqlite3.Connection, table: Table) -> None:
+    connection.execute(_model_ddl(table))
     for index in table.indexes:
         connection.execute(str(CreateIndex(index).compile(dialect=sqlite_dialect.dialect())))
