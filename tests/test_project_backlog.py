@@ -377,7 +377,7 @@ CREATE TABLE build_runner_executions (
 """
 
 
-def legacy_database(path: Path, *, execution: str | None = None) -> None:
+def legacy_database(path: Path, *, execution: str | None = None, process_id: str = "999999") -> None:
     """A schema-v1-shaped database. `execution` of 'stale' or 'live' adds a
     LAUNCHED execution row with a claim whose lease has expired (stale, orphaned
     by a coordinator that died) or is still unexpired (genuinely live)."""
@@ -403,7 +403,8 @@ def legacy_database(path: Path, *, execution: str | None = None) -> None:
             "INSERT INTO build_runner_executions (execution_id,task_id,role,worker_id,provider,adapter,"
             "claim_id,worktree_path,branch_name,process_id,result_path,status,result_data,launched_at,"
             "last_observed_at) VALUES ('EXEC-1','LEGACY-1','BUILDER','builder-1',NULL,'subprocess','CLAIM-1',"
-            "NULL,NULL,'999999',NULL,'RUNNING','{}','2000-01-01T00:00:00+00:00','2000-01-01T00:00:00+00:00')"
+            "NULL,NULL,?,NULL,'RUNNING','{}','2000-01-01T00:00:00+00:00','2000-01-01T00:00:00+00:00')",
+            (process_id,),
         )
     connection.commit()
     connection.close()
@@ -458,6 +459,47 @@ def test_migration_refuses_for_genuinely_live_execution_lease(tmp_path):
         assert connection.execute(
             "SELECT status FROM build_runner_executions WHERE execution_id = 'EXEC-1'"
         ).fetchone() == ("RUNNING",)
+
+
+def test_migration_refuses_for_genuinely_live_recorded_process_with_expired_lease(tmp_path):
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        path = tmp_path / "legacy.sqlite3"
+        legacy_database(path, execution="stale", process_id=str(proc.pid))
+
+        plan = plan_stale_execution_reconciliation(path)
+        assert plan.live_examined == 1
+        assert plan.refused and "live process evidence" in plan.refused
+        assert plan.genuinely_live == [
+            {
+                "execution_id": "EXEC-1",
+                "task_id": "LEGACY-1",
+                "status": "RUNNING",
+                "claim_id": "CLAIM-1",
+                "claim_status": "ACTIVE",
+                "lease_expires_at": "2000-01-01T00:00:00+00:00",
+                "process_id": str(proc.pid),
+                "process_alive": True,
+            }
+        ]
+
+        reconciled = reconcile_stale_executions(path, apply=True)
+        assert not reconciled.applied and reconciled.backup is None
+        assert reconciled.refused
+
+        migration = migrate_state(path, apply=True)
+        assert migration.refused and "live process evidence" in migration.refused
+        with sqlite3.connect(str(path)) as connection:
+            assert connection.execute(
+                "SELECT status FROM build_runner_executions WHERE execution_id = 'EXEC-1'"
+            ).fetchone() == ("RUNNING",)
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5)
 
 
 def test_stale_execution_deadlock_reconciles_then_migrates_then_resumes(tmp_path, session):

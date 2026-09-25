@@ -15,9 +15,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import shutil
 import sqlite3
+import sys
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -65,11 +67,12 @@ class StaleExecutionReport:
 
     Runs directly against the old-schema SQLite file (raw `sqlite3`, no ORM),
     so it can operate before `migrate_state` opens the database under the
-    current schema. Evidence is the same durable claim lease that the normal
-    post-migration recovery path (`service.reconcile_stale_executions`) uses:
-    an execution is only genuinely live if its claim is still ACTIVE with an
-    unexpired lease. Everything else is a stale/orphaned record left behind
-    by a coordinator process that died without releasing it.
+    current schema. Evidence includes the durable claim lease that the normal
+    post-migration recovery path (`service.reconcile_stale_executions`) uses
+    and the execution's durable recorded process id. An execution is genuinely
+    live if its claim is still ACTIVE with an unexpired lease or its recorded
+    process is still alive. Everything else is a stale/orphaned record left
+    behind by a coordinator process that died without releasing it.
     """
 
     database: str
@@ -103,6 +106,50 @@ def _as_utc(value: Any) -> datetime | None:
     if value.tzinfo is None:
         return value.replace(tzinfo=UTC)
     return value
+
+
+def _process_is_alive(process_id: Any) -> bool:
+    if process_id in (None, ""):
+        return False
+    try:
+        pid = int(process_id)
+    except (TypeError, ValueError):
+        return False
+    if pid <= 1:
+        return False
+    if sys.platform == "win32":
+        return _windows_process_is_alive(pid)
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    try:
+        with open(f"/proc/{pid}/stat", "r", encoding="utf-8") as stat:
+            return stat.read().split()[2] != "Z"
+    except OSError:
+        return True
+
+
+def _windows_process_is_alive(pid: int) -> bool:
+    import ctypes
+    from ctypes import wintypes
+
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    STILL_ACTIVE = 259
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        return False
+    try:
+        exit_code = wintypes.DWORD()
+        kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+            return False
+        return exit_code.value == STILL_ACTIVE
+    finally:
+        kernel32.CloseHandle(handle)
 
 
 def plan_stale_execution_reconciliation(path: Path) -> StaleExecutionReport:
@@ -167,6 +214,8 @@ def plan_stale_execution_reconciliation(path: Path) -> StaleExecutionReport:
                 and lease_expires_at is not None
                 and lease_expires_at > now
             )
+            process_id = row["process_id"] if "process_id" in exec_columns else None
+            process_alive = _process_is_alive(process_id)
             entry = {
                 "execution_id": row["execution_id"],
                 "task_id": row["task_id"],
@@ -174,12 +223,14 @@ def plan_stale_execution_reconciliation(path: Path) -> StaleExecutionReport:
                 "claim_id": claim_id,
                 "claim_status": claim["status"] if claim else None,
                 "lease_expires_at": claim["lease_expires_at"] if claim else None,
+                "process_id": process_id,
+                "process_alive": process_alive,
             }
-            (report.genuinely_live if genuinely_live else report.reconciled).append(entry)
+            (report.genuinely_live if genuinely_live or process_alive else report.reconciled).append(entry)
         if report.genuinely_live:
             report.refused = (
-                f"{len(report.genuinely_live)} execution(s) have an active, unexpired claim lease; "
-                "wait for them to finish (or their lease to expire) before migrating"
+                f"{len(report.genuinely_live)} execution(s) have live process evidence or an active, "
+                "unexpired claim lease; wait for them to finish before migrating"
             )
         return report
     finally:
