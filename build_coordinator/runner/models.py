@@ -235,6 +235,15 @@ class RunnerConfig:
     external_ci_enabled: bool = False
     external_ci_repo: str | None = None
     external_ci_max_consecutive_errors: int = 5
+    # GH-56: opt-in, repository-scoped standalone clone pools. When enabled,
+    # each worker's workspace for a repository is a full standalone `git
+    # clone` under clone_pool_root (keyed by repository identity and worker
+    # id) instead of a linked `git worktree add` checkout, avoiding the
+    # shared .git/worktrees metadata problems linked worktrees hit on
+    # Windows. Strictly additive: when False (the default), worktree
+    # provisioning behaves exactly as it did before this was added.
+    use_clone_pool: bool = False
+    clone_pool_root: str | None = None
 
     @classmethod
     def default(cls, *, dry_run: bool = False) -> "RunnerConfig":
@@ -384,6 +393,8 @@ class RunnerConfig:
             external_ci_max_consecutive_errors=int(
                 (data.get("external_ci") or {}).get("max_consecutive_errors", 5)
             ),
+            use_clone_pool=bool((data.get("clone_pool") or {}).get("enabled", False)),
+            clone_pool_root=(data.get("clone_pool") or {}).get("root"),
         )
 
     def public_summary(self) -> dict[str, Any]:
