@@ -1487,6 +1487,10 @@ class BuildRunner:
                 )
                 continue
 
+            if not self._run_task_setup(session, task, worker):
+                result.escalations.append(f"{task.task_id}:SETUP_FAILED")
+                continue
+
             try:
                 claim = claim_task(
                     session,
@@ -2365,6 +2369,60 @@ class BuildRunner:
             identity_args = resolve_git_identity_args(wt)
             _git(wt, *identity_args, "merge", "--no-ff", "-m", f"Merge {main_ref} into {branch}", f"refs/heads/{main_ref}")
         return dataclasses.replace(worker, branch_name=branch)
+
+    def _run_task_setup(self, session: Session, task: BuildTask, worker: WorkerConfig) -> bool:
+        """Run the project's `execution.setup` commands once per prepared task
+        workspace, before the agent starts. The outcome, recorded as durable
+        evidence, gates whether the task may launch."""
+        commands = list(self._config.setup_commands)
+        if not commands or not worker.worktree_path:
+            return True
+        cwd = worker.worktree_path
+        rows = session.scalars(
+            select(BuildTaskEvent)
+            .where(BuildTaskEvent.task_id == task.task_id)
+            .where(BuildTaskEvent.event_type == "runner.setup")
+            .order_by(BuildTaskEvent.created_at.desc())
+        ).all()
+        for row in rows:
+            data = row.event_data or {}
+            if data.get("workspace") == str(cwd) and data.get("commands") == commands:
+                if data.get("passed"):
+                    return True
+                break
+        outcome = run_validation(
+            commands,
+            cwd,
+            timeout_seconds=self._config.validation_timeout_seconds,
+        )
+        record_event(
+            session,
+            EventInput(
+                task_id=task.task_id,
+                event_type="runner.setup",
+                actor="runner",
+                event_data={
+                    "passed": outcome.passed,
+                    "workspace": str(cwd),
+                    "commands": commands,
+                    "results": outcome.results,
+                },
+            ),
+        )
+        if outcome.passed:
+            return True
+        self._block_task(
+            session,
+            task.task_id,
+            "SETUP_FAILED",
+            invariant="SETUP_FAILED",
+            worker=worker,
+            branch=worker.branch_name,
+            worktree=cwd,
+            error="; ".join(outcome.failure_summary()),
+            recovery_classification="RECOVERABLE_WORKTREE",
+        )
+        return False
 
     def _require_no_cross_objective_branch_collision_before_prepare(
         self, task: BuildTask, branch: str
