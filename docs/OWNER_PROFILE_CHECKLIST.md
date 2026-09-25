@@ -19,5 +19,15 @@ profile is public.
       repos, README profile if present) for any mention of Caventra or other
       private/internal project names, and remove them if found.
 
-None of the above can be verified from this repository's file state — an
-agent has no access to the GitHub account owner's profile settings.
+None of the above can be *changed* by an agent — profile edits require the
+account owner to be signed in to github.com. But the current state of each
+item **can** be read from the public GitHub API and cross-checked, run:
+
+```
+OWNER=<github-username> ./scripts/audit_owner_profile.sh
+```
+
+This prints, per item above, whether it's already satisfied (bio set,
+StageMesh pinned, link present, no Caventra reference found in bio/company
+field/profile README) or still needs the human action described here — so
+this checklist is a to-do list generated from live state, not a guess.

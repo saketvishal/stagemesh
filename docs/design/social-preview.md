@@ -21,3 +21,17 @@ be uploaded manually.
 4. Confirm the preview renders legibly at small size (GitHub shows a preview
    in the settings dialog; also check an actual shared link, e.g. paste the
    repo URL in a draft Slack/Discord message and check the unfurled card).
+5. Verify programmatically:
+   `REPO=owner/stagemesh ./scripts/configure_github_discovery.sh verify`
+   checks the live page's `og:image` meta tag and fails if it still points
+   at GitHub's default avatar/identicon image instead of a custom upload.
+
+## Why this can't be automated end-to-end
+
+GitHub has no API to upload a repository's social preview image (as of this
+writing, it's Settings-UI-only), and the SVG-to-PNG export plus the upload
+itself require either network access to an SVG rendering tool or a browser
+session — neither is available unattended in an isolated build-agent
+worktree. Steps 1-3 above are the exact, minimal manual sequence; step 5
+closes the loop so a maintainer can confirm it actually took effect rather
+than trusting that the upload happened.
