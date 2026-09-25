@@ -1,1 +1,1 @@
-"""GitHub integration package for Caventra Build Coordinator."""
+"""GitHub integration package for StageMesh Build Coordinator."""
