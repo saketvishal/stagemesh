@@ -102,12 +102,21 @@ tasks:
 
   - id: SM-008
     title: GitHub label provisioning for the optional task-source adapter
-    priority: 50
+    priority: 10
     risk: LOW
-    objective: "Create the stagemesh:* lifecycle labels the GitHub adapter applies, when the adapter is enabled."
+    objective: >
+      Ensure the GitHub task-source adapter can provision and recover its own
+      stagemesh:* lifecycle labels so a newly connected repository requires no
+      manual label setup and missing labels never block StageMesh execution.
     acceptance_criteria:
+      - On GitHub adapter initialization or first sync, ensure every stagemesh:* lifecycle label the adapter may emit exists.
       - Label creation is idempotent and only runs when the GitHub adapter is enabled.
-      - Local project backlog execution never depends on it.
+      - A brand-new GitHub repository with zero StageMesh labels can complete lifecycle synchronization without operator setup.
+      - Missing labels never prevent local task execution, validation, review, integration, or durable coordinator progress.
+      - If label provisioning fails because of permissions, network, or GitHub API failure, record durable outbound-sync evidence and retry later without corrupting task state.
+      - DONE synchronization does not remain permanently stuck merely because stagemesh:done was initially absent.
+      - Regression coverage includes the observed Caventra scenario: DONE task, stagemesh:done absent, StageMesh provisions the label, applies it, closes the issue, and requires no manual intervention.
+      - Local project backlog execution never depends on GitHub label provisioning.
     scope:
       allowed_paths: [build_coordinator/task_source/, tests/]
 
