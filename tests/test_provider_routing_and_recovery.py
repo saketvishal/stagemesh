@@ -20,7 +20,7 @@ from build_coordinator.agents.profiles import (
     RuntimeStatus,
     probe_runtime,
 )
-from build_coordinator.agents.wrapper import classify_failure
+from build_coordinator.agents.wrapper import classify_failure, sanitize_diagnostic
 from build_coordinator.claims import task_is_claimable
 from build_coordinator.db import Base, SessionLocal, engine, initialize_schema
 from build_coordinator.events import EventInput, record_event
@@ -337,6 +337,22 @@ def test_quota_exhaustion_classification():
 def test_rate_limiting_classification():
     assert classify_failure("You've hit your session limit · resets 5:50pm") == "RATE_LIMITED"
     assert classify_failure("HTTP 429 Too Many Requests") == "RATE_LIMITED"
+
+
+def test_ambiguous_retry_or_reset_text_is_not_rate_limited():
+    assert classify_failure("Claude status: resets 5:50pm") == "EXECUTION_FAILURE"
+    assert classify_failure("Provider reported an informational reset window; try again later if needed") == "EXECUTION_FAILURE"
+
+
+def test_provider_overload_is_unavailable_not_rate_limited():
+    assert classify_failure("Anthropic overloaded, please try again later") == "UNAVAILABLE"
+    assert classify_failure("HTTP 503 Service Unavailable") == "UNAVAILABLE"
+
+
+def test_provider_diagnostics_are_sanitized_before_persistence():
+    detail = sanitize_diagnostic("request failed authorization: Bearer sk-test-secret-token-1234567890")
+    assert "sk-test-secret-token" not in detail
+    assert "Bearer <redacted>" in detail
 
 
 # 10. Execution failure classification
