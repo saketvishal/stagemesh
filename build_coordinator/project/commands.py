@@ -140,10 +140,15 @@ def _open(project: ProjectDefinition):
     try:
         lifecycle.initialize_schema()
     except DatabaseSchemaError as exc:
-        raise ProjectError(
-            f"{exc} Run `stagemesh project migrate-state --all` to review an "
-            "explicit, backup-first migration of registered durable history."
-        ) from exc
+        db_path = _project_default_sqlite_path(project)
+        migrated = _migrate_database(db_path, apply=True)
+        if migrated.get("outcome") == "applied":
+            lifecycle.initialize_schema()
+        else:
+            raise ProjectError(
+                f"{exc} Run `stagemesh project migrate-state --all` to review an "
+                "explicit, backup-first migration of registered durable history."
+            ) from exc
     return lifecycle
 
 
