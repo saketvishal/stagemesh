@@ -43,6 +43,7 @@ from build_coordinator.types import (
 )
 from build_coordinator.models import (
     BuildCoordinatorState,
+    BuildObjective,
     BuildRunnerExecution,
     BuildTask,
     BuildTaskCheckpoint,
@@ -221,24 +222,15 @@ def _scope_conflicts(left: TaskOwnershipScope, right: TaskOwnershipScope) -> boo
 
 
 def _require_no_active_scope_conflict(session: Session, task: BuildTask, now: datetime) -> None:
-    scope = get_task_scope(task)
-    if scope is None:
-        return
-    active_claims = session.scalars(
-        select(BuildTaskClaim)
-        .where(BuildTaskClaim.claim_type == "IMPLEMENTATION")
-        .where(BuildTaskClaim.status == "ACTIVE")
-        .where(BuildTaskClaim.lease_expires_at > now)
-    ).all()
-    for claim in active_claims:
-        active_task = session.get(BuildTask, claim.task_id)
-        if active_task is None:
-            continue
-        active_scope = get_task_scope(active_task)
-        if active_scope is not None and _scope_conflicts(scope, active_scope):
-            raise CoordinatorPolicyError(
-                f"Task scope conflicts with active task: {active_task.task_id}"
-            )
+    from build_coordinator.runner.scheduling import (
+        active_implementation_tasks,
+        has_scope_conflict,
+    )
+    active_tasks = active_implementation_tasks(session, now)
+    if has_scope_conflict(task, active_tasks):
+        raise CoordinatorPolicyError(
+            f"Task scope conflicts with active tasks: {task.task_id}"
+        )
 
 
 def claim_task(
@@ -271,6 +263,37 @@ def _admit_implementation_claim(
     task = locked_task(session, request.task_id)
     if not task_is_claimable(session, task, now, check_migration_lock=False):
         raise CoordinatorPolicyError(f"Task is not claimable: {request.task_id}")
+
+    # Enforce worktree single-owner exclusivity
+    from build_coordinator.runner.scheduling import (
+        active_objective_implementations,
+        active_worktrees,
+        is_parallel_safe_serialized,
+        normalize_worktree_path,
+    )
+    if request.worktree_path:
+        norm_wt = normalize_worktree_path(request.worktree_path)
+        if norm_wt and norm_wt in active_worktrees(session, now):
+            raise CoordinatorPolicyError(f"Worktree is already owned: {request.worktree_path}")
+
+    # Enforce objective-level parallelism, human gates, and parallel_safe
+    if task.objective_id:
+        obj = session.get(BuildObjective, task.objective_id)
+        if obj is not None:
+            from build_coordinator.objectives import open_gates
+            if obj.state in {"HUMAN_GATE", "PAUSED"} or open_gates(session, obj.objective_id):
+                raise CoordinatorPolicyError(f"Objective has open human gates: {task.objective_id}")
+            active_obj_tasks = active_objective_implementations(session, task.objective_id, now)
+            other_active = [t for t in active_obj_tasks if t.task_id != task.task_id]
+            if len(other_active) >= obj.parallelism:
+                raise CoordinatorCapacityError(
+                    f"Objective parallelism reached: {len(other_active)}/{obj.parallelism}"
+                )
+            if is_parallel_safe_serialized(task, other_active):
+                raise CoordinatorPolicyError(
+                    f"parallel_safe serialization prevents claim: {task.task_id}"
+                )
+
     _require_no_active_scope_conflict(session, task, now)
 
     # Check active builder capacity (implementation claims only)
@@ -593,6 +616,7 @@ def transition_task(
     *,
     actor: str = "cli",
     reason: str | None = None,
+    event_data: dict[str, Any] | None = None,
 ) -> BuildTask:
     task = locked_task(session, task_id)
     from_state = task.state
@@ -604,13 +628,16 @@ def transition_task(
         task.current_claim_id = None
         task.lease_expires_at = None
         task.last_heartbeat_at = None
+    data = {"reason": reason} if reason else {}
+    if event_data:
+        data.update(event_data)
     record_event(session, EventInput(
         task_id=task_id,
         event_type="task.transitioned",
         actor=actor,
         from_state=from_state,
         to_state=to_state,
-        event_data={"reason": reason} if reason else {},
+        event_data=data,
     ))
     return task
 
@@ -728,7 +755,7 @@ def recover_expired(session: Session, *, actor: str = "cli") -> list[BuildTask]:
         task.current_claim_id = None
         task.last_heartbeat_at = None
         task.lease_expires_at = None
-        if task.state == "WAITING_FOR_INPUT":
+        if task.state in {"WAITING_FOR_INPUT", "BLOCKED"}:
             task.updated_at = now
         elif claim.claim_type == "REVIEW":
             task.state = "REVIEW_READY"
@@ -792,7 +819,7 @@ def recover_lost_execution_claims(
         task.current_claim_id = None
         task.last_heartbeat_at = None
         task.lease_expires_at = None
-        if task.state == "WAITING_FOR_INPUT":
+        if task.state in {"WAITING_FOR_INPUT", "BLOCKED"}:
             task.updated_at = now
         elif claim.claim_type == "REVIEW":
             task.state = "REVIEW_READY"
@@ -858,6 +885,14 @@ def reconcile_stale_executions(session: Session) -> list[BuildRunnerExecution]:
     terminated: list[BuildRunnerExecution] = []
     for row in live:
         if not row.claim_id:
+            row.status = "TERMINATED"
+            row.completed_at = now
+            row.last_observed_at = now
+            row.result_data = {
+                **(row.result_data or {}),
+                "reconciliation_state": "NO_CLAIM",
+            }
+            terminated.append(row)
             continue
         claim = session.get(BuildTaskClaim, row.claim_id)
         if (
