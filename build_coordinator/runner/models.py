@@ -224,6 +224,7 @@ class RunnerConfig:
     push_upstream: bool = False
     run_validation: bool = True
     validation_timeout_seconds: float = 900.0
+    setup_commands: tuple[str, ...] = ()
     max_execution_attempts: int = 3
     max_conflict_recovery_attempts: int = 2
     cleanup_branches: bool = False
@@ -387,6 +388,7 @@ class RunnerConfig:
             push_upstream=bool(data.get("push_upstream", False)),
             run_validation=bool(data.get("run_validation", True)),
             validation_timeout_seconds=float(data.get("validation_timeout_seconds", 900.0)),
+            setup_commands=tuple(data.get("setup_commands") or ()),
             max_execution_attempts=int(data.get("max_execution_attempts", 3)),
             max_conflict_recovery_attempts=int(data.get("max_conflict_recovery_attempts", 2)),
             cleanup_branches=bool(data.get("cleanup_branches", False)),
