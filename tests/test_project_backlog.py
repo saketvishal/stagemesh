@@ -15,7 +15,7 @@ import pytest
 import yaml
 from sqlalchemy import select
 
-from build_coordinator.db import DatabaseLifecycle
+from build_coordinator.db import DatabaseLifecycle, DatabaseSchemaError
 from build_coordinator.models import BuildRunnerExecution, BuildTask, BuildTaskClaim, BuildTaskEvent
 from build_coordinator.project.backlog import BacklogError, load_backlog, sync_backlog, task_priorities
 from build_coordinator.project.definition import (
@@ -33,6 +33,7 @@ from build_coordinator.project.state_migration import (
     plan_stale_execution_reconciliation,
     reconcile_stale_executions,
 )
+import build_coordinator.project.state_migration as state_migration
 from build_coordinator.service import transition_task, upsert_task
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -377,7 +378,7 @@ CREATE TABLE build_runner_executions (
 """
 
 
-def legacy_database(path: Path, *, execution: str | None = None) -> None:
+def legacy_database(path: Path, *, execution: str | None = None, process_id: str = "999999") -> None:
     """A schema-v1-shaped database. `execution` of 'stale' or 'live' adds a
     LAUNCHED execution row with a claim whose lease has expired (stale, orphaned
     by a coordinator that died) or is still unexpired (genuinely live)."""
@@ -403,7 +404,8 @@ def legacy_database(path: Path, *, execution: str | None = None) -> None:
             "INSERT INTO build_runner_executions (execution_id,task_id,role,worker_id,provider,adapter,"
             "claim_id,worktree_path,branch_name,process_id,result_path,status,result_data,launched_at,"
             "last_observed_at) VALUES ('EXEC-1','LEGACY-1','BUILDER','builder-1',NULL,'subprocess','CLAIM-1',"
-            "NULL,NULL,'999999',NULL,'RUNNING','{}','2000-01-01T00:00:00+00:00','2000-01-01T00:00:00+00:00')"
+            "NULL,NULL,?,NULL,'RUNNING','{}','2000-01-01T00:00:00+00:00','2000-01-01T00:00:00+00:00')",
+            (process_id,),
         )
     connection.commit()
     connection.close()
@@ -460,6 +462,74 @@ def test_migration_refuses_for_genuinely_live_execution_lease(tmp_path):
         ).fetchone() == ("RUNNING",)
 
 
+def test_migration_refuses_for_genuinely_live_recorded_process_with_expired_lease(tmp_path):
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        path = tmp_path / "legacy.sqlite3"
+        legacy_database(path, execution="stale", process_id=str(proc.pid))
+
+        plan = plan_stale_execution_reconciliation(path)
+        assert plan.live_examined == 1
+        assert plan.refused and "live process evidence" in plan.refused
+        assert plan.genuinely_live == [
+            {
+                "execution_id": "EXEC-1",
+                "task_id": "LEGACY-1",
+                "status": "RUNNING",
+                "claim_id": "CLAIM-1",
+                "claim_status": "ACTIVE",
+                "lease_expires_at": "2000-01-01T00:00:00+00:00",
+                "process_id": str(proc.pid),
+                "process_alive": True,
+            }
+        ]
+
+        reconciled = reconcile_stale_executions(path, apply=True)
+        assert not reconciled.applied and reconciled.backup is None
+        assert reconciled.refused
+
+        migration = migrate_state(path, apply=True)
+        assert migration.refused and "live process evidence" in migration.refused
+        with sqlite3.connect(str(path)) as connection:
+            assert connection.execute(
+                "SELECT status FROM build_runner_executions WHERE execution_id = 'EXEC-1'"
+            ).fetchone() == ("RUNNING",)
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5)
+
+
+def test_migration_refuses_when_recorded_process_probe_is_permission_denied(tmp_path, monkeypatch):
+    path = tmp_path / "legacy.sqlite3"
+    legacy_database(path, execution="stale", process_id="4242")
+
+    def inaccessible_process(pid, signal):
+        assert (pid, signal) == (4242, 0)
+        raise PermissionError("process exists but cannot be signaled")
+
+    monkeypatch.setattr(state_migration.sys, "platform", "linux")
+    monkeypatch.setattr(state_migration.os, "kill", inaccessible_process)
+
+    plan = plan_stale_execution_reconciliation(path)
+    assert plan.live_examined == 1
+    assert plan.refused and "live process evidence" in plan.refused
+    assert [e["execution_id"] for e in plan.genuinely_live] == ["EXEC-1"]
+    assert plan.genuinely_live[0]["process_alive"] is True
+
+    reconciled = reconcile_stale_executions(path, apply=True)
+    assert not reconciled.applied and reconciled.backup is None
+    assert reconciled.refused
+
+    with sqlite3.connect(str(path)) as connection:
+        assert connection.execute(
+            "SELECT status FROM build_runner_executions WHERE execution_id = 'EXEC-1'"
+        ).fetchone() == ("RUNNING",)
+
+
 def test_stale_execution_deadlock_reconciles_then_migrates_then_resumes(tmp_path, session):
     """Reproduces the Caventra deadlock: an old-schema database with a stale
     RUNNING execution (its claim's lease long expired -- the coordinator that
@@ -477,6 +547,11 @@ def test_stale_execution_deadlock_reconciles_then_migrates_then_resumes(tmp_path
 
     migration = migrate_state(path, apply=True)
     assert migration.refused and "1 live execution" in migration.refused
+    assert "appear stale/orphaned" in migration.refused
+    assert migration.stale_execution_reconciliation is not None
+    assert [
+        e["execution_id"] for e in migration.stale_execution_reconciliation["reconciled"]
+    ] == ["EXEC-1"]
     assert migration.backup is None
 
     plan = plan_stale_execution_reconciliation(path)
@@ -567,6 +642,60 @@ def test_versioned_schema_1_database_migrates_finding_registry_column(tmp_path):
         reloaded = db.get(BuildTask, "POST-MIGRATION-1")
         assert reloaded.finding_registry == {}
     lifecycle.dispose()
+
+
+def test_matching_version_with_missing_required_table_repairs_backup_first(tmp_path):
+    path = tmp_path / "missing-table.sqlite3"
+    lifecycle = DatabaseLifecycle(f"sqlite:///{path.as_posix()}", data_dir=tmp_path)
+    lifecycle.initialize_schema()
+    with lifecycle.session() as session:
+        upsert_task(
+            session,
+            SimpleNamespace(
+                task_id="KEEP-1",
+                title="Keep",
+                description="preserve me",
+                acceptance_criteria=[],
+                dependencies=[],
+                risk_level="MEDIUM",
+                review_policy="SELF",
+                permitted_scope=[],
+                required_validation=[],
+                implementation_notes=None,
+                program_key=None,
+                base_sha=None,
+                migration_allowed=False,
+                ownership_scope=None,
+            ),
+        )
+        session.commit()
+    lifecycle.dispose()
+
+    connection = sqlite3.connect(str(path))
+    connection.execute("DROP TABLE build_runner_executions")
+    connection.commit()
+    connection.close()
+
+    broken = DatabaseLifecycle(f"sqlite:///{path.as_posix()}", data_dir=tmp_path)
+    with pytest.raises(DatabaseSchemaError):
+        broken.initialize_schema()
+    broken.dispose()
+
+    report = plan_migration(path)
+    assert report.needed
+    assert {"table": "build_runner_executions", "action": "CREATE"} <= report.tables[0].items()
+
+    applied = migrate_state(path, apply=True)
+    assert applied.applied and Path(applied.backup).is_file()
+    assert all(row["identical"] for row in applied.preservation)
+    assert not plan_migration(path).needed
+
+    repaired = DatabaseLifecycle(f"sqlite:///{path.as_posix()}", data_dir=tmp_path)
+    repaired.initialize_schema()
+    with repaired.session() as session:
+        assert session.get(BuildTask, "KEEP-1").description == "preserve me"
+        assert session.query(BuildRunnerExecution).count() == 0
+    repaired.dispose()
 
 
 # ---------------------------------------------------------------- end to end
@@ -960,6 +1089,67 @@ def test_migration_module_is_self_contained_in_a_fresh_interpreter(tmp_path):
         text=True,
     )
     assert proc.returncode == 0, proc.stderr
+
+
+def test_global_migrate_state_uses_each_registered_projects_database(tmp_path, registry):
+    root_a, _ = make_project_repo(
+        tmp_path,
+        {"A-1": {}},
+        subdir="repo-a",
+        project_id="project-a",
+        name="Project A",
+    )
+    root_b, _ = make_project_repo(
+        tmp_path,
+        {"B-1": {}},
+        subdir="repo-b",
+        project_id="project-b",
+        name="Project B",
+    )
+    register_project(root_a)
+    register_project(root_b)
+    db_a = root_a / ".build-coordinator" / "coordinator.sqlite3"
+    db_b = root_b / ".build-coordinator" / "coordinator.sqlite3"
+    db_a.parent.mkdir(parents=True)
+    db_b.parent.mkdir(parents=True)
+    legacy_database(db_a)
+    legacy_database(db_b)
+
+    poisoned_env = {"BUILD_COORDINATOR_DATABASE_URL": f"sqlite:///{db_a.as_posix()}"}
+    dry_run = stagemesh(
+        ["project", "migrate-state", "--all"],
+        cwd=tmp_path,
+        registry=registry,
+        extra_env=poisoned_env,
+    )
+    assert dry_run.returncode == 0, dry_run.stderr
+    planned = json.loads(dry_run.stdout)
+    assert planned["projects"]["project-a"]["migration"]["database"] == str(db_a)
+    assert planned["projects"]["project-b"]["migration"]["database"] == str(db_b)
+    assert planned["projects"]["project-a"]["outcome"] == "planned"
+    assert planned["projects"]["project-b"]["outcome"] == "planned"
+
+    applied = stagemesh(
+        ["project", "migrate-state", "--all", "--apply"],
+        cwd=tmp_path,
+        registry=registry,
+        extra_env=poisoned_env,
+    )
+    assert applied.returncode == 0, applied.stderr
+    payload = json.loads(applied.stdout)
+    assert payload["projects"]["project-a"]["outcome"] == "applied"
+    assert payload["projects"]["project-b"]["outcome"] == "applied"
+    assert payload["projects"]["project-a"]["migration"]["database"] == str(db_a)
+    assert payload["projects"]["project-b"]["migration"]["database"] == str(db_b)
+    assert payload["projects"]["project-a"]["migration"]["backup"] != payload["projects"]["project-b"]["migration"]["backup"]
+    assert not plan_migration(db_a).needed
+    assert not plan_migration(db_b).needed
+    with sqlite3.connect(str(db_a)) as connection:
+        cols_a = [c[1] for c in connection.execute("PRAGMA table_info(build_tasks)")]
+    with sqlite3.connect(str(db_b)) as connection:
+        cols_b = [c[1] for c in connection.execute("PRAGMA table_info(build_tasks)")]
+    assert "objective_id" in cols_a
+    assert "objective_id" in cols_b
 
 
 @pytest.mark.parametrize("limit", [1, 2])

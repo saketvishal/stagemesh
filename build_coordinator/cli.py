@@ -29,6 +29,7 @@ from build_coordinator.service import (
     list_available_tasks,
     provide_task_input,
     recover_expired,
+    recover_execution_retry_exhausted,
     request_task_input,
     set_mode,
     transition_task,
@@ -203,6 +204,10 @@ def _add_transition_commands(sub) -> None:
     recover_rev.add_argument("task_id")
     recover_rev.add_argument("--reason", default="operator recovery: review environment failure")
 
+    recover_retry = sub.add_parser("recover-execution-retry")
+    recover_retry.add_argument("task_id")
+    recover_retry.add_argument("--reason", default="operator recovery: new execution retry generation")
+
 
 def _add_objective_commands(sub) -> None:
     """`objective` is the operator-facing surface: create/run/status work
@@ -308,6 +313,7 @@ def _run(args: argparse.Namespace, session) -> None:
         "request-input": _request_input,
         "provide-input": _provide_input,
         "recover-review-environment": _recover_review_environment,
+        "recover-execution-retry": _recover_execution_retry,
         "run": _runner,
     }
     handlers[args.command](args, session)
@@ -681,6 +687,22 @@ def _recover_review_environment(args: argparse.Namespace, session) -> None:
         reason=args.reason,
     )
     _print({"task_id": task.task_id, "state": task.state, "recovered": True})
+
+
+def _recover_execution_retry(args: argparse.Namespace, session) -> None:
+    task = recover_execution_retry_exhausted(
+        session,
+        args.task_id,
+        reason=args.reason,
+    )
+    _print(
+        {
+            "task_id": task.task_id,
+            "state": task.state,
+            "retry_generation": task.retry_generation,
+            "recovered": True,
+        }
+    )
 
 
 def _runner(args: argparse.Namespace, session) -> None:

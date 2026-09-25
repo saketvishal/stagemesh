@@ -96,7 +96,20 @@ class DatabaseLifecycle:
             raise DatabaseSchemaError(
                 "Build Coordinator database schema version "
                 f"{version!r} is not supported by this code "
-                f"(expected {CURRENT_SCHEMA_VERSION})."
+                f"(expected {CURRENT_SCHEMA_VERSION}). Run "
+                "`stagemesh project migrate-state --all` to review and apply "
+                "backup-first migrations for registered projects."
+            )
+        from build_coordinator.project.state_migration import schema_repair_items
+
+        repairs = schema_repair_items(self.engine)
+        if repairs:
+            summary = ", ".join(f"{item['action']} {item['table']}" for item in repairs[:5])
+            raise DatabaseSchemaError(
+                "Build Coordinator database schema is incomplete or incompatible "
+                f"despite version {CURRENT_SCHEMA_VERSION}: {summary}. Run "
+                "`stagemesh project migrate-state --all` to repair registered "
+                "projects with a backup-first migration."
             )
 
     def _record_schema_version(self) -> None:

@@ -15,15 +15,19 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import shutil
 import sqlite3
+import sys
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from sqlalchemy.dialects import sqlite as sqlite_dialect
+from sqlalchemy import inspect
+from sqlalchemy.engine import Engine
 from sqlalchemy.schema import CreateIndex, CreateTable, Table
 
 from build_coordinator import models  # noqa: F401  (registers every table on Base.metadata)
@@ -41,6 +45,7 @@ class MigrationReport:
     backup: str | None = None
     tables: list[dict[str, Any]] = field(default_factory=list)
     refused: str | None = None
+    stale_execution_reconciliation: dict[str, Any] | None = None
     preservation: list[dict[str, Any]] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
@@ -50,6 +55,7 @@ class MigrationReport:
             "applied": self.applied,
             "backup": self.backup,
             "refused": self.refused,
+            "stale_execution_reconciliation": self.stale_execution_reconciliation,
             "tables": self.tables,
             "preservation": self.preservation,
         }
@@ -61,11 +67,12 @@ class StaleExecutionReport:
 
     Runs directly against the old-schema SQLite file (raw `sqlite3`, no ORM),
     so it can operate before `migrate_state` opens the database under the
-    current schema. Evidence is the same durable claim lease that the normal
-    post-migration recovery path (`service.reconcile_stale_executions`) uses:
-    an execution is only genuinely live if its claim is still ACTIVE with an
-    unexpired lease. Everything else is a stale/orphaned record left behind
-    by a coordinator process that died without releasing it.
+    current schema. Evidence includes the durable claim lease that the normal
+    post-migration recovery path (`service.reconcile_stale_executions`) uses
+    and the execution's durable recorded process id. An execution is genuinely
+    live if its claim is still ACTIVE with an unexpired lease or its recorded
+    process is still alive. Everything else is a stale/orphaned record left
+    behind by a coordinator process that died without releasing it.
     """
 
     database: str
@@ -99,6 +106,57 @@ def _as_utc(value: Any) -> datetime | None:
     if value.tzinfo is None:
         return value.replace(tzinfo=UTC)
     return value
+
+
+def _process_is_alive(process_id: Any) -> bool:
+    if process_id in (None, ""):
+        return False
+    try:
+        pid = int(process_id)
+    except (TypeError, ValueError):
+        return False
+    if pid <= 1:
+        return False
+    if sys.platform == "win32":
+        return _windows_process_is_alive(pid)
+    try:
+        os.kill(pid, 0)
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    try:
+        with open(f"/proc/{pid}/stat", "r", encoding="utf-8") as stat:
+            return stat.read().split()[2] != "Z"
+    except OSError:
+        return True
+
+
+def _windows_process_is_alive(pid: int) -> bool:
+    import ctypes
+    from ctypes import wintypes
+
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    STILL_ACTIVE = 259
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        # ERROR_ACCESS_DENIED means the process exists but is not queryable.
+        if ctypes.get_last_error() == 5:
+            return True
+        return False
+    try:
+        exit_code = wintypes.DWORD()
+        kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+            if ctypes.get_last_error() == 5:
+                return True
+            return False
+        return exit_code.value == STILL_ACTIVE
+    finally:
+        kernel32.CloseHandle(handle)
 
 
 def plan_stale_execution_reconciliation(path: Path) -> StaleExecutionReport:
@@ -163,6 +221,8 @@ def plan_stale_execution_reconciliation(path: Path) -> StaleExecutionReport:
                 and lease_expires_at is not None
                 and lease_expires_at > now
             )
+            process_id = row["process_id"] if "process_id" in exec_columns else None
+            process_alive = _process_is_alive(process_id)
             entry = {
                 "execution_id": row["execution_id"],
                 "task_id": row["task_id"],
@@ -170,12 +230,14 @@ def plan_stale_execution_reconciliation(path: Path) -> StaleExecutionReport:
                 "claim_id": claim_id,
                 "claim_status": claim["status"] if claim else None,
                 "lease_expires_at": claim["lease_expires_at"] if claim else None,
+                "process_id": process_id,
+                "process_alive": process_alive,
             }
-            (report.genuinely_live if genuinely_live else report.reconciled).append(entry)
+            (report.genuinely_live if genuinely_live or process_alive else report.reconciled).append(entry)
         if report.genuinely_live:
             report.refused = (
-                f"{len(report.genuinely_live)} execution(s) have an active, unexpired claim lease; "
-                "wait for them to finish (or their lease to expire) before migrating"
+                f"{len(report.genuinely_live)} execution(s) have live process evidence or an active, "
+                "unexpired claim lease; wait for them to finish before migrating"
             )
         return report
     finally:
@@ -264,6 +326,11 @@ def _same_ddl(actual: str | None, table: Table) -> bool:
     return _normal(actual).replace('"', "") == _normal(_model_ddl(table)).replace('"', "")
 
 
+def _missing_indexes(connection: sqlite3.Connection, table: Table) -> list[str]:
+    present = {row[1] for row in connection.execute(f"PRAGMA index_list({table.name})")}
+    return [index.name for index in table.indexes if index.name not in present]
+
+
 def _schema_differences(connection: sqlite3.Connection) -> list[str]:
     present = {
         row[0]: row[1]
@@ -272,8 +339,28 @@ def _schema_differences(connection: sqlite3.Connection) -> list[str]:
     return [
         table.name
         for table in Base.metadata.sorted_tables
-        if table.name in present and not _same_ddl(present[table.name], table)
+        if table.name in present and (not _same_ddl(present[table.name], table) or _missing_indexes(connection, table))
     ]
+
+
+def schema_repair_items(engine: Engine) -> list[dict[str, Any]]:
+    """Physical schema compatibility checks for already-versioned databases."""
+    inspector = inspect(engine)
+    present = set(inspector.get_table_names())
+    items: list[dict[str, Any]] = []
+    for table in Base.metadata.sorted_tables:
+        if table.name not in present:
+            items.append({"table": table.name, "action": "CREATE"})
+    if items:
+        return items
+    if engine.dialect.name == "sqlite":
+        dbapi = engine.raw_connection()
+        try:
+            for table in _schema_differences(dbapi):
+                items.append({"table": table, "action": "REBUILD"})
+        finally:
+            dbapi.close()
+    return items
 
 
 def _default_for(column) -> Any:
@@ -373,17 +460,26 @@ def plan_migration(path: Path) -> MigrationReport:
             row[0]: row[1]
             for row in connection.execute("SELECT name, sql FROM sqlite_master WHERE type = 'table'")
         }
+        stored_version = None
         if SCHEMA_VERSION_TABLE in present:
             stored_version = connection.execute(
                 f"SELECT version FROM {SCHEMA_VERSION_TABLE} WHERE singleton_id = 1"
             ).fetchone()
             stored_version = stored_version[0] if stored_version else None
-            if stored_version == CURRENT_SCHEMA_VERSION:
-                return report
         for table in Base.metadata.sorted_tables:
             if table.name not in present:
+                report.tables.append(
+                    {
+                        "table": table.name,
+                        "action": "CREATE",
+                        "columns_added": [column.name for column in table.columns],
+                        "columns_dropped": [],
+                        "rows": 0,
+                    }
+                )
                 continue
-            if _same_ddl(present[table.name], table):
+            missing_indexes = _missing_indexes(connection, table)
+            if _same_ddl(present[table.name], table) and not missing_indexes:
                 continue
             have = [row[1] for row in connection.execute(f"PRAGMA table_info({table.name})")]
             want = [column.name for column in table.columns]
@@ -393,17 +489,31 @@ def plan_migration(path: Path) -> MigrationReport:
                     "action": "REBUILD",
                     "columns_added": [c for c in want if c not in have],
                     "columns_dropped": [c for c in have if c not in want],
+                    "indexes_added": missing_indexes,
                     "rows": connection.execute(f"SELECT COUNT(*) FROM {table.name}").fetchone()[0],
                 }
             )
-        report.needed = True
+        report.needed = bool(report.tables) or stored_version != CURRENT_SCHEMA_VERSION
         live = 0
         if "build_runner_executions" in present:
             live = connection.execute(
                 "SELECT COUNT(*) FROM build_runner_executions WHERE status IN (?, ?)", _LIVE
             ).fetchone()[0]
         if live:
-            report.refused = f"{live} live execution(s); wait for them to finish before migrating"
+            stale_report = plan_stale_execution_reconciliation(path)
+            report.stale_execution_reconciliation = stale_report.as_dict()
+            if stale_report.refused:
+                report.refused = (
+                    f"{live} live execution(s); {stale_report.refused}"
+                )
+            elif stale_report.reconciled:
+                report.refused = (
+                    f"{live} live execution(s); {len(stale_report.reconciled)} appear stale/orphaned. "
+                    "Run `stagemesh project migrate-state --apply` to take a backup, mark exactly "
+                    "those stale execution row(s) LOST, and retry migration."
+                )
+            else:
+                report.refused = f"{live} live execution(s); wait for them to finish before migrating"
         return report
     finally:
         connection.close()
@@ -436,7 +546,11 @@ def migrate_state(path: Path, *, apply: bool) -> MigrationReport:
             for table in Base.metadata.sorted_tables:
                 if table.name not in rebuilt:
                     continue
-                _rebuild(connection, table)
+                action = next(item["action"] for item in report.tables if item["table"] == table.name)
+                if action == "CREATE":
+                    _create_table(connection, table)
+                else:
+                    _rebuild(connection, table)
             leftover = _schema_differences(connection)
             if leftover:
                 raise ProjectError(f"schema still differs from the current models after rebuild: {leftover}")
@@ -490,5 +604,11 @@ def _rebuild(connection: sqlite3.Connection, table: Table) -> None:
     )
     connection.execute(f"DROP TABLE {table.name}")
     connection.execute(f"ALTER TABLE {staging} RENAME TO {table.name}")
+    for index in table.indexes:
+        connection.execute(str(CreateIndex(index).compile(dialect=sqlite_dialect.dialect())))
+
+
+def _create_table(connection: sqlite3.Connection, table: Table) -> None:
+    connection.execute(_model_ddl(table))
     for index in table.indexes:
         connection.execute(str(CreateIndex(index).compile(dialect=sqlite_dialect.dialect())))

@@ -139,7 +139,12 @@ schema-version record. `stagemesh project migrate-state` is the explicit,
 opt-in migration: it reports what would change, and with `--apply` takes a
 consistent SQLite backup, rebuilds only tables whose definition changed
 (rows copied verbatim), stamps the schema version, and refuses to run while
-executions are live. SQLite only.
+executions are genuinely live. When an older database contains stale
+`LAUNCHED`/`RUNNING` rows from a dead coordinator, migration reports an
+auditable stale-execution reconciliation plan. With `--apply`, StageMesh first
+backs up the database, marks exactly those stale execution rows `LOST`, keeps
+claims, checkpoints, branches and worktree metadata intact, then retries the
+migration so normal recovery can resume the task. SQLite only.
 
 ## Workspaces
 
