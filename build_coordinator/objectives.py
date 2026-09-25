@@ -971,3 +971,15 @@ def _reassess_completion(
         "objective.completed",
         task_count=len(tasks),
     )
+
+
+def resolve_task_repo(session: Session, task: BuildTask) -> str | None:
+    if task.objective_id is None:
+        return None
+    objective = session.get(BuildObjective, task.objective_id)
+    if objective is None:
+        return None
+    if getattr(objective, 'repo', None):
+        return objective.repo
+    from build_coordinator.github.sanitizer import derive_repo_from_objective_id
+    return derive_repo_from_objective_id(objective.objective_id)
