@@ -19,10 +19,12 @@ import pytest
 from sqlalchemy import select
 
 from build_coordinator.db import Base, SessionLocal, engine, initialize_schema
+from build_coordinator.events import record_event
 from build_coordinator.models import BuildTask, BuildTaskEvent
 from build_coordinator.runner.models import RunnerConfig
 from build_coordinator.runner.orchestrator import BuildRunner
 from build_coordinator.task_source.github import GitHubTaskSource
+from build_coordinator.types import EventInput
 
 
 class LabelAwareMockClient:
@@ -201,3 +203,87 @@ def test_done_sync_not_permanently_stuck_when_label_initially_absent():
     with SessionLocal() as session:
         task = session.get(BuildTask, "GH-200")
         assert task.state == "DONE"
+
+
+def test_done_sync_provisions_label_without_fresh_discovery_pass():
+    """A restart with local DONE work can provision labels during outbound sync."""
+    client = LabelAwareMockClient(issues=[], existing_labels=[])
+    source = GitHubTaskSource(repo="example/repo", client=client)
+
+    with SessionLocal() as session:
+        session.add(
+            BuildTask(
+                task_id="GH-201",
+                title="Already completed imported task",
+                description="Completed before this process started.",
+                acceptance_criteria=["Done"],
+                state="DONE",
+            )
+        )
+        record_event(
+            session,
+            EventInput(
+                task_id="GH-201",
+                event_type="task.synced_from_source",
+                actor="github-sync",
+                event_data={"source": "https://github.com/example/repo/issues/201"},
+            ),
+        )
+        session.commit()
+
+    config = RunnerConfig.default()
+    runner = BuildRunner(SessionLocal, config, task_source=source)
+    cycle = runner.run_once()
+
+    assert client.created_labels == ["stagemesh:done"]
+    assert "GH-201" in cycle.outbound_synced
+    assert client.labels == [{"repo": "example/repo", "number": "201", "label": "stagemesh:done"}]
+    assert client.closed == ["201"]
+
+
+def test_outbound_records_task_specific_failure_when_label_provisioning_fails():
+    """Provisioning failures leave DONE intact and create retryable outbound evidence."""
+    client = LabelAwareMockClient(issues=[], existing_labels=[], fail_on="create_label")
+    source = GitHubTaskSource(repo="example/repo", client=client)
+
+    with SessionLocal() as session:
+        session.add(
+            BuildTask(
+                task_id="GH-202",
+                title="Completed task awaiting GitHub sync",
+                description="Done locally.",
+                acceptance_criteria=["Done"],
+                state="DONE",
+            )
+        )
+        record_event(
+            session,
+            EventInput(
+                task_id="GH-202",
+                event_type="task.synced_from_source",
+                actor="github-sync",
+                event_data={"source": "https://github.com/example/repo/issues/202"},
+            ),
+        )
+        session.commit()
+
+    config = RunnerConfig.default()
+    runner = BuildRunner(SessionLocal, config, task_source=source)
+    cycle = runner.run_once()
+
+    assert "GH-202" not in cycle.outbound_synced
+    assert client.comments == []
+    assert client.labels == []
+    assert client.closed == []
+
+    with SessionLocal() as session:
+        task = session.get(BuildTask, "GH-202")
+        assert task.state == "DONE"
+        events = session.scalars(
+            select(BuildTaskEvent).where(
+                BuildTaskEvent.task_id == "GH-202",
+                BuildTaskEvent.event_type == "task.outbound_sync_failed",
+            )
+        ).all()
+        assert len(events) == 1
+        assert events[0].event_data.get("action") == "label_provisioning"
