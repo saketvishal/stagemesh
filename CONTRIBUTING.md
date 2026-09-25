@@ -4,7 +4,7 @@ Thank you for your interest in contributing to StageMesh.
 
 ## Before you start
 
-This project is in **v0.1-alpha** and the core architecture is still settling.
+This project is in **v0.2.0a1 (public alpha)** and the core architecture is still settling.
 Before investing significant effort, open an issue to discuss your proposed change.
 
 ## Development setup
@@ -83,7 +83,14 @@ Changes that violate these principles will not be accepted regardless of other m
 - Keep functions focused; avoid large functions
 - Add docstrings to public API functions and classes
 
-## License
+## Licensing of Contributions
 
-By contributing, you agree that your contributions will be licensed under the
-Apache-2.0 license.
+StageMesh is licensed under the [Apache License, Version 2.0](LICENSE).
+
+By submitting contributions (via pull requests, patches, documentation, or issue comments) to this project:
+- You agree that your contributions are licensed under the Apache License, Version 2.0 terms, without any additional terms or conditions (in accordance with Section 5 of the Apache License 2.0).
+- You represent that each contribution is your original creation, or that you have the right to submit it under the Apache License 2.0.
+- No Contributor License Agreement (CLA) or copyright assignment is currently required; contributions operate under the standard open-source inbound=outbound licensing model.
+- The project architecture remains compatible with adding formal Developer Certificate of Origin (DCO) sign-off (`Signed-off-by:`) or CLA automation in the future should project governance require it.
+- For full details, see [docs/open-source/LICENSE_POLICY.md](docs/open-source/LICENSE_POLICY.md).
+

@@ -5,9 +5,9 @@ Durable engineering execution across AI agents, models, and runtimes.
 StageMesh is a provider-neutral coordinator for autonomous multi-agent software
 engineering workflows.
 
-> **Status: v0.1.0-alpha (Public Alpha)**
+> **Status: v0.2.0a1 (Public Alpha)**
 >
-> StageMesh is published under the Apache 2.0 license. This first public alpha
+> StageMesh is published under the Apache 2.0 license. This public alpha
 > establishes durable engineering orchestration across AI agents, models, and runtimes.
 
 ---
@@ -38,7 +38,7 @@ engineering tasks. It:
 
 ---
 
-## What is proven (v0.1-alpha)
+## What is proven (v0.2.0a1)
 
 > [!IMPORTANT]
 > Only claims backed by execution evidence appear below. StageMesh does not claim
@@ -100,7 +100,7 @@ See [docs/SETUP.md](docs/SETUP.md) for full installation and configuration.
 - [Setup](docs/SETUP.md) - installation, configuration, first run
 - [Project-owned backlogs](docs/PROJECTS.md) - `.stagemesh/` project definitions, `stagemesh continue`, parallel execution
 - [Security & Trust Boundaries](SECURITY.md) - what the coordinator trusts and why
-- [Roadmap](docs/ROADMAP.md) - v0.1-alpha roadmap and what comes next
+- [Roadmap](docs/ROADMAP.md) - v0.2.0a1 roadmap and what comes next
 - [Contributing](CONTRIBUTING.md) - how to contribute
 - [Examples](examples/README.md) - configuration examples
 
@@ -126,4 +126,6 @@ See [docs/SETUP.md](docs/SETUP.md) for full installation and configuration.
 
 ## License
 
-Apache-2.0. See [LICENSE](LICENSE).
+StageMesh is licensed under the [Apache License, Version 2.0](LICENSE).
+For full licensing policy, boundary definitions, and dependency details, see [docs/open-source/LICENSE_POLICY.md](docs/open-source/LICENSE_POLICY.md).
+
