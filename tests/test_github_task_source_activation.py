@@ -370,6 +370,8 @@ def test_historical_objective_root_task_is_reconciled_without_losing_dependencie
         assert obj.dependencies == ["GH-75"]
         assert task.state == "STALE"
         assert task.reason_created == "OBJECTIVE_ROOT_COMPAT"
+        assert task_is_claimable(session, task, utcnow()) is False
+        assert "GH-71" not in {t.task_id for t in list_available_tasks(session)}
         event = session.query(BuildObjectiveEvent).filter_by(
             objective_id="GH-71",
             event_type="objective.historical_root_task_reconciled",

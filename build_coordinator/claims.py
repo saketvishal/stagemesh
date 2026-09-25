@@ -133,6 +133,8 @@ def task_is_claimable(
     *,
     check_migration_lock: bool = True,
 ) -> bool:
+    if task.reason_created == "OBJECTIVE_ROOT_COMPAT":
+        return False
     if task.state not in CLAIMABLE_STATES:
         return False
     for dep in task.dependencies:
