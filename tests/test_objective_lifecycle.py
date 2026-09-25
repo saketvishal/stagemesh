@@ -593,6 +593,158 @@ def test_resolving_an_already_resolved_gate_is_rejected():
             resolve_gate(session, gate_id, resolved_by="bob")
 
 
+def test_gate_resolved_before_plan_applied_resumes_to_planning():
+    from build_coordinator.objectives import record_planner_failed
+
+    with SessionLocal() as session:
+        create_objective(session, _spec())  # bare goal: stays PLANNING, no child tasks yet
+        objective = session.get(BuildObjective, "OBJ-1")
+        assert objective.state == "PLANNING"
+        record_planner_failed(session, objective, reason="planner produced an invalid plan")
+        session.commit()
+        assert session.get(BuildObjective, "OBJ-1").state == "HUMAN_GATE"
+        gate_id = open_gates(session, "OBJ-1")[0].gate_id
+
+    with SessionLocal() as session:
+        resolve_gate(session, gate_id, resolved_by="alice", resolution_note="retry planning")
+        session.commit()
+
+    with SessionLocal() as session:
+        objective = session.get(BuildObjective, "OBJ-1")
+        assert objective.state == "PLANNING"
+        assert open_gates(session, "OBJ-1") == []
+
+
+def test_gate_resolved_after_plan_already_applied_resumes_to_active_not_planning():
+    # Same trigger as test_gate_resolution_resumes_objective_when_no_gates_remain,
+    # but pins down that a gate captured while still PLANNING does not strand the
+    # objective back in PLANNING once real work tasks exist by the time it's resolved.
+    with SessionLocal() as session:
+        create_objective(
+            session,
+            _spec(
+                child_tasks=[_child("OBJ-1-A")],
+                requested_human_gates=["ARCHITECTURE_DECISION_REQUIRED"],
+            ),
+        )
+        session.commit()
+        gate_id = open_gates(session, "OBJ-1")[0].gate_id
+
+    with SessionLocal() as session:
+        resolve_gate(session, gate_id, resolved_by="alice")
+        session.commit()
+
+    with SessionLocal() as session:
+        assert session.get(BuildObjective, "OBJ-1").state == "ACTIVE"
+
+
+def test_recurring_gate_after_resolution_raises_a_new_gate_rather_than_stranding_the_task():
+    with SessionLocal() as session:
+        create_objective(session, _spec(child_tasks=[_child("OBJ-1-A")]))
+        task = session.get(BuildTask, "OBJ-1-A")
+        task.state = "BLOCKED"
+        record_event(
+            session,
+            EventInput(
+                task_id="OBJ-1-A",
+                event_type="task.transitioned",
+                from_state="INTEGRATING",
+                to_state="BLOCKED",
+                event_data={"reason": "REMOTE_PUSH_APPROVAL_REQUIRED"},
+            ),
+        )
+        session.commit()
+        objective = session.get(BuildObjective, "OBJ-1")
+        reconcile_objective(session, objective)
+        session.commit()
+        first_gate_id = open_gates(session, "OBJ-1")[0].gate_id
+
+    with SessionLocal() as session:
+        resolve_gate(session, first_gate_id, resolved_by="alice")
+        session.commit()
+        assert open_gates(session, "OBJ-1") == []
+
+    with SessionLocal() as session:
+        # The same task hits the same blocked reason again (e.g. a second
+        # remote push needs approval). This must open a fresh gate, not
+        # silently no-op against the now-resolved one.
+        record_event(
+            session,
+            EventInput(
+                task_id="OBJ-1-A",
+                event_type="task.transitioned",
+                from_state="INTEGRATING",
+                to_state="BLOCKED",
+                event_data={"reason": "REMOTE_PUSH_APPROVAL_REQUIRED"},
+            ),
+        )
+        session.commit()
+        objective = session.get(BuildObjective, "OBJ-1")
+        reconcile_objective(session, objective)
+        session.commit()
+        gates = open_gates(session, "OBJ-1")
+        assert len(gates) == 1
+        assert gates[0].gate_id != first_gate_id
+        assert session.get(BuildObjective, "OBJ-1").state == "HUMAN_GATE"
+
+
+def test_stale_gate_auto_reconciles_once_the_blocked_task_clears():
+    with SessionLocal() as session:
+        create_objective(session, _spec(child_tasks=[_child("OBJ-1-A")]))
+        task = session.get(BuildTask, "OBJ-1-A")
+        task.state = "BLOCKED"
+        record_event(
+            session,
+            EventInput(
+                task_id="OBJ-1-A",
+                event_type="task.transitioned",
+                from_state="INTEGRATING",
+                to_state="BLOCKED",
+                event_data={"reason": "MERGE_CONFLICT"},
+            ),
+        )
+        session.commit()
+        objective = session.get(BuildObjective, "OBJ-1")
+        reconcile_objective(session, objective)
+        session.commit()
+        assert open_gates(session, "OBJ-1")
+        assert session.get(BuildObjective, "OBJ-1").state == "HUMAN_GATE"
+
+    with SessionLocal() as session:
+        # The underlying condition clears on its own (e.g. an automatic
+        # rebase resolved the conflict) before a human actions the gate.
+        task = session.get(BuildTask, "OBJ-1-A")
+        task.state = "DONE"
+        session.commit()
+        objective = session.get(BuildObjective, "OBJ-1")
+        reconcile_objective(session, objective)
+        session.commit()
+        assert open_gates(session, "OBJ-1") == []
+        assert session.get(BuildObjective, "OBJ-1").state != "HUMAN_GATE"
+        resolved = session.scalar(select(BuildObjectiveGate).where(BuildObjectiveGate.objective_id == "OBJ-1"))
+        assert resolved.status == "RESOLVED"
+        assert resolved.resolved_by == "system:auto-reconciled"
+
+
+def test_stale_gate_reconciliation_does_not_resolve_gates_raised_directly_from_human_gate_field():
+    # A gate type that overlaps with BLOCKED_REASON_TO_GATE_TYPE's values but
+    # was raised straight from a structured `human_gate` field (not from a
+    # BLOCKED task) must never be auto-reconciled just because its source
+    # task isn't BLOCKED -- it was never BLOCKED to begin with.
+    with SessionLocal() as session:
+        create_objective(session, _spec(child_tasks=[_child("OBJ-1-A")]))
+        session.add(_succeeded_execution("OBJ-1-A", result_data={"human_gate": "ARCHITECTURE_DECISION_REQUIRED"}))
+        session.commit()
+
+    with SessionLocal() as session:
+        objective = session.get(BuildObjective, "OBJ-1")
+        reconcile_objective(session, objective)
+        session.commit()
+        gates = open_gates(session, "OBJ-1")
+        assert len(gates) == 1
+        assert session.get(BuildObjective, "OBJ-1").state == "HUMAN_GATE"
+
+
 # 26. objective pause/resume -------------------------------------------------------
 
 
@@ -624,6 +776,21 @@ def test_paused_objective_is_excluded_from_the_reconcile_cycle():
         summaries = run_objective_cycle(session)
         session.commit()
         assert summaries == []
+
+
+def test_objective_paused_while_still_planning_resumes_to_planning():
+    with SessionLocal() as session:
+        create_objective(session, _spec())  # bare goal: no plan applied yet
+        objective = session.get(BuildObjective, "OBJ-1")
+        assert objective.state == "PLANNING"
+        pause_objective(session, "OBJ-1")
+        session.commit()
+        assert session.get(BuildObjective, "OBJ-1").state == "PAUSED"
+
+    with SessionLocal() as session:
+        resume_objective(session, "OBJ-1")
+        session.commit()
+        assert session.get(BuildObjective, "OBJ-1").state == "PLANNING"
 
 
 # 27. objective completion criteria -------------------------------------------------
