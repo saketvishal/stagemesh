@@ -764,6 +764,19 @@ class BuildRunner:
                 extra_data={"blockers": blocker_list},
             )
             return
+        feature_sha = builder.feature_sha if builder else execution.result_data.get("feature_sha")
+        if execution.branch_name and not feature_sha:
+            result.escalations.append(f"{execution.task_id}:BUILDER_COMMIT_CONTRACT")
+            self._block_task(
+                session,
+                execution.task_id,
+                "BUILDER_COMMIT_CONTRACT",
+                invariant="BUILDER_COMMIT_CONTRACT",
+                execution=execution,
+                error="Builder result for an assigned task branch did not provide a reviewable feature commit",
+                recovery_classification="REWORK_REQUIRED",
+            )
+            return
         if execution.claim_id:
             checkpoint(
                 session,
@@ -771,7 +784,7 @@ class BuildRunner:
                 worker_id=execution.worker_id,
                 data=CheckpointInput(
                     current_step="runner observed builder success",
-                    current_head_sha=builder.feature_sha if builder else execution.result_data.get("feature_sha"),
+                    current_head_sha=feature_sha,
                     completed_work=["external builder process completed"],
                     files_changed=list(builder.files_changed) if builder else execution.result_data.get("files_changed") or [],
                     commits_created=list(builder.commits_created) if builder else execution.result_data.get("commits_created") or [],

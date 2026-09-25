@@ -50,6 +50,7 @@ from build_coordinator.models import (
     BuildTaskClaim,
     BuildTaskEvent,
 )
+from build_coordinator.runner.worktree import task_branch_name
 
 DEFAULT_LEASE_SECONDS = 1800
 
@@ -233,6 +234,53 @@ def _require_no_active_scope_conflict(session: Session, task: BuildTask, now: da
         )
 
 
+def _task_branch_has_real_work(branch_name: str) -> bool:
+    """Best-effort guard used to fail closed on durable branch collisions."""
+    try:
+        from pathlib import Path
+
+        from build_coordinator.config import get_settings
+        from build_coordinator.runner.worktree import _git, _ref_exists
+
+        root = Path(get_settings().repo_root)
+        if not _ref_exists(root, branch_name):
+            return False
+        base = "main"
+        if _git(root, "rev-parse", "--verify", "--quiet", f"{base}^{{commit}}").returncode != 0:
+            return True
+        ahead = _git(root, "rev-list", "--count", f"{base}..{branch_name}")
+        return ahead.returncode != 0 or int((ahead.stdout or "0").strip() or 0) > 0
+    except Exception:
+        return True
+
+
+def _canonicalize_task_branch(session: Session, task: BuildTask, request: ClaimRequest) -> ClaimRequest:
+    """Task rows, not worker slots, own task branch identity."""
+    canonical = task.branch_name or task_branch_name(task.task_id)
+    owner = session.scalar(
+        select(BuildTask)
+        .where(BuildTask.task_id != task.task_id)
+        .where(BuildTask.branch_name == canonical)
+        .where(BuildTask.state.notin_(("DONE", "FAILED", "STALE")))
+        .limit(1)
+    )
+    if owner is not None and owner.objective_id != task.objective_id and _task_branch_has_real_work(canonical):
+        raise CoordinatorPolicyError(
+            f"Branch {canonical} already belongs to task {owner.task_id}; refusing cross-objective collision"
+        )
+    if request.branch_name == canonical:
+        return request
+    return ClaimRequest(
+        task_id=request.task_id,
+        worker_id=request.worker_id,
+        provider=request.provider,
+        worker_metadata=request.worker_metadata,
+        branch_name=canonical,
+        worktree_path=request.worktree_path,
+        lease_seconds=request.lease_seconds,
+    )
+
+
 def claim_task(
     session: Session,
     request: ClaimRequest,
@@ -263,6 +311,7 @@ def _admit_implementation_claim(
     task = locked_task(session, request.task_id)
     if not task_is_claimable(session, task, now, check_migration_lock=False):
         raise CoordinatorPolicyError(f"Task is not claimable: {request.task_id}")
+    request = _canonicalize_task_branch(session, task, request)
 
     # Enforce worktree single-owner exclusivity
     from build_coordinator.runner.scheduling import (

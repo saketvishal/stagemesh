@@ -74,6 +74,45 @@ def _task(task_id: str, *, review_policy="INDEPENDENT", migration_allowed=False)
     )
 
 
+def test_claim_task_uses_task_owned_canonical_branch_over_worker_override():
+    with SessionLocal() as session:
+        upsert_task(session, _task("GH-60"))
+        session.commit()
+
+    with SessionLocal() as session:
+        claim = claim_task(
+            session,
+            ClaimRequest(
+                "GH-60",
+                worker_id="builder-a",
+                branch_name="stale/worker-slot-branch",
+            ),
+        )
+        task = session.get(BuildTask, "GH-60")
+
+        assert claim.branch_name == "stagemesh/GH-60"
+        assert task.branch_name == "stagemesh/GH-60"
+
+
+def test_claim_task_fails_closed_on_cross_objective_branch_collision(monkeypatch):
+    import build_coordinator.service as service_module
+
+    monkeypatch.setattr(service_module, "_task_branch_has_real_work", lambda _branch: True)
+
+    with SessionLocal() as session:
+        first = upsert_task(session, _task("GH-60A"))
+        first.objective_id = "OBJ-A"
+        first.branch_name = "stagemesh/shared"
+        second = upsert_task(session, _task("GH-60B"))
+        second.objective_id = "OBJ-B"
+        second.branch_name = "stagemesh/shared"
+        session.commit()
+
+    with SessionLocal() as session:
+        with pytest.raises(CoordinatorPolicyError, match="refusing cross-objective collision"):
+            claim_task(session, ClaimRequest("GH-60B", worker_id="builder-a"))
+
+
 def _config(*, auto_push=False, remediation_cycles=2):
     return RunnerConfig(
         workers=(
