@@ -319,25 +319,64 @@ def run_agent(
         tree.close()
 
 
+def _stream_encoding(stream: Any) -> str:
+    try:
+        encoding = getattr(stream, "encoding", None)
+    except Exception:
+        return "utf-8"
+    if isinstance(encoding, str) and encoding:
+        return encoding
+    return "utf-8"
+
+
+def _replacement_text(text: str, encoding: str) -> str:
+    try:
+        return text.encode(encoding, errors="replace").decode(encoding, errors="replace")
+    except Exception:
+        return text.encode("ascii", errors="replace").decode("ascii")
+
+
 def _safe_write_stdout_tail(output: str, max_chars: int = 4000) -> None:
-    tail = output[-max_chars:] if max_chars else output
-    buf = getattr(sys.stdout, "buffer", None)
+    """Write an agent stdout tail. Never raises.
+
+    A Windows cp1252 console raises UnicodeEncodeError from text writes of
+    arrows, emoji, and other characters outside the code page. Prefer UTF-8
+    bytes on the binary buffer. If that buffer is missing or rejects the
+    write, emit replacement text the stream can encode. Console failure must
+    not discard the result file or change the wrapper exit code.
+    """
+    try:
+        text = output if isinstance(output, str) else "" if output is None else str(output)
+        tail = text[-max_chars:] if max_chars else text
+    except Exception:
+        return
+
+    payload = tail.encode("utf-8", errors="replace") + b"\n"
+    buf = None
+    try:
+        buf = getattr(sys.stdout, "buffer", None)
+    except Exception:
+        buf = None
     if buf is not None:
         try:
-            buf.write(tail.encode("utf-8", errors="replace") + b"\n")
+            buf.write(payload)
             buf.flush()
             return
         except Exception:
             pass
-    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
-    try:
-        sys.stdout.write(tail + "\n")
-    except UnicodeEncodeError:
-        sys.stdout.write(tail.encode(encoding, errors="replace").decode(encoding, errors="replace") + "\n")
-    try:
-        sys.stdout.flush()
-    except Exception:
-        pass
+
+    # The reported encoding can disagree with the encoder (utf-8 attribute,
+    # strict cp1252 write). Try the stream encoding, then ASCII.
+    for encoding in (_stream_encoding(sys.stdout), "ascii"):
+        try:
+            sys.stdout.write(_replacement_text(tail, encoding) + "\n")
+        except Exception:
+            continue
+        try:
+            sys.stdout.flush()
+        except Exception:
+            pass
+        return
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -390,9 +429,12 @@ def main(argv: list[str] | None = None) -> int:
         final = output
         if Path(last_message).is_file():
             final = Path(last_message).read_text(encoding="utf-8", errors="replace")
-    # Agent output is arbitrary Unicode; a narrow console encoding (cp1252) must never crash the wrapper
-    # after the agent has finished, so write bytes with replacement.
-    _safe_write_stdout_tail(output, max_chars=4000)
+    # Best-effort diagnostics. A cp1252 console must not raise after the agent
+    # has finished: the result file and exit code below are the contract.
+    try:
+        _safe_write_stdout_tail(output, max_chars=4000)
+    except Exception:
+        pass
 
     if code != 0:
         failure = "EXECUTION_FAILURE" if code == 124 else classify_failure(output)
