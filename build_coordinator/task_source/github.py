@@ -850,6 +850,17 @@ class GitHubTaskSource(TaskSource):
         label = f"stagemesh:{state.lower()}"
         should_close = (state == "DONE")
 
+        if not self.ensure_labels(session):
+            self._record_outbound_failed(
+                session,
+                task_id,
+                issue_number,
+                error=f"GitHub lifecycle label provisioning failed for {self.repo}",
+                action="label_provisioning",
+                is_objective=False,
+            )
+            return False
+
         return self._execute_outbound(
             session,
             task_id,
@@ -894,6 +905,17 @@ class GitHubTaskSource(TaskSource):
         comment_body = self._format_objective_status_comment(objective_id, state, evidence)
         label = "stagemesh:done"
         should_close = True
+
+        if not self.ensure_labels(session):
+            self._record_outbound_failed(
+                session,
+                objective_id,
+                issue_number,
+                error=f"GitHub lifecycle label provisioning failed for {self.repo}",
+                action="label_provisioning",
+                is_objective=True,
+            )
+            return False
 
         return self._execute_outbound(
             session,
