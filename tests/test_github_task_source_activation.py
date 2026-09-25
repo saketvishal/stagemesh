@@ -110,12 +110,12 @@ def test_zero_adapter_silent_failure_is_prevented():
     assert len(diags) > 0
 
 
-def test_caventra_style_project_config_loads_and_activates():
-    proj = _make_project({"github": {"enabled": True, "repo": "saketvishal/Caventra"}})
+def test_project_github_config_loads_and_activates():
+    proj = _make_project({"github": {"enabled": True, "repo": "stagemesh/stagemesh"}})
     adapter, diags = _optional_task_source(proj, force=False, dry_run=False)
     assert adapter is not None
     assert isinstance(adapter, GitHubTaskSource)
-    assert adapter.repo == "saketvishal/Caventra"
+    assert adapter.repo == "stagemesh/stagemesh"
     assert len(diags) == 0
 
 
@@ -123,30 +123,30 @@ def test_github_sync_ingests_objective_issues_and_preserves_dependencies():
     issues = [
         {
             "number": 4,
-            "title": "Caventra V1 internal alpha: end-to-end Matter Intelligence flow by 2026-09-30",
-            "body": "## Objective\nDeliver a testable end-to-end Caventra V1 internal alpha by September 30, 2026.",
-            "labels": [{"name": "caventra:objective"}, {"name": "status:QUEUED"}],
+            "title": "StageMesh V1 internal alpha: end-to-end engineering flow by 2026-09-30",
+            "body": "## Objective\nDeliver a testable end-to-end StageMesh V1 internal alpha by September 30, 2026.",
+            "labels": [{"name": "stagemesh:objective"}, {"name": "status:QUEUED"}],
             "url": "https://github.com/example/repo/issues/4",
         },
         {
             "number": 40,
-            "title": "Objective: temporal Matter Intelligence and Decision Event foundation",
+            "title": "Objective: durable planner and event foundation",
             "body": "## Objective\nTemporal foundation.\n\n## Dependency\nRun after issue #4 is complete.",
-            "labels": [{"name": "caventra:objective"}, {"name": "status:QUEUED"}],
+            "labels": [{"name": "objective"}, {"name": "status:QUEUED"}],
             "url": "https://github.com/example/repo/issues/40",
         },
         {
             "number": 41,
-            "title": "Objective: legal data, temporal evaluation corpus, and model benchmark program",
+            "title": "Objective: evaluation corpus and benchmark program",
             "body": "## Objective\nEvaluation program.\n\n## Dependency\nRun after issue #4 is complete.",
-            "labels": [{"name": "caventra:objective"}, {"name": "status:QUEUED"}],
+            "labels": [{"name": "stagemesh:objective"}, {"name": "status:QUEUED"}],
             "url": "https://github.com/example/repo/issues/41",
         },
         {
             "number": 42,
-            "title": "Objective: prove or reject Caventra's longitudinal intelligence moat",
+            "title": "Objective: prove or reject the controller reliability hypothesis",
             "body": "## Objective\nCompetitive moat experiment.\n\n## Dependencies\nRun after issues #40 and #41 are complete.",
-            "labels": [{"name": "caventra:objective"}, {"name": "status:QUEUED"}],
+            "labels": [{"name": "stagemesh:objective"}, {"name": "status:QUEUED"}],
             "url": "https://github.com/example/repo/issues/42",
         },
     ]
@@ -178,6 +178,8 @@ def test_github_sync_ingests_objective_issues_and_preserves_dependencies():
         assert session.get(BuildObjective, "GH-40") is not None
         assert session.get(BuildObjective, "GH-41") is not None
         assert session.get(BuildObjective, "GH-42") is not None
+        assert session.get(BuildTask, "GH-4:PLAN") is not None
+        assert session.get(BuildTask, "GH-40:PLAN") is not None
 
         # Dependency relationships
         assert t4.dependencies == []
@@ -230,28 +232,28 @@ def test_github_sync_ingests_objective_issues_and_preserves_dependencies():
 
 
 def test_repeated_sync_is_idempotent_and_preserves_local_state():
-    # Pre-existing local task (e.g. CAV-122) in BLOCKED state
+    # Pre-existing local task in BLOCKED state
     with SessionLocal() as session:
         upsert_task(
             session,
             TaskSpec(
-                task_id="CAV-122-01",
-                title="SDD-122: Progressive Guidance frontend route and page",
+                task_id="SM-122-01",
+                title="SM-122: Progressive Guidance frontend route and page",
                 description="Local task",
                 acceptance_criteria=["Pass validation"],
                 dependencies=[],
             ),
         )
-        transition_task(session, "CAV-122-01", "CLAIMED", actor="builder")
-        transition_task(session, "CAV-122-01", "BLOCKED", actor="builder", reason="EXECUTION_RETRY_LIMIT_REACHED")
+        transition_task(session, "SM-122-01", "CLAIMED", actor="builder")
+        transition_task(session, "SM-122-01", "BLOCKED", actor="builder", reason="EXECUTION_RETRY_LIMIT_REACHED")
         session.commit()
 
     issues = [
         {
             "number": 4,
-            "title": "Caventra V1 internal alpha",
+            "title": "StageMesh V1 internal alpha",
             "body": "## Objective\nAlpha objective.",
-            "labels": [{"name": "caventra:objective"}, {"name": "status:QUEUED"}],
+            "labels": [{"name": "stagemesh:objective"}, {"name": "status:QUEUED"}],
             "url": "https://github.com/example/repo/issues/4",
         }
     ]
@@ -283,8 +285,8 @@ def test_repeated_sync_is_idempotent_and_preserves_local_state():
         t4 = session.get(BuildTask, "GH-4")
         assert t4.state == "IN_PROGRESS"
 
-        # Verify CAV-122-01 was completely untouched
-        cav = session.get(BuildTask, "CAV-122-01")
-        assert cav is not None
-        assert cav.state == "BLOCKED"
-        assert cav.title == "SDD-122: Progressive Guidance frontend route and page"
+        # Verify unrelated local work was completely untouched
+        local = session.get(BuildTask, "SM-122-01")
+        assert local is not None
+        assert local.state == "BLOCKED"
+        assert local.title == "SM-122: Progressive Guidance frontend route and page"
