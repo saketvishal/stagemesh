@@ -241,6 +241,9 @@ class GitIntegrationExecutor:
             proc = _git(holder, "merge", "--ff-only", new)
             if proc.returncode != 0:
                 _git(holder, "reset", "--hard", "HEAD")
+            else:
+                _git(holder, "reset", "--hard", new)
+                _git(holder, "clean", "-fd")
         else:
             current_wt_branch = _git(wt, "branch", "--show-current").stdout.strip()
             if current_wt_branch == branch or not current_wt_branch:

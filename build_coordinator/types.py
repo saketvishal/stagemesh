@@ -168,6 +168,7 @@ KNOWN_TASK_OUTCOMES = frozenset(TASK_OUTCOME_VALUES)
 FINDING_RISK_LEVELS = ("LOW", "MEDIUM", "HIGH", "CRITICAL")
 AUTO_CREATABLE_RISK_LEVELS = frozenset({"LOW"})
 PLANNER_TASK_REASON = "OBJECTIVE_PLANNER"
+OBJECTIVE_ROOT_COMPAT_REASON = "OBJECTIVE_ROOT_COMPAT"
 PLANNER_ALLOWED_REVIEW_POLICIES = frozenset({"INDEPENDENT", "TWO_REVIEWERS"})
 
 PLANNED_CHILD_TASK_FIELDS = frozenset(
@@ -445,6 +446,7 @@ class ObjectiveSpec:
     allowed_scope: tuple[str, ...] = ()
     prohibited_scope: tuple[str, ...] = ()
     completion_criteria: tuple[str, ...] = ()
+    dependencies: tuple[str, ...] = ()
     human_gate_policy: dict[str, Any] = field(default_factory=dict)
     parallelism: int = 2
     main_push_policy: str = "HUMAN_GATED"
