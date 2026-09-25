@@ -589,13 +589,18 @@ def test_15_subprocess_gh_cli_error_handling_and_returncode_inspection(monkeypat
         session.add(task)
         session.commit()
 
-    # Mock subprocess.run where 'gh issue comment' returns non-zero exit code
-    mock_run = MagicMock()
-    mock_run.return_value = SimpleNamespace(
-        returncode=1,
-        stdout="",
-        stderr="GraphQL: Could not resolve to an issue (404)",
-    )
+    # Mock subprocess.run: label list succeeds (label already present) so
+    # provisioning is a no-op, but 'gh issue comment' returns non-zero exit code
+    def fake_subprocess_run(cmd, **kwargs):
+        if cmd[:3] == ["gh", "label", "list"]:
+            return SimpleNamespace(returncode=0, stdout='[{"name": "stagemesh:done"}]', stderr="")
+        return SimpleNamespace(
+            returncode=1,
+            stdout="",
+            stderr="GraphQL: Could not resolve to an issue (404)",
+        )
+
+    mock_run = MagicMock(side_effect=fake_subprocess_run)
     monkeypatch.setattr(subprocess, "run", mock_run)
 
     with SessionLocal() as session:
@@ -605,7 +610,7 @@ def test_15_subprocess_gh_cli_error_handling_and_returncode_inspection(monkeypat
 
     # Verify command was called with exact args
     assert mock_run.called
-    call_args = mock_run.call_args[0][0]
+    call_args = mock_run.call_args_list[-1][0][0]
     assert call_args[:4] == ["gh", "issue", "comment", "77"]
 
     # Verify durable failure was recorded
@@ -642,6 +647,10 @@ def test_16_subprocess_gh_cli_success_path(monkeypatch):
 
     def fake_subprocess_run(cmd, **kwargs):
         called_cmds.append(cmd)
+        if cmd[:3] == ["gh", "label", "list"]:
+            return SimpleNamespace(returncode=0, stdout="[]", stderr="")
+        if cmd[:3] == ["gh", "label", "create"]:
+            return SimpleNamespace(returncode=0, stdout="success", stderr="")
         return SimpleNamespace(returncode=0, stdout="success", stderr="")
 
     monkeypatch.setattr(subprocess, "run", fake_subprocess_run)
@@ -651,12 +660,14 @@ def test_16_subprocess_gh_cli_success_path(monkeypatch):
         assert ok is True
         session.commit()
 
-    # Must execute: comment, edit --add-label, close
-    assert len(called_cmds) == 3
-    assert called_cmds[0][:4] == ["gh", "issue", "comment", "88"]
-    assert "all done" in called_cmds[0][7]
-    assert called_cmds[1] == ["gh", "issue", "edit", "88", "--repo", "example/repo", "--add-label", "stagemesh:done"]
-    assert called_cmds[2] == ["gh", "issue", "close", "88", "--repo", "example/repo"]
+    # Must execute: label list, label create (absent), comment, edit --add-label, close
+    assert len(called_cmds) == 5
+    assert called_cmds[0][:3] == ["gh", "label", "list"]
+    assert called_cmds[1][:3] == ["gh", "label", "create"]
+    assert called_cmds[2][:4] == ["gh", "issue", "comment", "88"]
+    assert "all done" in called_cmds[2][7]
+    assert called_cmds[3] == ["gh", "issue", "edit", "88", "--repo", "example/repo", "--add-label", "stagemesh:done"]
+    assert called_cmds[4] == ["gh", "issue", "close", "88", "--repo", "example/repo"]
 
     # Check success event
     with SessionLocal() as session:
