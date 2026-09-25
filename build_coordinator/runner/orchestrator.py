@@ -100,6 +100,18 @@ from build_coordinator.runner.worktree import (
     task_branch_name,
     validate_worktree_path,
 )
+from build_coordinator.claims import CLAIMABLE_STATES
+from build_coordinator.runner.scheduling import (
+    SCHEDULER_REASONS,
+    active_implementation_tasks,
+    active_worker_counts,
+    active_workers,
+    active_worktrees,
+    check_task_readiness,
+    normalize_worktree_path,
+    record_task_withheld,
+    sort_tasks_for_dispatch,
+)
 from build_coordinator.service import (
     ClaimRequest,
     checkpoint,
@@ -107,6 +119,7 @@ from build_coordinator.service import (
     claim_review,
     claim_task,
     ensure_state,
+    get_max_active_builders,
     get_resume_context,
     list_available_tasks,
     reconcile_stale_executions,
@@ -138,6 +151,7 @@ class RunnerCycleResult:
     objective_gates_raised: list[str] = field(default_factory=list)
     objectives_completed: list[str] = field(default_factory=list)
     outbound_synced: list[str] = field(default_factory=list)
+    scheduling_reasons: dict[str, str] = field(default_factory=dict)
 
 
 class BuildRunner:
@@ -998,43 +1012,110 @@ class BuildRunner:
         )
 
     def _dispatch_builders(self, session: Session, result: RunnerCycleResult) -> None:
-        available = list_available_tasks(session)
+        now = _now()
+        stmt = (
+            select(BuildTask)
+            .where(BuildTask.state.in_(CLAIMABLE_STATES))
+            .order_by(BuildTask.task_id)
+        )
+        candidates = list(session.scalars(stmt).all())
+        active_claims = {
+            c.task_id
+            for c in session.scalars(
+                select(BuildTaskClaim)
+                .where(BuildTaskClaim.claim_type == "IMPLEMENTATION")
+                .where(BuildTaskClaim.status == "ACTIVE")
+                .where(BuildTaskClaim.lease_expires_at > now)
+            ).all()
+        }
+        candidates = [t for t in candidates if t.task_id not in active_claims]
         if self._target_task_ids:
-            available = [task for task in available if self._target_allows(task.task_id)]
-        priorities = task_priorities(session, [task.task_id for task in available])
-        available.sort(key=lambda task: (priorities.get(task.task_id, 100), task.task_id))
+            candidates = [task for task in candidates if self._target_allows(task.task_id)]
+        candidates = [task for task in candidates if not is_planner_task(task)]
+
+        active_impl = active_implementation_tasks(session, now)
+        active_wt = active_worktrees(session, now)
+        active_wk_counts = active_worker_counts(session, now)
+        max_builders = get_max_active_builders(session)
+
+        priorities = task_priorities(session, [task.task_id for task in candidates])
+        sorted_candidates = sort_tasks_for_dispatch(session, candidates, priorities, active_impl)
+
         has_unlaunched_p0 = False
-        for task in available:
-            if is_planner_task(task):
-                continue
+        for task in sorted_candidates:
             task_priority = priorities.get(task.task_id, 100)
             if task_priority > 0 and has_unlaunched_p0:
                 # Lower-priority work does not jump ahead while executable P0 work exists
                 break
+
+            ready, reason = check_task_readiness(
+                session,
+                task,
+                now=now,
+                max_active_builders=max_builders,
+                active_tasks=active_impl,
+            )
+            if not ready:
+                assert reason is not None
+                result.scheduling_reasons[task.task_id] = reason
+                record_task_withheld(session, task.task_id, reason, task.objective_id)
+                if reason in {"objective_parallelism_full", "project_builder_capacity_full"}:
+                    result.capacity_full = True
+                continue
+
             if task.state == "REWORK_REQUIRED":
                 prompt_builder = RemediationPromptBuilder()
                 role = "REMEDIATION"
             else:
                 prompt_builder = BuilderPromptBuilder()
                 role = "BUILDER"
+
             worker, availability, decision = self._select_worker(
                 role, task_id=task.task_id, session=session
             )
             if availability == "slots_occupied":
                 result.capacity_full = True
+                reason = "worktree_or_worker_owned"
+                result.scheduling_reasons[task.task_id] = reason
+                record_task_withheld(session, task.task_id, reason, task.objective_id)
                 if task_priority == 0:
                     has_unlaunched_p0 = True
                 continue
             if availability in {"providers_unavailable", "provider_backoff"}:
                 result.capacity_full = True
+                reason = "worker_unavailable"
+                result.scheduling_reasons[task.task_id] = reason
+                record_task_withheld(session, task.task_id, reason, task.objective_id)
                 if task_priority == 0:
                     has_unlaunched_p0 = True
                 continue
             if worker is None:
+                reason = "worker_unavailable"
+                result.scheduling_reasons[task.task_id] = reason
+                record_task_withheld(session, task.task_id, reason, task.objective_id)
                 result.escalations.append(f"{task.task_id}:EXTERNAL_EXECUTOR_CONFIGURATION_REQUIRED")
                 if task_priority == 0:
                     has_unlaunched_p0 = True
                 continue
+
+            # Check single-owner invariants for worker and worktree
+            if active_wk_counts.get(worker.worker_id, 0) >= worker.max_concurrency:
+                reason = "worktree_or_worker_owned"
+                result.scheduling_reasons[task.task_id] = reason
+                record_task_withheld(session, task.task_id, reason, task.objective_id)
+                if task_priority == 0:
+                    has_unlaunched_p0 = True
+                continue
+
+            norm_wt = normalize_worktree_path(worker.worktree_path)
+            if norm_wt and norm_wt in active_wt:
+                reason = "worktree_or_worker_owned"
+                result.scheduling_reasons[task.task_id] = reason
+                record_task_withheld(session, task.task_id, reason, task.objective_id)
+                if task_priority == 0:
+                    has_unlaunched_p0 = True
+                continue
+
             try:
                 if self._config.task_branches and worker.worktree_path:
                     worker = self._prepare_task_worker(worker, task)
@@ -1053,6 +1134,7 @@ class BuildRunner:
                     ),
                 )
                 continue
+
             try:
                 claim = claim_task(
                     session,
@@ -1063,12 +1145,25 @@ class BuildRunner:
                         branch_name=worker.branch_name,
                         worktree_path=worker.worktree_path,
                     ),
+                    max_active_builders=max_builders,
                 )
-            except CoordinatorCapacityError:
+            except CoordinatorCapacityError as exc:
                 result.capacity_full = True
-                return
-            except CoordinatorPolicyError:
+                if "Objective parallelism" in str(exc):
+                    result.scheduling_reasons[task.task_id] = "objective_parallelism_full"
+                    continue
+                else:
+                    result.scheduling_reasons[task.task_id] = "project_builder_capacity_full"
+                    return
+            except CoordinatorPolicyError as exc:
+                if "parallel_safe" in str(exc):
+                    result.scheduling_reasons[task.task_id] = "parallel_safe_serialization"
+                elif "scope" in str(exc):
+                    result.scheduling_reasons[task.task_id] = "ownership_scope_conflict"
+                elif "gate" in str(exc):
+                    result.scheduling_reasons[task.task_id] = "human_gate_open"
                 continue
+
             context = get_resume_context(session, task.task_id)
             extra: dict[str, Any] = {"task_definition": _task_definition(task)}
             if role == "REMEDIATION":
@@ -1084,6 +1179,11 @@ class BuildRunner:
                 prompt,
                 routing_decision=decision,
             )
+            # Update tracking sets dynamically for the rest of this cycle
+            active_impl.append(task)
+            active_wk_counts[worker.worker_id] = active_wk_counts.get(worker.worker_id, 0) + 1
+            if norm_wt:
+                active_wt.add(norm_wt)
 
     def _planner_succeeded(
         self,
@@ -1491,6 +1591,7 @@ class BuildRunner:
             reviewed_feature_sha=reviewed_feature_sha,
             prompt_hash=hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
             status="LAUNCHED",
+            launched_at=_now(),
             result_data={
                 **(extra_result or {}),
                 **(
