@@ -43,6 +43,7 @@ from build_coordinator.runner.routing import (
     CAP_CODE_REVIEW,
     CAP_CODING,
     ProviderConfig,
+    RETRYABLE_PROVIDER_FAILURES,
     RoutingPolicy,
     StageRequirement,
     route_worker,
@@ -347,6 +348,12 @@ def test_ambiguous_retry_or_reset_text_is_not_rate_limited():
 def test_provider_overload_is_unavailable_not_rate_limited():
     assert classify_failure("Anthropic overloaded, please try again later") == "UNAVAILABLE"
     assert classify_failure("HTTP 503 Service Unavailable") == "UNAVAILABLE"
+
+
+def test_transient_provider_failures_are_retryable_taxonomy():
+    assert RETRYABLE_PROVIDER_FAILURES == frozenset(
+        {"RATE_LIMITED", "UNAVAILABLE", "NETWORK_FAILURE"}
+    )
 
 
 def test_provider_diagnostics_are_sanitized_before_persistence():
