@@ -26,7 +26,7 @@ from pathlib import Path
 
 from build_coordinator.github.sanitizer import full_repo_slug
 
-DEFAULT_POOL_ROOT = Path("C:/caventra-workers")
+DEFAULT_POOL_ROOT = Path("C:/stagemesh-workers")
 DEFAULT_MAX_CLONES_PER_REPO = 2
 
 
