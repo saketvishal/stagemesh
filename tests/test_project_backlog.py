@@ -1021,6 +1021,67 @@ def test_migration_module_is_self_contained_in_a_fresh_interpreter(tmp_path):
     assert proc.returncode == 0, proc.stderr
 
 
+def test_global_migrate_state_uses_each_registered_projects_database(tmp_path, registry):
+    root_a, _ = make_project_repo(
+        tmp_path,
+        {"A-1": {}},
+        subdir="repo-a",
+        project_id="project-a",
+        name="Project A",
+    )
+    root_b, _ = make_project_repo(
+        tmp_path,
+        {"B-1": {}},
+        subdir="repo-b",
+        project_id="project-b",
+        name="Project B",
+    )
+    register_project(root_a)
+    register_project(root_b)
+    db_a = root_a / ".build-coordinator" / "coordinator.sqlite3"
+    db_b = root_b / ".build-coordinator" / "coordinator.sqlite3"
+    db_a.parent.mkdir(parents=True)
+    db_b.parent.mkdir(parents=True)
+    legacy_database(db_a)
+    legacy_database(db_b)
+
+    poisoned_env = {"BUILD_COORDINATOR_DATABASE_URL": f"sqlite:///{db_a.as_posix()}"}
+    dry_run = stagemesh(
+        ["project", "migrate-state", "--all"],
+        cwd=tmp_path,
+        registry=registry,
+        extra_env=poisoned_env,
+    )
+    assert dry_run.returncode == 0, dry_run.stderr
+    planned = json.loads(dry_run.stdout)
+    assert planned["projects"]["project-a"]["migration"]["database"] == str(db_a)
+    assert planned["projects"]["project-b"]["migration"]["database"] == str(db_b)
+    assert planned["projects"]["project-a"]["outcome"] == "planned"
+    assert planned["projects"]["project-b"]["outcome"] == "planned"
+
+    applied = stagemesh(
+        ["project", "migrate-state", "--all", "--apply"],
+        cwd=tmp_path,
+        registry=registry,
+        extra_env=poisoned_env,
+    )
+    assert applied.returncode == 0, applied.stderr
+    payload = json.loads(applied.stdout)
+    assert payload["projects"]["project-a"]["outcome"] == "applied"
+    assert payload["projects"]["project-b"]["outcome"] == "applied"
+    assert payload["projects"]["project-a"]["migration"]["database"] == str(db_a)
+    assert payload["projects"]["project-b"]["migration"]["database"] == str(db_b)
+    assert payload["projects"]["project-a"]["migration"]["backup"] != payload["projects"]["project-b"]["migration"]["backup"]
+    assert not plan_migration(db_a).needed
+    assert not plan_migration(db_b).needed
+    with sqlite3.connect(str(db_a)) as connection:
+        cols_a = [c[1] for c in connection.execute("PRAGMA table_info(build_tasks)")]
+    with sqlite3.connect(str(db_b)) as connection:
+        cols_b = [c[1] for c in connection.execute("PRAGMA table_info(build_tasks)")]
+    assert "objective_id" in cols_a
+    assert "objective_id" in cols_b
+
+
 @pytest.mark.parametrize("limit", [1, 2])
 def test_configured_concurrency_is_the_parallelism_limit(tmp_path, registry, limit):
     root, _ = make_project_repo(

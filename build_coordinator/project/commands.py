@@ -233,16 +233,17 @@ def _migrate_database(db_path: Path, *, apply: bool) -> dict[str, Any]:
     }
 
 
+def _project_default_sqlite_path(project: ProjectDefinition) -> Path:
+    return project.state_dir / "coordinator.sqlite3"
+
+
 def _migrate_registered_projects(*, apply: bool) -> dict[str, Any]:
     projects = registered_projects()
     results: dict[str, Any] = {}
     for project in projects:
         try:
             require_git_repo(project)
-            apply_project_environment(project)
-            from build_coordinator.config import get_settings
-
-            db_path = sqlite_path_from_url(get_settings().database_url)
+            db_path = _project_default_sqlite_path(project)
             results[project.project_id] = {
                 "project": project.summary(),
                 **_migrate_database(db_path, apply=apply),
