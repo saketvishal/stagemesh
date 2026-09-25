@@ -47,3 +47,9 @@ uv.lock
 # Build
 *.whl
 *.tar.gz
+
+# Local IDE and agent directories
+.gemini/
+.claude/
+.kilo/
+*.log

@@ -105,6 +105,25 @@ class RemediationPromptBuilder(_PromptBuilder):
         "Do not rewrite history. Return to independent review."
     )
 
+    def build(
+        self,
+        context: ResumeContext,
+        *,
+        extra: dict[str, Any] | None = None,
+        repo_root: Any | None = None,
+    ) -> str:
+        extra = extra or {}
+        conflict_rec = extra.get("conflict_recovery")
+        if conflict_rec:
+            paths = conflict_rec.get("conflict_paths", [])
+            self.role_policy = (
+                f"Resolve Git merge conflict markers in conflicting files ({', '.join(paths)}). "
+                "Preserve both the task implementation and the changes that landed on main. "
+                "Ensure all tests pass, stage all resolved files, and commit the conflict resolution."
+            )
+        return super().build(context, extra=extra, repo_root=repo_root)
+
+
 
 class PlannerPromptBuilder(_PromptBuilder):
     role = "PLANNER"
