@@ -22,7 +22,7 @@ from build_coordinator.models import (
     BuildTask,
     BuildTaskEvent,
 )
-from build_coordinator.objectives import create_objective, get_planner_task
+from build_coordinator.objectives import _ensure_planner_task, create_objective, get_planner_task
 from build_coordinator.service import upsert_task
 from build_coordinator.task_source.base import SyncResult, TaskSource
 from build_coordinator.types import EventInput, ObjectiveSpec, TaskSpec
@@ -361,6 +361,8 @@ class GitHubTaskSource(TaskSource):
             existing.dependencies = authoritative_deps
             self._reconcile_historical_objective_task(session, existing, authoritative_deps, url)
             planner = get_planner_task(session, objective_id)
+            if planner is None and existing.state == "PLANNING":
+                planner = _ensure_planner_task(session, existing)
             if planner is not None:
                 planner.dependencies = authoritative_deps
             return existing
