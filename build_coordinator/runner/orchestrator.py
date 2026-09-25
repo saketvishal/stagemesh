@@ -45,6 +45,7 @@ from build_coordinator.objectives import (
     get_planner_task,
     is_planner_task,
     list_objectives,
+    objective_dependencies_satisfied,
     open_gates,
     record_planner_failed,
     record_planner_unavailable,
@@ -1500,6 +1501,8 @@ class BuildRunner:
             return
         for objective in list_objectives(session):
             if objective.state != "PLANNING":
+                continue
+            if not objective_dependencies_satisfied(session, objective):
                 continue
             planner_task = get_planner_task(session, objective.objective_id)
             if planner_task is None:
