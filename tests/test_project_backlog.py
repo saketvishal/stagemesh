@@ -16,7 +16,7 @@ import yaml
 from sqlalchemy import select
 
 from build_coordinator.db import DatabaseLifecycle
-from build_coordinator.models import BuildTask, BuildTaskEvent
+from build_coordinator.models import BuildRunnerExecution, BuildTask, BuildTaskClaim, BuildTaskEvent
 from build_coordinator.project.backlog import BacklogError, load_backlog, sync_backlog, task_priorities
 from build_coordinator.project.definition import (
     ProjectError,
@@ -27,7 +27,12 @@ from build_coordinator.project.definition import (
     resolve_project,
 )
 from build_coordinator.project.commands import normalize_argv
-from build_coordinator.project.state_migration import migrate_state, plan_migration
+from build_coordinator.project.state_migration import (
+    migrate_state,
+    plan_migration,
+    plan_stale_execution_reconciliation,
+    reconcile_stale_executions,
+)
 from build_coordinator.service import transition_task, upsert_task
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -347,7 +352,35 @@ CREATE TABLE build_tasks (
 """
 
 
-def legacy_database(path: Path, *, live_execution: bool = False) -> None:
+LEGACY_CLAIMS_DDL = """
+CREATE TABLE build_task_claims (
+    claim_id VARCHAR(36) NOT NULL, task_id VARCHAR(80) NOT NULL, claim_type VARCHAR(24) NOT NULL,
+    worker_id VARCHAR(160) NOT NULL, provider VARCHAR(80), worker_metadata JSON NOT NULL,
+    migration_allowed BOOLEAN NOT NULL, builder_slot INTEGER, claimed_at DATETIME NOT NULL,
+    lease_expires_at DATETIME NOT NULL, last_heartbeat_at DATETIME NOT NULL,
+    branch_name VARCHAR(240), worktree_path TEXT, status VARCHAR(24) NOT NULL,
+    PRIMARY KEY (claim_id)
+)
+"""
+
+LEGACY_EXECUTIONS_DDL = """
+CREATE TABLE build_runner_executions (
+    execution_id VARCHAR(36) NOT NULL, task_id VARCHAR(80) NOT NULL, role VARCHAR(24) NOT NULL,
+    worker_id VARCHAR(160) NOT NULL, provider VARCHAR(80), adapter VARCHAR(80) NOT NULL,
+    claim_id VARCHAR(36), worktree_path TEXT, branch_name VARCHAR(240), process_id VARCHAR(80),
+    result_path TEXT, reviewed_feature_sha VARCHAR(64), prompt_hash VARCHAR(64),
+    status VARCHAR(32) NOT NULL, exit_code INTEGER, result_data JSON NOT NULL,
+    human_escalation_type VARCHAR(80), launched_at DATETIME NOT NULL, last_observed_at DATETIME NOT NULL,
+    completed_at DATETIME,
+    PRIMARY KEY (execution_id)
+)
+"""
+
+
+def legacy_database(path: Path, *, execution: str | None = None) -> None:
+    """A schema-v1-shaped database. `execution` of 'stale' or 'live' adds a
+    LAUNCHED execution row with a claim whose lease has expired (stale, orphaned
+    by a coordinator that died) or is still unexpired (genuinely live)."""
     connection = sqlite3.connect(str(path))
     connection.execute(LEGACY_TASKS_DDL)
     connection.execute(
@@ -355,6 +388,23 @@ def legacy_database(path: Path, *, live_execution: bool = False) -> None:
         "review_policy,permitted_scope,required_validation,migration_allowed,ownership_scope,state) "
         "VALUES ('LEGACY-1','Legacy','d','[]','[]','MEDIUM','INDEPENDENT','[]','[]',0,'{}','REVIEWING')"
     )
+    if execution is not None:
+        connection.execute(LEGACY_CLAIMS_DDL)
+        connection.execute(LEGACY_EXECUTIONS_DDL)
+        lease = "2000-01-01T00:00:00+00:00" if execution == "stale" else "2999-01-01T00:00:00+00:00"
+        connection.execute(
+            "INSERT INTO build_task_claims (claim_id,task_id,claim_type,worker_id,provider,worker_metadata,"
+            "migration_allowed,builder_slot,claimed_at,lease_expires_at,last_heartbeat_at,status) VALUES "
+            "('CLAIM-1','LEGACY-1','IMPLEMENTATION','builder-1',NULL,'{}',0,1,"
+            "'2000-01-01T00:00:00+00:00',?,'2000-01-01T00:00:00+00:00','ACTIVE')",
+            (lease,),
+        )
+        connection.execute(
+            "INSERT INTO build_runner_executions (execution_id,task_id,role,worker_id,provider,adapter,"
+            "claim_id,worktree_path,branch_name,process_id,result_path,status,result_data,launched_at,"
+            "last_observed_at) VALUES ('EXEC-1','LEGACY-1','BUILDER','builder-1',NULL,'subprocess','CLAIM-1',"
+            "NULL,NULL,'999999',NULL,'RUNNING','{}','2000-01-01T00:00:00+00:00','2000-01-01T00:00:00+00:00')"
+        )
     connection.commit()
     connection.close()
 
@@ -384,6 +434,97 @@ def test_legacy_state_is_refused_then_migrated_with_backup_and_history_kept(tmp_
     lifecycle.dispose()
     with sqlite3.connect(applied.backup) as backup:
         assert backup.execute("SELECT state FROM build_tasks").fetchone() == ("REVIEWING",)
+
+
+def test_migration_refuses_for_genuinely_live_execution_lease(tmp_path):
+    """A claim whose lease has not expired means a coordinator could still be
+    actively renewing it: migration must keep refusing even after reconciliation
+    runs, and must not touch the execution row."""
+    path = tmp_path / "legacy.sqlite3"
+    legacy_database(path, execution="live")
+
+    plan = plan_stale_execution_reconciliation(path)
+    assert plan.live_examined == 1
+    assert plan.refused and "unexpired claim lease" in plan.refused
+    assert [e["execution_id"] for e in plan.genuinely_live] == ["EXEC-1"]
+
+    reconciled = reconcile_stale_executions(path, apply=True)
+    assert not reconciled.applied and reconciled.backup is None
+    assert reconciled.refused
+
+    migration = migrate_state(path, apply=True)
+    assert migration.refused and "live execution" in migration.refused
+    with sqlite3.connect(str(path)) as connection:
+        assert connection.execute(
+            "SELECT status FROM build_runner_executions WHERE execution_id = 'EXEC-1'"
+        ).fetchone() == ("RUNNING",)
+
+
+def test_stale_execution_deadlock_reconciles_then_migrates_then_resumes(tmp_path, session):
+    """Reproduces the Caventra deadlock: an old-schema database with a stale
+    RUNNING execution (its claim's lease long expired -- the coordinator that
+    held it is gone) cannot be opened by the new coordinator, and migration
+    refuses while the row looks live. Reconciliation must break the deadlock
+    without rewriting unrelated task history, and the normal post-migration
+    recovery path must then resume the task from a replacement worker."""
+    path = tmp_path / "legacy.sqlite3"
+    legacy_database(path, execution="stale")
+
+    lifecycle = DatabaseLifecycle(f"sqlite:///{path.as_posix()}", data_dir=tmp_path)
+    with pytest.raises(Exception, match="no build_coordinator_schema_version"):
+        lifecycle.initialize_schema()
+    lifecycle.dispose()
+
+    migration = migrate_state(path, apply=True)
+    assert migration.refused and "1 live execution" in migration.refused
+    assert migration.backup is None
+
+    plan = plan_stale_execution_reconciliation(path)
+    assert plan.live_examined == 1
+    assert not plan.refused
+    assert [e["execution_id"] for e in plan.reconciled] == ["EXEC-1"]
+
+    reconciled = reconcile_stale_executions(path, apply=True)
+    assert reconciled.applied and Path(reconciled.backup).is_file()
+    assert not reconciled.refused
+    with sqlite3.connect(str(path)) as connection:
+        row = connection.execute(
+            "SELECT status, result_data FROM build_runner_executions WHERE execution_id = 'EXEC-1'"
+        ).fetchone()
+        assert row[0] == "LOST"
+        assert json.loads(row[1])["reconciliation_state"] == "STALE_EXECUTION_PRE_MIGRATION"
+        # exact-row scoping: unrelated task history untouched
+        assert connection.execute(
+            "SELECT state FROM build_tasks WHERE task_id = 'LEGACY-1'"
+        ).fetchone() == ("REVIEWING",)
+        assert connection.execute(
+            "SELECT status FROM build_task_claims WHERE claim_id = 'CLAIM-1'"
+        ).fetchone() == ("ACTIVE",)
+
+    applied = migrate_state(path, apply=True)
+    assert applied.applied and Path(applied.backup).is_file()
+    assert applied.preservation and all(r["identical"] for r in applied.preservation)
+    assert not plan_migration(path).needed
+
+    lifecycle = DatabaseLifecycle(f"sqlite:///{path.as_posix()}", data_dir=tmp_path)
+    lifecycle.initialize_schema()
+    with lifecycle.session() as db:
+        execution = db.get(BuildRunnerExecution, "EXEC-1")
+        assert execution.status == "LOST"
+        claim = db.get(BuildTaskClaim, "CLAIM-1")
+        assert claim.status == "ACTIVE"
+
+        from build_coordinator.service import recover_expired
+
+        recovered = recover_expired(db)
+        db.commit()
+        assert [t.task_id for t in recovered] == ["LEGACY-1"]
+        task = db.get(BuildTask, "LEGACY-1")
+        assert task.current_claim_id is None
+        assert task.state == "STALE"
+        claim = db.get(BuildTaskClaim, "CLAIM-1")
+        assert claim.status == "EXPIRED"
+    lifecycle.dispose()
 
 
 def test_versioned_schema_1_database_migrates_finding_registry_column(tmp_path):
