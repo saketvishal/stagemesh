@@ -38,7 +38,7 @@ def events(root: Path, task_id: str, event_type: str | None = None):
 
 def run(root, tmp_path, registry, **env):
     register_project(root)
-    return stagemesh(["continue", "fixture"], cwd=tmp_path, registry=registry, extra_env=env)
+    return stagemesh(["continue", "fixture", "--json"], cwd=tmp_path, registry=registry, extra_env=env)
 
 
 PASS_IF_FIXED = f'"{sys.executable}" -c "import pathlib,sys; sys.exit(0 if pathlib.Path(\'fixed.txt\').exists() else 1)"'
@@ -177,7 +177,7 @@ def test_time_budget_stops_new_work_but_finishes_in_flight_work_and_restores_run
     root, _ = make_project_repo(tmp_path, {f"B-{i}": {"review": "NONE"} for i in range(1, 6)}, concurrency=1)
     register_project(root)
     proc = stagemesh(
-        ["continue", "fixture", "--timeout", "3"], cwd=tmp_path, registry=registry, extra_env={"SCRIPTED_WORKER_DELAY": "2"}
+        ["continue", "fixture", "--timeout", "3", "--json"], cwd=tmp_path, registry=registry, extra_env={"SCRIPTED_WORKER_DELAY": "2"}
     )
     assert proc.returncode == 0, proc.stderr
     payload = json.loads(proc.stdout)

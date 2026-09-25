@@ -26,6 +26,7 @@ HUMAN_ESCALATION_TYPES = (
     "ARCHITECTURE_DECISION_REQUIRED",
     "REMOTE_PUSH_APPROVAL_REQUIRED",
     "MERGE_CONFLICT",
+    "MERGE_CONFLICT_RECOVERY_FAILED",
     "MIGRATION_SCOPE_VIOLATION",
     "SECURITY_POLICY_BLOCK",
     "EXTERNAL_EXECUTOR_CONFIGURATION_REQUIRED",
@@ -224,6 +225,7 @@ class RunnerConfig:
     run_validation: bool = True
     validation_timeout_seconds: float = 900.0
     max_execution_attempts: int = 3
+    max_conflict_recovery_attempts: int = 2
     cleanup_branches: bool = False
     # When true every builder task gets its own branch, started from main_ref,
     # in the worker's managed worktree instead of reusing one branch per worker.
@@ -235,6 +237,15 @@ class RunnerConfig:
     external_ci_enabled: bool = False
     external_ci_repo: str | None = None
     external_ci_max_consecutive_errors: int = 5
+    # GH-56: opt-in, repository-scoped standalone clone pools. When enabled,
+    # each worker's workspace for a repository is a full standalone `git
+    # clone` under clone_pool_root (keyed by repository identity and worker
+    # id) instead of a linked `git worktree add` checkout, avoiding the
+    # shared .git/worktrees metadata problems linked worktrees hit on
+    # Windows. Strictly additive: when False (the default), worktree
+    # provisioning behaves exactly as it did before this was added.
+    use_clone_pool: bool = False
+    clone_pool_root: str | None = None
 
     @classmethod
     def default(cls, *, dry_run: bool = False) -> "RunnerConfig":
@@ -377,6 +388,7 @@ class RunnerConfig:
             run_validation=bool(data.get("run_validation", True)),
             validation_timeout_seconds=float(data.get("validation_timeout_seconds", 900.0)),
             max_execution_attempts=int(data.get("max_execution_attempts", 3)),
+            max_conflict_recovery_attempts=int(data.get("max_conflict_recovery_attempts", 2)),
             cleanup_branches=bool(data.get("cleanup_branches", False)),
             task_branches=bool(data.get("task_branches", False)),
             external_ci_enabled=bool((data.get("external_ci") or {}).get("enabled", False)),
@@ -384,6 +396,8 @@ class RunnerConfig:
             external_ci_max_consecutive_errors=int(
                 (data.get("external_ci") or {}).get("max_consecutive_errors", 5)
             ),
+            use_clone_pool=bool((data.get("clone_pool") or {}).get("enabled", False)),
+            clone_pool_root=(data.get("clone_pool") or {}).get("root"),
         )
 
     def public_summary(self) -> dict[str, Any]:

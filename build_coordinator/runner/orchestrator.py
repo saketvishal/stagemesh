@@ -106,6 +106,12 @@ from build_coordinator.runner.worktree import (
     _ref_exists,
     _git,
 )
+from build_coordinator.runner.clone_pool import (
+    ensure_repo_clone,
+    expected_remote_url,
+    sync_task_branch,
+    verify_clone_remote,
+)
 from build_coordinator.runner.git_safety import resolve_git_identity_args
 from build_coordinator.claims import CLAIMABLE_STATES
 from build_coordinator.runner.scheduling import (
@@ -766,7 +772,9 @@ class BuildRunner:
             )
             return
         feature_sha = builder.feature_sha if builder else execution.result_data.get("feature_sha")
-        if execution.branch_name and not feature_sha:
+        task = session.get(BuildTask, execution.task_id)
+        assigned_branch = execution.branch_name or (task.branch_name if task else None)
+        if assigned_branch and not feature_sha:
             result.escalations.append(f"{execution.task_id}:BUILDER_COMMIT_CONTRACT")
             self._block_task(
                 session,
@@ -778,6 +786,54 @@ class BuildRunner:
                 recovery_classification="REWORK_REQUIRED",
             )
             return
+        conflict_rec = (
+            (task.waiting_input or {}).get("conflict_recovery")
+            if task is not None and isinstance(task.waiting_input, dict)
+            else None
+        )
+        if conflict_rec and isinstance(conflict_rec, dict):
+            resolved_sha = feature_sha
+            original_sha = str(conflict_rec.get("task_sha") or "")
+            if not resolved_sha or resolved_sha == original_sha:
+                result.escalations.append(f"{execution.task_id}:MERGE_CONFLICT_RECOVERY_FAILED")
+                self._block_task(
+                    session,
+                    execution.task_id,
+                    "MERGE_CONFLICT_RECOVERY_FAILED",
+                    invariant="MERGE_CONFLICT_RECOVERY_FAILED",
+                    execution=execution,
+                    error="conflict recovery did not produce a distinct conflict-resolved feature SHA",
+                    recovery_classification="OPERATOR_ACTION_REQUIRED",
+                    extra_data={
+                        "conflict_recovery": conflict_rec,
+                        "conflict_resolved_sha": resolved_sha,
+                    },
+                )
+                return
+            waiting = dict(task.waiting_input or {})
+            updated_conflict = dict(conflict_rec)
+            updated_conflict.update(
+                {
+                    "original_reviewed_sha": original_sha,
+                    "conflict_resolved_sha": resolved_sha,
+                    "old_review_non_authoritative": True,
+                    "requires_exact_sha_rereview": True,
+                    "recovery_worker": execution.worker_id,
+                    "recovery_provider": execution.provider,
+                }
+            )
+            waiting["conflict_recovery"] = updated_conflict
+            task.waiting_input = waiting
+            record_event(
+                session,
+                EventInput(
+                    task_id=execution.task_id,
+                    event_type="runner.merge_conflict_recovery_resolved",
+                    actor="runner",
+                    claim_id=execution.claim_id,
+                    event_data=updated_conflict,
+                ),
+            )
         if execution.claim_id:
             checkpoint(
                 session,
@@ -794,9 +850,14 @@ class BuildRunner:
             )
         transition_task(session, execution.task_id, "IN_PROGRESS", actor="runner")
         transition_task(session, execution.task_id, "VALIDATING", actor="runner")
-        task = session.get(BuildTask, execution.task_id)
         if not self._validation_gate(session, task, execution, result):
             return
+        if conflict_rec and isinstance(conflict_rec, dict) and task is not None:
+            waiting = dict(task.waiting_input or {})
+            updated_conflict = dict(waiting.get("conflict_recovery") or conflict_rec)
+            updated_conflict["validation_completed_for_sha"] = updated_conflict.get("conflict_resolved_sha")
+            waiting["conflict_recovery"] = updated_conflict
+            task.waiting_input = waiting
         transition_task(
             session,
             execution.task_id,
@@ -833,6 +894,8 @@ class BuildRunner:
                     "passed": outcome.passed,
                     "workspace": str(cwd),
                     "execution_id": execution.execution_id,
+                    "feature_sha": (execution.result_data or {}).get("feature_sha")
+                    or execution.reviewed_feature_sha,
                     "results": outcome.results,
                 },
             ),
@@ -922,7 +985,13 @@ class BuildRunner:
                     event_data={
                         "reviewer": execution.worker_id,
                         "reviewed_feature_sha": execution.reviewed_feature_sha,
-                        "approvals": sorted(approving_reviewers(session, execution.task_id)),
+                        "approvals": sorted(
+                            approving_reviewers(
+                                session,
+                                execution.task_id,
+                                reviewed_feature_sha=execution.reviewed_feature_sha,
+                            )
+                        ),
                     },
                 ),
             )
@@ -1012,7 +1081,16 @@ class BuildRunner:
         task = session.get(BuildTask, execution.task_id)
         if task is None or task.review_policy != "TWO_REVIEWERS":
             return False
-        return len(approving_reviewers(session, execution.task_id)) < 2
+        return (
+            len(
+                approving_reviewers(
+                    session,
+                    execution.task_id,
+                    reviewed_feature_sha=execution.reviewed_feature_sha,
+                )
+            )
+            < 2
+        )
 
     def _integration_succeeded(
         self,
@@ -1442,6 +1520,28 @@ class BuildRunner:
             extra: dict[str, Any] = {"task_definition": _task_definition(task)}
             if role == "REMEDIATION":
                 extra["open_findings"] = finding_escalation_evidence(task.finding_registry or {})
+                waiting = task.waiting_input if isinstance(task.waiting_input, dict) else {}
+                if isinstance(waiting.get("conflict_recovery"), dict):
+                    conflict_recovery = dict(waiting["conflict_recovery"])
+                    conflict_recovery.update(
+                        {
+                            "recovery_worker": worker.worker_id,
+                            "recovery_provider": worker.provider,
+                        }
+                    )
+                    waiting = dict(waiting)
+                    waiting["conflict_recovery"] = conflict_recovery
+                    task.waiting_input = waiting
+                    extra["conflict_recovery"] = conflict_recovery
+                    record_event(
+                        session,
+                        EventInput(
+                            task_id=task.task_id,
+                            event_type="runner.merge_conflict_recovery_worker_selected",
+                            actor="runner",
+                            event_data=conflict_recovery,
+                        ),
+                    )
             prompt = prompt_builder.build(context, extra=extra)
             self._launch(
                 session,
@@ -1617,11 +1717,13 @@ class BuildRunner:
         for task in tasks:
             if not self._target_allows(task.task_id):
                 continue
+            review_target_sha = self._task_review_target_sha(task)
             worker, availability, decision = self._select_worker(
                 "REVIEWER",
                 task_id=task.task_id,
                 session=session,
                 deprioritized_workers=self._environment_blocked_reviewers(session, task.task_id),
+                review_target_sha=review_target_sha,
             )
             if availability == "slots_occupied":
                 result.capacity_full = True
@@ -2048,6 +2150,7 @@ class BuildRunner:
         task_id: str | None = None,
         session: Session | None = None,
         deprioritized_workers: set[str] | None = None,
+        review_target_sha: str | None = None,
     ) -> tuple[WorkerConfig | None, str, RoutingDecision]:
         """Return (worker, availability, deterministic routing decision).
 
@@ -2072,7 +2175,13 @@ class BuildRunner:
             routing_policy=self._config.routing_policy,
             session=session,
             task_id=task_id,
-            excluded_workers=reviewer_exclusions(session, task_id) if role == "REVIEWER" else set(),
+            excluded_workers=reviewer_exclusions(
+                session,
+                task_id,
+                reviewed_feature_sha=review_target_sha,
+            )
+            if role == "REVIEWER"
+            else set(),
             deprioritized_workers=deprioritized_workers,
         )
         worker = next(
@@ -2092,10 +2201,19 @@ class BuildRunner:
         return worker
 
     def _git_integrator(self) -> GitIntegrationExecutor:
+        expected_url = None
+        if self._config.use_clone_pool and self._config.upstream_remote:
+            try:
+                expected_url = expected_remote_url(
+                    self._settings.repo_root, remote=self._config.upstream_remote
+                )
+            except WorktreeValidationError:
+                expected_url = None
         return GitIntegrationExecutor(
             main_ref=self._config.main_ref,
             upstream_remote=self._config.upstream_remote,
             push=self._config.push_upstream,
+            expected_remote_url=expected_url,
         )
 
     def _executor_for_worker(self, worker: WorkerConfig) -> WorkerExecutor:
@@ -2195,10 +2313,41 @@ class BuildRunner:
             )
             return None
 
+    def _task_review_target_sha(self, task: BuildTask) -> str | None:
+        branch = task.branch_name
+        if not branch:
+            return None
+        try:
+            if self._config.remote_name:
+                self._git.fetch_prune(str(self._settings.repo_root), self._config.remote_name)
+                return self._git.rev_parse(
+                    str(self._settings.repo_root),
+                    f"{self._config.remote_name}/{branch}",
+                )
+            return self._git.rev_parse(str(self._settings.repo_root), branch)
+        except GitSafetyError:
+            return None
+
     def _prepare_task_worker(self, worker: WorkerConfig, task: BuildTask) -> WorkerConfig:
         resume = task.state in {"REWORK_REQUIRED", "STALE", "RESUMABLE"} and bool(task.branch_name)
         branch = task.branch_name if resume else task_branch_name(task.task_id)
         self._require_no_cross_objective_branch_collision_before_prepare(task, branch)
+        if self._config.use_clone_pool and self._config.clone_pool_root:
+            clone_path = ensure_repo_clone(
+                self._config.clone_pool_root,
+                repo_root=self._settings.repo_root,
+                slot_id=worker.worker_id,
+                remote=self._config.remote_name or "origin",
+                allowed_roots=self._config.allowed_workspace_roots,
+            )
+            sync_task_branch(
+                clone_path,
+                branch_name=branch,
+                base_ref=self._config.main_ref,
+                remote=self._config.remote_name or "origin",
+                resume=resume,
+            )
+            return dataclasses.replace(worker, worktree_path=str(clone_path), branch_name=branch)
         prepare_task_workspace(
             worker.worktree_path,
             repo_root=self._settings.repo_root,
@@ -2239,6 +2388,19 @@ class BuildRunner:
 
     def _validate_worker_worktree(self, worker: WorkerConfig) -> None:
         if not worker.worktree_path:
+            return
+        if self._config.use_clone_pool and self._config.clone_pool_root:
+            # The clone was already provisioned and verified in
+            # _prepare_task_worker; re-verify its remote here too since a
+            # pooled slot can be reused by a later task run in a separate
+            # process, and remote drift must fail closed rather than let a
+            # worker silently operate on the wrong repository.
+            expected = expected_remote_url(
+                self._settings.repo_root, remote=self._config.remote_name or "origin"
+            )
+            verify_clone_remote(
+                Path(worker.worktree_path), expected, remote=self._config.remote_name or "origin"
+            )
             return
         try:
             ensure_worktree(
@@ -2880,8 +3042,10 @@ class BuildRunner:
                             if attempts < max_attempts:
                                 conflict_data = {
                                     "conflict_type": "MERGE_CONFLICT",
+                                    "original_reviewed_sha": reviewed_sha,
                                     "conflict_paths": list(assessment.conflict_paths),
                                     "current_main_sha": assessment.current_main_sha,
+                                    "conflicting_current_main_sha": assessment.current_main_sha,
                                     "task_sha": reviewed_sha,
                                     "merge_base": assessment.merge_base,
                                     "attempts": attempts + 1,
@@ -2927,8 +3091,10 @@ class BuildRunner:
                             conflict_paths = ev.get("conflict_files") or ev.get("conflict_paths") or []
                             conflict_data = {
                                 "conflict_type": "MERGE_CONFLICT",
+                                "original_reviewed_sha": reviewed_sha or ev.get("task_sha", ""),
                                 "conflict_paths": list(conflict_paths),
                                 "current_main_sha": ev.get("current_main_sha", ""),
+                                "conflicting_current_main_sha": ev.get("current_main_sha", ""),
                                 "task_sha": reviewed_sha or ev.get("task_sha", ""),
                                 "merge_base": ev.get("merge_base", ""),
                                 "attempts": attempts + 1,
@@ -2981,28 +3147,38 @@ class BuildRunner:
         max_attempts = getattr(self._config, "max_conflict_recovery_attempts", 2)
 
         if attempts >= max_attempts:
-            result.escalations.append(f"{task_id}:MERGE_CONFLICT")
+            result.escalations.append(f"{task_id}:MERGE_CONFLICT_RECOVERY_FAILED")
             self._block_task(
                 session,
                 task_id,
-                "MERGE_CONFLICT",
-                invariant="MERGE_CONFLICT",
+                "MERGE_CONFLICT_RECOVERY_FAILED",
+                invariant="MERGE_CONFLICT_RECOVERY_FAILED",
                 error=f"merge conflict in {list(assessment.conflict_paths)} after {attempts} automated remediation attempts",
                 recovery_classification="OPERATOR_ACTION_REQUIRED",
                 extra_data={
+                    "conflict_type": "MERGE_CONFLICT",
+                    "conflict_recovery": conflict_state,
+                    "original_reviewed_sha": assessment.feature_remote_sha,
                     "conflict_paths": list(assessment.conflict_paths),
                     "current_main_sha": assessment.current_main_sha,
+                    "conflicting_current_main_sha": assessment.current_main_sha,
                     "task_sha": assessment.feature_remote_sha,
                     "merge_base": assessment.merge_base,
                     "attempts": attempts,
+                    "max_attempts": max_attempts,
+                    "conflict_recovery_worker": conflict_state.get("recovery_worker"),
+                    "conflict_recovery_provider": conflict_state.get("recovery_provider"),
+                    "next_action": "manual conflict resolution or task redesign required after bounded automated recovery attempts failed",
                 },
             )
             return
 
         conflict_data = {
             "conflict_type": "MERGE_CONFLICT",
+            "original_reviewed_sha": assessment.feature_remote_sha,
             "conflict_paths": list(assessment.conflict_paths),
             "current_main_sha": assessment.current_main_sha,
+            "conflicting_current_main_sha": assessment.current_main_sha,
             "task_sha": assessment.feature_remote_sha,
             "merge_base": assessment.merge_base,
             "attempts": attempts + 1,
