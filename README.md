@@ -14,10 +14,10 @@ engineering workflows.
 
 ## Package and CLI name
 
-For this first alpha, the Python distribution, import package, config paths,
-and CLI remain `build-coordinator` / `build_coordinator`. The public project
-name is StageMesh; the compatibility names are retained to avoid unnecessary
-breakage during early alpha adoption.
+For this first alpha, the Python distribution and primary CLI are `stagemesh`.
+The Python import package remains `build_coordinator`, and the compatibility
+CLI alias `build-coordinator` is retained to avoid unnecessary breakage during
+early alpha adoption.
 
 ---
 
@@ -74,6 +74,8 @@ engineering tasks. It:
 
 ## Quick start
 
+The public install path after the PyPI Trusted Publishing checklist is complete:
+
 ```bash
 pip install stagemesh
 cd my-git-repo
@@ -83,6 +85,10 @@ stagemesh doctor        # what works, what does not, and what to do next
 stagemesh continue      # works the project's .stagemesh/ backlog with real agents
 ```
 
+Until the `stagemesh` project is published on PyPI, do not treat the command
+above as launch-ready; follow the release checklist in
+[docs/evidence/PYPI_RELEASE.md](docs/evidence/PYPI_RELEASE.md).
+
 Run `stagemesh continue` from any directory: inside a project it works that
 project; anywhere else it coordinates every registered project at once, each in
 its own process and workspaces, up to that project's configured concurrency.
@@ -91,6 +97,9 @@ branches, providers and execution directories are chosen by StageMesh's queue
 and capability routing, never by you. See [docs/PROJECTS.md](docs/PROJECTS.md).
 
 See [docs/SETUP.md](docs/SETUP.md) for full installation and configuration.
+
+Release verification and the PyPI Trusted Publishing checklist are recorded in
+[docs/evidence/PYPI_RELEASE.md](docs/evidence/PYPI_RELEASE.md).
 
 ---
 
