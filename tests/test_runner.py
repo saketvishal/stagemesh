@@ -28,6 +28,7 @@ from build_coordinator.service import (
     TaskSpec,
     claim_task,
     recover_expired,
+    recover_execution_retry_exhausted,
     set_mode,
     transition_task,
     upsert_task,
@@ -889,6 +890,57 @@ def test_retryable_failure_relaunches_after_backoff_then_escalates_when_exhauste
             .where(BuildTaskEvent.to_state == "BLOCKED")
         ).all()[-1]
         assert blocked_event.event_data["reason"] == "EXECUTION_RETRY_LIMIT_REACHED"
+
+
+def test_operator_retry_recovery_opens_new_durable_generation(monkeypatch):
+    clock = {"now": utcnow()}
+    monkeypatch.setattr(orchestrator_module, "_now", lambda: clock["now"])
+
+    def rate_limited():
+        return ExecutionObservation(
+            "FAILED",
+            exit_code=1,
+            result_data={"provider_failure": "RATE_LIMITED", "schema_version": 1},
+        )
+
+    executors = {"builder-a": FakeExecutor([rate_limited(), rate_limited(), rate_limited(), rate_limited()])}
+    config = _config()
+    with SessionLocal() as session:
+        upsert_task(session, _task("RUN-RETRY-GEN"))
+        session.commit()
+
+    runner = _runner(config, executors=executors)
+    for _ in range(config.max_execution_attempts):
+        runner.run_once()
+        runner.run_once()
+        with SessionLocal() as session:
+            latest = session.scalars(
+                select(BuildRunnerExecution)
+                .where(BuildRunnerExecution.task_id == "RUN-RETRY-GEN")
+                .order_by(BuildRunnerExecution.launched_at.desc())
+            ).first()
+            clock["now"] = clock["now"] + timedelta(seconds=latest.result_data["retry_backoff_seconds"] + 1)
+
+    with SessionLocal() as session:
+        task = session.get(BuildTask, "RUN-RETRY-GEN")
+        assert task.state == "BLOCKED"
+        recovered = recover_execution_retry_exhausted(session, "RUN-RETRY-GEN", actor="operator")
+        assert recovered.state == "RESUMABLE"
+        assert recovered.retry_generation == 1
+        session.commit()
+
+    runner.run_once()
+    runner.run_once()
+    with SessionLocal() as session:
+        executions = session.scalars(
+            select(BuildRunnerExecution)
+            .where(BuildRunnerExecution.task_id == "RUN-RETRY-GEN")
+            .order_by(BuildRunnerExecution.launched_at)
+        ).all()
+        latest = executions[-1]
+        assert latest.result_data["retry_generation"] == 1
+        assert latest.result_data["retry_attempt"] == 1
+        assert session.get(BuildTask, "RUN-RETRY-GEN").state != "BLOCKED"
 
 
 def test_lost_execution_releases_active_claim_to_stale_with_checkpoint():

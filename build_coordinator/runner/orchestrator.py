@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -908,12 +908,22 @@ class BuildRunner:
         if not failure and not died:
             return False
         retryable = died or failure in RETRYABLE_PROVIDER_FAILURES
+        task = session.get(BuildTask, execution.task_id)
+        retry_generation = int((task.retry_generation if task is not None else 0) or 0)
         attempts = session.scalar(
             select(func.count())
             .select_from(BuildRunnerExecution)
             .where(BuildRunnerExecution.task_id == execution.task_id)
             .where(BuildRunnerExecution.role == execution.role)
             .where(BuildRunnerExecution.status.in_(("LOST", "FAILED")))
+            .where(
+                or_(
+                    BuildRunnerExecution.result_data["retry_generation"].as_integer() == retry_generation,
+                    BuildRunnerExecution.result_data["retry_generation"].as_integer().is_(None)
+                    if retry_generation == 0
+                    else False,
+                )
+            )
         ) or 0
         exhausted = attempts + 1 >= self._config.max_execution_attempts
         backoff_seconds = (
@@ -944,6 +954,7 @@ class BuildRunner:
             **merged,
             "reconciliation_state": "WORKER_EXITED" if died else "PROVIDER_FAILED",
             "retry_attempt": attempts + 1,
+            "retry_generation": retry_generation,
             "retryable_failure": retryable,
             "retry_backoff_seconds": backoff_seconds if retryable else None,
         }

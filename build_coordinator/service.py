@@ -47,6 +47,7 @@ from build_coordinator.models import (
     BuildTask,
     BuildTaskCheckpoint,
     BuildTaskClaim,
+    BuildTaskEvent,
 )
 
 DEFAULT_LEASE_SECONDS = 1800
@@ -80,6 +81,7 @@ __all__ = [
     "provide_task_input",
     "recover_expired",
     "recover_lost_execution_claims",
+    "recover_execution_retry_exhausted",
     "request_task_input",
     "reconcile_stale_executions",
     "recover_review_environment_blocked",
@@ -527,6 +529,61 @@ def recover_review_environment_blocked(
         ),
     )
     return recovered_task
+
+
+def _latest_block_reason(session: Session, task_id: str) -> str | None:
+    event = session.scalar(
+        select(BuildTaskEvent)
+        .where(BuildTaskEvent.task_id == task_id)
+        .where(BuildTaskEvent.to_state.in_(("BLOCKED", "FAILED")))
+        .order_by(BuildTaskEvent.created_at.desc())
+        .limit(1)
+    )
+    return (event.event_data or {}).get("reason") if event else None
+
+
+def recover_execution_retry_exhausted(
+    session: Session,
+    task_id: str,
+    *,
+    actor: str = "operator",
+    reason: str | None = None,
+) -> BuildTask:
+    """Open a new bounded retry generation for retry-exhausted work only."""
+    task = locked_task(session, task_id)
+    if task.state not in {"BLOCKED", "FAILED"}:
+        raise CoordinatorPolicyError(
+            f"Cannot recover task {task_id}: state is {task.state}, expected BLOCKED or FAILED"
+        )
+    latest_reason = _latest_block_reason(session, task_id)
+    if latest_reason != "EXECUTION_RETRY_LIMIT_REACHED":
+        raise CoordinatorPolicyError(
+            f"Cannot recover task {task_id}: latest terminal reason is {latest_reason!r}, "
+            "expected EXECUTION_RETRY_LIMIT_REACHED"
+        )
+    prior_state = task.state
+    task.retry_generation = int(task.retry_generation or 0) + 1
+    recovered = transition_task(
+        session,
+        task_id,
+        "RESUMABLE",
+        actor=actor,
+        reason=reason or "operator recovery: new execution retry generation",
+    )
+    record_event(
+        session,
+        EventInput(
+            task_id=task_id,
+            event_type="runner.execution_retry_generation_opened",
+            actor=actor,
+            event_data={
+                "retry_generation": recovered.retry_generation,
+                "prior_state": prior_state,
+                "reason": reason or "operator recovery: new execution retry generation",
+            },
+        ),
+    )
+    return recovered
 
 
 def transition_task(
