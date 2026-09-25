@@ -225,6 +225,7 @@ class RunnerConfig:
     run_validation: bool = True
     validation_timeout_seconds: float = 900.0
     max_execution_attempts: int = 3
+    max_conflict_recovery_attempts: int = 2
     cleanup_branches: bool = False
     # When true every builder task gets its own branch, started from main_ref,
     # in the worker's managed worktree instead of reusing one branch per worker.
@@ -387,6 +388,7 @@ class RunnerConfig:
             run_validation=bool(data.get("run_validation", True)),
             validation_timeout_seconds=float(data.get("validation_timeout_seconds", 900.0)),
             max_execution_attempts=int(data.get("max_execution_attempts", 3)),
+            max_conflict_recovery_attempts=int(data.get("max_conflict_recovery_attempts", 2)),
             cleanup_branches=bool(data.get("cleanup_branches", False)),
             task_branches=bool(data.get("task_branches", False)),
             external_ci_enabled=bool((data.get("external_ci") or {}).get("enabled", False)),

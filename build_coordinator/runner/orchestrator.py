@@ -803,6 +803,7 @@ class BuildRunner:
             updated_conflict = dict(conflict_rec)
             updated_conflict.update(
                 {
+                    "original_reviewed_sha": original_sha,
                     "conflict_resolved_sha": resolved_sha,
                     "old_review_non_authoritative": True,
                     "requires_exact_sha_rereview": True,
@@ -2977,8 +2978,10 @@ class BuildRunner:
                             if attempts < max_attempts:
                                 conflict_data = {
                                     "conflict_type": "MERGE_CONFLICT",
+                                    "original_reviewed_sha": reviewed_sha,
                                     "conflict_paths": list(assessment.conflict_paths),
                                     "current_main_sha": assessment.current_main_sha,
+                                    "conflicting_current_main_sha": assessment.current_main_sha,
                                     "task_sha": reviewed_sha,
                                     "merge_base": assessment.merge_base,
                                     "attempts": attempts + 1,
@@ -3024,8 +3027,10 @@ class BuildRunner:
                             conflict_paths = ev.get("conflict_files") or ev.get("conflict_paths") or []
                             conflict_data = {
                                 "conflict_type": "MERGE_CONFLICT",
+                                "original_reviewed_sha": reviewed_sha or ev.get("task_sha", ""),
                                 "conflict_paths": list(conflict_paths),
                                 "current_main_sha": ev.get("current_main_sha", ""),
+                                "conflicting_current_main_sha": ev.get("current_main_sha", ""),
                                 "task_sha": reviewed_sha or ev.get("task_sha", ""),
                                 "merge_base": ev.get("merge_base", ""),
                                 "attempts": attempts + 1,
@@ -3078,28 +3083,38 @@ class BuildRunner:
         max_attempts = getattr(self._config, "max_conflict_recovery_attempts", 2)
 
         if attempts >= max_attempts:
-            result.escalations.append(f"{task_id}:MERGE_CONFLICT")
+            result.escalations.append(f"{task_id}:MERGE_CONFLICT_RECOVERY_FAILED")
             self._block_task(
                 session,
                 task_id,
-                "MERGE_CONFLICT",
-                invariant="MERGE_CONFLICT",
+                "MERGE_CONFLICT_RECOVERY_FAILED",
+                invariant="MERGE_CONFLICT_RECOVERY_FAILED",
                 error=f"merge conflict in {list(assessment.conflict_paths)} after {attempts} automated remediation attempts",
                 recovery_classification="OPERATOR_ACTION_REQUIRED",
                 extra_data={
+                    "conflict_type": "MERGE_CONFLICT",
+                    "conflict_recovery": conflict_state,
+                    "original_reviewed_sha": assessment.feature_remote_sha,
                     "conflict_paths": list(assessment.conflict_paths),
                     "current_main_sha": assessment.current_main_sha,
+                    "conflicting_current_main_sha": assessment.current_main_sha,
                     "task_sha": assessment.feature_remote_sha,
                     "merge_base": assessment.merge_base,
                     "attempts": attempts,
+                    "max_attempts": max_attempts,
+                    "conflict_recovery_worker": conflict_state.get("recovery_worker"),
+                    "conflict_recovery_provider": conflict_state.get("recovery_provider"),
+                    "next_action": "manual conflict resolution or task redesign required after bounded automated recovery attempts failed",
                 },
             )
             return
 
         conflict_data = {
             "conflict_type": "MERGE_CONFLICT",
+            "original_reviewed_sha": assessment.feature_remote_sha,
             "conflict_paths": list(assessment.conflict_paths),
             "current_main_sha": assessment.current_main_sha,
+            "conflicting_current_main_sha": assessment.current_main_sha,
             "task_sha": assessment.feature_remote_sha,
             "merge_base": assessment.merge_base,
             "attempts": attempts + 1,
