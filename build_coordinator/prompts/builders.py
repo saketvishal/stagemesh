@@ -116,10 +116,20 @@ class RemediationPromptBuilder(_PromptBuilder):
         conflict_rec = extra.get("conflict_recovery")
         if conflict_rec:
             paths = conflict_rec.get("conflict_paths", [])
+            original_sha = conflict_rec.get("original_reviewed_sha") or conflict_rec.get("task_sha")
+            current_main_sha = (
+                conflict_rec.get("conflicting_current_main_sha")
+                or conflict_rec.get("current_main_sha")
+            )
             self.role_policy = (
-                f"Resolve Git merge conflict markers in conflicting files ({', '.join(paths)}). "
+                f"Resolve the Git merge conflict in conflicting files ({', '.join(paths)}). "
+                f"The prior reviewed feature SHA is {original_sha}; current main is {current_main_sha}. "
                 "Preserve both the task implementation and the changes that landed on main. "
-                "Ensure all tests pass, stage all resolved files, and commit the conflict resolution."
+                "Work on the existing task branch lineage against freshly fetched authoritative main; "
+                "do not create a duplicate task branch or rewrite published history. "
+                "Stage resolved files and commit the conflict resolution so the feature SHA changes. "
+                "The old review approval is not authoritative for the new SHA; after validation, "
+                "StageMesh will require independent review of the exact conflict-resolved SHA."
             )
         return super().build(context, extra=extra, repo_root=repo_root)
 
