@@ -6,6 +6,7 @@ import dataclasses
 
 import hashlib
 import subprocess
+import sys
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
