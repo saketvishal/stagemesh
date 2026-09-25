@@ -104,6 +104,7 @@ def add_continue_command(sub: argparse._SubParsersAction) -> None:
     p.add_argument("--github", action="store_true", help="also run the optional GitHub task-source adapter")
     p.add_argument("--all", action="store_true", dest="all_projects", help="coordinate every registered project (default outside a project)")
     p.add_argument("--task", dest="task_id", help="run only this explicit task id; unrelated backlog is not claimable")
+    p.add_argument("--json", action="store_true", help="print the complete structured result instead of the concise human summary")
 
 
 def normalize_argv(argv: list[str]) -> list[str]:
@@ -140,10 +141,15 @@ def _open(project: ProjectDefinition):
     try:
         lifecycle.initialize_schema()
     except DatabaseSchemaError as exc:
-        raise ProjectError(
-            f"{exc} Run `stagemesh project migrate-state --all` to review an "
-            "explicit, backup-first migration of registered durable history."
-        ) from exc
+        db_path = _project_default_sqlite_path(project)
+        migrated = _migrate_database(db_path, apply=True)
+        if migrated.get("outcome") == "applied":
+            lifecycle.initialize_schema()
+        else:
+            raise ProjectError(
+                f"{exc} Run `stagemesh project migrate-state --all` to review an "
+                "explicit, backup-first migration of registered durable history."
+            ) from exc
     return lifecycle
 
 
@@ -379,6 +385,7 @@ def handle_continue(args: argparse.Namespace) -> None:
     peak_parallel = 0
     idle_cycles = 0
     drained_from: str | None = None
+    last_escalations: dict[str, str] = {}
     for number in range(1, max(1, args.max_cycles) + 1):
         project = resolve_project(None, path=project.root)
         apply_project_environment(project)
@@ -422,7 +429,10 @@ def handle_continue(args: argparse.Namespace) -> None:
         for row in launched:
             print(f"[{project.project_id}] {row.get('role', '?').lower()} {row.get('task_id')} on {row.get('worker_id')}", file=sys.stderr, flush=True)
         for item in result.escalations:
-            print(f"[{project.project_id}] needs attention: {item}", file=sys.stderr, flush=True)
+            gate_id, _, reason = item.partition(":")
+            if last_escalations.get(gate_id) != reason:
+                print(f"[{project.project_id}] needs attention: {item}", file=sys.stderr, flush=True)
+                last_escalations[gate_id] = reason
         cycles.append(
             {
                 "cycle": number,
@@ -453,18 +463,75 @@ def handle_continue(args: argparse.Namespace) -> None:
         target_diagnostics = [
             _target_task_diagnostic(session, task_id) for task_id in sorted(target_task_ids)
         ]
-    _print(
-        {
-            "project": project.summary(),
-            "target_tasks": target_diagnostics,
-            "backlog_sync": sync_payload,
-            "task_source_adapters": adapter_payload,
-            "cycles_run": len(cycles),
-            "peak_parallel_builders": peak_parallel,
-            "cycles": cycles,
-            "final": final,
-        }
-    )
+    payload = {
+        "project": project.summary(),
+        "target_tasks": target_diagnostics,
+        "backlog_sync": sync_payload,
+        "task_source_adapters": adapter_payload,
+        "cycles_run": len(cycles),
+        "peak_parallel_builders": peak_parallel,
+        "cycles": cycles,
+        "final": final,
+    }
+    if getattr(args, "json", False):
+        _print(payload)
+    else:
+        print(_continue_human_summary(project, cycles, final, last_escalations), flush=True)
+
+
+_ESCALATION_LABELS = {
+    "EXTERNAL_EXECUTOR_CONFIGURATION_REQUIRED": "External executor configuration required",
+}
+
+
+def _escalation_label(reason: str) -> str:
+    return _ESCALATION_LABELS.get(reason, reason.replace("_", " ").capitalize())
+
+
+def _continue_human_summary(
+    project: ProjectDefinition,
+    cycles: list[dict[str, Any]],
+    final: dict[str, Any],
+    outstanding_escalations: dict[str, str] | None = None,
+) -> str:
+    """A bounded, operator-facing summary: current state and what needs attention,
+    never a dump of historical execution/routing evidence (that's `--json`)."""
+    live_by_task = {
+        e["task_id"]: e
+        for e in final.get("executions", [])
+        if e.get("status") in _LIVE_EXECUTION
+    }
+    by_state = final.get("tasks_by_state", {})
+    ready_count = by_state.get("READY", 0)
+
+    # Durable BLOCKED tasks plus same-run escalations (e.g. PLANNER configuration
+    # gates) that never reach BLOCKED task state but still need an operator.
+    attention: dict[str, str] = {
+        item["task_id"]: item.get("reason") or "human action required"
+        for item in final.get("blocked", [])
+    }
+    for gate_id, reason in (outstanding_escalations or {}).items():
+        attention.setdefault(gate_id, reason)
+
+    lines = [
+        f"StageMesh - {project.project_id}",
+        f"Cycle: {len(cycles)}",
+        "",
+        f"Active:       {len(live_by_task)}",
+        f"Needs action: {len(attention)}",
+        f"Ready:        {ready_count}",
+    ]
+    if live_by_task:
+        lines += ["", "ACTIVE"]
+        for task_id, execution in sorted(live_by_task.items()):
+            role = execution.get("role", "?")
+            worker = execution.get("worker_id", "?")
+            lines.append(f"  {task_id}  {role:<12} {worker}")
+    if attention:
+        lines += ["", "ATTENTION"]
+        for task_id, reason in sorted(attention.items()):
+            lines.append(f"  {task_id}  {_escalation_label(reason)}")
+    return "\n".join(lines)
 
 
 def _is_global_mode(args: argparse.Namespace) -> bool:
@@ -491,6 +558,7 @@ def handle_global_continue(args: argparse.Namespace) -> None:
             "(or run `stagemesh init` inside a repository)"
         )
     flags = [flag for flag, on in (("--dry-run", args.dry_run), ("--once", args.once), ("--no-sync", args.no_sync), ("--github", args.github)) if on]
+    flags.append("--json")
     if getattr(args, "task_id", None):
         flags += ["--task", args.task_id]
     flags += ["--max-cycles", str(args.max_cycles)] + (["--timeout", str(args.timeout)] if args.timeout is not None else [])

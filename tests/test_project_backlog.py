@@ -768,7 +768,7 @@ def test_continue_runs_project_backlog_in_parallel_from_any_directory(tmp_path, 
     trace = tmp_path / "trace.jsonl"
 
     run = stagemesh(
-        ["Continue Fixture development."],
+        ["Continue Fixture development.", "--json"],
         cwd=unrelated,
         registry=registry,
         extra_env={"SCRIPTED_WORKER_TRACE": str(trace), "SCRIPTED_WORKER_REWORK": "T-3"},
@@ -810,7 +810,7 @@ def test_continue_runs_project_backlog_in_parallel_from_any_directory(tmp_path, 
         assert integrated.count(f"scripted work for {task_id}") == commits
     assert "T-5" not in main_files  # review NONE: never integrated
 
-    again = stagemesh(["continue", "fixture"], cwd=unrelated, registry=registry)
+    again = stagemesh(["continue", "fixture", "--json"], cwd=unrelated, registry=registry)
     assert again.returncode == 0, again.stderr
     assert json.loads(again.stdout)["backlog_sync"]["counts"] == {"SKIPPED": 5}
 
@@ -853,7 +853,7 @@ def test_continue_with_missing_target_reports_diagnostic_and_claims_nothing(tmp_
     root, _ = make_project_repo(tmp_path, {"OTHER": {}})
     register_project(root)
 
-    run = stagemesh(["continue", "fixture", "--task", "MISSING", "--once"], cwd=tmp_path, registry=registry)
+    run = stagemesh(["continue", "fixture", "--task", "MISSING", "--once", "--json"], cwd=tmp_path, registry=registry)
 
     assert run.returncode == 0, run.stderr
     payload = json.loads(run.stdout)
@@ -869,7 +869,7 @@ def test_continue_with_blocked_target_reports_dependency_and_claims_nothing(tmp_
     root, _ = make_project_repo(tmp_path, {"DEP": {}, "TARGET": {"dependencies": ["DEP"]}, "OTHER": {}})
     register_project(root)
 
-    run = stagemesh(["continue", "fixture", "--task", "TARGET", "--once"], cwd=tmp_path, registry=registry)
+    run = stagemesh(["continue", "fixture", "--task", "TARGET", "--once", "--json"], cwd=tmp_path, registry=registry)
 
     assert run.returncode == 0, run.stderr
     payload = json.loads(run.stdout)
@@ -898,7 +898,7 @@ def test_continue_with_task_runs_only_selected_task_through_lifecycle(tmp_path, 
     )
     register_project(root)
 
-    run = stagemesh(["continue", "fixture", "--task", "TARGET"], cwd=tmp_path, registry=registry)
+    run = stagemesh(["continue", "fixture", "--task", "TARGET", "--json"], cwd=tmp_path, registry=registry)
 
     assert run.returncode == 0, run.stderr
     payload = json.loads(run.stdout)
@@ -943,7 +943,7 @@ def test_github_adapter_is_optional_and_never_blocks_local_execution(tmp_path, r
             except OSError:
                 pass
     without_gh = os.pathsep.join(filtered_entries)
-    run = stagemesh(["continue", "fixture"], cwd=tmp_path, registry=registry, extra_env={"PATH": without_gh})
+    run = stagemesh(["continue", "fixture", "--json"], cwd=tmp_path, registry=registry, extra_env={"PATH": without_gh})
     assert run.returncode == 0, run.stderr
     payload = json.loads(run.stdout)
     assert {t["task_id"]: t["state"] for t in payload["final"]["tasks"]} == {"G-1": "DONE"}
@@ -953,7 +953,7 @@ def test_github_adapter_is_optional_and_never_blocks_local_execution(tmp_path, r
 def test_github_adapter_is_off_unless_the_project_enables_it(tmp_path, registry):
     root, _ = make_project_repo(tmp_path, {"G-1": {"review": "NONE"}})
     register_project(root)
-    run = stagemesh(["continue", "fixture"], cwd=tmp_path, registry=registry)
+    run = stagemesh(["continue", "fixture", "--json"], cwd=tmp_path, registry=registry)
     assert json.loads(run.stdout)["task_source_adapters"] == []
 
 
@@ -961,7 +961,7 @@ def test_continue_recovers_crashed_execution_and_finishes(tmp_path, registry):
     root, _ = make_project_repo(tmp_path, {"R-1": {}, "R-2": {}}, concurrency=2)
     register_project(root)
     run = stagemesh(
-        ["continue", "fixture"],
+        ["continue", "fixture", "--json"],
         cwd=tmp_path,
         registry=registry,
         extra_env={"SCRIPTED_WORKER_CRASH": "R-1", "SCRIPTED_WORKER_REWORK": "R-2"},
@@ -1021,7 +1021,7 @@ def test_continue_recovers_after_coordinator_crash_without_losing_work(tmp_path,
     coordinator.communicate(timeout=30)
 
     resumed = stagemesh(
-        ["continue", "fixture"], cwd=tmp_path, registry=registry, extra_env={"SCRIPTED_WORKER_DELAY": "0.5"}
+        ["continue", "fixture", "--json"], cwd=tmp_path, registry=registry, extra_env={"SCRIPTED_WORKER_DELAY": "0.5"}
     )
     assert resumed.returncode == 0, resumed.stderr
     payload = json.loads(resumed.stdout)
@@ -1159,7 +1159,7 @@ def test_configured_concurrency_is_the_parallelism_limit(tmp_path, registry, lim
         tmp_path, {f"C-{i}": {"review": "NONE"} for i in range(1, 5)}, concurrency=limit
     )
     register_project(root)
-    run = stagemesh(["continue", "fixture"], cwd=tmp_path, registry=registry)
+    run = stagemesh(["continue", "fixture", "--json"], cwd=tmp_path, registry=registry)
     assert run.returncode == 0, run.stderr
     payload = json.loads(run.stdout)
     assert all(t["state"] == "DONE" for t in payload["final"]["tasks"])
@@ -1222,9 +1222,137 @@ def test_continue_reloads_project_yaml_between_cycles(tmp_path, registry, monkey
             timeout=None,
             once=False,
             all_projects=False,
+            json=True,
         )
     )
 
     payload = json.loads(capsys.readouterr().out)
     assert reload_builder_counts == [1, 3]
     assert payload["project"]["concurrency"] == 3
+
+
+def test_default_continue_output_is_concise_human_summary_not_full_json(tmp_path, registry):
+    root, _ = make_project_repo(tmp_path, {"S-1": {"review": "NONE"}}, concurrency=1)
+    register_project(root)
+
+    run = stagemesh(["continue", "fixture", "--once"], cwd=tmp_path, registry=registry)
+
+    assert run.returncode == 0, run.stderr
+    with pytest.raises(json.JSONDecodeError):
+        json.loads(run.stdout)
+    assert "StageMesh - fixture" in run.stdout
+    assert "Cycle:" in run.stdout
+    for forbidden in ("execution_id", "worktree_path", "routing_policy", "fallback_on", "candidates"):
+        assert forbidden not in run.stdout
+    assert len(run.stdout.splitlines()) < 30
+
+
+def test_continue_json_flag_preserves_full_structured_output(tmp_path, registry):
+    root, _ = make_project_repo(tmp_path, {"S-2": {"review": "NONE"}}, concurrency=1)
+    register_project(root)
+
+    run = stagemesh(["continue", "fixture", "--once", "--json"], cwd=tmp_path, registry=registry)
+
+    assert run.returncode == 0, run.stderr
+    payload = json.loads(run.stdout)  # must remain valid, complete JSON
+    assert payload["final"]["executions"]
+    assert "worktree_path" in payload["final"]["executions"][0]
+    assert "routing" in payload["final"]["executions"][0]
+
+
+@pytest.mark.timeout(180)
+def test_default_output_stays_bounded_as_historical_executions_grow(tmp_path, registry):
+    """Regression for the multi-thousand-line default `continue --once` output:
+    seed a project with many historical execution rows, then assert default
+    output size doesn't grow proportionally with that history."""
+    root, _ = make_project_repo(tmp_path, {"H-1": {"review": "NONE"}}, concurrency=1)
+    register_project(root)
+    fast = {"SCRIPTED_WORKER_DELAY": "0"}
+    # First real cycle creates the durable DB and finishes H-1.
+    first = stagemesh(["continue", "fixture", "--once", "--json"], cwd=tmp_path, registry=registry, extra_env=fast)
+    assert first.returncode == 0, first.stderr
+
+    db_path = root / ".build-coordinator" / "coordinator.sqlite3"
+    with sqlite3.connect(str(db_path)) as db:
+        db.row_factory = sqlite3.Row
+        columns = [row[1] for row in db.execute("PRAGMA table_info(build_runner_executions)")]
+        template = dict(db.execute("SELECT * FROM build_runner_executions LIMIT 1").fetchone())
+        assert template
+        placeholders = ", ".join("?" for _ in columns)
+        for i in range(300):
+            row = dict(template)
+            row["execution_id"] = f"synthetic-{i}"
+            row["status"] = "LOST"
+            row["claim_id"] = None  # avoid colliding with the real claim's uniqueness
+            db.execute(
+                f"INSERT INTO build_runner_executions ({', '.join(columns)}) VALUES ({placeholders})",
+                [row[c] for c in columns],
+            )
+        db.commit()
+
+    bounded = stagemesh(["continue", "fixture", "--once", "--task", "H-1"], cwd=tmp_path, registry=registry, extra_env=fast)
+    assert bounded.returncode == 0, bounded.stderr
+    lines = bounded.stdout.splitlines()
+    assert len(lines) < 30, f"default output grew with historical execution count: {len(lines)} lines"
+    assert "synthetic-" not in bounded.stdout
+
+    full = stagemesh(["continue", "fixture", "--once", "--task", "H-1", "--json"], cwd=tmp_path, registry=registry, extra_env=fast)
+    assert full.returncode == 0, full.stderr
+    full_payload = json.loads(full.stdout)
+    assert len(full_payload["final"]["executions"]) >= 300  # --json still carries the full audit trail
+
+
+def test_needs_attention_is_deduplicated_across_cycles_but_reprinted_on_change(tmp_path, registry, monkeypatch, capsys):
+    root, _ = make_project_repo(tmp_path, {}, concurrency=1)
+    register_project(root)
+    monkeypatch.setenv("STAGEMESH_PROJECT_REGISTRY", str(registry))
+    monkeypatch.setenv("STAGEMESH_POLL_SECONDS", "0")
+    monkeypatch.delenv("BUILD_COORDINATOR_DATABASE_URL", raising=False)
+    monkeypatch.delenv("BUILD_COORDINATOR_RUNNER_CONFIG", raising=False)
+
+    import build_coordinator.project.commands as commands
+
+    class EscalatingRunner:
+        def __init__(self, _session_factory, config, **_kwargs):
+            self.config = config
+            self.cycle = 0
+
+        def reload_config(self, config, *, live_worker_ids=None):
+            self.config = config
+
+        def run_once(self):
+            self.cycle += 1
+            reason = "EXTERNAL_EXECUTOR_CONFIGURATION_REQUIRED" if self.cycle < 3 else "OTHER_REASON_CHANGED"
+            return SimpleNamespace(
+                launched=["nonexistent-execution-id"],  # keeps the cycle loop from idling out early
+                observed=[],
+                recovered=[],
+                escalations=[f"GH-1:{reason}"],
+            )
+
+    monkeypatch.setattr(commands, "BuildRunner", EscalatingRunner)
+    commands.handle_continue(
+        SimpleNamespace(
+            target=[],
+            project_dir=str(root),
+            no_sync=True,
+            github=False,
+            dry_run=False,
+            task_id=None,
+            max_cycles=4,
+            timeout=None,
+            once=False,
+            all_projects=False,
+            json=True,
+        )
+    )
+
+    stderr_lines = [
+        line for line in capsys.readouterr().err.splitlines() if "needs attention" in line
+    ]
+    # cycles 1,2 unchanged (suppressed after the first print), cycle 3 changes reason (printed),
+    # cycle 4 unchanged again (suppressed): exactly two prints total.
+    assert stderr_lines == [
+        "[fixture] needs attention: GH-1:EXTERNAL_EXECUTOR_CONFIGURATION_REQUIRED",
+        "[fixture] needs attention: GH-1:OTHER_REASON_CHANGED",
+    ]
