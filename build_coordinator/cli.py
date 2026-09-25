@@ -18,6 +18,7 @@ from build_coordinator.coordinator_config import (
 from build_coordinator.policy import CoordinatorPolicyError
 from build_coordinator.project.commands import add_continue_command, add_project_commands
 from build_coordinator.db import DatabaseSchemaError, SessionLocal, configure_process_database
+from build_coordinator.events import stream_events
 from build_coordinator.service import (
     CheckpointInput,
     ClaimRequest,
@@ -112,6 +113,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_worker_commands(sub)
     _add_routing_commands(sub)
     _add_watcher_commands(sub)
+    _add_events_commands(sub)
     return parser
 
 
@@ -279,6 +281,16 @@ def _add_worker_commands(sub) -> None:
     eligible.add_argument("--task-id")
 
 
+def _add_events_commands(sub) -> None:
+    events = sub.add_parser("events")
+    events_sub = events.add_subparsers(dest="events_command", required=True)
+
+    stream = events_sub.add_parser("stream")
+    stream.add_argument("--after-cursor", help="resume streaming after this cursor")
+    stream.add_argument("--task-id", help="restrict the stream to a single task")
+    stream.add_argument("--limit", type=int, help="maximum number of events to emit")
+
+
 def _add_routing_commands(sub) -> None:
     routing = sub.add_parser("routing")
     routing_sub = routing.add_subparsers(dest="routing_command", required=True)
@@ -299,6 +311,9 @@ def _run(args: argparse.Namespace, session) -> None:
         return
     if args.command == "routing":
         _routing(args, session)
+        return
+    if args.command == "events":
+        _events(args, session)
         return
     handlers = {
         "status": _status,
@@ -339,6 +354,27 @@ def _workers(args: argparse.Namespace, session) -> None:
         "eligible": _workers_eligible,
     }
     handlers[args.workers_command](args, session)
+
+
+def _events(args: argparse.Namespace, session) -> None:
+    if args.events_command == "stream":
+        _events_stream(args, session)
+        return
+    raise SystemExit(f"unknown events command: {args.events_command}")
+
+
+def _events_stream(args: argparse.Namespace, session) -> None:
+    try:
+        records = stream_events(
+            session,
+            after_cursor=args.after_cursor,
+            task_id=args.task_id,
+            limit=args.limit,
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    for record in records:
+        print(json.dumps(record.to_dict()))
 
 
 def _routing(args: argparse.Namespace, session) -> None:
