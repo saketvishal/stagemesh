@@ -1,8 +1,9 @@
 # Setup Guide
 
-This guide sets up StageMesh v0.1-alpha from source. For this alpha, the
-installable package, CLI, Python module, and environment variables remain named
-`build-coordinator` / `build_coordinator`.
+This guide sets up StageMesh v0.2.0a1 from source. The public Python
+distribution and primary CLI are `stagemesh`. The Python import package
+remains `build_coordinator`, and the compatibility CLI alias
+`build-coordinator` is retained for early alpha adopters.
 
 ## Prerequisites
 
@@ -23,7 +24,7 @@ pip install -e ".[dev]"
 ### Verify installation
 
 ```bash
-python -m build_coordinator.cli --help
+stagemesh --help
 build-coordinator --help
 ```
 
@@ -127,9 +128,9 @@ python -m build_coordinator.cli status
 
 ## Adding the CLI to PATH
 
-Installing with `pip install -e .` exposes the `build-coordinator` console
-script in the active Python environment. You can also use the repository
-launchers directly.
+Installing with `pip install -e .` exposes the `stagemesh` console script
+(and the `build-coordinator` compatibility alias) in the active Python
+environment. You can also use the repository launchers directly.
 
 ### Linux / macOS
 
