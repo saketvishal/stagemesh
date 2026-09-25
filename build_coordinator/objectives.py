@@ -410,7 +410,7 @@ def _apply_plan(
         _create_planned_task(session, objective, item, plan_id=plan.plan_id)
 
 
-def _check_for_cycles(planned: list[PlannedChildTask]) -> None:
+def check_for_cycles(planned: list[PlannedChildTask]) -> None:
     graph = {item.task_id: set(item.dependencies) for item in planned}
 
     visiting: set[str] = set()
@@ -431,6 +431,9 @@ def _check_for_cycles(planned: list[PlannedChildTask]) -> None:
 
     for task_id in graph:
         visit(task_id, [])
+
+
+_check_for_cycles = check_for_cycles
 
 
 def _create_planned_task(
