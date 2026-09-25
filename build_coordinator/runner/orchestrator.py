@@ -770,6 +770,58 @@ class BuildRunner:
                 extra_data={"blockers": blocker_list},
             )
             return
+        task = session.get(BuildTask, execution.task_id)
+        conflict_rec = (
+            (task.waiting_input or {}).get("conflict_recovery")
+            if task is not None and isinstance(task.waiting_input, dict)
+            else None
+        )
+        if conflict_rec and isinstance(conflict_rec, dict):
+            resolved_sha = (
+                builder.feature_sha
+                if builder and builder.feature_sha
+                else execution.result_data.get("feature_sha")
+            )
+            original_sha = str(conflict_rec.get("task_sha") or "")
+            if not resolved_sha or resolved_sha == original_sha:
+                result.escalations.append(f"{execution.task_id}:MERGE_CONFLICT_RECOVERY_FAILED")
+                self._block_task(
+                    session,
+                    execution.task_id,
+                    "MERGE_CONFLICT_RECOVERY_FAILED",
+                    invariant="MERGE_CONFLICT_RECOVERY_FAILED",
+                    execution=execution,
+                    error="conflict recovery did not produce a distinct conflict-resolved feature SHA",
+                    recovery_classification="OPERATOR_ACTION_REQUIRED",
+                    extra_data={
+                        "conflict_recovery": conflict_rec,
+                        "conflict_resolved_sha": resolved_sha,
+                    },
+                )
+                return
+            waiting = dict(task.waiting_input or {})
+            updated_conflict = dict(conflict_rec)
+            updated_conflict.update(
+                {
+                    "conflict_resolved_sha": resolved_sha,
+                    "old_review_non_authoritative": True,
+                    "requires_exact_sha_rereview": True,
+                    "recovery_worker": execution.worker_id,
+                    "recovery_provider": execution.provider,
+                }
+            )
+            waiting["conflict_recovery"] = updated_conflict
+            task.waiting_input = waiting
+            record_event(
+                session,
+                EventInput(
+                    task_id=execution.task_id,
+                    event_type="runner.merge_conflict_recovery_resolved",
+                    actor="runner",
+                    claim_id=execution.claim_id,
+                    event_data=updated_conflict,
+                ),
+            )
         if execution.claim_id:
             checkpoint(
                 session,
@@ -786,9 +838,14 @@ class BuildRunner:
             )
         transition_task(session, execution.task_id, "IN_PROGRESS", actor="runner")
         transition_task(session, execution.task_id, "VALIDATING", actor="runner")
-        task = session.get(BuildTask, execution.task_id)
         if not self._validation_gate(session, task, execution, result):
             return
+        if conflict_rec and isinstance(conflict_rec, dict) and task is not None:
+            waiting = dict(task.waiting_input or {})
+            updated_conflict = dict(waiting.get("conflict_recovery") or conflict_rec)
+            updated_conflict["validation_completed_for_sha"] = updated_conflict.get("conflict_resolved_sha")
+            waiting["conflict_recovery"] = updated_conflict
+            task.waiting_input = waiting
         transition_task(
             session,
             execution.task_id,
@@ -825,6 +882,8 @@ class BuildRunner:
                     "passed": outcome.passed,
                     "workspace": str(cwd),
                     "execution_id": execution.execution_id,
+                    "feature_sha": (execution.result_data or {}).get("feature_sha")
+                    or execution.reviewed_feature_sha,
                     "results": outcome.results,
                 },
             ),
@@ -914,7 +973,13 @@ class BuildRunner:
                     event_data={
                         "reviewer": execution.worker_id,
                         "reviewed_feature_sha": execution.reviewed_feature_sha,
-                        "approvals": sorted(approving_reviewers(session, execution.task_id)),
+                        "approvals": sorted(
+                            approving_reviewers(
+                                session,
+                                execution.task_id,
+                                reviewed_feature_sha=execution.reviewed_feature_sha,
+                            )
+                        ),
                     },
                 ),
             )
@@ -1004,7 +1069,16 @@ class BuildRunner:
         task = session.get(BuildTask, execution.task_id)
         if task is None or task.review_policy != "TWO_REVIEWERS":
             return False
-        return len(approving_reviewers(session, execution.task_id)) < 2
+        return (
+            len(
+                approving_reviewers(
+                    session,
+                    execution.task_id,
+                    reviewed_feature_sha=execution.reviewed_feature_sha,
+                )
+            )
+            < 2
+        )
 
     def _integration_succeeded(
         self,
@@ -1421,6 +1495,9 @@ class BuildRunner:
             extra: dict[str, Any] = {"task_definition": _task_definition(task)}
             if role == "REMEDIATION":
                 extra["open_findings"] = finding_escalation_evidence(task.finding_registry or {})
+                waiting = task.waiting_input if isinstance(task.waiting_input, dict) else {}
+                if isinstance(waiting.get("conflict_recovery"), dict):
+                    extra["conflict_recovery"] = waiting["conflict_recovery"]
             prompt = prompt_builder.build(context, extra=extra)
             self._launch(
                 session,
@@ -1596,11 +1673,13 @@ class BuildRunner:
         for task in tasks:
             if not self._target_allows(task.task_id):
                 continue
+            review_target_sha = self._task_review_target_sha(task)
             worker, availability, decision = self._select_worker(
                 "REVIEWER",
                 task_id=task.task_id,
                 session=session,
                 deprioritized_workers=self._environment_blocked_reviewers(session, task.task_id),
+                review_target_sha=review_target_sha,
             )
             if availability == "slots_occupied":
                 result.capacity_full = True
@@ -2027,6 +2106,7 @@ class BuildRunner:
         task_id: str | None = None,
         session: Session | None = None,
         deprioritized_workers: set[str] | None = None,
+        review_target_sha: str | None = None,
     ) -> tuple[WorkerConfig | None, str, RoutingDecision]:
         """Return (worker, availability, deterministic routing decision).
 
@@ -2051,7 +2131,13 @@ class BuildRunner:
             routing_policy=self._config.routing_policy,
             session=session,
             task_id=task_id,
-            excluded_workers=reviewer_exclusions(session, task_id) if role == "REVIEWER" else set(),
+            excluded_workers=reviewer_exclusions(
+                session,
+                task_id,
+                reviewed_feature_sha=review_target_sha,
+            )
+            if role == "REVIEWER"
+            else set(),
             deprioritized_workers=deprioritized_workers,
         )
         worker = next(
@@ -2181,6 +2267,21 @@ class BuildRunner:
                     event_data={"error": str(exc), "phase": "review_sha_capture"},
                 ),
             )
+            return None
+
+    def _task_review_target_sha(self, task: BuildTask) -> str | None:
+        branch = task.branch_name
+        if not branch:
+            return None
+        try:
+            if self._config.remote_name:
+                self._git.fetch_prune(str(self._settings.repo_root), self._config.remote_name)
+                return self._git.rev_parse(
+                    str(self._settings.repo_root),
+                    f"{self._config.remote_name}/{branch}",
+                )
+            return self._git.rev_parse(str(self._settings.repo_root), branch)
+        except GitSafetyError:
             return None
 
     def _prepare_task_worker(self, worker: WorkerConfig, task: BuildTask) -> WorkerConfig:
