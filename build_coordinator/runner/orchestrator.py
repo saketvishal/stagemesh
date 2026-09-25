@@ -29,8 +29,10 @@ from build_coordinator.execution.results import (
 )
 from build_coordinator.execution.subprocess_executor import SubprocessExecutor
 from build_coordinator.models import (
+    BuildObjective,
     BuildRunnerExecution,
     BuildTask,
+    BuildTaskCheckpoint,
     BuildTaskEvent,
     new_uuid,
 )
@@ -126,6 +128,7 @@ class RunnerCycleResult:
     objective_unrelated_tasks_created: list[str] = field(default_factory=list)
     objective_gates_raised: list[str] = field(default_factory=list)
     objectives_completed: list[str] = field(default_factory=list)
+    outbound_synced: list[str] = field(default_factory=list)
 
 
 class BuildRunner:
@@ -195,8 +198,12 @@ class BuildRunner:
             except Exception as exc:
                 record_event(
                     session,
-                    event_type="runner.task_source_sync_error",
-                    payload={"error": str(exc)},
+                    EventInput(
+                        task_id=None,
+                        event_type="runner.task_source_sync_error",
+                        actor="runner",
+                        event_data={"error": str(exc)},
+                    ),
                 )
         recovered_tasks = recover_expired(session, actor="runner")
         result.recovered = [task.task_id for task in recovered_tasks]
@@ -218,10 +225,154 @@ class BuildRunner:
             self._dispatch_builders(session, result)
         self._dispatch_integration(session, result)
         self._reconcile_objectives(session, result)
+        if self._task_source is not None:
+            self._sync_outbound(session, result)
         return result
 
     def _target_allows(self, task_id: str) -> bool:
         return not self._target_task_ids or task_id in self._target_task_ids
+
+    def _sync_outbound(self, session: Session, result: RunnerCycleResult | None = None) -> None:
+        if self._task_source is None:
+            return
+
+        # 1. Sync completed objectives
+        try:
+            completed_objectives = session.scalars(
+                select(BuildObjective).where(BuildObjective.state == "COMPLETED")
+            ).all()
+            sync_obj_fn = getattr(self._task_source, "sync_objective_outbound", None)
+            if callable(sync_obj_fn):
+                for obj in completed_objectives:
+                    if not self._target_allows(obj.objective_id):
+                        continue
+                    evidence = self._collect_objective_evidence(session, obj.objective_id)
+                    synced = sync_obj_fn(
+                        session,
+                        obj.objective_id,
+                        "COMPLETED",
+                        evidence=evidence,
+                    )
+                    if synced and result is not None:
+                        result.outbound_synced.append(obj.objective_id)
+        except Exception as exc:
+            record_event(
+                session,
+                EventInput(
+                    task_id=None,
+                    event_type="runner.objective_source_sync_error",
+                    actor="runner",
+                    event_data={"error": str(exc)},
+                ),
+            )
+
+        # 2. Sync DONE tasks
+        try:
+            done_tasks = session.scalars(
+                select(BuildTask).where(BuildTask.state == "DONE")
+            ).all()
+            for task in done_tasks:
+                if not self._target_allows(task.task_id):
+                    continue
+                # If this task represents an objective issue itself, skip task-level sync
+                if session.get(BuildObjective, task.task_id) is not None:
+                    continue
+                evidence = self._collect_task_evidence(session, task.task_id)
+                synced = self._task_source.sync_outbound(
+                    session,
+                    task.task_id,
+                    "DONE",
+                    evidence=evidence,
+                )
+                if synced and result is not None:
+                    result.outbound_synced.append(task.task_id)
+        except Exception as exc:
+            record_event(
+                session,
+                EventInput(
+                    task_id=None,
+                    event_type="runner.task_source_sync_error",
+                    actor="runner",
+                    event_data={"error": str(exc)},
+                ),
+            )
+
+    def _collect_objective_evidence(self, session: Session, objective_id: str) -> dict[str, Any]:
+        obj = session.get(BuildObjective, objective_id)
+        if obj is None:
+            return {}
+        return {
+            "objective_id": obj.objective_id,
+            "goal": obj.goal,
+            "completion_criteria": list(obj.completion_criteria or []),
+        }
+
+    def _collect_task_evidence(self, session: Session, task_id: str) -> dict[str, Any]:
+        evidence: dict[str, Any] = {}
+        task = session.get(BuildTask, task_id)
+        if task is None:
+            return evidence
+
+        checkpoint = session.scalars(
+            select(BuildTaskCheckpoint)
+            .where(BuildTaskCheckpoint.task_id == task_id)
+            .order_by(BuildTaskCheckpoint.created_at.desc())
+        ).first()
+        if checkpoint:
+            if checkpoint.worker_id:
+                evidence["worker_id"] = checkpoint.worker_id
+            if checkpoint.claim_id:
+                evidence["claim_id"] = checkpoint.claim_id
+            if checkpoint.current_head_sha:
+                evidence["feature_sha"] = checkpoint.current_head_sha
+            if checkpoint.completed_work:
+                evidence["summary"] = "; ".join(checkpoint.completed_work)
+
+        executions = session.scalars(
+            select(BuildRunnerExecution)
+            .where(BuildRunnerExecution.task_id == task_id)
+            .order_by(BuildRunnerExecution.launched_at.desc())
+        ).all()
+        for exc in executions:
+            rdata = exc.result_data or {}
+            if not evidence.get("worker_id") and (exc.worker_id or rdata.get("worker_id")):
+                evidence["worker_id"] = exc.worker_id or rdata.get("worker_id")
+            if not evidence.get("claim_id") and exc.claim_id:
+                evidence["claim_id"] = exc.claim_id
+            if not evidence.get("feature_sha"):
+                sha = rdata.get("feature_sha") or rdata.get("integrated_sha") or rdata.get("head_sha")
+                if sha:
+                    evidence["feature_sha"] = sha
+            if not evidence.get("review_verdict") and exc.role == "REVIEWER":
+                rev = rdata.get("review") or rdata
+                verdict = rev.get("verdict") or rev.get("status")
+                if verdict:
+                    evidence["review_verdict"] = verdict
+            if not evidence.get("summary") and rdata.get("summary"):
+                evidence["summary"] = rdata.get("summary")
+
+        if not evidence.get("review_verdict"):
+            rev_event = session.scalars(
+                select(BuildTaskEvent)
+                .where(
+                    BuildTaskEvent.task_id == task_id,
+                    BuildTaskEvent.event_type.in_(("review.completed", "runner.review_completed")),
+                )
+                .order_by(BuildTaskEvent.created_at.desc())
+            ).first()
+            if rev_event and rev_event.event_data:
+                verdict = (
+                    rev_event.event_data.get("verdict")
+                    or rev_event.event_data.get("review_verdict")
+                    or (rev_event.event_data.get("review") or {}).get("verdict")
+                )
+                if verdict:
+                    evidence["review_verdict"] = verdict
+
+        if not evidence.get("summary") and task.description:
+            evidence["summary"] = task.description[:200]
+
+        return evidence
 
     def _reconcile_objectives(self, session: Session, result: RunnerCycleResult) -> None:
         for summary in run_objective_cycle(session):
