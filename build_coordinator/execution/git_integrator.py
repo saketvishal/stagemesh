@@ -67,7 +67,19 @@ def branch_holder(cwd: str | Path, branch: str, *, excluding: Path) -> Path | No
     return None
 
 
-def push_branch(cwd: str | Path, remote: str, sha: str, branch: str) -> tuple[bool, str]:
+def push_branch(
+    cwd: str | Path, remote: str, sha: str, branch: str, *, expected_remote_url: str | None = None
+) -> tuple[bool, str]:
+    if expected_remote_url is not None:
+        from build_coordinator.runner.clone_pool import normalize_remote_url
+
+        actual = _git(cwd, "remote", "get-url", remote).stdout.strip()
+        if normalize_remote_url(actual) != normalize_remote_url(expected_remote_url):
+            return (
+                False,
+                f"refusing to push: '{remote}' in {cwd} points at '{actual}', "
+                f"not the expected '{expected_remote_url}'",
+            )
     proc = _git(cwd, "push", remote, f"{sha}:refs/heads/{branch}")
     return proc.returncode == 0, (proc.stderr or proc.stdout).strip()[-400:]
 
@@ -81,10 +93,12 @@ class GitIntegrationExecutor:
         main_ref: str = "main",
         upstream_remote: str | None = None,
         push: bool = False,
+        expected_remote_url: str | None = None,
     ) -> None:
         self._main = main_ref
         self._remote = upstream_remote
         self._push = bool(push and upstream_remote)
+        self._expected_remote_url = expected_remote_url
         self._observations: dict[str, ExecutionObservation] = {}
         self._result_paths: dict[str, str] = {}
 
@@ -208,7 +222,9 @@ class GitIntegrationExecutor:
             "tests": [],
         }
         if self._push:
-            ok, detail = push_branch(wt, self._remote, merged, main)
+            ok, detail = push_branch(
+                wt, self._remote, merged, main, expected_remote_url=self._expected_remote_url
+            )
             if not ok:
                 facts["push_status"] = "FAILED"
                 raise IntegrationStop(

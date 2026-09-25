@@ -105,6 +105,12 @@ from build_coordinator.runner.worktree import (
     _ref_exists,
     _git,
 )
+from build_coordinator.runner.clone_pool import (
+    ensure_repo_clone,
+    expected_remote_url,
+    sync_task_branch,
+    verify_clone_remote,
+)
 from build_coordinator.runner.git_safety import resolve_git_identity_args
 from build_coordinator.claims import CLAIMABLE_STATES
 from build_coordinator.runner.scheduling import (
@@ -2062,10 +2068,19 @@ class BuildRunner:
         return worker
 
     def _git_integrator(self) -> GitIntegrationExecutor:
+        expected_url = None
+        if self._config.use_clone_pool and self._config.upstream_remote:
+            try:
+                expected_url = expected_remote_url(
+                    self._settings.repo_root, remote=self._config.upstream_remote
+                )
+            except WorktreeValidationError:
+                expected_url = None
         return GitIntegrationExecutor(
             main_ref=self._config.main_ref,
             upstream_remote=self._config.upstream_remote,
             push=self._config.push_upstream,
+            expected_remote_url=expected_url,
         )
 
     def _executor_for_worker(self, worker: WorkerConfig) -> WorkerExecutor:
@@ -2168,6 +2183,22 @@ class BuildRunner:
     def _prepare_task_worker(self, worker: WorkerConfig, task: BuildTask) -> WorkerConfig:
         resume = task.state in {"REWORK_REQUIRED", "STALE", "RESUMABLE"} and bool(task.branch_name)
         branch = task.branch_name if resume else task_branch_name(task.task_id)
+        if self._config.use_clone_pool and self._config.clone_pool_root:
+            clone_path = ensure_repo_clone(
+                self._config.clone_pool_root,
+                repo_root=self._settings.repo_root,
+                slot_id=worker.worker_id,
+                remote=self._config.remote_name or "origin",
+                allowed_roots=self._config.allowed_workspace_roots,
+            )
+            sync_task_branch(
+                clone_path,
+                branch_name=branch,
+                base_ref=self._config.main_ref,
+                remote=self._config.remote_name or "origin",
+                resume=resume,
+            )
+            return dataclasses.replace(worker, worktree_path=str(clone_path), branch_name=branch)
         prepare_task_workspace(
             worker.worktree_path,
             repo_root=self._settings.repo_root,
@@ -2188,6 +2219,19 @@ class BuildRunner:
 
     def _validate_worker_worktree(self, worker: WorkerConfig) -> None:
         if not worker.worktree_path:
+            return
+        if self._config.use_clone_pool and self._config.clone_pool_root:
+            # The clone was already provisioned and verified in
+            # _prepare_task_worker; re-verify its remote here too since a
+            # pooled slot can be reused by a later task run in a separate
+            # process, and remote drift must fail closed rather than let a
+            # worker silently operate on the wrong repository.
+            expected = expected_remote_url(
+                self._settings.repo_root, remote=self._config.remote_name or "origin"
+            )
+            verify_clone_remote(
+                Path(worker.worktree_path), expected, remote=self._config.remote_name or "origin"
+            )
             return
         try:
             ensure_worktree(
