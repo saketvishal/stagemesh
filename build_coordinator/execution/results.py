@@ -250,6 +250,18 @@ def parse_executor_result(
         human_escalation_type=human_escalation_type,
         objective_signal=objective_signal,
     )
+    for key in (
+        "provider_failure",
+        "failure_kind",
+        "detail",
+        "diagnostics",
+        "return_code",
+        "stdout_tail",
+        "stderr_tail",
+        "error",
+    ):
+        if key in data:
+            persisted[key] = sanitize_result_mapping(data[key])
     return ExecutorResult(
         schema_version=RESULT_SCHEMA_VERSION,
         execution_id=reported_execution_id,
