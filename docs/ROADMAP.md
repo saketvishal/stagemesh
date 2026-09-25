@@ -1,84 +1,81 @@
 # Roadmap
 
-## v0.1-alpha (current)
+StageMesh is in public alpha. The current development package version is `0.2.0a1`.
 
-The initial standalone release of StageMesh. All items below are
-**IMPLEMENTED AND PROVEN** unless marked otherwise.
+This roadmap distinguishes proven capability from active hardening and longer-term work. Public claims should remain evidence-driven.
 
-### Core infrastructure (complete)
-- [x] Task lifecycle (create, claim, checkpoint, transition, recover, integrate)
-- [x] Builder capacity enforcement
-- [x] Migration-capable task serialization
-- [x] Independent reviewer separation
-- [x] Structured JSON result ingestion
-- [x] Checkpoint / resume (worker replacement)
-- [x] SQLite and PostgreSQL support
-- [x] FakeExecutor for deterministic testing
+## Proven foundation
 
-### Provider-neutral execution (complete)
-- [x] Worker configuration: provider / model / runtime / capabilities / stages
-- [x] Capability-based deterministic stage routing
-- [x] SubprocessExecutor (stdin-prompt delivery, result-file contract)
-- [x] Codex CLI worker execution proven
+The following capabilities have deterministic tests and/or execution evidence:
 
-### Autonomous objective lifecycle (complete)
-- [x] Planner agent decomposes goal into child tasks
-- [x] Gate-triggered follow-on planning
-- [x] Objective status and progress visibility
+- durable task lifecycle, claims, leases, checkpoints, events, and recovery;
+- SQLite and PostgreSQL state backends;
+- project-owned `.stagemesh/` configuration and backlog discovery;
+- location-independent `stagemesh` CLI;
+- provider-neutral worker configuration;
+- capability/stage-based deterministic routing;
+- subprocess execution with structured result contracts;
+- independent-reviewer separation;
+- exact-SHA review/integration invariants;
+- autonomous objective planning/execution lifecycle;
+- Codex CLI execution acceptance;
+- git/worktree isolation and guarded integration.
 
-### Location-independent CLI (complete)
-- [x] Works from any working directory (not just repo root)
-- [x] Launcher scripts for Linux/macOS/Windows
+See [REAL_WORLD_VALIDATION.md](REAL_WORLD_VALIDATION.md) and [evidence/](evidence/) for the evidence-oriented documentation surface.
 
-### Pending final acceptance
-- [ ] Final independent release verification
-- [ ] Cross-provider independent review execution when provider runtimes are available
+## Active reliability hardening
 
----
+Current work focuses on making real multi-provider and concurrent execution safer and more autonomous.
 
-## v0.2 (planned; not yet started)
+Areas include:
 
-> Items below are **ROADMAP only**. Nothing below has been implemented.
+- objective/task source correctness and idempotent reconciliation;
+- risk-aware affected-test selection and modular validation;
+- provider failure/quota/rate-limit classification and auditable diagnostics;
+- provider-health recovery and failover accounting;
+- automatic merge-conflict recovery followed by validation and exact-SHA re-review;
+- lifecycle-label provisioning and outbound GitHub synchronization hardening;
+- external-CI reconciliation;
+- self-development acceptance and restart/idempotency coverage.
 
-### Watcher / unattended operation
-- [ ] Windows Task Scheduler integration (unattended startup)
-- [ ] GitHub label provisioning for task tracking
-- [ ] Transient failure backoff and retry
+The GitHub issue tracker is the authoritative source for exact task status and acceptance criteria.
 
-### Expanded provider support
-- [ ] Additional runtime adapters
-- [ ] Formal multi-provider acceptance matrix
+## Public adoption and distribution
 
-### Observability
-- [ ] Structured event streaming
-- [ ] Coordinator metrics endpoint
+Planned/ongoing repository-readiness work includes:
 
-### Configuration
-- [ ] Hot-reload worker config without restart
-- [ ] Worker health checks
+- clear public positioning and examples;
+- structured bug/feature issue intake;
+- reproducible real-world validation evidence;
+- consistent release/version metadata;
+- automated CI suitable for pull requests and main;
+- first tagged GitHub prerelease;
+- verified package publication/install path;
+- repository discovery metadata (topics/homepage);
+- community support/discussion surface when outside usage begins.
 
----
+See [PUBLIC_RELEASE_CHECKLIST.md](PUBLIC_RELEASE_CHECKLIST.md).
 
-## Not planned for this project
+## Future execution/runtime work
 
-The following are out of scope for the generic coordinator and belong in
-consuming product layers:
+Potential future areas:
 
-- Legal reasoning, legal document processing
-- Attorney marketplace or court filing automation
-- Payments
-- Domain-specific gate types
-- Product-branded launchers
-- Custom integration artifact formats
+- additional coding-agent/runtime adapters;
+- richer provider acceptance matrix;
+- executor integrations for persistent/session-oriented runtimes;
+- structured event streaming and observability;
+- coordinator metrics;
+- configurable/hot-reload worker policy;
+- broader external task-source integrations.
 
----
+## Out of scope for the generic coordinator
 
-## Publication gate
+The following belong in consuming products rather than StageMesh core:
 
-Publication requires an explicit human approval decision. The remaining blockers
-before v0.1-alpha publication are:
+- legal reasoning or legal document processing;
+- product-specific domain intelligence;
+- attorney/court/payment workflows;
+- private customer logic;
+- domain-specific orchestration that cannot be expressed generically.
 
-1. Final independent release verification
-2. Human approval gate
-
-StageMesh will not be published automatically when acceptance completes.
+StageMesh should remain a generic engineering coordination layer.
