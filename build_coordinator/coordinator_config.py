@@ -87,7 +87,7 @@ class CoordinatorConfig:
 
 def _explicit_config_path() -> Path:
     env_name = "BUILD_COORDINATOR_CONFIG"
-    configured = os.getenv("BUILD_COORDINATOR_CONFIG", "")
+    configured = os.getenv(env_name, "")
     raw = Path(configured)
     if not raw.is_absolute():
         raise CoordinatorConfigError(

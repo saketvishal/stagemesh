@@ -103,6 +103,27 @@ def test_resumed_task_keeps_its_commits_even_on_a_different_worker(repo, tmp_pat
     assert git(one, "rev-parse", "--abbrev-ref", "HEAD") == "HEAD"  # branch freed, never deleted
 
 
+def test_second_task_never_collides_with_a_branch_checked_out_elsewhere(repo, tmp_path):
+    """Two distinct tasks (e.g. from different objectives) must never end up
+    sharing one branch checkout: preparing task A's workspace while task B's
+    branch is checked out (with uncommitted work) in a sibling worktree must
+    detach that sibling and preserve its work rather than colliding with it."""
+    roots = (str(tmp_path / "wt"),)
+    holder = tmp_path / "wt" / "builder-1"
+    mover = tmp_path / "wt" / "builder-2"
+    branch = "stagemesh/T-collide"
+
+    held = prepare_task_workspace(holder, repo, branch_name=branch, base_ref="main", allowed_roots=roots)
+    (held / "dirty.txt").write_text("uncommitted on holder", encoding="utf-8")
+
+    prepare_task_workspace(mover, repo, branch_name=branch, base_ref="main", resume=True, allowed_roots=roots)
+
+    assert git(holder, "rev-parse", "--abbrev-ref", "HEAD") == "HEAD"  # detached, no longer holds the branch
+    assert git(mover, "rev-parse", "--abbrev-ref", "HEAD") == branch
+    assert (mover / "dirty.txt").read_text(encoding="utf-8") == "uncommitted on holder"
+    assert "recovered work-in-progress" in git(mover, "log", "-1", "--format=%s")
+
+
 def test_workspace_outside_allowed_roots_is_rejected(repo, tmp_path):
     with pytest.raises(WorktreeValidationError, match="outside allowed workspace roots"):
         prepare_task_workspace(

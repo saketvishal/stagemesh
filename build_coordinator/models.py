@@ -407,3 +407,32 @@ class BuildObjectiveEvent(Base):
     actor: Mapped[str | None] = mapped_column(String(160), nullable=True)
     event_data: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class BuildWatcherRecord(Base):
+    """Durable identity/lease metadata for one persistent watcher process
+    bound to a single authorized repository."""
+
+    __tablename__ = "build_watcher_records"
+    __table_args__ = (
+        Index("idx_build_watcher_records_repo", "repository_slug"),
+    )
+
+    task_name: Mapped[str] = mapped_column(String(160), primary_key=True)
+    watcher_id: Mapped[str] = mapped_column(String(36), nullable=False, default=new_uuid)
+    control_repo_root: Mapped[str] = mapped_column(Text, nullable=False)
+    repository_slug: Mapped[str] = mapped_column(String(160), nullable=False)
+    host_name: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    process_id: Mapped[int | None] = mapped_column(nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_cycle_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_cycle_summary: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    last_error_type: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    last_error_message_redacted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    restart_count: Mapped[int] = mapped_column(nullable=False, default=0)
+    consecutive_failure_count: Mapped[int] = mapped_column(nullable=False, default=0)
+    backoff_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    stop_requested: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
