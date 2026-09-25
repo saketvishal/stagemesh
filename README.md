@@ -107,6 +107,7 @@ See [docs/SETUP.md](docs/SETUP.md) for full installation and configuration.
 ## Evidence
 
 - [Codex Acceptance](docs/evidence/CODEX_ACCEPTANCE.md) - what has actually been proven
+- [Failure-Recovery Demo](docs/evidence/FAILURE_RECOVERY_DEMO.md) - reproducible proof that a crashed worker is recovered, reviewed, and integrated through governed completion
 
 ---
 
