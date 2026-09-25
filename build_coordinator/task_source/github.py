@@ -25,7 +25,7 @@ from build_coordinator.models import (
 from build_coordinator.objectives import _ensure_planner_task, create_objective, get_planner_task
 from build_coordinator.service import upsert_task
 from build_coordinator.task_source.base import SyncResult, TaskSource
-from build_coordinator.types import EventInput, ObjectiveSpec, TaskSpec
+from build_coordinator.types import EventInput, OBJECTIVE_ROOT_COMPAT_REASON, ObjectiveSpec, TaskSpec
 
 logger = logging.getLogger(__name__)
 
@@ -260,7 +260,7 @@ class GitHubTaskSource(TaskSource):
         task = upsert_task(session, spec)
         if objective_id:
             task.objective_id = objective_id
-            if task.reason_created == "OBJECTIVE_ROOT_COMPAT":
+            if task.reason_created == OBJECTIVE_ROOT_COMPAT_REASON:
                 task.reason_created = "GITHUB_SOURCE"
                 if task.state == "STALE":
                     task.state = "READY"
@@ -374,7 +374,10 @@ class GitHubTaskSource(TaskSource):
             if not authoritative_deps and historical_task is not None and historical_task.dependencies:
                 authoritative_deps = list(historical_task.dependencies)
             existing.goal = f"{title}: {body[:500]}"
-            existing.completion_criteria = list(ac) if ac else []
+            # completion_criteria is authoritative child-task-id state owned by
+            # the objective lifecycle (see _reassess_completion); GitHub's
+            # parsed acceptance-criteria prose must never overwrite it here,
+            # or a synced objective could never reach COMPLETED.
             existing.dependencies = authoritative_deps
             if reconcile_historical_root:
                 self._reconcile_historical_objective_task(session, existing, authoritative_deps, url)
@@ -389,7 +392,9 @@ class GitHubTaskSource(TaskSource):
             ObjectiveSpec(
                 objective_id=objective_id,
                 goal=f"{title}: {body[:500]}",
-                completion_criteria=tuple(ac) if ac else (),
+                # completion_criteria is authoritative child-task-id state;
+                # it is populated by planning, not by GitHub AC prose.
+                completion_criteria=(),
                 dependencies=tuple(deps),
             ),
         )
@@ -398,7 +403,12 @@ class GitHubTaskSource(TaskSource):
                 objective_id=objective_id,
                 event_type="objective.synced_from_source",
                 actor="github-sync",
-                event_data={"source": url, "title": title, "dependencies": list(deps)},
+                event_data={
+                    "source": url,
+                    "title": title,
+                    "dependencies": list(deps),
+                    "acceptance_criteria": list(ac),
+                },
             )
         )
         planner = get_planner_task(session, objective_id)
@@ -419,11 +429,7 @@ class GitHubTaskSource(TaskSource):
         obj = session.get(BuildObjective, objective_id)
         if obj is None:
             return False
-        return (
-            obj.goal == f"{title}: {body[:500]}"
-            and obj.completion_criteria == (list(ac) if ac else [])
-            and obj.dependencies == list(deps)
-        )
+        return obj.goal == f"{title}: {body[:500]}" and obj.dependencies == list(deps)
 
     def _reconcile_historical_objective_task(
         self,
@@ -437,10 +443,10 @@ class GitHubTaskSource(TaskSource):
             return
         if not objective.dependencies and task.dependencies:
             objective.dependencies = list(task.dependencies)
-        if task.reason_created == "OBJECTIVE_ROOT_COMPAT":
+        if task.reason_created == OBJECTIVE_ROOT_COMPAT_REASON:
             task.dependencies = list(deps)
             return
-        task.reason_created = "OBJECTIVE_ROOT_COMPAT"
+        task.reason_created = OBJECTIVE_ROOT_COMPAT_REASON
         task.objective_id = objective.objective_id
         task.dependencies = list(deps)
         if task.state in {"READY", "RESUMABLE", "STALE"}:
