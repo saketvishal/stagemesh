@@ -165,7 +165,9 @@ def _create_job_object():
         ]
 
     info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
-    info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    # Do not set KILL_ON_JOB_CLOSE so child processes survive coordinator cycle restarts and --once.
+    # Process trees are explicitly terminated via _terminate_windows / _terminate_job.
+    info.BasicLimitInformation.LimitFlags = 0
     kernel32.SetInformationJobObject.argtypes = [
         wintypes.HANDLE,
         ctypes.c_int,

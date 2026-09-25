@@ -215,14 +215,19 @@ def plan_stale_execution_reconciliation(path: Path) -> StaleExecutionReport:
                 else None
             )
             lease_expires_at = _as_utc(claim["lease_expires_at"]) if claim else None
-            genuinely_live = (
+            process_id = row["process_id"] if "process_id" in exec_columns else None
+            process_alive = _process_is_alive(process_id)
+            result_path = row["result_path"] if "result_path" in exec_columns else None
+            has_terminal_result = bool(result_path and Path(result_path).is_file())
+
+            genuinely_live = bool(
                 claim is not None
                 and claim["status"] == "ACTIVE"
                 and lease_expires_at is not None
                 and lease_expires_at > now
             )
-            process_id = row["process_id"] if "process_id" in exec_columns else None
-            process_alive = _process_is_alive(process_id)
+            is_live = (genuinely_live or bool(process_alive)) and not has_terminal_result
+
             entry = {
                 "execution_id": row["execution_id"],
                 "task_id": row["task_id"],
@@ -233,7 +238,7 @@ def plan_stale_execution_reconciliation(path: Path) -> StaleExecutionReport:
                 "process_id": process_id,
                 "process_alive": process_alive,
             }
-            (report.genuinely_live if genuinely_live or process_alive else report.reconciled).append(entry)
+            (report.genuinely_live if is_live else report.reconciled).append(entry)
         if report.genuinely_live:
             report.refused = (
                 f"{len(report.genuinely_live)} execution(s) have live process evidence or an active, "
@@ -279,21 +284,33 @@ def reconcile_stale_executions(path: Path, *, apply: bool) -> StaleExecutionRepo
             now = datetime.now(UTC).isoformat()
             for entry in report.reconciled:
                 row = connection.execute(
-                    "SELECT result_data FROM build_runner_executions WHERE execution_id = ?",
+                    "SELECT result_data, result_path FROM build_runner_executions WHERE execution_id = ?",
                     (entry["execution_id"],),
                 ).fetchone()
                 if row is None:
                     continue
-                try:
-                    result_data = json.loads(row["result_data"]) if row["result_data"] else {}
-                except (TypeError, json.JSONDecodeError):
-                    result_data = {}
-                result_data["reconciliation_state"] = "STALE_EXECUTION_PRE_MIGRATION"
+                result_path = row["result_path"] if "result_path" in row.keys() else None
+                terminal_status = "LOST"
+                result_data = None
+                if result_path and Path(result_path).is_file():
+                    try:
+                        file_data = json.loads(Path(result_path).read_text(encoding="utf-8"))
+                        if file_data.get("status") in {"SUCCEEDED", "FAILED", "HUMAN_ACTION_REQUIRED"}:
+                            terminal_status = file_data["status"]
+                            result_data = file_data
+                    except Exception:
+                        pass
+                if result_data is None:
+                    try:
+                        result_data = json.loads(row["result_data"]) if row["result_data"] else {}
+                    except (TypeError, json.JSONDecodeError):
+                        result_data = {}
+                    result_data["reconciliation_state"] = "STALE_EXECUTION_PRE_MIGRATION"
                 connection.execute(
-                    "UPDATE build_runner_executions SET status = 'LOST', completed_at = ?, "
+                    "UPDATE build_runner_executions SET status = ?, completed_at = ?, "
                     "last_observed_at = ?, result_data = ? "
                     "WHERE execution_id = ? AND status IN ('LAUNCHED', 'RUNNING')",
-                    (now, now, json.dumps(result_data), entry["execution_id"]),
+                    (terminal_status, now, now, json.dumps(result_data), entry["execution_id"]),
                 )
             connection.execute("COMMIT")
         except Exception:
