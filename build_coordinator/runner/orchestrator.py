@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import dataclasses
+
 import hashlib
 import time
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from sqlalchemy import func, select
@@ -67,13 +69,26 @@ from build_coordinator.runner.models import (
     WorkerConfig,
 )
 from build_coordinator.runner.routing import (
+    ProviderConfig,
+    RETRYABLE_PROVIDER_FAILURES,
     RoutingDecision,
     StageRequirement,
+    approving_reviewers,
     reviewer_exclusions,
     role_to_stage,
     route_worker,
 )
-from build_coordinator.runner.worktree import WorktreeValidationError, validate_worktree_path
+from build_coordinator.project.backlog import task_priorities
+from build_coordinator.execution.git_integrator import GitIntegrationExecutor
+from build_coordinator.runner.validation import run_validation
+from build_coordinator.runner.worktree import (
+    cleanup_task_branch,
+    WorktreeValidationError,
+    ensure_worktree,
+    prepare_task_workspace,
+    task_branch_name,
+    validate_worktree_path,
+)
 from build_coordinator.service import (
     ClaimRequest,
     checkpoint,
@@ -121,11 +136,41 @@ class BuildRunner:
         *,
         executors: dict[str, WorkerExecutor] | None = None,
         git: GitBackend | None = None,
+        task_source: Any = None,
+        target_task_ids: set[str] | frozenset[str] | tuple[str, ...] | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._config = config
         self._executors = executors or {}
+        self._executor_workers: dict[str, WorkerConfig] = {
+            w.worker_id: w for w in self._config.workers if w.worker_id in self._executors
+        }
         self._git = git if git is not None else RealGit()
+        self._settings = get_settings()
+        self._task_source = task_source
+        self._target_task_ids = frozenset(str(task_id) for task_id in (target_task_ids or ()))
+
+    def reload_config(
+        self,
+        config: RunnerConfig,
+        *,
+        live_worker_ids: set[str] | frozenset[str] | None = None,
+    ) -> None:
+        """Apply fresh routing/worker settings without disturbing live runs."""
+        live_worker_ids = live_worker_ids or set()
+        previous = {worker.worker_id: worker for worker in self._config.workers}
+        current = {worker.worker_id: worker for worker in config.workers}
+        for worker_id, executor in list(self._executors.items()):
+            if worker_id in live_worker_ids:
+                continue
+            active_worker = self._executor_workers.get(worker_id) or previous.get(worker_id)
+            if active_worker != current.get(worker_id):
+                terminate = getattr(executor, "terminate_all", None)
+                if callable(terminate):
+                    terminate()
+                self._executors.pop(worker_id, None)
+                self._executor_workers.pop(worker_id, None)
+        self._config = config
         self._settings = get_settings()
 
     def run_forever(self) -> None:
@@ -144,6 +189,15 @@ class BuildRunner:
     def _run_once(self, session: Session) -> RunnerCycleResult:
         state = ensure_state(session)
         result = RunnerCycleResult(mode=state.mode)
+        if self._task_source is not None and state.mode != "PAUSED":
+            try:
+                self._task_source.discover_tasks(session)
+            except Exception as exc:
+                record_event(
+                    session,
+                    event_type="runner.task_source_sync_error",
+                    payload={"error": str(exc)},
+                )
         recovered_tasks = recover_expired(session, actor="runner")
         result.recovered = [task.task_id for task in recovered_tasks]
         reconcile_stale_executions(session)
@@ -165,6 +219,9 @@ class BuildRunner:
         self._dispatch_integration(session, result)
         self._reconcile_objectives(session, result)
         return result
+
+    def _target_allows(self, task_id: str) -> bool:
+        return not self._target_task_ids or task_id in self._target_task_ids
 
     def _reconcile_objectives(self, session: Session, result: RunnerCycleResult) -> None:
         for summary in run_objective_cycle(session):
@@ -327,6 +384,8 @@ class BuildRunner:
             elif execution.role == "PLANNER":
                 self._planner_succeeded(session, execution, result, parsed)
             return
+        if observation.status == "FAILED" and self._recoverable_failure(session, execution, merged, observation):
+            return
         if observation.status == "FAILED":
             execution.status = "FAILED"
             execution.human_escalation_type = observation.human_escalation_type
@@ -389,12 +448,79 @@ class BuildRunner:
         transition_task(session, execution.task_id, "IN_PROGRESS", actor="runner")
         transition_task(session, execution.task_id, "VALIDATING", actor="runner")
         task = session.get(BuildTask, execution.task_id)
+        if not self._validation_gate(session, task, execution, result):
+            return
         transition_task(
             session,
             execution.task_id,
             "REVIEW_READY" if task and task.review_policy != "NONE" else "DONE",
             actor="runner",
         )
+
+    def _validation_gate(
+        self,
+        session: Session,
+        task: BuildTask | None,
+        execution: BuildRunnerExecution,
+        result: RunnerCycleResult,
+    ) -> bool:
+        """Run the task's validation commands in its workspace; the outcome, not
+        an agent's claim, decides whether the task may proceed."""
+        commands = list(task.required_validation or []) if task else []
+        if not commands or not self._config.run_validation:
+            return True
+        cwd = execution.worktree_path or self._git_cwd_for_execution(execution)
+        outcome = run_validation(
+            commands,
+            cwd,
+            timeout_seconds=self._config.validation_timeout_seconds,
+        )
+        record_event(
+            session,
+            EventInput(
+                task_id=execution.task_id,
+                event_type="runner.validation",
+                actor="runner",
+                claim_id=execution.claim_id,
+                event_data={
+                    "passed": outcome.passed,
+                    "workspace": str(cwd),
+                    "execution_id": execution.execution_id,
+                    "results": outcome.results,
+                },
+            ),
+        )
+        if execution.claim_id:
+            checkpoint(
+                session,
+                execution.claim_id,
+                worker_id=execution.worker_id,
+                data=CheckpointInput(
+                    current_step="runner validation " + ("passed" if outcome.passed else "failed"),
+                    last_successful_tests=[r["command"] for r in outcome.results if r["exit_code"] == 0],
+                    known_failures=outcome.failure_summary(),
+                ),
+            )
+        if outcome.passed:
+            return True
+        if self._remediation_cycles(session, execution.task_id) >= self._config.max_remediation_cycles:
+            result.escalations.append(f"{execution.task_id}:REMEDIATION_LIMIT_REACHED")
+            transition_task(
+                session, execution.task_id, "REWORK_REQUIRED", actor="runner", reason="deterministic validation failed"
+            )
+            self._block_task(session, execution.task_id, "REMEDIATION_LIMIT_REACHED")
+            return False
+        transition_task(
+            session,
+            execution.task_id,
+            "REWORK_REQUIRED",
+            actor="runner",
+            reason="deterministic validation failed",
+        )
+        return False
+
+    def _git_cwd_for_execution(self, execution: BuildRunnerExecution) -> str:
+        return str(self._settings.repo_root)
 
     def _review_succeeded(
         self,
@@ -429,6 +555,28 @@ class BuildRunner:
                     blockers=[] if eligible else list(verdict.findings),
                 ),
             )
+        if eligible and self._needs_second_reviewer(session, execution):
+            record_event(
+                session,
+                EventInput(
+                    task_id=execution.task_id,
+                    event_type="runner.review_approval_recorded",
+                    actor="runner",
+                    event_data={
+                        "reviewer": execution.worker_id,
+                        "reviewed_feature_sha": execution.reviewed_feature_sha,
+                        "approvals": sorted(approving_reviewers(session, execution.task_id)),
+                    },
+                ),
+            )
+            transition_task(
+                session,
+                execution.task_id,
+                "REVIEW_READY",
+                actor="runner",
+                reason="TWO_REVIEWERS: awaiting a second independent approval",
+            )
+            return
         if eligible:
             release_active_claims(session, execution.task_id, completed=True)
             task = session.get(BuildTask, execution.task_id)
@@ -463,6 +611,12 @@ class BuildRunner:
         result.escalations.append(f"{execution.task_id}:COORDINATOR_INVARIANT_FAILURE")
         self._block_task(session, execution.task_id, "COORDINATOR_INVARIANT_FAILURE")
 
+    def _needs_second_reviewer(self, session: Session, execution: BuildRunnerExecution) -> bool:
+        task = session.get(BuildTask, execution.task_id)
+        if task is None or task.review_policy != "TWO_REVIEWERS":
+            return False
+        return len(approving_reviewers(session, execution.task_id)) < 2
+
     def _integration_succeeded(
         self,
         session: Session,
@@ -471,6 +625,23 @@ class BuildRunner:
         parsed,
     ) -> None:
         integrator = parsed.integrator if parsed is not None else None
+        if execution.adapter == "builtin-git":
+            if integrator is None or integrator.push_status not in {"PUSHED", "NOT_REQUIRED"}:
+                result.escalations.append(f"{execution.task_id}:UPSTREAM_PUSH_FAILED")
+                self._block_task(session, execution.task_id, "UPSTREAM_PUSH_FAILED")
+                return
+            transition_task(session, execution.task_id, "DONE", actor="runner", reason="integration completed")
+            record_event(
+                session,
+                EventInput(
+                    task_id=execution.task_id,
+                    event_type="runner.integration_completed",
+                    actor="runner",
+                    event_data=execution.result_data,
+                ),
+            )
+            self._cleanup_integrated_task(session, execution)
+            return
         if not self._config.auto_push_allowed:
             result.escalations.append(f"{execution.task_id}:REMOTE_PUSH_APPROVAL_REQUIRED")
             self._block_task(session, execution.task_id, "REMOTE_PUSH_APPROVAL_REQUIRED")
@@ -486,10 +657,123 @@ class BuildRunner:
             ),
         )
 
+    def _recoverable_failure(
+        self,
+        session: Session,
+        execution: BuildRunnerExecution,
+        merged: dict,
+        observation: ExecutionObservation,
+    ) -> bool:
+        """A worker that died, or a provider that failed, must not strand the task.
+
+        The execution is recorded as LOST so ownership is released through the
+        normal recovery path (checkpoints and evidence stay) and a replacement
+        worker resumes the task. Transient provider failures (RATE_LIMITED,
+        UNAVAILABLE, NETWORK_FAILURE, per the routing taxonomy's
+        RETRYABLE_PROVIDER_FAILURES) and worker deaths are retried: the failing
+        provider is routed around for a bounded, exponentially growing cooldown
+        (see `_retry_backoff_seconds`) instead of being relaunched every poll
+        cycle, while other workers/providers remain free to pick the task up
+        immediately. Attempts are bounded and each one is recorded on its own
+        execution row; once exhausted the task escalates with a typed reason and
+        the checkpoint is preserved instead of looping forever."""
+        failure = str(merged.get("provider_failure") or "").upper()
+        died = observation.exit_code not in (None, 0) and not merged.get("schema_version")
+        if not failure and not died:
+            return False
+        retryable = died or failure in RETRYABLE_PROVIDER_FAILURES
+        attempts = session.scalar(
+            select(func.count())
+            .select_from(BuildRunnerExecution)
+            .where(BuildRunnerExecution.task_id == execution.task_id)
+            .where(BuildRunnerExecution.role == execution.role)
+            .where(BuildRunnerExecution.status.in_(("LOST", "FAILED")))
+        ) or 0
+        exhausted = attempts + 1 >= self._config.max_execution_attempts
+        backoff_seconds = (
+            _retry_backoff_seconds(failure or "WORKER_EXIT", attempts)
+            if retryable
+            else _COOLDOWN_SECONDS.get(failure, 300)
+        )
+        if failure:
+            record_event(
+                session,
+                EventInput(
+                    task_id=execution.task_id,
+                    event_type="runner.provider_failure",
+                    actor="runner",
+                    event_data={
+                        "provider": execution.provider,
+                        "worker_id": execution.worker_id,
+                        "failure": failure,
+                        "until": (_now() + timedelta(seconds=backoff_seconds)).isoformat(),
+                        "detail": str(merged.get("detail") or "")[:300],
+                    },
+                ),
+            )
+        execution.status = "LOST"
+        execution.completed_at = _now()
+        execution.result_data = {
+            **(execution.result_data or {}),
+            **merged,
+            "reconciliation_state": "WORKER_EXITED" if died else "PROVIDER_FAILED",
+            "retry_attempt": attempts + 1,
+            "retryable_failure": retryable,
+            "retry_backoff_seconds": backoff_seconds if retryable else None,
+        }
+        if execution.claim_id:
+            try:
+                checkpoint(
+                    session,
+                    execution.claim_id,
+                    worker_id=execution.worker_id,
+                    data=CheckpointInput(
+                        current_step=f"{execution.role.lower()} execution lost after {failure or 'worker exit'}",
+                        known_failures=[f"{failure or 'WORKER_EXITED'} (attempt {attempts + 1})"],
+                    ),
+                )
+            except CoordinatorPolicyError:
+                pass
+        if exhausted:
+            self._block_task(session, execution.task_id, "EXECUTION_RETRY_LIMIT_REACHED")
+        return True
+
+    def _cleanup_integrated_task(self, session: Session, execution: BuildRunnerExecution) -> None:
+        if not self._config.cleanup_branches:
+            return
+        task = session.get(BuildTask, execution.task_id)
+        if task is None or not task.branch_name:
+            return
+        removed, detail = cleanup_task_branch(
+            self._settings.repo_root,
+            task.branch_name,
+            main_ref=self._config.main_ref,
+            reviewed_sha=execution.reviewed_feature_sha,
+        )
+        record_event(
+            session,
+            EventInput(
+                task_id=execution.task_id,
+                event_type="runner.workspace_cleaned" if removed else "runner.cleanup_skipped",
+                actor="runner",
+                event_data={"branch": task.branch_name, "detail": detail},
+            ),
+        )
+
     def _dispatch_builders(self, session: Session, result: RunnerCycleResult) -> None:
-        for task in list_available_tasks(session):
+        available = list_available_tasks(session)
+        if self._target_task_ids:
+            available = [task for task in available if self._target_allows(task.task_id)]
+        priorities = task_priorities(session, [task.task_id for task in available])
+        available.sort(key=lambda task: (priorities.get(task.task_id, 100), task.task_id))
+        has_unlaunched_p0 = False
+        for task in available:
             if is_planner_task(task):
                 continue
+            task_priority = priorities.get(task.task_id, 100)
+            if task_priority > 0 and has_unlaunched_p0:
+                # Lower-priority work does not jump ahead while executable P0 work exists
+                break
             if task.state == "REWORK_REQUIRED":
                 prompt_builder = RemediationPromptBuilder()
                 role = "REMEDIATION"
@@ -501,12 +785,24 @@ class BuildRunner:
             )
             if availability == "slots_occupied":
                 result.capacity_full = True
+                if task_priority == 0:
+                    has_unlaunched_p0 = True
+                continue
+            if availability in {"providers_unavailable", "provider_backoff"}:
+                result.capacity_full = True
+                if task_priority == 0:
+                    has_unlaunched_p0 = True
                 continue
             if worker is None:
                 result.escalations.append(f"{task.task_id}:EXTERNAL_EXECUTOR_CONFIGURATION_REQUIRED")
+                if task_priority == 0:
+                    has_unlaunched_p0 = True
                 continue
             try:
-                self._validate_worker_worktree(worker)
+                if self._config.task_branches and worker.worktree_path:
+                    worker = self._prepare_task_worker(worker, task)
+                else:
+                    self._validate_worker_worktree(worker)
             except WorktreeValidationError as exc:
                 result.escalations.append(f"{task.task_id}:COORDINATOR_INVARIANT_FAILURE")
                 self._block_task(session, task.task_id, "COORDINATOR_INVARIANT_FAILURE")
@@ -537,7 +833,7 @@ class BuildRunner:
             except CoordinatorPolicyError:
                 continue
             context = get_resume_context(session, task.task_id)
-            prompt = prompt_builder.build(context)
+            prompt = prompt_builder.build(context, extra={"task_definition": _task_definition(task)})
             self._launch(
                 session,
                 result,
@@ -594,6 +890,8 @@ class BuildRunner:
             transition_task(session, execution.task_id, "DONE", actor="runner", reason="planner plan applied")
 
     def _dispatch_planners(self, session: Session, result: RunnerCycleResult) -> None:
+        if self._target_task_ids:
+            return
         worker, availability, decision = self._select_worker("PLANNER", session=session)
         if availability == "slots_occupied":
             result.capacity_full = True
@@ -685,10 +983,15 @@ class BuildRunner:
             select(BuildTask).where(BuildTask.state == "REVIEW_READY").order_by(BuildTask.task_id)
         ).all()
         for task in tasks:
+            if not self._target_allows(task.task_id):
+                continue
             worker, availability, decision = self._select_worker(
                 "REVIEWER", task_id=task.task_id, session=session
             )
             if availability == "slots_occupied":
+                result.capacity_full = True
+                continue
+            if availability in {"providers_unavailable", "provider_backoff"}:
                 result.capacity_full = True
                 continue
             if worker is None:
@@ -719,7 +1022,7 @@ class BuildRunner:
                         task.task_id,
                         worker_id=worker.worker_id,
                         provider=worker.provider,
-                        branch_name=worker.branch_name or task.branch_name,
+                        branch_name=task.branch_name or worker.branch_name,
                         worktree_path=worker.worktree_path,
                     ),
                 )
@@ -727,7 +1030,11 @@ class BuildRunner:
                 continue
             prompt = ReviewerPromptBuilder().build(
                 get_resume_context(session, task.task_id),
-                extra={"reviewed_feature_sha": reviewed_sha, "sha_source": "runner-owned-git"},
+                extra={
+                    "reviewed_feature_sha": reviewed_sha,
+                    "sha_source": "runner-owned-git",
+                    "task_definition": _task_definition(task),
+                },
             )
             self._launch(
                 session,
@@ -750,6 +1057,8 @@ class BuildRunner:
         ).all()
         seen_tasks: set[str] = set()
         for row in rows:
+            if not self._target_allows(row.task_id):
+                continue
             if row.task_id in seen_tasks:
                 continue
             seen_tasks.add(row.task_id)
@@ -808,7 +1117,7 @@ class BuildRunner:
                 assessment = assess_mechanical_merge(
                     self._git,
                     cwd=self._git_cwd(worker, task),
-                    branch_name=worker.branch_name or task.branch_name or row.branch_name or "HEAD",
+                    branch_name=task.branch_name or row.branch_name or worker.branch_name or "HEAD",
                     reviewed_feature_sha=reviewed_sha,
                     remote=self._config.remote_name,
                     main_ref=self._config.main_ref,
@@ -840,7 +1149,7 @@ class BuildRunner:
                         row.task_id,
                         worker_id=worker.worker_id,
                         provider=worker.provider,
-                        branch_name=worker.branch_name or task.branch_name,
+                        branch_name=task.branch_name or worker.branch_name,
                         worktree_path=worker.worktree_path,
                     ),
                 )
@@ -994,6 +1303,61 @@ class BuildRunner:
                     "process_tree_reaped": True,
                 }
 
+    def _effective_providers(self, session: Session | None) -> dict:
+        """Configured providers, with any provider that recently failed marked
+        unavailable so routing deterministically falls back to other runtimes."""
+        providers = dict(self._config.providers)
+        if session is None:
+            return providers
+        now = _now()
+        rows = session.scalars(
+            select(BuildTaskEvent).where(BuildTaskEvent.event_type == "runner.provider_failure")
+        ).all()
+        for row in sorted(rows, key=lambda r: (r.event_data or {}).get("until", "")):
+            data = row.event_data or {}
+            try:
+                until = datetime.fromisoformat(str(data.get("until")))
+            except ValueError:
+                continue
+            provider = data.get("provider")
+            if provider and until > now:
+                current = providers.get(provider) or ProviderConfig(provider)
+                providers[provider] = dataclasses.replace(
+                    current,
+                    availability=str(data.get("failure")),
+                    consumption_mode="FALLBACK",
+                )
+        return providers
+
+    def diagnostics(self, session: Session | None = None) -> dict[str, Any]:
+        """Summary of worker pool, providers, capabilities, availability, and concurrency."""
+        effective_providers = self._effective_providers(session)
+        worker_summary = []
+        for w in self._config.workers:
+            p = effective_providers.get(w.provider)
+            worker_summary.append({
+                "worker_id": w.worker_id,
+                "role": w.role,
+                "adapter": w.adapter,
+                "provider": w.provider,
+                "runtime": w.runtime,
+                "capabilities": list(w.capabilities),
+                "consumption_mode": p.consumption_mode if p else "ACTIVE",
+                "availability": p.availability if p else "AVAILABLE",
+                "reason_unavailable": (p.metadata.get("reason") or "") if p and p.availability != "AVAILABLE" else None,
+            })
+        configured_builders = [w for w in self._config.workers if w.role == "BUILDER"]
+        executable_builders = [
+            w["worker_id"] for w in worker_summary
+            if w["role"] == "BUILDER" and w["adapter"] != "unconfigured" and w["availability"] == "AVAILABLE"
+        ]
+        return {
+            "workers": worker_summary,
+            "configured_concurrency": sum(1 for w in configured_builders),
+            "executable_builders": executable_builders,
+            "has_configured_builders": any(w.adapter != "unconfigured" for w in configured_builders),
+        }
+
     def _select_worker(
         self,
         role: str,
@@ -1019,7 +1383,7 @@ class BuildRunner:
             workers,
             stage=stage,
             stage_requirement=requirement,
-            providers=self._config.providers,
+            providers=self._effective_providers(session),
             runtimes=self._config.runtimes,
             routing_policy=self._config.routing_policy,
             session=session,
@@ -1042,6 +1406,13 @@ class BuildRunner:
         worker, _availability, _decision = self._select_worker(role, task_id=task_id, session=session)
         return worker
 
+    def _git_integrator(self) -> GitIntegrationExecutor:
+        return GitIntegrationExecutor(
+            main_ref=self._config.main_ref,
+            upstream_remote=self._config.upstream_remote,
+            push=self._config.push_upstream,
+        )
+
     def _executor_for_worker(self, worker: WorkerConfig) -> WorkerExecutor:
         if worker.worker_id in self._executors:
             return self._executors[worker.worker_id]
@@ -1052,9 +1423,12 @@ class BuildRunner:
                 list(worker.command),
                 log_dir=self._log_dir(),
             )
+        elif worker.adapter == "builtin-git":
+            executor = self._git_integrator()
         else:
             raise CoordinatorPolicyError(f"Unknown executor adapter: {worker.adapter}")
         self._executors[worker.worker_id] = executor
+        self._executor_workers[worker.worker_id] = worker
         return executor
 
     def _executor_for_execution(self, execution: BuildRunnerExecution) -> WorkerExecutor:
@@ -1065,6 +1439,11 @@ class BuildRunner:
             return executor
         if execution.adapter == "fake":
             executor = FakeExecutor()
+            self._executors[execution.worker_id] = executor
+            return executor
+        if execution.adapter == "builtin-git":
+            executor = self._git_integrator()
+            executor.remember_result_path(execution.execution_id, execution.result_path)
             self._executors[execution.worker_id] = executor
             return executor
         if execution.adapter == "subprocess":
@@ -1081,6 +1460,8 @@ class BuildRunner:
                 else {},
             )
             self._executors[execution.worker_id] = executor
+            if worker is not None:
+                self._executor_workers[execution.worker_id] = worker
             return executor
         raise CoordinatorPolicyError(
             f"Cannot reconcile executor adapter after restart: {execution.adapter}"
@@ -1097,7 +1478,7 @@ class BuildRunner:
             return capture_feature_sha(
                 self._git,
                 cwd=self._git_cwd(worker, task),
-                branch_name=worker.branch_name or task.branch_name,
+                branch_name=task.branch_name or worker.branch_name,
                 remote=self._config.remote_name,
             )
         except GitSafetyError as exc:
@@ -1116,14 +1497,42 @@ class BuildRunner:
             )
             return None
 
+    def _prepare_task_worker(self, worker: WorkerConfig, task: BuildTask) -> WorkerConfig:
+        resume = task.state in {"REWORK_REQUIRED", "STALE", "RESUMABLE"} and bool(task.branch_name)
+        branch = task.branch_name if resume else task_branch_name(task.task_id)
+        prepare_task_workspace(
+            worker.worktree_path,
+            repo_root=self._settings.repo_root,
+            branch_name=branch,
+            base_ref=self._config.main_ref,
+            remote=self._config.remote_name,
+            resume=resume,
+            allowed_roots=self._config.allowed_workspace_roots,
+        )
+        return dataclasses.replace(worker, branch_name=branch)
+
     def _validate_worker_worktree(self, worker: WorkerConfig) -> None:
         if not worker.worktree_path:
             return
-        validate_worktree_path(
-            worker.worktree_path,
-            allowed_roots=self._config.allowed_workspace_roots,
-            require_git=worker.adapter == "subprocess",
-        )
+        try:
+            ensure_worktree(
+                worker.worktree_path,
+                repo_root=self._settings.repo_root,
+                branch_name=worker.branch_name,
+                base_sha=self._config.main_ref,
+                allowed_roots=self._config.allowed_workspace_roots,
+            )
+        except WorktreeValidationError as provisioning_error:
+            try:
+                validate_worktree_path(
+                    worker.worktree_path,
+                    allowed_roots=self._config.allowed_workspace_roots,
+                    require_git=worker.adapter == "subprocess",
+                )
+            except WorktreeValidationError as validation_error:
+                raise WorktreeValidationError(
+                    f"{validation_error} (automatic provisioning failed: {provisioning_error})"
+                ) from validation_error
 
     def _git_cwd(self, worker: WorkerConfig, task: BuildTask | None = None) -> str:
         if worker.worktree_path:
@@ -1267,6 +1676,42 @@ class BuildRunner:
             .where(BuildRunnerExecution.role == "REMEDIATION")
             .where(BuildRunnerExecution.status.in_(("LAUNCHED", "RUNNING", "SUCCEEDED")))
         ) or 0
+
+
+_COOLDOWN_SECONDS = {
+    "AUTH_FAILURE": 900,
+    "RATE_LIMITED": 600,
+    "QUOTA_EXHAUSTED": 1800,
+    "NETWORK_FAILURE": 120,
+    "UNAVAILABLE": 300,
+    "EXECUTION_FAILURE": 60,
+}
+_RETRY_BACKOFF_CAP_SECONDS = 3600
+
+
+def _retry_backoff_seconds(failure: str, attempt: int) -> int:
+    """Bounded exponential backoff before a retryable failure is relaunched.
+
+    `attempt` is the number of prior LOST/FAILED executions for this task and
+    role (0 for the first retry), so each successive retry waits longer, up to
+    `_RETRY_BACKOFF_CAP_SECONDS`."""
+    base = _COOLDOWN_SECONDS.get(failure, 300)
+    return min(base * (2 ** max(attempt, 0)), _RETRY_BACKOFF_CAP_SECONDS)
+
+
+def _task_definition(task: BuildTask) -> dict:
+    """What the task asks for, in the words of its version-controlled definition."""
+    return {
+        "task_id": task.task_id,
+        "title": task.title,
+        "description": task.description,
+        "acceptance_criteria": list(task.acceptance_criteria or []),
+        "required_validation": list(task.required_validation or []),
+        "permitted_scope": list(task.permitted_scope or []),
+        "implementation_notes": task.implementation_notes,
+        "review_policy": task.review_policy,
+        "risk_level": task.risk_level,
+    }
 
 
 def _sanitize_observation(observation: ExecutionObservation) -> ExecutionObservation:

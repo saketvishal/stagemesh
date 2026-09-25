@@ -1,0 +1,24 @@
+# StageMesh developing StageMesh: the same project mechanism any other project
+# uses. Definitions are version-controlled here; runtime state lives in the
+# git-ignored state_dir.
+schema_version: 1
+id: stagemesh
+name: StageMesh
+aliases: [stagemesh, build-coordinator]
+
+repository:
+  main_ref: main
+
+state_dir: .build-coordinator
+
+execution:
+  concurrency: 2
+  reviewers: 2                 # TWO_REVIEWERS tasks need two distinct reviewers
+  default_review_policy: INDEPENDENT
+
+# Agents come from the machine's verified runtimes (`stagemesh agent setup`).
+# Integration is local (no upstream) unless `upstream:` is configured.
+task_sources:
+  github:
+    enabled: true
+    repo: saketvishal/stagemesh

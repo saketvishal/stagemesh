@@ -1,1 +1,3 @@
-"""Provider-independent build coordinator for engineering work."""
+"""StageMesh: provider-neutral, project-owned, multi-agent engineering coordinator."""
+
+__version__ = "0.2.0a1"

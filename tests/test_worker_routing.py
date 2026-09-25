@@ -23,6 +23,8 @@ from build_coordinator.runner.routing import (
     CAP_CODE_REVIEW,
     CAP_CODING,
     CAP_SCM_OPERATOR,
+    PROVIDER_FAILURES,
+    RETRYABLE_PROVIDER_FAILURES,
     ProviderConfig,
     StageRequirement,
     route_worker,
@@ -71,6 +73,18 @@ def test_yaml_worker_config_loads_provider_runtime_model_and_redacts_auth(tmp_pa
 routing:
   policy_id: deterministic-v1
   version: "1"
+poll_seconds: 1.5
+max_remediation_cycles: 4
+auto_push_allowed: true
+main_ref: trunk
+remote_name: upstream
+upstream_remote: deploy
+push_upstream: true
+run_validation: false
+validation_timeout_seconds: 123
+max_execution_attempts: 5
+cleanup_branches: true
+task_branches: true
 providers:
   xai:
     enabled: true
@@ -112,6 +126,18 @@ workers:
 
     assert config.workers[0].worker_id == "builder-xai"
     assert config.workers[0].max_concurrency == 2
+    assert config.poll_seconds == 1.5
+    assert config.max_remediation_cycles == 4
+    assert config.auto_push_allowed is True
+    assert config.main_ref == "trunk"
+    assert config.remote_name == "upstream"
+    assert config.upstream_remote == "deploy"
+    assert config.push_upstream is True
+    assert config.run_validation is False
+    assert config.validation_timeout_seconds == 123
+    assert config.max_execution_attempts == 5
+    assert config.cleanup_branches is True
+    assert config.task_branches is True
     assert public["providers"]["xai"]["auth"]["value"] == "<redacted-ref>"
     assert public["workers"][0]["env"]["XAI_API_KEY"] == "<redacted-ref>"
     assert "must-not-be-public" not in json.dumps(public)
@@ -355,3 +381,11 @@ def test_routing_explanation_can_include_stage_ineligible_workers():
 
     reasons = {candidate.worker_id: candidate.reasons for candidate in decision.candidates}
     assert "stage_not_allowed" in reasons["reviewer-1"]
+
+
+def test_retryable_provider_failures_are_a_subset_of_the_routing_taxonomy():
+    assert RETRYABLE_PROVIDER_FAILURES == {"RATE_LIMITED", "UNAVAILABLE", "NETWORK_FAILURE"}
+    assert RETRYABLE_PROVIDER_FAILURES <= PROVIDER_FAILURES
+    # Failures that need a credential fix, quota reset, or investigation are
+    # deliberately excluded from automatic retry.
+    assert not RETRYABLE_PROVIDER_FAILURES & {"AUTH_FAILURE", "QUOTA_EXHAUSTED", "EXECUTION_FAILURE"}
