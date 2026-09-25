@@ -7,6 +7,28 @@ Thank you for your interest in contributing to StageMesh.
 This project is in **v0.1-alpha** and the core architecture is still settling.
 Before investing significant effort, open an issue to discuss your proposed change.
 
+## New contributor path
+
+Start with the curated [good first issue backlog](docs/GOOD_FIRST_ISSUES.md).
+Those entries are intentionally small, public-alpha friendly, and labeled for
+new contributors only when they do not require private context, provider
+credentials, paid model access, or deep coordinator internals.
+
+For your first contribution:
+
+1. Choose an issue labeled both `good first issue` and `help wanted`.
+2. Follow the issue's reproduction/setup path before changing code or docs.
+3. Keep the change scoped to the listed files or area unless the investigation
+   shows a nearby test or doc also needs a small update.
+4. Run the smallest validation command named in the issue, plus any directly
+   related tests you changed.
+5. Open a pull request that includes what changed, how you validated it, and
+   any Windows/Linux difference you noticed.
+
+StageMesh uses independent review as part of its engineering workflow. Expect a
+reviewer who did not author your change to validate the result against the issue
+acceptance criteria before integration.
+
 ## Development setup
 
 ```bash
