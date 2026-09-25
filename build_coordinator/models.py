@@ -321,6 +321,7 @@ class BuildObjective(Base):
     allowed_scope: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
     prohibited_scope: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
     completion_criteria: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    dependencies: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
     human_gate_policy: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     parallelism: Mapped[int] = mapped_column(nullable=False, default=2)
     main_push_policy: Mapped[str] = mapped_column(String(40), nullable=False, default="HUMAN_GATED")
