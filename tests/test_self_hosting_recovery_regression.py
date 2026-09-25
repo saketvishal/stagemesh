@@ -353,3 +353,269 @@ def test_multi_project_worktree_isolation(tmp_path: Path):
     assert not (wt2 / "p1.txt").exists()
     assert _git(repo1, "status", "--porcelain").stdout.strip() == ""
     assert _git(repo2, "status", "--porcelain").stdout.strip() == ""
+
+
+def test_retry_limit_reached_recovery_from_transient_failures(tmp_path: Path):
+    """GH-78 / GH-60 regression: when EXECUTION_RETRY_LIMIT_REACHED was caused by
+    transient infrastructure/provider failures or process exits, _recover_diagnosed_blockers
+    must automatically advance retry_generation and recover the task to READY."""
+    repo_root, _ = _setup_test_repo(tmp_path / "repo")
+    session_factory, runner = _setup_runner(tmp_path, repo_root)
+
+    with session_factory() as session:
+        ensure_state(session)
+        task = BuildTask(
+            task_id="GH-78",
+            title="Provider rate limit blocked task",
+            description="A test task",
+            state="READY",
+            review_policy="INDEPENDENT",
+            retry_generation=0,
+        )
+        session.add(task)
+        session.commit()
+
+        # Simulate task getting blocked with EXECUTION_RETRY_LIMIT_REACHED
+        transition_task(session, "GH-78", "BLOCKED", actor="runner", reason="EXECUTION_RETRY_LIMIT_REACHED")
+        # Add execution rows representing transient provider rate limits
+        for i in range(3):
+            exec_row = BuildRunnerExecution(
+                execution_id=f"exec-gh78-{i}",
+                task_id="GH-78",
+                role="BUILDER",
+                worker_id="builder-claude-1",
+                provider="anthropic",
+                adapter="claude",
+                status="LOST",
+                result_data={
+                    "reconciliation_state": "PROVIDER_FAILED",
+                    "provider_failure": "RATE_LIMITED",
+                    "retry_generation": 0,
+                },
+                completed_at=datetime.now(UTC),
+            )
+            session.add(exec_row)
+        session.commit()
+
+        result = RunnerCycleResult(mode="RUNNING")
+        runner._recover_diagnosed_blockers(session, result)
+        session.commit()
+
+        refreshed = session.get(BuildTask, "GH-78")
+        assert refreshed.state == "READY"
+        assert refreshed.retry_generation == 1
+        assert "GH-78" in result.recovered
+
+        # Check blocker recovered event
+        event = session.scalar(
+            select(BuildTaskEvent)
+            .where(BuildTaskEvent.task_id == "GH-78")
+            .where(BuildTaskEvent.event_type == "runner.blocker_recovered")
+        )
+        assert event is not None
+        assert event.event_data["reason"] == "EXECUTION_RETRY_LIMIT_REACHED"
+        assert event.event_data["recovery_type"] == "INFRASTRUCTURE_RETRY_RECOVERY"
+
+
+def test_reviewer_loss_does_not_consume_implementation_retry_budget(tmp_path: Path):
+    """Phase 7 & 15: A lost or failed reviewer must never consume the task's
+    implementation retry budget or block the task with EXECUTION_RETRY_LIMIT_REACHED."""
+    repo_root, _ = _setup_test_repo(tmp_path / "repo")
+    session_factory, runner = _setup_runner(tmp_path, repo_root)
+
+    with session_factory() as session:
+        ensure_state(session)
+        task = BuildTask(
+            task_id="GH-75",
+            title="Task under review",
+            description="A test task",
+            state="REVIEW_READY",
+            review_policy="INDEPENDENT",
+            retry_generation=0,
+        )
+        session.add(task)
+        session.commit()
+
+        # Reviewer execution fails
+        rev_exec = BuildRunnerExecution(
+            execution_id="exec-rev-1",
+            task_id="GH-75",
+            role="REVIEWER",
+            worker_id="reviewer-1",
+            provider="anthropic",
+            adapter="claude",
+            status="RUNNING",
+        )
+        session.add(rev_exec)
+        session.commit()
+
+        from build_coordinator.execution.base import ExecutionObservation
+        obs = ExecutionObservation(status="FAILED", exit_code=1)
+        handled = runner._recoverable_failure(
+            session,
+            rev_exec,
+            {"provider_failure": "UNAVAILABLE"},
+            obs,
+        )
+        session.commit()
+
+        assert handled is True
+        assert rev_exec.status == "LOST"
+        refreshed = session.get(BuildTask, "GH-75")
+        # Task remains in REVIEW_READY, NOT BLOCKED!
+        assert refreshed.state == "REVIEW_READY"
+
+
+def test_provider_rate_limit_does_not_consume_implementation_budget(tmp_path: Path):
+    """Phase 7 & 15: Transient provider failure (RATE_LIMITED) routes for cooldown
+    and leaves task in READY without consuming implementation retry limit."""
+    repo_root, _ = _setup_test_repo(tmp_path / "repo")
+    session_factory, runner = _setup_runner(tmp_path, repo_root)
+
+    with session_factory() as session:
+        ensure_state(session)
+        task = BuildTask(
+            task_id="GH-RATE-1",
+            title="Builder rate limit task",
+            description="A test task",
+            state="READY",
+            review_policy="INDEPENDENT",
+            retry_generation=0,
+        )
+        session.add(task)
+        session.commit()
+
+        build_exec = BuildRunnerExecution(
+            execution_id="exec-rate-1",
+            task_id="GH-RATE-1",
+            role="BUILDER",
+            worker_id="builder-grok",
+            provider="grok",
+            adapter="grok",
+            status="RUNNING",
+        )
+        session.add(build_exec)
+        session.commit()
+
+        from build_coordinator.execution.base import ExecutionObservation
+        obs = ExecutionObservation(status="FAILED", exit_code=1)
+        handled = runner._recoverable_failure(
+            session,
+            build_exec,
+            {"provider_failure": "RATE_LIMITED", "detail": "Rate limit exceeded"},
+            obs,
+        )
+        session.commit()
+
+        assert handled is True
+        assert build_exec.status == "LOST"
+        refreshed = session.get(BuildTask, "GH-RATE-1")
+        assert refreshed.state == "READY"
+
+        # Check provider failure event recorded
+        ev = session.scalar(
+            select(BuildTaskEvent)
+            .where(BuildTaskEvent.task_id == "GH-RATE-1")
+            .where(BuildTaskEvent.event_type == "runner.provider_failure")
+        )
+        assert ev is not None
+        assert ev.event_data["failure"] == "RATE_LIMITED"
+
+
+def test_builder_no_changes_retries_when_attempts_remain(tmp_path: Path):
+    """GH-55 regression: When builder produces 0 changes and acceptance criteria not met,
+    if attempts remain, it must retry (transitioning to READY) rather than instantly
+    blocking with COORDINATOR_INVARIANT_FAILURE."""
+    repo_root, _ = _setup_test_repo(tmp_path / "repo")
+    session_factory, runner = _setup_runner(tmp_path, repo_root)
+
+    with session_factory() as session:
+        ensure_state(session)
+        task = BuildTask(
+            task_id="GH-55-TEST",
+            title="Unsatisfied task",
+            description="A test task",
+            state="CLAIMED",
+            review_policy="INDEPENDENT",
+            retry_generation=0,
+        )
+        session.add(task)
+        session.commit()
+
+        exec_row = BuildRunnerExecution(
+            execution_id="exec-55-1",
+            task_id="GH-55-TEST",
+            role="BUILDER",
+            worker_id="builder-claude-1",
+            provider="anthropic",
+            adapter="claude",
+            status="SUCCEEDED",
+        )
+        session.add(exec_row)
+        session.commit()
+
+        from build_coordinator.execution.results import parse_executor_result
+        parsed = parse_executor_result(
+            {
+                "schema_version": 1,
+                "role": "BUILDER",
+                "feature_sha": "abc1234",
+                "blockers": ["the agent produced no changes on the task branch"],
+                "identity": {"provider": "anthropic", "runtime": "claude"},
+            },
+            execution_id="exec-55-1",
+            task_id="GH-55-TEST",
+            role="BUILDER",
+            require_identity=False,
+        )
+
+        result = RunnerCycleResult(mode="RUNNING")
+        runner._builder_succeeded(session, exec_row, result, parsed)
+        session.commit()
+
+        refreshed = session.get(BuildTask, "GH-55-TEST")
+        # Attempt 1 of 3: Should be RESUMABLE to retry with alternate worker, NOT blocked!
+        assert refreshed.state == "RESUMABLE"
+        assert "GH-55-TEST:NO_CHANGES_PRODUCED" not in result.escalations
+
+
+def test_recover_diagnosed_blocker_for_zero_change_with_remaining_attempts(tmp_path: Path):
+    """GH-55 recovery regression: If task was blocked with COORDINATOR_INVARIANT_FAILURE
+    due to zero changes on attempt 1, _recover_diagnosed_blockers recovers it to READY."""
+    repo_root, _ = _setup_test_repo(tmp_path / "repo")
+    session_factory, runner = _setup_runner(tmp_path, repo_root)
+
+    with session_factory() as session:
+        ensure_state(session)
+        task = BuildTask(
+            task_id="GH-55-REC",
+            title="Zero change blocked task",
+            description="A test task",
+            state="READY",
+            review_policy="INDEPENDENT",
+            retry_generation=0,
+        )
+        session.add(task)
+        session.commit()
+
+        transition_task(session, "GH-55-REC", "BLOCKED", actor="runner", reason="COORDINATOR_INVARIANT_FAILURE")
+        # 1 previous execution recorded
+        exec_row = BuildRunnerExecution(
+            execution_id="exec-55-rec-1",
+            task_id="GH-55-REC",
+            role="BUILDER",
+            worker_id="builder-claude-1",
+            provider="anthropic",
+            adapter="claude",
+            status="SUCCEEDED",
+        )
+        session.add(exec_row)
+        session.commit()
+
+        result = RunnerCycleResult(mode="RUNNING")
+        runner._recover_diagnosed_blockers(session, result)
+        session.commit()
+
+        refreshed = session.get(BuildTask, "GH-55-REC")
+        assert refreshed.state == "READY"
+        assert "GH-55-REC" in result.recovered
