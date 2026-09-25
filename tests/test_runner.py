@@ -19,7 +19,7 @@ from build_coordinator.models import (
 )
 from build_coordinator.runner import BuildRunner
 import build_coordinator.runner.orchestrator as orchestrator_module
-from build_coordinator.runner.git_safety import FakeGit
+from build_coordinator.runner.git_safety import FakeGit, MechanicalMergeAssessment
 from build_coordinator.runner.models import RunnerConfig, WorkerConfig
 from build_coordinator.runner.routing import ProviderConfig
 from build_coordinator.policy import CoordinatorPolicyError
@@ -88,6 +88,18 @@ def _config(*, auto_push=False, remediation_cycles=2):
     )
 
 
+def _config_with_conflict_budget(attempts: int):
+    return RunnerConfig(
+        workers=(
+            WorkerConfig("builder-a", "BUILDER", adapter="fake"),
+            WorkerConfig("reviewer-1", "REVIEWER", adapter="fake"),
+            WorkerConfig("integration-1", "INTEGRATION", adapter="fake"),
+        ),
+        max_conflict_recovery_attempts=attempts,
+        result_dir=os.getenv("BUILD_COORDINATOR_RESULT_DIR"),
+    )
+
+
 def _runner(config=None, executors=None, git=None):
     return BuildRunner(
         SessionLocal,
@@ -117,6 +129,90 @@ def _seed_priority(session, task_id: str, priority: int) -> None:
             event_data={"revision": 1, "priority": priority, "action": "CREATED"},
         ),
     )
+
+
+def test_merge_conflict_exhaustion_blocks_as_recovery_failed_with_evidence():
+    runner = _runner(config=_config_with_conflict_budget(1))
+    assessment = MechanicalMergeAssessment(
+        current_main_sha="main-2",
+        feature_remote_sha="feature-b1",
+        merge_base="base-1",
+        reviewed_sha_matches=True,
+        conflict=True,
+        conflict_paths=("src/app.py",),
+    )
+    with SessionLocal() as session:
+        upsert_task(session, _task("GH-78"))
+        task = session.get(BuildTask, "GH-78")
+        task.state = "REVIEWING"
+        task.branch_name = "stagemesh/GH-78"
+        task.waiting_input = {
+            "conflict_recovery": {
+                "attempts": 1,
+                "max_attempts": 1,
+                "recovery_worker": "builder-a",
+                "recovery_provider": "local",
+            }
+        }
+        result = orchestrator_module.RunnerCycleResult(mode="RUNNING")
+
+        runner._handle_merge_conflict(session, "GH-78", assessment, result)
+        session.flush()
+
+        task = session.get(BuildTask, "GH-78")
+        evidence = task.waiting_input["failure_evidence"]
+        assert task.state == "BLOCKED"
+        assert result.escalations == ["GH-78:MERGE_CONFLICT_RECOVERY_FAILED"]
+        assert evidence["underlying_invariant"] == "MERGE_CONFLICT_RECOVERY_FAILED"
+        assert evidence["original_reviewed_sha"] == "feature-b1"
+        assert evidence["conflicting_current_main_sha"] == "main-2"
+        assert evidence["conflict_paths"] == ["src/app.py"]
+        assert evidence["max_attempts"] == 1
+        assert evidence["conflict_recovery_worker"] == "builder-a"
+        assert evidence["conflict_recovery_provider"] == "local"
+
+
+def test_stale_review_for_pre_recovery_sha_is_not_accepted_for_integration():
+    git = FakeGit(remote_feature_sha="feature-b2", main_sha="main-2")
+    runner = _runner(config=_config(), git=git)
+    with SessionLocal() as session:
+        upsert_task(session, TaskSpec(**{**_task("GH-78").__dict__, "required_validation": []}))
+        task = session.get(BuildTask, "GH-78")
+        task.state = "REVIEWING"
+        task.branch_name = "stagemesh/GH-78"
+        session.add(
+            BuildRunnerExecution(
+                execution_id="review-b1",
+                task_id="GH-78",
+                role="REVIEWER",
+                worker_id="reviewer-1",
+                provider="local",
+                adapter="fake",
+                branch_name="stagemesh/GH-78",
+                reviewed_feature_sha="feature-b1",
+                status="SUCCEEDED",
+                result_data={
+                    "reviewed_feature_sha": "feature-b1",
+                    "review": {
+                        "verdict": "GREEN",
+                        "ready_for_integration": True,
+                        "required_remediation": [],
+                    },
+                },
+            )
+        )
+        session.flush()
+        result = orchestrator_module.RunnerCycleResult(mode="RUNNING")
+
+        runner._dispatch_integration(session, result)
+        session.flush()
+
+        task = session.get(BuildTask, "GH-78")
+        integrations = session.scalars(
+            select(BuildRunnerExecution).where(BuildRunnerExecution.role == "INTEGRATION")
+        ).all()
+        assert integrations == []
+        assert task.state == "REVIEW_READY"
 
 
 def test_ready_task_dispatches_one_builder():
