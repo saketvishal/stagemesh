@@ -672,6 +672,49 @@ class BuildRunner:
                         transition_task(session, execution.task_id, "VALIDATING", actor="runner")
                         self._validation_gate(session, execution, result, parsed)
                         return
+                task = session.get(BuildTask, execution.task_id)
+                retry_generation = int((task.retry_generation if task is not None else 0) or 0)
+                attempts = session.scalar(
+                    select(func.count())
+                    .select_from(BuildRunnerExecution)
+                    .where(BuildRunnerExecution.task_id == execution.task_id)
+                    .where(BuildRunnerExecution.role.in_(("BUILDER", "REMEDIATION")))
+                    .where(
+                        or_(
+                            BuildRunnerExecution.result_data["retry_generation"].as_integer() == retry_generation,
+                            BuildRunnerExecution.result_data["retry_generation"].as_integer().is_(None)
+                            if retry_generation == 0
+                            else False,
+                        )
+                    )
+                ) or 0
+                if attempts < self._config.max_execution_attempts:
+                    backoff = _retry_backoff_seconds("NO_CHANGES", attempts)
+                    record_event(
+                        session,
+                        EventInput(
+                            task_id=execution.task_id,
+                            event_type="runner.provider_failure",
+                            actor="runner",
+                            event_data={
+                                "provider": execution.provider,
+                                "worker_id": execution.worker_id,
+                                "failure": "NO_CHANGES_PRODUCED",
+                                "until": (_now() + timedelta(seconds=backoff)).isoformat(),
+                                "detail": "Agent produced no changes on task branch",
+                            },
+                        ),
+                    )
+                    release_active_claims(session, execution.task_id, completed=False)
+                    target_state = "RESUMABLE" if task and task.state in ("CLAIMED", "IN_PROGRESS") else "READY"
+                    transition_task(
+                        session,
+                        execution.task_id,
+                        target_state,
+                        actor="runner",
+                        reason=f"agent produced no changes; retrying with alternate worker/provider (attempt {attempts}/{self._config.max_execution_attempts})",
+                    )
+                    return
                 result.escalations.append(f"{execution.task_id}:NO_CHANGES_PRODUCED")
                 self._block_task(
                     session,
@@ -1013,6 +1056,82 @@ class BuildRunner:
         retryable = died or failure in RETRYABLE_PROVIDER_FAILURES
         task = session.get(BuildTask, execution.task_id)
         retry_generation = int((task.retry_generation if task is not None else 0) or 0)
+
+        # 1. REVIEWER role: Reviewer failures must never consume implementation retry budget
+        # nor trigger EXECUTION_RETRY_LIMIT_REACHED on the task.
+        if execution.role == "REVIEWER":
+            reviewer_attempts = session.scalar(
+                select(func.count())
+                .select_from(BuildRunnerExecution)
+                .where(BuildRunnerExecution.task_id == execution.task_id)
+                .where(BuildRunnerExecution.role == "REVIEWER")
+                .where(BuildRunnerExecution.status.in_(("LOST", "FAILED")))
+                .where(
+                    or_(
+                        BuildRunnerExecution.result_data["retry_generation"].as_integer() == retry_generation,
+                        BuildRunnerExecution.result_data["retry_generation"].as_integer().is_(None)
+                        if retry_generation == 0
+                        else False,
+                    )
+                )
+            ) or 0
+            backoff_seconds = (
+                _retry_backoff_seconds(failure or "WORKER_EXIT", reviewer_attempts)
+                if retryable
+                else _COOLDOWN_SECONDS.get(failure, 300)
+            )
+            if failure:
+                record_event(
+                    session,
+                    EventInput(
+                        task_id=execution.task_id,
+                        event_type="runner.provider_failure",
+                        actor="runner",
+                        event_data={
+                            "provider": execution.provider,
+                            "worker_id": execution.worker_id,
+                            "failure": failure,
+                            "until": (_now() + timedelta(seconds=backoff_seconds)).isoformat(),
+                            "detail": str(merged.get("detail") or "")[:300],
+                        },
+                    ),
+                )
+            execution.status = "LOST"
+            execution.completed_at = _now()
+            execution.result_data = {
+                **(execution.result_data or {}),
+                **merged,
+                "reconciliation_state": "WORKER_EXITED" if died else "PROVIDER_FAILED",
+                "reviewer_attempt": reviewer_attempts + 1,
+                "retry_generation": retry_generation,
+                "retryable_failure": retryable,
+                "retry_backoff_seconds": backoff_seconds if retryable else None,
+            }
+            if execution.claim_id:
+                try:
+                    checkpoint(
+                        session,
+                        execution.claim_id,
+                        worker_id=execution.worker_id,
+                        data=CheckpointInput(
+                            current_step=f"reviewer execution lost after {failure or 'worker exit'}",
+                            known_failures=[f"{failure or 'WORKER_EXITED'} (reviewer attempt {reviewer_attempts + 1})"],
+                        ),
+                    )
+                except CoordinatorPolicyError:
+                    pass
+            if reviewer_attempts + 1 >= self._config.max_review_environment_attempts:
+                self._block_task(
+                    session,
+                    execution.task_id,
+                    "REVIEW_ENVIRONMENT_BLOCKED",
+                    invariant="REVIEW_ENVIRONMENT",
+                    execution=execution,
+                    error=f"Reviewer repeatedly failed due to {failure or 'worker exit'}",
+                )
+            return True
+
+        # 2. BUILDER / REMEDIATION roles:
         attempts = session.scalar(
             select(func.count())
             .select_from(BuildRunnerExecution)
@@ -2338,6 +2457,89 @@ class BuildRunner:
                         if task.task_id not in result.recovered:
                             result.recovered.append(task.task_id)
                         self._release_blocker_gate(session, task, reason)
+                    except CoordinatorPolicyError:
+                        pass
+                else:
+                    # If task still has attempts remaining (like GH-55), recover to READY
+                    builder_attempts = session.scalar(
+                        select(func.count())
+                        .select_from(BuildRunnerExecution)
+                        .where(BuildRunnerExecution.task_id == task.task_id)
+                        .where(BuildRunnerExecution.role.in_(("BUILDER", "REMEDIATION")))
+                        .where(BuildRunnerExecution.status.in_(("LOST", "FAILED", "SUCCEEDED")))
+                    ) or 0
+                    if builder_attempts < self._config.max_execution_attempts:
+                        release_active_claims(session, task.task_id, completed=False)
+                        try:
+                            transition_task(
+                                session,
+                                task.task_id,
+                                "READY",
+                                actor="runner",
+                                reason=f"recovering {reason} with {self._config.max_execution_attempts - builder_attempts} attempts remaining; resuming to READY",
+                            )
+                            record_event(
+                                session,
+                                EventInput(
+                                    task_id=task.task_id,
+                                    event_type="runner.blocker_recovered",
+                                    actor="runner",
+                                    event_data={
+                                        "reason": reason,
+                                        "recovery_type": "ATTEMPTS_REMAINING",
+                                        "resumed_to": "READY",
+                                        "attempts_used": builder_attempts,
+                                    },
+                                ),
+                            )
+                            if task.task_id not in result.recovered:
+                                result.recovered.append(task.task_id)
+                            self._release_blocker_gate(session, task, reason)
+                        except CoordinatorPolicyError:
+                            pass
+
+            elif reason == "EXECUTION_RETRY_LIMIT_REACHED":
+                rows = session.scalars(
+                    select(BuildRunnerExecution)
+                    .where(BuildRunnerExecution.task_id == task.task_id)
+                    .order_by(BuildRunnerExecution.completed_at.desc())
+                ).all()
+                has_transient_failures = any(
+                    r.role == "REVIEWER"
+                    or (r.result_data or {}).get("reconciliation_state") in ("WORKER_EXITED", "LOST", "STALE_CLAIM", "NO_CLAIM", "PROVIDER_FAILED")
+                    or (r.result_data or {}).get("provider_failure")
+                    for r in rows
+                )
+                if has_transient_failures or not rows:
+                    task.retry_generation = int((task.retry_generation or 0)) + 1
+                    release_active_claims(session, task.task_id, completed=False)
+                    has_feature_sha = any(bool(r.reviewed_feature_sha or (r.result_data or {}).get("feature_sha")) for r in rows)
+                    target_state = "REVIEW_READY" if has_feature_sha and task.review_policy != "NONE" else "READY"
+                    try:
+                        transition_task(
+                            session,
+                            task.task_id,
+                            target_state,
+                            actor="runner",
+                            reason=f"transient infrastructure/provider failures recovered; advanced retry generation to {task.retry_generation}; resuming to {target_state}",
+                        )
+                        record_event(
+                            session,
+                            EventInput(
+                                task_id=task.task_id,
+                                event_type="runner.blocker_recovered",
+                                actor="runner",
+                                event_data={
+                                    "reason": "EXECUTION_RETRY_LIMIT_REACHED",
+                                    "recovery_type": "INFRASTRUCTURE_RETRY_RECOVERY",
+                                    "resumed_to": target_state,
+                                    "new_retry_generation": task.retry_generation,
+                                },
+                            ),
+                        )
+                        if task.task_id not in result.recovered:
+                            result.recovered.append(task.task_id)
+                        self._release_blocker_gate(session, task, "EXECUTION_RETRY_LIMIT_REACHED")
                     except CoordinatorPolicyError:
                         pass
 
