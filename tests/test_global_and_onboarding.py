@@ -301,6 +301,77 @@ def test_wrapper_safe_output_handles_non_ascii_unicode_under_narrow_encoding(mon
     monkeypatch.setattr(sys, "stdout", narrow)
     _safe_write_stdout_tail(sample)
     assert "Ran test" in narrow.data
+    narrow.data.encode("cp1252")
+
+
+def test_wrapper_safe_output_survives_narrow_console_failures(monkeypatch):
+    """Buffer, encoding, and write failures must not escape the stdout tail."""
+    from build_coordinator.agents.wrapper import _safe_write_stdout_tail
+
+    sample = "caf\u00e9 \u2192 emoji \U0001f680 CJK \u4e2d lone \ud800"
+
+    class StrictCp1252:
+        encoding = "cp1252"
+
+        def __init__(self):
+            self.data = ""
+
+        def write(self, text):
+            text.encode("cp1252", errors="strict")
+            self.data += text
+
+        def flush(self):
+            pass
+
+    class BufferRejects(StrictCp1252):
+        def __init__(self):
+            super().__init__()
+            self.buffer = self._Buf()
+
+        class _Buf:
+            def write(self, data):
+                raise OSError(22, "Invalid argument")
+
+            def flush(self):
+                raise OSError(22, "Invalid argument")
+
+    class DetachedBuffer(StrictCp1252):
+        @property
+        def buffer(self):
+            raise ValueError("underlying buffer has been detached")
+
+    class EncodingMismatch(StrictCp1252):
+        """Attribute says utf-8; the encoder is strict cp1252."""
+
+        encoding = "utf-8"
+
+    class NoneEncoding(StrictCp1252):
+        encoding = None
+
+    class RejectAll:
+        encoding = "cp1252"
+
+        def write(self, text):
+            raise UnicodeEncodeError("cp1252", text or "", 0, 1, "character maps to <undefined>")
+
+        def flush(self):
+            raise OSError(22, "Invalid argument")
+
+    for writer in (BufferRejects(), DetachedBuffer(), EncodingMismatch(), NoneEncoding()):
+        monkeypatch.setattr(sys, "stdout", writer)
+        _safe_write_stdout_tail(sample)
+        assert "caf" in writer.data
+        writer.data.encode("cp1252")
+
+    monkeypatch.setattr(sys, "stdout", RejectAll())
+    _safe_write_stdout_tail(sample)
+
+    preserved = StrictCp1252()
+    monkeypatch.setattr(sys, "stdout", preserved)
+    _safe_write_stdout_tail(sample)
+    assert "caf\u00e9" in preserved.data
+    assert "\u2192" not in preserved.data
+    assert "\U0001f680" not in preserved.data
 
 
 def test_wrapper_main_survives_non_ascii_output_without_crashing_or_losing_result(monkeypatch, tmp_path):
@@ -331,3 +402,80 @@ def test_wrapper_main_survives_non_ascii_output_without_crashing_or_losing_resul
     assert payload["status"] == "SUCCEEDED"
     assert payload["verdict"] == "GREEN"
     assert payload["execution_id"] == "exec-test-123"
+
+
+def test_wrapper_main_preserves_result_and_exit_when_console_rejects_unicode(monkeypatch, tmp_path):
+    """A cp1252 console that rejects the stdout tail must not drop the result contract."""
+    import io
+    from build_coordinator.agents import wrapper
+
+    class NarrowConsole:
+        """Binary writes fail the way a legacy Windows console does; text is strict cp1252."""
+
+        encoding = "cp1252"
+
+        def __init__(self):
+            self.data = ""
+            self.buffer = self._Buf()
+
+        class _Buf:
+            def write(self, data):
+                raise OSError(22, "Invalid argument")
+
+            def flush(self):
+                raise OSError(22, "Invalid argument")
+
+        def write(self, text):
+            text.encode("cp1252", errors="strict")
+            self.data += text
+
+        def flush(self):
+            pass
+
+    class RejectAll:
+        encoding = "cp1252"
+
+        def write(self, text):
+            raise UnicodeEncodeError("cp1252", text or "", 0, 1, "character maps to <undefined>")
+
+        def flush(self):
+            raise OSError(22, "Invalid argument")
+
+    verdict = (
+        "Review passed: \u2192 \U0001f680\n"
+        "```json\n"
+        '{"verdict": "GREEN", "findings": [], "required_remediation": [], "ready_for_integration": true}\n'
+        "```"
+    )
+
+    def run(writer, agent_result, name):
+        result_path = tmp_path / f"{name}.json"
+        monkeypatch.setenv("BUILD_COORDINATOR_ROLE", "REVIEWER")
+        monkeypatch.setenv("BUILD_COORDINATOR_RESULT_PATH", str(result_path))
+        monkeypatch.setenv("BUILD_COORDINATOR_EXECUTION_ID", "exec-narrow")
+        monkeypatch.setenv("BUILD_COORDINATOR_TASK_ID", "SM-019")
+        monkeypatch.setattr(sys, "stdin", io.StringIO("{}"))
+        monkeypatch.setattr(wrapper, "run_agent", lambda *a, **kw: agent_result)
+        monkeypatch.setattr(sys, "stdout", writer)
+        code = wrapper.main(["--runtime", "codex"])
+        payload = json.loads(result_path.read_text(encoding="utf-8"))
+        return code, payload, writer
+
+    code, payload, console = run(NarrowConsole(), (0, verdict), "success")
+    assert code == 0
+    assert payload["status"] == "SUCCEEDED"
+    assert payload["verdict"] == "GREEN"
+    assert payload["execution_id"] == "exec-narrow"
+    assert "Review passed" in console.data
+    console.data.encode("cp1252")
+
+    code, payload, _console = run(NarrowConsole(), (1, "usage limit \u2192 \U0001f680"), "failed")
+    assert code == 1
+    assert payload["status"] == "FAILED"
+    assert payload["provider_failure"] == "QUOTA_EXHAUSTED"
+    assert payload["execution_id"] == "exec-narrow"
+
+    code, payload, _console = run(RejectAll(), (0, verdict), "rejected")
+    assert code == 0
+    assert payload["status"] == "SUCCEEDED"
+    assert payload["verdict"] == "GREEN"
