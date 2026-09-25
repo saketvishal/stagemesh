@@ -39,7 +39,11 @@ from build_coordinator.project.runtime import (
     build_runner_config,
     require_git_repo,
 )
-from build_coordinator.project.state_migration import migrate_state, sqlite_path_from_url
+from build_coordinator.project.state_migration import (
+    migrate_state,
+    reconcile_stale_executions,
+    sqlite_path_from_url,
+)
 from build_coordinator.runner import BuildRunner
 from build_coordinator.runner.upstream import retry_pending_pushes
 from build_coordinator.service import ensure_state, list_available_tasks, set_mode
@@ -187,7 +191,24 @@ def handle_project(args: argparse.Namespace) -> None:
         apply_project_environment(project)
         from build_coordinator.config import get_settings
 
-        report = migrate_state(sqlite_path_from_url(get_settings().database_url), apply=args.apply)
+        db_path = sqlite_path_from_url(get_settings().database_url)
+        report = migrate_state(db_path, apply=args.apply)
+        if report.refused and "live execution" in report.refused:
+            # The old schema cannot be opened under the current models to run normal
+            # stale-execution recovery, and migration refuses while any execution row
+            # looks live. Reconcile directly against the old schema first, using the
+            # same durable claim-lease evidence the post-migration recovery path uses,
+            # so genuinely orphaned rows don't deadlock migration forever.
+            reconciliation = reconcile_stale_executions(db_path, apply=args.apply)
+            if args.apply and reconciliation.applied and not reconciliation.refused:
+                report = migrate_state(db_path, apply=True)
+            _print(
+                {
+                    "migration": report.as_dict(),
+                    "stale_execution_reconciliation": reconciliation.as_dict(),
+                }
+            )
+            return
         _print(report.as_dict())
         return
     lifecycle = _open(project)

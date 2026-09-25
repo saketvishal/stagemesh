@@ -55,6 +55,194 @@ class MigrationReport:
         }
 
 
+@dataclass
+class StaleExecutionReport:
+    """Pre-migration reconciliation of execution rows marked LAUNCHED/RUNNING.
+
+    Runs directly against the old-schema SQLite file (raw `sqlite3`, no ORM),
+    so it can operate before `migrate_state` opens the database under the
+    current schema. Evidence is the same durable claim lease that the normal
+    post-migration recovery path (`service.reconcile_stale_executions`) uses:
+    an execution is only genuinely live if its claim is still ACTIVE with an
+    unexpired lease. Everything else is a stale/orphaned record left behind
+    by a coordinator process that died without releasing it.
+    """
+
+    database: str
+    live_examined: int = 0
+    genuinely_live: list[dict[str, Any]] = field(default_factory=list)
+    reconciled: list[dict[str, Any]] = field(default_factory=list)
+    applied: bool = False
+    backup: str | None = None
+    refused: str | None = None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "database": self.database,
+            "live_examined": self.live_examined,
+            "genuinely_live": self.genuinely_live,
+            "reconciled": self.reconciled,
+            "applied": self.applied,
+            "backup": self.backup,
+            "refused": self.refused,
+        }
+
+
+def _as_utc(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value)
+        except ValueError:
+            return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value
+
+
+def plan_stale_execution_reconciliation(path: Path) -> StaleExecutionReport:
+    """Classify every LAUNCHED/RUNNING execution row as genuinely live or stale.
+
+    Read-only: never writes. Refuses to classify (and leaves every row alone)
+    if the schema predates claim/lease evidence, since there would be nothing
+    durable to distinguish a live process from an orphaned row.
+    """
+    report = StaleExecutionReport(str(path))
+    if not path.is_file():
+        return report
+    connection = sqlite3.connect(str(path))
+    connection.row_factory = sqlite3.Row
+    try:
+        tables = {
+            row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+        if "build_runner_executions" not in tables:
+            return report
+        exec_columns = {row[1] for row in connection.execute("PRAGMA table_info(build_runner_executions)")}
+        if not {"status", "execution_id"} <= exec_columns:
+            return report
+        live_rows = connection.execute(
+            "SELECT * FROM build_runner_executions WHERE status IN ('LAUNCHED', 'RUNNING')"
+        ).fetchall()
+        report.live_examined = len(live_rows)
+        if not live_rows:
+            return report
+        claim_columns = (
+            {row[1] for row in connection.execute("PRAGMA table_info(build_task_claims)")}
+            if "build_task_claims" in tables
+            else set()
+        )
+        can_evaluate = (
+            "build_task_claims" in tables
+            and {"claim_id", "status", "lease_expires_at"} <= claim_columns
+            and "claim_id" in exec_columns
+        )
+        if not can_evaluate:
+            report.refused = (
+                "cannot distinguish live from stale executions: this schema predates durable "
+                "claim/lease evidence (build_task_claims.status/lease_expires_at); reconcile "
+                "these rows manually before migrating"
+            )
+            return report
+        now = datetime.now(UTC)
+        for row in live_rows:
+            claim_id = row["claim_id"]
+            claim = (
+                connection.execute(
+                    "SELECT status, lease_expires_at FROM build_task_claims WHERE claim_id = ?",
+                    (claim_id,),
+                ).fetchone()
+                if claim_id
+                else None
+            )
+            lease_expires_at = _as_utc(claim["lease_expires_at"]) if claim else None
+            genuinely_live = (
+                claim is not None
+                and claim["status"] == "ACTIVE"
+                and lease_expires_at is not None
+                and lease_expires_at > now
+            )
+            entry = {
+                "execution_id": row["execution_id"],
+                "task_id": row["task_id"],
+                "status": row["status"],
+                "claim_id": claim_id,
+                "claim_status": claim["status"] if claim else None,
+                "lease_expires_at": claim["lease_expires_at"] if claim else None,
+            }
+            (report.genuinely_live if genuinely_live else report.reconciled).append(entry)
+        if report.genuinely_live:
+            report.refused = (
+                f"{len(report.genuinely_live)} execution(s) have an active, unexpired claim lease; "
+                "wait for them to finish (or their lease to expire) before migrating"
+            )
+        return report
+    finally:
+        connection.close()
+
+
+def reconcile_stale_executions(path: Path, *, apply: bool) -> StaleExecutionReport:
+    """Backup-first transition of exactly the stale execution rows to LOST.
+
+    Only `build_runner_executions.status` is touched, and only for the rows
+    `plan_stale_execution_reconciliation` classified as stale. Task history,
+    checkpoints and worktree metadata are left untouched so the normal
+    post-migration recovery path (`service.recover_lost_execution_claims`)
+    can resume the task from a replacement worker, exactly as it would for an
+    execution lost after a normal restart.
+    """
+    report = plan_stale_execution_reconciliation(path)
+    if not apply or report.refused or not report.reconciled:
+        return report
+
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    backup = path.with_name(f"{path.name}.pre-reconcile-{stamp}.bak")
+    source = sqlite3.connect(str(path))
+    try:
+        target = sqlite3.connect(str(backup))
+        try:
+            source.backup(target)
+        finally:
+            target.close()
+    finally:
+        source.close()
+    report.backup = str(backup)
+
+    connection = sqlite3.connect(str(path), isolation_level=None)
+    try:
+        connection.row_factory = sqlite3.Row
+        connection.execute("BEGIN")
+        try:
+            now = datetime.now(UTC).isoformat()
+            for entry in report.reconciled:
+                row = connection.execute(
+                    "SELECT result_data FROM build_runner_executions WHERE execution_id = ?",
+                    (entry["execution_id"],),
+                ).fetchone()
+                if row is None:
+                    continue
+                try:
+                    result_data = json.loads(row["result_data"]) if row["result_data"] else {}
+                except (TypeError, json.JSONDecodeError):
+                    result_data = {}
+                result_data["reconciliation_state"] = "STALE_EXECUTION_PRE_MIGRATION"
+                connection.execute(
+                    "UPDATE build_runner_executions SET status = 'LOST', completed_at = ?, "
+                    "last_observed_at = ?, result_data = ? "
+                    "WHERE execution_id = ? AND status IN ('LAUNCHED', 'RUNNING')",
+                    (now, now, json.dumps(result_data), entry["execution_id"]),
+                )
+            connection.execute("COMMIT")
+        except Exception:
+            connection.execute("ROLLBACK")
+            raise
+    finally:
+        connection.close()
+    report.applied = True
+    return report
+
+
 def sqlite_path_from_url(database_url: str) -> Path:
     if not database_url.startswith("sqlite:///"):
         raise ProjectError("state migration supports SQLite databases only")
