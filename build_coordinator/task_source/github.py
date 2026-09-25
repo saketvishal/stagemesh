@@ -33,6 +33,9 @@ logger = logging.getLogger(__name__)
 class GitHubTaskSource(TaskSource):
     """Discovers and synchronizes tasks from GitHub issues."""
 
+    # Every stagemesh:* label this adapter may apply to a GitHub issue.
+    LIFECYCLE_LABELS: tuple[str, ...] = ("stagemesh:done",)
+
     def __init__(
         self,
         repo: str | None = None,
@@ -46,11 +49,72 @@ class GitHubTaskSource(TaskSource):
         self.dry_run = dry_run
         self._client = client  # For mocking/testing
         self._outbound_events: list[dict[str, Any]] = []
+        self._labels_ensured = False
+
+    def ensure_labels(self, session) -> bool:
+        """Ensure every stagemesh:* lifecycle label exists in the repository.
+
+        Idempotent and safe to call every cycle: once labels are confirmed
+        present in this process, subsequent calls are no-ops. Failures (auth,
+        network, permissions) are recorded as durable outbound-sync evidence
+        and never raised, so missing labels can never block local task
+        execution -- provisioning is simply retried on the next sync.
+        """
+        if not self.repo or self._labels_ensured:
+            return True
+        if self.dry_run:
+            self._labels_ensured = True
+            return True
+        try:
+            existing = self._list_labels()
+            for label in self.LIFECYCLE_LABELS:
+                if label not in existing:
+                    self._create_label(label)
+            self._labels_ensured = True
+            return True
+        except Exception as exc:
+            err = str(exc)
+            logger.warning("Failed to provision GitHub lifecycle labels for %s: %s", self.repo, err)
+            record_event(
+                session,
+                EventInput(
+                    task_id=None,
+                    event_type="task_source.label_provisioning_failed",
+                    actor="github-sync",
+                    event_data={"error": err, "repo": self.repo},
+                ),
+            )
+            session.flush()
+            return False
+
+    def _list_labels(self) -> set[str]:
+        if self._client is not None:
+            if hasattr(self._client, "list_labels"):
+                return set(self._client.list_labels(repo=self.repo))
+            return set()
+        cmd = ["gh", "label", "list", "--repo", self.repo, "--json", "name", "--limit", "200"]
+        res = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", check=True)
+        return {item["name"] for item in json.loads(res.stdout)}
+
+    def _create_label(self, label: str) -> None:
+        if self._client is not None:
+            if hasattr(self._client, "create_label"):
+                self._client.create_label(repo=self.repo, name=label)
+            return
+        subprocess.run(
+            ["gh", "label", "create", label, "--repo", self.repo, "--color", "6f42c1", "--force"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=True,
+        )
 
     def discover_tasks(self, session) -> list[SyncResult]:
         """Fetch open issues from the repository and ingest into the durable queue."""
         if not self.repo:
             return []
+        self.ensure_labels(session)
         issues = self._fetch_issues()
         results: list[SyncResult] = []
         for issue in issues:
