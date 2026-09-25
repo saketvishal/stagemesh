@@ -135,6 +135,7 @@ from build_coordinator.service import (
     release_active_claims,
     request_task_input,
     transition_task,
+    _task_branch_has_real_work,
 )
 from build_coordinator.types import CheckpointInput, EventInput
 
@@ -1394,6 +1395,19 @@ class BuildRunner:
                     ),
                 )
                 continue
+            except CoordinatorPolicyError as exc:
+                result.scheduling_reasons[task.task_id] = "branch_collision"
+                record_task_withheld(session, task.task_id, "branch_collision", task.objective_id)
+                record_event(
+                    session,
+                    EventInput(
+                        task_id=task.task_id,
+                        event_type="runner.branch_collision",
+                        actor="runner",
+                        event_data={"error": str(exc), "branch": task.branch_name or task_branch_name(task.task_id)},
+                    ),
+                )
+                continue
 
             try:
                 claim = claim_task(
@@ -2184,6 +2198,7 @@ class BuildRunner:
     def _prepare_task_worker(self, worker: WorkerConfig, task: BuildTask) -> WorkerConfig:
         resume = task.state in {"REWORK_REQUIRED", "STALE", "RESUMABLE"} and bool(task.branch_name)
         branch = task.branch_name if resume else task_branch_name(task.task_id)
+        self._require_no_cross_objective_branch_collision_before_prepare(task, branch)
         prepare_task_workspace(
             worker.worktree_path,
             repo_root=self._settings.repo_root,
@@ -2201,6 +2216,26 @@ class BuildRunner:
             identity_args = resolve_git_identity_args(wt)
             _git(wt, *identity_args, "merge", "--no-ff", "-m", f"Merge {main_ref} into {branch}", f"refs/heads/{main_ref}")
         return dataclasses.replace(worker, branch_name=branch)
+
+    def _require_no_cross_objective_branch_collision_before_prepare(
+        self, task: BuildTask, branch: str
+    ) -> None:
+        """Fail before workspace preparation can reset a colliding task branch."""
+        with self._session_factory() as session:
+            owner = session.scalar(
+                select(BuildTask)
+                .where(BuildTask.task_id != task.task_id)
+                .where(BuildTask.branch_name == branch)
+                .where(BuildTask.state.notin_(("DONE", "FAILED", "STALE")))
+                .limit(1)
+            )
+            if owner is None or owner.objective_id == task.objective_id:
+                return
+            owner_task_id = owner.task_id
+        if _task_branch_has_real_work(branch):
+            raise CoordinatorPolicyError(
+                f"Branch {branch} already belongs to task {owner_task_id}; refusing cross-objective collision"
+            )
 
     def _validate_worker_worktree(self, worker: WorkerConfig) -> None:
         if not worker.worktree_path:

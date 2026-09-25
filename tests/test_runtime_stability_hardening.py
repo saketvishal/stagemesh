@@ -29,6 +29,7 @@ from build_coordinator.models import (
     BuildTaskClaim,
     BuildTaskEvent,
 )
+from build_coordinator.policy import CoordinatorPolicyError
 from build_coordinator.runner.models import RunnerConfig, WorkerConfig
 from build_coordinator.runner.orchestrator import BuildRunner, RunnerCycleResult
 from build_coordinator.runner.worktree import (
@@ -101,6 +102,53 @@ def _setup_runner(
     runner = BuildRunner(session_factory, config)
     runner._settings = dataclasses.replace(runner._settings, repo_root=repo, data_dir=tmp_path)
     return session_factory, runner
+
+
+def test_branch_collision_preflight_preserves_existing_real_work(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    repo, _remote = _setup_test_repo(tmp_path)
+    monkeypatch.setenv("BUILD_COORDINATOR_REPO_ROOT", str(repo))
+    worker = WorkerConfig(
+        worker_id="builder-a",
+        role="BUILDER",
+        provider="test",
+        adapter="fake",
+        worktree_path=str(tmp_path / "builder-a"),
+    )
+    session_factory, runner = _setup_runner(tmp_path, repo, workers=[worker])
+    branch = task_branch_name("GH-COLLIDE")
+    owner_wt = tmp_path / "owner"
+    prepare_task_workspace(
+        owner_wt,
+        repo_root=repo,
+        branch_name=branch,
+        base_ref="main",
+        resume=False,
+        allowed_roots=[str(tmp_path)],
+    )
+    (owner_wt / "owned.txt").write_text("do not reset me\n", encoding="utf-8")
+    _git(owner_wt, "add", "owned.txt")
+    _git(owner_wt, "commit", "-m", "owned branch work")
+    original_tip = _git(repo, "rev-parse", branch).stdout.strip()
+
+    with session_factory() as session:
+        owner = upsert_task(session, TaskSpec("GH-OWNER", "owner", "", []))
+        owner.objective_id = "OBJ-A"
+        owner.branch_name = branch
+        contender = upsert_task(session, TaskSpec("GH-COLLIDE", "contender", "", []))
+        contender.objective_id = "OBJ-B"
+        session.commit()
+
+        with pytest.raises(CoordinatorPolicyError, match="refusing cross-objective collision"):
+            runner._prepare_task_worker(worker, contender)
+
+        claims = session.scalars(
+            select(BuildTaskClaim).where(BuildTaskClaim.task_id == "GH-COLLIDE")
+        ).all()
+
+    assert claims == []
+    assert _git(repo, "rev-parse", branch).stdout.strip() == original_tip
 
 
 # ---------------------------------------------------------------------------
