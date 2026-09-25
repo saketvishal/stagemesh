@@ -87,6 +87,36 @@ def _record_event(session: Session, objective_id: str, event_type: str, *, actor
     )
 
 
+def _capture_resume_state(objective: BuildObjective) -> None:
+    """Record the state to return to once the current HUMAN_GATE/PAUSED
+    interruption clears. Only captures on the way OUT of a normal
+    progressing state -- a second interruption stacked on top of an
+    already-gated/paused objective must not overwrite the original target
+    (e.g. pausing an already-gated objective, then resolving the gate,
+    must still leave it PAUSED with the pre-gate resume target intact)."""
+    if objective.state not in {"HUMAN_GATE", "PAUSED"} and objective.resume_state is None:
+        objective.resume_state = objective.state
+
+
+def _resume_target_state(session: Session, objective: BuildObjective) -> str:
+    """Decide what state to resume an objective to once its HUMAN_GATE/
+    PAUSED interruption clears.
+
+    `resume_state` captures where the objective was interrupted from, but
+    it can go stale: a gate raised while still PLANNING (e.g. a plan
+    requesting human gates) is followed, in the same call, by the plan's
+    child tasks actually being created -- so by the time the gate is
+    resolved there is real work to reconcile and PLANNING would strand
+    it. Whether work tasks exist now is the authoritative signal; a
+    captured PLANNING target is only honored when no plan has been
+    applied yet."""
+    if not objective_work_tasks(session, objective.objective_id):
+        return "PLANNING"
+    if objective.resume_state and objective.resume_state != "PLANNING":
+        return objective.resume_state
+    return "ACTIVE"
+
+
 def _dedup_key(*parts: str) -> str:
     joined = "|".join(parts)
     return hashlib.sha256(joined.encode("utf-8")).hexdigest()[:40]
@@ -444,15 +474,21 @@ def _raise_gate(
     reason: str,
     source_task_id: str | None,
 ) -> BuildObjectiveGate | None:
-    """Open a typed human gate, unless an equivalent one is already open or
-    already resolved for this exact (objective, source, gate_type) --
-    restart-safe: reconciling the same finding twice must not open the gate
-    twice."""
+    """Open a typed human gate, unless an equivalent one is already OPEN
+    for this exact (objective, source, gate_type) -- restart-safe:
+    reconciling the same finding twice must not open the gate twice.
+
+    A gate that has already been RESOLVED does not count as "existing":
+    the same condition recurring after a prior resolution is a new
+    occurrence and must raise a fresh gate, or the recurrence goes
+    silently unaddressed with the task left stranded against a closed
+    gate."""
     existing = session.scalar(
         select(BuildObjectiveGate)
         .where(BuildObjectiveGate.objective_id == objective.objective_id)
         .where(BuildObjectiveGate.gate_type == gate_type)
         .where(BuildObjectiveGate.source_task_id == source_task_id)
+        .where(BuildObjectiveGate.status == "OPEN")
     )
     if existing is not None:
         return None
@@ -464,6 +500,7 @@ def _raise_gate(
     )
     session.add(gate)
     session.flush()
+    _capture_resume_state(objective)
     objective.state = "HUMAN_GATE"
     objective.updated_at = utcnow()
     _record_event(
@@ -497,10 +534,21 @@ def resolve_gate(
         gate_id=gate.gate_id,
         resolved_by=resolved_by,
     )
-    if not open_gates(session, objective.objective_id):
-        objective.state = "ACTIVE"
+    if not open_gates(session, objective.objective_id) and objective.state == "HUMAN_GATE":
+        # Only auto-resume out of HUMAN_GATE here. If the objective was
+        # also explicitly PAUSED, stay PAUSED -- an operator pause is not
+        # implicitly lifted by clearing gates; resume_objective() below
+        # still knows the original target via resume_state.
+        objective.state = _resume_target_state(session, objective)
+        objective.resume_state = None
         objective.updated_at = utcnow()
-        _record_event(session, objective.objective_id, "objective.resumed_from_gate", actor=resolved_by)
+        _record_event(
+            session,
+            objective.objective_id,
+            "objective.resumed_from_gate",
+            actor=resolved_by,
+            resumed_to=objective.state,
+        )
     return gate
 
 
@@ -508,6 +556,7 @@ def pause_objective(session: Session, objective_id: str, *, actor: str = "cli") 
     objective = get_objective(session, objective_id)
     if objective.state in {"COMPLETED", "FAILED"}:
         raise ObjectiveError(f"cannot pause a {objective.state} objective")
+    _capture_resume_state(objective)
     objective.state = "PAUSED"
     objective.updated_at = utcnow()
     _record_event(session, objective_id, "objective.paused", actor=actor)
@@ -518,9 +567,13 @@ def resume_objective(session: Session, objective_id: str, *, actor: str = "cli")
     objective = get_objective(session, objective_id)
     if objective.state != "PAUSED":
         raise ObjectiveError(f"objective is not paused: {objective.state}")
-    objective.state = "HUMAN_GATE" if open_gates(session, objective_id) else "ACTIVE"
+    if open_gates(session, objective_id):
+        objective.state = "HUMAN_GATE"
+    else:
+        objective.state = _resume_target_state(session, objective)
+        objective.resume_state = None
     objective.updated_at = utcnow()
-    _record_event(session, objective_id, "objective.resumed", actor=actor)
+    _record_event(session, objective_id, "objective.resumed", actor=actor, resumed_to=objective.state)
     return objective
 
 
@@ -535,6 +588,7 @@ class ObjectiveReconcileSummary:
     follow_ups_created: list[str] = field(default_factory=list)
     unrelated_tasks_created: list[str] = field(default_factory=list)
     gates_raised: list[str] = field(default_factory=list)
+    gates_reconciled: list[str] = field(default_factory=list)
     completed: bool = False
 
 
@@ -569,9 +623,74 @@ def reconcile_objective(session: Session, objective: BuildObjective) -> Objectiv
         for execution in executions:
             _reconcile_execution(session, objective, task, execution, summary)
 
+    _reconcile_stale_gates(session, objective, task_by_id, summary)
     _reconcile_blocked_tasks(session, objective, tasks, summary)
     _reassess_completion(session, objective, task_by_id, summary)
     return summary
+
+
+# Gate types raised from a runner-observed BLOCKED task (see
+# BLOCKED_REASON_TO_GATE_TYPE above) describe a *transient* task-level
+# condition, not an irreversible policy decision -- if the underlying
+# task moves out of BLOCKED on its own (e.g. an automatic rebase clears a
+# MERGE_CONFLICT before a human gets to the gate), the gate is stale and
+# must not keep stranding the objective waiting on a decision nobody
+# needs to make anymore.
+_RECONCILABLE_GATE_TYPES = frozenset(BLOCKED_REASON_TO_GATE_TYPE.values())
+
+# The exact reason prefix `_reconcile_blocked_tasks` uses below -- shared so
+# `_reconcile_stale_gates` can tell a gate that exists *because* a task was
+# BLOCKED apart from a gate of the same type raised directly from a
+# structured `human_gate` field (which carries no such transient,
+# runner-observed condition to reconcile against).
+_BLOCKED_TASK_GATE_REASON_MARKER = "blocked by runner:"
+
+
+def _reconcile_stale_gates(
+    session: Session,
+    objective: BuildObjective,
+    task_by_id: dict[str, BuildTask],
+    summary: ObjectiveReconcileSummary,
+) -> None:
+    for gate in open_gates(session, objective.objective_id):
+        if gate.gate_type not in _RECONCILABLE_GATE_TYPES:
+            continue
+        if gate.source_task_id is None:
+            continue
+        if _BLOCKED_TASK_GATE_REASON_MARKER not in gate.reason:
+            continue  # not raised from a BLOCKED-task condition -- nothing to reconcile
+        task = task_by_id.get(gate.source_task_id)
+        if task is None or task.state == "BLOCKED":
+            continue  # still blocked (or task gone) -- condition has not cleared
+        gate.status = "RESOLVED"
+        gate.resolved_at = utcnow()
+        gate.resolved_by = "system:auto-reconciled"
+        gate.resolution_note = (
+            f"source task {task.task_id} left BLOCKED (now {task.state}) before the "
+            "gate was actioned; underlying condition self-resolved"
+        )
+        _record_event(
+            session,
+            objective.objective_id,
+            "objective.gate_reconciled",
+            gate_id=gate.gate_id,
+            gate_type=gate.gate_type,
+            source_task_id=task.task_id,
+            resolved_task_state=task.state,
+        )
+        summary.gates_reconciled.append(gate.gate_id)
+
+    if summary.gates_reconciled and not open_gates(session, objective.objective_id) and objective.state == "HUMAN_GATE":
+        objective.state = _resume_target_state(session, objective)
+        objective.resume_state = None
+        objective.updated_at = utcnow()
+        _record_event(
+            session,
+            objective.objective_id,
+            "objective.resumed_from_gate",
+            actor="system:auto-reconciled",
+            resumed_to=objective.state,
+        )
 
 
 def _reconcile_blocked_tasks(
@@ -590,7 +709,7 @@ def _reconcile_blocked_tasks(
             session,
             objective,
             gate_type=gate_type,
-            reason=f"task {task.task_id} blocked by runner: {reason}",
+            reason=f"task {task.task_id} {_BLOCKED_TASK_GATE_REASON_MARKER} {reason}",
             source_task_id=task.task_id,
         )
         if gate is not None:

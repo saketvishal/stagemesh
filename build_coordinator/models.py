@@ -327,6 +327,12 @@ class BuildObjective(Base):
     max_auto_created_tasks: Mapped[int] = mapped_column(nullable=False, default=20)
     max_child_depth: Mapped[int] = mapped_column(nullable=False, default=4)
     auto_created_task_count: Mapped[int] = mapped_column(nullable=False, default=0)
+    # The lifecycle state to resume to once the current HUMAN_GATE/PAUSED
+    # interruption clears -- captured at the moment the objective first
+    # left its normal progressing state, so e.g. an objective gated while
+    # still PLANNING (no plan applied yet) resumes to PLANNING rather than
+    # being forced into ACTIVE with no work to reconcile.
+    resume_state: Mapped[str | None] = mapped_column(String(24), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
