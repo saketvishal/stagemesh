@@ -72,6 +72,7 @@ execution:
   concurrency: 3               # parallel builders (1..32)
   reviewers: 1
   default_review_policy: INDEPENDENT
+  setup: [npm install, pip install -r requirements.txt]  # optional; see below
 workers:                       # templates, expanded into builder-1..N, reviewer-1, integration-1
   builder:
     provider: local-agent
@@ -84,6 +85,14 @@ workers:                       # templates, expanded into builder-1..N, reviewer
 task_sources:                  # optional adapters; off unless enabled
   github: {enabled: false, repo: owner/name}
 ```
+
+`execution.setup` is an optional list of commands StageMesh runs once (no
+shell, with a timeout and durable evidence recorded as a `runner.setup`
+event) in a task's workspace after it is prepared and before the agent
+starts — for dependency-heavy projects where a fresh worktree has no
+`node_modules`/virtualenv and validation commands can't otherwise run. A
+failing setup command blocks the task (`SETUP_FAILED`) instead of launching
+the agent. Projects without `execution.setup` behave exactly as before.
 
 A role with no template becomes an `unconfigured` worker, so the runner reports
 `EXTERNAL_EXECUTOR_CONFIGURATION_REQUIRED` rather than pretending to work.
