@@ -21,7 +21,7 @@ VALID_TRANSITIONS: dict[str, frozenset[str]] = {
     ),
     "AWAITING_EXTERNAL_CI": frozenset({"DONE", "REWORK_REQUIRED", "BLOCKED"}),
     "REWORK_REQUIRED": frozenset({"CLAIMED", "BLOCKED", "FAILED"}),
-    "BLOCKED": frozenset({"READY", "RESUMABLE", "FAILED", "REVIEW_READY", "REVIEWING", "DONE"}),
+    "BLOCKED": frozenset({"READY", "RESUMABLE", "FAILED", "REVIEW_READY", "REVIEWING", "DONE", "REWORK_REQUIRED"}),
     "FAILED": frozenset({"RESUMABLE", "READY"}),
     "STALE": frozenset({"RESUMABLE", "CLAIMED", "FAILED", "READY", "BLOCKED"}),
     "RESUMABLE": frozenset({"CLAIMED", "BLOCKED", "FAILED"}),
