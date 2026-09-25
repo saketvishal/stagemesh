@@ -60,7 +60,7 @@ def test_a_broken_project_does_not_stop_unrelated_projects(tmp_path, registry):
 
 def test_project_mode_wins_inside_a_project_and_global_needs_registered_projects(tmp_path, registry):
     root, _ = make_project_repo(tmp_path, {"P-1": {"review": "NONE"}}, concurrency=1)
-    inside = payload(stagemesh(["continue"], cwd=root, registry=registry))
+    inside = payload(stagemesh(["continue", "--json"], cwd=root, registry=registry))
     assert "mode" not in inside and inside["final"]["tasks_by_state"] == {"DONE": 1}
     empty = tmp_path / "empty"
     empty.mkdir()
