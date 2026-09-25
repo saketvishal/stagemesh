@@ -75,9 +75,9 @@ class SubprocessExecutor:
 
     def _prepare_temp_dir(self, worker_id: str, execution_id: str) -> Path:
         target = self._temp_dir / worker_id / execution_id
-        target.mkdir(parents=True, exist_ok=True)
         probe = target / f".probe_{execution_id}.tmp"
         try:
+            target.mkdir(parents=True, exist_ok=True)
             probe.write_text("ok", encoding="utf-8")
             probe.unlink(missing_ok=True)
         except OSError as exc:
@@ -100,7 +100,16 @@ class SubprocessExecutor:
             self._pending_observations[execution_id] = preflight
             return ExecutionHandle(execution_id=execution_id, result_path=result_path)
         env = os.environ.copy()
-        managed_temp = self._prepare_temp_dir(launch.worker_id, execution_id)
+        try:
+            managed_temp = self._prepare_temp_dir(launch.worker_id, execution_id)
+        except RuntimeError as exc:
+            self._pending_observations[execution_id] = self._preflight_failure(
+                launch,
+                execution_id,
+                failure_kind="SANDBOX_TEMP_NOT_WRITABLE",
+                detail=str(exc),
+            )
+            return ExecutionHandle(execution_id=execution_id, result_path=result_path)
         temp_str = str(managed_temp.resolve())
         env["TEMP"] = temp_str
         env["TMP"] = temp_str
@@ -116,7 +125,16 @@ class SubprocessExecutor:
                     reviewed_feature_sha=launch.reviewed_feature_sha,
                 )
             )
-        stdout, stderr = self._open_logs(execution_id)
+        try:
+            stdout, stderr = self._open_logs(execution_id)
+        except OSError as exc:
+            self._pending_observations[execution_id] = self._preflight_failure(
+                launch,
+                execution_id,
+                failure_kind="LOG_PATH_NOT_WRITABLE",
+                detail=f"log files cannot be opened: {self._log_dir}: {exc}",
+            )
+            return ExecutionHandle(execution_id=execution_id, result_path=result_path)
         try:
             process = subprocess.Popen(
                 self._command,

@@ -76,6 +76,48 @@ def test_subprocess_executor_preflight_missing_workdir_is_structured_human_actio
     assert observation.result_data["diagnostics"]["worktree_path"] == str(missing)
 
 
+def test_subprocess_executor_late_temp_failure_is_structured_human_action(tmp_path: Path, monkeypatch):
+    executor = SubprocessExecutor([sys.executable, "-c", "raise SystemExit(0)"])
+    calls = {"count": 0}
+    original = executor._prepare_temp_dir
+
+    def fail_after_preflight(worker_id: str, execution_id: str):
+        calls["count"] += 1
+        if calls["count"] > 1:
+            raise RuntimeError("managed temp unwritable")
+        return original(worker_id, execution_id)
+
+    monkeypatch.setattr(executor, "_prepare_temp_dir", fail_after_preflight)
+
+    handle = executor.launch(_launch(tmp_path))
+    observation = executor.poll(handle.execution_id)
+
+    assert observation.status == "HUMAN_ACTION_REQUIRED"
+    assert observation.human_escalation_type == "COORDINATOR_INVARIANT_FAILURE"
+    assert observation.result_data["failure_kind"] == "SANDBOX_TEMP_NOT_WRITABLE"
+    assert "managed temp unwritable" in observation.result_data["detail"]
+
+
+def test_subprocess_executor_late_log_failure_is_structured_human_action(tmp_path: Path, monkeypatch):
+    executor = SubprocessExecutor(
+        [sys.executable, "-c", "raise SystemExit(0)"],
+        log_dir=tmp_path / "logs",
+    )
+
+    def fail_open_logs(execution_id: str):
+        raise PermissionError("log denied")
+
+    monkeypatch.setattr(executor, "_open_logs", fail_open_logs)
+
+    handle = executor.launch(_launch(tmp_path))
+    observation = executor.poll(handle.execution_id)
+
+    assert observation.status == "HUMAN_ACTION_REQUIRED"
+    assert observation.human_escalation_type == "COORDINATOR_INVARIANT_FAILURE"
+    assert observation.result_data["failure_kind"] == "LOG_PATH_NOT_WRITABLE"
+    assert "log denied" in observation.result_data["detail"]
+
+
 def test_generic_failure_evidence_survives_result_validation():
     parsed = parse_executor_result(
         {
