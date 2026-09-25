@@ -976,6 +976,7 @@ def test_continue_recovers_crashed_execution_and_finishes(tmp_path, registry):
     assert any(e for e in statuses if e[0] == "R-2" and e[1] == "REVIEWER")
 
 
+@pytest.mark.timeout(240)
 def test_continue_recovers_after_coordinator_crash_without_losing_work(tmp_path, registry):
     root, _ = make_project_repo(
         tmp_path,

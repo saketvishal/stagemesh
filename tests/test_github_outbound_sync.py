@@ -402,7 +402,7 @@ def test_10_repeated_reconciliation_is_idempotent():
 
 
 def test_11_restart_with_local_done_backfills_correctly():
-    """11. Restart with local DONE + GitHub open backfills correctly (Caventra scenario)."""
+    """11. Restart with local DONE + GitHub open backfills correctly."""
     # Issue exists on GitHub and is still open
     client = MockGitHubClient(
         [
@@ -455,9 +455,9 @@ def test_12_non_github_tasks_do_not_mutate_github():
             state="DONE",
         )
         t2 = BuildTask(
-            task_id="CAV-10",
-            title="Caventra internal task",
-            description="Internal Caventra chore",
+            task_id="LOCAL-10",
+            title="Local internal task",
+            description="Internal local chore",
             acceptance_criteria=["Done"],
             state="DONE",
         )

@@ -239,15 +239,18 @@ class GitIntegrationExecutor:
             proc = _git(wt, "update-ref", f"refs/heads/{branch}", new, old)
             if proc.returncode != 0:
                 raise IntegrationStop(
-                    "COORDINATOR_INVARIANT_FAILURE",
+                    "BRANCH_MOVED_CONCURRENTLY",
                     f"{branch} moved while integrating; retry: {(proc.stderr or '').strip()[-200:]}",
                 )
             return
         if _git(holder, "status", "--porcelain").stdout.strip():
-            raise IntegrationStop(
-                "WORKING_CHECKOUT_DIRTY",
-                f"{branch} is checked out with uncommitted changes at {holder}; commit or stash them, then retry",
-            )
+            from build_coordinator.runner.worktree import reconcile_displaced_task_work
+            reconcile_displaced_task_work(holder)
+            if _git(holder, "status", "--porcelain").stdout.strip():
+                raise IntegrationStop(
+                    "WORKING_CHECKOUT_DIRTY",
+                    f"{branch} is checked out with uncommitted changes at {holder}; commit or stash them, then retry",
+                )
         proc = _git(holder, "merge", "--ff-only", new)
         if proc.returncode != 0:
             raise IntegrationStop(

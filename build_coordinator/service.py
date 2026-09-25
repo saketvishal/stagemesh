@@ -616,6 +616,7 @@ def transition_task(
     *,
     actor: str = "cli",
     reason: str | None = None,
+    event_data: dict[str, Any] | None = None,
 ) -> BuildTask:
     task = locked_task(session, task_id)
     from_state = task.state
@@ -627,13 +628,16 @@ def transition_task(
         task.current_claim_id = None
         task.lease_expires_at = None
         task.last_heartbeat_at = None
+    data = {"reason": reason} if reason else {}
+    if event_data:
+        data.update(event_data)
     record_event(session, EventInput(
         task_id=task_id,
         event_type="task.transitioned",
         actor=actor,
         from_state=from_state,
         to_state=to_state,
-        event_data={"reason": reason} if reason else {},
+        event_data=data,
     ))
     return task
 
@@ -881,6 +885,14 @@ def reconcile_stale_executions(session: Session) -> list[BuildRunnerExecution]:
     terminated: list[BuildRunnerExecution] = []
     for row in live:
         if not row.claim_id:
+            row.status = "TERMINATED"
+            row.completed_at = now
+            row.last_observed_at = now
+            row.result_data = {
+                **(row.result_data or {}),
+                "reconciliation_state": "NO_CLAIM",
+            }
+            terminated.append(row)
             continue
         claim = session.get(BuildTaskClaim, row.claim_id)
         if (
