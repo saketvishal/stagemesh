@@ -174,10 +174,20 @@ class GitHubTaskSource(TaskSource):
         deps = self._parse_dependencies(body)
 
         if is_objective:
+            direct_execution = self._objective_direct_execution_enabled(labels, body)
             was_current = self._objective_sync_is_current(session, task_id, title, body, ac, deps)
             existed = session.get(BuildObjective, task_id) is not None
-            self._sync_objective(session, task_id, title, body, ac, deps, url)
-            if not self._objective_direct_execution_enabled(labels, body):
+            objective = self._sync_objective(
+                session,
+                task_id,
+                title,
+                body,
+                ac,
+                deps,
+                url,
+                reconcile_historical_root=not direct_execution,
+            )
+            if not direct_execution:
                 action = "SKIPPED" if was_current else ("UPDATED" if existed else "CREATED")
                 return SyncResult(
                     task_id=task_id,
@@ -186,6 +196,7 @@ class GitHubTaskSource(TaskSource):
                     source_ref=url,
                     details="Synced from GitHub issue as authoritative objective; no root implementation task created",
                 )
+            deps = list(objective.dependencies)
 
         return self._sync_task(
             session,
@@ -249,6 +260,10 @@ class GitHubTaskSource(TaskSource):
         task = upsert_task(session, spec)
         if objective_id:
             task.objective_id = objective_id
+            if task.reason_created == "OBJECTIVE_ROOT_COMPAT":
+                task.reason_created = "GITHUB_SOURCE"
+                if task.state == "STALE":
+                    task.state = "READY"
         session.flush()
         if action != "SKIPPED":
             self._record_sync_event(session, task.task_id, priority, url, action)
@@ -349,6 +364,8 @@ class GitHubTaskSource(TaskSource):
         ac: list[str],
         deps: list[str],
         url: str,
+        *,
+        reconcile_historical_root: bool = True,
     ) -> BuildObjective:
         existing = session.get(BuildObjective, objective_id)
         if existing is not None:
@@ -359,7 +376,8 @@ class GitHubTaskSource(TaskSource):
             existing.goal = f"{title}: {body[:500]}"
             existing.completion_criteria = list(ac) if ac else []
             existing.dependencies = authoritative_deps
-            self._reconcile_historical_objective_task(session, existing, authoritative_deps, url)
+            if reconcile_historical_root:
+                self._reconcile_historical_objective_task(session, existing, authoritative_deps, url)
             planner = get_planner_task(session, objective_id)
             if planner is None and existing.state == "PLANNING":
                 planner = _ensure_planner_task(session, existing)
