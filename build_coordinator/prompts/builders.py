@@ -75,7 +75,13 @@ class BuilderPromptBuilder(_PromptBuilder):
         "Implement the task contract, run required validation, checkpoint "
         "safe facts, and write a structured builder result JSON file to the "
         "runner-supplied result path. Do not perform independent review or "
-        "integration. Do not persist secrets or hidden reasoning."
+        "integration. Do not persist secrets or hidden reasoning. "
+        "A task branch has been assigned for this work: all reviewable "
+        "output MUST be captured as commits on that branch before you "
+        "report success -- uncommitted working-tree changes are not "
+        "reviewable and will be treated as no work having been done. "
+        "Never check out, create, or commit to any branch other than the "
+        "one assigned to this task."
     )
 
 
