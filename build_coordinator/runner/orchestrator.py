@@ -103,6 +103,7 @@ from build_coordinator.runner.worktree import (
     validate_worktree_path,
     reconcile_displaced_task_work,
     preserve_unknown_operator_work,
+    _ref_exists,
     _git,
 )
 from build_coordinator.runner.git_safety import resolve_git_identity_args
@@ -240,6 +241,7 @@ class BuildRunner:
         for task in recover_lost_execution_claims(session, actor="runner"):
             if task.task_id not in result.recovered:
                 result.recovered.append(task.task_id)
+        self._reconcile_git_reality(session, result)
         self._recover_diagnosed_blockers(session, result)
         result.observed = self._reconcile_active(session, result)
         for task in recover_lost_execution_claims(session, actor="runner"):
@@ -674,12 +676,35 @@ class BuildRunner:
                         self._validation_gate(session, execution, result, parsed)
                         return
                 task = session.get(BuildTask, execution.task_id)
+                # Check if existing task branch already has useful commits ahead of base
+                repo_root = Path(self._settings.repo_root)
+                branch = task.branch_name or task_branch_name(task.task_id) if task else None
+                has_work = False
+                if branch and _ref_exists(repo_root, branch):
+                    base = task.base_sha or self._config.main_ref if task else self._config.main_ref
+                    ahead_proc = _git(repo_root, "rev-list", "--count", f"{base}..{branch}")
+                    if ahead_proc.returncode == 0 and int(ahead_proc.stdout.strip() or 0) > 0:
+                        has_work = True
+                if has_work:
+                    transition_task(session, execution.task_id, "IN_PROGRESS", actor="runner")
+                    transition_task(session, execution.task_id, "VALIDATING", actor="runner")
+                    if self._validation_gate(session, task, execution, result):
+                        transition_task(
+                            session,
+                            execution.task_id,
+                            "REVIEW_READY" if task and task.review_policy != "NONE" else "DONE",
+                            actor="runner",
+                            reason="task branch contains commits; proceeding to review",
+                        )
+                    return
+
                 retry_generation = int((task.retry_generation if task is not None else 0) or 0)
                 attempts = session.scalar(
                     select(func.count())
                     .select_from(BuildRunnerExecution)
                     .where(BuildRunnerExecution.task_id == execution.task_id)
                     .where(BuildRunnerExecution.role.in_(("BUILDER", "REMEDIATION")))
+                    .where(BuildRunnerExecution.status.notin_(("LOST", "TERMINATED")))
                     .where(
                         or_(
                             BuildRunnerExecution.result_data["retry_generation"].as_integer() == retry_generation,
@@ -1004,6 +1029,9 @@ class BuildRunner:
         before the task is considered done. Strictly additive: disabled by
         default, and a push with no recorded SHA still goes straight to
         DONE as before (nothing to reconcile against)."""
+        task = session.get(BuildTask, execution.task_id)
+        if task is not None and task.state == "DONE":
+            return
         has_sha = bool((execution.result_data or {}).get("merge_commit_sha"))
         if self._config.external_ci_enabled and self._config.external_ci_repo and has_sha:
             transition_task(
@@ -1767,8 +1795,7 @@ class BuildRunner:
                 self._request_rereview(session, row.task_id, result, reason="REVIEWED_SHA_CHANGED")
                 continue
             if assessment.conflict:
-                result.escalations.append(f"{row.task_id}:MERGE_CONFLICT")
-                self._block_task(session, row.task_id, "MERGE_CONFLICT")
+                self._handle_merge_conflict(session, row.task_id, assessment, result)
                 continue
             try:
                 claim = claim_integration(
@@ -2153,6 +2180,13 @@ class BuildRunner:
             resume=resume,
             allowed_roots=self._config.allowed_workspace_roots,
         )
+        waiting = task.waiting_input if isinstance(task.waiting_input, dict) else {}
+        conflict_rec = waiting.get("conflict_recovery")
+        if conflict_rec and worker.worktree_path:
+            wt = Path(worker.worktree_path)
+            main_ref = self._config.main_ref
+            identity_args = resolve_git_identity_args(wt)
+            _git(wt, *identity_args, "merge", "--no-ff", "-m", f"Merge {main_ref} into {branch}", f"refs/heads/{main_ref}")
         return dataclasses.replace(worker, branch_name=branch)
 
     def _validate_worker_worktree(self, worker: WorkerConfig) -> None:
@@ -2276,6 +2310,9 @@ class BuildRunner:
             .limit(1)
         )
         if event is None:
+            task = session.get(BuildTask, task_id)
+            if task and isinstance(task.waiting_input, dict):
+                return task.waiting_input.get("blocked_reason")
             return None
         return (event.event_data or {}).get("reason")
 
@@ -2417,7 +2454,7 @@ class BuildRunner:
                     except CoordinatorPolicyError:
                         pass
 
-            elif reason in ("COORDINATOR_INVARIANT_FAILURE", "NO_CHANGES_PRODUCED"):
+            elif reason in ("COORDINATOR_INVARIANT_FAILURE", "NO_CHANGES_PRODUCED", "MALFORMED_EXECUTOR_RESULT"):
                 if self._check_task_already_satisfied(session, task.task_id):
                     repo_root = Path(self._settings.repo_root)
                     branch = task.branch_name or task_branch_name(task.task_id)
@@ -2463,23 +2500,22 @@ class BuildRunner:
                     except CoordinatorPolicyError:
                         pass
                 else:
-                    # If task still has attempts remaining (like GH-55), recover to READY
-                    builder_attempts = session.scalar(
-                        select(func.count())
-                        .select_from(BuildRunnerExecution)
-                        .where(BuildRunnerExecution.task_id == task.task_id)
-                        .where(BuildRunnerExecution.role.in_(("BUILDER", "REMEDIATION")))
-                        .where(BuildRunnerExecution.status.in_(("LOST", "FAILED", "SUCCEEDED")))
-                    ) or 0
-                    if builder_attempts < self._config.max_execution_attempts:
-                        release_active_claims(session, task.task_id, completed=False)
+                    repo_root = Path(self._settings.repo_root)
+                    branch = task.branch_name or task_branch_name(task.task_id)
+                    has_work = False
+                    if branch and _ref_exists(repo_root, branch):
+                        base = task.base_sha or self._config.main_ref
+                        ahead_proc = _git(repo_root, "rev-list", "--count", f"{base}..{branch}")
+                        if ahead_proc.returncode == 0 and int(ahead_proc.stdout.strip() or 0) > 0:
+                            has_work = True
+                    if has_work:
                         try:
                             transition_task(
                                 session,
                                 task.task_id,
-                                "READY",
+                                "REVIEW_READY" if task.review_policy != "NONE" else "DONE",
                                 actor="runner",
-                                reason=f"recovering {reason} with {self._config.max_execution_attempts - builder_attempts} attempts remaining; resuming to READY",
+                                reason=f"task branch contains existing commits; recovering {reason} to REVIEW_READY",
                             )
                             record_event(
                                 session,
@@ -2489,9 +2525,8 @@ class BuildRunner:
                                     actor="runner",
                                     event_data={
                                         "reason": reason,
-                                        "recovery_type": "ATTEMPTS_REMAINING",
-                                        "resumed_to": "READY",
-                                        "attempts_used": builder_attempts,
+                                        "recovery_type": "EXISTING_WORK_FOUND",
+                                        "resumed_to": "REVIEW_READY",
                                     },
                                 ),
                             )
@@ -2500,6 +2535,43 @@ class BuildRunner:
                             self._release_blocker_gate(session, task, reason)
                         except CoordinatorPolicyError:
                             pass
+                    else:
+                        builder_attempts = session.scalar(
+                            select(func.count())
+                            .select_from(BuildRunnerExecution)
+                            .where(BuildRunnerExecution.task_id == task.task_id)
+                            .where(BuildRunnerExecution.role.in_(("BUILDER", "REMEDIATION")))
+                            .where(BuildRunnerExecution.status.in_(("FAILED", "SUCCEEDED")))
+                        ) or 0
+                        if builder_attempts < self._config.max_execution_attempts:
+                            release_active_claims(session, task.task_id, completed=False)
+                            try:
+                                transition_task(
+                                    session,
+                                    task.task_id,
+                                    "READY",
+                                    actor="runner",
+                                    reason=f"recovering {reason} with {self._config.max_execution_attempts - builder_attempts} attempts remaining; resuming to READY",
+                                )
+                                record_event(
+                                    session,
+                                    EventInput(
+                                        task_id=task.task_id,
+                                        event_type="runner.blocker_recovered",
+                                        actor="runner",
+                                        event_data={
+                                            "reason": reason,
+                                            "recovery_type": "ATTEMPTS_REMAINING",
+                                            "resumed_to": "READY",
+                                            "attempts_used": builder_attempts,
+                                        },
+                                    ),
+                                )
+                                if task.task_id not in result.recovered:
+                                    result.recovered.append(task.task_id)
+                                self._release_blocker_gate(session, task, reason)
+                            except CoordinatorPolicyError:
+                                pass
 
             elif reason == "EXECUTION_RETRY_LIMIT_REACHED":
                 rows = session.scalars(
@@ -2665,15 +2737,60 @@ class BuildRunner:
                     except CoordinatorPolicyError:
                         pass
 
+            elif reason == "MALFORMED_EXECUTOR_RESULT":
+                repo_root = Path(self._settings.repo_root)
+                has_work = False
+                if task.branch_name:
+                    try:
+                        count = _git(repo_root, "rev-list", "--count", f"{main_ref}..{task.branch_name}").stdout.strip()
+                        has_work = int(count) > 0
+                    except Exception:
+                        pass
+                target_state = "REVIEW_READY" if has_work else "READY"
+                try:
+                    transition_task(
+                        session,
+                        task.task_id,
+                        target_state,
+                        actor="runner",
+                        reason=f"malformed executor result recovered: resuming to {target_state}",
+                    )
+                    record_event(
+                        session,
+                        EventInput(
+                            task_id=task.task_id,
+                            event_type="runner.blocker_recovered",
+                            actor="runner",
+                            event_data={
+                                "reason": "MALFORMED_EXECUTOR_RESULT",
+                                "resumed_to": target_state,
+                            },
+                        ),
+                    )
+                    if task.task_id not in result.recovered:
+                        result.recovered.append(task.task_id)
+                    self._release_blocker_gate(session, task, "MALFORMED_EXECUTOR_RESULT")
+                except CoordinatorPolicyError:
+                    pass
+
             elif reason == "MERGE_CONFLICT":
                 reviewed_sha = session.scalar(
                     select(BuildRunnerExecution.reviewed_feature_sha)
                     .where(BuildRunnerExecution.task_id == task.task_id)
-                    .where(BuildRunnerExecution.role == "REVIEWER")
-                    .where(BuildRunnerExecution.status == "SUCCEEDED")
+                    .where(BuildRunnerExecution.role.in_(("REVIEWER", "INTEGRATION")))
+                    .where(BuildRunnerExecution.reviewed_feature_sha.is_not(None))
                     .order_by(BuildRunnerExecution.completed_at.desc())
                     .limit(1)
                 )
+                if not reviewed_sha and isinstance(task.waiting_input, dict):
+                    ev = task.waiting_input.get("failure_evidence") or {}
+                    if isinstance(ev, dict) and ev.get("task_sha"):
+                        reviewed_sha = str(ev["task_sha"])
+                if not reviewed_sha and task.branch_name:
+                    try:
+                        reviewed_sha = self._git.rev_parse(str(self._settings.repo_root), task.branch_name)
+                    except Exception:
+                        pass
                 if reviewed_sha:
                     try:
                         assessment = assess_mechanical_merge(
@@ -2707,8 +2824,272 @@ class BuildRunner:
                             if task.task_id not in result.recovered:
                                 result.recovered.append(task.task_id)
                             self._release_blocker_gate(session, task, "MERGE_CONFLICT")
+                        else:
+                            waiting = dict(task.waiting_input) if isinstance(task.waiting_input, dict) else {}
+                            conflict_state = waiting.get("conflict_recovery") if isinstance(waiting.get("conflict_recovery"), dict) else {}
+                            attempts = int(conflict_state.get("attempts", 0) or 0)
+                            max_attempts = getattr(self._config, "max_conflict_recovery_attempts", 2)
+                            if attempts < max_attempts:
+                                conflict_data = {
+                                    "conflict_type": "MERGE_CONFLICT",
+                                    "conflict_paths": list(assessment.conflict_paths),
+                                    "current_main_sha": assessment.current_main_sha,
+                                    "task_sha": reviewed_sha,
+                                    "merge_base": assessment.merge_base,
+                                    "attempts": attempts + 1,
+                                    "max_attempts": max_attempts,
+                                }
+                                waiting["conflict_recovery"] = conflict_data
+                                task.waiting_input = waiting
+                                try:
+                                    release_active_claims(session, task.task_id, completed=False)
+                                except CoordinatorPolicyError:
+                                    pass
+                                transition_task(
+                                    session,
+                                    task.task_id,
+                                    "REWORK_REQUIRED",
+                                    actor="runner",
+                                    reason=f"recovering MERGE_CONFLICT with automated conflict remediation ({len(assessment.conflict_paths)} paths, attempt {attempts + 1}/{max_attempts})",
+                                )
+                                record_event(
+                                    session,
+                                    EventInput(
+                                        task_id=task.task_id,
+                                        event_type="runner.blocker_recovered",
+                                        actor="runner",
+                                        event_data={
+                                            "reason": "MERGE_CONFLICT",
+                                            "resumed_to": "REWORK_REQUIRED",
+                                            "conflict_paths": list(assessment.conflict_paths),
+                                            "attempt": attempts + 1,
+                                        },
+                                    ),
+                                )
+                                if task.task_id not in result.recovered:
+                                    result.recovered.append(task.task_id)
+                                self._release_blocker_gate(session, task, "MERGE_CONFLICT")
                     except Exception:
+                        waiting = dict(task.waiting_input) if isinstance(task.waiting_input, dict) else {}
+                        conflict_state = waiting.get("conflict_recovery") if isinstance(waiting.get("conflict_recovery"), dict) else {}
+                        attempts = int(conflict_state.get("attempts", 0) or 0)
+                        max_attempts = getattr(self._config, "max_conflict_recovery_attempts", 2)
+                        if attempts < max_attempts:
+                            ev = waiting.get("failure_evidence") or {}
+                            conflict_paths = ev.get("conflict_files") or ev.get("conflict_paths") or []
+                            conflict_data = {
+                                "conflict_type": "MERGE_CONFLICT",
+                                "conflict_paths": list(conflict_paths),
+                                "current_main_sha": ev.get("current_main_sha", ""),
+                                "task_sha": reviewed_sha or ev.get("task_sha", ""),
+                                "merge_base": ev.get("merge_base", ""),
+                                "attempts": attempts + 1,
+                                "max_attempts": max_attempts,
+                            }
+                            waiting["conflict_recovery"] = conflict_data
+                            task.waiting_input = waiting
+                            try:
+                                release_active_claims(session, task.task_id, completed=False)
+                            except CoordinatorPolicyError:
+                                pass
+                            transition_task(
+                                session,
+                                task.task_id,
+                                "REWORK_REQUIRED",
+                                actor="runner",
+                                reason=f"recovering MERGE_CONFLICT from stored failure evidence (attempt {attempts + 1}/{max_attempts})",
+                            )
+                            record_event(
+                                session,
+                                EventInput(
+                                    task_id=task.task_id,
+                                    event_type="runner.blocker_recovered",
+                                    actor="runner",
+                                    event_data={
+                                        "reason": "MERGE_CONFLICT",
+                                        "resumed_to": "REWORK_REQUIRED",
+                                        "attempt": attempts + 1,
+                                    },
+                                ),
+                            )
+                            if task.task_id not in result.recovered:
+                                result.recovered.append(task.task_id)
+                            self._release_blocker_gate(session, task, "MERGE_CONFLICT")
+
+    def _handle_merge_conflict(
+        self,
+        session: Session,
+        task_id: str,
+        assessment: MechanicalMergeAssessment,
+        result: RunnerCycleResult,
+    ) -> None:
+        task = session.get(BuildTask, task_id)
+        if task is None:
+            return
+
+        waiting = dict(task.waiting_input) if isinstance(task.waiting_input, dict) else {}
+        conflict_state = waiting.get("conflict_recovery") if isinstance(waiting.get("conflict_recovery"), dict) else {}
+        attempts = int(conflict_state.get("attempts", 0) or 0)
+        max_attempts = getattr(self._config, "max_conflict_recovery_attempts", 2)
+
+        if attempts >= max_attempts:
+            result.escalations.append(f"{task_id}:MERGE_CONFLICT")
+            self._block_task(
+                session,
+                task_id,
+                "MERGE_CONFLICT",
+                invariant="MERGE_CONFLICT",
+                error=f"merge conflict in {list(assessment.conflict_paths)} after {attempts} automated remediation attempts",
+                recovery_classification="OPERATOR_ACTION_REQUIRED",
+                extra_data={
+                    "conflict_paths": list(assessment.conflict_paths),
+                    "current_main_sha": assessment.current_main_sha,
+                    "task_sha": assessment.feature_remote_sha,
+                    "merge_base": assessment.merge_base,
+                    "attempts": attempts,
+                },
+            )
+            return
+
+        conflict_data = {
+            "conflict_type": "MERGE_CONFLICT",
+            "conflict_paths": list(assessment.conflict_paths),
+            "current_main_sha": assessment.current_main_sha,
+            "task_sha": assessment.feature_remote_sha,
+            "merge_base": assessment.merge_base,
+            "attempts": attempts + 1,
+            "max_attempts": max_attempts,
+        }
+        waiting["conflict_recovery"] = conflict_data
+        task.waiting_input = waiting
+        try:
+            release_active_claims(session, task_id, completed=False)
+        except CoordinatorPolicyError:
+            pass
+        transition_task(
+            session,
+            task_id,
+            "REWORK_REQUIRED",
+            actor="runner",
+            reason=f"merge conflict detected against main ({len(assessment.conflict_paths)} paths); routing to conflict remediation (attempt {attempts + 1}/{max_attempts})",
+        )
+        record_event(
+            session,
+            EventInput(
+                task_id=task_id,
+                event_type="runner.merge_conflict_remediation_scheduled",
+                actor="runner",
+                event_data=conflict_data,
+            ),
+        )
+
+    def _reconcile_git_reality(self, session: Session, result: RunnerCycleResult) -> None:
+        repo_root = Path(self._settings.repo_root)
+        main_ref = self._config.main_ref
+        try:
+            current_main = self._git.rev_parse(str(repo_root), main_ref)
+        except Exception:
+            return
+
+        # Clean up any aborted or lingering git operations in integration worktrees
+        for worker in self._config.workers:
+            if worker.role == "INTEGRATION" and worker.worktree_path:
+                wt = Path(worker.worktree_path)
+                if wt.exists():
+                    git_dir = wt / ".git"
+                    if git_dir.is_file():
+                        try:
+                            content = git_dir.read_text().strip()
+                            if content.startswith("gitdir:"):
+                                git_dir = Path(content.split(":", 1)[1].strip())
+                        except Exception:
+                            pass
+                    if (git_dir / "MERGE_HEAD").exists() or (git_dir / "REBASE_HEAD").exists():
+                        _git(wt, "merge", "--abort")
+                        _git(wt, "rebase", "--abort")
+                        _git(wt, "reset", "--hard", "HEAD")
+                        _git(wt, "clean", "-fd")
+
+        # Check tasks in INTEGRATING, REVIEWING, REVIEW_READY, or BLOCKED that are already in main
+        candidates = session.scalars(
+            select(BuildTask).where(
+                BuildTask.state.in_(("INTEGRATING", "REVIEWING", "REVIEW_READY", "BLOCKED"))
+            )
+        ).all()
+        for task in candidates:
+            if not self._target_allows(task.task_id):
+                continue
+            # If an execution is currently live for this task, let normal execution observation handle it
+            active_exec = session.scalar(
+                select(BuildRunnerExecution)
+                .where(BuildRunnerExecution.task_id == task.task_id)
+                .where(BuildRunnerExecution.status.in_(LIVE_EXECUTION_STATUSES))
+                .limit(1)
+            )
+            if active_exec is not None:
+                continue
+            commit_candidates = []
+            if task.branch_name:
+                try:
+                    commit_candidates.append(self._git.rev_parse(str(repo_root), task.branch_name))
+                except Exception:
+                    pass
+            last_exec_sha = session.scalar(
+                select(BuildRunnerExecution.reviewed_feature_sha)
+                .where(BuildRunnerExecution.task_id == task.task_id)
+                .where(BuildRunnerExecution.reviewed_feature_sha.is_not(None))
+                .order_by(BuildRunnerExecution.completed_at.desc())
+                .limit(1)
+            )
+            if last_exec_sha:
+                commit_candidates.append(last_exec_sha)
+
+            for cand in commit_candidates:
+                if not cand:
+                    continue
+                commit_msg = _git(repo_root, "log", "-n", "1", "--format=%s", cand).stdout.strip()
+                is_task_commit = (
+                    cand == last_exec_sha
+                    or task.task_id.lower() in commit_msg.lower()
+                    or task.task_id.replace("-", "").lower() in commit_msg.lower()
+                )
+                if not is_task_commit:
+                    continue
+                res = _git(repo_root, "merge-base", "--is-ancestor", cand, current_main)
+                if res.returncode == 0:
+                    try:
+                        release_active_claims(session, task.task_id, completed=True)
+                    except CoordinatorPolicyError:
                         pass
+                    if task.state != "DONE":
+                        transition_task(
+                            session,
+                            task.task_id,
+                            "DONE",
+                            actor="runner",
+                            reason=f"task commit {cand[:7]} is already an ancestor of {main_ref}; converged to Git reality",
+                        )
+                        record_event(
+                            session,
+                            EventInput(
+                                task_id=task.task_id,
+                                event_type="runner.converged_to_git_reality",
+                                actor="runner",
+                                event_data={"commit": cand, "target_state": "DONE"},
+                            ),
+                        )
+                        if task.task_id not in result.recovered:
+                            result.recovered.append(task.task_id)
+                        self._release_blocker_gate(session, task, "MERGE_CONFLICT")
+                        self._release_blocker_gate(session, task, "WORKING_CHECKOUT_DIRTY")
+                        self._release_blocker_gate(session, task, "UPSTREAM_PUSH_FAILED")
+                        cleanup_task_branch(
+                            repo_root,
+                            task.branch_name or task_branch_name(task.task_id),
+                            main_ref=main_ref,
+                            reviewed_sha=cand,
+                        )
+                    break
 
 
     def _temp_dir(self) -> Path:

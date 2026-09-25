@@ -299,7 +299,18 @@ def is_stagemesh_owned_path(path: str) -> bool:
         or norm.startswith("docs/")
         or norm.startswith(".stagemesh/")
         or norm.startswith("scripts/")
-        or norm in ("pyproject.toml", "uv.lock", "readme.md", ".gitignore", "changelog.md")
+        or norm.startswith(".github/")
+        or norm
+        in (
+            "pyproject.toml",
+            "uv.lock",
+            "readme.md",
+            ".gitignore",
+            "changelog.md",
+            "license",
+            "contributing.md",
+            "security.md",
+        )
     )
 
 

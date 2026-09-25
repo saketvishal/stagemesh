@@ -188,6 +188,8 @@ class GitIntegrationExecutor:
         )
         if merge.returncode != 0:
             _git(wt, "merge", "--abort")
+            _git(wt, "reset", "--hard", "HEAD")
+            _git(wt, "clean", "-fd")
             raise IntegrationStop(
                 "MERGE_CONFLICT",
                 f"merging the reviewed commit into {main} conflicts",
@@ -219,25 +221,30 @@ class GitIntegrationExecutor:
 
     def _advance(self, wt: Path, branch: str, new: str, old: str) -> None:
         holder = branch_holder(wt, branch, excluding=wt)
-        if holder is None:
-            proc = _git(wt, "update-ref", f"refs/heads/{branch}", new, old)
-            if proc.returncode != 0:
-                raise IntegrationStop(
-                    "BRANCH_MOVED_CONCURRENTLY",
-                    f"{branch} moved while integrating; retry: {(proc.stderr or '').strip()[-200:]}",
-                )
-            return
-        if _git(holder, "status", "--porcelain").stdout.strip():
-            from build_coordinator.runner.worktree import reconcile_displaced_task_work
-            reconcile_displaced_task_work(holder)
+        if holder is not None:
+            if _git(holder, "status", "--porcelain").stdout.strip():
+                from build_coordinator.runner.worktree import reconcile_displaced_task_work
+
+                reconcile_displaced_task_work(holder)
             if _git(holder, "status", "--porcelain").stdout.strip():
                 raise IntegrationStop(
                     "WORKING_CHECKOUT_DIRTY",
                     f"{branch} is checked out with uncommitted changes at {holder}; commit or stash them, then retry",
                 )
-        proc = _git(holder, "merge", "--ff-only", new)
+        proc = _git(wt, "update-ref", f"refs/heads/{branch}", new, old)
         if proc.returncode != 0:
             raise IntegrationStop(
-                "COORDINATOR_INVARIANT_FAILURE",
-                f"could not fast-forward the {branch} checkout: {(proc.stderr or '').strip()[-200:]}",
+                "BRANCH_MOVED_CONCURRENTLY",
+                f"{branch} moved while integrating; retry: {(proc.stderr or '').strip()[-200:]}",
             )
+        if holder is not None:
+            proc = _git(holder, "merge", "--ff-only", new)
+            if proc.returncode != 0:
+                _git(holder, "reset", "--hard", "HEAD")
+        else:
+            current_wt_branch = _git(wt, "branch", "--show-current").stdout.strip()
+            if current_wt_branch == branch or not current_wt_branch:
+                _git(wt, "checkout", branch)
+                _git(wt, "reset", "--hard", new)
+                _git(wt, "clean", "-fd")
+
