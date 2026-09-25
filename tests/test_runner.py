@@ -8,6 +8,7 @@ from sqlalchemy import delete, select
 
 from build_coordinator.db import Base, SessionLocal, engine, initialize_schema
 from build_coordinator.execution import ExecutionObservation, FakeExecutor
+from build_coordinator.events import record_event
 from build_coordinator.models import (
     BuildCoordinatorState,
     BuildRunnerExecution,
@@ -20,6 +21,7 @@ from build_coordinator.runner import BuildRunner
 import build_coordinator.runner.orchestrator as orchestrator_module
 from build_coordinator.runner.git_safety import FakeGit
 from build_coordinator.runner.models import RunnerConfig, WorkerConfig
+from build_coordinator.runner.routing import ProviderConfig
 from build_coordinator.policy import CoordinatorPolicyError
 from build_coordinator.service import (
     ClaimRequest,
@@ -31,6 +33,7 @@ from build_coordinator.service import (
     upsert_task,
     utcnow,
 )
+from build_coordinator.types import EventInput
 
 
 @pytest.fixture(autouse=True)
@@ -93,6 +96,28 @@ def _runner(config=None, executors=None, git=None):
     )
 
 
+def _targeted_runner(task_id: str, config=None, executors=None, git=None):
+    return BuildRunner(
+        SessionLocal,
+        config or _config(),
+        executors=executors,
+        git=git if git is not None else FakeGit(),
+        target_task_ids={task_id},
+    )
+
+
+def _seed_priority(session, task_id: str, priority: int) -> None:
+    record_event(
+        session,
+        EventInput(
+            task_id=task_id,
+            event_type="project.task_synced",
+            actor="test",
+            event_data={"revision": 1, "priority": priority, "action": "CREATED"},
+        ),
+    )
+
+
 def test_ready_task_dispatches_one_builder():
     with SessionLocal() as session:
         upsert_task(session, _task("RUN-READY"))
@@ -107,6 +132,163 @@ def test_ready_task_dispatches_one_builder():
         assert task.state == "CLAIMED"
         assert execution.role == "BUILDER"
         assert execution.prompt_hash
+
+
+def test_targeted_ready_task_runs_and_unrelated_ready_task_is_untouched():
+    with SessionLocal() as session:
+        upsert_task(session, _task("TARGET"))
+        upsert_task(session, _task("OTHER"))
+        session.commit()
+
+    result = _targeted_runner("TARGET").run_once()
+
+    assert len(result.launched) == 1
+    with SessionLocal() as session:
+        assert session.get(BuildTask, "TARGET").state == "CLAIMED"
+        assert session.get(BuildTask, "OTHER").state == "READY"
+        assert session.scalar(select(BuildRunnerExecution)).task_id == "TARGET"
+
+
+def test_targeted_run_ignores_higher_priority_unrelated_task():
+    with SessionLocal() as session:
+        upsert_task(session, _task("P0-OTHER"))
+        upsert_task(session, _task("TARGET"))
+        _seed_priority(session, "P0-OTHER", 0)
+        _seed_priority(session, "TARGET", 100)
+        session.commit()
+
+    result = _targeted_runner("TARGET").run_once()
+
+    assert len(result.launched) == 1
+    with SessionLocal() as session:
+        assert session.scalar(select(BuildRunnerExecution)).task_id == "TARGET"
+        assert session.get(BuildTask, "P0-OTHER").state == "READY"
+
+
+def test_targeted_missing_task_claims_nothing():
+    with SessionLocal() as session:
+        upsert_task(session, _task("OTHER"))
+        session.commit()
+
+    result = _targeted_runner("MISSING").run_once()
+
+    assert result.launched == []
+    with SessionLocal() as session:
+        assert session.get(BuildTask, "OTHER").state == "READY"
+        assert session.scalar(select(BuildRunnerExecution)) is None
+
+
+def test_targeted_blocked_task_claims_nothing_and_preserves_dependency_check():
+    with SessionLocal() as session:
+        upsert_task(session, _task("DEP"))
+        upsert_task(session, TaskSpec("TARGET", "Target", "d", ["ok"], dependencies=["DEP"]))
+        upsert_task(session, _task("OTHER"))
+        session.commit()
+
+    result = _targeted_runner("TARGET").run_once()
+
+    assert result.launched == []
+    with SessionLocal() as session:
+        assert session.get(BuildTask, "TARGET").state == "READY"
+        assert session.get(BuildTask, "OTHER").state == "READY"
+        assert session.scalar(select(BuildRunnerExecution)) is None
+
+
+def test_targeted_unavailable_provider_fails_safely_without_general_backlog_fallback():
+    config = RunnerConfig(
+        workers=(WorkerConfig("builder-a", "BUILDER", adapter="fake", provider="down"),),
+        providers={"down": ProviderConfig("down", availability="QUOTA_EXHAUSTED", consumption_mode="FALLBACK")},
+        result_dir=os.getenv("BUILD_COORDINATOR_RESULT_DIR"),
+    )
+    with SessionLocal() as session:
+        upsert_task(session, _task("TARGET"))
+        upsert_task(session, _task("OTHER"))
+        session.commit()
+
+    result = _targeted_runner("TARGET", config=config).run_once()
+
+    assert result.launched == []
+    assert result.capacity_full is True
+    with SessionLocal() as session:
+        assert session.get(BuildTask, "TARGET").state == "READY"
+        assert session.get(BuildTask, "OTHER").state == "READY"
+        assert session.scalar(select(BuildRunnerExecution)) is None
+
+
+def test_targeted_task_keeps_normal_review_and_integration_lifecycle():
+    config = RunnerConfig(
+        workers=(
+            WorkerConfig("builder-a", "BUILDER", adapter="fake"),
+            WorkerConfig("reviewer-1", "REVIEWER", adapter="fake"),
+            WorkerConfig("integration-1", "INTEGRATION", adapter="fake"),
+        ),
+        auto_push_allowed=True,
+        result_dir=os.getenv("BUILD_COORDINATOR_RESULT_DIR"),
+    )
+    executors = {
+        "builder-a": FakeExecutor([
+            ExecutionObservation("SUCCEEDED", result_data={"feature_sha": "feature-sha"})
+        ]),
+        "reviewer-1": FakeExecutor([
+            ExecutionObservation(
+                "SUCCEEDED",
+                result_data={"review": {"verdict": "GREEN", "ready_for_integration": True}},
+            )
+        ]),
+        "integration-1": FakeExecutor([ExecutionObservation("SUCCEEDED")]),
+    }
+    with SessionLocal() as session:
+        upsert_task(
+            session,
+            TaskSpec(
+                task_id="TARGET",
+                title="Target",
+                description="d",
+                acceptance_criteria=["ok"],
+                review_policy="INDEPENDENT",
+            ),
+        )
+        upsert_task(session, _task("OTHER"))
+        session.commit()
+
+    runner = _targeted_runner("TARGET", config=config, executors=executors, git=FakeGit())
+    for _ in range(6):
+        runner.run_once()
+
+    with SessionLocal() as session:
+        assert session.get(BuildTask, "TARGET").state == "DONE"
+        assert session.get(BuildTask, "OTHER").state == "READY"
+        roles = [
+            row.role
+            for row in session.scalars(
+                select(BuildRunnerExecution).where(BuildRunnerExecution.task_id == "TARGET")
+            )
+        ]
+        assert roles == ["BUILDER", "REVIEWER", "INTEGRATION"]
+        assert session.scalars(
+            select(BuildRunnerExecution).where(BuildRunnerExecution.task_id == "OTHER")
+        ).all() == []
+
+
+def test_runner_reload_keeps_live_executor_and_replaces_it_when_idle():
+    old_executor = FakeExecutor()
+    runner = _runner(
+        config=RunnerConfig(
+            workers=(WorkerConfig("builder-a", "BUILDER", adapter="fake"),),
+            result_dir=os.getenv("BUILD_COORDINATOR_RESULT_DIR"),
+        ),
+        executors={"builder-a": old_executor},
+    )
+    updated = RunnerConfig(
+        workers=(WorkerConfig("builder-a", "BUILDER", adapter="subprocess", command=("new-worker",)),),
+        result_dir=os.getenv("BUILD_COORDINATOR_RESULT_DIR"),
+    )
+
+    runner.reload_config(updated, live_worker_ids={"builder-a"})
+    assert runner._executors["builder-a"] is old_executor
+
+    runner.reload_config(updated, live_worker_ids=set())
+    assert "builder-a" not in runner._executors
 
 
 def test_worker_saturation_is_backpressure_not_configuration_escalation():
@@ -396,6 +578,70 @@ def test_failed_process_does_not_mark_task_done():
 
     with SessionLocal() as session:
         assert session.get(BuildTask, "RUN-FAIL").state == "CLAIMED"
+
+
+def test_retryable_failure_relaunches_after_backoff_then_escalates_when_exhausted(monkeypatch):
+    """RATE_LIMITED is retryable per the routing taxonomy (SM-002): each failure
+    is retried with no human gate, the backoff grows and is bounded per attempt,
+    every attempt is recorded on its own execution row with a checkpoint, and
+    once max_execution_attempts is exhausted the task escalates with a typed
+    reason instead of looping forever."""
+    clock = {"now": utcnow()}
+    monkeypatch.setattr(orchestrator_module, "_now", lambda: clock["now"])
+
+    def rate_limited():
+        return ExecutionObservation(
+            "FAILED",
+            exit_code=1,
+            result_data={"provider_failure": "RATE_LIMITED", "schema_version": 1},
+        )
+
+    executors = {"builder-a": FakeExecutor([rate_limited(), rate_limited(), rate_limited()])}
+    config = _config()
+    assert config.max_execution_attempts == 3
+    with SessionLocal() as session:
+        upsert_task(session, _task("RUN-RETRY"))
+        session.commit()
+
+    runner = _runner(config, executors=executors)
+    backoffs = []
+    for expected_attempt in (1, 2, 3):
+        runner.run_once()  # launches a fresh attempt once eligible again
+        runner.run_once()  # observes the RATE_LIMITED failure
+        with SessionLocal() as session:
+            executions = session.scalars(
+                select(BuildRunnerExecution)
+                .where(BuildRunnerExecution.task_id == "RUN-RETRY")
+                .order_by(BuildRunnerExecution.launched_at)
+            ).all()
+            assert len(executions) == expected_attempt, "each attempt is its own execution row"
+            latest = executions[-1]
+            assert latest.status == "LOST"
+            assert latest.result_data["retry_attempt"] == expected_attempt
+            assert latest.result_data["retryable_failure"] is True
+            checkpoint_row = session.scalars(
+                select(BuildTaskCheckpoint)
+                .where(BuildTaskCheckpoint.task_id == "RUN-RETRY")
+                .order_by(BuildTaskCheckpoint.created_at)
+            ).all()[-1]
+            assert f"attempt {expected_attempt}" in checkpoint_row.known_failures[0]
+            task = session.get(BuildTask, "RUN-RETRY")
+            if expected_attempt < 3:
+                assert task.state != "BLOCKED", "not exhausted yet: no human gate"
+            backoffs.append(latest.result_data["retry_backoff_seconds"])
+        clock["now"] = clock["now"] + timedelta(seconds=backoffs[-1] + 1)
+
+    assert backoffs == [600, 1200, 2400], "backoff grows per attempt and stays bounded"
+    with SessionLocal() as session:
+        task = session.get(BuildTask, "RUN-RETRY")
+        assert task.state == "BLOCKED"
+        blocked_event = session.scalars(
+            select(BuildTaskEvent)
+            .where(BuildTaskEvent.task_id == "RUN-RETRY")
+            .where(BuildTaskEvent.event_type == "task.transitioned")
+            .where(BuildTaskEvent.to_state == "BLOCKED")
+        ).all()[-1]
+        assert blocked_event.event_data["reason"] == "EXECUTION_RETRY_LIMIT_REACHED"
 
 
 def test_lost_execution_releases_active_claim_to_stale_with_checkpoint():

@@ -1,0 +1,141 @@
+# Known StageMesh product gaps, tracked as ordinary development tasks.
+# TWO_REVIEWERS enforcement is SM-011 (v0.2-roadmap.yaml).
+tasks:
+  - id: SM-012
+    title: Validate real coding-agent execution end to end
+    priority: 30
+    risk: HIGH
+    review: INDEPENDENT
+    objective: >
+      Every parallel run so far used a scripted stand-in worker. Prove the
+      subprocess adapter with a real coding-agent CLI in managed worktrees:
+      prompt delivery, structured result file, commits on the task branch,
+      review and integration.
+    requirements:
+      - Use only the worker templates in project.yaml plus operator environment; no per-run manual worktree or worker choice.
+      - Record durable evidence of each real execution (provider, runtime, exit code, result file).
+    acceptance_criteria:
+      - One builder, one independent reviewer and one integration execution complete with a real agent on a scratch repository.
+      - A malformed or missing result file is reported as a typed failure, not silently accepted.
+    scope:
+      allowed_paths: [examples/, docs/, tests/]
+
+  - id: SM-013
+    delivered_by: "StageMesh 0.2.0a1: deterministic validation gate (runner/validation.py, orchestrator._validation_gate; tests/test_engine_lifecycle.py::test_validation_*)"
+    title: Deterministic execution of task validation commands
+    priority: 5
+    risk: HIGH
+    review: INDEPENDENT
+    objective: >
+      A task's validation entries are handed to agents as prose. StageMesh
+      itself must run them: after a builder succeeds, run each command in the
+      task workspace and gate the VALIDATING stage on the results.
+    requirements:
+      - Run commands as argument arrays with a timeout and no shell interpolation; capture exit code and a bounded output tail as durable evidence.
+      - A failing command sends the task to REWORK_REQUIRED with the failure recorded; a task with no commands is unchanged.
+      - Commands come only from synchronized project definitions, never from executor output.
+    acceptance_criteria:
+      - A task with a failing validation command never reaches REVIEW_READY.
+      - Validation evidence is visible in `stagemesh project status`.
+    scope:
+      allowed_paths: [build_coordinator/runner/, build_coordinator/project/, tests/]
+    validation:
+      - python -m pytest tests/test_runner.py tests/test_project_backlog.py -q
+
+  - id: SM-014
+    delivered_by: "StageMesh 0.2.0a1: integrated task branch cleanup (runner/worktree.py cleanup_task_branch; tests/test_engine_lifecycle.py::test_integrated_task_branches_*)"
+    title: Clean up task branches and worktrees after integration
+    priority: 25
+    dependencies: [SM-001]
+    risk: MEDIUM
+    review: INDEPENDENT
+    objective: Remove merged task branches (local and remote-tracking) and stale stashes once a task is DONE, without touching resumable work.
+    acceptance_criteria:
+      - Only branches whose reviewed SHA is contained in main_ref are deleted.
+      - A task that is not DONE keeps its branch and worktree state.
+    scope:
+      allowed_paths: [build_coordinator/runner/, tests/]
+
+  - id: SM-015
+    title: Additional provider and runtime validation
+    priority: 60
+    dependencies: [SM-003, SM-012]
+    risk: MEDIUM
+    review: INDEPENDENT
+    objective: Exercise a second provider/runtime through the same project mechanism and confirm routing fallbacks behave as configured.
+    acceptance_criteria:
+      - A task is routed to a fallback provider when the first is unavailable, with the routing decision audited.
+      - Reviewer and builder providers can differ and the reviewer is never the builder worker.
+    scope:
+      allowed_paths: [build_coordinator/runner/, examples/, tests/]
+
+  - id: SM-016
+    title: Workspace setup commands for dependency-heavy projects
+    priority: 20
+    risk: MEDIUM
+    review: INDEPENDENT
+    objective: >
+      Fresh isolated worktrees have no installed dependencies (node_modules, virtualenvs), so
+      validation commands for such projects cannot run. Add an optional `execution.setup` list to
+      project.yaml: commands StageMesh runs (no shell, with timeout and captured evidence) in a
+      task workspace after it is prepared and before the agent starts.
+    acceptance_criteria:
+      - A project with `execution.setup` has the commands run once per prepared workspace, with durable evidence.
+      - A failing setup command blocks that task with a typed reason instead of launching the agent.
+      - Projects without `execution.setup` behave exactly as before.
+    scope:
+      allowed_paths: [build_coordinator/project/, build_coordinator/runner/, tests/, docs/]
+
+  - id: SM-017
+    title: Run validation commands without blocking the coordination loop
+    priority: 30
+    dependencies: [SM-016]
+    risk: MEDIUM
+    review: INDEPENDENT
+    objective: >
+      Validation currently runs inside the runner cycle, so a long test suite delays dispatch and
+      observation of other workers. Run validation as a tracked background execution with the same
+      evidence and lifecycle gating.
+    acceptance_criteria:
+      - Other tasks are dispatched and observed while one task's validation is running.
+      - A coordinator restart during validation re-runs it instead of losing or trusting it.
+    scope:
+      allowed_paths: [build_coordinator/runner/, tests/]
+
+  - id: SM-018
+    title: Prefer a different provider for independent review
+    priority: 40
+    risk: LOW
+    review: INDEPENDENT
+    objective: >
+      Independent review already excludes the implementing worker. When several providers are
+      available, also prefer a reviewer from a different provider than the builder, without
+      blocking when only one provider exists.
+    acceptance_criteria:
+      - With two providers, review of a task built on one is routed to the other, and the routing audit says why.
+      - With one provider, review proceeds as today.
+    scope:
+      allowed_paths: [build_coordinator/runner/routing.py, tests/]
+
+  - id: SM-019
+    title: Agent wrapper non-ASCII Unicode console output safety
+    priority: 10
+    risk: LOW
+    review: INDEPENDENT
+    objective: >
+      Under Windows cp1252 consoles, agent output containing non-ASCII Unicode
+      characters (e.g. arrows, emoji, UTF-8 symbols) caused print() in wrapper.py
+      to raise UnicodeEncodeError, losing successful agent executions. The wrapper
+      must safely handle arbitrary Unicode output without crashing or corrupting
+      the agent result contract.
+    requirements:
+      - Safely write stdout tail using binary buffer or replacement fallback under narrow console encodings.
+      - Add regression test coverage for narrow console encodings.
+    acceptance_criteria:
+      - The agent wrapper never crashes on arbitrary Unicode characters under narrow console encodings.
+      - Result file and exit codes are written reliably regardless of console encoding.
+      - Regression tests verify non-ASCII console output safety.
+    scope:
+      allowed_paths: [build_coordinator/agents/, tests/]
+    validation:
+      - pytest tests/test_global_and_onboarding.py -k test_wrapper -q

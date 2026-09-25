@@ -60,6 +60,7 @@ class _PromptBuilder:
         payload = {
             "global_build_policy": GLOBAL_BUILD_POLICY,
             "role_policy": self.role_policy,
+            "task_definition": extra.get("task_definition"),
             "task_envelope": envelope,
             "resume_context": extra,
             "result_file_contract": extra.get("result_file_contract")
@@ -85,7 +86,10 @@ class ReviewerPromptBuilder(_PromptBuilder):
         "write structured ReviewVerdict JSON to the runner-supplied result "
         "file. Do not modify product code. Do not treat free-form prose as "
         "the lifecycle result. reviewed_feature_sha must match the "
-        "runner-captured SHA supplied in this prompt."
+        "runner-captured SHA supplied in this prompt. Your worktree is "
+        "StageMesh-managed and may not be on the feature branch: inspect the "
+        "code at that SHA (for example `git checkout --detach <sha>` in your "
+        "own worktree) and never commit."
     )
 
 
