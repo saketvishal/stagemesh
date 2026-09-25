@@ -100,7 +100,14 @@ def cmd_backup(args: argparse.Namespace) -> int:
 
 
 def cmd_rewrite(args: argparse.Namespace) -> int:
-    """Rewrite commit messages in `range` to strip AI-provider attribution, preserving trees/topology."""
+    """Rewrite commit messages in `range` to strip AI-provider attribution, preserving trees/topology.
+
+    Uses `--partial` because `--refs` scopes this rewrite to less than full
+    history: without it, filter-repo treats the run as a fresh-start rewrite
+    and prunes the `origin` remote plus any local branches/tags outside
+    `range`, which would destroy refs backing other open PRs. `--partial`
+    keeps the `origin` remote and leaves out-of-range branches/tags intact.
+    """
     filter_repo = _run(["git", "filter-repo", "--version"])
     if filter_repo.returncode != 0:
         print("git-filter-repo is required (pip install git-filter-repo) and was not found.", file=sys.stderr)
@@ -129,6 +136,7 @@ def cmd_rewrite(args: argparse.Namespace) -> int:
             "git",
             "filter-repo",
             "--force",
+            "--partial",
             "--refs",
             args.range,
             "--commit-callback",
