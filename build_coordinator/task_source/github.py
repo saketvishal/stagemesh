@@ -16,12 +16,7 @@ from typing import Any
 from sqlalchemy import select
 
 from build_coordinator.events import record_event
-from build_coordinator.models import (
-    BuildObjective,
-    BuildObjectiveEvent,
-    BuildTask,
-    BuildTaskEvent,
-)
+from build_coordinator.models import BuildObjective, BuildObjectiveEvent, BuildTask, BuildTaskEvent
 from build_coordinator.objectives import create_objective
 from build_coordinator.service import upsert_task
 from build_coordinator.task_source.base import SyncResult, TaskSource
@@ -169,7 +164,7 @@ class GitHubTaskSource(TaskSource):
         else:
             task_id = f"GH-{number}"
 
-        is_objective = any("objective" in l.lower() for l in labels) or "## Objective" in body
+        is_objective = self._is_objective_issue(labels, body)
         ac = self._parse_acceptance_criteria(body)
         deps = self._parse_dependencies(body)
 
@@ -316,11 +311,22 @@ class GitHubTaskSource(TaskSource):
                 elif num == 2:
                     return 50
                 return num
-        if any("status:queued" in l.lower() for l in labels) or any("objective" in l.lower() for l in labels) or "## Objective" in body:
+        if (
+            any("status:queued" in l.lower() for l in labels)
+            or GitHubTaskSource._is_objective_issue(labels, body)
+        ):
             if re.search(r"\b(?:primary|alpha|v1 internal alpha)\b", body, re.IGNORECASE):
                 return 10
             return 20
         return 100
+
+    @staticmethod
+    def _is_objective_issue(labels: list[str], body: str) -> bool:
+        normalized = {label.strip().lower() for label in labels}
+        return bool(
+            {"objective", "stagemesh:objective"} & normalized
+            or re.search(r"^\s*#{1,6}\s*objective\b", body or "", re.IGNORECASE | re.MULTILINE)
+        )
 
     def _sync_objective(
         self,
@@ -331,16 +337,17 @@ class GitHubTaskSource(TaskSource):
         ac: list[str],
         url: str,
     ) -> BuildObjective:
-        existing = session.get(BuildObjective, objective_id)
-        if existing is not None:
-            return existing
-        obj = BuildObjective(
-            objective_id=objective_id,
-            goal=f"{title}: {body[:500]}",
-            completion_criteria=list(ac) if ac else [],
-            state="PLANNING",
+        existed = session.get(BuildObjective, objective_id) is not None
+        obj = create_objective(
+            session,
+            ObjectiveSpec(
+                objective_id=objective_id,
+                goal=f"{title}: {body[:500]}",
+                completion_criteria=tuple(ac),
+            ),
         )
-        session.add(obj)
+        if existed:
+            return obj
         session.add(
             BuildObjectiveEvent(
                 objective_id=objective_id,
@@ -402,7 +409,7 @@ class GitHubTaskSource(TaskSource):
                 dep_id = f"GH-{num}"
                 if dep_id not in deps:
                     deps.append(dep_id)
-            # Match explicit task IDs (e.g. GH-100, SM-001, CAV-122-01)
+            # Match explicit task IDs (e.g. GH-100, SM-001, TASK-122-01)
             for tid in re.findall(r"\b([A-Za-z0-9_]+-\d+)\b", clause):
                 if tid not in deps:
                     deps.append(tid)
