@@ -310,6 +310,39 @@ def test_targeted_task_keeps_normal_review_and_integration_lifecycle():
         ).all() == []
 
 
+def test_branch_assigned_builder_success_without_feature_sha_blocks_for_rework():
+    executors = {
+        "builder-a": FakeExecutor([ExecutionObservation("SUCCEEDED", result_data={})]),
+    }
+    with SessionLocal() as session:
+        upsert_task(session, _task("RUN-NO-COMMIT"))
+        session.commit()
+
+    runner = _targeted_runner("RUN-NO-COMMIT", executors=executors)
+    runner.run_once()
+    result = runner.run_once()
+
+    assert "RUN-NO-COMMIT:BUILDER_COMMIT_CONTRACT" in result.escalations
+    with SessionLocal() as session:
+        task = session.get(BuildTask, "RUN-NO-COMMIT")
+        execution = session.scalar(
+            select(BuildRunnerExecution).where(BuildRunnerExecution.task_id == "RUN-NO-COMMIT")
+        )
+        blocked_event = session.scalar(
+            select(BuildTaskEvent)
+            .where(BuildTaskEvent.task_id == "RUN-NO-COMMIT")
+            .where(BuildTaskEvent.to_state == "BLOCKED")
+        )
+
+        assert task.state == "BLOCKED"
+        assert task.branch_name == "stagemesh/RUN-NO-COMMIT"
+        assert execution.status == "SUCCEEDED"
+        evidence = blocked_event.event_data
+        assert evidence["underlying_invariant"] == "BUILDER_COMMIT_CONTRACT"
+        assert evidence["recovery_classification"] == "REWORK_REQUIRED"
+        assert execution.result_data["failure_evidence"]["recovery_classification"] == "REWORK_REQUIRED"
+
+
 def test_runner_reload_keeps_live_executor_and_replaces_it_when_idle():
     old_executor = FakeExecutor()
     runner = _runner(
