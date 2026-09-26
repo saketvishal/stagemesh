@@ -82,6 +82,7 @@ from build_coordinator.runner.models import (
 from build_coordinator.runner.routing import (
     _naive,
     ProviderConfig,
+    PROVIDER_FAILURES,
     RETRYABLE_PROVIDER_FAILURES,
     RoutingDecision,
     StageRequirement,
@@ -732,18 +733,17 @@ class BuildRunner:
                     )
                 ) or 0
                 if attempts < self._config.max_execution_attempts:
-                    backoff = _retry_backoff_seconds("NO_CHANGES", attempts)
                     record_event(
                         session,
                         EventInput(
                             task_id=execution.task_id,
-                            event_type="runner.provider_failure",
+                            event_type="runner.no_changes_produced",
                             actor="runner",
                             event_data={
                                 "provider": execution.provider,
                                 "worker_id": execution.worker_id,
-                                "failure": "NO_CHANGES_PRODUCED",
-                                "until": (_now() + timedelta(seconds=backoff)).isoformat(),
+                                "retry_generation": retry_generation,
+                                "attempt": attempts,
                                 "detail": "Agent produced no changes on task branch",
                             },
                         ),
@@ -1436,7 +1436,10 @@ class BuildRunner:
                 role = "BUILDER"
 
             worker, availability, decision = self._select_worker(
-                role, task_id=task.task_id, session=session
+                role,
+                task_id=task.task_id,
+                session=session,
+                deprioritized_workers=self._no_change_workers(session, task.task_id),
             )
             if availability == "slots_occupied":
                 result.capacity_full = True
@@ -2155,12 +2158,15 @@ class BuildRunner:
                 until = datetime.fromisoformat(str(data.get("until")))
             except ValueError:
                 continue
+            failure = str(data.get("failure") or "").upper()
+            if failure not in PROVIDER_FAILURES:
+                continue
             provider = data.get("provider")
             if provider and until > now:
                 current = providers.get(provider) or ProviderConfig(provider)
                 providers[provider] = dataclasses.replace(
                     current,
-                    availability=str(data.get("failure")),
+                    availability=failure,
                     consumption_mode="FALLBACK",
                 )
         return providers
@@ -2610,6 +2616,26 @@ class BuildRunner:
             if str(review.get("verdict", "")).upper() == "REVIEW_ENVIRONMENT_BLOCKED":
                 count += 1
         return count
+
+    def _no_change_workers(self, session: Session, task_id: str) -> set[str]:
+        task = session.get(BuildTask, task_id)
+        retry_generation = int((task.retry_generation if task is not None else 0) or 0)
+        rows = session.scalars(
+            select(BuildTaskEvent)
+            .where(BuildTaskEvent.task_id == task_id)
+            .where(BuildTaskEvent.event_type == "runner.no_changes_produced")
+        ).all()
+        workers: set[str] = set()
+        for row in rows:
+            data = row.event_data or {}
+            try:
+                event_generation = int(data.get("retry_generation", 0) or 0)
+            except (TypeError, ValueError):
+                event_generation = 0
+            worker_id = str(data.get("worker_id") or "").strip()
+            if worker_id and event_generation == retry_generation:
+                workers.add(worker_id)
+        return workers
 
     def _environment_blocked_reviewers(self, session: Session, task_id: str) -> set[str]:
         since = session.scalar(
