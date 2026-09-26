@@ -436,11 +436,11 @@ def handle_continue(args: argparse.Namespace) -> None:
                 _execution_row(session.get(BuildRunnerExecution, execution_id))
                 for execution_id in result.launched
             ]
-        for change in result.provider_state_changes:
+        for change in getattr(result, "provider_state_changes", []) or []:
             print(_provider_state_change_line(project.project_id, change), file=sys.stderr, flush=True)
         waiting_now = {
             task_id
-            for task_id, reason in (result.scheduling_reasons or {}).items()
+            for task_id, reason in (getattr(result, "scheduling_reasons", {}) or {}).items()
             if reason == "provider_capacity_wait"
         }
         for task_id in sorted(waiting_now - announced_capacity_waits):
@@ -465,8 +465,8 @@ def handle_continue(args: argparse.Namespace) -> None:
                 "observed": list(result.observed),
                 "recovered": list(result.recovered),
                 "escalations": list(result.escalations),
-                "scheduling_reasons": dict(result.scheduling_reasons),
-                "provider_state_changes": list(result.provider_state_changes),
+                "scheduling_reasons": dict(getattr(result, "scheduling_reasons", {}) or {}),
+                "provider_state_changes": list(getattr(result, "provider_state_changes", []) or []),
                 "live_builders": len(live_builders),
                 "live_executions": len(live),
             }
@@ -554,7 +554,7 @@ def _escalation_label(reason: str) -> str:
 def _provider_capacity_waiting(result) -> bool:
     return any(
         reason == "provider_capacity_wait"
-        for reason in (result.scheduling_reasons or {}).values()
+        for reason in (getattr(result, "scheduling_reasons", {}) or {}).values()
     )
 
 
