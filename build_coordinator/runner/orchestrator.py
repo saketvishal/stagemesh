@@ -3425,6 +3425,9 @@ class BuildRunner:
         recent_integrations = self._recent_integration_evidence(session, execution.task_id)
         superseding_integration = self._find_superseding_integration(repo_root, scope, recent_integrations)
         scope_touched_by_recent_integration = bool(scope_changed and superseding_integration is not None)
+        integration_explicitly_reconciles_task = self._integration_explicitly_reconciles_task(
+            task, superseding_integration
+        )
         stale_by_scope_reconciliation = self._stale_by_scope_reconciliation(
             task,
             satisfaction,
@@ -3444,6 +3447,7 @@ class BuildRunner:
             "acceptance_satisfaction_evidence": satisfaction,
             "definition_marked_stale": marked_stale,
             "stale_by_scope_reconciliation": stale_by_scope_reconciliation,
+            "integration_explicitly_reconciles_task": integration_explicitly_reconciles_task,
             "scope_touched_by_recent_integration": scope_touched_by_recent_integration,
             "superseding_integration": superseding_integration,
             "scope_changed_since_base": scope_changed,
@@ -3499,6 +3503,13 @@ class BuildRunner:
             return False
         if satisfaction.get("satisfied"):
             return False
+        return True
+
+    def _integration_explicitly_reconciles_task(
+        self, task: BuildTask | None, superseding_integration: dict | None
+    ) -> bool:
+        if task is None or superseding_integration is None:
+            return False
         superseded_ids = {
             task_id
             for field in (
@@ -3514,12 +3525,13 @@ class BuildRunner:
     def _find_superseding_integration(
         self, repo_root: Path, scope: list[str], recent_integrations: list[dict]
     ) -> dict | None:
-        """Scope files changing since base_sha is only *evidence* something moved;
-        it is not proof this task's definition is stale/obsolete. Require a concrete
-        tie: a different task's integration whose own commit actually touched a file
-        within this task's permitted scope. Without that tie the outcome must stay
-        UNRESOLVED so genuine no-change cases keep retrying with a bounded budget
-        instead of being blocked as STALE_OR_OBSOLETE."""
+        """Find a different task integration that concretely touched this task's scope.
+
+        Scope drift alone is not enough to mark a task stale; the deterministic
+        reconciliation tie is the recorded integration's own commit changing a
+        permitted-scope path. Without that tie, genuine no-change cases stay
+        UNRESOLVED and keep the bounded retry path.
+        """
         if not scope:
             return None
         for integration in recent_integrations:

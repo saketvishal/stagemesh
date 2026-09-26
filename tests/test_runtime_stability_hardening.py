@@ -716,7 +716,7 @@ def test_concurrent_integration_can_satisfy_ready_task_without_builder_retry(tmp
         assert recent[0]["same_task"] is False
 
 
-def test_concurrent_scope_change_stays_unresolved_when_acceptance_not_satisfied(tmp_path: Path):
+def test_concurrent_scope_change_obsoletes_ready_task_when_acceptance_not_satisfied(tmp_path: Path):
     repo, _ = _setup_test_repo(tmp_path)
     session_factory, runner = _setup_runner(tmp_path, repo)
     base_sha = _git(repo, "rev-parse", "HEAD").stdout.strip()
@@ -779,16 +779,17 @@ def test_concurrent_scope_change_stays_unresolved_when_acceptance_not_satisfied(
         session.commit()
 
         refreshed = session.get(BuildTask, "GH-STALE-SCOPE")
-        assert refreshed.state != "BLOCKED"
-        assert result.escalations == []
+        assert refreshed.state == "BLOCKED"
+        assert result.escalations == ["GH-STALE-SCOPE:STALE_OR_OBSOLETE_TASK_DEFINITION"]
         reconciled = session.scalar(
             select(BuildTaskEvent)
             .where(BuildTaskEvent.task_id == "GH-STALE-SCOPE")
             .where(BuildTaskEvent.event_type == "runner.no_changes_reconciled")
         )
         assert reconciled is not None
-        assert reconciled.event_data["outcome"] == "UNRESOLVED"
-        assert reconciled.event_data["stale_by_scope_reconciliation"] is False
+        assert reconciled.event_data["outcome"] == "STALE_OR_OBSOLETE"
+        assert reconciled.event_data["stale_by_scope_reconciliation"] is True
+        assert reconciled.event_data["integration_explicitly_reconciles_task"] is False
         assert reconciled.event_data["scope_touched_by_recent_integration"] is True
         assert reconciled.event_data["acceptance_appears_satisfied"] is False
 
@@ -879,7 +880,7 @@ def test_concurrent_integration_can_obsolete_ready_task_without_premarked_metada
         ]
 
 
-def test_integration_event_with_merge_commit_stays_unresolved_when_scope_changed(tmp_path: Path):
+def test_integration_event_with_merge_commit_obsoletes_task_when_scope_changed(tmp_path: Path):
     repo, _ = _setup_test_repo(tmp_path)
     session_factory, runner = _setup_runner(tmp_path, repo)
     base_sha = _git(repo, "rev-parse", "HEAD").stdout.strip()
@@ -946,16 +947,19 @@ def test_integration_event_with_merge_commit_stays_unresolved_when_scope_changed
         session.commit()
 
         refreshed = session.get(BuildTask, "GH-STALE-MERGE-EVENT")
-        assert refreshed.state != "BLOCKED"
-        assert result.escalations == []
+        assert refreshed.state == "BLOCKED"
+        assert result.escalations == [
+            "GH-STALE-MERGE-EVENT:STALE_OR_OBSOLETE_TASK_DEFINITION"
+        ]
         reconciled = session.scalar(
             select(BuildTaskEvent)
             .where(BuildTaskEvent.task_id == "GH-STALE-MERGE-EVENT")
             .where(BuildTaskEvent.event_type == "runner.no_changes_reconciled")
         )
         assert reconciled is not None
-        assert reconciled.event_data["outcome"] == "UNRESOLVED"
-        assert reconciled.event_data["stale_by_scope_reconciliation"] is False
+        assert reconciled.event_data["outcome"] == "STALE_OR_OBSOLETE"
+        assert reconciled.event_data["stale_by_scope_reconciliation"] is True
+        assert reconciled.event_data["integration_explicitly_reconciles_task"] is False
         assert reconciled.event_data["scope_touched_by_recent_integration"] is True
         superseding = reconciled.event_data["superseding_integration"]
         assert superseding["task_id"] == "GH-OTHER"
