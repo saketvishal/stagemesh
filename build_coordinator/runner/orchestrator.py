@@ -125,6 +125,7 @@ from build_coordinator.runner.scheduling import (
     active_workers,
     active_worktrees,
     check_task_readiness,
+    launch_counts,
     normalize_worktree_path,
     record_task_withheld,
     sort_tasks_for_dispatch,
@@ -2290,9 +2291,49 @@ class BuildRunner:
                 )
         return providers
 
+    def _provider_failure_visibility(self, session: Session | None) -> dict[str, dict[str, Any]]:
+        if session is None:
+            return {}
+        now = _now()
+        visibility: dict[str, dict[str, Any]] = {}
+        rows = session.scalars(
+            select(BuildTaskEvent).where(BuildTaskEvent.event_type == "runner.provider_failure")
+        ).all()
+        for row in rows:
+            data = row.event_data or {}
+            provider = data.get("provider")
+            if not provider:
+                continue
+            detail = visibility.setdefault(str(provider), {"failures": 0})
+            detail["failures"] += 1
+            try:
+                until = datetime.fromisoformat(str(data.get("until")))
+            except ValueError:
+                until = None
+            failure = str(data.get("failure") or "").upper()
+            if until and until > now:
+                active = detail.get("active_failure")
+                if not active or str(active.get("reset_at") or "") < until.isoformat():
+                    detail["active_failure"] = {
+                        "failure": failure,
+                        "reset_at": until.isoformat(),
+                        "seconds_until_reset": max(0.0, (until - now).total_seconds()),
+                    }
+            elif until:
+                detail["last_reset_at"] = max(str(detail.get("last_reset_at") or ""), until.isoformat())
+        return visibility
+
     def diagnostics(self, session: Session | None = None) -> dict[str, Any]:
         """Summary of worker pool, providers, capabilities, availability, and concurrency."""
         effective_providers = self._effective_providers(session)
+        active_counts = active_worker_counts(session, _now()) if session is not None else {}
+        launches = launch_counts(session) if session is not None else {}
+        active_by_provider: dict[str, int] = {}
+        launches_by_provider: dict[str, int] = {}
+        for worker in self._config.workers:
+            active_by_provider[worker.provider] = active_by_provider.get(worker.provider, 0) + active_counts.get(worker.worker_id, 0)
+            launches_by_provider[worker.provider] = launches_by_provider.get(worker.provider, 0) + launches.get(worker.worker_id, 0)
+        failure_visibility = self._provider_failure_visibility(session)
         worker_summary = []
         for w in self._config.workers:
             p = effective_providers.get(w.provider)
@@ -2303,8 +2344,17 @@ class BuildRunner:
                 "provider": w.provider,
                 "runtime": w.runtime,
                 "capabilities": list(w.capabilities),
+                "active_workers": active_counts.get(w.worker_id, 0),
+                "active_provider_workers": active_by_provider.get(w.provider, 0),
+                "launches": launches.get(w.worker_id, 0),
+                "mode": p.consumption_mode if p else "ACTIVE",
                 "consumption_mode": p.consumption_mode if p else "ACTIVE",
                 "availability": p.availability if p else "AVAILABLE",
+                "eligible": (
+                    w.enabled
+                    and w.adapter != "unconfigured"
+                    and (p is None or (p.enabled and p.consumption_mode != "DISABLED" and p.availability == "AVAILABLE"))
+                ),
                 "reason_unavailable": (p.metadata.get("reason") or "") if p and p.availability != "AVAILABLE" else None,
             })
         configured_builders = [w for w in self._config.workers if w.role == "BUILDER"]
@@ -2314,6 +2364,22 @@ class BuildRunner:
         ]
         return {
             "workers": worker_summary,
+            "providers": {
+                provider: {
+                    "mode": provider_config.consumption_mode,
+                    "consumption_mode": provider_config.consumption_mode,
+                    "availability": provider_config.availability,
+                    "eligible": (
+                        provider_config.enabled
+                        and provider_config.consumption_mode != "DISABLED"
+                        and provider_config.availability == "AVAILABLE"
+                    ),
+                    "active_workers": active_by_provider.get(provider, 0),
+                    "launches": launches_by_provider.get(provider, 0),
+                    **failure_visibility.get(provider, {}),
+                }
+                for provider, provider_config in effective_providers.items()
+            },
             "configured_concurrency": sum(1 for w in configured_builders),
             "executable_builders": executable_builders,
             "has_configured_builders": any(w.adapter != "unconfigured" for w in configured_builders),
