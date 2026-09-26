@@ -585,6 +585,38 @@ class GitHubTaskSource(TaskSource):
 
         return None
 
+    def is_objective_fully_delivered(self, session, objective_id: str) -> bool:
+        """Whether a GitHub-backed objective's internal COMPLETED state has
+        actually been mirrored onto the source issue (label + close).
+
+        #87: internal `COMPLETED` reflects implementation truth only -- it
+        must never be read as "fully synchronized/delivered" on its own.
+        Callers that need to know whether the objective is *durably* done
+        from GitHub's perspective (not just locally) must consult this
+        instead of `BuildObjective.state`.
+        """
+        obj = session.get(BuildObjective, objective_id)
+        if obj is None or obj.state != "COMPLETED":
+            return False
+        if not self.repo or self.dry_run:
+            return True
+        issue_number = self._resolve_issue_number(session, objective_id, is_objective=True)
+        if issue_number is None:
+            return True
+        return self._is_outbound_synced(session, objective_id, "COMPLETED", is_objective=True)
+
+    def is_task_fully_delivered(self, session, task_id: str) -> bool:
+        """Task-level counterpart of `is_objective_fully_delivered`. See #87."""
+        task = session.get(BuildTask, task_id)
+        if task is None or task.state != "DONE":
+            return False
+        if not self.repo or self.dry_run:
+            return True
+        issue_number = self._resolve_issue_number(session, task_id, is_objective=False)
+        if issue_number is None:
+            return True
+        return self._is_outbound_synced(session, task_id, "DONE", is_objective=False)
+
     def _is_outbound_synced(self, session, entity_id: str, state: str, is_objective: bool = False) -> bool:
         if is_objective:
             events = session.scalars(
@@ -670,14 +702,21 @@ class GitHubTaskSource(TaskSource):
         comment_body: str,
         label: str,
         should_close: bool,
+        synced_state: str,
         is_objective: bool = False,
     ) -> bool:
+        # #87: the recorded `synced_state` must match the value idempotency
+        # checks look up (the caller's lifecycle `state`, e.g. "COMPLETED"
+        # for an objective) -- not a value derived from `should_close`/
+        # `label` here. A mismatch would make `_is_outbound_synced` never
+        # recognize a prior success, causing side effects (comment/close) to
+        # be re-attempted forever instead of becoming a stable no-op.
         if not self.repo or self.dry_run:
             self._record_outbound_synced(
                 session,
                 entity_id,
                 issue_number,
-                state="DONE" if should_close else label,
+                state=synced_state,
                 is_objective=is_objective,
             )
             return True
@@ -709,7 +748,7 @@ class GitHubTaskSource(TaskSource):
                     session,
                     entity_id,
                     issue_number,
-                    state="DONE" if should_close else label,
+                    state=synced_state,
                     is_objective=is_objective,
                 )
                 return True
@@ -869,6 +908,7 @@ class GitHubTaskSource(TaskSource):
             comment_body=comment_body,
             label=label,
             should_close=should_close,
+            synced_state=state,
             is_objective=False,
         )
 
@@ -925,6 +965,7 @@ class GitHubTaskSource(TaskSource):
             comment_body=comment_body,
             label=label,
             should_close=should_close,
+            synced_state=state,
             is_objective=True,
         )
 
