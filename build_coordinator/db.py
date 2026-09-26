@@ -16,7 +16,7 @@ from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from build_coordinator.config import BuildCoordinatorSettings, get_settings
 
-CURRENT_SCHEMA_VERSION = 4
+CURRENT_SCHEMA_VERSION = 5
 SCHEMA_VERSION_TABLE = "build_coordinator_schema_version"
 
 
