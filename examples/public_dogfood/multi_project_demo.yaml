@@ -10,7 +10,7 @@ projects:
     concurrency: 1
 global_invocation:
   command_examples:
-    - stagemesh continue --capacity 2
+    - stagemesh continue --all --capacity 2
     - stagemesh "Continue all registered projects."
 expected:
   - two projects keep isolated state

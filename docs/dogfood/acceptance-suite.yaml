@@ -31,9 +31,9 @@ scenarios:
       - cleanup
     command_outline:
       - stagemesh init
-      - stagemesh objective create DEMO-001 --review-policy SELF
-      - stagemesh run --once
-      - stagemesh cleanup --dry-run
+      - stagemesh objective create DEMO-001 --title "Demo public dogfood task" --review-policy SELF
+      - stagemesh continue --once
+      - "automatic: runner cleanup_branches config removes the worktree/branch after integration - see build_coordinator/runner/worktree.py:cleanup_task_branch"
     expected_evidence:
       - task reaches an integration-ready terminal state
       - result JSON identity fields match execution context
@@ -47,9 +47,9 @@ scenarios:
       - validation
       - GitHub delivery
     command_outline:
-      - stagemesh objective create DEMO-002 --review-policy INDEPENDENT
-      - stagemesh run --once
-      - stagemesh github outbound --dry-run
+      - stagemesh objective create DEMO-002 --title "Demo staged review task" --review-policy INDEPENDENT
+      - stagemesh continue --once
+      - stagemesh continue --once --github --dry-run
     expected_evidence:
       - builder worker and reviewer worker are different ids
       - reviewed SHA is captured and matched before integration
@@ -63,7 +63,7 @@ scenarios:
       - global invocation
       - cleanup
     command_outline:
-      - stagemesh continue --capacity 2
+      - stagemesh continue --all --capacity 2
       - stagemesh "Continue all registered projects."
     expected_evidence:
       - two independent builder claims run concurrently when capacity allows
