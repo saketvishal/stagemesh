@@ -125,6 +125,7 @@ from build_coordinator.runner.scheduling import (
     active_workers,
     active_worktrees,
     check_task_readiness,
+    launch_counts,
     normalize_worktree_path,
     record_task_withheld,
     sort_tasks_for_dispatch,
@@ -741,20 +742,12 @@ class BuildRunner:
                     )
                 ) or 0
                 if attempts < self._config.max_execution_attempts:
-                    record_event(
+                    self._record_no_changes_produced(
                         session,
-                        EventInput(
-                            task_id=execution.task_id,
-                            event_type="runner.no_changes_produced",
-                            actor="runner",
-                            event_data={
-                                "provider": execution.provider,
-                                "worker_id": execution.worker_id,
-                                "retry_generation": retry_generation,
-                                "attempt": attempts,
-                                "detail": "Agent produced no changes on task branch",
-                            },
-                        ),
+                        execution,
+                        retry_generation=retry_generation,
+                        attempt=attempts,
+                        detail="Agent produced no changes on task branch",
                     )
                     release_active_claims(session, execution.task_id, completed=False)
                     target_state = "RESUMABLE" if task and task.state in ("CLAIMED", "IN_PROGRESS") else "READY"
@@ -1196,6 +1189,75 @@ class BuildRunner:
         task = session.get(BuildTask, execution.task_id)
         retry_generation = int((task.retry_generation if task is not None else 0) or 0)
 
+        if failure == "NO_CHANGES_PRODUCED" and execution.role in {"BUILDER", "REMEDIATION"}:
+            attempts = session.scalar(
+                select(func.count())
+                .select_from(BuildRunnerExecution)
+                .where(BuildRunnerExecution.task_id == execution.task_id)
+                .where(BuildRunnerExecution.role == execution.role)
+                .where(BuildRunnerExecution.status.in_(("LOST", "FAILED")))
+                .where(
+                    or_(
+                        BuildRunnerExecution.result_data["retry_generation"].as_integer() == retry_generation,
+                        BuildRunnerExecution.result_data["retry_generation"].as_integer().is_(None)
+                        if retry_generation == 0
+                        else False,
+                    )
+                )
+            ) or 0
+            attempt = attempts + 1
+            detail = str(merged.get("detail") or "Agent produced no changes on task branch")[:300]
+            self._record_no_changes_produced(
+                session,
+                execution,
+                retry_generation=retry_generation,
+                attempt=attempt,
+                detail=detail,
+            )
+            execution.status = "LOST"
+            execution.completed_at = _now()
+            execution.result_data = {
+                **(execution.result_data or {}),
+                **merged,
+                "reconciliation_state": "NO_CHANGES_PRODUCED",
+                "retry_attempt": attempt,
+                "retry_generation": retry_generation,
+                "retryable_failure": True,
+                "retry_backoff_seconds": None,
+            }
+            if execution.claim_id:
+                try:
+                    checkpoint(
+                        session,
+                        execution.claim_id,
+                        worker_id=execution.worker_id,
+                        data=CheckpointInput(
+                            current_step=f"{execution.role.lower()} execution produced no changes",
+                            known_failures=[f"NO_CHANGES_PRODUCED (attempt {attempt})"],
+                        ),
+                    )
+                except CoordinatorPolicyError:
+                    pass
+            if attempt >= self._config.max_execution_attempts:
+                result.escalations.append(f"{execution.task_id}:NO_CHANGES_PRODUCED")
+                self._block_task(
+                    session,
+                    execution.task_id,
+                    "NO_CHANGES_PRODUCED",
+                    invariant="BUILDER_COMMIT_CONTRACT",
+                    execution=execution,
+                    error="Agent produced no changes on task branch and acceptance criteria not met",
+                    recovery_classification="REWORK_REQUIRED",
+                    extra_data={
+                        "provider_failure": "NO_CHANGES_PRODUCED",
+                        "retry_attempts": attempt,
+                        "max_attempts": self._config.max_execution_attempts,
+                        "retry_generation": retry_generation,
+                        "preserved_checkpoint": bool(execution.claim_id),
+                    },
+                )
+            return True
+
         # 1. REVIEWER role: Reviewer failures must never consume implementation retry budget
         # nor trigger EXECUTION_RETRY_LIMIT_REACHED on the task.
         if execution.role == "REVIEWER":
@@ -1219,7 +1281,7 @@ class BuildRunner:
                 if retryable
                 else _COOLDOWN_SECONDS.get(failure, 300)
             )
-            if failure:
+            if failure in PROVIDER_FAILURES:
                 record_event(
                     session,
                     EventInput(
@@ -1318,7 +1380,7 @@ class BuildRunner:
             if retryable
             else _COOLDOWN_SECONDS.get(failure, 300)
         )
-        if failure:
+        if failure in PROVIDER_FAILURES:
             record_event(
                 session,
                 EventInput(
@@ -2265,9 +2327,12 @@ class BuildRunner:
         """Summary of worker pool, providers, capabilities, availability, and concurrency."""
         effective_providers = self._effective_providers(session)
         active_counts = active_worker_counts(session, _now()) if session is not None else {}
+        launches = launch_counts(session) if session is not None else {}
         active_by_provider: dict[str, int] = {}
+        launches_by_provider: dict[str, int] = {}
         for worker in self._config.workers:
             active_by_provider[worker.provider] = active_by_provider.get(worker.provider, 0) + active_counts.get(worker.worker_id, 0)
+            launches_by_provider[worker.provider] = launches_by_provider.get(worker.provider, 0) + launches.get(worker.worker_id, 0)
         failure_visibility = self._provider_failure_visibility(session)
         worker_summary = []
         for w in self._config.workers:
@@ -2281,6 +2346,7 @@ class BuildRunner:
                 "capabilities": list(w.capabilities),
                 "active_workers": active_counts.get(w.worker_id, 0),
                 "active_provider_workers": active_by_provider.get(w.provider, 0),
+                "launches": launches.get(w.worker_id, 0),
                 "mode": p.consumption_mode if p else "ACTIVE",
                 "consumption_mode": p.consumption_mode if p else "ACTIVE",
                 "availability": p.availability if p else "AVAILABLE",
@@ -2309,6 +2375,7 @@ class BuildRunner:
                         and provider_config.availability == "AVAILABLE"
                     ),
                     "active_workers": active_by_provider.get(provider, 0),
+                    "launches": launches_by_provider.get(provider, 0),
                     **failure_visibility.get(provider, {}),
                 }
                 for provider, provider_config in effective_providers.items()
@@ -2754,6 +2821,31 @@ class BuildRunner:
             if worker_id and event_generation == retry_generation:
                 workers.add(worker_id)
         return workers
+
+    def _record_no_changes_produced(
+        self,
+        session: Session,
+        execution: BuildRunnerExecution,
+        *,
+        retry_generation: int,
+        attempt: int,
+        detail: str,
+    ) -> None:
+        record_event(
+            session,
+            EventInput(
+                task_id=execution.task_id,
+                event_type="runner.no_changes_produced",
+                actor="runner",
+                event_data={
+                    "provider": execution.provider,
+                    "worker_id": execution.worker_id,
+                    "retry_generation": retry_generation,
+                    "attempt": attempt,
+                    "detail": detail,
+                },
+            ),
+        )
 
     def _environment_blocked_reviewers(self, session: Session, task_id: str) -> set[str]:
         since = session.scalar(
@@ -3971,6 +4063,7 @@ def _task_definition(task: BuildTask) -> dict:
         "implementation_notes": task.implementation_notes,
         "review_policy": task.review_policy,
         "risk_level": task.risk_level,
+        "metadata": dict(task.definition_metadata or {}),
     }
 
 

@@ -147,6 +147,19 @@ def active_workers(session: Session, now: datetime | None = None) -> set[str]:
     return set(active_worker_counts(session, now).keys())
 
 
+def launch_counts(session: Session) -> dict[str, int]:
+    """Return the total number of launches ever recorded per worker ID.
+
+    Distinct from active_worker_counts (point-in-time occupancy): this is a
+    cumulative usage counter for reporting how much a worker/provider has run.
+    """
+    counts: dict[str, int] = {}
+    worker_ids = session.scalars(select(BuildRunnerExecution.worker_id)).all()
+    for worker_id in worker_ids:
+        counts[worker_id] = counts.get(worker_id, 0) + 1
+    return counts
+
+
 def is_parallel_safe_serialized(task: BuildTask, active_objective_tasks: list[BuildTask]) -> bool:
     """Check if task cannot execute due to parallel_safe serialization within its objective.
 

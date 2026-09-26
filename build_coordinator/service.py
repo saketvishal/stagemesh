@@ -142,6 +142,7 @@ def upsert_task(session: Session, spec: TaskSpec) -> BuildTask:
             base_sha=spec.base_sha,
             migration_allowed=spec.migration_allowed,
             ownership_scope=scope_dict,
+            definition_metadata=dict(spec.definition_metadata or {}),
         )
         session.add(task)
         record_event(session, EventInput(
@@ -167,6 +168,7 @@ def upsert_task(session: Session, spec: TaskSpec) -> BuildTask:
         task.program_key = spec.program_key
         task.base_sha = spec.base_sha
         task.migration_allowed = spec.migration_allowed
+        task.definition_metadata = dict(spec.definition_metadata or {})
         if spec.ownership_scope is not None:
             task.ownership_scope = scope_dict
     return task
