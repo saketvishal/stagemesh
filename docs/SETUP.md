@@ -158,6 +158,64 @@ C:\path\to\repo\build_coordinator\bin\build-coordinator.ps1 status
 
 ---
 
+## Windows unattended startup
+
+On Windows, install a per-user Task Scheduler entry that runs
+`stagemesh continue` every time the operator account logs on:
+
+```powershell
+C:\path\to\repo\build_coordinator\bin\stagemesh-windows-startup.ps1 install `
+  -ProjectDir C:\path\to\project
+```
+
+The installer is idempotent. Running it again updates the same deterministic
+task in place with `schtasks.exe /Create /F`; it does not create duplicates.
+The task runs with the `ONLOGON` trigger and limited user privileges, and the
+scheduled action invokes the checked-in launcher:
+
+```text
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File ...\stagemesh.ps1 continue --project-dir C:\path\to\project --max-cycles 2000
+```
+
+Optional flags:
+
+```powershell
+# Name a registered project explicitly.
+C:\path\to\repo\build_coordinator\bin\stagemesh-windows-startup.ps1 install `
+  -ProjectDir C:\path\to\project `
+  -ProjectName my-product
+
+# Coordinate every registered project after logon.
+C:\path\to\repo\build_coordinator\bin\stagemesh-windows-startup.ps1 install -All
+
+# Include the optional GitHub task-source adapter.
+C:\path\to\repo\build_coordinator\bin\stagemesh-windows-startup.ps1 install `
+  -ProjectDir C:\path\to\project `
+  -Github
+```
+
+Check or remove the entry:
+
+```powershell
+C:\path\to\repo\build_coordinator\bin\stagemesh-windows-startup.ps1 status `
+  -ProjectDir C:\path\to\project
+
+C:\path\to\repo\build_coordinator\bin\stagemesh-windows-startup.ps1 uninstall `
+  -ProjectDir C:\path\to\project
+```
+
+Uninstall is also idempotent: if the task is already absent, it exits
+successfully and reports `installed: false`.
+
+After a reboot, Task Scheduler starts the same durable
+`stagemesh continue` loop. Because `continue` reconciles stale executions and
+resumes from the project's `.build-coordinator/` state directory, recovered
+work is picked back up instead of being duplicated. Keep Python, Git, and any
+worker CLIs available on the operator account's logon `PATH`, and keep secrets
+in the usual credential stores or environment, not in the scheduled task.
+
+---
+
 ## First run
 
 ### 1. Initialize the database
