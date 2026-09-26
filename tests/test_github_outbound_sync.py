@@ -715,7 +715,8 @@ def test_15_subprocess_gh_cli_error_handling_and_returncode_inspection(monkeypat
     # provisioning is a no-op, but 'gh issue comment' returns non-zero exit code
     def fake_subprocess_run(cmd, **kwargs):
         if cmd[:3] == ["gh", "label", "list"]:
-            return SimpleNamespace(returncode=0, stdout='[{"name": "stagemesh:done"}]', stderr="")
+            stdout = json.dumps([{"name": label} for label in source.LIFECYCLE_LABELS])
+            return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
         return SimpleNamespace(
             returncode=1,
             stdout="",
@@ -782,14 +783,24 @@ def test_16_subprocess_gh_cli_success_path(monkeypatch):
         assert ok is True
         session.commit()
 
-    # Must execute: label list, label create (absent), comment, edit --add-label, close
-    assert len(called_cmds) == 5
+    # Must execute: label list, all missing label creates, comment, edit --add-label, close
+    create_count = len(source.LIFECYCLE_LABELS)
+    assert len(called_cmds) == 4 + create_count
     assert called_cmds[0][:3] == ["gh", "label", "list"]
-    assert called_cmds[1][:3] == ["gh", "label", "create"]
-    assert called_cmds[2][:4] == ["gh", "issue", "comment", "88"]
-    assert "all done" in called_cmds[2][7]
-    assert called_cmds[3] == ["gh", "issue", "edit", "88", "--repo", "example/repo", "--add-label", "stagemesh:done"]
-    assert called_cmds[4] == ["gh", "issue", "close", "88", "--repo", "example/repo"]
+    assert [cmd[:3] for cmd in called_cmds[1 : 1 + create_count]] == [["gh", "label", "create"]] * create_count
+    assert called_cmds[1 + create_count][:4] == ["gh", "issue", "comment", "88"]
+    assert "all done" in called_cmds[1 + create_count][7]
+    assert called_cmds[2 + create_count] == [
+        "gh",
+        "issue",
+        "edit",
+        "88",
+        "--repo",
+        "example/repo",
+        "--add-label",
+        "stagemesh:done",
+    ]
+    assert called_cmds[3 + create_count] == ["gh", "issue", "close", "88", "--repo", "example/repo"]
 
     # Check success event
     with SessionLocal() as session:
