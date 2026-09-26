@@ -9,7 +9,7 @@ import subprocess
 import sys
 
 import pytest
-from tests.test_project_backlog import REPO_ROOT, git, make_project_repo, stagemesh
+from test_project_backlog import REPO_ROOT, git, make_project_repo, stagemesh
 
 from build_coordinator import __version__
 from build_coordinator.agents import machine
