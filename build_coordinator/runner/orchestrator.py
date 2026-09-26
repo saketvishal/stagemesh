@@ -1785,7 +1785,14 @@ class BuildRunner:
                         event_data={
                             "provider": execution.provider,
                             "worker_id": execution.worker_id,
-                            "runtime": execution.runtime,
+                            "runtime": next(
+                                (
+                                    worker.runtime
+                                    for worker in self._config.workers
+                                    if worker.worker_id == execution.worker_id
+                                ),
+                                None,
+                            ),
                             "failure": failure,
                             "until": unavailable_until.isoformat(),
                             "provider_reset_at": merged.get("provider_reset_at"),
@@ -1799,7 +1806,14 @@ class BuildRunner:
                             "state": "UNAVAILABLE",
                             "task_id": execution.task_id,
                             "provider": execution.provider,
-                            "runtime": execution.runtime,
+                            "runtime": next(
+                                (
+                                    worker.runtime
+                                    for worker in self._config.workers
+                                    if worker.worker_id == execution.worker_id
+                                ),
+                                None,
+                            ),
                             "worker_id": execution.worker_id,
                             "failure": failure,
                             "until": unavailable_until.isoformat(),
@@ -1921,7 +1935,14 @@ class BuildRunner:
                     event_data={
                         "provider": execution.provider,
                         "worker_id": execution.worker_id,
-                        "runtime": execution.runtime,
+                        "runtime": next(
+                                (
+                                    worker.runtime
+                                    for worker in self._config.workers
+                                    if worker.worker_id == execution.worker_id
+                                ),
+                                None,
+                            ),
                         "failure": failure,
                         "until": unavailable_until.isoformat(),
                         "provider_reset_at": merged.get("provider_reset_at"),
@@ -1935,7 +1956,14 @@ class BuildRunner:
                         "state": "UNAVAILABLE",
                         "task_id": execution.task_id,
                         "provider": execution.provider,
-                        "runtime": execution.runtime,
+                        "runtime": next(
+                                (
+                                    worker.runtime
+                                    for worker in self._config.workers
+                                    if worker.worker_id == execution.worker_id
+                                ),
+                                None,
+                            ),
                         "worker_id": execution.worker_id,
                         "failure": failure,
                         "until": unavailable_until.isoformat(),
