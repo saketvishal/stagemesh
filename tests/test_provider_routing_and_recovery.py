@@ -545,9 +545,73 @@ def test_no_infinite_fallback_respects_max_attempts():
     r2 = runner.run_once()  # attempt 1 failed & recovered, attempt 2 launched on builder-b
     assert len(r2.launched) == 1
     r3 = runner.run_once()  # attempt 2 failed, max attempts (2) reached -> blocked
+    assert r3.escalations == ["TASK-MAX:PROVIDER_FAILURE_RETRIES_EXHAUSTED:RATE_LIMITED"]
     with SessionLocal() as session:
         task = session.get(BuildTask, "TASK-MAX")
         assert task.state == "BLOCKED"
+        checkpoints = session.scalars(
+            select(BuildTaskCheckpoint).where(BuildTaskCheckpoint.task_id == "TASK-MAX")
+        ).all()
+        assert len(checkpoints) >= 1
+
+
+def test_retryable_failure_relaunches_with_backoff_and_records_attempts():
+    executors = {
+        "builder-a": FakeExecutor(
+            [
+                ExecutionObservation("FAILED", result_data={"provider_failure": "UNAVAILABLE"}),
+                ExecutionObservation("SUCCEEDED", result_data={"feature_sha": "abc123"}),
+            ]
+        ),
+    }
+    config = RunnerConfig(
+        workers=(WorkerConfig("builder-a", "BUILDER", adapter="fake", provider="p-a", capabilities=(CAP_CODING,)),),
+        providers={"p-a": ProviderConfig("p-a", availability="AVAILABLE", consumption_mode="ACTIVE")},
+        max_execution_attempts=3,
+        result_dir=os.getenv("BUILD_COORDINATOR_RESULT_DIR"),
+    )
+    with SessionLocal() as session:
+        upsert_task(session, _task("TASK-RETRY-BACKOFF"))
+        session.commit()
+
+    runner = BuildRunner(SessionLocal, config=config, executors=executors, git=FakeGit())
+    r1 = runner.run_once()  # attempt 1 launched
+    assert len(r1.launched) == 1
+    r2 = runner.run_once()  # attempt 1 observed as UNAVAILABLE, retried without a human gate
+    assert r2.escalations == []
+
+    with SessionLocal() as session:
+        task = session.get(BuildTask, "TASK-RETRY-BACKOFF")
+        assert task.state != "BLOCKED"
+        # Backdate the recorded backoff window to simulate its expiry without
+        # sleeping in the test.
+        failure_event = session.scalars(
+            select(BuildTaskEvent)
+            .where(BuildTaskEvent.task_id == "TASK-RETRY-BACKOFF")
+            .where(BuildTaskEvent.event_type == "runner.provider_failure")
+        ).one()
+        failure_event.event_data = {
+            **failure_event.event_data,
+            "until": (datetime.now(UTC) - timedelta(seconds=1)).isoformat(),
+        }
+        session.commit()
+
+    r3 = runner.run_once()  # attempt 2 launched on the same worker once backoff has elapsed
+    assert len(r3.launched) == 1
+
+    with SessionLocal() as session:
+        executions = session.scalars(
+            select(BuildRunnerExecution)
+            .where(BuildRunnerExecution.task_id == "TASK-RETRY-BACKOFF")
+            .order_by(BuildRunnerExecution.execution_id)
+        ).all()
+        assert len(executions) == 2
+        first, second = executions
+        assert first.status == "LOST"
+        assert first.result_data["retryable_failure"] is True
+        assert first.result_data["retry_attempt"] == 1
+        assert first.result_data["retry_backoff_seconds"] > 0
+        assert second.worker_id == "builder-a"
 
 
 # 13. Configurable concurrency
