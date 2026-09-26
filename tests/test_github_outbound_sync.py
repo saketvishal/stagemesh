@@ -957,3 +957,12 @@ def test_gh_cli_reopened_issue_removes_stale_done_before_ready_label(monkeypatch
     assert not any("--remove-label" in cmd and "priority:P0" in cmd for cmd in called_cmds)
     assert not any("--remove-label" in cmd and "risk:high" in cmd for cmd in called_cmds)
     assert ["gh", "issue", "edit", "120", "--repo", "example/repo", "--add-label", "stagemesh:ready"] in called_cmds
+
+    with SessionLocal() as session:
+        event = session.scalars(
+            select(BuildTaskEvent).where(
+                BuildTaskEvent.task_id == "GH-120",
+                BuildTaskEvent.event_type == "task.outbound_synced",
+            )
+        ).one()
+        assert event.event_data["state"] == "READY"

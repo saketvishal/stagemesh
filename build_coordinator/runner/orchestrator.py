@@ -35,6 +35,7 @@ from build_coordinator.execution.subprocess_executor import SubprocessExecutor
 from build_coordinator.models import (
     BuildObjective,
     BuildRunnerExecution,
+    TASK_STATES,
     BuildTask,
     BuildTaskCheckpoint,
     BuildTaskClaim,
@@ -327,12 +328,14 @@ class BuildRunner:
                 ),
             )
 
-        # 2. Sync DONE tasks
+        # 2. Sync task lifecycle labels. GitHub lifecycle labels are mutually
+        # exclusive, so non-DONE states need outbound reconciliation too; a
+        # reopened issue may still carry stagemesh:done from an earlier close.
         try:
-            done_tasks = session.scalars(
-                select(BuildTask).where(BuildTask.state == "DONE")
+            lifecycle_tasks = session.scalars(
+                select(BuildTask).where(BuildTask.state.in_(TASK_STATES))
             ).all()
-            for task in done_tasks:
+            for task in lifecycle_tasks:
                 if not self._target_allows(task.task_id):
                     continue
                 # If this task represents an objective issue itself, skip task-level sync
@@ -342,7 +345,7 @@ class BuildRunner:
                 synced = self._task_source.sync_outbound(
                     session,
                     task.task_id,
-                    "DONE",
+                    task.state,
                     evidence=evidence,
                 )
                 if synced and result is not None:
