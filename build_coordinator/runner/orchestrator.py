@@ -109,6 +109,7 @@ from build_coordinator.runner.worktree import (
 from build_coordinator.runner.clone_pool import (
     ensure_repo_clone,
     expected_remote_url,
+    repo_identity,
     sync_task_branch,
     verify_clone_remote,
 )
@@ -1436,7 +1437,7 @@ class BuildRunner:
                     has_unlaunched_p0 = True
                 continue
 
-            norm_wt = normalize_worktree_path(worker.worktree_path)
+            norm_wt = normalize_worktree_path(self._worker_slot_worktree_path(worker))
             if norm_wt and norm_wt in active_wt:
                 reason = "worktree_or_worker_owned"
                 result.scheduling_reasons[task.task_id] = reason
@@ -1446,7 +1447,10 @@ class BuildRunner:
                 continue
 
             try:
-                if self._config.task_branches and worker.worktree_path:
+                if self._config.task_branches and (
+                    worker.worktree_path
+                    or (self._config.use_clone_pool and self._config.clone_pool_root)
+                ):
                     worker = self._prepare_task_worker(worker, task)
                 else:
                     self._validate_worker_worktree(worker)
@@ -1742,7 +1746,11 @@ class BuildRunner:
                     continue
                 result.escalations.append(f"{task.task_id}:EXTERNAL_EXECUTOR_CONFIGURATION_REQUIRED")
                 continue
+            if self._worker_slot_is_active(session, worker):
+                result.capacity_full = True
+                continue
             try:
+                worker = self._prepare_git_stage_worker(worker, task)
                 self._validate_worker_worktree(worker)
             except WorktreeValidationError as exc:
                 result.escalations.append(f"{task.task_id}:WORKTREE_INVALID")
@@ -1845,7 +1853,14 @@ class BuildRunner:
             if worker is None:
                 result.escalations.append(f"{row.task_id}:EXTERNAL_EXECUTOR_CONFIGURATION_REQUIRED")
                 continue
+            task = session.get(BuildTask, row.task_id)
+            if task is None or task.state != "REVIEWING":
+                continue
+            if self._worker_slot_is_active(session, worker):
+                result.capacity_full = True
+                continue
             try:
+                worker = self._prepare_git_stage_worker(worker, task)
                 self._validate_worker_worktree(worker)
             except WorktreeValidationError as exc:
                 result.escalations.append(f"{row.task_id}:WORKTREE_INVALID")
@@ -1886,9 +1901,6 @@ class BuildRunner:
                     error="integration requires a reviewed feature SHA",
                     recovery_classification="RECOVERABLE_GIT_STATE",
                 )
-                continue
-            task = session.get(BuildTask, row.task_id)
-            if task is None or task.state != "REVIEWING":
                 continue
             assessment = None
             try:
@@ -2333,7 +2345,7 @@ class BuildRunner:
             return None
 
     def _prepare_task_worker(self, worker: WorkerConfig, task: BuildTask) -> WorkerConfig:
-        resume = task.state in {"REWORK_REQUIRED", "STALE", "RESUMABLE"} and bool(task.branch_name)
+        resume = bool(task.branch_name)
         branch = task.branch_name if resume else task_branch_name(task.task_id)
         self._require_no_cross_objective_branch_collision_before_prepare(task, branch)
         if self._config.use_clone_pool and self._config.clone_pool_root:
@@ -2369,6 +2381,26 @@ class BuildRunner:
             identity_args = resolve_git_identity_args(wt)
             _git(wt, *identity_args, "merge", "--no-ff", "-m", f"Merge {main_ref} into {branch}", f"refs/heads/{main_ref}")
         return dataclasses.replace(worker, branch_name=branch)
+
+    def _prepare_git_stage_worker(self, worker: WorkerConfig, task: BuildTask) -> WorkerConfig:
+        if self._config.use_clone_pool and self._config.clone_pool_root:
+            return self._prepare_task_worker(worker, task)
+        return worker
+
+    def _worker_slot_worktree_path(self, worker: WorkerConfig) -> str | None:
+        if worker.worktree_path:
+            return worker.worktree_path
+        if not (self._config.use_clone_pool and self._config.clone_pool_root):
+            return None
+        pool_dir = (
+            Path(self._config.clone_pool_root).expanduser().resolve()
+            / repo_identity(self._settings.repo_root, remote=self._config.remote_name or "origin")
+        )
+        return str(pool_dir / worker.worker_id)
+
+    def _worker_slot_is_active(self, session: Session, worker: WorkerConfig) -> bool:
+        norm_wt = normalize_worktree_path(self._worker_slot_worktree_path(worker))
+        return bool(norm_wt and norm_wt in active_worktrees(session, _now()))
 
     def _run_task_setup(self, session: Session, task: BuildTask, worker: WorkerConfig) -> bool:
         """Run the project's `execution.setup` commands once per prepared task
