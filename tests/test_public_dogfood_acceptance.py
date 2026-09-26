@@ -30,12 +30,14 @@ from build_coordinator.service import (
     ClaimRequest,
     claim_review,
     claim_task,
+    checkpoint,
+    get_resume_context,
     recover_expired,
     transition_task,
     upsert_task,
     utcnow,
 )
-from build_coordinator.types import TaskSpec
+from build_coordinator.types import CheckpointInput, TaskSpec
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -467,7 +469,37 @@ def test_provider_fallback_recovery_preserves_checkpoint_and_history():
     launch1 = runner.run_once()
     assert len(launch1.launched) == 1
 
+    with SessionLocal() as session:
+        claim = session.scalar(
+            select(BuildTaskClaim)
+            .where(BuildTaskClaim.task_id == "DEMO-FALLBACK")
+            .where(BuildTaskClaim.worker_id == "builder-provider-a")
+            .where(BuildTaskClaim.status == "ACTIVE")
+        )
+        assert claim is not None
+        checkpoint(
+            session,
+            claim.claim_id,
+            worker_id="builder-provider-a",
+            data=CheckpointInput(
+                current_step="implemented reusable helper",
+                completed_work=["demo_helper.py"],
+                remaining_work=["run validation"],
+                files_changed=["demo_helper.py"],
+                current_head_sha="checkpoint-sha-3",
+            ),
+        )
+        session.commit()
+
     recovered = runner.run_once()  # observes FAILED, recovers claim
+    assert recovered.observed == ["DEMO-FALLBACK"]
+
+    with SessionLocal() as session:
+        resume_context = get_resume_context(session, "DEMO-FALLBACK")
+        assert resume_context.previous_worker_id == "builder-provider-a"
+        assert resume_context.completed_work == ("demo_helper.py",)
+        assert resume_context.remaining_work == ("run validation",)
+
     launch2 = runner.run_once()  # dispatches remaining candidate: builder-provider-b
     assert len(launch2.launched) == 1
 
@@ -482,12 +514,20 @@ def test_provider_fallback_recovery_preserves_checkpoint_and_history():
         events = session.scalars(
             select(BuildTaskEvent).where(BuildTaskEvent.task_id == "DEMO-FALLBACK")
         ).all()
+        checkpoints = session.scalars(
+            select(BuildTaskCheckpoint).where(BuildTaskCheckpoint.task_id == "DEMO-FALLBACK")
+        ).all()
 
     assert [execution.worker_id for execution in executions] == [
         "builder-provider-a",
         "builder-provider-b",
     ]
     assert executions[1].status == "SUCCEEDED"
+    assert [(row.worker_id, row.current_step) for row in checkpoints] == [
+        ("builder-provider-a", "implemented reusable helper")
+    ]
+    assert checkpoints[0].completed_work == ["demo_helper.py"]
+    assert checkpoints[0].current_head_sha == "checkpoint-sha-3"
     assert len(events) > 0  # history is preserved, not wiped by the handoff
 
 
