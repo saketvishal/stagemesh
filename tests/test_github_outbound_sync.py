@@ -56,6 +56,7 @@ class MockGitHubClient:
         self.comments: list[dict] = []
         self.closed: list[str] = []
         self.labels: list[dict] = []
+        self.removed_labels: list[dict] = []
         self.fail_on = fail_on
 
     def list_issues(self, repo: str, labels: tuple[str, ...]):
@@ -72,6 +73,11 @@ class MockGitHubClient:
         if self.fail_on == "label":
             raise RuntimeError("Failed to modify labels")
         self.labels.append({"repo": repo, "number": str(number), "label": label})
+
+    def remove_label(self, repo: str, number: str, label: str):
+        if self.fail_on == "remove_label":
+            raise RuntimeError("Failed to remove label")
+        self.removed_labels.append({"repo": repo, "number": str(number), "label": label})
 
     def close_issue(self, repo: str, number: str):
         if self.fail_on == "close":
@@ -402,6 +408,73 @@ def test_10_repeated_reconciliation_is_idempotent():
     assert len(client.comments) == 1
     assert len(client.closed) == 1
     assert len(client.labels) == 1
+
+
+def test_reopened_issue_sync_removes_stale_done_lifecycle_label_and_preserves_unrelated_labels():
+    client = MockGitHubClient([])
+    source = GitHubTaskSource(repo="example/repo", client=client)
+
+    with SessionLocal() as session:
+        session.add(
+            BuildTask(
+                task_id="GH-118",
+                title="Reopened operational regression",
+                description="Issue was reopened after validation evidence.",
+                acceptance_criteria=["Fix regression"],
+                state="READY",
+            )
+        )
+        record_event(
+            session,
+            EventInput(
+                task_id="GH-118",
+                event_type="task.synced_from_source",
+                actor="github-sync",
+                event_data={"source": "https://github.com/example/repo/issues/118"},
+            ),
+        )
+        ok = source.sync_outbound(session, "GH-118", "READY")
+        session.commit()
+
+    assert ok is True
+    removed = {entry["label"] for entry in client.removed_labels}
+    assert "stagemesh:done" in removed
+    assert all(label.startswith("stagemesh:") for label in removed)
+    assert client.labels == [{"repo": "example/repo", "number": "118", "label": "stagemesh:ready"}]
+    assert client.closed == []
+
+
+def test_lifecycle_label_replacement_leaves_exactly_one_current_stage_label():
+    client = MockGitHubClient([])
+    source = GitHubTaskSource(repo="example/repo", client=client)
+
+    with SessionLocal() as session:
+        session.add(
+            BuildTask(
+                task_id="GH-119",
+                title="Move into progress",
+                description="Replace stale lifecycle labels.",
+                acceptance_criteria=["Done"],
+                state="IN_PROGRESS",
+            )
+        )
+        record_event(
+            session,
+            EventInput(
+                task_id="GH-119",
+                event_type="task.synced_from_source",
+                actor="github-sync",
+                event_data={"source": "https://github.com/example/repo/issues/119"},
+            ),
+        )
+        ok = source.sync_outbound(session, "GH-119", "IN_PROGRESS")
+        session.commit()
+
+    assert ok is True
+    added_lifecycle = [entry["label"] for entry in client.labels if entry["label"].startswith("stagemesh:")]
+    assert added_lifecycle == ["stagemesh:in_progress"]
+    assert "stagemesh:in_progress" not in {entry["label"] for entry in client.removed_labels}
+    assert "stagemesh:done" in {entry["label"] for entry in client.removed_labels}
 
 
 def test_11_restart_with_local_done_backfills_correctly():
@@ -774,6 +847,9 @@ def test_16_subprocess_gh_cli_success_path(monkeypatch):
             return SimpleNamespace(returncode=0, stdout="[]", stderr="")
         if cmd[:3] == ["gh", "label", "create"]:
             return SimpleNamespace(returncode=0, stdout="success", stderr="")
+        if cmd[:3] == ["gh", "issue", "view"]:
+            stdout = json.dumps({"labels": [{"name": "stagemesh:ready"}, {"name": "risk:high"}]})
+            return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
         return SimpleNamespace(returncode=0, stdout="success", stderr="")
 
     monkeypatch.setattr(subprocess, "run", fake_subprocess_run)
@@ -783,14 +859,25 @@ def test_16_subprocess_gh_cli_success_path(monkeypatch):
         assert ok is True
         session.commit()
 
-    # Must execute: label list, all missing label creates, comment, edit --add-label, close
+    # Must execute: label list, all missing label creates, comment, view, stale remove, add-label, close
     create_count = len(source.LIFECYCLE_LABELS)
-    assert len(called_cmds) == 4 + create_count
+    assert len(called_cmds) == 6 + create_count
     assert called_cmds[0][:3] == ["gh", "label", "list"]
     assert [cmd[:3] for cmd in called_cmds[1 : 1 + create_count]] == [["gh", "label", "create"]] * create_count
     assert called_cmds[1 + create_count][:4] == ["gh", "issue", "comment", "88"]
     assert "all done" in called_cmds[1 + create_count][7]
-    assert called_cmds[2 + create_count] == [
+    assert called_cmds[2 + create_count][:4] == ["gh", "issue", "view", "88"]
+    assert called_cmds[3 + create_count] == [
+        "gh",
+        "issue",
+        "edit",
+        "88",
+        "--repo",
+        "example/repo",
+        "--remove-label",
+        "stagemesh:ready",
+    ]
+    assert called_cmds[4 + create_count] == [
         "gh",
         "issue",
         "edit",
@@ -800,7 +887,7 @@ def test_16_subprocess_gh_cli_success_path(monkeypatch):
         "--add-label",
         "stagemesh:done",
     ]
-    assert called_cmds[3 + create_count] == ["gh", "issue", "close", "88", "--repo", "example/repo"]
+    assert called_cmds[5 + create_count] == ["gh", "issue", "close", "88", "--repo", "example/repo"]
 
     # Check success event
     with SessionLocal() as session:
@@ -811,3 +898,71 @@ def test_16_subprocess_gh_cli_success_path(monkeypatch):
             )
         ).all()
         assert len(events) == 1
+
+
+def test_gh_cli_reopened_issue_removes_stale_done_before_ready_label(monkeypatch):
+    source = GitHubTaskSource(repo="example/repo")
+
+    with SessionLocal() as session:
+        session.add(
+            BuildTask(
+                task_id="GH-120",
+                title="Reopened CLI-backed issue",
+                description="Reopened after regression evidence.",
+                acceptance_criteria=["Fix regression"],
+                state="READY",
+            )
+        )
+        record_event(
+            session,
+            EventInput(
+                task_id="GH-120",
+                event_type="task.synced_from_source",
+                actor="github-sync",
+                event_data={"source": "https://github.com/example/repo/issues/120"},
+            ),
+        )
+        session.commit()
+
+    called_cmds = []
+
+    def fake_subprocess_run(cmd, **kwargs):
+        called_cmds.append(cmd)
+        if cmd[:3] == ["gh", "label", "list"]:
+            stdout = json.dumps([{"name": label} for label in source.LIFECYCLE_LABELS])
+            return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
+        if cmd[:3] == ["gh", "issue", "view"]:
+            stdout = json.dumps(
+                {
+                    "labels": [
+                        {"name": "stagemesh:done"},
+                        {"name": "priority:P0"},
+                        {"name": "risk:high"},
+                    ]
+                }
+            )
+            return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
+        return SimpleNamespace(returncode=0, stdout="success", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_subprocess_run)
+
+    with SessionLocal() as session:
+        ok = source.sync_outbound(session, "GH-120", "READY", evidence={"summary": "reopened"})
+        assert ok is True
+        session.commit()
+
+    assert [
+        cmd for cmd in called_cmds if "--remove-label" in cmd
+    ] == [["gh", "issue", "edit", "120", "--repo", "example/repo", "--remove-label", "stagemesh:done"]]
+    assert not any("--remove-label" in cmd and "priority:P0" in cmd for cmd in called_cmds)
+    assert not any("--remove-label" in cmd and "risk:high" in cmd for cmd in called_cmds)
+    assert ["gh", "issue", "edit", "120", "--repo", "example/repo", "--add-label", "stagemesh:ready"] in called_cmds
+
+    with SessionLocal() as session:
+        event = session.scalars(
+            select(BuildTaskEvent).where(
+                BuildTaskEvent.task_id == "GH-120",
+                BuildTaskEvent.event_type == "task.outbound_synced",
+            )
+        ).one()
+        assert event.event_data["state"] == "READY"
