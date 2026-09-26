@@ -33,7 +33,7 @@ from build_coordinator.models import (
     BuildTask,
     BuildTaskEvent,
 )
-from build_coordinator.claims import task_source_is_executable
+from build_coordinator.claims import objective_dependency_is_satisfied, task_source_is_executable
 from build_coordinator.policy import CoordinatorPolicyError
 from build_coordinator.service import upsert_task, utcnow
 from build_coordinator.planner import planner_task_id
@@ -151,7 +151,7 @@ def objective_dependencies_satisfied(session: Session, objective: BuildObjective
     for dep_id in objective.dependencies or []:
         dep_objective = session.get(BuildObjective, dep_id)
         if dep_objective is not None:
-            if dep_objective.state != "COMPLETED":
+            if not objective_dependency_is_satisfied(session, dep_objective):
                 return False
             continue
         dep_task = session.get(BuildTask, dep_id)

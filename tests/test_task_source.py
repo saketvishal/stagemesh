@@ -9,8 +9,14 @@ from sqlalchemy import select
 from build_coordinator.claims import task_is_claimable
 from build_coordinator.db import Base, SessionLocal, engine, initialize_schema
 from build_coordinator.models import BuildObjective, BuildObjectiveEvent, BuildTask, BuildTaskEvent
-from build_coordinator.objectives import objective_source_is_closed, objective_source_is_executable, run_objective_cycle
+from build_coordinator.objectives import (
+    objective_dependencies_satisfied,
+    objective_source_is_closed,
+    objective_source_is_executable,
+    run_objective_cycle,
+)
 from build_coordinator.planner import planner_task_id
+from build_coordinator.runner.scheduling import REASON_DEPENDENCY_NOT_DONE, check_task_readiness
 from build_coordinator.service import utcnow
 from build_coordinator.task_source import get_task_source
 from build_coordinator.task_source.base import TaskSourceConfig
@@ -237,6 +243,79 @@ def test_deferred_github_objective_does_not_launch_planner():
         assert planner.definition_metadata["source_eligibility"] == "DEFERRED"
         assert not objective_source_is_executable(session, objective)
         assert not task_is_claimable(session, planner, utcnow())
+
+
+def test_deferred_completed_github_objective_does_not_satisfy_dependents():
+    prerequisite = {
+        "number": 129,
+        "title": "Prerequisite objective",
+        "body": "## Objective\nFinish this first.",
+        "labels": [{"name": "objective"}],
+        "url": "https://github.com/example/repo/issues/129",
+        "state": "OPEN",
+    }
+    dependent = {
+        "number": 130,
+        "title": "Dependent objective",
+        "body": "## Objective\nPlan this second.\n\n## Dependency\nRun after issue #129 is complete.",
+        "labels": [{"name": "objective"}],
+        "url": "https://github.com/example/repo/issues/130",
+        "state": "OPEN",
+    }
+    client = FakeGitHubClient([prerequisite, dependent])
+    source = GitHubTaskSource(repo="example/repo", client=client)
+
+    with SessionLocal() as session:
+        source.discover_tasks(session)
+        session.get(BuildObjective, "GH-129").state = "COMPLETED"
+        session.add(
+            BuildTask(
+                task_id="LOCAL-DEPENDS-ON-GH-129",
+                title="Task after objective",
+                description="Must wait for eligible objective completion.",
+                acceptance_criteria=["Runs after GH-129"],
+                dependencies=["GH-129"],
+                state="READY",
+            )
+        )
+        session.commit()
+
+    prerequisite["labels"] = [{"name": "objective"}, {"name": "stagemesh:deferred"}]
+    client.issue_by_number[129]["labels"] = prerequisite["labels"]
+    with SessionLocal() as session:
+        source.discover_tasks(session)
+        session.commit()
+
+    with SessionLocal() as session:
+        prerequisite_objective = session.get(BuildObjective, "GH-129")
+        dependent_objective = session.get(BuildObjective, "GH-130")
+        dependent_planner = session.get(BuildTask, planner_task_id("GH-130"))
+        dependent_task = session.get(BuildTask, "LOCAL-DEPENDS-ON-GH-129")
+
+        assert prerequisite_objective.state == "COMPLETED"
+        assert not objective_source_is_executable(session, prerequisite_objective)
+        assert not objective_dependencies_satisfied(session, dependent_objective)
+        assert not task_is_claimable(session, dependent_planner, utcnow())
+        assert not task_is_claimable(session, dependent_task, utcnow())
+        assert check_task_readiness(session, dependent_task)[0:2] == (False, REASON_DEPENDENCY_NOT_DONE)
+
+    prerequisite["labels"] = [{"name": "objective"}]
+    client.issue_by_number[129]["labels"] = prerequisite["labels"]
+    with SessionLocal() as session:
+        source.discover_tasks(session)
+        session.commit()
+
+    with SessionLocal() as session:
+        prerequisite_objective = session.get(BuildObjective, "GH-129")
+        dependent_objective = session.get(BuildObjective, "GH-130")
+        dependent_planner = session.get(BuildTask, planner_task_id("GH-130"))
+        dependent_task = session.get(BuildTask, "LOCAL-DEPENDS-ON-GH-129")
+
+        assert objective_source_is_executable(session, prerequisite_objective)
+        assert objective_dependencies_satisfied(session, dependent_objective)
+        assert task_is_claimable(session, dependent_planner, utcnow())
+        assert task_is_claimable(session, dependent_task, utcnow())
+        assert check_task_readiness(session, dependent_task)[0:2] == (True, None)
 
 
 def test_github_source_identity_does_not_import_policy_authority():
