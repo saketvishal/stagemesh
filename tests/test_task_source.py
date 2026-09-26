@@ -102,6 +102,8 @@ def test_github_task_source_syncs_objective():
         planner = session.get(BuildTask, planner_task_id("GH-201"))
         assert planner is not None
         assert planner.objective_id == "GH-201"
+        assert "Migrate database engine to distributed PostgreSQL" in planner.description
+        assert "Do not implement the work" in planner.description
 
 
 def test_github_objective_reimport_reconciles_legacy_root_and_creates_planner():
@@ -174,6 +176,45 @@ def test_github_objective_reimport_reconciles_legacy_root_and_creates_planner():
         assert planner.objective_id == "GH-71"
         assert planner.reason_created == "OBJECTIVE_PLANNER"
         assert planner.dependencies == ["GH-75"]
+        assert "Architecture and validation program" in planner.description
+
+
+def test_github_objective_resync_refreshes_planner_task_description():
+    client = FakeGitHubClient(
+        [
+            {
+                "number": 111,
+                "title": "Original objective",
+                "body": "## Objective\nDraft the original plan.",
+                "labels": [{"name": "objective"}],
+                "url": "https://github.com/example/repo/issues/111",
+            }
+        ]
+    )
+    source = GitHubTaskSource(repo="example/repo", client=client)
+    with SessionLocal() as session:
+        source.discover_tasks(session)
+        session.commit()
+
+    client.issues = [
+        {
+            "number": 111,
+            "title": "Updated objective",
+            "body": "## Objective\nDraft the updated rollout plan.",
+            "labels": [{"name": "objective"}],
+            "url": "https://github.com/example/repo/issues/111",
+        }
+    ]
+    with SessionLocal() as session:
+        source.discover_tasks(session)
+        session.commit()
+
+    with SessionLocal() as session:
+        planner = session.get(BuildTask, planner_task_id("GH-111"))
+        assert planner is not None
+        assert "Updated objective" in planner.description
+        assert "updated rollout plan" in planner.description
+        assert "original plan" not in planner.description
 
 
 def test_github_task_source_sync_outbound():
