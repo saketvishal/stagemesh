@@ -104,7 +104,8 @@ from build_coordinator.runner.routing import (
     role_to_stage,
     route_worker,
 )
-from build_coordinator.project.backlog import task_priorities
+from build_coordinator.project.backlog import load_backlog, persist_delivery_evidence, task_priorities
+from build_coordinator.project.definition import find_project_root, load_project
 from build_coordinator.execution.git_integrator import GitIntegrationExecutor
 from build_coordinator.runner.ci_reconciliation import reconcile_awaiting_ci
 from build_coordinator.runner.validation import (
@@ -1624,6 +1625,39 @@ class BuildRunner:
                 event_data=execution.result_data,
             ),
         )
+        self._persist_project_delivery_evidence(session, execution)
+
+    def _persist_project_delivery_evidence(self, session: Session, execution: BuildRunnerExecution) -> None:
+        sha = (execution.result_data or {}).get("merge_commit_sha") or (execution.result_data or {}).get("final_main_sha")
+        if not isinstance(sha, str) or not sha:
+            return
+        repo_root = find_project_root(Path(self._settings.repo_root))
+        if repo_root is None:
+            return
+        try:
+            project = load_project(repo_root)
+            changed = persist_delivery_evidence(repo_root, load_backlog(project), execution.task_id, sha=sha)
+        except Exception as exc:
+            record_event(
+                session,
+                EventInput(
+                    task_id=execution.task_id,
+                    event_type="project.delivery_evidence_failed",
+                    actor="runner",
+                    event_data={"sha": sha, "error": str(exc)},
+                ),
+            )
+            return
+        if changed:
+            record_event(
+                session,
+                EventInput(
+                    task_id=execution.task_id,
+                    event_type="project.delivery_evidence_persisted",
+                    actor="runner",
+                    event_data={"sha": sha},
+                ),
+            )
 
     def _recoverable_failure(
         self,

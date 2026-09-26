@@ -17,7 +17,14 @@ from sqlalchemy import select
 
 from build_coordinator.db import DatabaseLifecycle, DatabaseSchemaError
 from build_coordinator.models import BuildRunnerExecution, BuildTask, BuildTaskClaim, BuildTaskEvent
-from build_coordinator.project.backlog import BacklogError, load_backlog, sync_backlog, task_priorities
+from build_coordinator.project.backlog import (
+    BacklogError,
+    audit_delivery_evidence,
+    load_backlog,
+    persist_delivery_evidence,
+    sync_backlog,
+    task_priorities,
+)
 from build_coordinator.project.definition import (
     ProjectError,
     find_project_root,
@@ -381,6 +388,66 @@ def test_sync_reports_orphans_and_unresolvable_dependencies(tmp_path, session):
     assert actions == {"A-1": "SKIPPED", "B-2": "ORPHANED", "Z-9": "ERROR"}
     assert session.get(BuildTask, "B-2") is not None
     assert session.get(BuildTask, "Z-9") is None
+
+
+def test_structured_delivery_evidence_bootstraps_done_without_execution(tmp_path, session):
+    root = write_project(tmp_path / "repo", tasks={"A-1": {}})
+    git(root, "init", "-b", "main")
+    git(root, "add", ".")
+    git(root, "commit", "-m", "init")
+    sha = git(root, "rev-parse", "HEAD")
+    data = yaml.safe_load((root / ".stagemesh" / "tasks" / "backlog.yaml").read_text(encoding="utf-8"))
+    data["tasks"][0]["delivered_by"] = {"sha": sha, "version": "fixture-1"}
+    (root / ".stagemesh" / "tasks" / "backlog.yaml").write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+
+    project = load_project(root)
+    report = sync_backlog(session, project, load_backlog(project))
+    session.commit()
+
+    assert report.counts() == {"RECONCILED": 1}
+    assert session.get(BuildTask, "A-1").state == "DONE"
+    assert session.scalars(select(BuildRunnerExecution)).all() == []
+
+
+def test_stale_delivery_evidence_fails_closed(tmp_path, session):
+    root = write_project(tmp_path / "repo", tasks={"A-1": {}})
+    git(root, "init", "-b", "main")
+    git(root, "add", ".")
+    git(root, "commit", "-m", "init")
+    data = yaml.safe_load((root / ".stagemesh" / "tasks" / "backlog.yaml").read_text(encoding="utf-8"))
+    data["tasks"][0]["delivered_by"] = {"sha": "0" * 40}
+    (root / ".stagemesh" / "tasks" / "backlog.yaml").write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+
+    project = load_project(root)
+    report = sync_backlog(session, project, load_backlog(project))
+
+    assert report.counts() == {"ERROR": 1}
+    assert session.get(BuildTask, "A-1") is None
+    assert "not present" in report.results[0].details
+
+
+def test_persist_delivery_evidence_and_audit_missing_entries(tmp_path, session):
+    root = write_project(tmp_path / "repo", tasks={"A-1": {}, "B-2": {}})
+    git(root, "init", "-b", "main")
+    git(root, "add", ".")
+    git(root, "commit", "-m", "init")
+    sha = git(root, "rev-parse", "HEAD")
+    project = load_project(root)
+    definitions = load_backlog(project)
+    assert persist_delivery_evidence(root, definitions, "A-1", sha=sha, version="fixture-1")
+
+    sync_backlog(session, project, load_backlog(project))
+    transition_task(session, "B-2", "CLAIMED", actor="test")
+    transition_task(session, "B-2", "IN_PROGRESS", actor="test")
+    transition_task(session, "B-2", "VALIDATING", actor="test")
+    transition_task(session, "B-2", "DONE", actor="test")
+    audit = audit_delivery_evidence(session, project, load_backlog(project))
+    statuses = {row["task_id"]: row["status"] for row in audit["tasks"]}
+
+    assert statuses == {
+        "A-1": "DELIVERED_WITH_EVIDENCE",
+        "B-2": "DELIVERED_MISSING_LEDGER_ENTRY",
+    }
 
 
 # ---------------------------------------------------------------- legacy state
