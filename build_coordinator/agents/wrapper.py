@@ -188,6 +188,19 @@ def render_prompt(role: str, raw: str, *, base_ref: str, reviewed_sha: str | Non
         head += f"\nNotes:\n{definition['implementation_notes']}\n"
     validation = definition.get("required_validation") or []
 
+    if role == "PLANNER":
+        return (
+            "You are the StageMesh planning agent. Plan work only; do not modify "
+            "repository files, create commits, change branches, or implement the tasks.\n\n"
+            "The JSON below is the authoritative planner objective, policy, and "
+            "result contract. Follow it exactly.\n\n"
+            + raw
+            + "\n\nReturn your result in the final response as ONE fenced ```json "
+            "object matching the planner result contract. The StageMesh wrapper "
+            "will persist the trusted lifecycle envelope. Do not include hidden "
+            "reasoning or chain-of-thought."
+        )
+
     if role == "REVIEWER":
         prior_findings = resume_context.get("open_findings_from_prior_review") or []
         disposition_section = ""
