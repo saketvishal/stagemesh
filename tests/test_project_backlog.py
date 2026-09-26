@@ -1280,6 +1280,71 @@ def test_continue_reloads_project_yaml_between_cycles(tmp_path, registry, monkey
     assert payload["project"]["concurrency"] == 3
 
 
+def test_continue_applies_reloaded_concurrency_without_interrupting_live_builders(
+    tmp_path, registry, monkeypatch, capsys
+):
+    root, _ = make_project_repo(
+        tmp_path,
+        {
+            "HOT-1": {"review": "NONE"},
+            "HOT-2": {"review": "NONE"},
+            "HOT-3": {"review": "NONE"},
+        },
+        concurrency=1,
+        workers={"builder": {"adapter": "fake"}, "reviewer": {"adapter": "fake"}},
+        extra={},
+    )
+    monkeypatch.setenv("STAGEMESH_PROJECT_REGISTRY", str(registry))
+    monkeypatch.setenv("STAGEMESH_POLL_SECONDS", "0")
+    monkeypatch.delenv("BUILD_COORDINATOR_DATABASE_URL", raising=False)
+    monkeypatch.delenv("BUILD_COORDINATOR_RUNNER_CONFIG", raising=False)
+
+    import build_coordinator.project.commands as commands
+
+    real_runner = commands.BuildRunner
+
+    class BoundaryReloadRunner(real_runner):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.cycles = 0
+
+        def run_once(self):
+            self.cycles += 1
+            result = super().run_once()
+            if self.cycles == 1:
+                project = yaml.safe_load((root / ".stagemesh" / "project.yaml").read_text(encoding="utf-8"))
+                project["execution"]["concurrency"] = 3
+                (root / ".stagemesh" / "project.yaml").write_text(
+                    yaml.safe_dump(project),
+                    encoding="utf-8",
+                )
+            return result
+
+    monkeypatch.setattr(commands, "BuildRunner", BoundaryReloadRunner)
+    commands.handle_continue(
+        SimpleNamespace(
+            target=[],
+            project_dir=str(root),
+            no_sync=False,
+            github=False,
+            dry_run=False,
+            task_id=None,
+            max_cycles=2,
+            timeout=None,
+            once=False,
+            all_projects=False,
+            json=True,
+        )
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["project"]["concurrency"] == 3
+    assert [len(cycle["launched"]) for cycle in payload["cycles"]] == [1, 2]
+    assert payload["cycles"][0]["live_builders"] == 1
+    assert payload["cycles"][1]["live_builders"] == 3
+    assert payload["peak_parallel_builders"] == 3
+
+
 def test_default_continue_output_is_concise_human_summary_not_full_json(tmp_path, registry):
     root, _ = make_project_repo(tmp_path, {"S-1": {"review": "NONE"}}, concurrency=1)
     register_project(root)
