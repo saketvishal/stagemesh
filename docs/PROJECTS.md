@@ -110,7 +110,7 @@ tasks:
     acceptance_criteria: [...]  # at least one
     dependencies: [PROJ-000]
     priority: 10                # lower runs earlier among eligible tasks
-    review: INDEPENDENT         # NONE | SELF | INDEPENDENT (TWO_REVIEWERS: see gaps)
+    review: INDEPENDENT_WORKER  # NONE | SELF | INDEPENDENT_WORKER | INDEPENDENT_PROVIDER | TWO_REVIEWERS | TWO_PROVIDERS
     risk: MEDIUM                # LOW | MEDIUM | HIGH | CRITICAL
     scope: {allowed_paths: [src/feature/]}
     validation: [pytest tests/feature -q]
@@ -153,7 +153,9 @@ executions are genuinely live. When an older database contains stale
 auditable stale-execution reconciliation plan. With `--apply`, StageMesh first
 backs up the database, marks exactly those stale execution rows `LOST`, keeps
 claims, checkpoints, branches and worktree metadata intact, then retries the
-migration so normal recovery can resume the task. SQLite only.
+migration so normal recovery can resume the task. Legacy `INDEPENDENT` review
+policy rows are rewritten to `INDEPENDENT_WORKER`, preserving the same effective
+worker-independence safety with explicit semantics. SQLite only.
 
 ## Workspaces
 
@@ -198,9 +200,13 @@ the lifecycle result. Reviewers run read-only and return a structured verdict.
 * **Validation** - a task's `validation:` commands are run by StageMesh itself in the
   task workspace after the builder finishes (no shell, timeout, captured output as
   durable evidence). Failure sends the task to rework; only a pass proceeds to review.
-* **Review** - `INDEPENDENT` never lets the implementer review; `TWO_REVIEWERS` needs
-  two distinct reviewers' approvals of the same implementation. A rejected review goes
-  rework -> validation -> re-review automatically.
+* **Review** - `INDEPENDENT` is a legacy alias for `INDEPENDENT_WORKER`.
+  `SELF` needs one eligible approval. `INDEPENDENT_WORKER` needs one approval
+  from a different reviewer `worker_id` for the exact feature SHA.
+  `INDEPENDENT_PROVIDER` needs one approval from a different provider.
+  `TWO_REVIEWERS` needs two distinct reviewer workers, and `TWO_PROVIDERS`
+  needs approvals from two distinct providers. A rejected review goes rework ->
+  validation -> re-review automatically.
 * **Integration** - deterministic and runner-owned: the reviewed commit is merged into
   `main_ref` in StageMesh's own worktree and the branch advanced safely. A `main_ref`
   checked out by a human is only fast-forwarded when clean; conflicts and dirty checkouts

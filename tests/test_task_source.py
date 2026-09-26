@@ -69,7 +69,7 @@ def test_github_task_source_syncs_standard_task():
         assert task is not None
         assert task.title == "Implement S3 adapter streaming"
         assert task.dependencies == ["GH-100"]
-        assert task.review_policy == "INDEPENDENT"
+        assert task.review_policy == "INDEPENDENT_WORKER"
         assert task.risk_level == "HIGH"
         assert "Verify chunked transfer" in task.acceptance_criteria
 
