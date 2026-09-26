@@ -3170,6 +3170,62 @@ class BuildRunner:
             elif reason == "REVIEWED_SHA_CHANGED":
                 self._request_rereview(session, task.task_id, result, reason="REVIEWED_SHA_CHANGED")
 
+            elif reason == "BRANCH_MOVED_CONCURRENTLY":
+                reviewed_sha = session.scalar(
+                    select(BuildRunnerExecution.reviewed_feature_sha)
+                    .where(BuildRunnerExecution.task_id == task.task_id)
+                    .where(BuildRunnerExecution.role.in_(("REVIEWER", "INTEGRATION")))
+                    .where(BuildRunnerExecution.reviewed_feature_sha.is_not(None))
+                    .order_by(BuildRunnerExecution.completed_at.desc())
+                    .limit(1)
+                )
+                if not reviewed_sha:
+                    self._request_rereview(session, task.task_id, result, reason="REVIEWED_SHA_CHANGED")
+                    continue
+
+                repo_root = Path(self._settings.repo_root)
+                branch = task.branch_name or task_branch_name(task.task_id)
+                current_feature_sha = None
+                if branch:
+                    proc = _git(repo_root, "rev-parse", "--verify", f"{branch}^{{commit}}")
+                    if proc.returncode == 0:
+                        current_feature_sha = proc.stdout.strip()
+
+                if current_feature_sha and current_feature_sha != reviewed_sha:
+                    self._request_rereview(session, task.task_id, result, reason="REVIEWED_SHA_CHANGED")
+                    continue
+
+                try:
+                    release_active_claims(session, task.task_id, completed=False)
+                except CoordinatorPolicyError:
+                    pass
+                try:
+                    transition_task(
+                        session,
+                        task.task_id,
+                        "REVIEWING",
+                        actor="runner",
+                        reason="main moved concurrently during integration; retrying exact reviewed SHA against current main",
+                    )
+                    record_event(
+                        session,
+                        EventInput(
+                            task_id=task.task_id,
+                            event_type="runner.blocker_recovered",
+                            actor="runner",
+                            event_data={
+                                "reason": "BRANCH_MOVED_CONCURRENTLY",
+                                "resumed_to": "REVIEWING",
+                                "reviewed_feature_sha": reviewed_sha,
+                            },
+                        ),
+                    )
+                    if task.task_id not in result.recovered:
+                        result.recovered.append(task.task_id)
+                    self._release_blocker_gate(session, task, "BRANCH_MOVED_CONCURRENTLY")
+                except CoordinatorPolicyError:
+                    pass
+
             elif reason == "REVIEW_ENVIRONMENT_BLOCKED":
                 attempts = self._review_environment_attempts(session, task.task_id)
                 if attempts < self._config.max_review_environment_attempts:
