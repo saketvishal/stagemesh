@@ -746,6 +746,16 @@ def persist_delivery_evidence(
     return True
 
 
+def _matches_delivery_evidence(evidence: Any, sha: str, version: str | None = None) -> bool:
+    if not isinstance(evidence, dict):
+        return False
+    if evidence.get("sha") != sha and evidence.get("integrated_sha") != sha:
+        return False
+    if version and evidence.get("version") != version:
+        return False
+    return True
+
+
 def persist_delivery_evidence_in_history(
     repo_root: Path,
     definitions: list[TaskDefinition],
@@ -766,9 +776,54 @@ def persist_delivery_evidence_in_history(
     definition = next((item for item in definitions if item.task_id == task_id), None)
     if definition is None or not definition.source:
         return {"status": "NOT_PROJECT_BACKLOG_TASK", "changed": False}
-    changed = persist_delivery_evidence(repo_root, definitions, task_id, sha=sha, version=version)
-    if not changed:
-        return {"status": "UNCHANGED", "changed": False}
+
+    committed = _committed_delivered_by(repo_root, definition)
+    committed_durable = _matches_delivery_evidence(committed, sha, version)
+
+    if committed_durable:
+        evidence_commit = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(repo_root),
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        if push_remote:
+            ok, detail = push_branch(
+                repo_root,
+                push_remote,
+                evidence_commit,
+                push_branch_name,
+                expected_remote_url=expected_remote_url,
+            )
+            if not ok:
+                return {
+                    "status": "PUSH_FAILED",
+                    "changed": False,
+                    "sha": sha,
+                    "evidence_commit": evidence_commit,
+                    "source": definition.source,
+                    "push_status": "FAILED",
+                    "detail": detail,
+                }
+            is_up_to_date = "Everything up-to-date" in detail
+            return {
+                "status": "UNCHANGED" if is_up_to_date else "COMMITTED",
+                "changed": not is_up_to_date,
+                "sha": sha,
+                "evidence_commit": evidence_commit,
+                "source": definition.source,
+                "push_status": "PUSHED",
+            }
+        return {
+            "status": "UNCHANGED",
+            "changed": False,
+            "sha": sha,
+            "evidence_commit": evidence_commit,
+            "source": definition.source,
+        }
+
+    persist_delivery_evidence(repo_root, definitions, task_id, sha=sha, version=version)
 
     source_path = repo_root / definition.source
     rel_path = str(source_path.relative_to(repo_root))
