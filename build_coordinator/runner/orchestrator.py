@@ -2858,7 +2858,7 @@ class BuildRunner:
             self._executors[execution.worker_id] = executor
             return executor
         if execution.adapter == "subprocess":
-            worker = next(
+            worker = self._executor_workers.get(execution.worker_id) or next(
                 (item for item in self._config.workers if item.worker_id == execution.worker_id),
                 None,
             )
