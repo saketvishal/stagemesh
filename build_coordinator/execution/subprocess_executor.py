@@ -143,6 +143,8 @@ class SubprocessExecutor:
                 stdout=stdout,
                 stderr=stderr,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 shell=False,
                 env=env,
                 **popen_kwargs(),
