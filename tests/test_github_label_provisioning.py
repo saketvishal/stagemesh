@@ -43,6 +43,7 @@ class LabelAwareMockClient:
         self.comments: list[dict] = []
         self.closed: list[str] = []
         self.labels: list[dict] = []
+        self.removed_labels: list[dict] = []
         self.fail_on = fail_on
 
     def list_issues(self, repo: str, labels: tuple[str, ...]):
@@ -67,6 +68,20 @@ class LabelAwareMockClient:
         if label not in self.known_labels:
             raise RuntimeError(f"label '{label}' not found in repository")
         self.labels.append({"repo": repo, "number": str(number), "label": label})
+        for issue in self.issues:
+            if str(issue.get("number")) == str(number):
+                issue.setdefault("labels", []).append({"name": label})
+
+    def remove_label(self, repo: str, number: str, label: str):
+        for issue in self.issues:
+            if str(issue.get("number")) == str(number):
+                issue["labels"] = [
+                    existing
+                    for existing in issue.get("labels", [])
+                    if (existing.get("name") if isinstance(existing, dict) else str(existing)) != label
+                ]
+                break
+        self.removed_labels.append({"repo": repo, "number": str(number), "label": label})
 
     def close_issue(self, repo: str, number: str):
         self.closed.append(str(number))
@@ -291,6 +306,8 @@ def test_subprocess_non_done_lifecycle_records_state_for_idempotent_retry(monkey
             return SimpleNamespace(returncode=0, stdout="[]", stderr="")
         if cmd[:3] == ["gh", "label", "create"]:
             return SimpleNamespace(returncode=0, stdout="created", stderr="")
+        if cmd[:3] == ["gh", "issue", "view"]:
+            return SimpleNamespace(returncode=0, stdout='{"labels":[]}', stderr="")
         return SimpleNamespace(returncode=0, stdout="ok", stderr="")
 
     monkeypatch.setattr(subprocess, "run", fake_subprocess_run)
@@ -304,6 +321,15 @@ def test_subprocess_non_done_lifecycle_records_state_for_idempotent_retry(monkey
                 acceptance_criteria=["Reviewed"],
                 state="REVIEW_READY",
             )
+        )
+        record_event(
+            session,
+            EventInput(
+                task_id="GH-205",
+                event_type="task.synced_from_source",
+                actor="github-sync",
+                event_data={"source": "https://github.com/example/repo/issues/205"},
+            ),
         )
         ok = source.sync_outbound(session, "GH-205", "REVIEW_READY")
         assert ok is True
@@ -326,6 +352,90 @@ def test_subprocess_non_done_lifecycle_records_state_for_idempotent_retry(monkey
     edit_cmds = [cmd for cmd in called_cmds if cmd[:3] == ["gh", "issue", "edit"]]
     assert len(edit_cmds) == 1
     assert edit_cmds[0][-1] == "stagemesh:review_ready"
+
+
+def test_reopened_issue_runner_cycle_replaces_stale_done_label_with_ready():
+    """Normal discovery + runner path reconciles a reopened actionable issue."""
+    client = LabelAwareMockClient(
+        issues=[
+            {
+                "number": 205,
+                "title": "Reopened after validation regression",
+                "body": "Regression evidence means this is actionable again.",
+                "labels": [{"name": "stagemesh:done"}, {"name": "priority:P0"}, {"name": "risk:high"}],
+                "url": "https://github.com/example/repo/issues/205",
+            }
+        ],
+        existing_labels=EXPECTED_LIFECYCLE_LABELS,
+    )
+    source = GitHubTaskSource(repo="example/repo", client=client)
+
+    with SessionLocal() as session:
+        session.add(
+            BuildTask(
+                task_id="GH-205",
+                title="Previously completed issue",
+                description="Closed before regression evidence arrived.",
+                acceptance_criteria=["Done"],
+                state="DONE",
+            )
+        )
+        record_event(
+            session,
+            EventInput(
+                task_id="GH-205",
+                event_type="task.outbound_synced",
+                actor="github-sync",
+                event_data={"state": "DONE", "issue_number": 205},
+            ),
+        )
+        session.commit()
+
+    with SessionLocal() as session:
+        results = source.discover_tasks(session)
+        task = session.get(BuildTask, "GH-205")
+        assert task.state == "READY"
+        session.commit()
+
+    assert [result.task_id for result in results] == ["GH-205"]
+
+    config = RunnerConfig.default()
+    runner = BuildRunner(SessionLocal, config, task_source=source)
+    cycle = runner.run_once()
+
+    assert "GH-205" in cycle.outbound_synced
+    assert client.removed_labels == [{"repo": "example/repo", "number": "205", "label": "stagemesh:done"}]
+    assert client.labels[-1] == {"repo": "example/repo", "number": "205", "label": "stagemesh:ready"}
+    assert client.closed == []
+    issue_labels = {label["name"] for label in client.issues[0]["labels"]}
+    assert "stagemesh:done" not in issue_labels
+    assert {"stagemesh:ready", "priority:P0", "risk:high"}.issubset(issue_labels)
+
+
+def test_client_lifecycle_replacement_skips_absent_stale_labels():
+    """Client path is idempotent when most lifecycle labels are absent."""
+    client = LabelAwareMockClient(
+        issues=[
+            {
+                "number": 206,
+                "title": "Ready issue without stale labels",
+                "body": "No stale lifecycle label is currently applied.",
+                "labels": [{"name": "priority:P1"}],
+                "url": "https://github.com/example/repo/issues/206",
+            }
+        ],
+        existing_labels=EXPECTED_LIFECYCLE_LABELS,
+    )
+    source = GitHubTaskSource(repo="example/repo", client=client)
+
+    with SessionLocal() as session:
+        source.discover_tasks(session)
+        ok = source.sync_outbound(session, "GH-206", "READY")
+        session.commit()
+
+    assert ok is True
+    assert client.removed_labels == []
+    assert client.labels == [{"repo": "example/repo", "number": "206", "label": "stagemesh:ready"}]
 
 
 def test_outbound_records_task_specific_failure_when_label_provisioning_fails():
