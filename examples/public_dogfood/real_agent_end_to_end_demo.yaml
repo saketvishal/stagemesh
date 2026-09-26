@@ -26,6 +26,25 @@
 # StageMesh worker template uses; "operator environment" here means "the
 # named runtime's CLI is installed and authenticated on the machine running
 # this project", not a bespoke environment variable.
+#
+# INTEGRATION below uses the same `command:` array mechanism directly rather
+# than `runtime: <id>`, because `build_coordinator/agents/wrapper.py` (the
+# command `runtime: claude` resolves to) never special-cases the INTEGRATION
+# role: its generic prompt tells the agent not to touch git history, and its
+# result derivation reports a `feature_sha` from HEAD, never a
+# `merge_commit_sha`. Editing that wrapper is outside this task's allowed
+# paths, so this project instead points `workers.integration.command`
+# straight at an INTEGRATION-aware operator script
+# (`tests/_real_agent_integration_worker.py`) that drives the real `claude`
+# CLI with permission to run `git checkout`/`git merge`, then independently
+# verifies from git state that the merge really happened before reporting
+# SUCCEEDED. The `PYTHON_EXECUTABLE`/`INTEGRATION_AGENT_SCRIPT` placeholders
+# below are literal paths an operator would normally just write by hand into
+# their own project.yaml (an absolute interpreter and script path, exactly
+# like any other `command:` entry); `tests/test_real_agent_end_to_end.py`
+# fills them in with this machine's real, concrete paths before the project
+# loader ever sees the file -- this is not `${VAR}` shell-style expansion,
+# just how the example manifest stays host-independent on disk.
 schema_version: 1
 id: real-agent-demo
 name: Real Agent End-to-End Demo
@@ -42,28 +61,29 @@ workers:
   reviewer:
     runtime: claude
     timeout_seconds: 600
-  # INTEGRATION is StageMesh's own deterministic merge step (the SCM_OPERATOR
-  # role, `build_coordinator.execution.git_integrator.GitIntegrationExecutor`)
-  # by design: merging an already-reviewed commit is mechanical and does not
-  # need a model (see that module's docstring). `adapter: builtin-git` is
-  # also the default `build_runner_config` falls back to when a project
-  # declares no `workers.integration` template at all; it is listed here for
-  # clarity. This is a real execution against the real scratch git
-  # repository -- a real `git merge --no-ff` that advances `main` -- not a
-  # scripted stand-in.
+  # INTEGRATION is a real, third coding-agent CLI subprocess execution, just
+  # like BUILDER and REVIEWER -- not StageMesh's built-in git integrator.
+  # See the note above for why this uses a literal `command:` array (an
+  # INTEGRATION-aware operator script) instead of `runtime: claude`.
   integration:
-    adapter: builtin-git
-    provider: stagemesh
+    adapter: subprocess
+    provider: anthropic
+    timeout_seconds: 600
+    command:
+      - "PYTHON_EXECUTABLE"
+      - "INTEGRATION_AGENT_SCRIPT"
 notes: >
   Validates real coding-agent execution end to end on a disposable scratch
   repository: one BUILDER execution and one independent REVIEWER execution
   (distinct worker id, per INDEPENDENT review policy) against a real,
   operator-installed `claude` CLI via the SubprocessExecutor adapter, then
-  one INTEGRATION execution via StageMesh's real (non-scripted) git
-  integrator that merges the reviewed commit into main. All three are
-  launched from these worker templates via `build_runner_config` plus the
-  operator's installed/authenticated `claude` CLI -- no per-run manual
-  worktree or worker choice. See tests/test_real_agent_end_to_end.py for the
-  automated harness that drives this scenario and records durable evidence
-  under docs/evidence/real_agent_runs/, and
+  one INTEGRATION execution that is also a real `claude` CLI subprocess --
+  driven by an INTEGRATION-aware operator script that grants the agent
+  `git checkout`/`git merge` permissions and independently verifies the
+  merge from git state -- which merges the reviewed commit into main. All
+  three are launched from these worker templates via `build_runner_config`
+  plus the operator's installed/authenticated `claude` CLI -- no per-run
+  manual worktree or worker choice. See tests/test_real_agent_end_to_end.py
+  for the automated harness that drives this scenario and records durable
+  evidence under docs/evidence/real_agent_runs/, and
   docs/evidence/REAL_AGENT_EXECUTION_ACCEPTANCE.md for what is being proven.

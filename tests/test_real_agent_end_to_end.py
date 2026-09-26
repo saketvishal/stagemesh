@@ -10,7 +10,12 @@ constructing executors.
 
 The live scenario (``test_real_agent_builder_reviewer_integration_on_scratch_repo``)
 copies ``examples/public_dogfood/real_agent_end_to_end_demo.yaml`` into a
-scratch repository's ``.stagemesh/project.yaml``, loads it with
+scratch repository's ``.stagemesh/project.yaml`` (substituting this
+machine's real Python interpreter and the path to
+``tests/_real_agent_integration_worker.py`` for the manifest's literal
+``PYTHON_EXECUTABLE``/``INTEGRATION_AGENT_SCRIPT`` placeholders -- see the
+comment in that manifest for why this is a plain path substitution, not
+``${VAR}`` shell-style expansion), loads it with
 ``build_coordinator.project.definition.load_project`` +
 ``build_coordinator.project.runtime.build_runner_config`` (the same functions
 StageMesh itself uses to turn worker templates into ``WorkerConfig``
@@ -22,36 +27,33 @@ against a real ``RealGit`` backend -- exactly the pattern used in
 Nothing in this test hand-picks a worker id, an executor instance, or a
 worktree path: ``BuildRunner`` resolves the worker for each role, provisions
 its worktree via ``build_coordinator/runner/worktree.py:ensure_worktree``,
-and launches/polls the real executor itself. BUILDER and REVIEWER resolve to
-``adapter: subprocess`` (StageMesh's own agent wrapper, which drives the real
-``claude`` CLI found on PATH). INTEGRATION resolves to StageMesh's own real
-(not scripted) ``builtin-git`` executor.
+and launches/polls the real executor itself.
 
-INTEGRATION is deliberately NOT routed through a third coding-agent
-subprocess. That was investigated for this task (see the "why not
-`adapter: subprocess` for INTEGRATION" note in
-``docs/evidence/REAL_AGENT_EXECUTION_ACCEPTANCE.md`` for the full citation
-trail) and found to be actively unsafe with the current wrapper: nothing in
-``build_coordinator/agents/wrapper.py::main`` special-cases the INTEGRATION
-role -- ``role_key`` is only remapped for REMEDIATION, so INTEGRATION prompts
-fall through to the generic builder prompt, which explicitly tells the agent
-"Do NOT run git commit, push, checkout, reset, rebase or branch commands" and
-then has the wrapper itself derive `feature_sha` from HEAD, never a
-`merge_commit_sha`. Worse, `BuildRunner._integration_succeeded` only demands
-`merge_commit_sha` when `execution.adapter == "builtin-git"`
-(``build_coordinator/runner/orchestrator.py`` around line 1578); for any
-other adapter it transitions the task straight to DONE once `auto_push_allowed`
-policy is satisfied, with no check that any merge onto main ever happened.
-Routing INTEGRATION through `adapter: subprocess` today would therefore mark
-tasks DONE without a real merge -- a regression, not a stronger proof. Fixing
-this would require editing `build_coordinator/agents/wrapper.py` and
-`build_coordinator/runner/orchestrator.py`, which are out of this task's
-allowed edit paths (`examples/`, `docs/`, `tests/` only). Given that, keeping
-INTEGRATION on the real, non-scripted `builtin-git` executor -- which really
-does execute `git merge --no-ff` against the scratch repository and only
-reports `merge_commit_sha` when that merge actually happened -- is the
-honest choice; it is a real execution against the real scratch repository,
-just not a third LLM subprocess.
+All three roles resolve to ``adapter: subprocess`` and are real coding-agent
+CLI executions. BUILDER and REVIEWER go through StageMesh's own agent
+wrapper (``build_coordinator/agents/wrapper.py``), which drives the real
+``claude`` CLI found on PATH. INTEGRATION goes through
+``tests/_real_agent_integration_worker.py`` instead of that wrapper, because
+``wrapper.py`` never special-cases the INTEGRATION role -- ``role_key`` is
+only remapped for REMEDIATION, so its generic builder prompt tells the agent
+not to touch git history at all, and its result derivation reports a
+`feature_sha` from HEAD, never a `merge_commit_sha`. Editing
+`build_coordinator/agents/wrapper.py` is outside this task's allowed edit
+paths (`examples/`, `docs/`, `tests/` only), so the INTEGRATION worker
+template instead points straight at an INTEGRATION-aware operator script
+that drives the real `claude` CLI with permission to run
+`git checkout`/`git merge --no-ff`, then -- following the same "an agent's
+self-report is never the lifecycle result" discipline as `wrapper.py` --
+independently verifies from git state that the merge really happened before
+ever reporting `status: SUCCEEDED`. Because the adapter is `subprocess`
+rather than `builtin-git`, `BuildRunner._integration_succeeded`
+(`build_coordinator/runner/orchestrator.py`) requires `auto_push_allowed`
+before completing the task; this test sets
+`BUILD_COORDINATOR_AUTO_PUSH_ALLOWED=true` for the scratch scenario (the
+scratch repo has no upstream remote configured, so nothing is actually
+pushed anywhere) and independently re-verifies from `git log` that the
+reported `merge_commit_sha` really is reachable from `main`, so the test's
+own assertions -- not just the orchestrator's transition -- are the proof.
 
 The scenario is opt-in: it only runs when a real, authenticated `claude` CLI
 is discoverable on PATH, matching the same pattern documented for the Claude
@@ -92,6 +94,7 @@ from build_coordinator.types import TaskSpec
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEMO_MANIFEST = REPO_ROOT / "examples" / "public_dogfood" / "real_agent_end_to_end_demo.yaml"
+INTEGRATION_AGENT_SCRIPT = REPO_ROOT / "tests" / "_real_agent_integration_worker.py"
 EVIDENCE_DIR = REPO_ROOT / "docs" / "evidence" / "real_agent_runs" / "SM-012"
 
 _PROJECT_ENV_KEYS = (
@@ -100,6 +103,7 @@ _PROJECT_ENV_KEYS = (
     "BUILD_COORDINATOR_MAX_ACTIVE_BUILDERS",
     "BUILD_COORDINATOR_DATABASE_URL",
     "BUILD_COORDINATOR_ALLOWED_WORKSPACE_ROOTS",
+    "BUILD_COORDINATOR_AUTO_PUSH_ALLOWED",
 )
 
 
@@ -127,7 +131,10 @@ def _load_demo_project(scratch_repo: Path):
     """
     project_dir = scratch_repo / ".stagemesh"
     project_dir.mkdir(parents=True, exist_ok=True)
-    (project_dir / "project.yaml").write_text(DEMO_MANIFEST.read_text(encoding="utf-8"), encoding="utf-8")
+    manifest = DEMO_MANIFEST.read_text(encoding="utf-8")
+    manifest = manifest.replace("PYTHON_EXECUTABLE", Path(sys.executable).as_posix())
+    manifest = manifest.replace("INTEGRATION_AGENT_SCRIPT", INTEGRATION_AGENT_SCRIPT.as_posix())
+    (project_dir / "project.yaml").write_text(manifest, encoding="utf-8")
     return load_project(scratch_repo)
 
 
@@ -149,14 +156,17 @@ def _wait(executor: SubprocessExecutor, execution_id: str, *, timeout: float = 3
     return observation
 
 
-def _record_evidence(role: str, execution: BuildRunnerExecution) -> Path:
+def _record_evidence(role: str, execution: BuildRunnerExecution, command: tuple[str, ...]) -> Path:
     """Persist durable evidence for a single real, managed execution.
 
-    Required by SM-012: provider, runtime, exit code, and the result file
-    itself must be recorded durably (under docs/evidence/), not only
-    asserted in-process or left under a pytest tmp_path that gets cleaned up.
-    The values here come straight off the `BuildRunnerExecution` row that
-    `BuildRunner` itself wrote -- not anything this test constructed.
+    Required by SM-012: provider, runtime, subprocess command, exit code, and
+    the result file itself must be recorded durably (under docs/evidence/),
+    not only asserted in-process or left under a pytest tmp_path that gets
+    cleaned up. The status/provider/adapter/exit_code values come straight
+    off the `BuildRunnerExecution` row that `BuildRunner` itself wrote; the
+    command comes from the same `WorkerConfig` the orchestrator resolved and
+    launched (execution rows do not persist argv, so it is captured here
+    from the worker the test already holds a reference to, not invented).
     """
     EVIDENCE_DIR.mkdir(parents=True, exist_ok=True)
     result_path = Path(execution.result_path) if execution.result_path else None
@@ -167,6 +177,7 @@ def _record_evidence(role: str, execution: BuildRunnerExecution) -> Path:
         "worker_id": execution.worker_id,
         "provider": execution.provider,
         "adapter": execution.adapter,
+        "command": list(command),
         "exit_code": execution.exit_code,
         "status": execution.status,
         "result_path": str(result_path) if result_path else None,
@@ -195,6 +206,14 @@ def test_real_agent_builder_reviewer_integration_on_scratch_repo(tmp_path: Path,
     # project. Snapshot and restore so this never leaks into other tests.
     previous_env = {key: os.environ.get(key) for key in _PROJECT_ENV_KEYS}
     try:
+        # INTEGRATION resolves to `adapter: subprocess`, not `builtin-git`, so
+        # `BuildRunner._integration_succeeded` requires auto-push approval
+        # before completing the task. The scratch repo has no upstream
+        # remote configured, so this never actually pushes anything anywhere
+        # -- it only lets the orchestrator transition a real subprocess
+        # integration to DONE, matching the policy a real project with a
+        # third-party INTEGRATION worker would need to set.
+        os.environ["BUILD_COORDINATOR_AUTO_PUSH_ALLOWED"] = "true"
         apply_project_environment(project)
         config = build_runner_config(project, dry_run=False)
 
@@ -204,7 +223,9 @@ def test_real_agent_builder_reviewer_integration_on_scratch_repo(tmp_path: Path,
         assert reviewer_worker.worker_id != builder_worker.worker_id, "reviewer must be an independent worker id"
         assert builder_worker.adapter == "subprocess"
         assert reviewer_worker.adapter == "subprocess"
-        assert integration_worker.adapter == "builtin-git"
+        assert integration_worker.adapter == "subprocess"
+        assert integration_worker.command, "INTEGRATION must launch a real subprocess command, not an empty argv"
+        assert integration_worker.command[-1] == INTEGRATION_AGENT_SCRIPT.as_posix()
 
         # This test's own isolated coordinator DB (set up by tests/conftest.py)
         # is reused as-is: apply_project_environment only sets
@@ -257,8 +278,15 @@ def test_real_agent_builder_reviewer_integration_on_scratch_repo(tmp_path: Path,
             # Detach for use after the session closes.
             session.expunge_all()
 
+        workers_by_role = {
+            "BUILDER": builder_worker,
+            "REVIEWER": reviewer_worker,
+            "INTEGRATION": integration_worker,
+        }
         for execution in executions:
-            _record_evidence(execution.role, execution)
+            worker = workers_by_role.get(execution.role)
+            command = tuple(worker.command) if worker is not None else ()
+            _record_evidence(execution.role, execution, command)
 
         by_role = {execution.role: execution for execution in executions}
         assert state == "DONE", (
@@ -273,7 +301,8 @@ def test_real_agent_builder_reviewer_integration_on_scratch_repo(tmp_path: Path,
         assert by_role["REVIEWER"].worker_id == reviewer_worker.worker_id
         assert by_role["REVIEWER"].worker_id != by_role["BUILDER"].worker_id
         assert by_role["INTEGRATION"].worker_id == integration_worker.worker_id
-        assert by_role["INTEGRATION"].adapter == "builtin-git"
+        assert by_role["INTEGRATION"].adapter == "subprocess"
+        assert by_role["INTEGRATION"].exit_code == 0
 
         feature_sha = by_role["BUILDER"].result_data.get("feature_sha")
         assert feature_sha, by_role["BUILDER"].result_data
