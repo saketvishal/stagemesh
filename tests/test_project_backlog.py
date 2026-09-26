@@ -859,6 +859,24 @@ def test_top_level_project_binding_respects_explicit_database_url(monkeypatch):
     assert cli._legacy_command_lifecycle(Namespace(command="status")) is sentinel
 
 
+def test_operator_dashboard_binds_to_current_project_state(tmp_path, registry, monkeypatch):
+    from argparse import Namespace
+
+    import build_coordinator.cli as cli
+    from build_coordinator.project.commands import _open
+
+    root = write_project(tmp_path / "repo")
+    register_project(root)
+    monkeypatch.delenv("BUILD_COORDINATOR_DATABASE_URL", raising=False)
+    monkeypatch.chdir(root)
+
+    lifecycle = cli._legacy_command_lifecycle(
+        Namespace(command="operator", operator_command="dashboard")
+    )
+
+    assert lifecycle.database_url == _open(load_project(root)).database_url
+
+
 def test_top_level_task_commands_bind_to_current_project_state(tmp_path, registry):
     root, _ = make_project_repo(
         tmp_path,
