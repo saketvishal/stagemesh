@@ -158,6 +158,90 @@ C:\path\to\repo\build_coordinator\bin\build-coordinator.ps1 status
 
 ---
 
+## Windows unattended startup
+
+On Windows, install a per-user Task Scheduler entry that runs
+`stagemesh continue` at system startup, even before the operator signs in:
+
+```powershell
+C:\path\to\repo\build_coordinator\bin\stagemesh-windows-startup.ps1 install `
+  -ProjectDir C:\path\to\project
+```
+
+The installer is idempotent. Running it again updates the same deterministic
+task in place with `Register-ScheduledTask -Force`; it does not create
+duplicates. The task uses an `AtStartup` trigger, the current user's S4U logon
+type, and least-privilege run level so it can start after reboot without an
+interactive logon or a stored password. The scheduled action invokes the
+checked-in launcher:
+
+```text
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File ...\stagemesh.ps1 continue --project-dir C:\path\to\project --max-cycles 2000
+```
+
+Optional flags:
+
+```powershell
+# Name a registered project explicitly.
+C:\path\to\repo\build_coordinator\bin\stagemesh-windows-startup.ps1 install `
+  -ProjectDir C:\path\to\project `
+  -ProjectName my-product
+
+# Coordinate every registered project after logon.
+C:\path\to\repo\build_coordinator\bin\stagemesh-windows-startup.ps1 install -All
+
+# Include the optional GitHub task-source adapter.
+C:\path\to\repo\build_coordinator\bin\stagemesh-windows-startup.ps1 install `
+  -ProjectDir C:\path\to\project `
+  -Github
+```
+
+Check or remove the entry:
+
+```powershell
+C:\path\to\repo\build_coordinator\bin\stagemesh-windows-startup.ps1 status `
+  -ProjectDir C:\path\to\project
+
+C:\path\to\repo\build_coordinator\bin\stagemesh-windows-startup.ps1 uninstall `
+  -ProjectDir C:\path\to\project
+```
+
+Use the same task-name-affecting flags for `status` and `uninstall` that were
+used at install time. For example:
+
+```powershell
+# Status or remove the named-project task.
+C:\path\to\repo\build_coordinator\bin\stagemesh-windows-startup.ps1 status `
+  -ProjectDir C:\path\to\project `
+  -ProjectName my-product
+
+C:\path\to\repo\build_coordinator\bin\stagemesh-windows-startup.ps1 uninstall `
+  -ProjectDir C:\path\to\project `
+  -ProjectName my-product
+
+# Status or remove the all-projects task.
+C:\path\to\repo\build_coordinator\bin\stagemesh-windows-startup.ps1 status `
+  -ProjectDir C:\path\to\project `
+  -All
+
+C:\path\to\repo\build_coordinator\bin\stagemesh-windows-startup.ps1 uninstall `
+  -ProjectDir C:\path\to\project `
+  -All
+```
+
+Uninstall is also idempotent: if the task is already absent, it exits
+successfully and reports `installed: false`.
+
+After a reboot, Task Scheduler starts the same durable
+`stagemesh continue` loop. Because `continue` reconciles stale executions and
+resumes from the project's `.build-coordinator/` state directory, recovered
+work is picked back up instead of being duplicated. Keep Python, Git, and any
+worker CLIs available through machine-level `PATH` entries or absolute paths in
+configuration, and keep secrets in credential stores that are available to
+non-interactive startup tasks. Do not put secrets in the scheduled task.
+
+---
+
 ## First run
 
 ### 1. Initialize the database
