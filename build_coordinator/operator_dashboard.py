@@ -26,9 +26,22 @@ from build_coordinator.runner.models import RunnerConfig
 from build_coordinator.service import ensure_state, list_available_tasks
 
 LIVE_EXECUTION_STATUSES = frozenset({"LAUNCHED", "RUNNING"})
-HUMAN_ATTENTION_TASK_STATES = frozenset({"WAITING_FOR_INPUT", "BLOCKED", "FAILED"})
+HUMAN_ATTENTION_TASK_STATES = frozenset({"WAITING_FOR_INPUT", "FAILED"})
 PASSIVE_WAIT_TASK_STATES = frozenset({"AWAITING_EXTERNAL_CI"})
 AUTONOMOUS_RECOVERY_TASK_STATES = frozenset({"RESUMABLE", "REWORK_REQUIRED", "STALE"})
+AUTONOMOUS_RECOVERY_CLASSIFICATIONS = frozenset(
+    {
+        "RECOVERABLE_GIT_STATE",
+        "RECOVERABLE_WORKTREE",
+    }
+)
+EXHAUSTED_RECOVERY_CLASSIFICATIONS = frozenset(
+    {
+        "TASK_REDESIGN_REQUIRED",
+        "REWORK_REQUIRED",
+    }
+)
+HUMAN_ACTION_RECOVERY_CLASSIFICATIONS = frozenset({"OPERATOR_ACTION_REQUIRED"})
 
 CONFIGURATION_ESCALATIONS = frozenset(
     {
@@ -116,7 +129,7 @@ def operator_dashboard(session: Session, *, now: datetime | None = None) -> dict
             "autonomous_recovery": [
                 _task_queue_item(task, "autonomous_recoverable", latest_events, latest_executions)
                 for task in tasks
-                if task.state in AUTONOMOUS_RECOVERY_TASK_STATES
+                if _is_autonomous_recovery_task(task)
             ],
             "passive_waits": [
                 _task_queue_item(task, "passive_wait", latest_events, latest_executions)
@@ -228,7 +241,7 @@ def _attention_queue(
         )
 
     for task in tasks:
-        if task.state in HUMAN_ATTENTION_TASK_STATES:
+        if _task_needs_human_attention(task):
             queue.append(_task_queue_item(task, _task_attention_category(task), latest_events, latest_executions))
 
     for execution in executions:
@@ -238,8 +251,32 @@ def _attention_queue(
     return sorted(queue, key=lambda item: (item.get("task_id") or "", item.get("kind") or ""))
 
 
+def _is_autonomous_recovery_task(task: BuildTask) -> bool:
+    if task.state in AUTONOMOUS_RECOVERY_TASK_STATES:
+        return True
+    return task.state == "BLOCKED" and _task_recovery_classification(task) in AUTONOMOUS_RECOVERY_CLASSIFICATIONS
+
+
+def _task_needs_human_attention(task: BuildTask) -> bool:
+    if task.state in HUMAN_ATTENTION_TASK_STATES:
+        return True
+    if task.state != "BLOCKED":
+        return False
+    recovery_classification = _task_recovery_classification(task)
+    if recovery_classification in AUTONOMOUS_RECOVERY_CLASSIFICATIONS:
+        return False
+    return recovery_classification in (
+        HUMAN_ACTION_RECOVERY_CLASSIFICATIONS | EXHAUSTED_RECOVERY_CLASSIFICATIONS
+    ) or _task_waiting_type(task) in (
+        CONFIGURATION_ESCALATIONS | POLICY_ESCALATIONS | EXHAUSTED_RECOVERY_ESCALATIONS
+    )
+
+
 def _task_attention_category(task: BuildTask) -> str:
-    waiting_type = str((task.waiting_input or {}).get("type") or "").upper()
+    recovery_classification = _task_recovery_classification(task)
+    if recovery_classification in EXHAUSTED_RECOVERY_CLASSIFICATIONS:
+        return "exhausted_automated_recovery"
+    waiting_type = _task_waiting_type(task)
     if waiting_type in CONFIGURATION_ESCALATIONS:
         return "credentials_or_configuration"
     if waiting_type in POLICY_ESCALATIONS:
@@ -251,6 +288,17 @@ def _task_attention_category(task: BuildTask) -> str:
     if task.state == "FAILED":
         return "exhausted_automated_recovery"
     return "human_action_required"
+
+
+def _task_waiting_type(task: BuildTask) -> str:
+    return str((task.waiting_input or {}).get("type") or "").upper()
+
+
+def _task_recovery_classification(task: BuildTask) -> str:
+    failure_evidence = (task.waiting_input or {}).get("failure_evidence") or {}
+    if not isinstance(failure_evidence, dict):
+        return ""
+    return str(failure_evidence.get("recovery_classification") or "").upper()
 
 
 def _task_queue_item(

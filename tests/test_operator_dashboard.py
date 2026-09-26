@@ -57,6 +57,26 @@ def test_operator_dashboard_separates_attention_from_recoverable_and_passive_wai
                     waiting_input={"type": "REMOTE_PUSH_APPROVAL_REQUIRED", "question": "approve push?"},
                 ),
                 _task("RECOVER-1", "RESUMABLE"),
+                _task(
+                    "RECOVER-BLOCKED-1",
+                    "BLOCKED",
+                    waiting_input={
+                        "failure_evidence": {
+                            "reason": "dirty worktree",
+                            "recovery_classification": "RECOVERABLE_WORKTREE",
+                        }
+                    },
+                ),
+                _task(
+                    "RECOVER-BLOCKED-2",
+                    "BLOCKED",
+                    waiting_input={
+                        "failure_evidence": {
+                            "reason": "git ref drift",
+                            "recovery_classification": "RECOVERABLE_GIT_STATE",
+                        }
+                    },
+                ),
                 _task("CI-1", "AWAITING_EXTERNAL_CI"),
                 _task("READY-1", "READY"),
             ]
@@ -93,7 +113,10 @@ def test_operator_dashboard_separates_attention_from_recoverable_and_passive_wai
     assert {item["task_id"] for item in attention if item.get("task_id")} == {"POLICY-1"}
     assert {item["category"] for item in attention} == {"unresolved_policy_decision", "human_action_required"}
     assert attention[0]["evidence"]
-    assert payload["non_actionable"]["autonomous_recovery"][0]["task_id"] == "RECOVER-1"
+    autonomous_recovery_ids = {
+        item["task_id"] for item in payload["non_actionable"]["autonomous_recovery"]
+    }
+    assert autonomous_recovery_ids == {"RECOVER-1", "RECOVER-BLOCKED-1", "RECOVER-BLOCKED-2"}
     assert payload["non_actionable"]["passive_waits"][0]["task_id"] == "CI-1"
     assert payload["tasks"]["by_state"]["AWAITING_EXTERNAL_CI"] == 1
     assert "providers" in payload["fleet"]
@@ -111,6 +134,26 @@ def test_operator_dashboard_classifies_configuration_and_exhausted_recovery_atte
                     waiting_input={"type": "AGENT_AUTHENTICATION_REQUIRED", "question": "log in"},
                 ),
                 _task("FAILED-1", "FAILED"),
+                _task(
+                    "OPERATOR-BLOCKED-1",
+                    "BLOCKED",
+                    waiting_input={
+                        "failure_evidence": {
+                            "reason": "manual repair required",
+                            "recovery_classification": "OPERATOR_ACTION_REQUIRED",
+                        }
+                    },
+                ),
+                _task(
+                    "EXHAUSTED-BLOCKED-1",
+                    "BLOCKED",
+                    waiting_input={
+                        "failure_evidence": {
+                            "reason": "task needs redesign",
+                            "recovery_classification": "TASK_REDESIGN_REQUIRED",
+                        }
+                    },
+                ),
             ]
         )
         session.add(
@@ -134,6 +177,8 @@ def test_operator_dashboard_classifies_configuration_and_exhausted_recovery_atte
     categories = {(item["task_id"], item["category"]) for item in payload["attention_queue"]}
     assert ("CONFIG-1", "credentials_or_configuration") in categories
     assert ("FAILED-1", "exhausted_automated_recovery") in categories
+    assert ("OPERATOR-BLOCKED-1", "human_action_required") in categories
+    assert ("EXHAUSTED-BLOCKED-1", "exhausted_automated_recovery") in categories
 
 
 def test_operator_dashboard_command_emits_json(capsys):
