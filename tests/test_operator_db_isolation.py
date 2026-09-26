@@ -138,6 +138,64 @@ def test_running_coordinator_tests_never_touches_operator_canary_db(tmp_path: Pa
     assert basetemp.exists(), "nested pytest did not use the isolated --basetemp"
 
 
+def test_targeted_objective_runner_file_never_touches_operator_canary_db(tmp_path: Path):
+    fake_home = tmp_path / "fake-home"
+    fake_home.mkdir()
+    canary_db_path = fake_home / "canary-operator-data" / "canary.sqlite3"
+    _create_canary_database(canary_db_path)
+
+    config_dir = fake_home / ".build-coordinator"
+    config_dir.mkdir()
+    (config_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "control_repo_root": str(fake_home / "control-repo"),
+                "database_url": f"sqlite:///{canary_db_path.as_posix()}",
+                "data_dir": str(canary_db_path.parent),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    before_raw, before_tables, before_rows = _canary_snapshot(canary_db_path)
+
+    env, basetemp = _isolated_nested_pytest_env(tmp_path)
+    for var in ("BUILD_COORDINATOR_DATABASE_URL", "BUILD_COORDINATOR_CONFIG", "BUILD_COORDINATOR_REPO_ROOT"):
+        env.pop(var, None)
+    env["HOME"] = str(fake_home)
+    env["USERPROFILE"] = str(fake_home)
+    env["PYTHONPATH"] = str(REPO_ROOT)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "tests/test_objective_runner_integration.py",
+            f"--basetemp={basetemp}",
+            "-p",
+            "no:cacheprovider",
+            "-q",
+            "--no-header",
+        ],
+        cwd=str(REPO_ROOT),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+
+    assert result.returncode == 0, (
+        f"targeted objective runner test failed under redirected HOME:\n"
+        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+
+    after_raw, after_tables, after_rows = _canary_snapshot(canary_db_path)
+    assert after_tables == before_tables
+    assert after_rows == before_rows
+    assert after_raw == before_raw
+
+
 def test_nested_pytest_uses_isolated_temp_storage(tmp_path: Path):
     """Nested pytest must not create or require the user-global
     pytest-of-<user> directory under the operator TEMP."""
