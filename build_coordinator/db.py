@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from urllib.parse import urlparse
+from urllib.request import url2pathname
 
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.engine import Engine
@@ -32,6 +34,73 @@ class DatabaseSchemaError(RuntimeError):
     """Raised when coordinator persistence is missing or incompatible."""
 
 
+class TestStateIsolationError(RuntimeError):
+    """Raised when tests try to bind the real project durable state."""
+
+
+def _sqlite_path_from_url(database_url: str) -> Path | None:
+    parsed = urlparse(database_url)
+    if parsed.scheme != "sqlite":
+        return None
+    if parsed.path in {"", "/:memory:"}:
+        return None
+    if parsed.netloc:
+        path = url2pathname(parsed.path)
+        return Path(f"//{parsed.netloc}{path}").expanduser().resolve()
+    if parsed.path.startswith("/") and not parsed.path.startswith("//"):
+        # SQLAlchemy treats sqlite:///foo.db as a relative path, even though
+        # urlparse exposes the path as /foo.db. Resolve it the same way the
+        # engine will open it so the test-state guard cannot be bypassed.
+        return Path(url2pathname(parsed.path[1:])).expanduser().resolve()
+    path = url2pathname(parsed.path)
+    return Path(path).expanduser().resolve()
+
+
+def _active_project_state_dirs() -> set[Path]:
+    candidates: set[Path] = set()
+    roots = [Path.cwd(), Path(__file__).resolve()]
+    for env_name in ("BUILD_COORDINATOR_REPO_ROOT", "REPO_ROOT"):
+        configured = os.getenv(env_name)
+        if configured:
+            roots.append(Path(configured).expanduser())
+    for root in roots:
+        try:
+            resolved = root.resolve()
+        except OSError:
+            resolved = root.absolute()
+        parts = resolved.parts
+        for index, part in enumerate(parts):
+            if part == ".build-coordinator":
+                candidates.add(Path(*parts[: index + 1]).resolve())
+        candidates.add((resolved / ".build-coordinator").resolve())
+        try:
+            candidates.add((resolved.parents[1] / ".build-coordinator").resolve())
+        except IndexError:
+            pass
+    return candidates
+
+
+def _is_path_within(path: Path | None, directory: Path) -> bool:
+    if path is None:
+        return False
+    return path == directory or path.is_relative_to(directory)
+
+
+def _assert_test_state_isolated(database_url: str, data_dir: Path | str | None) -> None:
+    if os.getenv("STAGEMESH_TEST_STATE_GUARD") != "1":
+        return
+
+    db_path = _sqlite_path_from_url(database_url)
+    resolved_data_dir = Path(data_dir).expanduser().resolve() if data_dir is not None else None
+    active_state_dirs = _active_project_state_dirs()
+    for state_dir in active_state_dirs:
+        if _is_path_within(resolved_data_dir, state_dir) or _is_path_within(db_path, state_dir):
+            raise TestStateIsolationError(
+                "Refusing to run tests against the active project durable state: "
+                f"database_url={database_url!r}, data_dir={str(data_dir)!r}"
+            )
+
+
 class DatabaseLifecycle:
     """Engine/session factory bound to one explicit database configuration."""
 
@@ -45,6 +114,7 @@ class DatabaseLifecycle:
             raise ValueError("database_url must be non-empty")
         self.database_url = str(database_url).strip()
         self.data_dir = Path(data_dir) if data_dir else None
+        _assert_test_state_isolated(self.database_url, self.data_dir)
         self.engine = engine_from_url(self.database_url, data_dir=self.data_dir)
         self.session_factory = sessionmaker(
             bind=self.engine,
