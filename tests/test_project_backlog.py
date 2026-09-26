@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import sqlite3
@@ -21,7 +22,6 @@ from build_coordinator.project.backlog import (
     BacklogError,
     audit_delivery_evidence,
     load_backlog,
-    persist_delivery_evidence,
     persist_delivery_evidence_in_history,
     sync_backlog,
     task_priorities,
@@ -42,6 +42,8 @@ from build_coordinator.project.state_migration import (
     reconcile_stale_executions,
 )
 import build_coordinator.project.state_migration as state_migration
+from build_coordinator.runner.models import RunnerConfig, WorkerConfig
+from build_coordinator.runner.orchestrator import BuildRunner
 from build_coordinator.service import transition_task, upsert_task
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -391,7 +393,7 @@ def test_sync_reports_orphans_and_unresolvable_dependencies(tmp_path, session):
     assert session.get(BuildTask, "Z-9") is None
 
 
-def test_structured_delivery_evidence_bootstraps_done_without_execution(tmp_path, session):
+def test_uncommitted_structured_delivery_evidence_fails_closed(tmp_path, session):
     root = write_project(tmp_path / "repo", tasks={"A-1": {}})
     git(root, "init", "-b", "main")
     git(root, "add", ".")
@@ -405,9 +407,10 @@ def test_structured_delivery_evidence_bootstraps_done_without_execution(tmp_path
     report = sync_backlog(session, project, load_backlog(project))
     session.commit()
 
-    assert report.counts() == {"RECONCILED": 1}
-    assert session.get(BuildTask, "A-1").state == "DONE"
+    assert report.counts() == {"ERROR": 1}
+    assert session.get(BuildTask, "A-1") is None
     assert session.scalars(select(BuildRunnerExecution)).all() == []
+    assert "not present in committed repository history" in report.results[0].details
 
 
 def test_stale_delivery_evidence_fails_closed(tmp_path, session):
@@ -435,7 +438,7 @@ def test_persist_delivery_evidence_and_audit_missing_entries(tmp_path, session):
     sha = git(root, "rev-parse", "HEAD")
     project = load_project(root)
     definitions = load_backlog(project)
-    assert persist_delivery_evidence(root, definitions, "A-1", sha=sha, version="fixture-1")
+    assert persist_delivery_evidence_in_history(root, definitions, "A-1", sha=sha, version="fixture-1")["status"] == "COMMITTED"
 
     sync_backlog(session, project, load_backlog(project))
     transition_task(session, "B-2", "CLAIMED", actor="test")
@@ -449,6 +452,21 @@ def test_persist_delivery_evidence_and_audit_missing_entries(tmp_path, session):
         "A-1": "DELIVERED_WITH_EVIDENCE",
         "B-2": "DELIVERED_MISSING_LEDGER_ENTRY",
     }
+
+
+def test_audit_delivery_reports_duplicate_definitions(tmp_path, session):
+    root = write_project(tmp_path / "repo", tasks={"A-1": {}})
+    (root / ".stagemesh" / "tasks" / "duplicate.yaml").write_text(task_yaml(**{"A-1": {}}), encoding="utf-8")
+    project = load_project(root)
+
+    with pytest.raises(BacklogError):
+        load_backlog(project)
+
+    audit = audit_delivery_evidence(session, project, load_backlog(project, allow_duplicates=True))
+    statuses = [row["status"] for row in audit["tasks"] if row["task_id"] == "A-1"]
+
+    assert audit["counts"] == {"SUPERSEDED": 2}
+    assert statuses == ["SUPERSEDED", "SUPERSEDED"]
 
 
 def test_delivery_evidence_is_committed_and_bootstraps_clean_clone_without_execution(tmp_path):
@@ -488,6 +506,78 @@ def test_delivery_evidence_is_committed_and_bootstraps_clean_clone_without_execu
             assert fresh.scalars(select(BuildRunnerExecution)).all() == []
     finally:
         lifecycle.dispose()
+
+
+def test_governed_integration_records_evidence_then_fresh_sync_launches_zero_executions(tmp_path):
+    root = write_project(tmp_path / "repo", tasks={"A-1": {}})
+    git(root, "init", "-b", "main")
+    git(root, "add", ".")
+    git(root, "commit", "-m", "init")
+    (root / "delivered.txt").write_text("done\n", encoding="utf-8")
+    git(root, "add", "delivered.txt")
+    git(root, "commit", "-m", "Integrate A-1")
+    delivered_sha = git(root, "rev-parse", "HEAD")
+
+    lifecycle = DatabaseLifecycle(f"sqlite:///{(tmp_path / 'runtime.sqlite3').as_posix()}", data_dir=tmp_path / "runtime")
+    lifecycle.initialize_schema()
+    try:
+        with lifecycle.session() as runtime:
+            project = load_project(root)
+            sync_backlog(runtime, project, load_backlog(project))
+            for state in ("CLAIMED", "IN_PROGRESS", "VALIDATING", "REVIEW_READY", "REVIEWING", "INTEGRATING"):
+                transition_task(runtime, "A-1", state, actor="test")
+            execution = BuildRunnerExecution(
+                task_id="A-1",
+                role="INTEGRATION",
+                worker_id="integration-1",
+                provider="test",
+                adapter="builtin-git",
+                status="SUCCEEDED",
+                result_data={"final_main_sha": delivered_sha, "push_status": "NOT_REQUIRED"},
+            )
+            runtime.add(execution)
+            runtime.flush()
+            runner = BuildRunner(
+                lambda: runtime,
+                RunnerConfig(
+                    workers=(
+                        WorkerConfig(
+                            worker_id="integration-1",
+                            role="INTEGRATION",
+                            provider="test",
+                            adapter="builtin-git",
+                            worktree_path=str(root),
+                        ),
+                    ),
+                    allowed_workspace_roots=[str(tmp_path)],
+                ),
+            )
+            runner._settings = dataclasses.replace(runner._settings, repo_root=root, data_dir=tmp_path)
+
+            runner._complete_or_await_ci(runtime, execution)
+            runtime.commit()
+
+            assert runtime.get(BuildTask, "A-1").state == "DONE"
+            assert "Record delivery evidence for A-1" in git(root, "log", "-1", "--pretty=%s")
+    finally:
+        lifecycle.dispose()
+
+    fresh_lifecycle = DatabaseLifecycle(
+        f"sqlite:///{(tmp_path / 'fresh-runtime.sqlite3').as_posix()}",
+        data_dir=tmp_path / "fresh-runtime",
+    )
+    fresh_lifecycle.initialize_schema()
+    try:
+        with fresh_lifecycle.session() as fresh:
+            project = load_project(root)
+            report = sync_backlog(fresh, project, load_backlog(project))
+            fresh.commit()
+
+            assert report.counts() == {"RECONCILED": 1}
+            assert fresh.get(BuildTask, "A-1").state == "DONE"
+            assert fresh.scalars(select(BuildRunnerExecution)).all() == []
+    finally:
+        fresh_lifecycle.dispose()
 
 
 # ---------------------------------------------------------------- legacy state
