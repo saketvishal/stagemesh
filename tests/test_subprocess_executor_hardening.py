@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import sys
+import time
+from dataclasses import replace
 from pathlib import Path
 
 from build_coordinator.execution.base import ExecutionLaunch
@@ -46,6 +48,48 @@ def test_subprocess_executor_records_sanitized_evidence_when_provider_exits_with
     assert "hello" in observation.result_data["stdout_tail"]
     assert "super-secret" not in observation.result_data["stderr_tail"]
     assert "token=<redacted>" in observation.result_data["stderr_tail"]
+
+
+def test_subprocess_executor_preserves_unicode_output_in_utf8_logs_and_evidence(tmp_path: Path):
+    log_dir = tmp_path / "logs"
+    result_path = tmp_path / "result.json"
+    script = (
+        "import sys; "
+        "print('stdout unicode: caf\\u00e9 \\u2192 \\U0001f680 \\u4e2d'); "
+        "print('stderr unicode: snowman \\u2603 \\U0001f680', file=sys.stderr); "
+        "sys.exit(2)"
+    )
+    executor = SubprocessExecutor(
+        [sys.executable, "-c", script],
+        log_dir=log_dir,
+    )
+
+    launch = replace(
+        _launch(tmp_path, result_path=result_path),
+        extra_env={
+            "PYTHONIOENCODING": "utf-8",
+            "PYTHONUTF8": "0",
+            "PYTHONLEGACYWINDOWSSTDIO": "1",
+        },
+    )
+
+    handle = executor.launch(launch)
+    for _ in range(50):
+        observation = executor.poll(handle.execution_id)
+        if observation.status != "RUNNING":
+            break
+        time.sleep(0.02)
+
+    assert observation.status == "FAILED"
+    expected_stdout = "caf\u00e9 \u2192 \U0001f680 \u4e2d"
+    expected_stderr = "snowman \u2603 \U0001f680"
+    stdout_log = (log_dir / "exec-gh-61.stdout.log").read_text(encoding="utf-8")
+    stderr_log = (log_dir / "exec-gh-61.stderr.log").read_text(encoding="utf-8")
+    assert expected_stdout in stdout_log
+    assert expected_stderr in stderr_log
+    assert expected_stdout in observation.result_data["stdout_tail"]
+    assert expected_stderr in observation.result_data["stderr_tail"]
+    json.dumps(observation.result_data, ensure_ascii=False).encode("utf-8")
 
 
 def test_subprocess_executor_classifies_transient_no_result_failures_for_bounded_retry(tmp_path: Path):
