@@ -7,11 +7,14 @@ import subprocess
 
 import pytest
 
+from build_coordinator.claims import task_is_claimable
 from build_coordinator.db import Base, SessionLocal, engine, initialize_schema
 from build_coordinator.models import BuildTask, BuildTaskEvent
 from build_coordinator.project.commands import _optional_task_source
 from build_coordinator.project.definition import ProjectDefinition
+from build_coordinator.service import utcnow
 from build_coordinator.task_source import get_task_source
+from build_coordinator.task_source.base import source_identity_metadata
 from build_coordinator.task_source.azure_devops import AzureDevOpsTaskSource
 
 
@@ -150,6 +153,9 @@ def test_azure_devops_import_records_source_identity_without_becoming_lifecycle_
         assert task is not None
         assert task.state == "BLOCKED"
         assert task.definition_metadata["task_source"] == "azure_devops"
+        assert task.definition_metadata["source_type"] == "azure_devops"
+        assert task.definition_metadata["source_owner"] == "https://dev.azure.com/acme/mesh"
+        assert task.definition_metadata["source_ref"] == "123"
         assert task.definition_metadata["source_work_item_id"] == "123"
         event = session.query(BuildTaskEvent).filter_by(
             task_id="ADO-123",
@@ -157,6 +163,32 @@ def test_azure_devops_import_records_source_identity_without_becoming_lifecycle_
             event_type="task.synced_from_source",
         ).one()
         assert event.event_data["work_item_id"] == "123"
+
+
+def test_closed_source_suppression_is_source_neutral_not_lifecycle_authority():
+    with SessionLocal() as session:
+        session.add(
+            BuildTask(
+                task_id="LOCAL-1",
+                title="Locally owned task with closed source context",
+                description="Do work",
+                acceptance_criteria=["Works"],
+                definition_metadata={
+                    "task_source": "local",
+                    "source_type": "local",
+                    "source_ref": "backlog/LOCAL-1",
+                    "source_state": "CLOSED",
+                },
+                state="READY",
+            )
+        )
+        session.commit()
+
+    with SessionLocal() as session:
+        task = session.get(BuildTask, "LOCAL-1")
+        assert task is not None
+        assert task.state == "READY"
+        assert not task_is_claimable(session, task, utcnow())
 
 
 def test_azure_devops_outbound_sends_lifecycle_state_and_evidence_only():
@@ -204,6 +236,141 @@ def test_azure_devops_outbound_sends_lifecycle_state_and_evidence_only():
         session.commit()
 
     assert len(client.updates) == 1
+
+
+def test_azure_devops_outbound_uses_legacy_sync_event_without_source_metadata():
+    client = FakeAzureDevOpsClient([])
+    source = AzureDevOpsTaskSource(
+        organization="https://dev.azure.com/acme",
+        project="mesh",
+        client=client,
+    )
+
+    with SessionLocal() as session:
+        session.add(
+            BuildTask(
+                task_id="ADO-404",
+                title="Legacy Azure DevOps task",
+                description="Imported before source metadata existed",
+                acceptance_criteria=["Works"],
+                definition_metadata={},
+                state="DONE",
+            )
+        )
+        session.add(
+            BuildTaskEvent(
+                task_id="ADO-404",
+                event_type="task.synced_from_source",
+                actor="azure-devops-sync",
+                event_data={
+                    "source": "https://dev.azure.com/acme/mesh/_workitems/edit/404",
+                    "work_item_id": "404",
+                    "action": "CREATED",
+                },
+            )
+        )
+        ok = source.sync_outbound(session, "ADO-404", "DONE", evidence={"summary": "legacy"})
+        session.commit()
+
+    assert ok is True
+    assert client.updates == [
+        {
+            "organization": "https://dev.azure.com/acme",
+            "project": "mesh",
+            "work_item_id": "404",
+            "state": "DONE",
+            "evidence": {"summary": "legacy"},
+        }
+    ]
+
+
+def test_azure_devops_outbound_ignores_prefix_without_azure_source_identity():
+    client = FakeAzureDevOpsClient([])
+    source = AzureDevOpsTaskSource(
+        organization="https://dev.azure.com/acme",
+        project="mesh",
+        client=client,
+    )
+
+    with SessionLocal() as session:
+        session.add(
+            BuildTask(
+                task_id="ADO-456",
+                title="Local task with Azure-looking id",
+                description="Must not sync to Azure DevOps",
+                acceptance_criteria=["Works"],
+                definition_metadata=source_identity_metadata(
+                    source_type="local",
+                    source_owner="test-proj",
+                    source_ref=".stagemesh/tasks/backlog.yaml:ADO-456",
+                    source_url=".stagemesh/tasks/backlog.yaml",
+                ),
+                state="DONE",
+            )
+        )
+        ok = source.sync_outbound(session, "ADO-456", "DONE", evidence={"summary": "local"})
+        session.commit()
+
+    assert ok is True
+    assert client.updates == []
+
+
+def test_azure_devops_outbound_ignores_raw_prefix_without_sync_event():
+    client = FakeAzureDevOpsClient([])
+    source = AzureDevOpsTaskSource(
+        organization="https://dev.azure.com/acme",
+        project="mesh",
+        client=client,
+    )
+
+    with SessionLocal() as session:
+        session.add(
+            BuildTask(
+                task_id="ADO-505",
+                title="Raw Azure-looking task",
+                description="Must not infer work item authority from id",
+                acceptance_criteria=["Works"],
+                definition_metadata={},
+                state="DONE",
+            )
+        )
+        ok = source.sync_outbound(session, "ADO-505", "DONE", evidence={"summary": "raw"})
+        session.commit()
+
+    assert ok is True
+    assert client.updates == []
+
+
+def test_azure_devops_outbound_ignores_foreign_azure_owner():
+    client = FakeAzureDevOpsClient([])
+    source = AzureDevOpsTaskSource(
+        organization="https://dev.azure.com/acme",
+        project="mesh",
+        client=client,
+    )
+
+    with SessionLocal() as session:
+        session.add(
+            BuildTask(
+                task_id="ADO-789",
+                title="Different Azure project task",
+                description="Must not sync to this Azure project",
+                acceptance_criteria=["Works"],
+                definition_metadata=source_identity_metadata(
+                    source_type="azure_devops",
+                    source_owner="https://dev.azure.com/acme/other",
+                    source_ref="789",
+                    source_url="https://dev.azure.com/acme/other/_workitems/edit/789",
+                    legacy={"source_work_item_id": "789"},
+                ),
+                state="DONE",
+            )
+        )
+        ok = source.sync_outbound(session, "ADO-789", "DONE", evidence={"summary": "foreign"})
+        session.commit()
+
+    assert ok is True
+    assert client.updates == []
 
 
 def test_azure_devops_cli_outbound_updates_lifecycle_state_and_discussion(monkeypatch):
