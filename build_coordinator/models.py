@@ -305,11 +305,20 @@ class BuildWorkerLease(Base):
         CheckConstraint("status IN ('ACTIVE','RELEASED','EXPIRED')", name="chk_build_worker_leases_status"),
         Index("idx_build_worker_leases_worker", "worker_id"),
         Index("idx_build_worker_leases_status_expiry", "status", "lease_expires_at"),
+        Index(
+            "uq_build_worker_leases_active_slot",
+            "worker_id",
+            "slot_index",
+            unique=True,
+            sqlite_where=text("status = 'ACTIVE' AND slot_index IS NOT NULL"),
+            postgresql_where=text("status = 'ACTIVE' AND slot_index IS NOT NULL"),
+        ),
     )
 
     lease_id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
     worker_id: Mapped[str] = mapped_column(String(160), nullable=False)
     provider: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    slot_index: Mapped[int | None] = mapped_column(nullable=True)
     machine_id: Mapped[str | None] = mapped_column(String(160), nullable=True)
     process_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
     task_id: Mapped[str | None] = mapped_column(String(80), nullable=True)

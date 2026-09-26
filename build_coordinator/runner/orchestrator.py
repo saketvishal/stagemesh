@@ -149,6 +149,7 @@ from build_coordinator.service import (
     reconcile_stale_executions,
     recover_expired,
     recover_lost_execution_claims,
+    release_worker_leases_for_execution,
     release_active_claims,
     request_task_input,
     transition_task,
@@ -2188,26 +2189,8 @@ class BuildRunner:
         execution_id = new_uuid()
         result_path = str(self._result_dir() / f"{execution_id}.json")
         executor = self._executor_for_worker(worker)
-        if isinstance(executor, SubprocessExecutor):
-            executor.remember_result_path(execution_id, result_path)
-        handle = executor.launch(
-            ExecutionLaunch(
-                task_id=task_id,
-                role=role,
-                worker_id=worker.worker_id,
-                provider=worker.provider,
-                worktree_path=worker.worktree_path,
-                branch_name=worker.branch_name,
-                prompt=prompt,
-                execution_id=execution_id,
-                result_path=result_path,
-                reviewed_feature_sha=reviewed_feature_sha,
-                timeout_seconds=worker.timeout_seconds,
-                extra_env=worker.resolved_env(),
-            )
-        )
         row = BuildRunnerExecution(
-            execution_id=handle.execution_id,
+            execution_id=execution_id,
             task_id=task_id,
             role=role,
             worker_id=worker.worker_id,
@@ -2216,8 +2199,7 @@ class BuildRunner:
             claim_id=str(claim_id) if claim_id else None,
             worktree_path=worker.worktree_path,
             branch_name=worker.branch_name,
-            process_id=handle.process_id,
-            result_path=handle.result_path or result_path,
+            result_path=result_path,
             reviewed_feature_sha=reviewed_feature_sha,
             prompt_hash=hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
             status="LAUNCHED",
@@ -2231,23 +2213,64 @@ class BuildRunner:
                 ),
             },
         )
-        lease = BuildWorkerLease(
-            worker_id=worker.worker_id,
-            provider=worker.provider,
-            machine_id=socket.gethostname(),
-            process_id=str(os.getpid()),
-            task_id=task_id,
-            execution_id=handle.execution_id,
-            lease_expires_at=_now() + timedelta(seconds=worker.timeout_seconds or 3600),
-            status="ACTIVE",
-        )
+        slot_count = max(1, int(worker.max_concurrency or 1))
+        reserved_slot: int | None = None
+        for slot_index in range(slot_count):
+            lease = BuildWorkerLease(
+                worker_id=worker.worker_id,
+                provider=worker.provider,
+                slot_index=slot_index,
+                machine_id=socket.gethostname(),
+                process_id=str(os.getpid()),
+                task_id=task_id,
+                execution_id=execution_id,
+                lease_expires_at=_now() + timedelta(seconds=worker.timeout_seconds or 3600),
+                status="ACTIVE",
+            )
+            try:
+                with session.begin_nested():
+                    session.add(lease)
+                    session.flush()
+                reserved_slot = slot_index
+                break
+            except IntegrityError:
+                continue
+        if reserved_slot is None:
+            result.capacity_full = True
+            return
         try:
             with session.begin_nested():
                 session.add(row)
-                session.add(lease)
                 session.flush()
         except IntegrityError:
+            release_worker_leases_for_execution(session, execution_id)
             return
+        try:
+            if isinstance(executor, SubprocessExecutor):
+                executor.remember_result_path(execution_id, result_path)
+            handle = executor.launch(
+                ExecutionLaunch(
+                    task_id=task_id,
+                    role=role,
+                    worker_id=worker.worker_id,
+                    provider=worker.provider,
+                    worktree_path=worker.worktree_path,
+                    branch_name=worker.branch_name,
+                    prompt=prompt,
+                    execution_id=execution_id,
+                    result_path=result_path,
+                    reviewed_feature_sha=reviewed_feature_sha,
+                    timeout_seconds=worker.timeout_seconds,
+                    extra_env=worker.resolved_env(),
+                )
+            )
+        except Exception:
+            release_worker_leases_for_execution(session, execution_id)
+            session.delete(row)
+            raise
+        row.execution_id = handle.execution_id
+        row.process_id = handle.process_id
+        row.result_path = handle.result_path or result_path
         record_event(
             session,
             EventInput(
@@ -2272,15 +2295,7 @@ class BuildRunner:
         result.launched.append(handle.execution_id)
 
     def _release_worker_lease(self, session: Session, execution_id: str) -> None:
-        leases = session.scalars(
-            select(BuildWorkerLease)
-            .where(BuildWorkerLease.execution_id == execution_id)
-            .where(BuildWorkerLease.status == "ACTIVE")
-        ).all()
-        now = _now()
-        for lease in leases:
-            lease.status = "RELEASED"
-            lease.heartbeat_at = now
+        release_worker_leases_for_execution(session, execution_id)
 
     def _kill_reconciled_process_trees(self, session: Session) -> None:
         from build_coordinator.execution.process_tree import kill_process_tree

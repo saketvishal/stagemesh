@@ -53,6 +53,7 @@ from build_coordinator.models import (
     BuildTaskCheckpoint,
     BuildTaskClaim,
     BuildTaskEvent,
+    BuildWorkerLease,
 )
 from build_coordinator.runner.worktree import task_branch_name
 
@@ -857,7 +858,9 @@ def recover_expired(session: Session, *, actor: str = "cli") -> list[BuildTask]:
         else:
             task.state = "STALE"
         task.updated_at = now
-        terminate_executions_for_claim(session, claim.claim_id, reason="STALE_CLAIM")
+        terminated = terminate_executions_for_claim(session, claim.claim_id, reason="STALE_CLAIM")
+        for execution in terminated:
+            release_worker_leases_for_execution(session, execution.execution_id, status="EXPIRED")
         recovered.append(task)
         record_event(session, EventInput(
             task_id=task.task_id,
@@ -904,6 +907,7 @@ def recover_lost_execution_claims(
         )
         if live_successor is not None:
             continue
+        release_worker_leases_for_execution(session, execution.execution_id)
         task = locked_task(session, claim.task_id)
         if task.current_claim_id != claim.claim_id:
             continue
@@ -967,6 +971,27 @@ def terminate_executions_for_claim(
     return list(rows)
 
 
+def release_worker_leases_for_execution(
+    session: Session,
+    execution_id: str,
+    *,
+    status: str = "RELEASED",
+) -> None:
+    if status not in {"RELEASED", "EXPIRED"}:
+        raise CoordinatorPolicyError(f"Invalid worker lease release status: {status}")
+    now = utcnow()
+    leases = session.scalars(
+        select(BuildWorkerLease)
+        .where(BuildWorkerLease.execution_id == execution_id)
+        .where(BuildWorkerLease.status == "ACTIVE")
+    ).all()
+    for lease in leases:
+        lease.status = status
+        lease.heartbeat_at = now
+        if status == "EXPIRED" and _as_utc(lease.lease_expires_at) > now:
+            lease.lease_expires_at = now
+
+
 def reconcile_stale_executions(session: Session) -> list[BuildRunnerExecution]:
     """Terminate live execution rows whose coordinator claim is no longer authoritative."""
     now = utcnow()
@@ -985,6 +1010,7 @@ def reconcile_stale_executions(session: Session) -> list[BuildRunnerExecution]:
                 **(row.result_data or {}),
                 "reconciliation_state": "NO_CLAIM",
             }
+            release_worker_leases_for_execution(session, row.execution_id)
             terminated.append(row)
             continue
         claim = session.get(BuildTaskClaim, row.claim_id)
@@ -1001,5 +1027,6 @@ def reconcile_stale_executions(session: Session) -> list[BuildRunnerExecution]:
             **(row.result_data or {}),
             "reconciliation_state": "STALE_CLAIM",
         }
+        release_worker_leases_for_execution(session, row.execution_id, status="EXPIRED")
         terminated.append(row)
     return terminated
