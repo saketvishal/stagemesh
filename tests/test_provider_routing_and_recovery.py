@@ -449,10 +449,21 @@ def test_task_scoped_no_changes_failure_does_not_emit_provider_failure():
         assert observed_execution is not None
         assert observed_execution.task_id == "TASK-NO-CHANGES-FAILURE"
     assert observed.escalations == []
-    retry = runner.run_once()
-    assert len(retry.launched) == 1
+    # NO_CHANGES recovery may dispatch the replacement builder in the same
+    # cycle that observes the failed execution. Assert the retry exists
+    # without coupling the test to a one-cycle scheduling delay.
+    if observed.launched:
+        retry_execution_id = observed.launched[0]
+    else:
+        retry = runner.run_once()
+        assert len(retry.launched) == 1
+        retry_execution_id = retry.launched[0]
 
     with SessionLocal() as session:
+        retry_execution = session.get(BuildRunnerExecution, retry_execution_id)
+        assert retry_execution is not None
+        assert retry_execution.task_id == "TASK-NO-CHANGES-FAILURE"
+        assert retry_execution.worker_id == "builder-codex-2"
         provider_failures = session.scalars(
             select(BuildTaskEvent)
             .where(BuildTaskEvent.task_id == "TASK-NO-CHANGES-FAILURE")
