@@ -13,8 +13,14 @@ from typing import Any
 
 from sqlalchemy import select
 
+from build_coordinator.coordinator_lock import (
+    CoordinatorLockHeld,
+    acquire_coordinator_lock,
+    heartbeat_coordinator_lock,
+    release_coordinator_lock,
+)
 from build_coordinator.db import DatabaseSchemaError, SessionLocal, configure_process_database
-from build_coordinator.models import BuildRunnerExecution, BuildTask, BuildTaskEvent
+from build_coordinator.models import BuildRunnerExecution, BuildTask, BuildTaskEvent, new_uuid
 from build_coordinator.project.backlog import (
     TaskDefinition,
     load_backlog,
@@ -379,6 +385,15 @@ def handle_continue(args: argparse.Namespace) -> None:
             flush=True,
         )
         return
+    instance_id = new_uuid()
+    with lifecycle.session() as session:
+        try:
+            acquire_coordinator_lock(session, instance_id=instance_id)
+        except CoordinatorLockHeld as exc:
+            session.rollback()
+            raise ProjectError(str(exc)) from exc
+        session.commit()
+
     runner = BuildRunner(SessionLocal, config, task_source=task_source, target_task_ids=target_task_ids)
     started = time.monotonic()
     cycles: list[dict[str, Any]] = []
@@ -386,66 +401,73 @@ def handle_continue(args: argparse.Namespace) -> None:
     idle_cycles = 0
     drained_from: str | None = None
     last_escalations: dict[str, str] = {}
-    for number in range(1, max(1, args.max_cycles) + 1):
-        project, config = _reload_project_runtime(project, lifecycle, runner)
-        if args.timeout is not None and drained_from is None and time.monotonic() - started > args.timeout:
+    try:
+        for number in range(1, max(1, args.max_cycles) + 1):
+            project, config = _reload_project_runtime(project, lifecycle, runner)
+            if args.timeout is not None and drained_from is None and time.monotonic() - started > args.timeout:
+                with lifecycle.session() as session:
+                    state = ensure_state(session)
+                    drained_from = state.mode
+                    if drained_from == "RUNNING":
+                        set_mode(session, "DRAINING")
+                    session.commit()
+                print(f"[{project.project_id}] time budget reached: finishing in-flight work, starting nothing new", file=sys.stderr, flush=True)
+            if project.push_upstream and (number == 1 or number % 10 == 0):
+                with lifecycle.session() as session:
+                    retry_pending_pushes(
+                        session,
+                        repo_root=project.root,
+                        remote=project.upstream_remote,
+                        main_ref=project.main_ref,
+                    )
+                    session.commit()
+            result = runner.run_once()
             with lifecycle.session() as session:
-                state = ensure_state(session)
-                drained_from = state.mode
-                if drained_from == "RUNNING":
-                    set_mode(session, "DRAINING")
+                live = session.scalars(
+                    select(BuildRunnerExecution).where(BuildRunnerExecution.status.in_(_LIVE_EXECUTION))
+                ).all()
+                live_builders = [e for e in live if e.role in _BUILD_ROLES]
+                peak_parallel = max(peak_parallel, len(live_builders))
+                launched = [
+                    _execution_row(session.get(BuildRunnerExecution, execution_id))
+                    for execution_id in result.launched
+                ]
+                heartbeat_coordinator_lock(session, instance_id=instance_id)
                 session.commit()
-            print(f"[{project.project_id}] time budget reached: finishing in-flight work, starting nothing new", file=sys.stderr, flush=True)
-        if project.push_upstream and (number == 1 or number % 10 == 0):
-            with lifecycle.session() as session:
-                retry_pending_pushes(
-                    session,
-                    repo_root=project.root,
-                    remote=project.upstream_remote,
-                    main_ref=project.main_ref,
-                )
-                session.commit()
-        result = runner.run_once()
-        with lifecycle.session() as session:
-            live = session.scalars(
-                select(BuildRunnerExecution).where(BuildRunnerExecution.status.in_(_LIVE_EXECUTION))
-            ).all()
-            live_builders = [e for e in live if e.role in _BUILD_ROLES]
-            peak_parallel = max(peak_parallel, len(live_builders))
-            launched = [
-                _execution_row(session.get(BuildRunnerExecution, execution_id))
-                for execution_id in result.launched
-            ]
-        for row in launched:
-            print(f"[{project.project_id}] {row.get('role', '?').lower()} {row.get('task_id')} on {row.get('worker_id')}", file=sys.stderr, flush=True)
-        for item in result.escalations:
-            gate_id, _, reason = item.partition(":")
-            if last_escalations.get(gate_id) != reason:
-                print(f"[{project.project_id}] needs attention: {item}", file=sys.stderr, flush=True)
-                last_escalations[gate_id] = reason
-        cycles.append(
-            {
-                "cycle": number,
-                "launched": launched,
-                "observed": list(result.observed),
-                "recovered": list(result.recovered),
-                "escalations": list(result.escalations),
-                "live_builders": len(live_builders),
-                "live_executions": len(live),
-            }
-        )
-        if args.once:
-            break
-        if not live and not result.launched:
-            idle_cycles += 1
-            if idle_cycles >= 2:
+            for row in launched:
+                print(f"[{project.project_id}] {row.get('role', '?').lower()} {row.get('task_id')} on {row.get('worker_id')}", file=sys.stderr, flush=True)
+            for item in result.escalations:
+                gate_id, _, reason = item.partition(":")
+                if last_escalations.get(gate_id) != reason:
+                    print(f"[{project.project_id}] needs attention: {item}", file=sys.stderr, flush=True)
+                    last_escalations[gate_id] = reason
+            cycles.append(
+                {
+                    "cycle": number,
+                    "launched": launched,
+                    "observed": list(result.observed),
+                    "recovered": list(result.recovered),
+                    "escalations": list(result.escalations),
+                    "live_builders": len(live_builders),
+                    "live_executions": len(live),
+                }
+            )
+            if args.once:
                 break
-        else:
-            idle_cycles = 0
-        time.sleep(config.poll_seconds)
-    if drained_from == "RUNNING":
+            if not live and not result.launched:
+                idle_cycles += 1
+                if idle_cycles >= 2:
+                    break
+            else:
+                idle_cycles = 0
+            time.sleep(config.poll_seconds)
+        if drained_from == "RUNNING":
+            with lifecycle.session() as session:
+                set_mode(session, "RUNNING")
+                session.commit()
+    finally:
         with lifecycle.session() as session:
-            set_mode(session, "RUNNING")
+            release_coordinator_lock(session, instance_id=instance_id)
             session.commit()
 
     with lifecycle.session() as session:
