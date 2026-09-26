@@ -113,6 +113,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_checkpoint_commands(sub)
     _add_transition_commands(sub)
     _add_objective_commands(sub)
+    _add_operator_commands(sub)
     _add_worker_commands(sub)
     _add_routing_commands(sub)
     _add_watcher_commands(sub)
@@ -302,6 +303,12 @@ def _add_objective_commands(sub) -> None:
     approve.add_argument("--note")
 
 
+def _add_operator_commands(sub) -> None:
+    operator = sub.add_parser("operator")
+    operator_sub = operator.add_subparsers(dest="operator_command", required=True)
+    operator_sub.add_parser("dashboard")
+
+
 def _add_worker_commands(sub) -> None:
     workers = sub.add_parser("workers")
     workers_sub = workers.add_subparsers(dest="workers_command", required=True)
@@ -344,6 +351,9 @@ def _run(args: argparse.Namespace, session) -> None:
         return
     if args.command == "objective":
         _objective(args, session)
+        return
+    if args.command == "operator":
+        _operator(args, session)
         return
     if args.command == "workers":
         _workers(args, session)
@@ -390,6 +400,15 @@ def _objective(args: argparse.Namespace, session) -> None:
         "approve": _objective_approve,
     }
     handlers[args.objective_command](args, session)
+
+
+def _operator(args: argparse.Namespace, session) -> None:
+    if args.operator_command == "dashboard":
+        from build_coordinator.operator_dashboard import operator_dashboard
+
+        _print(operator_dashboard(session))
+        return
+    raise SystemExit(f"unknown operator command: {args.operator_command}")
 
 
 def _workers(args: argparse.Namespace, session) -> None:
