@@ -1287,24 +1287,33 @@ def test_retryable_failure_relaunches_after_backoff_then_escalates_when_exhauste
             .where(BuildTaskEvent.event_type == "task.transitioned")
             .where(BuildTaskEvent.to_state == "BLOCKED")
         ).all()[-1]
-        assert blocked_event.event_data["reason"] == "EXECUTION_RETRY_LIMIT_REACHED"
+        assert blocked_event.event_data["reason"] == "PROVIDER_FAILURE_RETRIES_EXHAUSTED:RATE_LIMITED"
+        evidence = blocked_event.event_data
+        assert evidence["underlying_invariant"] == "EXECUTION_RETRY_LIMIT_REACHED"
+        assert evidence["provider_failure"] == "RATE_LIMITED"
+        assert evidence["retry_attempts"] == 3
+        assert evidence["max_attempts"] == 3
+        assert evidence["retryable_failure"] is True
+        assert evidence["preserved_checkpoint"] is True
 
 
-def test_operator_retry_recovery_opens_new_durable_generation(monkeypatch):
+@pytest.mark.parametrize("provider_failure", ["RATE_LIMITED", "UNAVAILABLE", "NETWORK_FAILURE"])
+def test_operator_retry_recovery_opens_new_durable_generation(monkeypatch, provider_failure):
     clock = {"now": utcnow()}
     monkeypatch.setattr(orchestrator_module, "_now", lambda: clock["now"])
 
-    def rate_limited():
+    def provider_failed():
         return ExecutionObservation(
             "FAILED",
             exit_code=1,
-            result_data={"provider_failure": "RATE_LIMITED", "schema_version": 1},
+            result_data={"provider_failure": provider_failure, "schema_version": 1},
         )
 
-    executors = {"builder-a": FakeExecutor([rate_limited(), rate_limited(), rate_limited(), rate_limited()])}
+    executors = {"builder-a": FakeExecutor([provider_failed(), provider_failed(), provider_failed(), provider_failed()])}
     config = _config()
+    task_id = f"RUN-RETRY-GEN-{provider_failure}"
     with SessionLocal() as session:
-        upsert_task(session, _task("RUN-RETRY-GEN"))
+        upsert_task(session, _task(task_id))
         session.commit()
 
     runner = _runner(config, executors=executors)
@@ -1314,15 +1323,23 @@ def test_operator_retry_recovery_opens_new_durable_generation(monkeypatch):
         with SessionLocal() as session:
             latest = session.scalars(
                 select(BuildRunnerExecution)
-                .where(BuildRunnerExecution.task_id == "RUN-RETRY-GEN")
+                .where(BuildRunnerExecution.task_id == task_id)
                 .order_by(BuildRunnerExecution.launched_at.desc())
             ).first()
             clock["now"] = clock["now"] + timedelta(seconds=latest.result_data["retry_backoff_seconds"] + 1)
 
     with SessionLocal() as session:
-        task = session.get(BuildTask, "RUN-RETRY-GEN")
+        task = session.get(BuildTask, task_id)
         assert task.state == "BLOCKED"
-        recovered = recover_execution_retry_exhausted(session, "RUN-RETRY-GEN", actor="operator")
+        blocked_event = session.scalars(
+            select(BuildTaskEvent)
+            .where(BuildTaskEvent.task_id == task_id)
+            .where(BuildTaskEvent.event_type == "task.transitioned")
+            .where(BuildTaskEvent.to_state == "BLOCKED")
+        ).all()[-1]
+        assert blocked_event.event_data["reason"] == f"PROVIDER_FAILURE_RETRIES_EXHAUSTED:{provider_failure}"
+        assert blocked_event.event_data["underlying_invariant"] == "EXECUTION_RETRY_LIMIT_REACHED"
+        recovered = recover_execution_retry_exhausted(session, task_id, actor="operator")
         assert recovered.state == "RESUMABLE"
         assert recovered.retry_generation == 1
         session.commit()
@@ -1332,13 +1349,61 @@ def test_operator_retry_recovery_opens_new_durable_generation(monkeypatch):
     with SessionLocal() as session:
         executions = session.scalars(
             select(BuildRunnerExecution)
-            .where(BuildRunnerExecution.task_id == "RUN-RETRY-GEN")
+            .where(BuildRunnerExecution.task_id == task_id)
             .order_by(BuildRunnerExecution.launched_at)
         ).all()
         latest = executions[-1]
         assert latest.result_data["retry_generation"] == 1
         assert latest.result_data["retry_attempt"] == 1
-        assert session.get(BuildTask, "RUN-RETRY-GEN").state != "BLOCKED"
+        assert session.get(BuildTask, task_id).state != "BLOCKED"
+
+
+@pytest.mark.parametrize("provider_failure", ["RATE_LIMITED", "UNAVAILABLE", "NETWORK_FAILURE"])
+def test_runner_recovers_typed_provider_retry_exhaustion(monkeypatch, provider_failure):
+    clock = {"now": utcnow()}
+    monkeypatch.setattr(orchestrator_module, "_now", lambda: clock["now"])
+
+    def provider_failed():
+        return ExecutionObservation(
+            "FAILED",
+            exit_code=1,
+            result_data={"provider_failure": provider_failure, "schema_version": 1},
+        )
+
+    config = _config()
+    task_id = f"RUN-AUTO-RETRY-GEN-{provider_failure}"
+    executors = {"builder-a": FakeExecutor([provider_failed(), provider_failed(), provider_failed()])}
+    with SessionLocal() as session:
+        upsert_task(session, _task(task_id))
+        session.commit()
+
+    runner = _runner(config, executors=executors)
+    for _ in range(config.max_execution_attempts):
+        runner.run_once()
+        runner.run_once()
+        with SessionLocal() as session:
+            latest = session.scalars(
+                select(BuildRunnerExecution)
+                .where(BuildRunnerExecution.task_id == task_id)
+                .order_by(BuildRunnerExecution.launched_at.desc())
+            ).first()
+            clock["now"] = clock["now"] + timedelta(seconds=latest.result_data["retry_backoff_seconds"] + 1)
+
+    result = runner.run_once()
+
+    assert task_id in result.recovered
+    with SessionLocal() as session:
+        task = session.get(BuildTask, task_id)
+        assert task.state != "BLOCKED"
+        assert task.retry_generation == 1
+        recovered_event = session.scalars(
+            select(BuildTaskEvent)
+            .where(BuildTaskEvent.task_id == task_id)
+            .where(BuildTaskEvent.event_type == "runner.blocker_recovered")
+        ).all()[-1]
+        assert recovered_event.event_data["reason"] == f"PROVIDER_FAILURE_RETRIES_EXHAUSTED:{provider_failure}"
+        assert recovered_event.event_data["underlying_invariant"] == "EXECUTION_RETRY_LIMIT_REACHED"
+        assert recovered_event.event_data["recovery_type"] == "INFRASTRUCTURE_RETRY_RECOVERY"
 
 
 def test_lost_execution_releases_active_claim_to_stale_with_checkpoint():
