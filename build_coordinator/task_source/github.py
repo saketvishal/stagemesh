@@ -41,16 +41,18 @@ def _resolve_issue_number_static(
     if not is_objective:
         task = session.get(BuildTask, entity_id)
         metadata = dict(task.definition_metadata or {}) if task is not None else {}
-        if metadata.get("source_type") != "github":
-            return None
-        if repo is not None and metadata.get("source_owner") != repo:
-            return None
-        source_ref = metadata.get("source_ref")
-        if source_ref is not None and re.fullmatch(r"\d+", str(source_ref)):
-            return int(source_ref)
-        issue_number = metadata.get("source_issue_number")
-        if issue_number is not None and re.fullmatch(r"\d+", str(issue_number)):
-            return int(issue_number)
+        has_source_identity = metadata.get("source_type") is not None or metadata.get("source_owner") is not None
+        if has_source_identity:
+            if metadata.get("source_type") != "github":
+                return None
+            if repo is not None and metadata.get("source_owner") != repo:
+                return None
+            source_ref = metadata.get("source_ref")
+            if source_ref is not None and re.fullmatch(r"\d+", str(source_ref)):
+                return int(source_ref)
+            issue_number = metadata.get("source_issue_number")
+            if issue_number is not None and re.fullmatch(r"\d+", str(issue_number)):
+                return int(issue_number)
 
         events = session.scalars(
             select(BuildTaskEvent)
@@ -962,17 +964,19 @@ class GitHubTaskSource(TaskSource):
         if not is_objective:
             task = session.get(BuildTask, entity_id)
             metadata = dict(task.definition_metadata or {}) if task is not None else {}
-            if (
-                metadata.get("source_type") != "github"
-                or metadata.get("source_owner") != self.repo
-            ):
-                return None
-            source_ref = metadata.get("source_ref")
-            if source_ref is not None and re.fullmatch(r"\d+", str(source_ref)):
-                return int(source_ref)
-            issue_number = metadata.get("source_issue_number")
-            if issue_number is not None and re.fullmatch(r"\d+", str(issue_number)):
-                return int(issue_number)
+            has_source_identity = metadata.get("source_type") is not None or metadata.get("source_owner") is not None
+            if has_source_identity:
+                if (
+                    metadata.get("source_type") != "github"
+                    or metadata.get("source_owner") != self.repo
+                ):
+                    return None
+                source_ref = metadata.get("source_ref")
+                if source_ref is not None and re.fullmatch(r"\d+", str(source_ref)):
+                    return int(source_ref)
+                issue_number = metadata.get("source_issue_number")
+                if issue_number is not None and re.fullmatch(r"\d+", str(issue_number)):
+                    return int(issue_number)
 
             events = session.scalars(
                 select(BuildTaskEvent)
