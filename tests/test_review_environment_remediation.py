@@ -640,6 +640,7 @@ def test_reviewer_rate_limit_is_capacity_wait_not_task_block():
     result = runner.run_once()  # observe RATE_LIMITED -> keep task waiting at review stage
 
     assert result.escalations == []
+    assert result.scheduling_reasons[task_id] == "provider_capacity_wait"
     with SessionLocal() as session:
         task = session.get(BuildTask, task_id)
         assert task.state == "REVIEW_READY"
