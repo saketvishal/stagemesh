@@ -651,19 +651,20 @@ def verify_delivery_evidence(repo_root: Path, definition: TaskDefinition) -> dic
     """Verify structured delivery evidence against authoritative git history.
 
     Legacy string `delivered_by` declarations remain compatible. They are
-    accepted as manually declared evidence but cannot be git-verified until
-    migrated to the structured form written by `persist_delivery_evidence`.
+    accepted only when the exact declaration is already present in committed
+    repository history. They cannot verify a delivery SHA until migrated to the
+    structured form written by `persist_delivery_evidence`.
     """
     if not definition.delivered_by:
         return {"status": "MISSING", "detail": "no delivered_by evidence"}
-    if not isinstance(definition.delivered_by, dict):
-        return {"status": "LEGACY", "detail": str(definition.delivered_by)}
     committed = _committed_delivered_by(repo_root, definition)
     if committed != definition.delivered_by:
         return {
             "status": "STALE",
             "detail": "delivered_by evidence is not present in committed repository history",
         }
+    if not isinstance(definition.delivered_by, dict):
+        return {"status": "LEGACY", "detail": str(definition.delivered_by)}
     sha = definition.delivered_sha
     if not sha:
         return {"status": "STALE", "detail": "structured delivered_by is missing sha"}
