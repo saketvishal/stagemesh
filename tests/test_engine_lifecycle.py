@@ -10,7 +10,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from tests.test_project_backlog import WORKER, git, make_project_repo, stagemesh  # noqa: E402
+from test_project_backlog import WORKER, git, make_project_repo, stagemesh  # noqa: E402
 
 from build_coordinator.project.definition import register_project
 
