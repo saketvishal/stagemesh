@@ -1,0 +1,36 @@
+{
+  "command": [
+    "C:\\Program Files\\Python313\\python.exe",
+    "-m",
+    "build_coordinator.agents.wrapper",
+    "--runtime",
+    "claude"
+  ],
+  "exit_code": 0,
+  "provider": "anthropic",
+  "result_data": {
+    "blockers": [],
+    "commits_created": [
+      "fe62bc9772b5b35a41ff9852adb473a9b99f1e8d"
+    ],
+    "execution_id": "exec-builder-SM-012-REAL",
+    "feature_sha": "fe62bc9772b5b35a41ff9852adb473a9b99f1e8d",
+    "files_changed": [
+      ".stagemesh/project.yaml",
+      "NOTES.md"
+    ],
+    "role": "BUILDER",
+    "runtime": "claude",
+    "schema_version": 1,
+    "scope_expansion_required": false,
+    "status": "SUCCEEDED",
+    "task_id": "SM-012-REAL",
+    "tests": []
+  },
+  "result_file_present": true,
+  "result_path": "C:\\Users\\saket\\AppData\\Local\\Temp\\sm012_pytest\\pytest-of-saket\\pytest-3\\test_real_agent_builder_review0\\builder-result.json",
+  "role": "BUILDER",
+  "runtime": "claude",
+  "status": "SUCCEEDED",
+  "worker_id": "builder-1"
+}
