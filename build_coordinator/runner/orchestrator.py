@@ -625,7 +625,7 @@ class BuildRunner:
             elif execution.role == "PLANNER":
                 self._planner_succeeded(session, execution, result, parsed)
             return
-        if observation.status == "FAILED" and self._recoverable_failure(session, execution, merged, observation):
+        if observation.status == "FAILED" and self._recoverable_failure(session, execution, result, merged, observation):
             return
         if observation.status == "FAILED":
             execution.status = "FAILED"
@@ -1339,6 +1339,7 @@ class BuildRunner:
         self,
         session: Session,
         execution: BuildRunnerExecution,
+        result: RunnerCycleResult,
         merged: dict,
         observation: ExecutionObservation,
     ) -> bool:
