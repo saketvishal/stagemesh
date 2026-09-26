@@ -15,6 +15,9 @@ Verifies:
 
 from __future__ import annotations
 
+import subprocess
+from types import SimpleNamespace
+
 import pytest
 from sqlalchemy import select
 
@@ -290,6 +293,65 @@ def test_non_done_lifecycle_sync_provisions_label_before_applying():
     assert client.created_labels == EXPECTED_LIFECYCLE_LABELS
     assert client.labels == [{"repo": "example/repo", "number": "203", "label": "stagemesh:review_ready"}]
     assert client.closed == []
+
+
+def test_subprocess_non_done_lifecycle_records_state_for_idempotent_retry(monkeypatch):
+    """Subprocess sync records the lifecycle state, not the label text."""
+    source = GitHubTaskSource(repo="example/repo")
+    called_cmds = []
+
+    def fake_subprocess_run(cmd, **kwargs):
+        called_cmds.append(cmd)
+        if cmd[:3] == ["gh", "label", "list"]:
+            return SimpleNamespace(returncode=0, stdout="[]", stderr="")
+        if cmd[:3] == ["gh", "label", "create"]:
+            return SimpleNamespace(returncode=0, stdout="created", stderr="")
+        if cmd[:3] == ["gh", "issue", "view"]:
+            return SimpleNamespace(returncode=0, stdout='{"labels":[]}', stderr="")
+        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_subprocess_run)
+
+    with SessionLocal() as session:
+        session.add(
+            BuildTask(
+                task_id="GH-205",
+                title="Review ready via subprocess",
+                description="Ready for review.",
+                acceptance_criteria=["Reviewed"],
+                state="REVIEW_READY",
+            )
+        )
+        record_event(
+            session,
+            EventInput(
+                task_id="GH-205",
+                event_type="task.synced_from_source",
+                actor="github-sync",
+                event_data={"source": "https://github.com/example/repo/issues/205"},
+            ),
+        )
+        ok = source.sync_outbound(session, "GH-205", "REVIEW_READY")
+        assert ok is True
+        session.commit()
+
+    with SessionLocal() as session:
+        events = session.scalars(
+            select(BuildTaskEvent).where(
+                BuildTaskEvent.task_id == "GH-205",
+                BuildTaskEvent.event_type == "task.outbound_synced",
+            )
+        ).all()
+        assert len(events) == 1
+        assert events[0].event_data.get("state") == "REVIEW_READY"
+
+        ok = source.sync_outbound(session, "GH-205", "REVIEW_READY")
+        assert ok is True
+        session.commit()
+
+    edit_cmds = [cmd for cmd in called_cmds if cmd[:3] == ["gh", "issue", "edit"]]
+    assert len(edit_cmds) == 1
+    assert edit_cmds[0][-1] == "stagemesh:review_ready"
 
 
 def test_reopened_issue_runner_cycle_replaces_stale_done_label_with_ready():

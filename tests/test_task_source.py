@@ -17,11 +17,21 @@ from build_coordinator.task_source.github import GitHubTaskSource
 class FakeGitHubClient:
     def __init__(self, issues: list[dict]):
         self.issues = list(issues)
+        self.issue_by_number = {
+            int(issue["number"]): {
+                **issue,
+                "state": str(issue.get("state") or "OPEN").upper(),
+            }
+            for issue in issues
+        }
         self.comments: list[dict] = []
         self.closed: list[str] = []
 
     def list_issues(self, repo: str, labels: tuple[str, ...]):
         return self.issues
+
+    def get_issue(self, repo: str, issue_number: int):
+        return self.issue_by_number[int(issue_number)]
 
     def add_comment(self, repo: str, number: str, body: str):
         self.comments.append({"repo": repo, "number": number, "body": body})
@@ -72,6 +82,77 @@ def test_github_task_source_syncs_standard_task():
         assert task.review_policy == "INDEPENDENT_WORKER"
         assert task.risk_level == "HIGH"
         assert "Verify chunked transfer" in task.acceptance_criteria
+
+
+def test_github_source_closure_suppresses_local_task_without_marking_done():
+    issue = {
+        "number": 120,
+        "title": "Source-controlled task",
+        "body": "Implement the requested behavior.\n\n### Acceptance Criteria\n- Works",
+        "labels": [],
+        "url": "https://github.com/example/repo/issues/120",
+        "state": "OPEN",
+    }
+    client = FakeGitHubClient([issue])
+    source = GitHubTaskSource(repo="example/repo", client=client)
+
+    with SessionLocal() as session:
+        source.discover_tasks(session)
+        session.commit()
+
+    with SessionLocal() as session:
+        task = session.get(BuildTask, "GH-120")
+        assert task is not None
+        assert task.state == "READY"
+        assert task.definition_metadata["source_state"] == "OPEN"
+        assert task_is_claimable(session, task, utcnow())
+
+    client.issues = []
+    client.issue_by_number[120] = {**issue, "state": "CLOSED"}
+
+    with SessionLocal() as session:
+        results = source.discover_tasks(session)
+        session.commit()
+        task = session.get(BuildTask, "GH-120")
+        assert task is not None
+        assert task.state == "READY"
+        assert task.definition_metadata["source_state"] == "CLOSED"
+        assert not task_is_claimable(session, task, utcnow())
+        assert any(result.action == "SOURCE_CLOSED" for result in results)
+
+
+def test_github_source_reopen_clears_closed_source_suppression():
+    issue = {
+        "number": 121,
+        "title": "Reopenable source task",
+        "body": "Implement the requested behavior.\n\n### Acceptance Criteria\n- Works",
+        "labels": [],
+        "url": "https://github.com/example/repo/issues/121",
+        "state": "OPEN",
+    }
+    client = FakeGitHubClient([issue])
+    source = GitHubTaskSource(repo="example/repo", client=client)
+
+    with SessionLocal() as session:
+        source.discover_tasks(session)
+        session.commit()
+
+    client.issues = []
+    client.issue_by_number[121] = {**issue, "state": "CLOSED"}
+    with SessionLocal() as session:
+        source.discover_tasks(session)
+        session.commit()
+
+    client.issues = [{**issue, "state": "OPEN"}]
+    client.issue_by_number[121] = {**issue, "state": "OPEN"}
+    with SessionLocal() as session:
+        results = source.discover_tasks(session)
+        session.commit()
+        task = session.get(BuildTask, "GH-121")
+        assert task is not None
+        assert task.definition_metadata["source_state"] == "OPEN"
+        assert task_is_claimable(session, task, utcnow())
+        assert any(result.action == "SOURCE_OPEN" for result in results)
 
 
 def test_github_task_source_syncs_objective():

@@ -126,6 +126,14 @@ def active_migration_claim(session: Session, now: datetime) -> BuildTaskClaim | 
     )
 
 
+def task_source_is_closed(task: BuildTask) -> bool:
+    metadata = task.definition_metadata or {}
+    return (
+        str(metadata.get("task_source") or "").lower() == "github"
+        and str(metadata.get("source_state") or "").upper() == "CLOSED"
+    )
+
+
 def task_is_claimable(
     session: Session,
     task: BuildTask,
@@ -134,6 +142,8 @@ def task_is_claimable(
     check_migration_lock: bool = True,
 ) -> bool:
     if task.reason_created == "OBJECTIVE_ROOT_COMPAT":
+        return False
+    if task_source_is_closed(task):
         return False
     if task.state not in CLAIMABLE_STATES:
         return False
