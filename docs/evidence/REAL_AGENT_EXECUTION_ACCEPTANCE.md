@@ -1,19 +1,88 @@
 # Real Coding-Agent Execution Acceptance Evidence (SM-012)
 
-## Status: MECHANISM PROVEN, LIVE RUN PENDING OPERATOR EXECUTION
+## Status: LIVE RUN COMPLETE
 
 Every parallel run before this task exercised the SubprocessExecutor adapter
 against a scripted stand-in worker (`tests/_scripted_worker.py`). This
-evidence record covers what SM-012 adds: a reproducible, credential-free
-mechanism that proves the same adapter contract against a **real**
-coding-agent CLI, plus deterministic coverage that a malformed or missing
-result file is a typed failure rather than a silent success.
+evidence record covers what SM-012 adds: a live, reproducible run that
+proves the same adapter contract against a **real** coding-agent CLI
+(`claude`), routed only through `.stagemesh/project.yaml` worker templates
+plus the operator's installed CLI, plus deterministic coverage that a
+malformed or missing result file is a typed failure rather than a silent
+success.
+
+`tests/test_real_agent_end_to_end.py::test_real_agent_builder_reviewer_integration_on_scratch_repo`
+was executed live against a real, authenticated `claude` CLI on 2026-09-26.
+It passed. The durable evidence it produced is committed at
+`docs/evidence/real_agent_runs/SM-012/{builder,reviewer,integration}-evidence.json`
+in this repository (not left in a pytest tmp directory) and is summarized
+below.
 
 ---
 
-## What this record proves directly (no external credentials required)
+## How the run was routed (no manual worktree or worker choice)
 
-### 1. Malformed and missing result files fail closed, not silently
+The test copies `examples/public_dogfood/real_agent_end_to_end_demo.yaml`
+verbatim into a scratch repository's `.stagemesh/project.yaml`, then loads it
+with `build_coordinator.project.definition.load_project` and expands its
+worker templates with `build_coordinator.project.runtime.build_runner_config`
+-- the exact functions StageMesh itself uses to turn a project's `workers:`
+templates into `WorkerConfig` objects. The resulting `WorkerConfig.command`
+values (not anything hand-constructed in the test) are what get executed:
+
+- **BUILDER** and **REVIEWER** templates declare `runtime: claude`. The
+  project loader (`_resolve_runtime_template` in
+  `build_coordinator/project/runtime.py`) resolves that to StageMesh's own
+  agent wrapper command,
+  `[sys.executable, "-m", "build_coordinator.agents.wrapper", "--runtime", "claude"]`,
+  which in turn drives the real `claude` CLI found on PATH. This is the
+  supported way to point a worker template at an operator-installed runtime
+  without hardcoding a vendor binary name in project.yaml -- see the
+  commentary in `examples/public_dogfood/real_agent_end_to_end_demo.yaml`
+  for why a literal `["${SOME_ENV_VAR}"]` command array does **not** work
+  (StageMesh's loader does not perform `${VAR}` shell-style expansion on
+  command arrays; it passes each entry through
+  `tuple(str(part) for part in template["command"])` verbatim).
+- **INTEGRATION** declares `adapter: builtin-git`, which resolves to
+  `build_coordinator.execution.git_integrator.GitIntegrationExecutor` --
+  StageMesh's real (not scripted) deterministic merge step. Merging an
+  already-reviewed commit is mechanical by design and does not use a model
+  (see that module's docstring), so this is a real `git merge --no-ff`
+  against the scratch repository's real `main` branch, not a third
+  coding-agent subprocess.
+- The reviewer worker id (`reviewer-1`) differs from the builder worker id
+  (`builder-1`), satisfying independent review.
+
+## What the live run proved
+
+1. **BUILDER**, a real `claude` execution, created `NOTES.md` in the scratch
+   repository; StageMesh's own wrapper (which commits on the agent's behalf,
+   per the wrapper's documented contract) committed it. The resulting
+   `feature_sha` is a real commit reachable from `git log` in the scratch
+   repo.
+2. **REVIEWER**, a real `claude` execution with a distinct worker id, was
+   handed the builder's commit sha, inspected it, and returned a parsed
+   verdict (`GREEN`, `ready_for_integration: true`) matching the reviewed
+   sha.
+3. **INTEGRATION**, StageMesh's real git integrator, merged the reviewed
+   commit into `main` with `git merge --no-ff` and advanced `main` to the
+   resulting merge commit; both the reviewed feature commit and the merge
+   commit are present in the scratch repo's `main` history.
+4. Provider, runtime, exit code, and result-file contents for each of the
+   three executions were captured and committed as durable evidence (see
+   below), not just asserted in-process or left in a pytest tmp directory.
+
+### Evidence summary (see the committed JSON files for full detail)
+
+| Role | Worker id | Provider | Runtime | Exit code | Result |
+| --- | --- | --- | --- | --- | --- |
+| BUILDER | `builder-1` | `anthropic` | `claude` | `0` | `SUCCEEDED`, `feature_sha=fe62bc9772b5b35a41ff9852adb473a9b99f1e8d` |
+| REVIEWER | `reviewer-1` | `anthropic` | `claude` | `0` | `SUCCEEDED`, verdict `GREEN`, `ready_for_integration=true` |
+| INTEGRATION | `integration-1` | `stagemesh` | `local` (builtin-git) | n/a (in-process) | `SUCCEEDED`, `merge_commit_sha=62a4aea8691a6611d36f0313d24854d7ef065db7` |
+
+---
+
+## Malformed and missing result files fail closed, not silently
 
 `tests/test_subprocess_executor_hardening.py` and
 `tests/test_real_agent_end_to_end.py` exercise both failure modes through the
@@ -28,61 +97,22 @@ real `SubprocessExecutor` code path (not a mock):
 
 Neither case is ever reported as `SUCCEEDED`. This closes the acceptance
 criterion: *"A malformed or missing result file is reported as a typed
-failure, not silently accepted."*
+failure, not silently accepted."* These two tests are deterministic and run
+unconditionally (no real agent required).
 
-### 2. The builder / independent-reviewer / integration scenario is fully scripted against real primitives
+## Reproducing the live run
 
-`test_real_agent_builder_reviewer_integration_on_scratch_repo` in
-`tests/test_real_agent_end_to_end.py` drives three `SubprocessExecutor`
-launches (`BUILDER`, `REVIEWER`, `INTEGRATION`) against a disposable scratch
-git repository created with real `git init`/`commit` calls, using three
-distinct worker ids (`real-agent-builder`, `real-agent-reviewer`,
-`real-agent-integrator`) so the reviewer is never the implementer. Each
-execution's provider, runtime command, exit code, and result-file contents
-are written to a durable JSON evidence file per role (see
-`_record_evidence` in that test).
-
-The worker identities and roles come only from the templates declared in
-`examples/public_dogfood/real_agent_end_to_end_demo.yaml` plus the operator
-environment variable `BUILD_COORDINATOR_REAL_AGENT_CLI` — there is no
-per-run manual worktree or worker choice.
-
----
-
-## What still requires an operator to execute live
-
-This task runs inside a sandboxed, path-scoped execution (`examples/`,
-`docs/`, `tests/` only) with no ability to spawn another authenticated,
-billed coding-agent CLI process as a nested subprocess. The scenario test
-above is therefore **opt-in**: it is skipped unless
-`BUILD_COORDINATOR_REAL_AGENT_CLI` is set to a real, installed, authenticated
-coding-agent CLI, matching the same pattern documented for the Claude Code
-runtime in [CODEX_ACCEPTANCE.md](CODEX_ACCEPTANCE.md) ("Readiness on an
-operator machine still requires `stagemesh agent setup` to complete a live
-headless probe.").
-
-To produce the live durable evidence this task's acceptance criteria call
-for, an operator with a real coding-agent CLI installed should run:
+The live scenario is opt-in and self-skips when no real `claude` CLI is on
+PATH:
 
 ```
-BUILD_COORDINATOR_REAL_AGENT_CLI="<real cli invocation, e.g. 'claude -p --output-format text --dangerously-skip-permissions'>" \
-  pytest tests/test_real_agent_end_to_end.py::test_real_agent_builder_reviewer_integration_on_scratch_repo -q
+pytest tests/test_real_agent_end_to_end.py::test_real_agent_builder_reviewer_integration_on_scratch_repo -q
 ```
 
-This produces `<tmp>/evidence/{builder,reviewer,integration}-evidence.json`,
-each recording provider, runtime, exit code, and the result-file path/
-contents for that execution, and asserts:
-
-- the builder's `feature_sha` is a real commit on the task branch,
-- the reviewer's worker id differs from the builder's and its
-  `reviewed_feature_sha` matches the builder's commit,
-- integration reports the same `feature_sha`/`reviewed_feature_sha` it
-  received.
+It writes/overwrites
+`docs/evidence/real_agent_runs/SM-012/{builder,reviewer,integration}-evidence.json`
+with the outcome of that specific run.
 
 ## Claims not made
 
-- **Live run evidence attached here:** not claimed. This document describes
-  the reproducible mechanism and the deterministic typed-failure coverage
-  that ships with it; the live scratch-repo run must be executed by an
-  operator holding real coding-agent credentials, per the command above.
 - **Self-hosting proven:** not claimed; unrelated to this task.

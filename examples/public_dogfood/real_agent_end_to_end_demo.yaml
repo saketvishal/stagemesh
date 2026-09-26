@@ -1,53 +1,69 @@
+# Real coding-agent end-to-end demo (SM-012).
+#
+# This file is a genuine `.stagemesh/project.yaml` body: copy it verbatim to
+# `<scratch-repo>/.stagemesh/project.yaml` and it loads through the real
+# project loader (`build_coordinator.project.definition.load_project`) and
+# the real worker-template expander
+# (`build_coordinator.project.runtime.build_runner_config`) exactly like any
+# other StageMesh project. `tests/test_real_agent_end_to_end.py` does exactly
+# that, so this manifest is proven executable through the same loader path
+# it documents, not just described.
+#
+# Worker commands are intentionally NOT written as a literal
+# `["${SOME_ENV_VAR}"]` array: StageMesh's project loader passes command
+# entries through `tuple(str(part) for part in template["command"])` with no
+# `${VAR}` shell-style expansion, so a literal placeholder like that would be
+# executed as-is (a non-existent binary named `${SOME_ENV_VAR}`), not
+# substituted. The supported way to point a worker template at a real,
+# operator-installed coding-agent CLI without hardcoding a vendor binary name
+# in project.yaml is `runtime: <id>`: the loader (`_resolve_runtime_template`
+# in build_coordinator/project/runtime.py) looks up `<id>` in
+# `build_coordinator.agents.profiles.PROFILES` and supplies StageMesh's own
+# wrapper command,
+#   `[sys.executable, "-m", "build_coordinator.agents.wrapper", "--runtime", "<id>"]
+# which in turn resolves and drives the real, operator-installed CLI (found
+# via PATH, e.g. `claude`) headlessly. This is the same mechanism every other
+# StageMesh worker template uses; "operator environment" here means "the
+# named runtime's CLI is installed and authenticated on the machine running
+# this project", not a bespoke environment variable.
 schema_version: 1
-demo_id: real-agent-end-to-end-demo
-description: >
-  Validates the SubprocessExecutor adapter against a real coding-agent CLI
-  (not a scripted stand-in) on a disposable scratch repository. Runs one
-  BUILDER execution, one independent REVIEWER execution, and one INTEGRATION
-  execution, each launched from the worker templates declared below plus
-  operator environment only — no per-run manual worktree or worker choice.
-project:
-  id: demo-real-agent
-  repo: /path/to/disposable-scratch-repo
-task:
-  id: DEMO-REAL-001
-  title: Prove real coding-agent execution end to end
-  description: >
-    Make a small, verifiable change to the scratch repository so the
-    structured result file and commit history can be checked as durable
-    evidence of a genuine agent execution.
-  acceptance_criteria:
-    - Builder produces a commit on the task branch and a valid result file.
-    - An independently claimed reviewer worker validates the branch.
-    - Integration merges the reviewed SHA and reports a final main SHA.
-  review_policy: INDEPENDENT
+id: real-agent-demo
+name: Real Agent End-to-End Demo
+repository:
+  main_ref: main
+execution:
+  concurrency: 1
+  reviewers: 1
+  default_review_policy: INDEPENDENT
 workers:
-  - id: real-agent-builder
-    provider: operator-configured
-    stages: [BUILD]
-    # Replace with the real, installed coding-agent CLI. Do not hardcode a
-    # vendor binary name in coordinator code; this file is trusted operator
-    # configuration, matching the pattern used by every other worker
-    # template in examples/.
-    command: ["${BUILD_COORDINATOR_REAL_AGENT_CLI}"]
-  - id: real-agent-reviewer
-    provider: operator-configured
-    stages: [REVIEW]
-    command: ["${BUILD_COORDINATOR_REAL_AGENT_CLI}"]
-  - id: real-agent-integrator
-    provider: operator-configured
-    stages: [INTEGRATE]
-    command: ["${BUILD_COORDINATOR_REAL_AGENT_CLI}"]
-evidence:
-  - provider, runtime, exit code, and result file path recorded per execution
-  - builder worker id differs from reviewer worker id (independent review)
-  - a missing or malformed result file is reported as a typed FAILED
-    observation (failure_kind EXECUTOR_RESULT_INVALID_OR_MISSING), never
-    silently accepted as success
-  - reviewed SHA matches the SHA integration reads before merge
+  builder:
+    runtime: claude
+    timeout_seconds: 600
+  reviewer:
+    runtime: claude
+    timeout_seconds: 600
+  # INTEGRATION is StageMesh's own deterministic merge step (the SCM_OPERATOR
+  # role, `build_coordinator.execution.git_integrator.GitIntegrationExecutor`)
+  # by design: merging an already-reviewed commit is mechanical and does not
+  # need a model (see that module's docstring). `adapter: builtin-git` is
+  # also the default `build_runner_config` falls back to when a project
+  # declares no `workers.integration` template at all; it is listed here for
+  # clarity. This is a real execution against the real scratch git
+  # repository -- a real `git merge --no-ff` that advances `main` -- not a
+  # scripted stand-in.
+  integration:
+    adapter: builtin-git
+    provider: stagemesh
 notes: >
-  This demo intentionally has no scripted fallback: BUILD_COORDINATOR_REAL_AGENT_CLI
-  must point at a real, authenticated coding-agent CLI on the operator's
-  machine. See tests/test_real_agent_end_to_end.py for the automated harness
-  that drives this same scenario and records durable evidence, and
+  Validates real coding-agent execution end to end on a disposable scratch
+  repository: one BUILDER execution and one independent REVIEWER execution
+  (distinct worker id, per INDEPENDENT review policy) against a real,
+  operator-installed `claude` CLI via the SubprocessExecutor adapter, then
+  one INTEGRATION execution via StageMesh's real (non-scripted) git
+  integrator that merges the reviewed commit into main. All three are
+  launched from these worker templates via `build_runner_config` plus the
+  operator's installed/authenticated `claude` CLI -- no per-run manual
+  worktree or worker choice. See tests/test_real_agent_end_to_end.py for the
+  automated harness that drives this scenario and records durable evidence
+  under docs/evidence/real_agent_runs/, and
   docs/evidence/REAL_AGENT_EXECUTION_ACCEPTANCE.md for what is being proven.
