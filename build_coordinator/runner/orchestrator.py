@@ -1966,43 +1966,6 @@ class BuildRunner:
                     },
                 ),
             )
-        if failure in PROVIDER_FAILURES:
-            provider_was_unavailable = (
-                capacity_failure
-                and _provider_capacity_is_active(
-                    session,
-                    execution.provider,
-                    now=_now(),
-                )
-            )
-            unavailable_until = _provider_unavailable_until(
-                merged,
-                fallback_seconds=backoff_seconds,
-            )
-            record_event(
-                session,
-                EventInput(
-                    task_id=execution.task_id,
-                    event_type="runner.provider_failure",
-                    actor="runner",
-                    event_data={
-                        "provider": execution.provider,
-                        "worker_id": execution.worker_id,
-                        "runtime": next(
-                                (
-                                    worker.runtime
-                                    for worker in self._config.workers
-                                    if worker.worker_id == execution.worker_id
-                                ),
-                                None,
-                            ),
-                        "failure": failure,
-                        "until": unavailable_until.isoformat(),
-                        "provider_reset_at": merged.get("provider_reset_at"),
-                        "detail": str(merged.get("detail") or "")[:300],
-                    },
-                ),
-            )
             if capacity_failure and not provider_was_unavailable:
                 result.provider_state_changes.append(
                     {
