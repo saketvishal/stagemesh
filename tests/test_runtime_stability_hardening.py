@@ -20,7 +20,7 @@ from sqlalchemy.orm import sessionmaker
 
 from build_coordinator.db import Base
 from build_coordinator.events import record_event
-from build_coordinator.execution.base import ExecutionObservation
+from build_coordinator.execution.base import ExecutionLaunch, ExecutionObservation
 from build_coordinator.execution.git_integrator import GitIntegrationExecutor, IntegrationStop
 from build_coordinator.execution.results import parse_executor_result
 from build_coordinator.models import (
@@ -731,6 +731,166 @@ def test_scenario_11_parallel_builders_serialize_integrations(tmp_path: Path):
     assert _git(repo, "status", "--porcelain").stdout.strip() == ""
     assert (repo / "p1.txt").exists()
     assert (repo / "p2.txt").exists()
+
+
+def test_branch_moved_concurrently_retries_exact_reviewed_sha(tmp_path: Path):
+    """A CAS loser is retried against new main without spending build attempts."""
+    repo, _ = _setup_test_repo(tmp_path)
+    wt1 = tmp_path / "worktrees" / "race-1"
+    wt2 = tmp_path / "worktrees" / "race-2"
+    base_sha = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    ensure_worktree(
+        wt1,
+        repo_root=repo,
+        branch_name="stagemesh/GH-108-A",
+        base_sha=base_sha,
+        allowed_roots=[str(tmp_path)],
+    )
+    ensure_worktree(
+        wt2,
+        repo_root=repo,
+        branch_name="stagemesh/GH-108-B",
+        base_sha=base_sha,
+        allowed_roots=[str(tmp_path)],
+    )
+
+    (wt1 / "winner.txt").write_text("winner\n", encoding="utf-8")
+    _git(wt1, "add", "winner.txt")
+    _git(wt1, "commit", "-m", "winner commit")
+    sha1 = _git(wt1, "rev-parse", "HEAD").stdout.strip()
+
+    (wt2 / "loser.txt").write_text("loser\n", encoding="utf-8")
+    _git(wt2, "add", "loser.txt")
+    _git(wt2, "commit", "-m", "loser commit")
+    sha2 = _git(wt2, "rev-parse", "HEAD").stdout.strip()
+
+    class RaceExecutor(GitIntegrationExecutor):
+        def __init__(self) -> None:
+            super().__init__(main_ref="main")
+            self.injected = False
+
+        def _advance(self, wt: Path, branch: str, new: str, old: str) -> None:
+            if not self.injected and wt == wt2:
+                self.injected = True
+                first = GitIntegrationExecutor(main_ref="main")
+                observed = first.launch(
+                    ExecutionLaunch(
+                        task_id="GH-108-A",
+                        role="INTEGRATION",
+                        worker_id="integration-1",
+                        provider="test",
+                        worktree_path=str(wt1),
+                        branch_name="stagemesh/GH-108-A",
+                        prompt="integrate",
+                        reviewed_feature_sha=sha1,
+                    )
+                )
+                assert first.poll(observed.execution_id).status == "SUCCEEDED"
+            super()._advance(wt, branch, new, old)
+
+    race = RaceExecutor()
+    handle = race.launch(
+        ExecutionLaunch(
+            task_id="GH-108-B",
+            role="INTEGRATION",
+            worker_id="integration-1",
+            provider="test",
+            prompt="integrate",
+            worktree_path=str(wt2),
+            branch_name="stagemesh/GH-108-B",
+            reviewed_feature_sha=sha2,
+        )
+    )
+    observed = race.poll(handle.execution_id)
+    assert observed.status == "HUMAN_ACTION_REQUIRED"
+    assert observed.human_escalation_type == "BRANCH_MOVED_CONCURRENTLY"
+    assert (repo / "winner.txt").exists()
+    assert not (repo / "loser.txt").exists()
+
+    session_factory, runner = _setup_runner(tmp_path, repo)
+    with session_factory() as session:
+        ensure_state(session)
+        task = BuildTask(
+            task_id="GH-108-B",
+            title="CAS loser",
+            description="retry integration",
+            state="BLOCKED",
+            branch_name="stagemesh/GH-108-B",
+        )
+        session.add(task)
+        session.add(
+            BuildRunnerExecution(
+                execution_id="review-gh-108-b",
+                task_id="GH-108-B",
+                role="REVIEWER",
+                worker_id="reviewer-1",
+                provider="test",
+                adapter="fake",
+                status="SUCCEEDED",
+                completed_at=datetime.now(UTC),
+                reviewed_feature_sha=sha2,
+                branch_name="stagemesh/GH-108-B",
+                worktree_path=str(wt2),
+                result_data={
+                    "review": {
+                        "verdict": "GREEN",
+                        "ready_for_integration": True,
+                        "reviewed_feature_sha": sha2,
+                    }
+                },
+            )
+        )
+        session.add(
+            BuildRunnerExecution(
+                execution_id="integration-gh-108-b-stale",
+                task_id="GH-108-B",
+                role="INTEGRATION",
+                worker_id="integration-1",
+                provider="test",
+                adapter="builtin-git",
+                status="HUMAN_ACTION_REQUIRED",
+                completed_at=datetime.now(UTC),
+                reviewed_feature_sha=sha2,
+                branch_name="stagemesh/GH-108-B",
+                worktree_path=str(wt2),
+                human_escalation_type="BRANCH_MOVED_CONCURRENTLY",
+                result_data=observed.result_data,
+            )
+        )
+        record_event(
+            session,
+            EventInput(
+                task_id="GH-108-B",
+                event_type="task.transitioned",
+                actor="runner",
+                to_state="BLOCKED",
+                event_data={"reason": "BRANCH_MOVED_CONCURRENTLY"},
+            ),
+        )
+        session.commit()
+
+    result = RunnerCycleResult()
+    with session_factory() as session:
+        runner._recover_diagnosed_blockers(session, result)
+        assert "GH-108-B" in result.recovered
+        task = session.get(BuildTask, "GH-108-B")
+        assert task.state == "REVIEWING"
+        runner._dispatch_integration(session, result)
+        session.commit()
+
+    runner.run_once()
+
+    with session_factory() as session:
+        task = session.get(BuildTask, "GH-108-B")
+        assert task.state == "DONE"
+        builder_attempts = session.scalars(
+            select(BuildRunnerExecution).where(BuildRunnerExecution.role.in_(("BUILDER", "REMEDIATION")))
+        ).all()
+        assert builder_attempts == []
+
+    assert (repo / "winner.txt").exists()
+    assert (repo / "loser.txt").exists()
 
 
 # ---------------------------------------------------------------------------
