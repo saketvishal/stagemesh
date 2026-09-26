@@ -792,6 +792,91 @@ def test_concurrent_scope_change_classifies_stale_when_acceptance_not_satisfied(
         assert reconciled.event_data["acceptance_appears_satisfied"] is False
 
 
+def test_integration_event_with_merge_commit_classifies_stale_when_scope_changed(tmp_path: Path):
+    repo, _ = _setup_test_repo(tmp_path)
+    session_factory, runner = _setup_runner(tmp_path, repo)
+    base_sha = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    (repo / "README.md").write_text("# Test Repo\n\nMerged sibling change\n", encoding="utf-8")
+    _git(repo, "add", "README.md")
+    _git(repo, "commit", "-m", "integrate sibling task with built-in event shape")
+    merge_commit_sha = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    with session_factory() as session:
+        ensure_state(session)
+        task = BuildTask(
+            task_id="GH-STALE-MERGE-EVENT",
+            title="Task made stale by real integration event",
+            description="desc",
+            state="CLAIMED",
+            review_policy="INDEPENDENT",
+            base_sha=base_sha,
+            permitted_scope=["README.md"],
+            acceptance_criteria=["README.md contains Original requested text"],
+        )
+        session.add(task)
+        record_event(
+            session,
+            EventInput(
+                task_id="GH-OTHER",
+                event_type="runner.integration_completed",
+                actor="runner",
+                event_data={
+                    "merge_commit_sha": merge_commit_sha,
+                    "final_main_sha": merge_commit_sha,
+                    "push_status": "NOT_REQUIRED",
+                },
+            ),
+        )
+        exec_row = BuildRunnerExecution(
+            execution_id="exec-stale-merge-event-1",
+            task_id="GH-STALE-MERGE-EVENT",
+            role="BUILDER",
+            worker_id="b-1",
+            provider="test",
+            adapter="fake",
+            status="SUCCEEDED",
+            worktree_path=str(repo),
+        )
+        session.add(exec_row)
+        session.commit()
+
+        parsed = parse_executor_result(
+            {
+                "schema_version": 1,
+                "role": "BUILDER",
+                "feature_sha": "dummy",
+                "blockers": ["the agent produced no changes on the task branch"],
+                "identity": {"provider": "test", "runtime": "fake"},
+            },
+            execution_id="exec-stale-merge-event-1",
+            task_id="GH-STALE-MERGE-EVENT",
+            role="BUILDER",
+            require_identity=False,
+        )
+
+        result = RunnerCycleResult(mode="RUNNING")
+        runner._builder_succeeded(session, exec_row, result, parsed)
+        session.commit()
+
+        refreshed = session.get(BuildTask, "GH-STALE-MERGE-EVENT")
+        assert refreshed.state == "BLOCKED"
+        assert result.escalations == ["GH-STALE-MERGE-EVENT:STALE_OR_OBSOLETE_TASK_DEFINITION"]
+        reconciled = session.scalar(
+            select(BuildTaskEvent)
+            .where(BuildTaskEvent.task_id == "GH-STALE-MERGE-EVENT")
+            .where(BuildTaskEvent.event_type == "runner.no_changes_reconciled")
+        )
+        assert reconciled is not None
+        assert reconciled.event_data["outcome"] == "STALE_OR_OBSOLETE"
+        assert reconciled.event_data["stale_by_scope_reconciliation"] is True
+        superseding = reconciled.event_data["superseding_integration"]
+        assert superseding["task_id"] == "GH-OTHER"
+        assert superseding["feature_sha"] is None
+        assert superseding["merge_commit_sha"] == merge_commit_sha
+        assert superseding["final_main_sha"] == merge_commit_sha
+        assert superseding["integrated_sha"] == merge_commit_sha
+
+
 def test_scope_change_without_superseding_integration_stays_unresolved(tmp_path: Path):
     """A permitted-scope file changing since base_sha, alongside some unrelated
     recent integration, is only evidence -- not proof the task definition is

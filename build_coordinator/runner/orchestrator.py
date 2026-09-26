@@ -3027,11 +3027,17 @@ class BuildRunner:
         evidence: list[dict] = []
         for row in rows:
             data = row.event_data or {}
+            feature_sha = data.get("feature_sha") or data.get("reviewed_feature_sha")
+            merge_commit_sha = data.get("merge_commit_sha")
+            final_main_sha = data.get("final_main_sha")
             evidence.append(
                 {
                     "task_id": row.task_id,
                     "created_at": row.created_at.isoformat() if row.created_at else None,
-                    "feature_sha": data.get("feature_sha") or data.get("reviewed_feature_sha"),
+                    "feature_sha": feature_sha,
+                    "merge_commit_sha": merge_commit_sha,
+                    "final_main_sha": final_main_sha,
+                    "integrated_sha": merge_commit_sha or final_main_sha or feature_sha,
                     "same_task": row.task_id == task_id,
                 }
             )
@@ -3051,16 +3057,16 @@ class BuildRunner:
         for integration in recent_integrations:
             if integration.get("same_task"):
                 continue
-            feature_sha = integration.get("feature_sha")
-            if not isinstance(feature_sha, str) or not feature_sha:
+            integrated_sha = integration.get("integrated_sha")
+            if not isinstance(integrated_sha, str) or not integrated_sha:
                 continue
-            integration_paths = self._changed_paths_for_commit(repo_root, feature_sha)
+            integration_paths = self._changed_paths_for_commit(repo_root, integrated_sha)
             if self._scope_changed(scope, integration_paths):
                 return integration
         return None
 
     def _changed_paths_for_commit(self, repo_root: Path, sha: str) -> list[str]:
-        proc = _git(repo_root, "diff-tree", "--no-commit-id", "--name-only", "-r", sha)
+        proc = _git(repo_root, "diff-tree", "--no-commit-id", "--name-only", "-r", "-m", sha)
         if proc.returncode != 0:
             return []
         return [line.strip().replace("\\", "/") for line in proc.stdout.splitlines() if line.strip()]
