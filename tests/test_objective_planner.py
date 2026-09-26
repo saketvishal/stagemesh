@@ -477,6 +477,45 @@ def test_malformed_planner_execution_fails_closed_without_creating_work():
         assert planner_task.state == "BLOCKED"
 
 
+def test_changed_planner_contract_recovers_blocked_malformed_planner(monkeypatch):
+    with SessionLocal() as session:
+        create_objective(session, _spec())
+        session.commit()
+
+    bad = ExecutionObservation(
+        "SUCCEEDED",
+        result_data={"plan": {"tasks": [{"title": "no id", "worktree": "x"}]}},
+    )
+    good = _planner_success_observation()
+    executor = FakeExecutor([bad, good])
+    runner = _runner(executors={"planner-1": executor})
+
+    runner.run_once()  # launch bad planner
+    runner.run_once()  # observe malformed result and block it
+
+    with SessionLocal() as session:
+        planner_task = session.get(BuildTask, planner_task_id("OBJ-PLAN"))
+        assert planner_task is not None
+        assert planner_task.state == "BLOCKED"
+
+    monkeypatch.setattr(
+        PlannerPromptBuilder,
+        "role_policy",
+        PlannerPromptBuilder.role_policy + " Contract revision for retry.",
+    )
+
+    recovered = runner.run_once()
+    assert planner_task_id("OBJ-PLAN") in recovered.recovered
+    assert recovered.launched
+
+    runner.run_once()  # observe the new-contract successful planner result
+    with SessionLocal() as session:
+        assert {task.task_id for task in objective_work_tasks(session, "OBJ-PLAN")} == {
+            "OBJ-PLAN-A",
+            "OBJ-PLAN-B",
+        }
+
+
 # -- planner unavailable ---------------------------------------------------------
 
 
