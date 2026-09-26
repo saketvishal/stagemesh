@@ -6,6 +6,7 @@ import os
 from typing import Any
 
 from build_coordinator.task_source.base import SyncResult, TaskSource, TaskSourceConfig
+from build_coordinator.task_source.azure_devops import AzureDevOpsTaskSource
 from build_coordinator.task_source.github import GitHubTaskSource
 
 
@@ -35,6 +36,26 @@ def get_task_source(config: dict[str, Any] | TaskSourceConfig | None = None) -> 
         return GitHubTaskSource(
             repo=repo,
             labels=cfg.labels,
+            dry_run=cfg.dry_run,
+        )
+    if cfg.source_type.lower() in {"azure_devops", "azure-devops", "azdo"}:
+        organization = cfg.options.get("organization") or cfg.options.get("org")
+        project = cfg.options.get("project")
+        query = cfg.options.get("query")
+        if not (organization or os.getenv("BUILD_COORDINATOR_AZDO_ORG")):
+            raise ValueError(
+                "missing Azure DevOps organization: 'organization' must be specified in "
+                "task_sources.azure_devops or BUILD_COORDINATOR_AZDO_ORG environment variable"
+            )
+        if not (project or os.getenv("BUILD_COORDINATOR_AZDO_PROJECT")):
+            raise ValueError(
+                "missing Azure DevOps project: 'project' must be specified in "
+                "task_sources.azure_devops or BUILD_COORDINATOR_AZDO_PROJECT environment variable"
+            )
+        return AzureDevOpsTaskSource(
+            organization=organization,
+            project=project,
+            query=query,
             dry_run=cfg.dry_run,
         )
     raise ValueError(f"unsupported task source type: '{cfg.source_type}'")
