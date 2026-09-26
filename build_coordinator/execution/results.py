@@ -364,6 +364,14 @@ def result_file_contract_for_role(role: str) -> dict[str, Any]:
     if str(role or "").upper() in PLANNER_ROLES:
         from build_coordinator.types import OBJECTIVE_GATE_TYPES
 
+        contract["required_top_level_fields"] = [
+            "schema_version",
+            "execution_id",
+            "task_id",
+            "role",
+            "status",
+            "plan",
+        ]
         contract["plan"] = {
             "required": True,
             "fields": {
@@ -385,9 +393,11 @@ def result_file_contract_for_role(role: str) -> dict[str, Any]:
                 "chain_of_thought",
             ],
             "instructions": (
-                "Emit only a structured plan. Do not choose worktrees, "
-                "authorize remote main push, weaken review policy, or persist "
-                "hidden reasoning."
+                "Write the full executor-result envelope, not a bare plan. "
+                "The top-level JSON MUST contain schema_version, execution_id, "
+                "task_id, role, status, and plan; put the structured ObjectivePlan "
+                "inside plan. Do not choose worktrees, authorize remote main push, "
+                "weaken review policy, or persist hidden reasoning."
             ),
         }
     return contract
