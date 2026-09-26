@@ -24,6 +24,7 @@ import re
 import subprocess
 import sys
 import tempfile
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -123,6 +124,65 @@ def sanitize_diagnostic(text: str, *, max_chars: int = 300) -> str:
     for pattern in _SECRET_PATTERNS:
         detail = pattern.sub(r"\1 <redacted>", detail)
     return detail
+
+
+def parse_provider_reset_at(output: str, *, now: datetime | None = None) -> str | None:
+    """Parse a provider reset hint into an absolute UTC timestamp when bounded.
+
+    The parser is deliberately conservative: a reset hint alone never changes
+    failure classification. Callers use this only after a provider-capacity
+    failure has already been classified.
+    """
+    local_now = now or datetime.now().astimezone()
+    if local_now.tzinfo is None:
+        local_now = local_now.replace(tzinfo=UTC)
+    text = output or ""
+
+    # Machine-readable/ISO style hints.
+    iso_match = re.search(
+        r"(?i)\b(?:reset_at|resets?\s+at)\s*[:=]?\s*"
+        r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2}))",
+        text,
+    )
+    if iso_match:
+        raw = iso_match.group(1).replace("Z", "+00:00")
+        try:
+            parsed = datetime.fromisoformat(raw)
+        except ValueError:
+            parsed = None
+        if parsed is not None and parsed.tzinfo is not None and parsed > local_now:
+            return parsed.astimezone(UTC).isoformat()
+
+    # Relative windows such as "resets in 2h 15m" or "reset in 45 minutes".
+    rel_match = re.search(
+        r"(?i)\bresets?\s+in\s+"
+        r"(?:(\d+)\s*(?:h|hr|hrs|hour|hours))?"
+        r"\s*(?:(\d+)\s*(?:m|min|mins|minute|minutes))?\b",
+        text,
+    )
+    if rel_match and (rel_match.group(1) or rel_match.group(2)):
+        hours = int(rel_match.group(1) or 0)
+        minutes = int(rel_match.group(2) or 0)
+        if hours or minutes:
+            return (local_now + timedelta(hours=hours, minutes=minutes)).astimezone(UTC).isoformat()
+
+    # Local clock hints such as "resets at 8:00 PM" or "resets 5:50pm".
+    clock_match = re.search(
+        r"(?i)\bresets?(?:\s+at)?\s+(\d{1,2}):(\d{2})\s*(am|pm)\b",
+        text,
+    )
+    if clock_match:
+        hour = int(clock_match.group(1))
+        minute = int(clock_match.group(2))
+        suffix = clock_match.group(3).lower()
+        if 1 <= hour <= 12 and 0 <= minute <= 59:
+            hour24 = hour % 12 + (12 if suffix == "pm" else 0)
+            candidate = local_now.replace(hour=hour24, minute=minute, second=0, microsecond=0)
+            if candidate <= local_now:
+                candidate += timedelta(days=1)
+            return candidate.astimezone(UTC).isoformat()
+
+    return None
 
 
 def git(cwd: str, *args: str) -> str:
@@ -497,9 +557,20 @@ def main(argv: list[str] | None = None) -> int:
 
     if code != 0:
         failure = "EXECUTION_FAILURE" if code == 124 else classify_failure(output)
+        failed_result = {
+            **identity,
+            "status": "FAILED",
+            "provider_failure": failure,
+            "detail": sanitize_diagnostic(output),
+            "runtime": args.runtime,
+        }
+        if failure in {"RATE_LIMITED", "QUOTA_EXHAUSTED"}:
+            reset_at = parse_provider_reset_at(output)
+            if reset_at:
+                failed_result["provider_reset_at"] = reset_at
         write_result(
             result_path,
-            {**identity, "status": "FAILED", "provider_failure": failure, "detail": sanitize_diagnostic(output), "runtime": args.runtime},
+            failed_result,
         )
         emit_stdout_tail()
         return 1

@@ -14,7 +14,7 @@ import os
 import pytest
 from sqlalchemy import delete, select
 
-from tests._state_isolation import configure_isolated_test_state
+from _state_isolation import configure_isolated_test_state
 
 configure_isolated_test_state()
 

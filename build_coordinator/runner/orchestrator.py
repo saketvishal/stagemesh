@@ -189,6 +189,7 @@ class RunnerCycleResult:
     objectives_completed: list[str] = field(default_factory=list)
     outbound_synced: list[str] = field(default_factory=list)
     scheduling_reasons: dict[str, str] = field(default_factory=dict)
+    provider_state_changes: list[dict[str, Any]] = field(default_factory=list)
     steward: dict[str, Any] = field(default_factory=dict)
 
 
@@ -276,6 +277,7 @@ class BuildRunner:
             if task.task_id not in result.recovered:
                 result.recovered.append(task.task_id)
         self._reconcile_git_reality(session, result)
+        self._reconcile_provider_capacity_transitions(session, result)
         self._recover_diagnosed_blockers(session, result)
         self._run_steward_maintenance(session, result)
         result.observed = self._reconcile_active(session, result)
@@ -1645,17 +1647,19 @@ class BuildRunner:
         worker resumes the task. Transient provider failures (RATE_LIMITED,
         UNAVAILABLE, NETWORK_FAILURE, per the routing taxonomy's
         RETRYABLE_PROVIDER_FAILURES) and worker deaths are retried: the failing
-        provider is routed around for a bounded, exponentially growing cooldown
-        (see `_retry_backoff_seconds`) instead of being relaunched every poll
-        cycle, while other workers/providers remain free to pick the task up
-        immediately. Attempts are bounded and each one is recorded on its own
-        execution row; once exhausted the task escalates with a typed reason and
-        the checkpoint is preserved instead of looping forever."""
+        provider is routed around for a bounded cooldown instead of being
+        relaunched every poll cycle, while other workers/providers remain free
+        to pick the task up immediately. RATE_LIMITED and QUOTA_EXHAUSTED are
+        provider-capacity observations and therefore do not consume substantive
+        task/reviewer retry budgets. Other failures remain bounded; once their
+        budget is exhausted the task escalates with typed evidence and preserved
+        checkpoints instead of looping forever."""
         failure = str(merged.get("provider_failure") or "").upper()
         died = observation.exit_code not in (None, 0) and not merged.get("schema_version")
         if not failure and not died:
             return False
-        retryable = died or failure in RETRYABLE_PROVIDER_FAILURES
+        capacity_failure = failure in _PROVIDER_CAPACITY_FAILURES
+        retryable = died or failure in RETRYABLE_PROVIDER_FAILURES or capacity_failure
         task = session.get(BuildTask, execution.task_id)
         retry_generation = int((task.retry_generation if task is not None else 0) or 0)
 
@@ -1752,27 +1756,34 @@ class BuildRunner:
         # 1. REVIEWER role: Reviewer failures must never consume implementation retry budget
         # nor trigger EXECUTION_RETRY_LIMIT_REACHED on the task.
         if execution.role == "REVIEWER":
-            reviewer_attempts = session.scalar(
-                select(func.count())
-                .select_from(BuildRunnerExecution)
-                .where(BuildRunnerExecution.task_id == execution.task_id)
-                .where(BuildRunnerExecution.role == "REVIEWER")
-                .where(BuildRunnerExecution.status.in_(("LOST", "FAILED")))
-                .where(
-                    or_(
-                        BuildRunnerExecution.result_data["retry_generation"].as_integer() == retry_generation,
-                        BuildRunnerExecution.result_data["retry_generation"].as_integer().is_(None)
-                        if retry_generation == 0
-                        else False,
-                    )
-                )
-            ) or 0
+            reviewer_attempts = _substantive_failure_attempts(
+                session,
+                execution.task_id,
+                role="REVIEWER",
+                retry_generation=retry_generation,
+            )
             backoff_seconds = (
-                _retry_backoff_seconds(failure or "WORKER_EXIT", reviewer_attempts)
-                if retryable
-                else _COOLDOWN_SECONDS.get(failure, 300)
+                _COOLDOWN_SECONDS.get(failure, 300)
+                if capacity_failure
+                else (
+                    _retry_backoff_seconds(failure or "WORKER_EXIT", reviewer_attempts)
+                    if retryable
+                    else _COOLDOWN_SECONDS.get(failure, 300)
+                )
             )
             if failure in PROVIDER_FAILURES:
+                provider_was_unavailable = (
+                    capacity_failure
+                    and _provider_capacity_is_active(
+                        session,
+                        execution.provider,
+                        now=_now(),
+                    )
+                )
+                unavailable_until = _provider_unavailable_until(
+                    merged,
+                    fallback_seconds=backoff_seconds,
+                )
                 record_event(
                     session,
                     EventInput(
@@ -1782,21 +1793,55 @@ class BuildRunner:
                         event_data={
                             "provider": execution.provider,
                             "worker_id": execution.worker_id,
+                            "runtime": next(
+                                (
+                                    worker.runtime
+                                    for worker in self._config.workers
+                                    if worker.worker_id == execution.worker_id
+                                ),
+                                None,
+                            ),
                             "failure": failure,
-                            "until": (_now() + timedelta(seconds=backoff_seconds)).isoformat(),
+                            "until": unavailable_until.isoformat(),
+                            "provider_reset_at": merged.get("provider_reset_at"),
                             "detail": str(merged.get("detail") or "")[:300],
                         },
                     ),
                 )
+                if capacity_failure and not provider_was_unavailable:
+                    result.provider_state_changes.append(
+                        {
+                            "state": "UNAVAILABLE",
+                            "task_id": execution.task_id,
+                            "provider": execution.provider,
+                            "runtime": next(
+                                (
+                                    worker.runtime
+                                    for worker in self._config.workers
+                                    if worker.worker_id == execution.worker_id
+                                ),
+                                None,
+                            ),
+                            "worker_id": execution.worker_id,
+                            "failure": failure,
+                            "until": unavailable_until.isoformat(),
+                            "reset_source": (
+                                "provider"
+                                if merged.get("provider_reset_at")
+                                else "fallback"
+                            ),
+                        }
+                    )
             execution.status = "LOST"
             execution.completed_at = _now()
             execution.result_data = {
                 **(execution.result_data or {}),
                 **merged,
                 "reconciliation_state": "WORKER_EXITED" if died else "PROVIDER_FAILED",
-                "reviewer_attempt": reviewer_attempts + 1,
+                "reviewer_attempt": reviewer_attempts if capacity_failure else reviewer_attempts + 1,
                 "retry_generation": retry_generation,
                 "retryable_failure": retryable,
+                "provider_capacity_failure": capacity_failure,
                 "retry_backoff_seconds": backoff_seconds if retryable else None,
             }
             if execution.claim_id:
@@ -1807,11 +1852,29 @@ class BuildRunner:
                         worker_id=execution.worker_id,
                         data=CheckpointInput(
                             current_step=f"reviewer execution lost after {failure or 'worker exit'}",
-                            known_failures=[f"{failure or 'WORKER_EXITED'} (reviewer attempt {reviewer_attempts + 1})"],
+                            known_failures=[
+                                (
+                                    f"{failure} (provider capacity)"
+                                    if capacity_failure
+                                    else f"{failure or 'WORKER_EXITED'} (reviewer attempt {reviewer_attempts + 1})"
+                                )
+                            ],
                         ),
                     )
                 except CoordinatorPolicyError:
                     pass
+            if capacity_failure:
+                try:
+                    transition_task(
+                        session,
+                        execution.task_id,
+                        "REVIEW_READY",
+                        actor="runner",
+                        reason=f"reviewer provider capacity unavailable: {failure}; trying another eligible provider",
+                    )
+                except CoordinatorPolicyError:
+                    release_active_claims(session, execution.task_id, completed=False)
+                return True
             if reviewer_attempts + 1 >= self._config.max_review_environment_attempts:
                 if failure:
                     self._block_task(
@@ -1850,29 +1913,35 @@ class BuildRunner:
             return True
 
         # 2. BUILDER / REMEDIATION roles:
-        attempts = session.scalar(
-            select(func.count())
-            .select_from(BuildRunnerExecution)
-            .where(BuildRunnerExecution.task_id == execution.task_id)
-            .where(BuildRunnerExecution.role == execution.role)
-            .where(BuildRunnerExecution.adapter != "validation")
-            .where(BuildRunnerExecution.status.in_(("LOST", "FAILED")))
-            .where(
-                or_(
-                    BuildRunnerExecution.result_data["retry_generation"].as_integer() == retry_generation,
-                    BuildRunnerExecution.result_data["retry_generation"].as_integer().is_(None)
-                    if retry_generation == 0
-                    else False,
-                )
-            )
-        ) or 0
-        exhausted = attempts + 1 >= self._config.max_execution_attempts
+        attempts = _substantive_failure_attempts(
+            session,
+            execution.task_id,
+            role=execution.role,
+            retry_generation=retry_generation,
+        )
+        exhausted = (not capacity_failure) and attempts + 1 >= self._config.max_execution_attempts
         backoff_seconds = (
-            _retry_backoff_seconds(failure or "WORKER_EXIT", attempts)
-            if retryable
-            else _COOLDOWN_SECONDS.get(failure, 300)
+            _COOLDOWN_SECONDS.get(failure, 300)
+            if capacity_failure
+            else (
+                _retry_backoff_seconds(failure or "WORKER_EXIT", attempts)
+                if retryable
+                else _COOLDOWN_SECONDS.get(failure, 300)
+            )
         )
         if failure in PROVIDER_FAILURES:
+            provider_was_unavailable = (
+                capacity_failure
+                and _provider_capacity_is_active(
+                    session,
+                    execution.provider,
+                    now=_now(),
+                )
+            )
+            unavailable_until = _provider_unavailable_until(
+                merged,
+                fallback_seconds=backoff_seconds,
+            )
             record_event(
                 session,
                 EventInput(
@@ -1882,21 +1951,55 @@ class BuildRunner:
                     event_data={
                         "provider": execution.provider,
                         "worker_id": execution.worker_id,
+                        "runtime": next(
+                                (
+                                    worker.runtime
+                                    for worker in self._config.workers
+                                    if worker.worker_id == execution.worker_id
+                                ),
+                                None,
+                            ),
                         "failure": failure,
-                        "until": (_now() + timedelta(seconds=backoff_seconds)).isoformat(),
+                        "until": unavailable_until.isoformat(),
+                        "provider_reset_at": merged.get("provider_reset_at"),
                         "detail": str(merged.get("detail") or "")[:300],
                     },
                 ),
             )
+            if capacity_failure and not provider_was_unavailable:
+                result.provider_state_changes.append(
+                    {
+                        "state": "UNAVAILABLE",
+                        "task_id": execution.task_id,
+                        "provider": execution.provider,
+                        "runtime": next(
+                                (
+                                    worker.runtime
+                                    for worker in self._config.workers
+                                    if worker.worker_id == execution.worker_id
+                                ),
+                                None,
+                            ),
+                        "worker_id": execution.worker_id,
+                        "failure": failure,
+                        "until": unavailable_until.isoformat(),
+                        "reset_source": (
+                            "provider"
+                            if merged.get("provider_reset_at")
+                            else "fallback"
+                        ),
+                    }
+                )
         execution.status = "LOST"
         execution.completed_at = _now()
         execution.result_data = {
             **(execution.result_data or {}),
             **merged,
             "reconciliation_state": "WORKER_EXITED" if died else "PROVIDER_FAILED",
-            "retry_attempt": attempts + 1,
+            "retry_attempt": attempts if capacity_failure else attempts + 1,
             "retry_generation": retry_generation,
             "retryable_failure": retryable,
+            "provider_capacity_failure": capacity_failure,
             "retry_backoff_seconds": backoff_seconds if retryable else None,
         }
         if execution.claim_id:
@@ -1907,7 +2010,13 @@ class BuildRunner:
                     worker_id=execution.worker_id,
                     data=CheckpointInput(
                         current_step=f"{execution.role.lower()} execution lost after {failure or 'worker exit'}",
-                        known_failures=[f"{failure or 'WORKER_EXITED'} (attempt {attempts + 1})"],
+                        known_failures=[
+                            (
+                                f"{failure} (provider capacity)"
+                                if capacity_failure
+                                else f"{failure or 'WORKER_EXITED'} (attempt {attempts + 1})"
+                            )
+                        ],
                     ),
                 )
             except CoordinatorPolicyError:
@@ -2034,7 +2143,7 @@ class BuildRunner:
                 continue
             if availability in {"providers_unavailable", "provider_backoff"}:
                 result.capacity_full = True
-                reason = "worker_unavailable"
+                reason = "provider_capacity_wait"
                 result.scheduling_reasons[task.task_id] = reason
                 record_task_withheld(session, task.task_id, reason, task.objective_id)
                 if task_priority == 0:
@@ -2316,6 +2425,7 @@ class BuildRunner:
                 continue
             if availability in {"providers_unavailable", "provider_backoff"}:
                 result.capacity_full = True
+                result.scheduling_reasons[planner_task.task_id] = "provider_capacity_wait"
                 record_planner_unavailable(
                     session,
                     objective,
@@ -2393,6 +2503,7 @@ class BuildRunner:
                 continue
             if availability in {"providers_unavailable", "provider_backoff"}:
                 result.capacity_full = True
+                result.scheduling_reasons[task.task_id] = "provider_capacity_wait"
                 continue
             if worker is None:
                 if self._review_environment_attempts(session, task.task_id) > 0:
@@ -2814,6 +2925,100 @@ class BuildRunner:
                     **(row.result_data or {}),
                     "process_tree_reaped": True,
                 }
+
+    def _reconcile_provider_capacity_transitions(
+        self,
+        session: Session,
+        result: RunnerCycleResult,
+    ) -> None:
+        """Record one provider re-entry event when a capacity window expires."""
+        now = _now()
+        failures = session.scalars(
+            select(BuildTaskEvent)
+            .where(BuildTaskEvent.event_type == "runner.provider_failure")
+            .order_by(BuildTaskEvent.created_at.desc())
+        ).all()
+        recovered = session.scalars(
+            select(BuildTaskEvent)
+            .where(BuildTaskEvent.event_type == "runner.provider_recovered")
+            .order_by(BuildTaskEvent.created_at.desc())
+        ).all()
+        latest_recovery_by_provider: dict[str, BuildTaskEvent] = {}
+        for event in recovered:
+            provider = str((event.event_data or {}).get("provider") or "")
+            if provider and provider not in latest_recovery_by_provider:
+                latest_recovery_by_provider[provider] = event
+
+        seen: set[str] = set()
+        for event in failures:
+            data = event.event_data or {}
+            provider = str(data.get("provider") or "")
+            failure = str(data.get("failure") or "").upper()
+            if not provider or provider in seen or failure not in _PROVIDER_CAPACITY_FAILURES:
+                continue
+            seen.add(provider)
+            try:
+                until = datetime.fromisoformat(str(data.get("until")))
+            except (TypeError, ValueError):
+                continue
+            if until > now:
+                continue
+            prior_recovery = latest_recovery_by_provider.get(provider)
+            if (
+                prior_recovery is not None
+                and prior_recovery.created_at is not None
+                and event.created_at is not None
+                and prior_recovery.created_at >= event.created_at
+            ):
+                continue
+            payload = {
+                "provider": provider,
+                "runtime": data.get("runtime"),
+                "worker_id": data.get("worker_id"),
+                "prior_failure": failure,
+                "available_at": now.isoformat(),
+                "prior_until": until.isoformat(),
+            }
+            record_event(
+                session,
+                EventInput(
+                    task_id=event.task_id,
+                    event_type="runner.provider_recovered",
+                    actor="runner",
+                    event_data=payload,
+                ),
+            )
+            result.provider_state_changes.append(
+                {
+                    "state": "AVAILABLE",
+                    "task_id": event.task_id,
+                    **payload,
+                }
+            )
+
+    def provider_capacity_recheck_seconds(self, *, fallback_seconds: float = 30.0) -> float:
+        """Return a bounded sleep before rechecking temporary provider capacity."""
+        fallback_seconds = max(float(self._config.poll_seconds), float(fallback_seconds))
+        with self._session_factory() as session:
+            now = _now()
+            delays: list[float] = []
+            rows = session.scalars(
+                select(BuildTaskEvent).where(BuildTaskEvent.event_type == "runner.provider_failure")
+            ).all()
+            for row in rows:
+                data = row.event_data or {}
+                failure = str(data.get("failure") or "").upper()
+                if failure not in _PROVIDER_CAPACITY_FAILURES:
+                    continue
+                try:
+                    until = datetime.fromisoformat(str(data.get("until")))
+                except (TypeError, ValueError):
+                    continue
+                if until > now:
+                    delays.append((until - now).total_seconds())
+        if not delays:
+            return fallback_seconds
+        return max(float(self._config.poll_seconds), min(min(delays), fallback_seconds))
 
     def _effective_providers(self, session: Session | None) -> dict:
         """Configured providers, with any provider that recently failed marked
@@ -3856,6 +4061,55 @@ class BuildRunner:
                 continue
             reason = self._latest_block_reason(session, task.task_id)
             if not reason:
+                continue
+
+            capacity_failure = _provider_capacity_failure_from_block_reason(reason)
+            if capacity_failure:
+                latest_execution = session.scalar(
+                    select(BuildRunnerExecution)
+                    .where(BuildRunnerExecution.task_id == task.task_id)
+                    .order_by(
+                        BuildRunnerExecution.completed_at.desc(),
+                        BuildRunnerExecution.launched_at.desc(),
+                    )
+                    .limit(1)
+                )
+                role = latest_execution.role if latest_execution is not None else "BUILDER"
+                if role == "REVIEWER":
+                    target_state = "REVIEW_READY"
+                elif role == "PLANNER":
+                    target_state = "READY"
+                else:
+                    target_state = "RESUMABLE"
+                try:
+                    transition_task(
+                        session,
+                        task.task_id,
+                        target_state,
+                        actor="runner",
+                        reason=(
+                            f"provider capacity recovered from legacy block {capacity_failure}; "
+                            f"resuming to {target_state}"
+                        ),
+                    )
+                    record_event(
+                        session,
+                        EventInput(
+                            task_id=task.task_id,
+                            event_type="runner.provider_capacity_blocker_recovered",
+                            actor="runner",
+                            event_data={
+                                "provider_failure": capacity_failure,
+                                "prior_reason": reason,
+                                "resumed_to": target_state,
+                            },
+                        ),
+                    )
+                    if task.task_id not in result.recovered:
+                        result.recovered.append(task.task_id)
+                    self._release_blocker_gate(session, task, reason)
+                except CoordinatorPolicyError:
+                    pass
                 continue
 
             if is_planner_task(task) and reason == "MALFORMED_EXECUTOR_RESULT":
@@ -5081,6 +5335,94 @@ class BuildRunner:
             .where(BuildRunnerExecution.role == "REMEDIATION")
             .where(BuildRunnerExecution.status.in_(("LAUNCHED", "RUNNING", "SUCCEEDED")))
         ) or 0
+
+
+_PROVIDER_CAPACITY_FAILURES = frozenset({"RATE_LIMITED", "QUOTA_EXHAUSTED"})
+
+
+def _provider_capacity_is_active(
+    session: Session,
+    provider: str | None,
+    *,
+    now: datetime | None = None,
+) -> bool:
+    if not provider:
+        return False
+    now = now or _now()
+    rows = session.scalars(
+        select(BuildTaskEvent).where(BuildTaskEvent.event_type == "runner.provider_failure")
+    ).all()
+    for row in rows:
+        data = row.event_data or {}
+        if str(data.get("provider") or "") != str(provider):
+            continue
+        if str(data.get("failure") or "").upper() not in _PROVIDER_CAPACITY_FAILURES:
+            continue
+        try:
+            until = datetime.fromisoformat(str(data.get("until")))
+        except (TypeError, ValueError):
+            continue
+        if until > now:
+            return True
+    return False
+
+
+def _provider_unavailable_until(
+    merged: dict[str, Any],
+    *,
+    fallback_seconds: float,
+) -> datetime:
+    reset_at = merged.get("provider_reset_at")
+    if reset_at:
+        try:
+            parsed = datetime.fromisoformat(str(reset_at).replace("Z", "+00:00"))
+        except ValueError:
+            parsed = None
+        if parsed is not None:
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=UTC)
+            if parsed > _now():
+                return parsed.astimezone(UTC)
+    return _now() + timedelta(seconds=fallback_seconds)
+
+
+def _provider_capacity_failure_from_block_reason(reason: str) -> str | None:
+    for prefix in ("PROVIDER_FAILURE:", "PROVIDER_FAILURE_RETRIES_EXHAUSTED:"):
+        if reason.startswith(prefix):
+            failure = reason[len(prefix):].strip().upper()
+            if failure in _PROVIDER_CAPACITY_FAILURES:
+                return failure
+    return None
+
+
+def _substantive_failure_attempts(
+    session: Session,
+    task_id: str,
+    *,
+    role: str,
+    retry_generation: int,
+) -> int:
+    """Count task failures that are actually about the task/worker, not provider capacity."""
+    rows = session.scalars(
+        select(BuildRunnerExecution)
+        .where(BuildRunnerExecution.task_id == task_id)
+        .where(BuildRunnerExecution.role == role)
+        .where(BuildRunnerExecution.status.in_(("LOST", "FAILED")))
+    ).all()
+    attempts = 0
+    for row in rows:
+        data = row.result_data or {}
+        try:
+            generation = int(data.get("retry_generation", 0) or 0)
+        except (TypeError, ValueError):
+            generation = 0
+        if generation != retry_generation:
+            continue
+        failure = str(data.get("provider_failure") or "").upper()
+        if failure in _PROVIDER_CAPACITY_FAILURES:
+            continue
+        attempts += 1
+    return attempts
 
 
 _COOLDOWN_SECONDS = {
