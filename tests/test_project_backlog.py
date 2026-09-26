@@ -22,6 +22,7 @@ from build_coordinator.project.backlog import (
     audit_delivery_evidence,
     load_backlog,
     persist_delivery_evidence,
+    persist_delivery_evidence_in_history,
     sync_backlog,
     task_priorities,
 )
@@ -448,6 +449,45 @@ def test_persist_delivery_evidence_and_audit_missing_entries(tmp_path, session):
         "A-1": "DELIVERED_WITH_EVIDENCE",
         "B-2": "DELIVERED_MISSING_LEDGER_ENTRY",
     }
+
+
+def test_delivery_evidence_is_committed_and_bootstraps_clean_clone_without_execution(tmp_path):
+    root = write_project(tmp_path / "repo", tasks={"A-1": {}})
+    git(root, "init", "-b", "main")
+    git(root, "add", ".")
+    git(root, "commit", "-m", "init")
+    delivered_sha = git(root, "rev-parse", "HEAD")
+
+    project = load_project(root)
+    result = persist_delivery_evidence_in_history(
+        root,
+        load_backlog(project),
+        "A-1",
+        sha=delivered_sha,
+        version="fixture-1",
+    )
+
+    assert result["status"] == "COMMITTED"
+    evidence_commit = git(root, "rev-parse", "HEAD")
+    assert evidence_commit != delivered_sha
+    assert "Record delivery evidence for A-1" in git(root, "log", "-1", "--pretty=%s")
+    assert git(root, "show", "HEAD:.stagemesh/tasks/backlog.yaml")
+
+    clone = tmp_path / "clone"
+    git(tmp_path, "clone", str(root), str(clone))
+    lifecycle = DatabaseLifecycle(f"sqlite:///{(tmp_path / 'fresh.sqlite3').as_posix()}", data_dir=tmp_path / "fresh")
+    lifecycle.initialize_schema()
+    try:
+        with lifecycle.session() as fresh:
+            cloned_project = load_project(clone)
+            report = sync_backlog(fresh, cloned_project, load_backlog(cloned_project))
+            fresh.commit()
+
+            assert report.counts() == {"RECONCILED": 1}
+            assert fresh.get(BuildTask, "A-1").state == "DONE"
+            assert fresh.scalars(select(BuildRunnerExecution)).all() == []
+    finally:
+        lifecycle.dispose()
 
 
 # ---------------------------------------------------------------- legacy state

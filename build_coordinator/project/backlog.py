@@ -26,6 +26,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from build_coordinator.events import record_event
+from build_coordinator.execution.git_integrator import push_branch
 from build_coordinator.models import BuildTask, BuildTaskEvent
 from build_coordinator.project.definition import (
     ProjectDefinition,
@@ -33,6 +34,7 @@ from build_coordinator.project.definition import (
     read_yaml,
 )
 from build_coordinator.policy import normalize_review_policy
+from build_coordinator.runner.git_safety import resolve_git_identity_args
 from build_coordinator.service import transition_task, upsert_task
 from build_coordinator.task_source.base import SyncResult, source_identity_metadata
 from build_coordinator.types import EventInput, TaskSpec
@@ -706,6 +708,84 @@ def persist_delivery_evidence(
         return False
     path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
     return True
+
+
+def persist_delivery_evidence_in_history(
+    repo_root: Path,
+    definitions: list[TaskDefinition],
+    task_id: str,
+    *,
+    sha: str,
+    version: str | None = None,
+    push_remote: str | None = None,
+    push_branch_name: str = "main",
+    expected_remote_url: str | None = None,
+) -> dict[str, Any]:
+    """Persist delivery evidence and commit it to repository history.
+
+    `delivered_by` remains the single authoritative representation. This
+    helper makes the YAML update durable across fresh coordinator databases,
+    schema migrations, and clones by recording the update in git history.
+    """
+    definition = next((item for item in definitions if item.task_id == task_id), None)
+    if definition is None or not definition.source:
+        return {"status": "NOT_PROJECT_BACKLOG_TASK", "changed": False}
+    changed = persist_delivery_evidence(repo_root, definitions, task_id, sha=sha, version=version)
+    if not changed:
+        return {"status": "UNCHANGED", "changed": False}
+
+    source_path = repo_root / definition.source
+    rel_path = str(source_path.relative_to(repo_root))
+    subprocess.run(["git", "add", "--", rel_path], cwd=str(repo_root), capture_output=True, text=True, check=True)
+    identity_args = resolve_git_identity_args(repo_root)
+    commit = subprocess.run(
+        [
+            "git",
+            *identity_args,
+            "commit",
+            "-m",
+            f"Record delivery evidence for {task_id}",
+            "--",
+            rel_path,
+        ],
+        cwd=str(repo_root),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if commit.returncode != 0:
+        return {
+            "status": "COMMIT_FAILED",
+            "changed": True,
+            "detail": (commit.stderr or commit.stdout).strip()[-400:],
+        }
+    evidence_commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=str(repo_root),
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    result: dict[str, Any] = {
+        "status": "COMMITTED",
+        "changed": True,
+        "sha": sha,
+        "evidence_commit": evidence_commit,
+        "source": definition.source,
+    }
+    if push_remote:
+        ok, detail = push_branch(
+            repo_root,
+            push_remote,
+            evidence_commit,
+            push_branch_name,
+            expected_remote_url=expected_remote_url,
+        )
+        result["push_status"] = "PUSHED" if ok else "FAILED"
+        if not ok:
+            result["status"] = "PUSH_FAILED"
+            result["detail"] = detail
+    return result
 
 
 def audit_delivery_evidence(session: Session, project: ProjectDefinition, definitions: list[TaskDefinition]) -> dict[str, Any]:

@@ -145,6 +145,43 @@ def test_success_ci_reconciles_task_to_done(db):
     assert db.get(BuildTask, "T-2").state == "DONE"
 
 
+def test_success_ci_records_project_delivery_evidence_before_done(db):
+    _make_task_awaiting_ci(db, "T-2E", "sha-good")
+    client = _FakeClient({"sha-good": [{"status": "completed", "conclusion": "success"}]})
+    calls = []
+
+    reconcile_awaiting_ci(
+        db,
+        repo="org/repo",
+        client=client,
+        delivery_evidence_recorder=lambda task_id, sha: calls.append((task_id, sha)) or {"status": "COMMITTED"},
+    )
+
+    assert calls == [("T-2E", "sha-good")]
+    assert db.get(BuildTask, "T-2E").state == "DONE"
+
+
+def test_success_ci_fails_closed_when_project_delivery_evidence_cannot_persist(db):
+    _make_task_awaiting_ci(db, "T-2F", "sha-good")
+    client = _FakeClient({"sha-good": [{"status": "completed", "conclusion": "success"}]})
+
+    outcomes = reconcile_awaiting_ci(
+        db,
+        repo="org/repo",
+        client=client,
+        delivery_evidence_recorder=lambda task_id, sha: {"status": "COMMIT_FAILED", "detail": "read-only repo"},
+    )
+
+    assert outcomes == [
+        {
+            "task_id": "T-2F",
+            "status": "UNREACHABLE",
+            "detail": "project delivery evidence failed: read-only repo",
+        }
+    ]
+    assert db.get(BuildTask, "T-2F").state == "BLOCKED"
+
+
 def test_failure_ci_routes_to_rework(db):
     _make_task_awaiting_ci(db, "T-3", "sha-bad")
     client = _FakeClient({"sha-bad": [{"status": "completed", "conclusion": "failure"}]})
