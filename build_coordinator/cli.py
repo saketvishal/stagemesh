@@ -56,6 +56,7 @@ from build_coordinator.objectives import (
 from build_coordinator.runner import BuildRunner
 from build_coordinator.runner.models import RunnerConfig
 from build_coordinator.runner.routing import StageRequirement, route_worker
+from build_coordinator.runner.scheduling import active_worker_counts
 from build_coordinator.runner.worker_health import derive_worker_health
 from build_coordinator.types import ObjectiveSpec, PlannedChildTask, StructuredContractError, TaskSpec
 
@@ -620,6 +621,11 @@ def _workers_list(args: argparse.Namespace, session) -> None:
     events = session.scalars(
         select(BuildTaskEvent).where(BuildTaskEvent.event_type == "runner.provider_failure")
     ).all()
+    active_counts = active_worker_counts(session)
+    active_by_provider = {
+        provider: sum(active_counts.get(worker.worker_id, 0) for worker in config.workers if worker.provider == provider)
+        for provider in {worker.provider for worker in config.workers}
+    }
     health = derive_worker_health(
         config.workers,
         (row.event_data or {} for row in events),
@@ -636,6 +642,18 @@ def _workers_list(args: argparse.Namespace, session) -> None:
                 "capabilities": list(worker.capability_names()),
                 "stages": list(worker.stage_names()),
                 "max_concurrency": worker.max_concurrency,
+                "active_workers": active_counts.get(worker.worker_id, 0),
+                "active_provider_workers": active_by_provider.get(worker.provider, 0),
+                "provider_mode": (
+                    config.providers[worker.provider].consumption_mode
+                    if worker.provider in config.providers
+                    else "ACTIVE"
+                ),
+                "provider_availability": (
+                    config.providers[worker.provider].availability
+                    if worker.provider in config.providers
+                    else "AVAILABLE"
+                ),
                 "health": health[worker.worker_id].to_public_dict(),
             }
             for worker in config.workers
