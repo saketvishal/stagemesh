@@ -209,6 +209,66 @@ def test_auth_failure_blocks_fallback_to_other_provider():
     )
 
 
+def test_independent_review_prefers_different_provider_and_audits_reason(tmp_path: Path):
+    with SessionLocal() as session:
+        upsert_task(session, _task("REVIEW-XPROVIDER"))
+        claim_task(session, ClaimRequest("REVIEW-XPROVIDER", worker_id="builder-xai", provider="xai"))
+        session.commit()
+
+        workers = (
+            WorkerConfig("builder-xai", "BUILDER", provider="xai", adapter="fake", capabilities=(CAP_CODING,), stages=("implementation",)),
+            WorkerConfig("reviewer-xai", "REVIEWER", provider="xai", adapter="fake", capabilities=(CAP_CODE_REVIEW,), stages=("review",), preference=1),
+            WorkerConfig("reviewer-openai", "REVIEWER", provider="openai", adapter="fake", capabilities=(CAP_CODE_REVIEW,), stages=("review",), preference=99),
+        )
+
+        decision = route_worker(
+            workers,
+            stage="review",
+            stage_requirement=StageRequirement("review", capabilities=(CAP_CODE_REVIEW,)),
+            providers={},
+            runtimes={},
+            routing_policy=RunnerConfig().routing_policy,
+            session=session,
+            task_id="REVIEW-XPROVIDER",
+            excluded_workers={"builder-xai"},
+        )
+
+    assert decision.selected_worker_id == "reviewer-openai"
+    audit = decision.to_audit_dict(next(worker for worker in workers if worker.worker_id == decision.selected_worker_id))
+    assert audit["selected_provider"] == "openai"
+    reasons = {candidate["worker_id"]: candidate["reasons"] for candidate in audit["candidates"]}
+    assert "preferred_different_provider_than_builder" in reasons["reviewer-openai"]
+    assert "preferred_different_provider_than_builder" not in reasons["reviewer-xai"]
+
+
+def test_independent_review_still_routes_when_only_builders_provider_exists(tmp_path: Path):
+    with SessionLocal() as session:
+        upsert_task(session, _task("REVIEW-ONE-PROVIDER"))
+        claim_task(session, ClaimRequest("REVIEW-ONE-PROVIDER", worker_id="builder-xai", provider="xai"))
+        session.commit()
+
+        workers = (
+            WorkerConfig("builder-xai", "BUILDER", provider="xai", adapter="fake", capabilities=(CAP_CODING,), stages=("implementation",)),
+            WorkerConfig("reviewer-xai", "REVIEWER", provider="xai", adapter="fake", capabilities=(CAP_CODE_REVIEW,), stages=("review",), preference=1),
+        )
+
+        decision = route_worker(
+            workers,
+            stage="review",
+            stage_requirement=StageRequirement("review", capabilities=(CAP_CODE_REVIEW,)),
+            providers={},
+            runtimes={},
+            routing_policy=RunnerConfig().routing_policy,
+            session=session,
+            task_id="REVIEW-ONE-PROVIDER",
+            excluded_workers={"builder-xai"},
+        )
+
+    assert decision.selected_worker_id == "reviewer-xai"
+    reasons = {candidate.worker_id: candidate.reasons for candidate in decision.candidates}
+    assert reasons["reviewer-xai"] == ("eligible",)
+
+
 def test_cross_provider_resume_state_can_route_to_different_eligible_worker(tmp_path: Path):
     with SessionLocal() as session:
         upsert_task(session, _task("RESUME-XPROVIDER"))
