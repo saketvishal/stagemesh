@@ -16,6 +16,12 @@ from build_coordinator.coordinator_config import (
     CoordinatorConfigError,
     load_coordinator_config,
 )
+from build_coordinator.coordinator_lock import (
+    CoordinatorLockHeld,
+    acquire_coordinator_lock,
+    heartbeat_coordinator_lock,
+    release_coordinator_lock,
+)
 from build_coordinator.policy import CoordinatorPolicyError
 from build_coordinator.project.commands import add_continue_command, add_project_commands
 from build_coordinator.db import DatabaseSchemaError, SessionLocal, configure_process_database
@@ -42,6 +48,7 @@ from build_coordinator.models import (
     BuildRunnerExecution,
     BuildTask,
     BuildTaskEvent,
+    new_uuid,
 )
 from build_coordinator.objectives import (
     ObjectiveError,
@@ -146,6 +153,7 @@ def _should_bind_legacy_command_to_project(args: argparse.Namespace) -> bool:
         "provide-input",
         "recover-review-environment",
         "recover-execution-retry",
+        "run",
     }
 
 
@@ -796,27 +804,40 @@ def _recover_execution_retry(args: argparse.Namespace, session) -> None:
 
 def _runner(args: argparse.Namespace, session) -> None:
     session.commit()
+    instance_id = new_uuid()
+    try:
+        acquire_coordinator_lock(session, instance_id=instance_id)
+    except CoordinatorLockHeld as exc:
+        session.rollback()
+        raise SystemExit(str(exc)) from exc
+    session.commit()
     runner = BuildRunner(SessionLocal, RunnerConfig.default(dry_run=args.dry_run))
-    if args.once:
-        result = runner.run_once()
-        _print(
-            {
-                "mode": result.mode,
-                "recovered": result.recovered,
-                "launched": result.launched,
-                "observed": result.observed,
-                "escalations": result.escalations,
-                "capacity_full": result.capacity_full,
-                "objectives_reconciled": result.objectives_reconciled,
-                "objective_follow_ups_created": result.objective_follow_ups_created,
-                "objective_unrelated_tasks_created": result.objective_unrelated_tasks_created,
-                "objective_gates_raised": result.objective_gates_raised,
-                "objectives_completed": result.objectives_completed,
-            }
-        )
-        return
-    runner.run_forever()
-    _print({"runner": "stopped"})
+    try:
+        if args.once:
+            result = runner.run_once()
+            heartbeat_coordinator_lock(session, instance_id=instance_id)
+            session.commit()
+            _print(
+                {
+                    "mode": result.mode,
+                    "recovered": result.recovered,
+                    "launched": result.launched,
+                    "observed": result.observed,
+                    "escalations": result.escalations,
+                    "capacity_full": result.capacity_full,
+                    "objectives_reconciled": result.objectives_reconciled,
+                    "objective_follow_ups_created": result.objective_follow_ups_created,
+                    "objective_unrelated_tasks_created": result.objective_unrelated_tasks_created,
+                    "objective_gates_raised": result.objective_gates_raised,
+                    "objectives_completed": result.objectives_completed,
+                }
+            )
+            return
+        runner.run_forever()
+        _print({"runner": "stopped"})
+    finally:
+        release_coordinator_lock(session, instance_id=instance_id)
+        session.commit()
 
 
 def _transition(args: argparse.Namespace, session) -> None:

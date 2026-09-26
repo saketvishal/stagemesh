@@ -14,11 +14,11 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from sqlalchemy import func, or_, select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
 from build_coordinator.config import get_settings
-from build_coordinator.db import with_sqlite_retry
+from build_coordinator.db import DatabaseBusyError, _is_transient_sqlite_lock_error
 from build_coordinator.events import record_event
 from build_coordinator.execution.base import (
     ExecutionLaunch,
@@ -196,6 +196,7 @@ class BuildRunner:
         self._settings = get_settings()
         self._task_source = task_source
         self._target_task_ids = frozenset(str(task_id) for task_id in (target_task_ids or ()))
+        self._external_launch_started = False
 
     def reload_config(
         self,
@@ -228,17 +229,23 @@ class BuildRunner:
             time.sleep(self._config.poll_seconds)
 
     def run_once(self) -> RunnerCycleResult:
-        def _cycle() -> RunnerCycleResult:
-            with self._session_factory() as session:
-                result = self._run_once(session)
-                session.commit()
-                return result
-
-        # The whole cycle (including the autoflush a later query in
-        # `_run_once` can trigger) is retried from a fresh session on
-        # transient SQLite writer contention, since a partially flushed,
-        # now-failed session cannot be resumed safely.
-        return with_sqlite_retry(_cycle)
+        attempts = 5
+        for attempt in range(1, attempts + 1):
+            self._external_launch_started = False
+            try:
+                with self._session_factory() as session:
+                    result = self._run_once(session)
+                    session.commit()
+                    return result
+            except OperationalError as exc:
+                if self._external_launch_started or not _is_transient_sqlite_lock_error(exc):
+                    raise
+                if attempt == attempts:
+                    raise DatabaseBusyError(
+                        f"SQLite write contention persisted before external launch after {attempts} attempts: {exc}"
+                    ) from exc
+                time.sleep(min(1.0, 0.05 * (2 ** (attempt - 1))))
+        raise AssertionError("unreachable")  # pragma: no cover
 
     def _run_once(self, session: Session) -> RunnerCycleResult:
         state = ensure_state(session)
@@ -2190,26 +2197,8 @@ class BuildRunner:
         execution_id = new_uuid()
         result_path = str(self._result_dir() / f"{execution_id}.json")
         executor = self._executor_for_worker(worker)
-        if isinstance(executor, SubprocessExecutor):
-            executor.remember_result_path(execution_id, result_path)
-        handle = executor.launch(
-            ExecutionLaunch(
-                task_id=task_id,
-                role=role,
-                worker_id=worker.worker_id,
-                provider=worker.provider,
-                worktree_path=worker.worktree_path,
-                branch_name=worker.branch_name,
-                prompt=prompt,
-                execution_id=execution_id,
-                result_path=result_path,
-                reviewed_feature_sha=reviewed_feature_sha,
-                timeout_seconds=worker.timeout_seconds,
-                extra_env=worker.resolved_env(),
-            )
-        )
         row = BuildRunnerExecution(
-            execution_id=handle.execution_id,
+            execution_id=execution_id,
             task_id=task_id,
             role=role,
             worker_id=worker.worker_id,
@@ -2218,8 +2207,8 @@ class BuildRunner:
             claim_id=str(claim_id) if claim_id else None,
             worktree_path=worker.worktree_path,
             branch_name=worker.branch_name,
-            process_id=handle.process_id,
-            result_path=handle.result_path or result_path,
+            process_id=None,
+            result_path=result_path,
             reviewed_feature_sha=reviewed_feature_sha,
             prompt_hash=hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
             status="LAUNCHED",
@@ -2239,6 +2228,28 @@ class BuildRunner:
                 session.flush()
         except IntegrityError:
             return
+        session.commit()
+        if isinstance(executor, SubprocessExecutor):
+            executor.remember_result_path(execution_id, result_path)
+        self._external_launch_started = True
+        handle = executor.launch(
+            ExecutionLaunch(
+                task_id=task_id,
+                role=role,
+                worker_id=worker.worker_id,
+                provider=worker.provider,
+                worktree_path=worker.worktree_path,
+                branch_name=worker.branch_name,
+                prompt=prompt,
+                execution_id=execution_id,
+                result_path=result_path,
+                reviewed_feature_sha=reviewed_feature_sha,
+                timeout_seconds=worker.timeout_seconds,
+                extra_env=worker.resolved_env(),
+            )
+        )
+        row.process_id = handle.process_id
+        row.result_path = handle.result_path or result_path
         record_event(
             session,
             EventInput(
