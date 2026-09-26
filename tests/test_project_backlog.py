@@ -219,6 +219,50 @@ def test_backlog_loads_sorted_and_validates(tmp_path):
     assert [d.task_id for d in definitions] == ["A-1", "B-2", "C-3"]
     assert definitions[1].priority == 5 and definitions[2].review_policy == "NONE"
     assert definitions[0].review_policy == "INDEPENDENT"  # project default
+    assert definitions[0].metadata == {}
+
+
+def test_backlog_accepts_bounded_task_metadata_and_hashes_it(tmp_path):
+    root = write_project(
+        tmp_path / "repo",
+        tasks={"A-1": {"metadata": {"mvp_definition_of_done_items": [1, 2, 3]}}},
+    )
+    project = load_project(root)
+    definition = load_backlog(project)[0]
+
+    assert definition.metadata == {"mvp_definition_of_done_items": [1, 2, 3]}
+    assert definition.to_spec().definition_metadata == definition.metadata
+    original_hash = definition.content_hash()
+    with SessionLocal() as session:
+        sync_backlog(session, project, [definition])
+        assert session.get(BuildTask, "A-1").definition_metadata == definition.metadata
+
+    (root / ".stagemesh" / "tasks" / "backlog.yaml").write_text(
+        task_yaml(**{"A-1": {"metadata": {"mvp_definition_of_done_items": [1, 2, 3, 4]}}}),
+        encoding="utf-8",
+    )
+
+    assert load_backlog(project)[0].content_hash() != original_hash
+
+
+def test_backlog_rejects_top_level_project_specific_fields_and_bad_metadata(tmp_path):
+    root = write_project(tmp_path / "repo", tasks={"A-1": {"mvp_definition_of_done_items": [1, 2, 3]}})
+    with pytest.raises(BacklogError, match="unknown field"):
+        load_backlog(load_project(root))
+
+    (root / ".stagemesh" / "tasks" / "backlog.yaml").write_text(
+        task_yaml(**{"A-1": {"metadata": ["not", "a", "mapping"]}}),
+        encoding="utf-8",
+    )
+    with pytest.raises(BacklogError, match="`metadata` must be a mapping"):
+        load_backlog(load_project(root))
+
+    (root / ".stagemesh" / "tasks" / "backlog.yaml").write_text(
+        task_yaml(**{"A-1": {"metadata": {"nested": {"api_token": "nope"}}}}),
+        encoding="utf-8",
+    )
+    with pytest.raises(BacklogError, match="secret or credential keys"):
+        load_backlog(load_project(root))
 
 
 def test_backlog_rejects_structural_errors_without_partial_load(tmp_path):

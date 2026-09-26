@@ -3855,6 +3855,7 @@ def _task_definition(task: BuildTask) -> dict:
         "implementation_notes": task.implementation_notes,
         "review_policy": task.review_policy,
         "risk_level": task.risk_level,
+        "metadata": dict(task.definition_metadata or {}),
     }
 
 
