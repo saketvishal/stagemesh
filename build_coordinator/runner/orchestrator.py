@@ -1043,6 +1043,8 @@ class BuildRunner:
             if not verdict.findings and not verdict.finding_dispositions:
                 self._review_protocol_blocked(session, execution, verdict, result)
                 return
+            if self._review_disagreement_deadlocked(session, execution, registry, result):
+                return
             if self._remediation_limit_reached(session, execution, verdict, result):
                 return
             transition_task(
@@ -1098,6 +1100,71 @@ class BuildRunner:
             error=f"unrecognized review verdict: {verdict.verdict}",
             recovery_classification="OPERATOR_ACTION_REQUIRED",
         )
+
+    def _review_disagreement_deadlocked(
+        self,
+        session: Session,
+        execution: BuildRunnerExecution,
+        registry: dict,
+        result: RunnerCycleResult,
+    ) -> bool:
+        """Fail closed when independent reviewers disagree on a finding.
+
+        A registry disagreement means at least two reviewers classified the
+        same durable finding into opposite categories (open vs closed). That
+        is reviewer deadlock, not meaningful unresolved builder work, so do
+        not spend remediation budget or ask a builder to re-fix a disputed
+        item without human tie-break evidence.
+        """
+        disputed = [
+            entry
+            for entry in open_findings(registry)
+            if isinstance(entry.get("disagreement"), dict)
+        ]
+        if not disputed:
+            return False
+        evidence = {
+            "reason": "REVIEWER_DISAGREEMENT_DEADLOCK",
+            "classification": "reviewer_disagreement",
+            "reviewer": execution.worker_id,
+            "reviewed_feature_sha": execution.reviewed_feature_sha,
+            "open_findings": [
+                {
+                    "id": entry.get("id"),
+                    "description": entry.get("description"),
+                    "attempts": entry.get("attempts"),
+                    "disagreement": entry.get("disagreement"),
+                    "history": entry.get("history"),
+                }
+                for entry in disputed
+            ],
+            "why_not_remediation": (
+                "Independent reviewers disagree about whether the finding is open, "
+                "so another autonomous remediation would be adjudicating review "
+                "deadlock rather than targeting currently agreed unresolved work."
+            ),
+        }
+        result.escalations.append(f"{execution.task_id}:REVIEWER_DISAGREEMENT_DEADLOCK")
+        record_event(
+            session,
+            EventInput(
+                task_id=execution.task_id,
+                event_type="runner.review_disagreement_deadlock",
+                actor="runner",
+                event_data=evidence,
+            ),
+        )
+        self._block_task(
+            session,
+            execution.task_id,
+            "REVIEWER_DISAGREEMENT_DEADLOCK",
+            invariant="REVIEWER_DISAGREEMENT_DEADLOCK",
+            execution=execution,
+            error="Independent reviewers disagreed about open remediation findings",
+            recovery_classification="OPERATOR_ACTION_REQUIRED",
+            extra_data=evidence,
+        )
+        return True
 
     def _review_protocol_blocked(
         self,

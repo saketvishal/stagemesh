@@ -8,7 +8,7 @@ from pathlib import Path
 from datetime import timedelta
 
 import pytest
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 
 from build_coordinator.db import Base, SessionLocal, engine, initialize_schema
 from build_coordinator.execution import ExecutionObservation, FakeExecutor
@@ -22,6 +22,7 @@ from build_coordinator.models import (
     BuildTaskEvent,
 )
 from build_coordinator.runner import BuildRunner
+from build_coordinator.runner.findings import finding_fingerprint
 import build_coordinator.runner.orchestrator as orchestrator_module
 from build_coordinator.runner.clone_pool import is_standalone_clone, repo_identity
 from build_coordinator.runner.git_safety import FakeGit, MechanicalMergeAssessment
@@ -1176,6 +1177,108 @@ def test_new_finding_after_resolution_gets_its_own_budget_not_raw_count():
         open_findings = event.event_data["open_findings"]
         assert len(open_findings) == 1
         assert open_findings[0]["description"] == "defect B"
+
+
+def test_reviewer_disagreement_deadlocks_instead_of_spending_remediation_budget():
+    """#119 follow-up to #81: finding-aware accounting still churned when
+    independent reviewers disagreed about the same durable finding. That is
+    not meaningful unresolved builder work, so it needs a tie-break gate
+    instead of another remediation attempt."""
+    task_id = "RUN-REVIEW-DISAGREEMENT"
+    finding = "missing regression coverage for the scheduler"
+    finding_id = finding_fingerprint(finding)
+    executors = {
+        "reviewer-2": FakeExecutor(
+            [
+                ExecutionObservation(
+                    "SUCCEEDED",
+                    result_data={
+                        "review": {
+                            "verdict": "REMEDIATION_REQUIRED",
+                            "findings": [],
+                            "finding_dispositions": [
+                                {
+                                    "id": finding_id,
+                                    "status": "RESOLVED",
+                                    "reason": "the new scheduler regression test covers it",
+                                }
+                            ],
+                            "required_remediation": ["reviewer-1 may still want changes"],
+                        }
+                    },
+                )
+            ]
+        ),
+    }
+    config = RunnerConfig(
+        workers=(
+            WorkerConfig("builder-a", "BUILDER", adapter="fake"),
+            WorkerConfig("reviewer-2", "REVIEWER", adapter="fake"),
+        ),
+        max_remediation_cycles=2,
+        result_dir=os.getenv("BUILD_COORDINATOR_RESULT_DIR"),
+    )
+    with SessionLocal() as session:
+        upsert_task(session, TaskSpec(**{**_task(task_id).__dict__, "required_validation": []}))
+        task = session.get(BuildTask, task_id)
+        task.finding_registry = {
+            "entries": {
+                finding_id: {
+                    "id": finding_id,
+                    "description": finding,
+                    "status": "STILL_OPEN",
+                    "attempts": 1,
+                    "first_seen_cycle": "review-cycle:reviewer-1-opened",
+                    "last_seen_cycle": "review-cycle:reviewer-1-opened",
+                    "history": [
+                        {
+                            "execution_id": "reviewer-1-opened",
+                            "cycle": "review-cycle:reviewer-1-opened",
+                            "status": "STILL_OPEN",
+                            "reason": "",
+                            "reopened": False,
+                        }
+                    ],
+                    "reviewer_history": {
+                        "reviewer-1": {
+                            "status": "STILL_OPEN",
+                            "reason": "",
+                            "execution_id": "reviewer-1-opened",
+                        }
+                    },
+                }
+            },
+            "processed_execution_ids": ["reviewer-1-opened"],
+        }
+        task.state = "REVIEW_READY"
+        session.commit()
+
+    runner = _runner(config=config, executors=executors)
+    runner.run_once()  # launch reviewer-2
+    result = runner.run_once()  # reviewer-2 disagrees -> deadlock, not remediation
+
+    assert f"{task_id}:REVIEWER_DISAGREEMENT_DEADLOCK" in result.escalations
+    assert f"{task_id}:REMEDIATION_LIMIT_REACHED" not in result.escalations
+    with SessionLocal() as session:
+        assert session.get(BuildTask, task_id).state == "BLOCKED"
+        assert runner._remediation_cycles(session, task_id) == 0
+        remediation_count = session.scalar(
+            select(func.count())
+            .select_from(BuildRunnerExecution)
+            .where(BuildRunnerExecution.task_id == task_id)
+            .where(BuildRunnerExecution.role == "REMEDIATION")
+        )
+        assert remediation_count == 0
+        event = session.scalar(
+            select(BuildTaskEvent)
+            .where(BuildTaskEvent.task_id == task_id)
+            .where(BuildTaskEvent.event_type == "runner.review_disagreement_deadlock")
+        )
+        assert event is not None
+        assert event.event_data["why_not_remediation"].startswith("Independent reviewers disagree")
+        open_findings = event.event_data["open_findings"]
+        assert open_findings[0]["id"] == finding_id
+        assert open_findings[0]["disagreement"]["resolved_status"] == "STILL_OPEN"
 
 
 def test_findings_omitted_after_being_tracked_retries_review_not_remediation():

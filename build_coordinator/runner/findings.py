@@ -118,6 +118,7 @@ def _apply_reviewer_classification(
     of one silently overwriting the other."""
     if not reviewer_id:
         return status, False
+    reviewer_status = status
     reviewer_history = dict(entry.get("reviewer_history") or {})
     conflicting = {
         rid: rec
@@ -135,7 +136,7 @@ def _apply_reviewer_classification(
             "cycle": cycle_label,
         }
         status = STATUS_STILL_OPEN
-    reviewer_history[reviewer_id] = {"status": status, "reason": reason, "execution_id": execution_id}
+    reviewer_history[reviewer_id] = {"status": reviewer_status, "reason": reason, "execution_id": execution_id}
     entry["reviewer_history"] = reviewer_history
     return status, disagreed
 
@@ -291,8 +292,19 @@ def reconcile_findings(
                 )
                 entries[finding_id] = entry
                 continue
-            entry["status"] = STATUS_STILL_OPEN
-            entry["attempts"] = int(entry.get("attempts") or 0) + 1
+            status, disagreed = _apply_reviewer_classification(
+                entry,
+                reviewer_id=reviewer_id,
+                status=STATUS_STILL_OPEN,
+                reason=reason,
+                execution_id=execution_id,
+                cycle_label=cycle_label,
+            )
+            entry["status"] = status
+            if status == STATUS_STILL_OPEN:
+                entry["attempts"] = int(entry.get("attempts") or 0) + 1
+                if disagreed:
+                    reason = reason or "reviewer disagreement"
         entry["description"] = description
         entry["last_seen_cycle"] = cycle_label
         _append_history(entry, status=entry["status"], reason=reason, reopened=was_closed and entry["status"] == STATUS_STILL_OPEN)
