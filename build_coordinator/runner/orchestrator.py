@@ -681,7 +681,16 @@ class BuildRunner:
                         execution.reviewed_feature_sha = sha
                         transition_task(session, execution.task_id, "IN_PROGRESS", actor="runner")
                         transition_task(session, execution.task_id, "VALIDATING", actor="runner")
-                        self._validation_gate(session, execution, result, parsed)
+                        task = session.get(BuildTask, execution.task_id)
+                        if not self._validation_gate(session, task, execution, result):
+                            return
+                        transition_task(
+                            session,
+                            execution.task_id,
+                            "REVIEW_READY" if task and task.review_policy != "NONE" else "DONE",
+                            actor="runner",
+                            reason="task already satisfied; verification commit validated",
+                        )
                         return
                 task = session.get(BuildTask, execution.task_id)
                 # Check if existing task branch already has useful commits ahead of base
