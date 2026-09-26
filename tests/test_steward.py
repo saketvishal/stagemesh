@@ -118,6 +118,67 @@ def test_steward_dry_run_surfaces_candidates_without_mutating_claims():
         assert execution is not None and execution.status == "RUNNING"
 
 
+def test_steward_dry_run_respects_configured_responsibilities():
+    now = utcnow()
+    with SessionLocal() as session:
+        upsert_task(session, _task("HEALTH-ONLY-STALE"))
+        stale_claim = claim_task(session, ClaimRequest("HEALTH-ONLY-STALE", worker_id="builder-a"))
+        stale_claim.lease_expires_at = now - timedelta(minutes=5)
+        session.add(
+            BuildRunnerExecution(
+                execution_id="exec-health-only-stale",
+                task_id="HEALTH-ONLY-STALE",
+                role="BUILDER",
+                worker_id="builder-a",
+                adapter="fake",
+                claim_id=stale_claim.claim_id,
+                status="RUNNING",
+            )
+        )
+
+        upsert_task(session, _task("HEALTH-ONLY-LOST"))
+        lost_claim = claim_task(session, ClaimRequest("HEALTH-ONLY-LOST", worker_id="builder-b"))
+        session.add(
+            BuildRunnerExecution(
+                execution_id="exec-health-only-lost",
+                task_id="HEALTH-ONLY-LOST",
+                role="BUILDER",
+                worker_id="builder-b",
+                adapter="fake",
+                claim_id=lost_claim.claim_id,
+                status="LOST",
+                completed_at=now - timedelta(minutes=1),
+            )
+        )
+
+        session.add(
+            BuildWorkerLease(
+                lease_id="lease-health-only-expired",
+                worker_id="builder-c",
+                task_id="HEALTH-ONLY-STALE",
+                lease_expires_at=now - timedelta(minutes=1),
+                status="ACTIVE",
+            )
+        )
+        session.commit()
+
+    with SessionLocal() as session:
+        result = run_steward_cycle(
+            session,
+            workers=(_steward(),),
+            config=StewardConfig(
+                enabled=True,
+                apply=False,
+                responsibilities=("health_audits",),
+            ),
+            now=now,
+        )
+
+        assert result.applied is False
+        assert result.cleanup_candidates == []
+        assert result.audits == ["health:active_leases=1:live_executions=1"]
+
+
 def test_steward_apply_recovers_stale_claims_idempotently():
     now = utcnow()
     with SessionLocal() as session:
