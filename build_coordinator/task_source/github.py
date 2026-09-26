@@ -25,7 +25,7 @@ from build_coordinator.models import (
 )
 from build_coordinator.objectives import _ensure_planner_task, create_objective, get_planner_task
 from build_coordinator.service import upsert_task, utcnow
-from build_coordinator.task_source.base import SyncResult, TaskSource
+from build_coordinator.task_source.base import SyncResult, TaskSource, source_identity_metadata
 from build_coordinator.types import EventInput, OBJECTIVE_ROOT_COMPAT_REASON, ObjectiveSpec, TaskSpec
 
 logger = logging.getLogger(__name__)
@@ -424,12 +424,14 @@ class GitHubTaskSource(TaskSource):
                 continue
 
             metadata.update(
-                {
-                    "task_source": "github",
-                    "source_issue_number": issue_number,
-                    "source_state": source_state,
-                    "source_url": source_url,
-                }
+                source_identity_metadata(
+                    source_type="github",
+                    source_owner=self.repo,
+                    source_ref=str(issue_number),
+                    source_url=source_url,
+                    source_state=source_state,
+                    legacy={"source_issue_number": issue_number},
+                )
             )
             task.definition_metadata = metadata
 
@@ -560,6 +562,8 @@ class GitHubTaskSource(TaskSource):
         else:
             action = "CREATED"
 
+        issue_match = re.search(r"/issues/(\d+)$", url)
+        issue_number = int(issue_match.group(1)) if issue_match else None
         spec = TaskSpec(
             task_id=task_id,
             title=title,
@@ -570,10 +574,14 @@ class GitHubTaskSource(TaskSource):
             review_policy=review_policy,
             definition_metadata={
                 **(existing.definition_metadata if existing is not None else {}),
-                "task_source": "github",
-                "source_issue_number": int(re.search(r"/issues/(\d+)$", url).group(1)) if re.search(r"/issues/(\d+)$", url) else None,
-                "source_state": "OPEN",
-                "source_url": url,
+                **source_identity_metadata(
+                    source_type="github",
+                    source_owner=self.repo,
+                    source_ref=str(issue_number if issue_number is not None else task_id),
+                    source_url=url,
+                    source_state="OPEN",
+                    legacy={"source_issue_number": issue_number},
+                ),
             },
         )
         task = upsert_task(session, spec)

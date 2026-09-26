@@ -7,10 +7,12 @@ import subprocess
 
 import pytest
 
+from build_coordinator.claims import task_is_claimable
 from build_coordinator.db import Base, SessionLocal, engine, initialize_schema
 from build_coordinator.models import BuildTask, BuildTaskEvent
 from build_coordinator.project.commands import _optional_task_source
 from build_coordinator.project.definition import ProjectDefinition
+from build_coordinator.service import utcnow
 from build_coordinator.task_source import get_task_source
 from build_coordinator.task_source.azure_devops import AzureDevOpsTaskSource
 
@@ -150,6 +152,9 @@ def test_azure_devops_import_records_source_identity_without_becoming_lifecycle_
         assert task is not None
         assert task.state == "BLOCKED"
         assert task.definition_metadata["task_source"] == "azure_devops"
+        assert task.definition_metadata["source_type"] == "azure_devops"
+        assert task.definition_metadata["source_owner"] == "https://dev.azure.com/acme/mesh"
+        assert task.definition_metadata["source_ref"] == "123"
         assert task.definition_metadata["source_work_item_id"] == "123"
         event = session.query(BuildTaskEvent).filter_by(
             task_id="ADO-123",
@@ -157,6 +162,32 @@ def test_azure_devops_import_records_source_identity_without_becoming_lifecycle_
             event_type="task.synced_from_source",
         ).one()
         assert event.event_data["work_item_id"] == "123"
+
+
+def test_closed_source_suppression_is_source_neutral_not_lifecycle_authority():
+    with SessionLocal() as session:
+        session.add(
+            BuildTask(
+                task_id="LOCAL-1",
+                title="Locally owned task with closed source context",
+                description="Do work",
+                acceptance_criteria=["Works"],
+                definition_metadata={
+                    "task_source": "local",
+                    "source_type": "local",
+                    "source_ref": "backlog/LOCAL-1",
+                    "source_state": "CLOSED",
+                },
+                state="READY",
+            )
+        )
+        session.commit()
+
+    with SessionLocal() as session:
+        task = session.get(BuildTask, "LOCAL-1")
+        assert task is not None
+        assert task.state == "READY"
+        assert not task_is_claimable(session, task, utcnow())
 
 
 def test_azure_devops_outbound_sends_lifecycle_state_and_evidence_only():
