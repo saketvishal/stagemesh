@@ -688,6 +688,52 @@ def test_versioned_schema_1_database_migrates_finding_registry_column(tmp_path):
     lifecycle.dispose()
 
 
+def test_versioned_schema_4_database_migrates_definition_metadata_column(tmp_path):
+    """A versioned database from before task metadata gets an explicit,
+    backup-first migration instead of being treated as current."""
+    path = tmp_path / "v4.sqlite3"
+    lifecycle = DatabaseLifecycle(f"sqlite:///{path.as_posix()}", data_dir=tmp_path)
+    lifecycle.initialize_schema()
+    with lifecycle.session() as db:
+        db.add(
+            BuildTask(
+                task_id="KEEP-1",
+                title="Keep",
+                description="preserve me",
+                acceptance_criteria=["done"],
+                dependencies=[],
+            )
+        )
+        db.commit()
+    lifecycle.dispose()
+
+    connection = sqlite3.connect(str(path))
+    connection.execute("ALTER TABLE build_tasks DROP COLUMN definition_metadata")
+    connection.execute("UPDATE build_coordinator_schema_version SET version = 4 WHERE singleton_id = 1")
+    connection.commit()
+    connection.close()
+
+    report = plan_migration(path)
+    assert report.needed
+    build_tasks_change = next(t for t in report.tables if t["table"] == "build_tasks")
+    assert "definition_metadata" in build_tasks_change["columns_added"]
+
+    applied = migrate_state(path, apply=True)
+    assert applied.applied and Path(applied.backup).is_file()
+    assert applied.preservation and all(r["identical"] for r in applied.preservation)
+    assert not plan_migration(path).needed
+
+    lifecycle = DatabaseLifecycle(f"sqlite:///{path.as_posix()}", data_dir=tmp_path)
+    lifecycle.initialize_schema()
+    with lifecycle.session() as db:
+        reloaded = db.get(BuildTask, "KEEP-1")
+        assert reloaded is not None
+        assert reloaded.title == "Keep"
+        assert reloaded.acceptance_criteria == ["done"]
+        assert reloaded.definition_metadata == {}
+    lifecycle.dispose()
+
+
 def test_matching_version_with_missing_required_table_repairs_backup_first(tmp_path):
     path = tmp_path / "missing-table.sqlite3"
     lifecycle = DatabaseLifecycle(f"sqlite:///{path.as_posix()}", data_dir=tmp_path)
