@@ -750,6 +750,62 @@ def stagemesh(args: list[str], *, cwd: Path, registry: Path, extra_env: dict | N
     )
 
 
+def _project_task_states(root: Path, registry: Path) -> dict[str, str]:
+    status = stagemesh(["status"], cwd=root, registry=registry)
+    assert status.returncode == 0, status.stderr
+    return {task["task_id"]: task["state"] for task in json.loads(status.stdout)["tasks"]}
+
+
+def test_top_level_project_binding_respects_explicit_database_url(monkeypatch):
+    from argparse import Namespace
+
+    import build_coordinator.cli as cli
+
+    sentinel = object()
+    monkeypatch.setenv("BUILD_COORDINATOR_DATABASE_URL", "sqlite:///explicit.sqlite3")
+    monkeypatch.setattr(cli, "configure_process_database", lambda: sentinel)
+
+    assert cli._legacy_command_lifecycle(Namespace(command="status")) is sentinel
+
+
+def test_top_level_task_commands_bind_to_current_project_state(tmp_path, registry):
+    root, _ = make_project_repo(
+        tmp_path,
+        {
+            "TO-DONE": {},
+            "TO-BLOCK": {},
+            "TO-FAIL": {},
+            "TO-REVIEW-RECOVER": {},
+            "TO-RETRY-RECOVER": {},
+        },
+    )
+    register_project(root)
+    sync = stagemesh(["project", "sync", "fixture"], cwd=tmp_path, registry=registry)
+    assert sync.returncode == 0, sync.stderr
+
+    for args in (
+        ["validating", "TO-DONE"],
+        ["review-ready", "TO-DONE"],
+        ["complete", "TO-DONE"],
+        ["block", "TO-BLOCK", "--reason", "waiting on operator"],
+        ["fail", "TO-FAIL", "--reason", "terminal fixture failure"],
+        ["block", "TO-REVIEW-RECOVER", "--reason", "REVIEW_ENVIRONMENT_BLOCKED"],
+        ["recover-review-environment", "TO-REVIEW-RECOVER"],
+        ["fail", "TO-RETRY-RECOVER", "--reason", "EXECUTION_RETRY_LIMIT_REACHED"],
+        ["recover-execution-retry", "TO-RETRY-RECOVER"],
+    ):
+        result = stagemesh(args, cwd=root, registry=registry)
+        assert result.returncode == 0, result.stderr
+
+    assert _project_task_states(root, registry) == {
+        "TO-DONE": "DONE",
+        "TO-BLOCK": "BLOCKED",
+        "TO-FAIL": "FAILED",
+        "TO-REVIEW-RECOVER": "REVIEW_READY",
+        "TO-RETRY-RECOVER": "RESUMABLE",
+    }
+
+
 def test_continue_runs_project_backlog_in_parallel_from_any_directory(tmp_path, registry):
     root, origin = make_project_repo(
         tmp_path,
