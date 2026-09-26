@@ -17,8 +17,11 @@ command already uses.
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+import os
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Any, Callable
 from uuid import uuid4
 
 from build_coordinator.github.controller import GitHubAutonomousController
@@ -43,6 +46,96 @@ class CycleOutcome:
     ok: bool
     failure_class: str | None = None
     backoff_seconds: float | None = None
+
+
+@dataclass
+class ConfigReloadState:
+    """Last-known-good runner config for long-lived watcher processes."""
+
+    config: RunnerConfig
+    signature: tuple[str, int, int] | None = None
+    status: dict[str, Any] = field(default_factory=dict)
+
+
+def _runner_config_signature() -> tuple[str, int, int] | None:
+    raw_path = os.getenv("BUILD_COORDINATOR_RUNNER_CONFIG")
+    if not raw_path:
+        return None
+    path = Path(raw_path).resolve()
+    stat = path.stat()
+    return (str(path), int(stat.st_mtime_ns), int(stat.st_size))
+
+
+def initial_config_reload_state(
+    *,
+    dry_run: bool = False,
+    loader: Callable[..., RunnerConfig] = RunnerConfig.default,
+) -> ConfigReloadState:
+    """Load the initial runner config and capture its reload signature."""
+
+    config = loader(dry_run=dry_run)
+    signature = _runner_config_signature()
+    return ConfigReloadState(
+        config=config,
+        signature=signature,
+        status={
+            "state": "loaded",
+            "source": signature[0] if signature else "default",
+            "worker_count": len(config.workers),
+            "reloaded_at": datetime.now(UTC).isoformat(),
+        },
+    )
+
+
+def refresh_config_reload_state(
+    state: ConfigReloadState,
+    *,
+    logger: WatcherLogger,
+    repository_slug: str,
+    loader: Callable[..., RunnerConfig] = RunnerConfig.default,
+) -> ConfigReloadState:
+    """Safely hot-reload worker config.
+
+    A malformed edit is reported and the previous valid config remains active;
+    no running cycle observes a partially-loaded config.
+    """
+
+    try:
+        signature = _runner_config_signature()
+    except Exception as exc:
+        status = {
+            "state": "failed",
+            "source": os.getenv("BUILD_COORDINATOR_RUNNER_CONFIG") or "default",
+            "error_type": type(exc).__name__,
+            "message": str(exc),
+            "using_previous": True,
+        }
+        logger.log("watcher.config_reload_failed", repository_slug=repository_slug, message=str(exc), extra=status)
+        return ConfigReloadState(config=state.config, signature=state.signature, status=status)
+
+    if signature == state.signature:
+        return state
+
+    try:
+        config = loader()
+        status = {
+            "state": "reloaded",
+            "source": signature[0] if signature else "default",
+            "worker_count": len(config.workers),
+            "reloaded_at": datetime.now(UTC).isoformat(),
+        }
+        logger.log("watcher.config_reloaded", repository_slug=repository_slug, extra=status)
+        return ConfigReloadState(config=config, signature=signature, status=status)
+    except Exception as exc:
+        status = {
+            "state": "failed",
+            "source": signature[0] if signature else "default",
+            "error_type": type(exc).__name__,
+            "message": str(exc),
+            "using_previous": True,
+        }
+        logger.log("watcher.config_reload_failed", repository_slug=repository_slug, message=str(exc), extra=status)
+        return ConfigReloadState(config=state.config, signature=state.signature, status=status)
 
 
 def run_foreground_cycle(
@@ -257,9 +350,27 @@ def run_foreground(
 ) -> None:
     """Repeat `run_foreground_cycle` until stop is requested (or `once` is
     set, for deterministic tests / smoke checks)."""
-    config = runner_config or RunnerConfig.default()
+    reload_state = (
+        ConfigReloadState(
+            config=runner_config,
+            status={
+                "state": "static",
+                "source": "argument",
+                "worker_count": len(runner_config.workers),
+            },
+        )
+        if runner_config is not None
+        else initial_config_reload_state()
+    )
     instance_id = uuid4().hex
     while True:
+        if runner_config is None:
+            reload_state = refresh_config_reload_state(
+                reload_state,
+                logger=logger,
+                repository_slug=repository_slug,
+            )
+        config = reload_state.config
         outcome = run_foreground_cycle(
             session_factory,
             repository_slug=repository_slug,
@@ -271,6 +382,16 @@ def run_foreground(
             github_client=github_client,
             instance_id=instance_id,
         )
+        if outcome.task_name and reload_state.status:
+            with session_factory() as session:
+                from build_coordinator.models import BuildWatcherRecord
+
+                record = session.get(BuildWatcherRecord, outcome.task_name)
+                if record is not None:
+                    summary = dict(record.last_cycle_summary or {})
+                    summary["config_reload"] = reload_state.status
+                    record.last_cycle_summary = summary
+                    session.commit()
         if once:
             return
         with session_factory() as session:

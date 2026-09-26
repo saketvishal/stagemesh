@@ -4,10 +4,11 @@ acceptance criterion 1)."""
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 
-from build_coordinator.cli import _build_parser, _watcher_running_health
+from build_coordinator.cli import _build_parser, _run, _watcher_metrics, _watcher_running_health
 
 
 @pytest.mark.parametrize(
@@ -42,6 +43,22 @@ def test_watcher_run_defaults_once_to_false():
     parser = _build_parser()
     args = parser.parse_args(["watcher", "run", "--foreground"])
     assert args.once is False
+
+
+def test_watcher_command_dispatches_to_watcher_handler(monkeypatch):
+    called = {}
+
+    def fake_watcher(args, session):
+        called["args"] = args
+        called["session"] = session
+
+    monkeypatch.setattr("build_coordinator.cli._watcher", fake_watcher)
+    args = SimpleNamespace(command="watcher", watcher_command="status")
+    session = object()
+
+    _run(args, session)
+
+    assert called == {"args": args, "session": session}
 
 
 def test_watcher_provision_labels_defaults_dry_run_to_false():
@@ -100,3 +117,19 @@ def test_watcher_running_health_rejects_confirmed_dead_process():
     )
 
     assert health["running"] is False
+
+
+def test_watcher_status_metrics_include_reload_and_failure_counts():
+    last_cycle_summary = {"config_reload": {"state": "reloaded", "worker_count": 2}}
+    record = SimpleNamespace(
+        restart_count=3,
+        consecutive_failure_count=2,
+        backoff_until=None,
+        last_cycle_summary=last_cycle_summary,
+    )
+
+    metrics = _watcher_metrics(record)
+
+    assert metrics["restart_count"] == 3
+    assert metrics["consecutive_failure_count"] == 2
+    assert metrics["config_reload"] == {"state": "reloaded", "worker_count": 2}
