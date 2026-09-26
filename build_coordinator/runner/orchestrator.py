@@ -103,7 +103,12 @@ from build_coordinator.runner.routing import (
 from build_coordinator.project.backlog import task_priorities
 from build_coordinator.execution.git_integrator import GitIntegrationExecutor
 from build_coordinator.runner.ci_reconciliation import reconcile_awaiting_ci
-from build_coordinator.runner.validation import ValidationExecutor, ValidationOutcome, run_validation
+from build_coordinator.runner.validation import (
+    ValidationExecutor,
+    ValidationOutcome,
+    run_validation,
+    validation_environment_fingerprint,
+)
 from build_coordinator.runner.worktree import (
     cleanup_task_branch,
     WorktreeValidationError,
@@ -927,6 +932,20 @@ class BuildRunner:
         if self._active_validation(session, source_execution.task_id) is not None:
             return
         execution_id = new_uuid()
+        feature_sha = (source_execution.result_data or {}).get("feature_sha") or source_execution.reviewed_feature_sha
+        validated_sha = feature_sha or self._current_head_sha(cwd)
+        env_fingerprint = validation_environment_fingerprint()
+        context = {
+            "task_id": source_execution.task_id,
+            "source_execution_id": source_execution.execution_id,
+            "validated_sha": validated_sha,
+            "workspace": str(cwd),
+            "commands": commands,
+            "environment_fingerprint": env_fingerprint,
+        }
+        validation_context_hash = hashlib.sha256(
+            json.dumps(context, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
         handle = self._validation_executor.launch(
             ExecutionLaunch(
                 task_id=source_execution.task_id,
@@ -937,8 +956,7 @@ class BuildRunner:
                 branch_name=source_execution.branch_name,
                 prompt="",
                 execution_id=execution_id,
-                reviewed_feature_sha=(source_execution.result_data or {}).get("feature_sha")
-                or source_execution.reviewed_feature_sha,
+                reviewed_feature_sha=validated_sha,
                 metadata={"commands": commands},
             )
         )
@@ -953,17 +971,19 @@ class BuildRunner:
             worktree_path=cwd,
             branch_name=source_execution.branch_name,
             process_id=handle.process_id,
-            reviewed_feature_sha=(source_execution.result_data or {}).get("feature_sha")
-            or source_execution.reviewed_feature_sha,
-            prompt_hash=hashlib.sha256("|".join(commands).encode("utf-8")).hexdigest(),
+            reviewed_feature_sha=validated_sha,
+            prompt_hash=validation_context_hash,
             status="LAUNCHED",
             launched_at=_now(),
             result_data={
                 "commands": commands,
                 "workspace": str(cwd),
                 "source_execution_id": source_execution.execution_id,
-                "feature_sha": (source_execution.result_data or {}).get("feature_sha")
-                or source_execution.reviewed_feature_sha,
+                "feature_sha": feature_sha,
+                "validated_sha": validated_sha,
+                "environment_fingerprint": env_fingerprint,
+                "validation_context_hash": validation_context_hash,
+                "started_at": _now().isoformat(),
                 "next_state": next_state,
                 "success_reason": success_reason,
             },
@@ -981,6 +1001,9 @@ class BuildRunner:
                     "commands": commands,
                     "source_execution_id": source_execution.execution_id,
                     "validation_execution_id": handle.execution_id,
+                    "validated_sha": validated_sha,
+                    "environment_fingerprint": env_fingerprint,
+                    "validation_context_hash": validation_context_hash,
                 },
             ),
         )
@@ -1044,14 +1067,40 @@ class BuildRunner:
         execution.exit_code = observation.exit_code
         execution.human_escalation_type = observation.human_escalation_type
         execution.completed_at = _now()
+        merged.setdefault("ended_at", execution.completed_at.isoformat())
         if observation.status in {"LOST", "TERMINATED"}:
             execution.status = observation.status
             execution.result_data = {
                 **merged,
                 "reconciliation_state": "LOST" if observation.status == "LOST" else "TERMINATED",
+                "validation_terminal_type": merged.get("validation_terminal_type")
+                or ("LOST" if observation.status == "LOST" else "CANCELLED"),
             }
             return
         passed = observation.status == "SUCCEEDED" and bool(merged.get("passed", True))
+        current_sha = self._current_head_sha(str(merged.get("workspace") or execution.worktree_path or ""))
+        if (
+            passed
+            and _looks_like_git_sha(merged.get("validated_sha"))
+            and _looks_like_git_sha(current_sha)
+            and current_sha != merged.get("validated_sha")
+        ):
+            passed = False
+            stale_result = {
+                "command": "<validation-context>",
+                "exit_code": 1,
+                "failure_type": "STALE_VALIDATION_CONTEXT",
+                "started_at": merged.get("started_at"),
+                "completed_at": merged.get("ended_at"),
+                "duration_seconds": 0,
+                "output_tail": (
+                    "validation completed for "
+                    f"{merged.get('validated_sha')} but workspace is now {current_sha}"
+                )[-2000:],
+            }
+            merged["results"] = [*(merged.get("results") or []), stale_result]
+            merged["validation_terminal_type"] = "STALE_VALIDATION_CONTEXT"
+            merged["passed"] = False
         execution.status = "SUCCEEDED" if passed else "FAILED"
         execution.result_data = merged
         outcome = ValidationOutcome(
@@ -1070,6 +1119,12 @@ class BuildRunner:
                     "workspace": str(merged.get("workspace") or execution.worktree_path),
                     "execution_id": execution.execution_id,
                     "feature_sha": merged.get("feature_sha") or execution.reviewed_feature_sha,
+                    "validated_sha": merged.get("validated_sha") or execution.reviewed_feature_sha,
+                    "environment_fingerprint": merged.get("environment_fingerprint"),
+                    "validation_context_hash": merged.get("validation_context_hash") or execution.prompt_hash,
+                    "started_at": merged.get("started_at"),
+                    "ended_at": merged.get("ended_at"),
+                    "validation_terminal_type": merged.get("validation_terminal_type"),
                     "results": outcome.results,
                 },
             ),
@@ -1123,6 +1178,14 @@ class BuildRunner:
 
     def _git_cwd_for_execution(self, execution: BuildRunnerExecution) -> str:
         return str(self._settings.repo_root)
+
+    def _current_head_sha(self, cwd: str | Path) -> str | None:
+        if not cwd:
+            return None
+        proc = _git(Path(cwd), "rev-parse", "HEAD")
+        if proc.returncode != 0:
+            return None
+        return proc.stdout.strip() or None
 
     def _review_succeeded(
         self,
@@ -4919,3 +4982,9 @@ def _string_list(value: object) -> list[str]:
 
 def _now() -> datetime:
     return datetime.now(UTC)
+
+
+def _looks_like_git_sha(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    return 7 <= len(value) <= 64 and all(ch in "0123456789abcdefABCDEF" for ch in value)
