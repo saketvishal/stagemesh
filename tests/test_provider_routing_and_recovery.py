@@ -411,6 +411,40 @@ def test_fallback_to_another_provider():
         assert execs[1].worker_id == "builder-codex-1" and execs[1].status == "SUCCEEDED"
 
 
+def test_task_scoped_no_changes_failure_does_not_emit_provider_failure():
+    executors = {
+        "builder-codex-1": FakeExecutor([
+            ExecutionObservation("FAILED", result_data={"provider_failure": "NO_CHANGES_PRODUCED"})
+        ]),
+        "builder-codex-2": FakeExecutor(),
+    }
+    config = RunnerConfig(
+        workers=(
+            WorkerConfig("builder-codex-1", "BUILDER", adapter="fake", provider="openai", capabilities=(CAP_CODING,), preference=1),
+            WorkerConfig("builder-codex-2", "BUILDER", adapter="fake", provider="openai", capabilities=(CAP_CODING,), preference=2),
+        ),
+        providers={"openai": ProviderConfig("openai", availability="AVAILABLE", consumption_mode="ACTIVE")},
+        max_execution_attempts=2,
+        result_dir=os.getenv("BUILD_COORDINATOR_RESULT_DIR"),
+    )
+    with SessionLocal() as session:
+        upsert_task(session, _task("TASK-NO-CHANGES-FAILURE"))
+        session.commit()
+
+    runner = BuildRunner(SessionLocal, config=config, executors=executors, git=FakeGit())
+    assert len(runner.run_once().launched) == 1
+    runner.run_once()
+
+    with SessionLocal() as session:
+        provider_failures = session.scalars(
+            select(BuildTaskEvent)
+            .where(BuildTaskEvent.task_id == "TASK-NO-CHANGES-FAILURE")
+            .where(BuildTaskEvent.event_type == "runner.provider_failure")
+        ).all()
+
+    assert provider_failures == []
+
+
 # 12. No infinite fallback respects max attempts
 def test_no_infinite_fallback_respects_max_attempts():
     executors = {

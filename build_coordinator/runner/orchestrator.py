@@ -1219,7 +1219,7 @@ class BuildRunner:
                 if retryable
                 else _COOLDOWN_SECONDS.get(failure, 300)
             )
-            if failure:
+            if failure in PROVIDER_FAILURES:
                 record_event(
                     session,
                     EventInput(
@@ -1318,7 +1318,7 @@ class BuildRunner:
             if retryable
             else _COOLDOWN_SECONDS.get(failure, 300)
         )
-        if failure:
+        if failure in PROVIDER_FAILURES:
             record_event(
                 session,
                 EventInput(
