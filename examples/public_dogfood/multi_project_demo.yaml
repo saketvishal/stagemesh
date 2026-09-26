@@ -1,0 +1,30 @@
+schema_version: 1
+demo_id: parallelism-and-global-invocation
+description: Public-safe multi-project demo for global continue.
+projects:
+  - id: demo-project-one
+    repo: /path/to/disposable-demo-repo-one
+    concurrency: 1
+  - id: demo-project-two
+    repo: /path/to/disposable-demo-repo-two
+    concurrency: 1
+global_invocation:
+  command_examples:
+    - stagemesh continue --all --capacity 2
+    - stagemesh "Continue all registered projects."
+expected:
+  - two projects keep isolated state
+  - bounded capacity allows one active builder per project
+  - cleanup can remove generated state for each disposable project
+workers:
+  - id: builder-project-one
+    provider: provider-a
+    project: demo-project-one
+    stages: [BUILD, REVIEW, INTEGRATE]
+    command: [python, examples/stdin_print_cli_wrapper.py]
+  - id: builder-project-two
+    provider: provider-b
+    project: demo-project-two
+    stages: [BUILD, REVIEW, INTEGRATE]
+    command: [python, examples/stdin_print_cli_wrapper.py]
+
