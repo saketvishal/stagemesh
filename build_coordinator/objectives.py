@@ -263,19 +263,13 @@ def create_objective(session: Session, spec: ObjectiveSpec) -> BuildObjective:
 
 def _ensure_planner_task(session: Session, objective: BuildObjective) -> BuildTask:
     task_id = planner_task_id(objective.objective_id)
-    existing = session.get(BuildTask, task_id)
-    if existing is not None:
-        return existing
+    is_new = session.get(BuildTask, task_id) is None
     task = upsert_task(
         session,
         TaskSpec(
             task_id=task_id,
             title=f"Plan objective {objective.objective_id}",
-            description=(
-                "Controller-owned planner step. Decompose the free-text "
-                "objective into a validated structured plan. Do not implement "
-                "the work, choose worktrees, or authorize remote main push."
-            ),
+            description=_planner_task_description(objective),
             acceptance_criteria=[
                 "Emit a schema-valid ObjectivePlan with at least one child task",
                 "Do not persist chain-of-thought",
@@ -290,13 +284,38 @@ def _ensure_planner_task(session: Session, objective: BuildObjective) -> BuildTa
     task.parallel_safe = True
     task.requires_integration = False
     task.dedup_key = _dedup_key(objective.objective_id, "PLANNER")
-    _record_event(
-        session,
-        objective.objective_id,
-        "objective.planner_task_created",
-        task_id=task.task_id,
-    )
+    if is_new:
+        _record_event(
+            session,
+            objective.objective_id,
+            "objective.planner_task_created",
+            task_id=task.task_id,
+        )
     return task
+
+
+def _planner_task_description(objective: BuildObjective) -> str:
+    lines = [
+        "Controller-owned planner step. Decompose the free-text objective into a validated structured plan.",
+        "",
+        f"Objective: {objective.objective_id}",
+        f"Goal: {objective.goal}",
+    ]
+    if objective.constraints:
+        lines.append(f"Constraints: {', '.join(objective.constraints)}")
+    if objective.allowed_scope:
+        lines.append(f"Allowed scope: {', '.join(objective.allowed_scope)}")
+    if objective.prohibited_scope:
+        lines.append(f"Prohibited scope: {', '.join(objective.prohibited_scope)}")
+    if objective.completion_criteria:
+        lines.append(f"Completion criteria: {', '.join(objective.completion_criteria)}")
+    lines.extend(
+        [
+            "",
+            "Do not implement the work, choose worktrees, or authorize remote main push.",
+        ]
+    )
+    return "\n".join(lines)
 
 
 def apply_validated_plan(
