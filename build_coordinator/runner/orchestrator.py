@@ -2983,18 +2983,23 @@ class BuildRunner:
         scope_changed = self._scope_changed(scope, changed_paths)
         metadata = task.definition_metadata if task is not None and isinstance(task.definition_metadata, dict) else {}
         marked_stale = bool(metadata.get("stale") or metadata.get("obsolete") or metadata.get("superseded_by"))
-        already_satisfied = self._check_task_already_satisfied(session, execution.task_id)
+        satisfaction = self._task_satisfaction_evidence(session, task)
+        already_satisfied = bool(satisfaction.get("satisfied"))
+        recent_integrations = self._recent_integration_evidence(session, execution.task_id)
+        stale_by_scope_reconciliation = bool(scope_changed and recent_integrations)
         outcome = "UNRESOLVED"
         if already_satisfied:
             outcome = "ALREADY_SATISFIED"
-        elif marked_stale:
+        elif marked_stale or stale_by_scope_reconciliation:
             outcome = "STALE_OR_OBSOLETE"
         return {
             "outcome": outcome,
             "detail": detail,
             "deterministic_recheck": True,
             "acceptance_appears_satisfied": already_satisfied,
+            "acceptance_satisfaction_evidence": satisfaction,
             "definition_marked_stale": marked_stale,
+            "stale_by_scope_reconciliation": stale_by_scope_reconciliation,
             "scope_changed_since_base": scope_changed,
             "changed_paths_since_base": changed_paths[:50],
             "permitted_scope": scope,
@@ -3003,7 +3008,7 @@ class BuildRunner:
             "reviewed_feature_sha": current_sha if already_satisfied else None,
             "reconciled_against": {
                 "main_ref": self._config.main_ref,
-                "recent_integrations": self._recent_integration_evidence(session, execution.task_id),
+                "recent_integrations": recent_integrations,
             },
         }
 
@@ -3304,23 +3309,24 @@ class BuildRunner:
             elif reason in ("COORDINATOR_INVARIANT_FAILURE", "NO_CHANGES_PRODUCED", "MALFORMED_EXECUTOR_RESULT"):
                 if self._check_task_already_satisfied(session, task.task_id):
                     repo_root = Path(self._settings.repo_root)
-                    branch = task.branch_name or task_branch_name(task.task_id)
-                    tree_proc = _git(repo_root, "rev-parse", f"refs/heads/{branch}^{{tree}}")
-                    if tree_proc.returncode == 0:
-                        tree_sha = tree_proc.stdout.strip()
-                        parent_sha = _git(repo_root, "rev-parse", f"refs/heads/{branch}").stdout.strip()
-                        identity_args = resolve_git_identity_args(repo_root)
-                        commit_proc = _git(
-                            repo_root,
-                            *identity_args,
-                            "commit-tree",
-                            tree_sha,
-                            "-p", parent_sha,
-                            "-m", f"{task.task_id}: verify existing implementation meets acceptance criteria",
-                        )
-                        if commit_proc.returncode == 0:
-                            v_commit = commit_proc.stdout.strip()
-                            _git(repo_root, "update-ref", f"refs/heads/{branch}", v_commit)
+                    current_sha = self._rev_parse(repo_root, "HEAD") or self._rev_parse(repo_root, self._config.main_ref)
+                    evidence = self._task_satisfaction_evidence(session, task)
+                    execution = session.scalar(
+                        select(BuildRunnerExecution)
+                        .where(BuildRunnerExecution.task_id == task.task_id)
+                        .order_by(BuildRunnerExecution.completed_at.desc(), BuildRunnerExecution.launched_at.desc())
+                        .limit(1)
+                    )
+                    if execution is not None and current_sha:
+                        execution.reviewed_feature_sha = current_sha
+                        execution.result_data = {
+                            **(execution.result_data or {}),
+                            "feature_sha": current_sha,
+                            "reviewed_feature_sha": current_sha,
+                            "satisfied_by_existing_implementation": True,
+                            "reconciliation_state": "ALREADY_SATISFIED",
+                            "reconciliation_evidence": evidence,
+                        }
                     try:
                         transition_task(
                             session,
@@ -3338,6 +3344,8 @@ class BuildRunner:
                                 event_data={
                                     "reason": reason,
                                     "resumed_to": "REVIEW_READY",
+                                    "satisfied_by_existing_implementation": True,
+                                    "reconciliation_evidence": evidence,
                                 },
                             ),
                         )
@@ -4094,22 +4102,91 @@ class BuildRunner:
 
     def _check_task_already_satisfied(self, session: Session, task_id: str) -> bool:
         task = session.get(BuildTask, task_id)
+        return bool(self._task_satisfaction_evidence(session, task).get("satisfied"))
+
+    def _task_satisfaction_evidence(self, session: Session, task: BuildTask | None) -> dict:
         if task is None:
-            return False
-        if task_id == "SM-003":
-            root = Path(self._settings.repo_root)
-            test_file = root / "tests" / "test_worker_health.py"
-            health_file = root / "build_coordinator" / "runner" / "worker_health.py"
-            if test_file.is_file() and health_file.is_file():
-                proc = subprocess.run(
-                    [sys.executable, "-m", "pytest", str(test_file)],
-                    cwd=str(root),
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
-                return proc.returncode == 0
-        return False
+            return {"satisfied": False, "reason": "TASK_NOT_FOUND"}
+        root = Path(self._settings.repo_root)
+        commands = list(task.required_validation or [])
+        if commands:
+            if not self._config.run_validation:
+                return {
+                    "satisfied": False,
+                    "reason": "VALIDATION_DISABLED",
+                    "required_validation": commands,
+                }
+            outcome = run_validation(
+                commands,
+                root,
+                timeout_seconds=self._config.validation_timeout_seconds,
+            )
+            return {
+                "satisfied": outcome.passed,
+                "reason": "REQUIRED_VALIDATION_PASSED" if outcome.passed else "REQUIRED_VALIDATION_FAILED",
+                "required_validation": commands,
+                "validation_results": outcome.results,
+            }
+
+        criteria = [str(item).strip() for item in list(task.acceptance_criteria or []) if str(item).strip()]
+        checks = [self._file_contains_acceptance_evidence(root, criterion) for criterion in criteria]
+        actionable_checks = [check for check in checks if check is not None]
+        if actionable_checks:
+            satisfied = all(bool(check.get("satisfied")) for check in actionable_checks)
+            return {
+                "satisfied": satisfied,
+                "reason": "FILE_CONTENT_ACCEPTANCE_PASSED" if satisfied else "FILE_CONTENT_ACCEPTANCE_FAILED",
+                "acceptance_checks": actionable_checks,
+                "unchecked_acceptance_criteria": [
+                    criterion for criterion, check in zip(criteria, checks, strict=False) if check is None
+                ],
+            }
+
+        return {
+            "satisfied": False,
+            "reason": "NO_DETERMINISTIC_ACCEPTANCE_CHECK_AVAILABLE",
+            "acceptance_criteria": criteria,
+            "required_validation": commands,
+        }
+
+    def _file_contains_acceptance_evidence(self, root: Path, criterion: str) -> dict | None:
+        marker = " contains "
+        lowered = criterion.lower()
+        if marker not in lowered:
+            return None
+        marker_index = lowered.index(marker)
+        path_text = criterion[:marker_index].strip().strip("`'\"")
+        expected = criterion[marker_index + len(marker) :].strip().strip("`'\"")
+        if not path_text or not expected:
+            return None
+        candidate = (root / path_text).resolve()
+        try:
+            candidate.relative_to(root.resolve())
+        except ValueError:
+            return {
+                "satisfied": False,
+                "criterion": criterion,
+                "reason": "PATH_OUTSIDE_REPOSITORY",
+                "path": path_text,
+            }
+        if not candidate.is_file():
+            return {
+                "satisfied": False,
+                "criterion": criterion,
+                "reason": "FILE_NOT_FOUND",
+                "path": path_text,
+            }
+        try:
+            content = candidate.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            content = candidate.read_text(errors="replace")
+        return {
+            "satisfied": expected in content,
+            "criterion": criterion,
+            "reason": "FILE_CONTAINS_TEXT" if expected in content else "TEXT_NOT_FOUND",
+            "path": path_text,
+            "expected_text": expected,
+        }
 
     def _recover_worktree_for_task(self, session: Session, task: BuildTask) -> bool:
         root = Path(self._settings.repo_root)
