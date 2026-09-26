@@ -189,6 +189,36 @@ def test_public_alpha_claims_match_accepted_evidence():
     assert "Cross-provider independent review execution when provider runtimes are available" not in roadmap
 
 
+def test_roadmap_bounds_multi_model_deliberation_as_future_optional_work():
+    """Future council workflows must remain bounded, opt-in, and subordinate
+    to deterministic validation/review rather than advertised as consensus
+    proof."""
+    roadmap = (REPO_ROOT / "docs" / "ROADMAP.md").read_text(encoding="utf-8")
+
+    assert "Post-1.0 research / future work" in roadmap
+    assert "Bounded multi-model deliberation and council workflows" in roadmap
+    assert "explicitly deferred from the current roadmap cut" in roadmap
+
+    for required in (
+        "Opt-in and policy-driven",
+        "Bounded participant and round counts",
+        "Exact task, context, and version identity",
+        "Separately preserved participant proposals and evidence",
+        "Deterministic, coordinator-owned final lifecycle decision",
+        "Explicit disagreement as evidence",
+        "Operator policy controls when deliberation is allowed or required",
+        "Enforceable cost and latency budgets",
+        "Consensus is not proof of correctness",
+        "deterministic validation, exact-SHA\n  review, and existing governance gates remain authoritative",
+        "Automatic consensus being treated as proof of correctness",
+    ):
+        assert required in roadmap
+
+    assert "Unconstrained swarm behavior" in roadmap
+    assert "Recursive self-delegation" in roadmap
+    assert "Replacing deterministic validation or exact-SHA review" in roadmap
+
+
 # ---------------------------------------------------------------------------
 # New behavioral coverage: actually exercise the described scenarios.
 # ---------------------------------------------------------------------------
