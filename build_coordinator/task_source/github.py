@@ -24,7 +24,7 @@ from build_coordinator.models import (
     TASK_STATES,
 )
 from build_coordinator.objectives import _ensure_planner_task, create_objective, get_planner_task
-from build_coordinator.service import upsert_task
+from build_coordinator.service import upsert_task, utcnow
 from build_coordinator.task_source.base import SyncResult, TaskSource
 from build_coordinator.types import EventInput, OBJECTIVE_ROOT_COMPAT_REASON, ObjectiveSpec, TaskSpec
 
@@ -227,8 +227,16 @@ class GitHubTaskSource(TaskSource):
         if self._client is not None:
             if not hasattr(self._client, "remove_label"):
                 return True
+            present_labels = self._client_issue_label_names(issue_number)
             for label in stale_labels:
-                self._client.remove_label(repo=self.repo, number=str(issue_number), label=label)
+                if present_labels is not None and label not in present_labels:
+                    continue
+                try:
+                    self._client.remove_label(repo=self.repo, number=str(issue_number), label=label)
+                except Exception as exc:
+                    if self._is_absent_label_error(exc):
+                        continue
+                    raise
             return True
 
         present_labels = self._issue_label_names(issue_number)
@@ -262,6 +270,33 @@ class GitHubTaskSource(TaskSource):
             raise RuntimeError(err)
         data = json.loads(proc.stdout or "{}")
         return {label.get("name", "") for label in data.get("labels", []) if isinstance(label, dict)}
+
+    def _client_issue_label_names(self, issue_number: int) -> set[str] | None:
+        if self._client is None:
+            return None
+        if hasattr(self._client, "get_issue"):
+            issue = self._client.get_issue(repo=self.repo, issue_number=issue_number)
+            labels = getattr(issue, "labels", None)
+            if labels is not None:
+                return {label.get("name", "") if isinstance(label, dict) else str(label) for label in labels}
+        if hasattr(self._client, "issues"):
+            for issue in getattr(self._client, "issues"):
+                if str(issue.get("number")) == str(issue_number):
+                    return {
+                        label.get("name", "") if isinstance(label, dict) else str(label)
+                        for label in issue.get("labels", [])
+                    }
+        return None
+
+    @staticmethod
+    def _is_absent_label_error(exc: Exception) -> bool:
+        message = str(exc).lower()
+        return (
+            "not found" in message
+            or "does not exist" in message
+            or "missing" in message
+            or "not applied" in message
+        )
 
     def discover_tasks(self, session) -> list[SyncResult]:
         """Fetch open issues from the repository and ingest into the durable queue."""
@@ -411,6 +446,7 @@ class GitHubTaskSource(TaskSource):
             review_policy=review_policy,
         )
         task = upsert_task(session, spec)
+        self._reconcile_reopened_task_from_open_issue(session, task, labels, url)
         if objective_id:
             task.objective_id = objective_id
             if task.reason_created == OBJECTIVE_ROOT_COMPAT_REASON:
@@ -431,6 +467,38 @@ class GitHubTaskSource(TaskSource):
             action=action,
             source_ref=url,
             details=details,
+        )
+
+    def _reconcile_reopened_task_from_open_issue(
+        self,
+        session,
+        task: BuildTask,
+        labels: list[str],
+        url: str,
+    ) -> None:
+        if task.state != "DONE":
+            return
+        if "stagemesh:done" not in {label.strip().lower() for label in labels}:
+            return
+        from_state = task.state
+        task.state = "READY"
+        task.current_claim_id = None
+        task.lease_expires_at = None
+        task.last_heartbeat_at = None
+        task.updated_at = utcnow()
+        record_event(
+            session,
+            EventInput(
+                task_id=task.task_id,
+                event_type="task.reopened_from_source",
+                actor="github-sync",
+                from_state=from_state,
+                to_state="READY",
+                event_data={
+                    "source": url,
+                    "reason": "GitHub issue is open again; reopening StageMesh task for dispatch",
+                },
+            ),
         )
 
     @staticmethod
@@ -1006,7 +1074,7 @@ class GitHubTaskSource(TaskSource):
                 session,
                 entity_id,
                 issue_number,
-                state="DONE" if should_close else label,
+                state=synced_state,
                 is_objective=is_objective,
             )
             return True
