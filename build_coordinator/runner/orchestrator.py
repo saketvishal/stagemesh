@@ -14,6 +14,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
@@ -137,6 +138,7 @@ from build_coordinator.runner.scheduling import (
     record_task_withheld,
     sort_tasks_for_dispatch,
 )
+from build_coordinator.runner.steward import run_steward_cycle
 from build_coordinator.service import (
     ClaimRequest,
     checkpoint,
@@ -179,6 +181,7 @@ class RunnerCycleResult:
     objectives_completed: list[str] = field(default_factory=list)
     outbound_synced: list[str] = field(default_factory=list)
     scheduling_reasons: dict[str, str] = field(default_factory=dict)
+    steward: dict[str, Any] = field(default_factory=dict)
 
 
 class BuildRunner:
@@ -266,6 +269,7 @@ class BuildRunner:
                 result.recovered.append(task.task_id)
         self._reconcile_git_reality(session, result)
         self._recover_diagnosed_blockers(session, result)
+        self._run_steward_maintenance(session, result)
         result.observed = self._reconcile_active(session, result)
         for task in recover_lost_execution_claims(session, actor="runner"):
             if task.task_id not in result.recovered:
@@ -284,6 +288,19 @@ class BuildRunner:
         if self._task_source is not None:
             self._sync_outbound(session, result)
         return result
+
+    def _run_steward_maintenance(self, session: Session, result: RunnerCycleResult) -> None:
+        steward = run_steward_cycle(
+            session,
+            workers=self._config.workers,
+            config=self._config.steward,
+        )
+        if steward.skipped_reason == "DISABLED":
+            return
+        result.steward = steward.to_dict()
+        for task_id in steward.recovered_tasks:
+            if task_id not in result.recovered:
+                result.recovered.append(task_id)
 
     def _reconcile_awaiting_external_ci(self, session: Session, result: RunnerCycleResult) -> None:
         """#65: non-blocking. A PENDING observation here leaves tasks in
