@@ -20,11 +20,14 @@ from sqlalchemy import select
 
 from build_coordinator.db import Base, SessionLocal, engine, initialize_schema
 from build_coordinator.events import record_event
-from build_coordinator.models import BuildTask, BuildTaskEvent
+from build_coordinator.models import TASK_STATES, BuildTask, BuildTaskEvent
 from build_coordinator.runner.models import RunnerConfig
 from build_coordinator.runner.orchestrator import BuildRunner
 from build_coordinator.task_source.github import GitHubTaskSource
 from build_coordinator.types import EventInput
+
+
+EXPECTED_LIFECYCLE_LABELS = [f"stagemesh:{state.lower()}" for state in TASK_STATES]
 
 
 class LabelAwareMockClient:
@@ -82,8 +85,8 @@ def test_new_repo_with_zero_labels_gets_stagemesh_done_provisioned():
         source.discover_tasks(session)
         session.commit()
 
-    assert "stagemesh:done" in client.created_labels
-    assert "stagemesh:done" in client.known_labels
+    assert client.created_labels == EXPECTED_LIFECYCLE_LABELS
+    assert set(EXPECTED_LIFECYCLE_LABELS).issubset(client.known_labels)
 
 
 def test_provisioning_is_idempotent_across_cycles():
@@ -97,12 +100,12 @@ def test_provisioning_is_idempotent_across_cycles():
         source.discover_tasks(session)
         session.commit()
 
-    assert client.created_labels == ["stagemesh:done"]
+    assert client.created_labels == EXPECTED_LIFECYCLE_LABELS
 
 
 def test_provisioning_skips_labels_that_already_exist():
     """Idempotent w.r.t. pre-existing repo state: no duplicate creation attempted."""
-    client = LabelAwareMockClient(issues=[], existing_labels=["stagemesh:done"])
+    client = LabelAwareMockClient(issues=[], existing_labels=EXPECTED_LIFECYCLE_LABELS)
     source = GitHubTaskSource(repo="example/repo", client=client)
 
     with SessionLocal() as session:
@@ -161,7 +164,7 @@ def test_provisioning_retries_on_next_cycle_after_failure():
     with SessionLocal() as session:
         source.discover_tasks(session)
         session.commit()
-    assert client.created_labels == ["stagemesh:done"]
+    assert client.created_labels == EXPECTED_LIFECYCLE_LABELS
 
 
 def test_done_sync_not_permanently_stuck_when_label_initially_absent():
@@ -235,10 +238,43 @@ def test_done_sync_provisions_label_without_fresh_discovery_pass():
     runner = BuildRunner(SessionLocal, config, task_source=source)
     cycle = runner.run_once()
 
-    assert client.created_labels == ["stagemesh:done"]
+    assert client.created_labels == EXPECTED_LIFECYCLE_LABELS
     assert "GH-201" in cycle.outbound_synced
     assert client.labels == [{"repo": "example/repo", "number": "201", "label": "stagemesh:done"}]
     assert client.closed == ["201"]
+
+
+def test_non_done_lifecycle_sync_provisions_label_before_applying():
+    """Any stagemesh:* task lifecycle label the adapter emits is provisioned first."""
+    client = LabelAwareMockClient(issues=[], existing_labels=[])
+    source = GitHubTaskSource(repo="example/repo", client=client)
+
+    with SessionLocal() as session:
+        session.add(
+            BuildTask(
+                task_id="GH-203",
+                title="Review ready imported task",
+                description="Ready for review.",
+                acceptance_criteria=["Reviewed"],
+                state="REVIEW_READY",
+            )
+        )
+        record_event(
+            session,
+            EventInput(
+                task_id="GH-203",
+                event_type="task.synced_from_source",
+                actor="github-sync",
+                event_data={"source": "https://github.com/example/repo/issues/203"},
+            ),
+        )
+        ok = source.sync_outbound(session, "GH-203", "REVIEW_READY")
+        session.commit()
+
+    assert ok is True
+    assert client.created_labels == EXPECTED_LIFECYCLE_LABELS
+    assert client.labels == [{"repo": "example/repo", "number": "203", "label": "stagemesh:review_ready"}]
+    assert client.closed == []
 
 
 def test_outbound_records_task_specific_failure_when_label_provisioning_fails():
