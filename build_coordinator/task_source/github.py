@@ -25,19 +25,35 @@ from build_coordinator.models import (
 )
 from build_coordinator.objectives import _ensure_planner_task, create_objective, get_planner_task
 from build_coordinator.service import upsert_task, utcnow
-from build_coordinator.task_source.base import SyncResult, TaskSource
+from build_coordinator.task_source.base import SyncResult, TaskSource, source_identity_metadata
 from build_coordinator.types import EventInput, OBJECTIVE_ROOT_COMPAT_REASON, ObjectiveSpec, TaskSpec
 
 logger = logging.getLogger(__name__)
 
 
-def _resolve_issue_number_static(session, entity_id: str, is_objective: bool = False) -> int | None:
+def _resolve_issue_number_static(
+    session,
+    entity_id: str,
+    is_objective: bool = False,
+    repo: str | None = None,
+) -> int | None:
     """Instance-independent counterpart of `GitHubTaskSource._resolve_issue_number`."""
-    m = re.match(r"^GH-(\d+)$", entity_id)
-    if m:
-        return int(m.group(1))
-
     if not is_objective:
+        task = session.get(BuildTask, entity_id)
+        metadata = dict(task.definition_metadata or {}) if task is not None else {}
+        has_source_identity = metadata.get("source_type") is not None or metadata.get("source_owner") is not None
+        if has_source_identity:
+            if metadata.get("source_type") != "github":
+                return None
+            if repo is not None and metadata.get("source_owner") != repo:
+                return None
+            source_ref = metadata.get("source_ref")
+            if source_ref is not None and re.fullmatch(r"\d+", str(source_ref)):
+                return int(source_ref)
+            issue_number = metadata.get("source_issue_number")
+            if issue_number is not None and re.fullmatch(r"\d+", str(issue_number)):
+                return int(issue_number)
+
         events = session.scalars(
             select(BuildTaskEvent)
             .where(
@@ -48,7 +64,12 @@ def _resolve_issue_number_static(session, entity_id: str, is_objective: bool = F
         ).all()
         for ev in events:
             src = (ev.event_data or {}).get("source", "")
-            sm = re.search(r"/issues/(\d+)$", src)
+            pattern = (
+                rf"^https://github\.com/{re.escape(repo)}/issues/(\d+)$"
+                if repo is not None
+                else r"/issues/(\d+)$"
+            )
+            sm = re.search(pattern, src)
             if sm:
                 return int(sm.group(1))
     else:
@@ -62,7 +83,12 @@ def _resolve_issue_number_static(session, entity_id: str, is_objective: bool = F
         ).all()
         for ev in obj_events:
             src = (ev.event_data or {}).get("source", "")
-            sm = re.search(r"/issues/(\d+)$", src)
+            pattern = (
+                rf"^https://github\.com/{re.escape(repo)}/issues/(\d+)$"
+                if repo is not None
+                else r"/issues/(\d+)$"
+            )
+            sm = re.search(pattern, src)
             if sm:
                 return int(sm.group(1))
         events = session.scalars(
@@ -75,7 +101,12 @@ def _resolve_issue_number_static(session, entity_id: str, is_objective: bool = F
         ).all()
         for ev in events:
             src = (ev.event_data or {}).get("source", "")
-            sm = re.search(r"/issues/(\d+)$", src)
+            pattern = (
+                rf"^https://github\.com/{re.escape(repo)}/issues/(\d+)$"
+                if repo is not None
+                else r"/issues/(\d+)$"
+            )
+            sm = re.search(pattern, src)
             if sm:
                 return int(sm.group(1))
 
@@ -118,7 +149,7 @@ def check_objective_fully_delivered(
         return False
     if not repo or dry_run:
         return True
-    issue_number = _resolve_issue_number_static(session, objective_id, is_objective=True)
+    issue_number = _resolve_issue_number_static(session, objective_id, is_objective=True, repo=repo)
     if issue_number is None:
         return True
     return _is_outbound_synced_static(session, objective_id, "COMPLETED", is_objective=True)
@@ -133,7 +164,7 @@ def check_task_fully_delivered(
         return False
     if not repo or dry_run:
         return True
-    issue_number = _resolve_issue_number_static(session, task_id, is_objective=False)
+    issue_number = _resolve_issue_number_static(session, task_id, is_objective=False, repo=repo)
     if issue_number is None:
         return True
     return _is_outbound_synced_static(session, task_id, "DONE", is_objective=False)
@@ -424,12 +455,14 @@ class GitHubTaskSource(TaskSource):
                 continue
 
             metadata.update(
-                {
-                    "task_source": "github",
-                    "source_issue_number": issue_number,
-                    "source_state": source_state,
-                    "source_url": source_url,
-                }
+                source_identity_metadata(
+                    source_type="github",
+                    source_owner=self.repo,
+                    source_ref=str(issue_number),
+                    source_url=source_url,
+                    source_state=source_state,
+                    legacy={"source_issue_number": issue_number},
+                )
             )
             task.definition_metadata = metadata
 
@@ -560,6 +593,8 @@ class GitHubTaskSource(TaskSource):
         else:
             action = "CREATED"
 
+        issue_match = re.search(r"/issues/(\d+)$", url)
+        issue_number = int(issue_match.group(1)) if issue_match else None
         spec = TaskSpec(
             task_id=task_id,
             title=title,
@@ -570,10 +605,14 @@ class GitHubTaskSource(TaskSource):
             review_policy=review_policy,
             definition_metadata={
                 **(existing.definition_metadata if existing is not None else {}),
-                "task_source": "github",
-                "source_issue_number": int(re.search(r"/issues/(\d+)$", url).group(1)) if re.search(r"/issues/(\d+)$", url) else None,
-                "source_state": "OPEN",
-                "source_url": url,
+                **source_identity_metadata(
+                    source_type="github",
+                    source_owner=self.repo,
+                    source_ref=str(issue_number if issue_number is not None else task_id),
+                    source_url=url,
+                    source_state="OPEN",
+                    legacy={"source_issue_number": issue_number},
+                ),
             },
         )
         task = upsert_task(session, spec)
@@ -922,13 +961,23 @@ class GitHubTaskSource(TaskSource):
         return deps
 
     def _resolve_issue_number(self, session, entity_id: str, is_objective: bool = False) -> int | None:
-        # 1. Exact GH-<digits> pattern
-        m = re.match(r"^GH-(\d+)$", entity_id)
-        if m:
-            return int(m.group(1))
-
-        # 2. Check sync events in database
         if not is_objective:
+            task = session.get(BuildTask, entity_id)
+            metadata = dict(task.definition_metadata or {}) if task is not None else {}
+            has_source_identity = metadata.get("source_type") is not None or metadata.get("source_owner") is not None
+            if has_source_identity:
+                if (
+                    metadata.get("source_type") != "github"
+                    or metadata.get("source_owner") != self.repo
+                ):
+                    return None
+                source_ref = metadata.get("source_ref")
+                if source_ref is not None and re.fullmatch(r"\d+", str(source_ref)):
+                    return int(source_ref)
+                issue_number = metadata.get("source_issue_number")
+                if issue_number is not None and re.fullmatch(r"\d+", str(issue_number)):
+                    return int(issue_number)
+
             events = session.scalars(
                 select(BuildTaskEvent)
                 .where(
@@ -939,7 +988,7 @@ class GitHubTaskSource(TaskSource):
             ).all()
             for ev in events:
                 src = (ev.event_data or {}).get("source", "")
-                sm = re.search(r"/issues/(\d+)$", src)
+                sm = re.search(rf"^https://github\.com/{re.escape(str(self.repo or ''))}/issues/(\d+)$", src)
                 if sm:
                     return int(sm.group(1))
         else:
@@ -953,7 +1002,7 @@ class GitHubTaskSource(TaskSource):
             ).all()
             for ev in obj_events:
                 src = (ev.event_data or {}).get("source", "")
-                sm = re.search(r"/issues/(\d+)$", src)
+                sm = re.search(rf"^https://github\.com/{re.escape(str(self.repo or ''))}/issues/(\d+)$", src)
                 if sm:
                     return int(sm.group(1))
             events = session.scalars(
@@ -966,7 +1015,7 @@ class GitHubTaskSource(TaskSource):
             ).all()
             for ev in events:
                 src = (ev.event_data or {}).get("source", "")
-                sm = re.search(r"/issues/(\d+)$", src)
+                sm = re.search(rf"^https://github\.com/{re.escape(str(self.repo or ''))}/issues/(\d+)$", src)
                 if sm:
                     return int(sm.group(1))
 

@@ -19,7 +19,7 @@ from sqlalchemy import select
 from build_coordinator.events import record_event
 from build_coordinator.models import BuildTask, BuildTaskEvent
 from build_coordinator.service import upsert_task
-from build_coordinator.task_source.base import SyncResult, TaskSource
+from build_coordinator.task_source.base import SyncResult, TaskSource, source_identity_metadata
 from build_coordinator.types import EventInput, TaskSpec
 
 logger = logging.getLogger(__name__)
@@ -125,11 +125,13 @@ class AzureDevOpsTaskSource(TaskSource):
                 description=description[:2000],
                 acceptance_criteria=criteria,
                 dependencies=list(item.get("dependencies") or []),
-                definition_metadata={
-                    "task_source": "azure_devops",
-                    "source_work_item_id": work_item_id,
-                    "source_url": url,
-                },
+                definition_metadata=source_identity_metadata(
+                    source_type="azure_devops",
+                    source_owner=f"{self.organization}/{self.project}",
+                    source_ref=work_item_id,
+                    source_url=url,
+                    legacy={"source_work_item_id": work_item_id},
+                ),
             ),
         )
         session.flush()
@@ -165,9 +167,22 @@ class AzureDevOpsTaskSource(TaskSource):
         )
 
     def _resolve_work_item_id(self, session, task_id: str) -> str | None:
-        match = re.match(r"^ADO-(\d+)$", task_id)
-        if match:
-            return match.group(1)
+        task = session.get(BuildTask, task_id)
+        metadata = dict(task.definition_metadata or {}) if task is not None else {}
+        expected_owner = f"{self.organization}/{self.project}"
+        has_source_identity = metadata.get("source_type") is not None or metadata.get("source_owner") is not None
+        if has_source_identity:
+            if (
+                metadata.get("source_type") != "azure_devops"
+                or metadata.get("source_owner") != expected_owner
+            ):
+                return None
+            source_ref = metadata.get("source_ref")
+            if source_ref is not None and re.fullmatch(r"\d+", str(source_ref)):
+                return str(source_ref)
+            work_item_id = metadata.get("source_work_item_id")
+            if work_item_id is not None and re.fullmatch(r"\d+", str(work_item_id)):
+                return str(work_item_id)
         events = session.scalars(
             select(BuildTaskEvent)
             .where(BuildTaskEvent.task_id == task_id)
@@ -176,8 +191,15 @@ class AzureDevOpsTaskSource(TaskSource):
         ).all()
         for event in events:
             data = event.event_data or {}
-            if data.get("work_item_id"):
-                return str(data["work_item_id"])
+            work_item_id = data.get("work_item_id")
+            source = str(data.get("source") or "")
+            expected_prefix = f"{expected_owner}/_workitems/edit/"
+            if (
+                work_item_id is not None
+                and re.fullmatch(r"\d+", str(work_item_id))
+                and source.startswith(expected_prefix)
+            ):
+                return str(work_item_id)
         return None
 
     def _is_outbound_synced(self, session, task_id: str, state: str) -> bool:
