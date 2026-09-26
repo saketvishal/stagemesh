@@ -18,7 +18,7 @@ from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
 from build_coordinator.config import get_settings
-from build_coordinator.db import DatabaseBusyError, _is_transient_sqlite_lock_error
+from build_coordinator.db import _is_transient_sqlite_lock_error, with_sqlite_retry
 from build_coordinator.events import record_event
 from build_coordinator.execution.base import (
     ExecutionLaunch,
@@ -229,23 +229,22 @@ class BuildRunner:
             time.sleep(self._config.poll_seconds)
 
     def run_once(self) -> RunnerCycleResult:
-        attempts = 5
-        for attempt in range(1, attempts + 1):
+        def _attempt() -> RunnerCycleResult:
             self._external_launch_started = False
-            try:
-                with self._session_factory() as session:
-                    result = self._run_once(session)
-                    session.commit()
-                    return result
-            except OperationalError as exc:
-                if self._external_launch_started or not _is_transient_sqlite_lock_error(exc):
-                    raise
-                if attempt == attempts:
-                    raise DatabaseBusyError(
-                        f"SQLite write contention persisted before external launch after {attempts} attempts: {exc}"
-                    ) from exc
-                time.sleep(min(1.0, 0.05 * (2 ** (attempt - 1))))
-        raise AssertionError("unreachable")  # pragma: no cover
+            with self._session_factory() as session:
+                result = self._run_once(session)
+                session.commit()
+                return result
+
+        return with_sqlite_retry(
+            _attempt,
+            attempts=5,
+            # Once `_run_once` has kicked off a non-idempotent external launch
+            # (e.g. spawned a worker process), retrying from scratch would
+            # duplicate that launch -- surface the lock error immediately
+            # instead of retrying past that point.
+            is_retryable=lambda exc: not self._external_launch_started and _is_transient_sqlite_lock_error(exc),
+        )
 
     def _run_once(self, session: Session) -> RunnerCycleResult:
         state = ensure_state(session)
