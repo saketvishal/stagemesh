@@ -34,6 +34,7 @@ PROVIDER_FAILURES = frozenset(
         "EXECUTION_FAILURE",
     }
 )
+PROVIDER_CONSUMPTION_MODES = frozenset({"ACTIVE", "FALLBACK", "DISABLED"})
 # Transient provider failures worth an automatic, bounded retry with backoff.
 # The remaining PROVIDER_FAILURES values (AUTH_FAILURE, QUOTA_EXHAUSTED,
 # EXECUTION_FAILURE) are not blindly retried here: they typically need a
@@ -89,14 +90,22 @@ class ProviderConfig:
     auth: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        mode = str(self.consumption_mode or "ACTIVE").upper()
+        if mode not in PROVIDER_CONSUMPTION_MODES:
+            mode = "ACTIVE"
+        object.__setattr__(self, "consumption_mode", mode)
+        object.__setattr__(self, "availability", str(self.availability or "AVAILABLE").upper())
+
     @classmethod
     def from_mapping(cls, provider_id: str, data: dict[str, Any] | None) -> "ProviderConfig":
         row = data or {}
+        mode = str(row.get("mode", row.get("consumption_mode", "ACTIVE"))).upper()
         return cls(
             provider_id=provider_id,
             enabled=bool(row.get("enabled", True)),
             availability=str(row.get("availability", "AVAILABLE")).upper(),
-            consumption_mode=str(row.get("consumption_mode", "ACTIVE")).upper(),
+            consumption_mode=mode,
             auth=dict(row.get("auth") or {}),
             metadata=dict(row.get("metadata") or {}),
         )
@@ -105,6 +114,7 @@ class ProviderConfig:
         return {
             "provider_id": self.provider_id,
             "enabled": self.enabled,
+            "mode": self.consumption_mode,
             "availability": self.availability,
             "consumption_mode": self.consumption_mode,
             "auth": _public_refs(self.auth),
@@ -233,12 +243,26 @@ class CandidateExplanation:
     worker_id: str
     eligible: bool
     reasons: tuple[str, ...]
+    provider: str | None = None
+    provider_mode: str = "ACTIVE"
+    provider_availability: str = "AVAILABLE"
+    runtime: str | None = None
+    runtime_availability: str = "AVAILABLE"
+    active_workers: int = 0
+    active_provider_workers: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "worker_id": self.worker_id,
             "eligible": self.eligible,
             "reasons": list(self.reasons),
+            "provider": self.provider,
+            "provider_mode": self.provider_mode,
+            "provider_availability": self.provider_availability,
+            "runtime": self.runtime,
+            "runtime_availability": self.runtime_availability,
+            "active_workers": self.active_workers,
+            "active_provider_workers": self.active_provider_workers,
         }
 
 
@@ -310,6 +334,7 @@ def route_worker(
     workers = list(workers)
     all_workers = workers
     active_by_worker = _active_implementation_counts(session)
+    active_by_provider = _active_provider_counts(all_workers, active_by_worker)
     builder_provider = _builder_provider_for_review(session, task_id, workers) if stage == "review" else None
     candidates: list[CandidateExplanation] = []
     eligible: list[WorkerLike] = []
@@ -324,7 +349,20 @@ def route_worker(
             excluded_workers=excluded_workers,
         )
         ok = not reasons
-        candidates.append(CandidateExplanation(worker.worker_id, ok, tuple(reasons or ("eligible",))))
+        candidates.append(
+            CandidateExplanation(
+                worker.worker_id,
+                ok,
+                tuple(reasons or ("eligible",)),
+                provider=worker.provider,
+                provider_mode=_provider_mode(worker.provider, providers),
+                provider_availability=_provider_availability(worker.provider, providers),
+                runtime=worker.runtime,
+                runtime_availability=_runtime_availability(worker.runtime, runtimes),
+                active_workers=active_by_worker.get(worker.worker_id, 0),
+                active_provider_workers=active_by_provider.get(worker.provider, 0),
+            )
+        )
         if ok:
             eligible.append(worker)
     no_fallback_hits = tuple(
@@ -378,22 +416,25 @@ def route_worker(
                     and _worker_provider(candidate.worker_id, workers) != builder_provider
                     else candidate.reasons
                 ),
+                provider=candidate.provider,
+                provider_mode=candidate.provider_mode,
+                provider_availability=candidate.provider_availability,
+                runtime=candidate.runtime,
+                runtime_availability=candidate.runtime_availability,
+                active_workers=candidate.active_workers,
+                active_provider_workers=candidate.active_provider_workers,
             )
             for candidate in candidates
         ]
-    provider_load = {
-        provider: sum(active_by_worker.get(w.worker_id, 0) for w in all_workers if w.provider == provider)
-        for provider in {w.provider for w in all_workers}
-    }
     selected = sorted(
         eligible,
         key=lambda worker: (
             1 if worker.worker_id in deprioritized_workers else 0,
             0 if (prefer_different_provider and worker.provider != builder_provider) else 1,
             0 if worker.worker_id in stage_requirement.preferred_workers else 1,
-            0 if (providers.get(worker.provider) and providers[worker.provider].consumption_mode == "ACTIVE") else 1,
+            0 if _provider_mode(worker.provider, providers) == "ACTIVE" else 1,
             worker.preference,
-            provider_load.get(worker.provider, 0),
+            active_by_provider.get(worker.provider, 0),
             active_by_worker.get(worker.worker_id, 0),
             worker.worker_id,
         ),
@@ -541,6 +582,28 @@ def _candidate_reasons(
     if active_by_worker.get(worker.worker_id, 0) >= worker.max_concurrency:
         reasons.append("max_concurrency_reached")
     return reasons
+
+
+def _active_provider_counts(workers: Iterable[WorkerLike], active_by_worker: dict[str, int]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for worker in workers:
+        counts[worker.provider] = counts.get(worker.provider, 0) + active_by_worker.get(worker.worker_id, 0)
+    return counts
+
+
+def _provider_mode(provider_id: str, providers: dict[str, ProviderConfig]) -> str:
+    provider = providers.get(provider_id)
+    return provider.consumption_mode if provider is not None else "ACTIVE"
+
+
+def _provider_availability(provider_id: str, providers: dict[str, ProviderConfig]) -> str:
+    provider = providers.get(provider_id)
+    return provider.availability if provider is not None else "AVAILABLE"
+
+
+def _runtime_availability(runtime_id: str, runtimes: dict[str, RuntimeConfig]) -> str:
+    runtime = runtimes.get(runtime_id)
+    return runtime.availability if runtime is not None else "AVAILABLE"
 
 
 def _active_implementation_counts(session: Session | None) -> dict[str, int]:

@@ -145,6 +145,31 @@ workers:
     assert "must-not-be-public" not in json.dumps(public)
 
 
+def test_provider_mode_alias_loads_active_fallback_disabled_policy(tmp_path: Path):
+    config_path = tmp_path / "workers.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "providers": {
+                    "openai": {"mode": "ACTIVE"},
+                    "anthropic": {"consumption_mode": "FALLBACK"},
+                    "xai": {"mode": "DISABLED"},
+                },
+                "workers": [{"id": "builder-a", "role": "BUILDER", "adapter": "fake"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = RunnerConfig.from_file(config_path)
+    public = config.public_summary()
+
+    assert config.providers["openai"].consumption_mode == "ACTIVE"
+    assert config.providers["anthropic"].consumption_mode == "FALLBACK"
+    assert config.providers["xai"].consumption_mode == "DISABLED"
+    assert public["providers"]["anthropic"]["mode"] == "FALLBACK"
+
+
 def test_route_explain_reports_eligible_and_ineligible_reasons():
     workers = (
         WorkerConfig("builder-fast", "BUILDER", adapter="fake", capabilities=(CAP_CODING,), stages=("implementation",), preference=20),
@@ -164,6 +189,32 @@ def test_route_explain_reports_eligible_and_ineligible_reasons():
     reasons = {item.worker_id: item.reasons for item in decision.candidates}
     assert reasons["builder-fast"] == ("eligible",)
     assert "stage_not_allowed" in reasons["reviewer"]
+
+
+def test_fallback_provider_preserves_capacity_while_active_provider_is_eligible():
+    workers = (
+        WorkerConfig("builder-fallback", "BUILDER", provider="anthropic", adapter="fake", capabilities=(CAP_CODING,), stages=("implementation",), preference=1),
+        WorkerConfig("builder-active", "BUILDER", provider="openai", adapter="fake", capabilities=(CAP_CODING,), stages=("implementation",), preference=99),
+    )
+
+    decision = route_worker(
+        workers,
+        stage="implementation",
+        stage_requirement=StageRequirement("implementation", capabilities=(CAP_CODING,)),
+        providers={
+            "anthropic": ProviderConfig("anthropic", consumption_mode="FALLBACK"),
+            "openai": ProviderConfig("openai", consumption_mode="ACTIVE"),
+        },
+        runtimes={},
+        routing_policy=RunnerConfig().routing_policy,
+    )
+
+    assert decision.selected_worker_id == "builder-active"
+    audit = decision.to_audit_dict(next(worker for worker in workers if worker.worker_id == decision.selected_worker_id))
+    candidates = {candidate["worker_id"]: candidate for candidate in audit["candidates"]}
+    assert candidates["builder-fallback"]["eligible"] is True
+    assert candidates["builder-fallback"]["provider_mode"] == "FALLBACK"
+    assert candidates["builder-active"]["provider_mode"] == "ACTIVE"
 
 
 def test_quota_exhaustion_excludes_provider_and_falls_back_to_other_provider():
@@ -365,6 +416,100 @@ def test_cross_provider_resume_state_can_route_to_different_eligible_worker(tmp_
         assert execution.worker_id == "builder-openai"
         assert execution.provider == "openai"
         assert execution.result_data["routing"]["selected_worker"] == "builder-openai"
+
+
+def test_routing_audit_reports_active_worker_and_provider_usage(tmp_path: Path):
+    with SessionLocal() as session:
+        upsert_task(session, _task("ACTIVE-USAGE"))
+        claim_task(session, ClaimRequest("ACTIVE-USAGE", worker_id="builder-openai", provider="openai"))
+        session.commit()
+
+        workers = (
+            WorkerConfig("builder-openai", "BUILDER", provider="openai", adapter="fake", capabilities=(CAP_CODING,), stages=("implementation",), max_concurrency=2),
+            WorkerConfig("builder-openai-2", "BUILDER", provider="openai", adapter="fake", capabilities=(CAP_CODING,), stages=("implementation",)),
+        )
+        decision = route_worker(
+            workers,
+            stage="implementation",
+            stage_requirement=StageRequirement("implementation", capabilities=(CAP_CODING,)),
+            providers={"openai": ProviderConfig("openai", consumption_mode="ACTIVE")},
+            runtimes={},
+            routing_policy=RunnerConfig().routing_policy,
+            session=session,
+        )
+
+    candidates = {candidate.worker_id: candidate.to_dict() for candidate in decision.candidates}
+    assert candidates["builder-openai"]["active_workers"] == 1
+    assert candidates["builder-openai"]["active_provider_workers"] == 1
+    assert candidates["builder-openai"]["provider_mode"] == "ACTIVE"
+
+
+def test_runner_diagnostics_reports_provider_modes_usage_and_failure_reset(tmp_path: Path):
+    config = _config(
+        tmp_path,
+        (
+            WorkerConfig("builder-active", "BUILDER", provider="openai", adapter="fake", capabilities=(CAP_CODING,), stages=("implementation",)),
+            WorkerConfig("builder-fallback", "BUILDER", provider="anthropic", adapter="fake", capabilities=(CAP_CODING,), stages=("implementation",)),
+        ),
+    )
+    config = RunnerConfig(
+        workers=config.workers,
+        providers={
+            "openai": ProviderConfig("openai", consumption_mode="ACTIVE"),
+            "anthropic": ProviderConfig("anthropic", consumption_mode="FALLBACK"),
+        },
+        result_dir=config.result_dir,
+    )
+    reset_at = utcnow() + timedelta(minutes=10)
+    with SessionLocal() as session:
+        upsert_task(session, _task("DIAG-USAGE"))
+        claim_task(session, ClaimRequest("DIAG-USAGE", worker_id="builder-active", provider="openai"))
+        record_event(
+            session,
+            EventInput(
+                task_id="DIAG-USAGE",
+                event_type="runner.provider_failure",
+                actor="runner",
+                event_data={
+                    "provider": "anthropic",
+                    "failure": "RATE_LIMITED",
+                    "until": reset_at.isoformat(),
+                },
+            ),
+        )
+        session.commit()
+        diagnostics = BuildRunner(SessionLocal, config, executors={}, git=FakeGit()).diagnostics(session)
+
+    assert diagnostics["providers"]["openai"]["mode"] == "ACTIVE"
+    assert diagnostics["providers"]["openai"]["active_workers"] == 1
+    assert diagnostics["providers"]["anthropic"]["mode"] == "FALLBACK"
+    assert diagnostics["providers"]["anthropic"]["availability"] == "RATE_LIMITED"
+    assert diagnostics["providers"]["anthropic"]["active_failure"]["failure"] == "RATE_LIMITED"
+    assert diagnostics["workers"][0]["active_provider_workers"] == 1
+
+
+def test_runner_diagnostics_reports_cumulative_launches_per_worker_and_provider(tmp_path: Path):
+    config = _config(
+        tmp_path,
+        (WorkerConfig("builder-a", "BUILDER", provider="openai", adapter="fake", capabilities=(CAP_CODING,), stages=("implementation",)),),
+    )
+    runner = BuildRunner(SessionLocal, config, executors={"builder-a": FakeExecutor()}, git=FakeGit())
+    with SessionLocal() as session:
+        upsert_task(session, _task("DIAG-LAUNCHES-1"))
+        session.commit()
+    runner.run_once()
+
+    with SessionLocal() as session:
+        upsert_task(session, _task("DIAG-LAUNCHES-2"))
+        session.commit()
+    runner.run_once()
+
+    with SessionLocal() as session:
+        diagnostics = runner.diagnostics(session)
+
+    worker = next(w for w in diagnostics["workers"] if w["worker_id"] == "builder-a")
+    assert worker["launches"] == 2
+    assert diagnostics["providers"]["openai"]["launches"] == 2
 
 
 def test_historical_unknown_provider_failure_is_ignored_for_provider_health(tmp_path: Path):
