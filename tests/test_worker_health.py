@@ -120,3 +120,25 @@ def test_non_provider_failure_event_does_not_poison_provider_health() -> None:
 
     assert health["w1"].status == "AVAILABLE"
     assert health["w1"].failure_class is None
+
+
+def test_malformed_unknown_provider_failure_event_is_ignored() -> None:
+    workers = [_Worker("w1", "openai")]
+    events = [
+        None,
+        {
+            "provider": "openai",
+            "failure": "NO_CHANGES_PRODUCED",
+            "until": object(),
+        },
+        {
+            "provider": "openai",
+            "failure": "NOT_A_PROVIDER_FAILURE",
+            "until": "not a timestamp",
+        },
+    ]
+
+    health = derive_worker_health(workers, events, now=NOW)
+
+    assert health["w1"].status == "AVAILABLE"
+    assert health["w1"].failure_class is None

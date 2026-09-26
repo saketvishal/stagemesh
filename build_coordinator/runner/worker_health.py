@@ -51,13 +51,18 @@ def derive_worker_health(
     """
     cooldowns: dict[str, tuple[datetime, str]] = {}
     for event in provider_failure_events:
+        if not isinstance(event, dict):
+            continue
         provider = event.get("provider")
+        failure = str(event.get("failure") or "UNKNOWN").upper()
+        if failure not in PROVIDER_FAILURES:
+            continue
         until_raw = event.get("until")
         if not provider or not until_raw:
             continue
-        until = until_raw if isinstance(until_raw, datetime) else datetime.fromisoformat(str(until_raw))
-        failure = str(event.get("failure") or "UNKNOWN").upper()
-        if failure not in PROVIDER_FAILURES:
+        try:
+            until = until_raw if isinstance(until_raw, datetime) else datetime.fromisoformat(str(until_raw))
+        except (TypeError, ValueError):
             continue
         existing = cooldowns.get(provider)
         if existing is None or until > existing[0]:
