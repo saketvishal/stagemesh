@@ -1,0 +1,104 @@
+schema_version: 1
+suite_id: public-dogfood-gh-50
+title: Public dogfood acceptance suite
+purpose: >
+  Repeatable, public-safe acceptance coverage for StageMesh dogfood runs.
+  Scenarios use placeholder repositories, fake or scripted workers, and
+  sanitized task text so the suite can be shared without private data,
+  credentials, customer facts, or proprietary implementation details.
+public_safety:
+  allowed_inputs:
+    - Placeholder repositories created only for the run.
+    - FakeExecutor or local scripted workers under examples/.
+    - Generic task titles, descriptions, and acceptance criteria.
+    - Redacted provider labels such as provider-a and provider-b.
+  forbidden_inputs:
+    - Secrets, tokens, cookies, or credential files.
+    - Private repository names, customer names, or proprietary product names.
+    - Machine-specific absolute paths.
+    - Real issue bodies copied from private trackers.
+repeatability:
+  database: sqlite
+  providers: fake-or-scripted
+  network_required: false
+  cleanup_required: true
+scenarios:
+  - id: single-agent-demo
+    demo: examples/public_dogfood/single_agent_demo.yaml
+    requirements:
+      - single-agent public demo
+      - structured result validation
+      - cleanup
+    command_outline:
+      - stagemesh init
+      - stagemesh objective create DEMO-001 --review-policy SELF
+      - stagemesh run --once
+      - stagemesh cleanup --dry-run
+    expected_evidence:
+      - task reaches an integration-ready terminal state
+      - result JSON identity fields match execution context
+      - generated state can be removed or dry-run audited
+
+  - id: staged-independent-review
+    demo: examples/public_dogfood/staged_agents_demo.yaml
+    requirements:
+      - staged agents public demo
+      - independent review
+      - validation
+      - GitHub delivery
+    command_outline:
+      - stagemesh objective create DEMO-002 --review-policy INDEPENDENT
+      - stagemesh run --once
+      - stagemesh github outbound --dry-run
+    expected_evidence:
+      - builder worker and reviewer worker are different ids
+      - reviewed SHA is captured and matched before integration
+      - outbound GitHub payload is sanitized and dry-run visible
+
+  - id: parallelism-and-global-invocation
+    demo: examples/public_dogfood/multi_project_demo.yaml
+    requirements:
+      - parallelism
+      - multi-project execution
+      - global invocation
+      - cleanup
+    command_outline:
+      - stagemesh continue --capacity 2
+      - stagemesh "Continue all registered projects."
+    expected_evidence:
+      - two independent builder claims run concurrently when capacity allows
+      - projects keep separate state directories and worktrees
+      - global invocation allocates bounded capacity across project backlogs
+
+  - id: provider-fallback-recovery
+    demo: examples/public_dogfood/provider_fallback_demo.yaml
+    requirements:
+      - provider fallback
+      - cross-provider recovery
+      - controlled interruption and recovery
+    command_outline:
+      - run provider-a worker until a checkpoint is recorded
+      - expire or fail the provider-a claim
+      - run provider-b replacement worker
+    expected_evidence:
+      - expired claim is preserved in history
+      - replacement worker receives resume context
+      - task continues without losing checkpoint metadata
+
+  - id: high-risk-governance
+    demo: examples/public_dogfood/high_risk_governance_demo.yaml
+    requirements:
+      - high-risk governance
+      - review
+      - validation
+      - controlled interruption and recovery
+    command_outline:
+      - create a HIGH risk task with TWO_REVIEWERS policy
+      - run builder and two reviewer workers
+      - inject a review SHA drift or blocked validation result
+    expected_evidence:
+      - implementer cannot review own work
+      - two distinct reviewers are required
+      - SHA drift or contradictory verdict fails closed
+      - human escalation is durable until operator action
+

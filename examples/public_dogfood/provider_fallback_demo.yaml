@@ -1,0 +1,37 @@
+schema_version: 1
+demo_id: provider-fallback-recovery
+description: Public-safe recovery demo using two provider labels.
+project:
+  id: demo-recovery
+  repo: /path/to/disposable-demo-repo
+task:
+  id: DEMO-003
+  title: Preserve checkpointed progress
+  description: Complete a task after the first worker records a checkpoint and stops.
+  acceptance_criteria:
+    - First worker checkpoint is visible in resume context.
+    - Replacement worker completes the task.
+    - Expired claim remains in history.
+  review_policy: INDEPENDENT
+interruption:
+  mode: expire-claim
+  first_worker: builder-provider-a
+  replacement_worker: builder-provider-b
+workers:
+  - id: builder-provider-a
+    provider: provider-a
+    stages: [BUILD]
+    command: [python, examples/stdin_print_cli_wrapper.py]
+  - id: builder-provider-b
+    provider: provider-b
+    stages: [BUILD, REMEDIATION]
+    command: [python, examples/stdin_print_cli_wrapper.py]
+  - id: reviewer-provider-b
+    provider: provider-b
+    stages: [REVIEW]
+    command: [python, examples/stdin_print_cli_wrapper.py]
+evidence:
+  - checkpoint metadata survives interruption
+  - provider-b receives resume context
+  - task proceeds without private provider credentials
+

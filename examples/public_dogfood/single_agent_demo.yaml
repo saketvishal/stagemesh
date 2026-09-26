@@ -1,0 +1,24 @@
+schema_version: 1
+demo_id: single-agent-demo
+description: Public-safe self-review demo for a disposable repository.
+project:
+  id: demo-single
+  repo: /path/to/disposable-demo-repo
+task:
+  id: DEMO-001
+  title: Add visible health text
+  description: Add a small user-visible health message to the demo app.
+  acceptance_criteria:
+    - Health text is rendered.
+    - Unit tests pass.
+  review_policy: SELF
+workers:
+  - id: demo-agent-1
+    provider: scripted-local
+    stages: [BUILD, REVIEW, INTEGRATE]
+    command: [python, examples/stdin_print_cli_wrapper.py]
+evidence:
+  - structured result JSON validates identity fields
+  - task reaches integration-ready state
+  - cleanup dry-run reports generated state
+
