@@ -30,6 +30,7 @@ from typing import Any
 from build_coordinator.agents.profiles import PROFILES
 from build_coordinator.runner.git_safety import resolve_git_identity, resolve_git_identity_args
 from build_coordinator.execution.process_tree import attach_started_process, popen_kwargs
+from build_coordinator.execution.results import sanitize_result_mapping
 
 RESULT_SCHEMA_VERSION = 1
 # Build/test byproducts that are never part of a deliverable, even when a project forgot to ignore them.
@@ -187,6 +188,19 @@ def render_prompt(role: str, raw: str, *, base_ref: str, reviewed_sha: str | Non
         head += f"\nNotes:\n{definition['implementation_notes']}\n"
     validation = definition.get("required_validation") or []
 
+    if role == "PLANNER":
+        return (
+            "You are the StageMesh planning agent. Plan work only; do not modify "
+            "repository files, create commits, change branches, or implement the tasks.\n\n"
+            "The JSON below is the authoritative planner objective, policy, and "
+            "result contract. Follow it exactly.\n\n"
+            + raw
+            + "\n\nReturn your result in the final response as ONE fenced ```json "
+            "object matching the planner result contract. The StageMesh wrapper "
+            "will persist the trusted lifecycle envelope. Do not include hidden "
+            "reasoning or chain-of-thought."
+        )
+
     if role == "REVIEWER":
         prior_findings = resume_context.get("open_findings_from_prior_review") or []
         disposition_section = ""
@@ -274,6 +288,50 @@ def parse_verdict(text: str) -> dict[str, Any] | None:
         }:
             return data
     return None
+
+
+def parse_planner_payload(text: str) -> dict[str, Any] | None:
+    """Extract only the planner's ObjectivePlan from a full executor envelope.
+
+    The model-supplied identity/status are intentionally ignored. The wrapper
+    writes trusted lifecycle identity itself, exactly as it does for reviewer
+    results.
+    """
+    candidates: list[str] = []
+    stripped = text.strip()
+    if stripped.startswith("{") and stripped.endswith("}"):
+        candidates.append(stripped)
+    fenced = re.findall(r"```(?:json)?\s*(.*?)\s*```", text, flags=re.DOTALL)
+    for block in fenced[::-1]:
+        candidate = block.strip()
+        if candidate.startswith("{") and candidate.endswith("}"):
+            candidates.append(candidate)
+    for candidate in candidates:
+        try:
+            data = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(data, dict):
+            continue
+        plan = data.get("plan")
+        if isinstance(plan, dict):
+            cleaned = sanitize_result_mapping(plan)
+            return cleaned if isinstance(cleaned, dict) else None
+    return None
+
+
+def planner_result_payload(
+    identity: dict[str, Any],
+    plan: dict[str, Any],
+    *,
+    runtime: str,
+) -> dict[str, Any]:
+    return {
+        **identity,
+        "status": "SUCCEEDED",
+        "plan": sanitize_result_mapping(plan),
+        "runtime": runtime,
+    }
 
 
 def write_result(path: Path, payload: dict[str, Any]) -> None:
@@ -445,6 +503,49 @@ def main(argv: list[str] | None = None) -> int:
         )
         emit_stdout_tail()
         return 1
+
+    if role_key == "PLANNER":
+        plan = None
+
+        # The planner prompt may cause a capable agent to write the full
+        # executor envelope directly to the runner-supplied result path.
+        # Read only its plan payload; identity/status remain wrapper-owned.
+        if result_path.is_file():
+            try:
+                existing = json.loads(result_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                existing = None
+            if isinstance(existing, dict) and isinstance(existing.get("plan"), dict):
+                cleaned = sanitize_result_mapping(existing["plan"])
+                plan = cleaned if isinstance(cleaned, dict) else None
+
+        # Provider CLIs commonly return their structured result in the final
+        # message instead of writing the file themselves.
+        if plan is None:
+            plan = parse_planner_payload(final) or parse_planner_payload(output)
+
+        if plan is None:
+            write_result(
+                result_path,
+                {
+                    **identity,
+                    "status": "FAILED",
+                    "detail": (
+                        "planner produced no parseable full executor envelope "
+                        "containing a top-level plan"
+                    ),
+                    "runtime": args.runtime,
+                },
+            )
+            emit_stdout_tail()
+            return 1
+
+        write_result(
+            result_path,
+            planner_result_payload(identity, plan, runtime=args.runtime),
+        )
+        emit_stdout_tail()
+        return 0
 
     if role_key == "REVIEWER":
         verdict = parse_verdict(final) or parse_verdict(output)
