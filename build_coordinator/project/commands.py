@@ -499,6 +499,7 @@ def _reload_project_runtime(
 
 _ESCALATION_LABELS = {
     "EXTERNAL_EXECUTOR_CONFIGURATION_REQUIRED": "External executor configuration required",
+    "SETUP_FAILED": "Workspace setup failed",
 }
 
 
