@@ -1,6 +1,6 @@
 # Roadmap
 
-## v0.1-alpha (current)
+## v0.2.0a1 (current)
 
 The initial standalone release of StageMesh. All items below are
 **IMPLEMENTED AND PROVEN** unless marked otherwise.
@@ -43,7 +43,7 @@ The initial standalone release of StageMesh. All items below are
 
 ---
 
-## v0.2 (planned; not yet started)
+## Next alpha stabilization (planned; not yet started)
 
 > Items below are **ROADMAP only**. Nothing below has been implemented.
 
@@ -165,7 +165,7 @@ consuming product layers:
 ## Publication gate
 
 Publication requires an explicit human approval decision. The remaining blockers
-before v0.1-alpha publication are:
+before v0.2.0a1 publication are:
 
 1. Human approval gate
 2. PyPI release checklist completion
