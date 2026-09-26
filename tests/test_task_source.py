@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import pytest
 from pathlib import Path
+from sqlalchemy import select
 
 from build_coordinator.claims import task_is_claimable
 from build_coordinator.db import Base, SessionLocal, engine, initialize_schema
-from build_coordinator.models import BuildObjective, BuildTask, BuildTaskEvent
+from build_coordinator.models import BuildObjective, BuildObjectiveEvent, BuildTask, BuildTaskEvent
+from build_coordinator.objectives import objective_source_is_closed, run_objective_cycle
 from build_coordinator.planner import planner_task_id
 from build_coordinator.service import utcnow
 from build_coordinator.task_source.base import TaskSourceConfig
@@ -196,6 +198,43 @@ def test_github_source_reopen_clears_closed_source_suppression():
         assert any(result.action == "SOURCE_OPEN" for result in results)
 
 
+@pytest.mark.parametrize(
+    "state",
+    ["BLOCKED", "REWORK_REQUIRED", "REVIEW_READY", "REVIEWING", "IN_PROGRESS", "INTEGRATING"],
+)
+def test_github_source_closure_keeps_non_ready_lifecycle_states_non_runnable(state: str):
+    issue = {
+        "number": 122,
+        "title": f"Close while {state}",
+        "body": "Implement the requested behavior.\n\n### Acceptance Criteria\n- Works",
+        "labels": [],
+        "url": "https://github.com/example/repo/issues/122",
+        "state": "OPEN",
+    }
+    client = FakeGitHubClient([issue])
+    source = GitHubTaskSource(repo="example/repo", client=client)
+
+    with SessionLocal() as session:
+        source.discover_tasks(session)
+        task = session.get(BuildTask, "GH-122")
+        assert task is not None
+        task.state = state
+        session.commit()
+
+    client.issues = []
+    client.issue_by_number[122] = {**issue, "state": "CLOSED"}
+    with SessionLocal() as session:
+        results = source.discover_tasks(session)
+        session.commit()
+
+        task = session.get(BuildTask, "GH-122")
+        assert task is not None
+        assert task.state == state
+        assert task.definition_metadata["source_state"] == "CLOSED"
+        assert not task_is_claimable(session, task, utcnow())
+        assert any(result.task_id == "GH-122" and result.action == "SOURCE_CLOSED" for result in results)
+
+
 def test_github_task_source_syncs_objective():
     client = FakeGitHubClient(
         [
@@ -337,6 +376,170 @@ def test_github_objective_resync_refreshes_planner_task_description():
         assert "Updated objective" in planner.description
         assert "updated rollout plan" in planner.description
         assert "original plan" not in planner.description
+
+
+def test_github_objective_source_closure_suppresses_planner_without_completing_objective():
+    issue = {
+        "number": 222,
+        "title": "Closable objective",
+        "body": "## Objective\nPlan work only while source remains open.",
+        "labels": [{"name": "objective"}],
+        "url": "https://github.com/example/repo/issues/222",
+        "state": "OPEN",
+    }
+    client = FakeGitHubClient([issue])
+    source = GitHubTaskSource(repo="example/repo", client=client)
+
+    with SessionLocal() as session:
+        source.discover_tasks(session)
+        session.commit()
+
+    client.issues = []
+    client.issue_by_number[222] = {**issue, "state": "CLOSED"}
+    with SessionLocal() as session:
+        results = source.discover_tasks(session)
+        session.commit()
+
+        objective = session.get(BuildObjective, "GH-222")
+        planner = session.get(BuildTask, planner_task_id("GH-222"))
+        assert objective is not None
+        assert planner is not None
+        assert objective.state == "PLANNING"
+        assert objective_source_is_closed(session, objective)
+        assert planner.definition_metadata["source_state"] == "CLOSED"
+        assert not task_is_claimable(session, planner, utcnow())
+        assert any(result.task_id == "GH-222" and result.action == "SOURCE_CLOSED" for result in results)
+
+        events = session.scalars(
+            select(BuildObjectiveEvent).where(
+                BuildObjectiveEvent.objective_id == "GH-222",
+                BuildObjectiveEvent.event_type == "objective.source_state_changed",
+            )
+        ).all()
+        assert any(event.event_data["to_state"] == "CLOSED" for event in events)
+
+
+def test_github_objective_source_reopen_restores_planner_scheduling():
+    issue = {
+        "number": 223,
+        "title": "Reopenable objective",
+        "body": "## Objective\nResume planning when reopened.",
+        "labels": [{"name": "objective"}],
+        "url": "https://github.com/example/repo/issues/223",
+        "state": "OPEN",
+    }
+    client = FakeGitHubClient([issue])
+    source = GitHubTaskSource(repo="example/repo", client=client)
+
+    with SessionLocal() as session:
+        source.discover_tasks(session)
+        session.commit()
+
+    client.issues = []
+    client.issue_by_number[223] = {**issue, "state": "CLOSED"}
+    with SessionLocal() as session:
+        source.discover_tasks(session)
+        session.commit()
+
+    client.issues = [{**issue, "state": "OPEN"}]
+    client.issue_by_number[223] = {**issue, "state": "OPEN"}
+    with SessionLocal() as session:
+        results = source.discover_tasks(session)
+        session.commit()
+
+        objective = session.get(BuildObjective, "GH-223")
+        planner = session.get(BuildTask, planner_task_id("GH-223"))
+        assert objective is not None
+        assert planner is not None
+        assert not objective_source_is_closed(session, objective)
+        assert planner.definition_metadata["source_state"] == "OPEN"
+        assert task_is_claimable(session, planner, utcnow())
+        assert any(result.task_id == "GH-223" and result.action == "SOURCE_OPEN" for result in results)
+
+
+def test_closed_github_objective_does_not_create_follow_up_work_from_prior_live_execution():
+    issue = {
+        "number": 224,
+        "title": "Draining objective",
+        "body": "## Objective\nDo not spawn follow-up work after source closure.",
+        "labels": [{"name": "objective"}],
+        "url": "https://github.com/example/repo/issues/224",
+        "state": "OPEN",
+    }
+    client = FakeGitHubClient([issue])
+    source = GitHubTaskSource(repo="example/repo", client=client)
+
+    with SessionLocal() as session:
+        source.discover_tasks(session)
+        objective = session.get(BuildObjective, "GH-224")
+        assert objective is not None
+        objective.state = "ACTIVE"
+        session.add(
+            BuildTask(
+                task_id="GH-224-WORK",
+                title="Existing child work",
+                description="Already valid local child work.",
+                acceptance_criteria=["Works"],
+                objective_id="GH-224",
+                state="DONE",
+            )
+        )
+        session.commit()
+
+    client.issues = []
+    client.issue_by_number[224] = {**issue, "state": "CLOSED"}
+    with SessionLocal() as session:
+        source.discover_tasks(session)
+        summaries = run_objective_cycle(session)
+        session.commit()
+
+        objective = session.get(BuildObjective, "GH-224")
+        assert objective is not None
+        assert objective.state == "ACTIVE"
+        assert summaries == []
+        assert session.get(BuildTask, "GH-224-WORK") is not None
+        assert session.query(BuildTask).filter(BuildTask.objective_id == "GH-224").count() == 2
+
+
+def test_closed_source_dependency_does_not_satisfy_dependents_as_done():
+    closed_metadata = source_identity_metadata(
+        source_type="github",
+        source_owner="example/repo",
+        source_ref="301",
+        source_url="https://github.com/example/repo/issues/301",
+        source_state="CLOSED",
+        legacy={"source_issue_number": 301},
+    )
+    with SessionLocal() as session:
+        session.add(
+            BuildTask(
+                task_id="GH-301",
+                title="Closed source dependency",
+                description="Preserved evidence, not completed work.",
+                acceptance_criteria=["Works"],
+                definition_metadata=closed_metadata,
+                state="READY",
+            )
+        )
+        session.add(
+            BuildTask(
+                task_id="GH-302",
+                title="Dependent task",
+                description="Must wait for actual DONE.",
+                acceptance_criteria=["Works"],
+                dependencies=["GH-301"],
+                state="READY",
+            )
+        )
+        session.commit()
+
+    with SessionLocal() as session:
+        dependency = session.get(BuildTask, "GH-301")
+        dependent = session.get(BuildTask, "GH-302")
+        assert dependency is not None
+        assert dependent is not None
+        assert not task_is_claimable(session, dependency, utcnow())
+        assert not task_is_claimable(session, dependent, utcnow())
 
 
 def test_github_task_source_sync_outbound():
