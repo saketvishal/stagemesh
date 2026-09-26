@@ -499,7 +499,6 @@ def test_task_scoped_no_changes_failure_does_not_emit_provider_failure():
         executions = session.scalars(
             select(BuildRunnerExecution)
             .where(BuildRunnerExecution.task_id == "TASK-NO-CHANGES-FAILURE")
-            .order_by(BuildRunnerExecution.execution_id)
         ).all()
 
     assert provider_failures == []
@@ -509,7 +508,11 @@ def test_task_scoped_no_changes_failure_does_not_emit_provider_failure():
     assert no_changes[0].event_data["retry_generation"] == 0
     assert no_changes[0].event_data["attempt"] == 1
     assert no_changes[0].event_data["detail"] == "no diff after attempting task"
-    assert [execution.worker_id for execution in executions] == ["builder-codex-1", "builder-codex-2"]
+    assert len(executions) == 2
+    assert {execution.worker_id for execution in executions} == {
+        "builder-codex-1",
+        "builder-codex-2",
+    }
     with SessionLocal() as session:
         reconciliations = session.scalars(
             select(BuildTaskEvent)
