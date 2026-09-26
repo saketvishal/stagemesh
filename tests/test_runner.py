@@ -42,6 +42,7 @@ from build_coordinator.service import (
     upsert_task,
     utcnow,
 )
+from build_coordinator.task_source.base import source_identity_metadata
 from build_coordinator.types import EventInput
 
 
@@ -162,6 +163,20 @@ def _runner(config=None, executors=None, git=None):
         executors=executors,
         git=git if git is not None else FakeGit(),
     )
+
+
+class RecordingTaskSource:
+    def __init__(self):
+        self.outbound: list[tuple[str, str]] = []
+        self.discoveries = 0
+
+    def discover_tasks(self, session):
+        self.discoveries += 1
+        return []
+
+    def sync_outbound(self, session, task_id: str, state: str, *, evidence=None) -> bool:
+        self.outbound.append((task_id, state))
+        return True
 
 
 def _git(cwd: Path, *args: str) -> str:
@@ -666,6 +681,79 @@ def test_targeted_task_keeps_normal_review_and_integration_lifecycle():
         assert session.scalars(
             select(BuildRunnerExecution).where(BuildRunnerExecution.task_id == "OTHER")
         ).all() == []
+
+
+def test_live_builder_drains_after_task_becomes_deferred_without_outbound_done_sync():
+    task_source = RecordingTaskSource()
+    config = RunnerConfig(
+        workers=(
+            WorkerConfig("builder-a", "BUILDER", adapter="fake"),
+            WorkerConfig("reviewer-1", "REVIEWER", adapter="fake"),
+            WorkerConfig("integration-1", "INTEGRATION", adapter="fake"),
+        ),
+        run_validation=False,
+        result_dir=os.getenv("BUILD_COORDINATOR_RESULT_DIR"),
+    )
+    executors = {
+        "builder-a": FakeExecutor([
+            ExecutionObservation("SUCCEEDED", result_data={"feature_sha": "feature-sha"})
+        ]),
+    }
+    with SessionLocal() as session:
+        task = upsert_task(
+            session,
+            TaskSpec(
+                task_id="GH-124",
+                title="Task GH-124",
+                description="Runner test task",
+                acceptance_criteria=["passes"],
+                review_policy="NONE",
+                required_validation=[],
+            ),
+        )
+        task.definition_metadata = source_identity_metadata(
+            source_type="github",
+            source_owner="example/repo",
+            source_ref="124",
+            source_url="https://github.com/example/repo/issues/124",
+            source_state="OPEN",
+            source_eligibility="ELIGIBLE",
+            legacy={"source_issue_number": 124},
+        )
+        session.commit()
+
+    runner = BuildRunner(
+        SessionLocal,
+        config,
+        executors=executors,
+        git=FakeGit(),
+        task_source=task_source,
+    )
+    launched = runner.run_once()
+    assert launched.launched == ["GH-124:BUILDER"]
+
+    with SessionLocal() as session:
+        task = session.get(BuildTask, "GH-124")
+        metadata = dict(task.definition_metadata or {})
+        metadata["source_eligibility"] = "DEFERRED"
+        metadata["source_eligibility_reason"] = "matched exclude label(s): stagemesh:deferred"
+        task.definition_metadata = metadata
+        session.commit()
+
+    drained = runner.run_once()
+
+    assert "GH-124" not in drained.outbound_synced
+    assert ("GH-124", "DONE") not in task_source.outbound
+    with SessionLocal() as session:
+        task = session.get(BuildTask, "GH-124")
+        assert task.state == "DONE"
+        roles = [
+            row.role
+            for row in session.scalars(
+                select(BuildRunnerExecution).where(BuildRunnerExecution.task_id == "GH-124")
+            )
+        ]
+        assert roles == ["BUILDER"]
 
 
 def test_validation_runs_in_background_while_ready_tasks_dispatch():

@@ -15,6 +15,7 @@ from typing import Any
 
 from sqlalchemy import select
 
+from build_coordinator.claims import task_source_is_executable
 from build_coordinator.events import record_event
 from build_coordinator.models import (
     BuildObjective,
@@ -1523,6 +1524,10 @@ class GitHubTaskSource(TaskSource):
         if session.get(BuildObjective, task_id) is not None:
             return True
 
+        task = session.get(BuildTask, task_id)
+        if task is not None and not task_source_is_executable(task):
+            return True
+
         # Check source identity: Only GitHub-originating tasks can update GitHub!
         issue_number = self._resolve_issue_number(session, task_id, is_objective=False)
         if issue_number is None:
@@ -1578,6 +1583,9 @@ class GitHubTaskSource(TaskSource):
         # Only sync when objective is actually COMPLETED
         obj = session.get(BuildObjective, objective_id)
         if obj is None or obj.state != "COMPLETED":
+            return True
+        objective_eligibility = self._objective_source_eligibility(session, objective_id)
+        if objective_eligibility is not None and objective_eligibility != SOURCE_ELIGIBLE:
             return True
 
         # Resolve issue number
