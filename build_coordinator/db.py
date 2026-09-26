@@ -44,9 +44,15 @@ def _sqlite_path_from_url(database_url: str) -> Path | None:
         return None
     if parsed.path in {"", "/:memory:"}:
         return None
-    path = url2pathname(parsed.path)
     if parsed.netloc:
+        path = url2pathname(parsed.path)
         return Path(f"//{parsed.netloc}{path}").expanduser().resolve()
+    if parsed.path.startswith("/") and not parsed.path.startswith("//"):
+        # SQLAlchemy treats sqlite:///foo.db as a relative path, even though
+        # urlparse exposes the path as /foo.db. Resolve it the same way the
+        # engine will open it so the test-state guard cannot be bypassed.
+        return Path(url2pathname(parsed.path[1:])).expanduser().resolve()
+    path = url2pathname(parsed.path)
     return Path(path).expanduser().resolve()
 
 
