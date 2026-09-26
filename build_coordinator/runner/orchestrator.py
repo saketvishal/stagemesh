@@ -50,7 +50,7 @@ from build_coordinator.objectives import (
     apply_validated_plan,
     get_objective,
     get_planner_task,
-    objective_source_is_closed,
+    objective_source_is_executable,
     is_planner_task,
     list_objectives,
     objective_dependencies_satisfied,
@@ -133,7 +133,7 @@ from build_coordinator.runner.clone_pool import (
     verify_clone_remote,
 )
 from build_coordinator.runner.git_safety import resolve_git_identity_args
-from build_coordinator.claims import CLAIMABLE_STATES, task_source_is_closed
+from build_coordinator.claims import CLAIMABLE_STATES, task_source_is_executable
 from build_coordinator.runner.scheduling import (
     SCHEDULER_REASONS,
     active_implementation_tasks,
@@ -2286,7 +2286,7 @@ class BuildRunner:
         for objective in list_objectives(session):
             if objective.state != "PLANNING":
                 continue
-            if objective_source_is_closed(session, objective):
+            if not objective_source_is_executable(session, objective):
                 continue
             if not objective_dependencies_satisfied(session, objective):
                 continue
@@ -2373,7 +2373,7 @@ class BuildRunner:
         for task in tasks:
             if not self._target_allows(task.task_id):
                 continue
-            if task_source_is_closed(task):
+            if not task_source_is_executable(task):
                 continue
             review_target_sha = self._task_review_target_sha(task)
             worker, availability, decision = self._select_worker(
@@ -2508,7 +2508,7 @@ class BuildRunner:
             task = session.get(BuildTask, row.task_id)
             if task is None or task.state != "REVIEWING":
                 continue
-            if task_source_is_closed(task):
+            if not task_source_is_executable(task):
                 continue
             if self._worker_slot_is_active(session, worker):
                 result.capacity_full = True
@@ -3847,7 +3847,7 @@ class BuildRunner:
         for task in blocked:
             if not self._target_allows(task.task_id):
                 continue
-            if task_source_is_closed(task):
+            if not task_source_is_executable(task):
                 continue
             reason = self._latest_block_reason(session, task.task_id)
             if not reason:
