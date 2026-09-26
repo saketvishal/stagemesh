@@ -154,9 +154,14 @@ def _expire_orphan_worker_leases(session: Session, now: datetime) -> list[str]:
     leases = session.scalars(
         select(BuildWorkerLease)
         .where(BuildWorkerLease.status == "ACTIVE")
-        .where(BuildWorkerLease.lease_expires_at <= now)
     ).all()
     for lease in leases:
+        execution_missing = (
+            lease.execution_id is not None
+            and session.get(BuildRunnerExecution, lease.execution_id) is None
+        )
+        if _as_utc(lease.lease_expires_at) > now and not execution_missing:
+            continue
         lease.status = "EXPIRED"
         lease.heartbeat_at = now
         released.append(lease.lease_id)

@@ -230,11 +230,16 @@ class StewardConfig:
     def from_mapping(cls, data: dict[str, Any] | None) -> "StewardConfig":
         row = data or {}
         responsibilities = row.get("responsibilities")
+        default_responsibilities = cls().responsibilities
         return cls(
             enabled=bool(row.get("enabled", False)),
             interval_seconds=float(row.get("interval_seconds", 300.0)),
             apply=bool(row.get("apply", False)),
-            responsibilities=_normal_tuple(responsibilities) or cls().responsibilities,
+            responsibilities=(
+                default_responsibilities
+                if responsibilities is None
+                else _normal_tuple(responsibilities)
+            ),
         )
 
     def to_public_dict(self) -> dict[str, Any]:
