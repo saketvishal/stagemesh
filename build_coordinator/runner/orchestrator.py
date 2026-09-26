@@ -77,6 +77,7 @@ from build_coordinator.runner.git_safety import (
 from build_coordinator.runner.findings import (
     escalation_evidence as finding_escalation_evidence,
     open_findings,
+    record_convergence_generation,
     reconcile_findings,
 )
 from build_coordinator.runner.models import (
@@ -1152,7 +1153,11 @@ class BuildRunner:
                 recovery_classification="OPERATOR_ACTION_REQUIRED",
             )
             return
-        registry = self._reconcile_review_findings(session, execution, verdict)
+        registry = (
+            self._reconcile_review_findings(session, execution, verdict)
+            if verdict.verdict != "REVIEW_ENVIRONMENT_BLOCKED"
+            else {}
+        )
         blockers = [entry["description"] for entry in open_findings(registry)] if registry.get("entries") else list(verdict.findings)
         if execution.claim_id:
             checkpoint(
@@ -1242,6 +1247,8 @@ class BuildRunner:
                 )
                 return
             if self._review_disagreement_deadlocked(session, execution, registry, result):
+                return
+            if self._request_comprehensive_convergence_review(session, execution, registry, result):
                 return
             if self._remediation_limit_reached(session, execution, verdict, result):
                 return
@@ -2338,6 +2345,8 @@ class BuildRunner:
                     "open_findings_from_prior_review": finding_escalation_evidence(
                         task.finding_registry or {}
                     ),
+                    "convergence_review": (task.finding_registry or {}).get("convergence")
+                    or {},
                 },
             )
             self._launch(
@@ -4745,8 +4754,35 @@ class BuildRunner:
         reviewer that stops restating findings cannot silently resolve them."""
         task = session.get(BuildTask, execution.task_id)
         prior_registry = dict(task.finding_registry or {}) if task is not None else {}
+        prior_convergence = dict((prior_registry.get("convergence") or {}))
+        comprehensive_review = bool(prior_convergence.get("pending_comprehensive_review"))
         has_finding_signal = bool(verdict.findings) or bool(verdict.finding_dispositions)
         if not has_finding_signal:
+            if comprehensive_review and verdict.integration_eligible():
+                registry = reconcile_findings(
+                    prior_registry,
+                    findings=[],
+                    finding_dispositions=[],
+                    execution_id=execution.execution_id,
+                    cycle_label=f"review-cycle:{execution.execution_id}",
+                    reviewer_id=execution.worker_id,
+                )
+                registry = record_convergence_generation(
+                    registry,
+                    prior_registry=prior_registry,
+                    execution_id=execution.execution_id,
+                    cycle_label=f"review-cycle:{execution.execution_id}",
+                    reviewer_id=execution.worker_id,
+                    comprehensive_review=True,
+                )
+                convergence = dict(registry.get("convergence") or {})
+                convergence["pending_comprehensive_review"] = False
+                convergence["comprehensive_used"] = True
+                convergence["comprehensive_execution_id"] = execution.execution_id
+                registry["convergence"] = convergence
+                if task is not None:
+                    task.finding_registry = registry
+                return registry
             return prior_registry
         registry = reconcile_findings(
             prior_registry,
@@ -4756,9 +4792,71 @@ class BuildRunner:
             cycle_label=f"review-cycle:{execution.execution_id}",
             reviewer_id=execution.worker_id,
         )
+        registry = record_convergence_generation(
+            registry,
+            prior_registry=prior_registry,
+            execution_id=execution.execution_id,
+            cycle_label=f"review-cycle:{execution.execution_id}",
+            reviewer_id=execution.worker_id,
+            comprehensive_review=comprehensive_review,
+        )
+        convergence = dict(registry.get("convergence") or {})
+        if comprehensive_review:
+            convergence["pending_comprehensive_review"] = False
+            convergence["comprehensive_used"] = True
+            convergence["comprehensive_execution_id"] = execution.execution_id
+            registry["convergence"] = convergence
         if task is not None:
             task.finding_registry = registry
         return registry
+
+    def _request_comprehensive_convergence_review(
+        self,
+        session: Session,
+        execution: BuildRunnerExecution,
+        registry: dict,
+        result: RunnerCycleResult,
+    ) -> bool:
+        task = session.get(BuildTask, execution.task_id)
+        if task is None:
+            return False
+        convergence = dict((registry or {}).get("convergence") or {})
+        generations = int(convergence.get("generations") or 0)
+        if generations < self._config.max_convergence_generations:
+            return False
+        if convergence.get("comprehensive_used") or convergence.get("pending_comprehensive_review"):
+            return False
+        convergence["pending_comprehensive_review"] = True
+        convergence["threshold"] = self._config.max_convergence_generations
+        convergence["stop_reason"] = "serial_new_finding_convergence_threshold_reached"
+        registry = dict(registry or {})
+        registry["convergence"] = convergence
+        task.finding_registry = registry
+        record_event(
+            session,
+            EventInput(
+                task_id=execution.task_id,
+                event_type="runner.comprehensive_convergence_review_requested",
+                actor="runner",
+                event_data={
+                    "convergence_generations": generations,
+                    "threshold": self._config.max_convergence_generations,
+                    "open_findings": finding_escalation_evidence(registry),
+                    "history": convergence.get("history") or [],
+                    "reason": convergence["stop_reason"],
+                },
+            ),
+        )
+        result.escalations.append(f"{execution.task_id}:COMPREHENSIVE_CONVERGENCE_REVIEW_REQUIRED")
+        release_active_claims(session, execution.task_id, completed=False)
+        transition_task(
+            session,
+            execution.task_id,
+            "REVIEW_READY",
+            actor="runner",
+            reason="serial finding convergence threshold reached; requesting comprehensive review",
+        )
+        return True
 
     def _remediation_limit_reached(
         self,
@@ -4785,6 +4883,13 @@ class BuildRunner:
         registry = self._reconcile_review_findings(session, execution, verdict)
         if registry.get("entries") and has_finding_signal:
             open_entries = open_findings(registry)
+            convergence = dict(registry.get("convergence") or {})
+            convergence_limit_reached = bool(
+                open_entries
+                and convergence.get("comprehensive_used")
+                and int(convergence.get("generations") or 0)
+                >= self._config.max_convergence_generations
+            )
             # `attempts` counts how many times a finding has been *reported*
             # STILL_OPEN, so its first report (before any remediation has
             # run against it) counts as 1. Escalate once max_remediation_cycles
@@ -4793,7 +4898,7 @@ class BuildRunner:
             limit_reached = any(
                 int(entry.get("attempts") or 0) > self._config.max_remediation_cycles
                 for entry in open_entries
-            )
+            ) or convergence_limit_reached
         else:
             limit_reached = (
                 self._remediation_cycles(session, task_id) >= self._config.max_remediation_cycles
@@ -4808,7 +4913,15 @@ class BuildRunner:
                 task_id=task_id,
                 event_type="runner.remediation_limit_reached",
                 actor="runner",
-                event_data={"open_findings": evidence},
+                event_data={
+                    "open_findings": evidence,
+                    "convergence": (registry or {}).get("convergence") or {},
+                    "why_autonomous_convergence_stopped": (
+                        "comprehensive_convergence_review_still_found_unresolved_work"
+                        if (registry or {}).get("convergence", {}).get("comprehensive_used")
+                        else "per_finding_remediation_budget_exhausted"
+                    ),
+                },
             ),
         )
         self._block_task(session, task_id, "REMEDIATION_LIMIT_REACHED")

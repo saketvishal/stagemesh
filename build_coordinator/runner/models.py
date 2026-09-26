@@ -218,6 +218,7 @@ class RunnerConfig:
     routing_policy: RoutingPolicy = field(default_factory=RoutingPolicy)
     poll_seconds: float = 5.0
     max_remediation_cycles: int = 2
+    max_convergence_generations: int = 3
     max_review_environment_attempts: int = 2
     auto_push_allowed: bool = False
     allowed_workspace_roots: tuple[str, ...] = ()
@@ -383,6 +384,7 @@ class RunnerConfig:
             routing_policy=routing_policy,
             poll_seconds=float(data.get("poll_seconds", 5.0)),
             max_remediation_cycles=int(data.get("max_remediation_cycles", 2)),
+            max_convergence_generations=int(data.get("max_convergence_generations", 3)),
             max_review_environment_attempts=int(data.get("max_review_environment_attempts", 2)),
             auto_push_allowed=bool(data.get("auto_push_allowed", False)),
             allowed_workspace_roots=allowed_roots,
