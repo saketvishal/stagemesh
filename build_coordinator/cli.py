@@ -150,6 +150,7 @@ def _should_bind_legacy_command_to_project(args: argparse.Namespace) -> bool:
         "recover-review-environment",
         "recover-execution-retry",
         "metrics",
+        "operator",
     }
 
 
