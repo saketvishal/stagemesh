@@ -149,6 +149,8 @@ def test_azure_devops_import_records_source_identity_without_becoming_lifecycle_
         task = session.get(BuildTask, "ADO-123")
         assert task is not None
         assert task.state == "BLOCKED"
+        assert task.definition_metadata["task_source"] == "azure_devops"
+        assert task.definition_metadata["source_work_item_id"] == "123"
         event = session.query(BuildTaskEvent).filter_by(
             task_id="ADO-123",
             actor="azure-devops-sync",
