@@ -343,14 +343,11 @@ def test_scenario_4_failed_integration_clean_guarantee(tmp_path: Path):
 # ---------------------------------------------------------------------------
 # SCENARIO 5: Builder Zero-Changes When Already Satisfied
 # ---------------------------------------------------------------------------
-def test_scenario_5_builder_zero_changes_when_already_satisfied(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
+def test_scenario_5_builder_zero_changes_when_already_satisfied(tmp_path: Path):
     """Builder returns no changes but task already satisfied -> validation/review
     -> no operator escalation."""
     repo, _ = _setup_test_repo(tmp_path)
     session_factory, runner = _setup_runner(tmp_path, repo)
-    monkeypatch.setattr(runner, "_check_task_already_satisfied", lambda _session, task_id: task_id == "GH-SATISFIED")
     validation_script = repo / "validate_already_satisfied.py"
     validation_script.write_text(
         "from pathlib import Path\n"
@@ -408,6 +405,7 @@ def test_scenario_5_builder_zero_changes_when_already_satisfied(
         assert refreshed.state == "REVIEW_READY"
         verification_sha = _git(repo, "rev-parse", "HEAD").stdout.strip()
         assert exec_row.reviewed_feature_sha == verification_sha
+        assert _git(repo, "log", "--oneline").stdout.count("\n") == 1
         assert exec_row.reviewed_feature_sha
         assert (repo / "validation-marker.txt").read_text(encoding="utf-8") == "validated"
         assert "GH-SATISFIED:NO_CHANGES_PRODUCED" not in result.escalations
@@ -419,6 +417,78 @@ def test_scenario_5_builder_zero_changes_when_already_satisfied(
         assert len(validation_events) == 1
         assert validation_events[0].event_data["passed"] is True
         assert validation_events[0].event_data["feature_sha"] == verification_sha
+        reconciliations = session.scalars(
+            select(BuildTaskEvent)
+            .where(BuildTaskEvent.task_id == "GH-SATISFIED")
+            .where(BuildTaskEvent.event_type == "runner.no_changes_reconciled")
+        ).all()
+        assert len(reconciliations) == 1
+        assert reconciliations[0].event_data["outcome"] == "ALREADY_SATISFIED"
+        assert reconciliations[0].event_data["deterministic_recheck"] is True
+
+
+def test_blocked_no_change_recovery_does_not_create_verification_commit(tmp_path: Path):
+    repo, _ = _setup_test_repo(tmp_path)
+    session_factory, runner = _setup_runner(tmp_path, repo)
+    original_head = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    original_commit_count = _git(repo, "rev-list", "--count", "HEAD").stdout.strip()
+    validation_script = repo / "validate_blocked_satisfied.py"
+    validation_script.write_text("print('already satisfied')\n", encoding="utf-8")
+
+    with session_factory() as session:
+        ensure_state(session)
+        task = BuildTask(
+            task_id="GH-BLOCKED-SATISFIED",
+            title="Blocked satisfied task",
+            description="desc",
+            state="BLOCKED",
+            review_policy="INDEPENDENT",
+            acceptance_criteria=["Existing implementation is valid"],
+            required_validation=[f'"{sys.executable}" validate_blocked_satisfied.py'],
+        )
+        session.add(task)
+        exec_row = BuildRunnerExecution(
+            execution_id="exec-blocked-satisfied-1",
+            task_id="GH-BLOCKED-SATISFIED",
+            role="BUILDER",
+            worker_id="b-1",
+            provider="test",
+            adapter="fake",
+            status="FAILED",
+            worktree_path=str(repo),
+        )
+        session.add(exec_row)
+        record_event(
+            session,
+            EventInput(
+                task_id="GH-BLOCKED-SATISFIED",
+                event_type="task.transitioned",
+                actor="runner",
+                from_state="CLAIMED",
+                to_state="BLOCKED",
+                event_data={"reason": "NO_CHANGES_PRODUCED"},
+            ),
+        )
+        session.commit()
+
+        result = RunnerCycleResult(mode="RUNNING")
+        runner._recover_diagnosed_blockers(session, result)
+        session.commit()
+
+        refreshed = session.get(BuildTask, "GH-BLOCKED-SATISFIED")
+        assert refreshed.state == "REVIEW_READY"
+        assert exec_row.reviewed_feature_sha == original_head
+        assert _git(repo, "rev-parse", "HEAD").stdout.strip() == original_head
+        assert _git(repo, "rev-list", "--count", "HEAD").stdout.strip() == original_commit_count
+        assert result.recovered == ["GH-BLOCKED-SATISFIED"]
+        recovered = session.scalar(
+            select(BuildTaskEvent)
+            .where(BuildTaskEvent.task_id == "GH-BLOCKED-SATISFIED")
+            .where(BuildTaskEvent.event_type == "runner.blocker_recovered")
+        )
+        assert recovered is not None
+        assert recovered.event_data["satisfied_by_existing_implementation"] is True
+        assert recovered.event_data["reconciliation_evidence"]["reason"] == "REQUIRED_VALIDATION_PASSED"
 
 
 # ---------------------------------------------------------------------------
@@ -489,6 +559,504 @@ def test_scenario_6_builder_zero_changes_when_not_satisfied_retries(tmp_path: Pa
         assert provider_failures == []
         assert len(no_change_events) == 1
         assert (no_change_events[0].event_data or {}).get("worker_id") == "b-1"
+        reconciliations = session.scalars(
+            select(BuildTaskEvent)
+            .where(BuildTaskEvent.task_id == "GH-UNSAT")
+            .where(BuildTaskEvent.event_type == "runner.no_changes_reconciled")
+        ).all()
+        assert len(reconciliations) == 1
+        assert reconciliations[0].event_data["outcome"] == "UNRESOLVED"
+
+
+def test_no_change_stale_task_definition_blocks_without_retry(tmp_path: Path):
+    repo, _ = _setup_test_repo(tmp_path)
+    session_factory, runner = _setup_runner(tmp_path, repo)
+
+    with session_factory() as session:
+        ensure_state(session)
+        task = BuildTask(
+            task_id="GH-STALE",
+            title="Stale task",
+            description="desc",
+            state="CLAIMED",
+            review_policy="INDEPENDENT",
+            definition_metadata={"obsolete": True, "superseded_by": "GH-OTHER"},
+        )
+        session.add(task)
+        session.commit()
+
+        exec_row = BuildRunnerExecution(
+            execution_id="exec-stale-1",
+            task_id="GH-STALE",
+            role="BUILDER",
+            worker_id="b-1",
+            provider="test",
+            adapter="fake",
+            status="SUCCEEDED",
+        )
+        session.add(exec_row)
+        session.commit()
+
+        parsed = parse_executor_result(
+            {
+                "schema_version": 1,
+                "role": "BUILDER",
+                "feature_sha": "dummy",
+                "blockers": ["the agent produced no changes on the task branch"],
+                "identity": {"provider": "test", "runtime": "fake"},
+            },
+            execution_id="exec-stale-1",
+            task_id="GH-STALE",
+            role="BUILDER",
+            require_identity=False,
+        )
+
+        result = RunnerCycleResult(mode="RUNNING")
+        runner._builder_succeeded(session, exec_row, result, parsed)
+        session.commit()
+
+        refreshed = session.get(BuildTask, "GH-STALE")
+        assert refreshed.state == "BLOCKED"
+        assert result.escalations == ["GH-STALE:STALE_OR_OBSOLETE_TASK_DEFINITION"]
+        events = session.scalars(
+            select(BuildTaskEvent)
+            .where(BuildTaskEvent.task_id == "GH-STALE")
+            .where(BuildTaskEvent.event_type == "runner.no_changes_reconciled")
+        ).all()
+        assert len(events) == 1
+        assert events[0].event_data["outcome"] == "STALE_OR_OBSOLETE"
+
+
+def test_concurrent_integration_can_satisfy_ready_task_without_builder_retry(tmp_path: Path):
+    repo, _ = _setup_test_repo(tmp_path)
+    session_factory, runner = _setup_runner(tmp_path, repo)
+    base_sha = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    (repo / "README.md").write_text("# Test Repo\n\nIntegrated fix\n", encoding="utf-8")
+    _git(repo, "add", "README.md")
+    _git(repo, "commit", "-m", "integrate sibling task")
+    integrated_sha = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    with session_factory() as session:
+        ensure_state(session)
+        session.add(
+            BuildTask(
+                task_id="GH-OTHER",
+                title="Sibling task",
+                description="desc",
+                state="DONE",
+                review_policy="NONE",
+            )
+        )
+        task = BuildTask(
+            task_id="GH-READY",
+            title="Ready task satisfied by sibling integration",
+            description="desc",
+            state="CLAIMED",
+            review_policy="INDEPENDENT",
+            base_sha=base_sha,
+            permitted_scope=["README.md"],
+            acceptance_criteria=["README.md contains Integrated fix"],
+        )
+        session.add(task)
+        record_event(
+            session,
+            EventInput(
+                task_id="GH-OTHER",
+                event_type="runner.integration_completed",
+                actor="runner",
+                event_data={"feature_sha": integrated_sha},
+            ),
+        )
+        exec_row = BuildRunnerExecution(
+            execution_id="exec-ready-1",
+            task_id="GH-READY",
+            role="BUILDER",
+            worker_id="b-1",
+            provider="test",
+            adapter="fake",
+            status="SUCCEEDED",
+            worktree_path=str(repo),
+        )
+        session.add(exec_row)
+        session.commit()
+
+        parsed = parse_executor_result(
+            {
+                "schema_version": 1,
+                "role": "BUILDER",
+                "feature_sha": "dummy",
+                "blockers": ["the agent produced no changes on the task branch"],
+                "identity": {"provider": "test", "runtime": "fake"},
+            },
+            execution_id="exec-ready-1",
+            task_id="GH-READY",
+            role="BUILDER",
+            require_identity=False,
+        )
+
+        result = RunnerCycleResult(mode="RUNNING")
+        runner._builder_succeeded(session, exec_row, result, parsed)
+        session.commit()
+
+        refreshed = session.get(BuildTask, "GH-READY")
+        assert refreshed.state == "REVIEW_READY"
+        assert exec_row.reviewed_feature_sha == integrated_sha
+        assert result.escalations == []
+        reconciled = session.scalar(
+            select(BuildTaskEvent)
+            .where(BuildTaskEvent.task_id == "GH-READY")
+            .where(BuildTaskEvent.event_type == "runner.no_changes_reconciled")
+        )
+        assert reconciled is not None
+        assert reconciled.event_data["outcome"] == "ALREADY_SATISFIED"
+        assert reconciled.event_data["scope_changed_since_base"] is True
+        assert reconciled.event_data["changed_paths_since_base"] == ["README.md"]
+        recent = reconciled.event_data["reconciled_against"]["recent_integrations"]
+        assert recent[0]["task_id"] == "GH-OTHER"
+        assert recent[0]["same_task"] is False
+
+
+def test_concurrent_scope_change_obsoletes_ready_task_when_acceptance_not_satisfied(tmp_path: Path):
+    repo, _ = _setup_test_repo(tmp_path)
+    session_factory, runner = _setup_runner(tmp_path, repo)
+    base_sha = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    (repo / "README.md").write_text("# Test Repo\n\nDifferent sibling change\n", encoding="utf-8")
+    _git(repo, "add", "README.md")
+    _git(repo, "commit", "-m", "integrate conflicting sibling scope")
+    integrated_sha = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    with session_factory() as session:
+        ensure_state(session)
+        task = BuildTask(
+            task_id="GH-STALE-SCOPE",
+            title="Task made stale by sibling integration",
+            description="desc",
+            state="CLAIMED",
+            review_policy="INDEPENDENT",
+            base_sha=base_sha,
+            permitted_scope=["README.md"],
+            acceptance_criteria=["README.md contains Original requested text"],
+        )
+        session.add(task)
+        record_event(
+            session,
+            EventInput(
+                task_id="GH-OTHER",
+                event_type="runner.integration_completed",
+                actor="runner",
+                event_data={"feature_sha": integrated_sha},
+            ),
+        )
+        exec_row = BuildRunnerExecution(
+            execution_id="exec-stale-scope-1",
+            task_id="GH-STALE-SCOPE",
+            role="BUILDER",
+            worker_id="b-1",
+            provider="test",
+            adapter="fake",
+            status="SUCCEEDED",
+            worktree_path=str(repo),
+        )
+        session.add(exec_row)
+        session.commit()
+
+        parsed = parse_executor_result(
+            {
+                "schema_version": 1,
+                "role": "BUILDER",
+                "feature_sha": "dummy",
+                "blockers": ["the agent produced no changes on the task branch"],
+                "identity": {"provider": "test", "runtime": "fake"},
+            },
+            execution_id="exec-stale-scope-1",
+            task_id="GH-STALE-SCOPE",
+            role="BUILDER",
+            require_identity=False,
+        )
+
+        result = RunnerCycleResult(mode="RUNNING")
+        runner._builder_succeeded(session, exec_row, result, parsed)
+        session.commit()
+
+        refreshed = session.get(BuildTask, "GH-STALE-SCOPE")
+        assert refreshed.state == "BLOCKED"
+        assert result.escalations == ["GH-STALE-SCOPE:STALE_OR_OBSOLETE_TASK_DEFINITION"]
+        reconciled = session.scalar(
+            select(BuildTaskEvent)
+            .where(BuildTaskEvent.task_id == "GH-STALE-SCOPE")
+            .where(BuildTaskEvent.event_type == "runner.no_changes_reconciled")
+        )
+        assert reconciled is not None
+        assert reconciled.event_data["outcome"] == "STALE_OR_OBSOLETE"
+        assert reconciled.event_data["stale_by_scope_reconciliation"] is True
+        assert reconciled.event_data["integration_explicitly_reconciles_task"] is False
+        assert reconciled.event_data["scope_touched_by_recent_integration"] is True
+        assert reconciled.event_data["acceptance_appears_satisfied"] is False
+
+
+def test_concurrent_integration_can_obsolete_ready_task_without_premarked_metadata(tmp_path: Path):
+    repo, _ = _setup_test_repo(tmp_path)
+    session_factory, runner = _setup_runner(tmp_path, repo)
+    base_sha = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    (repo / "README.md").write_text("# Test Repo\n\nReplacement sibling implementation\n", encoding="utf-8")
+    _git(repo, "add", "README.md")
+    _git(repo, "commit", "-m", "integrate replacement sibling task")
+    integrated_sha = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    with session_factory() as session:
+        ensure_state(session)
+        task = BuildTask(
+            task_id="GH-OBSOLETED-BY-INTEGRATION",
+            title="Task obsoleted by sibling integration",
+            description="desc",
+            state="CLAIMED",
+            review_policy="INDEPENDENT",
+            base_sha=base_sha,
+            permitted_scope=["README.md"],
+            acceptance_criteria=["README.md contains Original requested text"],
+        )
+        session.add(task)
+        record_event(
+            session,
+            EventInput(
+                task_id="GH-OTHER",
+                event_type="runner.integration_completed",
+                actor="runner",
+                event_data={
+                    "feature_sha": integrated_sha,
+                    "obsolete_task_ids": ["GH-OBSOLETED-BY-INTEGRATION"],
+                },
+            ),
+        )
+        exec_row = BuildRunnerExecution(
+            execution_id="exec-obsoleted-by-integration-1",
+            task_id="GH-OBSOLETED-BY-INTEGRATION",
+            role="BUILDER",
+            worker_id="b-1",
+            provider="test",
+            adapter="fake",
+            status="SUCCEEDED",
+            worktree_path=str(repo),
+        )
+        session.add(exec_row)
+        session.commit()
+
+        parsed = parse_executor_result(
+            {
+                "schema_version": 1,
+                "role": "BUILDER",
+                "feature_sha": "dummy",
+                "blockers": ["the agent produced no changes on the task branch"],
+                "identity": {"provider": "test", "runtime": "fake"},
+            },
+            execution_id="exec-obsoleted-by-integration-1",
+            task_id="GH-OBSOLETED-BY-INTEGRATION",
+            role="BUILDER",
+            require_identity=False,
+        )
+
+        result = RunnerCycleResult(mode="RUNNING")
+        runner._builder_succeeded(session, exec_row, result, parsed)
+        session.commit()
+
+        refreshed = session.get(BuildTask, "GH-OBSOLETED-BY-INTEGRATION")
+        assert refreshed.state == "BLOCKED"
+        assert result.escalations == [
+            "GH-OBSOLETED-BY-INTEGRATION:STALE_OR_OBSOLETE_TASK_DEFINITION"
+        ]
+        reconciled = session.scalar(
+            select(BuildTaskEvent)
+            .where(BuildTaskEvent.task_id == "GH-OBSOLETED-BY-INTEGRATION")
+            .where(BuildTaskEvent.event_type == "runner.no_changes_reconciled")
+        )
+        assert reconciled is not None
+        assert reconciled.event_data["outcome"] == "STALE_OR_OBSOLETE"
+        assert reconciled.event_data["definition_marked_stale"] is False
+        assert reconciled.event_data["stale_by_scope_reconciliation"] is True
+        assert reconciled.event_data["scope_touched_by_recent_integration"] is True
+        assert reconciled.event_data["superseding_integration"]["task_id"] == "GH-OTHER"
+        assert reconciled.event_data["superseding_integration"]["obsolete_task_ids"] == [
+            "GH-OBSOLETED-BY-INTEGRATION"
+        ]
+
+
+def test_integration_event_with_merge_commit_obsoletes_task_when_scope_changed(tmp_path: Path):
+    repo, _ = _setup_test_repo(tmp_path)
+    session_factory, runner = _setup_runner(tmp_path, repo)
+    base_sha = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    (repo / "README.md").write_text("# Test Repo\n\nMerged sibling change\n", encoding="utf-8")
+    _git(repo, "add", "README.md")
+    _git(repo, "commit", "-m", "integrate sibling task with built-in event shape")
+    merge_commit_sha = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    with session_factory() as session:
+        ensure_state(session)
+        task = BuildTask(
+            task_id="GH-STALE-MERGE-EVENT",
+            title="Task made stale by real integration event",
+            description="desc",
+            state="CLAIMED",
+            review_policy="INDEPENDENT",
+            base_sha=base_sha,
+            permitted_scope=["README.md"],
+            acceptance_criteria=["README.md contains Original requested text"],
+        )
+        session.add(task)
+        record_event(
+            session,
+            EventInput(
+                task_id="GH-OTHER",
+                event_type="runner.integration_completed",
+                actor="runner",
+                event_data={
+                    "merge_commit_sha": merge_commit_sha,
+                    "final_main_sha": merge_commit_sha,
+                    "push_status": "NOT_REQUIRED",
+                },
+            ),
+        )
+        exec_row = BuildRunnerExecution(
+            execution_id="exec-stale-merge-event-1",
+            task_id="GH-STALE-MERGE-EVENT",
+            role="BUILDER",
+            worker_id="b-1",
+            provider="test",
+            adapter="fake",
+            status="SUCCEEDED",
+            worktree_path=str(repo),
+        )
+        session.add(exec_row)
+        session.commit()
+
+        parsed = parse_executor_result(
+            {
+                "schema_version": 1,
+                "role": "BUILDER",
+                "feature_sha": "dummy",
+                "blockers": ["the agent produced no changes on the task branch"],
+                "identity": {"provider": "test", "runtime": "fake"},
+            },
+            execution_id="exec-stale-merge-event-1",
+            task_id="GH-STALE-MERGE-EVENT",
+            role="BUILDER",
+            require_identity=False,
+        )
+
+        result = RunnerCycleResult(mode="RUNNING")
+        runner._builder_succeeded(session, exec_row, result, parsed)
+        session.commit()
+
+        refreshed = session.get(BuildTask, "GH-STALE-MERGE-EVENT")
+        assert refreshed.state == "BLOCKED"
+        assert result.escalations == [
+            "GH-STALE-MERGE-EVENT:STALE_OR_OBSOLETE_TASK_DEFINITION"
+        ]
+        reconciled = session.scalar(
+            select(BuildTaskEvent)
+            .where(BuildTaskEvent.task_id == "GH-STALE-MERGE-EVENT")
+            .where(BuildTaskEvent.event_type == "runner.no_changes_reconciled")
+        )
+        assert reconciled is not None
+        assert reconciled.event_data["outcome"] == "STALE_OR_OBSOLETE"
+        assert reconciled.event_data["stale_by_scope_reconciliation"] is True
+        assert reconciled.event_data["integration_explicitly_reconciles_task"] is False
+        assert reconciled.event_data["scope_touched_by_recent_integration"] is True
+        superseding = reconciled.event_data["superseding_integration"]
+        assert superseding["task_id"] == "GH-OTHER"
+        assert superseding["feature_sha"] is None
+        assert superseding["merge_commit_sha"] == merge_commit_sha
+        assert superseding["final_main_sha"] == merge_commit_sha
+        assert superseding["integrated_sha"] == merge_commit_sha
+
+
+def test_scope_change_without_superseding_integration_stays_unresolved(tmp_path: Path):
+    """A permitted-scope file changing since base_sha, alongside some unrelated
+    recent integration, is only evidence -- not proof the task definition is
+    stale/obsolete. Unless a recorded integration's own commit concretely
+    touched the scoped file, the task must stay UNRESOLVED and keep the bounded
+    builder retry path instead of being blocked as STALE_OR_OBSOLETE_TASK_DEFINITION."""
+    repo, _ = _setup_test_repo(tmp_path)
+    session_factory, runner = _setup_runner(tmp_path, repo)
+    base_sha = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    # README.md (this task's permitted scope) changes due to unrecorded/prep work.
+    (repo / "README.md").write_text("# Test Repo\n\nUnrelated prep edit\n", encoding="utf-8")
+    _git(repo, "add", "README.md")
+    _git(repo, "commit", "-m", "unrelated prep work touching README")
+
+    # A separate, unrelated integration lands too, but it never touches README.md.
+    (repo / "OTHER.md").write_text("other file\n", encoding="utf-8")
+    _git(repo, "add", "OTHER.md")
+    _git(repo, "commit", "-m", "integrate unrelated sibling task")
+    integrated_sha = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    with session_factory() as session:
+        ensure_state(session)
+        task = BuildTask(
+            task_id="GH-UNRESOLVED-SCOPE",
+            title="Task still requiring genuine implementation work",
+            description="desc",
+            state="CLAIMED",
+            review_policy="INDEPENDENT",
+            base_sha=base_sha,
+            permitted_scope=["README.md"],
+            acceptance_criteria=["README.md contains Genuinely required change"],
+        )
+        session.add(task)
+        record_event(
+            session,
+            EventInput(
+                task_id="GH-OTHER",
+                event_type="runner.integration_completed",
+                actor="runner",
+                event_data={"feature_sha": integrated_sha},
+            ),
+        )
+        exec_row = BuildRunnerExecution(
+            execution_id="exec-unresolved-scope-1",
+            task_id="GH-UNRESOLVED-SCOPE",
+            role="BUILDER",
+            worker_id="b-1",
+            provider="test",
+            adapter="fake",
+            status="SUCCEEDED",
+            worktree_path=str(repo),
+        )
+        session.add(exec_row)
+        session.commit()
+
+        parsed = parse_executor_result(
+            {
+                "schema_version": 1,
+                "role": "BUILDER",
+                "feature_sha": "dummy",
+                "blockers": ["the agent produced no changes on the task branch"],
+                "identity": {"provider": "test", "runtime": "fake"},
+            },
+            execution_id="exec-unresolved-scope-1",
+            task_id="GH-UNRESOLVED-SCOPE",
+            role="BUILDER",
+            require_identity=False,
+        )
+
+        result = RunnerCycleResult(mode="RUNNING")
+        runner._builder_succeeded(session, exec_row, result, parsed)
+        session.commit()
+
+        refreshed = session.get(BuildTask, "GH-UNRESOLVED-SCOPE")
+        assert refreshed.state != "BLOCKED"
+        assert result.escalations == []
+        reconciled = session.scalar(
+            select(BuildTaskEvent)
+            .where(BuildTaskEvent.task_id == "GH-UNRESOLVED-SCOPE")
+            .where(BuildTaskEvent.event_type == "runner.no_changes_reconciled")
+        )
+        assert reconciled is not None
+        assert reconciled.event_data["outcome"] == "UNRESOLVED"
+        assert reconciled.event_data["scope_changed_since_base"] is True
+        assert reconciled.event_data["stale_by_scope_reconciliation"] is False
+        assert reconciled.event_data["scope_touched_by_recent_integration"] is False
+        assert reconciled.event_data["superseding_integration"] is None
 
 
 # ---------------------------------------------------------------------------
