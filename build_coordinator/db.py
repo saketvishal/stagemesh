@@ -59,13 +59,31 @@ def _sqlite_path_from_url(database_url: str) -> Path | None:
 def _active_project_state_dirs() -> set[Path]:
     candidates: set[Path] = set()
     roots = [Path.cwd(), Path(__file__).resolve()]
+    for env_name in ("BUILD_COORDINATOR_REPO_ROOT", "REPO_ROOT"):
+        configured = os.getenv(env_name)
+        if configured:
+            roots.append(Path(configured).expanduser())
     for root in roots:
-        parts = root.resolve().parts
+        try:
+            resolved = root.resolve()
+        except OSError:
+            resolved = root.absolute()
+        parts = resolved.parts
         for index, part in enumerate(parts):
             if part == ".build-coordinator":
                 candidates.add(Path(*parts[: index + 1]).resolve())
-        candidates.add((root.resolve().parents[1] / ".build-coordinator").resolve())
+        candidates.add((resolved / ".build-coordinator").resolve())
+        try:
+            candidates.add((resolved.parents[1] / ".build-coordinator").resolve())
+        except IndexError:
+            pass
     return candidates
+
+
+def _is_path_within(path: Path | None, directory: Path) -> bool:
+    if path is None:
+        return False
+    return path == directory or path.is_relative_to(directory)
 
 
 def _assert_test_state_isolated(database_url: str, data_dir: Path | str | None) -> None:
@@ -76,7 +94,7 @@ def _assert_test_state_isolated(database_url: str, data_dir: Path | str | None) 
     resolved_data_dir = Path(data_dir).expanduser().resolve() if data_dir is not None else None
     active_state_dirs = _active_project_state_dirs()
     for state_dir in active_state_dirs:
-        if resolved_data_dir == state_dir or db_path == (state_dir / "coordinator.sqlite3").resolve():
+        if _is_path_within(resolved_data_dir, state_dir) or _is_path_within(db_path, state_dir):
             raise TestStateIsolationError(
                 "Refusing to run tests against the active project durable state: "
                 f"database_url={database_url!r}, data_dir={str(data_dir)!r}"

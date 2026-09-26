@@ -156,3 +156,20 @@ def test_test_guard_refuses_relative_sqlite_url_to_active_project_state(monkeypa
         raise AssertionError("expected TestStateIsolationError")
     except TestStateIsolationError as exc:
         assert "active project durable state" in str(exc)
+
+
+def test_test_guard_refuses_state_under_explicit_repo_root(monkeypatch, tmp_path: Path):
+    repo_root = tmp_path / "operator-project"
+    active_state_dir = repo_root / ".build-coordinator"
+    nested_state_dir = active_state_dir / "pytest-leak"
+    monkeypatch.setenv("BUILD_COORDINATOR_REPO_ROOT", str(repo_root))
+    monkeypatch.setenv("STAGEMESH_TEST_STATE_GUARD", "1")
+
+    try:
+        DatabaseLifecycle(
+            f"sqlite:///{(nested_state_dir / 'coordinator.sqlite3').as_posix()}",
+            data_dir=nested_state_dir,
+        )
+        raise AssertionError("expected TestStateIsolationError")
+    except TestStateIsolationError as exc:
+        assert "active project durable state" in str(exc)
