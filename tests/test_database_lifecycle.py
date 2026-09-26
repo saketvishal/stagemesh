@@ -12,6 +12,7 @@ from build_coordinator.db import (
     DatabaseSchemaError,
     DatabaseUnconfiguredError,
     SCHEMA_VERSION_TABLE,
+    TestStateIsolationError,
     engine_from_url,
     get_process_database,
     reset_process_database,
@@ -130,3 +131,45 @@ def test_process_default_requires_explicit_configure_without_env(monkeypatch):
         from build_coordinator.db import configure_process_database
 
         configure_process_database(database_url=url, data_dir=data_dir)
+
+
+def test_test_guard_refuses_active_project_durable_state(monkeypatch):
+    active_state_dir = REPO_ROOT / ".build-coordinator"
+    monkeypatch.setenv("STAGEMESH_TEST_STATE_GUARD", "1")
+
+    try:
+        DatabaseLifecycle(
+            f"sqlite:///{(active_state_dir / 'coordinator.sqlite3').as_posix()}",
+            data_dir=active_state_dir,
+        )
+        raise AssertionError("expected TestStateIsolationError")
+    except TestStateIsolationError as exc:
+        assert "active project durable state" in str(exc)
+
+
+def test_test_guard_refuses_relative_sqlite_url_to_active_project_state(monkeypatch):
+    monkeypatch.chdir(REPO_ROOT)
+    monkeypatch.setenv("STAGEMESH_TEST_STATE_GUARD", "1")
+
+    try:
+        DatabaseLifecycle("sqlite:///.build-coordinator/coordinator.sqlite3")
+        raise AssertionError("expected TestStateIsolationError")
+    except TestStateIsolationError as exc:
+        assert "active project durable state" in str(exc)
+
+
+def test_test_guard_refuses_state_under_explicit_repo_root(monkeypatch, tmp_path: Path):
+    repo_root = tmp_path / "operator-project"
+    active_state_dir = repo_root / ".build-coordinator"
+    nested_state_dir = active_state_dir / "pytest-leak"
+    monkeypatch.setenv("BUILD_COORDINATOR_REPO_ROOT", str(repo_root))
+    monkeypatch.setenv("STAGEMESH_TEST_STATE_GUARD", "1")
+
+    try:
+        DatabaseLifecycle(
+            f"sqlite:///{(nested_state_dir / 'coordinator.sqlite3').as_posix()}",
+            data_dir=nested_state_dir,
+        )
+        raise AssertionError("expected TestStateIsolationError")
+    except TestStateIsolationError as exc:
+        assert "active project durable state" in str(exc)

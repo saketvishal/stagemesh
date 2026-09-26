@@ -14,6 +14,10 @@ import os
 import pytest
 from sqlalchemy import delete, select
 
+from tests._state_isolation import configure_isolated_test_state
+
+configure_isolated_test_state()
+
 from build_coordinator.db import Base, SessionLocal, engine, initialize_schema
 from build_coordinator.execution import ExecutionObservation, FakeExecutor
 from build_coordinator.models import (
