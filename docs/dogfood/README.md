@@ -29,13 +29,29 @@ The suite covers:
 Use the manifest as the source of truth:
 
 ```bash
+python -m pip install -e ".[dev]"
 python -m pytest tests/test_public_dogfood_acceptance.py
 ```
 
-The pytest check validates that every required behavior has a public scenario
-and that the manifest does not contain private names, machine paths, or secret
-shaped values. Operators can then run the command outlines in
-`acceptance-suite.yaml` against disposable repositories.
+The pytest check is the local, no-provider smoke for the public demo entry
+point. It validates that every required behavior has a public scenario, that
+the command outlines reference registered CLI surfaces, and that the manifest
+does not contain private names, machine paths, or secret-shaped values.
+Operators can then run the command outlines in `acceptance-suite.yaml` against
+disposable repositories.
+
+If you are running from an already-created virtual environment, verify the
+environment before launching the smoke:
+
+```bash
+python -m build_coordinator --version
+python -c "import pytest, sqlalchemy, yaml"
+```
+
+In network-restricted environments, install dependencies before entering the
+sandbox or provide a populated package cache. The smoke itself does not require
+network access, provider credentials, or real agent CLIs, but a bare Python
+environment without the `dev` extra cannot launch it.
 
 ## Evidence Rules
 
