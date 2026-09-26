@@ -30,7 +30,7 @@ from build_coordinator.project.definition import (
 )
 from build_coordinator.policy import normalize_review_policy
 from build_coordinator.service import transition_task, upsert_task
-from build_coordinator.task_source.base import SyncResult
+from build_coordinator.task_source.base import SyncResult, source_identity_metadata
 from build_coordinator.types import EventInput, TaskSpec
 
 SYNC_EVENT = "task.definition_synced"
@@ -103,6 +103,7 @@ class TaskDefinition:
     ownership: dict[str, Any] | None
     metadata: dict[str, Any]
     source: str = ""
+    source_owner: str = ""
     delivered_by: str | None = None
 
     def description(self) -> str:
@@ -126,10 +127,22 @@ class TaskDefinition:
             program_key=self.program_key,
             migration_allowed=self.migration_allowed,
             ownership_scope=self.ownership,  # type: ignore[arg-type]
-            definition_metadata=self.metadata,
+            definition_metadata=self.source_metadata(),
         )
 
+    def source_metadata(self) -> dict[str, Any]:
+        return {
+            **self.metadata,
+            **source_identity_metadata(
+                source_type="local",
+                source_owner=self.source_owner,
+                source_ref=f"{self.source}:{self.task_id}",
+                source_url=self.source,
+            ),
+        }
+
     def content_hash(self) -> str:
+        metadata = self.source_metadata()
         payload = {
             "spec": {
                 "title": self.title,
@@ -144,7 +157,7 @@ class TaskDefinition:
                 "program_key": self.program_key,
                 "migration_allowed": self.migration_allowed,
                 "ownership": self.ownership,
-                "metadata": self.metadata,
+                "metadata": metadata,
                 "delivered_by": self.delivered_by,
             },
             "priority": self.priority,
@@ -293,6 +306,7 @@ def _definition_from_mapping(
         ownership=ownership,
         metadata=metadata,
         source=source,
+        source_owner=project.project_id,
         delivered_by=str(data.get("delivered_by")).strip() if data.get("delivered_by") else None,
     )
     if task_id in definition.dependencies:

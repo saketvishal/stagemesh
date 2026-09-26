@@ -231,11 +231,18 @@ def test_backlog_accepts_bounded_task_metadata_and_hashes_it(tmp_path):
     definition = load_backlog(project)[0]
 
     assert definition.metadata == {"mvp_definition_of_done_items": [1, 2, 3]}
-    assert definition.to_spec().definition_metadata == definition.metadata
+    assert definition.to_spec().definition_metadata == {
+        "mvp_definition_of_done_items": [1, 2, 3],
+        "task_source": "local",
+        "source_type": "local",
+        "source_owner": "fixture",
+        "source_ref": ".stagemesh/tasks/backlog.yaml:A-1",
+        "source_url": ".stagemesh/tasks/backlog.yaml",
+    }
     original_hash = definition.content_hash()
     with SessionLocal() as session:
         sync_backlog(session, project, [definition])
-        assert session.get(BuildTask, "A-1").definition_metadata == definition.metadata
+        assert session.get(BuildTask, "A-1").definition_metadata == definition.to_spec().definition_metadata
 
     (root / ".stagemesh" / "tasks" / "backlog.yaml").write_text(
         task_yaml(**{"A-1": {"metadata": {"mvp_definition_of_done_items": [1, 2, 3, 4]}}}),
