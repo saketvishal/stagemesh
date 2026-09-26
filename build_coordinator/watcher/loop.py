@@ -24,6 +24,11 @@ from pathlib import Path
 from typing import Any, Callable
 from uuid import uuid4
 
+from build_coordinator.coordinator_lock import (
+    CoordinatorLockHeld,
+    acquire_coordinator_lock,
+    release_coordinator_lock,
+)
 from build_coordinator.github.controller import GitHubAutonomousController
 from build_coordinator.runner.models import RunnerConfig
 from build_coordinator.watcher import lock as watcher_lock
@@ -231,6 +236,28 @@ def run_foreground_cycle(
                     failure_class=failure_class,
                 )
 
+    # The watcher drives `BuildRunner.run_once()` (via `GitHubAutonomousController`)
+    # against the same project database as `stagemesh continue`. It must hold the
+    # same single-coordinator lock while it writes, or a concurrently running
+    # `continue` (or a second watcher cycle) could mutate BuildTask/
+    # BuildRunnerExecution rows at the same time -- exactly the unguarded
+    # concurrent-writer scenario GH-101 closes for the CLI entry point.
+    coordinator_instance_id = instance_id or task_name
+    with session_factory() as session:
+        try:
+            acquire_coordinator_lock(session, instance_id=coordinator_instance_id)
+            session.commit()
+        except CoordinatorLockHeld as exc:
+            session.rollback()
+            logger.log(
+                "watcher.coordinator_lock_held",
+                repository_slug=repo.slug,
+                cycle_id=cycle_id,
+                message=str(exc),
+                extra=exc.owner,
+            )
+            return CycleOutcome(task_name=task_name, cycle_id=cycle_id, ok=False, failure_class="POLICY_FAILURE")
+
     try:
         controller = GitHubAutonomousController(
             session_factory,
@@ -247,6 +274,10 @@ def run_foreground_cycle(
             _record_failure(session, task_name, failure_class, str(exc), backoff_policy, logger, repo.slug, cycle_id)
             session.commit()
         return CycleOutcome(task_name=task_name, cycle_id=cycle_id, ok=False, failure_class=failure_class)
+    finally:
+        with session_factory() as session:
+            release_coordinator_lock(session, instance_id=coordinator_instance_id)
+            session.commit()
 
     with session_factory() as session:
         runner_result = result.runner_result

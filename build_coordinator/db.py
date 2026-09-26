@@ -287,6 +287,7 @@ def with_sqlite_retry(
     attempts: int = 5,
     base_delay: float = 0.05,
     max_delay: float = 1.0,
+    is_retryable: Callable[[OperationalError], bool] = _is_transient_sqlite_lock_error,
 ) -> _T:
     """Run `fn`, retrying with bounded exponential backoff if it fails on
     transient SQLite writer contention.
@@ -297,12 +298,17 @@ def with_sqlite_retry(
     outlasts `attempts`, propagates (lock contention becomes
     `DatabaseBusyError` so it is distinguishable from a real query/logic
     bug).
+
+    `is_retryable` lets a caller narrow which `OperationalError`s are worth
+    retrying beyond the default transient-lock check -- e.g. a caller that
+    started a non-idempotent side effect partway through `fn` and must not
+    retry once that has happened.
     """
     for attempt in range(1, attempts + 1):
         try:
             return fn()
         except OperationalError as exc:
-            if not _is_transient_sqlite_lock_error(exc):
+            if not is_retryable(exc):
                 raise
             if attempt == attempts:
                 raise DatabaseBusyError(
