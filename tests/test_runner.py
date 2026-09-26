@@ -830,6 +830,50 @@ def test_runner_reload_keeps_live_executor_and_replaces_it_when_idle():
     assert "builder-a" not in runner._executors
 
 
+def test_runner_reload_reconciles_live_subprocess_with_preserved_worker_config():
+    runner = _runner(
+        config=RunnerConfig(
+            workers=(
+                WorkerConfig(
+                    "builder-a",
+                    "BUILDER",
+                    adapter="subprocess",
+                    command=("old-worker", "--run"),
+                ),
+            ),
+            result_dir=os.getenv("BUILD_COORDINATOR_RESULT_DIR"),
+        )
+    )
+    updated = RunnerConfig(
+        workers=(
+            WorkerConfig(
+                "builder-a",
+                "BUILDER",
+                adapter="subprocess",
+                command=("new-worker", "--run"),
+            ),
+        ),
+        result_dir=os.getenv("BUILD_COORDINATOR_RESULT_DIR"),
+    )
+    execution = BuildRunnerExecution(
+        execution_id="live-exec",
+        task_id="LIVE-1",
+        role="BUILDER",
+        worker_id="builder-a",
+        provider="local",
+        adapter="subprocess",
+        status="RUNNING",
+        result_path=str(Path(os.environ["BUILD_COORDINATOR_RESULT_DIR"]) / "live-exec.json"),
+    )
+
+    runner.reload_config(updated, live_worker_ids={"builder-a"})
+    runner._executors.pop("builder-a", None)
+
+    executor = runner._executor_for_execution(execution)
+
+    assert executor._command == ["old-worker", "--run"]
+
+
 def test_worker_saturation_is_backpressure_not_configuration_escalation():
     with SessionLocal() as session:
         for task_id in ("SAT-1", "SAT-2", "SAT-3", "SAT-4", "SAT-5"):
