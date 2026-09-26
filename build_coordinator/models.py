@@ -118,6 +118,7 @@ class BuildTask(Base):
     base_sha: Mapped[str | None] = mapped_column(String(64), nullable=True)
     migration_allowed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     ownership_scope: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    definition_metadata: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     state: Mapped[str] = mapped_column(String(24), nullable=False, default="READY")
     waiting_input: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     # Durable, content-fingerprinted registry of reviewer findings across

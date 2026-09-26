@@ -500,6 +500,27 @@ def test_ready_task_dispatches_one_builder():
         assert execution.prompt_hash
 
 
+def test_task_definition_prompt_payload_includes_metadata():
+    with SessionLocal() as session:
+        upsert_task(
+            session,
+            TaskSpec(
+                **{
+                    **_task("RUN-META").__dict__,
+                    "definition_metadata": {"mvp_definition_of_done_items": [1, 2, 3]},
+                }
+            ),
+        )
+        session.commit()
+
+    executor = FakeExecutor()
+    result = _runner(executors={"builder-a": executor}).run_once()
+
+    assert len(result.launched) == 1
+    prompt = json.loads(executor.launches[0].prompt)
+    assert prompt["task_definition"]["metadata"] == {"mvp_definition_of_done_items": [1, 2, 3]}
+
+
 def test_targeted_ready_task_runs_and_unrelated_ready_task_is_untouched():
     with SessionLocal() as session:
         upsert_task(session, _task("TARGET"))
