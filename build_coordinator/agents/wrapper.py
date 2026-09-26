@@ -429,12 +429,13 @@ def main(argv: list[str] | None = None) -> int:
         final = output
         if Path(last_message).is_file():
             final = Path(last_message).read_text(encoding="utf-8", errors="replace")
-    # Best-effort diagnostics. A cp1252 console must not raise after the agent
-    # has finished: the result file and exit code below are the contract.
-    try:
-        _safe_write_stdout_tail(output, max_chars=4000)
-    except Exception:
-        pass
+    def emit_stdout_tail() -> None:
+        # Best-effort diagnostics. A cp1252 console must not raise after the
+        # agent has finished: the result file and exit code are the contract.
+        try:
+            _safe_write_stdout_tail(output, max_chars=4000)
+        except Exception:
+            pass
 
     if code != 0:
         failure = "EXECUTION_FAILURE" if code == 124 else classify_failure(output)
@@ -442,6 +443,7 @@ def main(argv: list[str] | None = None) -> int:
             result_path,
             {**identity, "status": "FAILED", "provider_failure": failure, "detail": sanitize_diagnostic(output), "runtime": args.runtime},
         )
+        emit_stdout_tail()
         return 1
 
     if role_key == "REVIEWER":
@@ -451,6 +453,7 @@ def main(argv: list[str] | None = None) -> int:
                 result_path,
                 {**identity, "status": "FAILED", "provider_failure": "EXECUTION_FAILURE", "detail": "reviewer produced no parseable verdict"},
             )
+            emit_stdout_tail()
             return 1
         write_result(
             result_path,
@@ -468,6 +471,7 @@ def main(argv: list[str] | None = None) -> int:
                 "ready_for_integration": bool(verdict.get("ready_for_integration")),
             },
         )
+        emit_stdout_tail()
         return 0
 
     # builder / remediation: derive the result from git, not from the agent
@@ -502,6 +506,7 @@ def main(argv: list[str] | None = None) -> int:
             "runtime": args.runtime,
         },
     )
+    emit_stdout_tail()
     return 0
 
 
