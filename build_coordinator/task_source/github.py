@@ -494,7 +494,110 @@ class GitHubTaskSource(TaskSource):
                         ),
                     )
                 )
+        objective_ids = session.scalars(
+            select(BuildObjectiveEvent.objective_id)
+            .where(BuildObjectiveEvent.actor == "github-sync")
+            .where(BuildObjectiveEvent.objective_id.isnot(None))
+            .distinct()
+        ).all()
+        for objective_id in objective_ids:
+            if not objective_id:
+                continue
+            objective = session.get(BuildObjective, objective_id)
+            if objective is None:
+                continue
+            issue_number = self._resolve_issue_number(session, objective_id, is_objective=True)
+            if issue_number is None:
+                continue
+            if issue_number in open_issue_numbers:
+                source_state = "OPEN"
+                source_url = f"https://github.com/{self.repo}/issues/{issue_number}"
+            else:
+                source = self._fetch_issue_by_number(issue_number)
+                if source is None:
+                    continue
+                source_state = str(source.get("state") or "").upper()
+                source_url = source.get("url") or f"https://github.com/{self.repo}/issues/{issue_number}"
+            if source_state not in {"OPEN", "CLOSED"}:
+                continue
+            previous_state = self._latest_objective_source_state(session, objective.objective_id)
+            self._apply_objective_source_state(
+                session,
+                objective,
+                issue_number=issue_number,
+                source_url=source_url,
+                source_state=source_state,
+                previous_state=previous_state,
+            )
+            if source_state != previous_state:
+                results.append(
+                    SyncResult(
+                        task_id=objective.objective_id,
+                        title=objective.goal[:240],
+                        action=f"SOURCE_{source_state}",
+                        source_ref=str(source_url),
+                        details=(
+                            "GitHub objective issue closed; planner and objective-generated work suppressed"
+                            if source_state == "CLOSED"
+                            else "GitHub objective issue reopened; objective source suppression cleared"
+                        ),
+                    )
+                )
         return results
+
+    def _latest_objective_source_state(self, session, objective_id: str) -> str:
+        planner = get_planner_task(session, objective_id)
+        if planner is not None:
+            metadata = planner.definition_metadata or {}
+            if metadata.get("source_type") == "github" and metadata.get("source_state") is not None:
+                return str(metadata.get("source_state") or "").upper()
+        event = session.scalar(
+            select(BuildObjectiveEvent)
+            .where(BuildObjectiveEvent.objective_id == objective_id)
+            .where(BuildObjectiveEvent.event_type == "objective.source_state_changed")
+            .order_by(BuildObjectiveEvent.created_at.desc())
+        )
+        return str(((event.event_data if event is not None else {}) or {}).get("to_state") or "").upper()
+
+    def _apply_objective_source_state(
+        self,
+        session,
+        objective: BuildObjective,
+        *,
+        issue_number: int,
+        source_url: str,
+        source_state: str,
+        previous_state: str,
+    ) -> None:
+        planner = get_planner_task(session, objective.objective_id)
+        if planner is not None:
+            metadata = dict(planner.definition_metadata or {})
+            metadata.update(
+                source_identity_metadata(
+                    source_type="github",
+                    source_owner=self.repo,
+                    source_ref=str(issue_number),
+                    source_url=source_url,
+                    source_state=source_state,
+                    legacy={"source_issue_number": issue_number},
+                )
+            )
+            planner.definition_metadata = metadata
+        if source_state == previous_state:
+            return
+        session.add(
+            BuildObjectiveEvent(
+                objective_id=objective.objective_id,
+                event_type="objective.source_state_changed",
+                actor="github-sync",
+                event_data={
+                    "source": source_url,
+                    "issue_number": issue_number,
+                    "from_state": previous_state or None,
+                    "to_state": source_state,
+                },
+            )
+        )
 
     def _sync_issue(self, session, issue: dict[str, Any]) -> SyncResult | None:
         number = issue["number"]
@@ -849,6 +952,17 @@ class GitHubTaskSource(TaskSource):
                 },
             )
         )
+        issue_match = re.search(r"/issues/(\d+)$", url)
+        issue_number = int(issue_match.group(1)) if issue_match else None
+        if issue_number is not None:
+            self._apply_objective_source_state(
+                session,
+                obj,
+                issue_number=issue_number,
+                source_url=url,
+                source_state="OPEN",
+                previous_state="",
+            )
         planner = get_planner_task(session, objective_id)
         if planner is not None:
             planner.dependencies = list(deps)

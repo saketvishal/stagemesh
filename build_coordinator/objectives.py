@@ -190,6 +190,23 @@ def get_planner_task(session: Session, objective_id: str) -> BuildTask | None:
     return session.get(BuildTask, planner_task_id(objective_id))
 
 
+def objective_source_is_closed(session: Session, objective: BuildObjective) -> bool:
+    planner = get_planner_task(session, objective.objective_id)
+    if planner is not None:
+        metadata = planner.definition_metadata or {}
+        if metadata.get("source_type") == "github" and metadata.get("source_state") is not None:
+            return str(metadata.get("source_state") or "").upper() == "CLOSED"
+    latest = session.scalar(
+        select(BuildObjectiveEvent)
+        .where(BuildObjectiveEvent.objective_id == objective.objective_id)
+        .where(BuildObjectiveEvent.event_type == "objective.source_state_changed")
+        .order_by(BuildObjectiveEvent.created_at.desc())
+    )
+    if latest is None:
+        return False
+    return str((latest.event_data or {}).get("to_state") or "").upper() == "CLOSED"
+
+
 def open_gates(session: Session, objective_id: str) -> list[BuildObjectiveGate]:
     return list(
         session.scalars(
@@ -659,6 +676,8 @@ def run_objective_cycle(session: Session) -> list[ObjectiveReconcileSummary]:
     restart) converges rather than duplicating work."""
     summaries: list[ObjectiveReconcileSummary] = []
     for objective in list_objectives(session):
+        if objective_source_is_closed(session, objective):
+            continue
         # HUMAN_GATE still reconciles: later blocked-task reasons (especially
         # REMOTE_PUSH_APPROVAL_REQUIRED) must surface as additional typed
         # gates. Open gates keep the objective stopped via _reassess_completion.
