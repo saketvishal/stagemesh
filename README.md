@@ -84,6 +84,8 @@ engineering tasks. It:
 Run `stagemesh continue` from any directory: inside a project it works that
 project; anywhere else it coordinates every registered project at once, each in
 its own process and workspaces, up to that project's configured concurrency.
+Use `stagemesh continue --capacity N` outside a project to allocate a bounded
+global builder budget fairly across registered project backlogs for that run.
 `stagemesh "Continue <project> development."` works too. Workers, worktrees,
 branches, providers, and execution directories are chosen by StageMesh's queue
 and capability routing, never by you. See [Project-owned backlogs](docs/PROJECTS.md).
