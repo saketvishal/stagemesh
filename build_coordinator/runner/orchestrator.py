@@ -1040,6 +1040,29 @@ class BuildRunner:
             )
             return
         if verdict.verdict == "REMEDIATION_REQUIRED":
+            if not verdict.findings and not verdict.finding_dispositions:
+                self._review_protocol_blocked(session, execution, verdict, result)
+                return
+            if registry.get("entries") and not open_findings(registry):
+                self._review_protocol_blocked(
+                    session,
+                    execution,
+                    verdict,
+                    result,
+                    reason="REMEDIATION_REQUIRED_WITHOUT_OPEN_FINDINGS",
+                    why_not_remediation=(
+                        "Review finding_dispositions closed all tracked findings, "
+                        "so there is no currently open finding for a remediation "
+                        "worker to target."
+                    ),
+                    transition_reason=(
+                        "review protocol blocked: remediation required without open findings"
+                    ),
+                    error="Reviewer requested remediation after closing all tracked findings",
+                )
+                return
+            if self._review_disagreement_deadlocked(session, execution, registry, result):
+                return
             if self._remediation_limit_reached(session, execution, verdict, result):
                 return
             transition_task(
@@ -1094,6 +1117,141 @@ class BuildRunner:
             execution=execution,
             error=f"unrecognized review verdict: {verdict.verdict}",
             recovery_classification="OPERATOR_ACTION_REQUIRED",
+        )
+
+    def _review_disagreement_deadlocked(
+        self,
+        session: Session,
+        execution: BuildRunnerExecution,
+        registry: dict,
+        result: RunnerCycleResult,
+    ) -> bool:
+        """Fail closed when independent reviewers disagree on a finding.
+
+        A registry disagreement means at least two reviewers classified the
+        same durable finding into opposite categories (open vs closed). That
+        is reviewer deadlock, not meaningful unresolved builder work, so do
+        not spend remediation budget or ask a builder to re-fix a disputed
+        item without human tie-break evidence.
+        """
+        disputed = [
+            entry
+            for entry in open_findings(registry)
+            if isinstance(entry.get("disagreement"), dict)
+        ]
+        if not disputed:
+            return False
+        evidence = {
+            "reason": "REVIEWER_DISAGREEMENT_DEADLOCK",
+            "classification": "reviewer_disagreement",
+            "reviewer": execution.worker_id,
+            "reviewed_feature_sha": execution.reviewed_feature_sha,
+            "open_findings": [
+                {
+                    "id": entry.get("id"),
+                    "description": entry.get("description"),
+                    "attempts": entry.get("attempts"),
+                    "disagreement": entry.get("disagreement"),
+                    "history": entry.get("history"),
+                }
+                for entry in disputed
+            ],
+            "why_not_remediation": (
+                "Independent reviewers disagree about whether the finding is open, "
+                "so another autonomous remediation would be adjudicating review "
+                "deadlock rather than targeting currently agreed unresolved work."
+            ),
+        }
+        result.escalations.append(f"{execution.task_id}:REVIEWER_DISAGREEMENT_DEADLOCK")
+        record_event(
+            session,
+            EventInput(
+                task_id=execution.task_id,
+                event_type="runner.review_disagreement_deadlock",
+                actor="runner",
+                event_data=evidence,
+            ),
+        )
+        self._block_task(
+            session,
+            execution.task_id,
+            "REVIEWER_DISAGREEMENT_DEADLOCK",
+            invariant="REVIEWER_DISAGREEMENT_DEADLOCK",
+            execution=execution,
+            error="Independent reviewers disagreed about open remediation findings",
+            recovery_classification="OPERATOR_ACTION_REQUIRED",
+            extra_data=evidence,
+        )
+        return True
+
+    def _review_protocol_blocked(
+        self,
+        session: Session,
+        execution: BuildRunnerExecution,
+        verdict: ReviewVerdict,
+        result: RunnerCycleResult,
+        *,
+        reason: str = "REMEDIATION_REQUIRED_WITHOUT_FINDING_SIGNAL",
+        why_not_remediation: str | None = None,
+        transition_reason: str = "review protocol blocked: remediation required without finding signal",
+        error: str = "Reviewer requested remediation without findings or finding dispositions",
+    ) -> None:
+        """Retry malformed REMEDIATION_REQUIRED reviews as review failures.
+
+        A remediation request without a finding id, finding text, or
+        disposition has no durable work item for #81's finding-aware budget.
+        Treating it as implementation failure would spend remediation attempts
+        on unstructured reviewer output and can converge to an empty-evidence
+        REMEDIATION_LIMIT_REACHED.
+        """
+        release_active_claims(session, execution.task_id, completed=False)
+        task = session.get(BuildTask, execution.task_id)
+        if task is not None:
+            task.current_claim_id = None
+            task.lease_expires_at = None
+            task.last_heartbeat_at = None
+        evidence = {
+            "reviewer": execution.worker_id,
+            "reviewed_feature_sha": execution.reviewed_feature_sha,
+            "verdict": verdict.verdict,
+            "required_remediation": list(verdict.required_remediation),
+            "reason": reason,
+            "classification": "review_protocol_blocked",
+            "why_not_remediation": why_not_remediation
+            or (
+                "No findings or finding_dispositions were supplied, so there is no "
+                "currently open finding for a remediation worker to target."
+            ),
+        }
+        record_event(
+            session,
+            EventInput(
+                task_id=execution.task_id,
+                event_type="runner.review_protocol_blocked",
+                actor="runner",
+                event_data=evidence,
+            ),
+        )
+        attempts = self._review_environment_attempts(session, execution.task_id)
+        if attempts >= self._config.max_review_environment_attempts:
+            result.escalations.append(f"{execution.task_id}:REVIEW_ENVIRONMENT_BLOCKED")
+            self._block_task(
+                session,
+                execution.task_id,
+                "REVIEW_ENVIRONMENT_BLOCKED",
+                invariant="REVIEW_PROTOCOL_BLOCKED",
+                execution=execution,
+                error=error,
+                recovery_classification="OPERATOR_ACTION_REQUIRED",
+                extra_data=evidence,
+            )
+            return
+        transition_task(
+            session,
+            execution.task_id,
+            "REVIEW_READY",
+            actor="runner",
+            reason=transition_reason,
         )
 
     def _needs_second_reviewer(self, session: Session, execution: BuildRunnerExecution) -> bool:
@@ -2824,6 +2982,15 @@ class BuildRunner:
             review = data.get("review") if isinstance(data.get("review"), dict) else data
             if str(review.get("verdict", "")).upper() == "REVIEW_ENVIRONMENT_BLOCKED":
                 count += 1
+        protocol_events = session.scalars(
+            select(BuildTaskEvent)
+            .where(BuildTaskEvent.task_id == task_id)
+            .where(BuildTaskEvent.event_type == "runner.review_protocol_blocked")
+        ).all()
+        for event in protocol_events:
+            if since is not None and event.created_at is not None and _naive(event.created_at) < _naive(since):
+                continue
+            count += 1
         return count
 
     def _no_change_workers(self, session: Session, task_id: str) -> set[str]:
