@@ -1438,11 +1438,20 @@ class BuildRunner:
         not spend remediation budget or ask a builder to re-fix a disputed
         item without human tie-break evidence.
         """
-        disputed = [
-            entry
-            for entry in open_findings(registry)
-            if isinstance(entry.get("disagreement"), dict)
-        ]
+        reviewed_sha = execution.reviewed_feature_sha
+        disputed = []
+        for entry in open_findings(registry):
+            disagreement = entry.get("disagreement")
+            if not isinstance(disagreement, dict):
+                continue
+            disagreement_sha = disagreement.get("reviewed_feature_sha")
+            same_generation = (
+                disagreement_sha == reviewed_sha
+                if reviewed_sha is not None or disagreement_sha is not None
+                else True
+            )
+            if same_generation:
+                disputed.append(entry)
         if not disputed:
             return False
         evidence = {
