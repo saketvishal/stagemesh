@@ -117,7 +117,7 @@ def acquire_coordinator_lock(
     lease_expired = age is None or age > stale_after_seconds
     if record.process_id is not None and record.host_name == _host_name():
         owner_alive = is_pid_alive(record.process_id)
-        if owner_alive and not lease_expired:
+        if owner_alive:
             raise CoordinatorLockHeld(
                 f"a coordinator is already running against this project as PID "
                 f"{record.process_id} on {record.host_name!r} "
@@ -129,15 +129,17 @@ def acquire_coordinator_lock(
                     "heartbeat_age_seconds": age,
                 },
             )
-        recovery_reason = "owner_process_dead" if not owner_alive else "owner_lease_expired"
+        recovery_reason = "owner_process_dead"
     elif record.process_id is not None and not lease_expired:
         raise CoordinatorLockHeld(
             f"a coordinator is recorded as running on a different host "
             f"({record.host_name!r}); refusing to take over the fresh lock from here",
             owner={"process_id": record.process_id, "host_name": record.host_name, "heartbeat_age_seconds": age},
         )
-    else:
+    elif record.process_id is not None:
         recovery_reason = "cross_host_lease_expired"
+    else:
+        recovery_reason = None
 
     record.instance_id = instance_id
     record.host_name = _host_name()
@@ -145,13 +147,17 @@ def acquire_coordinator_lock(
     record.started_at = now
     record.heartbeat_at = now
     session.flush()
-    return CoordinatorLockAcquisition(record=record, recovered_stale=True, recovery_reason=recovery_reason)
+    return CoordinatorLockAcquisition(
+        record=record,
+        recovered_stale=recovery_reason is not None,
+        recovery_reason=recovery_reason,
+    )
 
 
 def _raise_lock_held(record: BuildCoordinatorLock, *, now: datetime, stale_after_seconds: float) -> None:
     age = _heartbeat_age_seconds(record, now=now)
     if record.process_id is not None and record.host_name == _host_name():
-        if is_pid_alive(record.process_id) and not (age is None or age > stale_after_seconds):
+        if is_pid_alive(record.process_id):
             raise CoordinatorLockHeld(
                 f"a coordinator is already running against this project as PID "
                 f"{record.process_id} on {record.host_name!r} "
