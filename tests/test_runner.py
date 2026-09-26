@@ -1820,6 +1820,17 @@ def test_reviewer_disagreement_deadlocks_instead_of_spending_remediation_budget(
                             "status": "STILL_OPEN",
                             "reason": "",
                             "execution_id": "reviewer-1-opened",
+                            "cycle": "review-cycle:reviewer-1-opened",
+                            "reviewed_feature_sha": "feature-sha",
+                            "classifications": [
+                                {
+                                    "status": "STILL_OPEN",
+                                    "reason": "",
+                                    "execution_id": "reviewer-1-opened",
+                                    "cycle": "review-cycle:reviewer-1-opened",
+                                    "reviewed_feature_sha": "feature-sha",
+                                }
+                            ],
                         }
                     },
                 }

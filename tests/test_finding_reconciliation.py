@@ -356,6 +356,169 @@ def test_conflicting_reviewer_dispositions_are_recorded_and_resolved_open():
     assert set(entry["disagreement"]["reviewers"]) == {"reviewer-a", "reviewer-b"}
 
 
+def test_superseded_sha_still_open_then_new_sha_resolved_does_not_disagree():
+    registry = reconcile_findings(
+        {},
+        findings=["missing test for empty input"],
+        finding_dispositions=[],
+        execution_id="exec-a",
+        cycle_label="cycle-a",
+        reviewer_id="reviewer-a",
+        reviewed_feature_sha="sha-a",
+    )
+    finding_id = next(iter(registry["entries"]))
+
+    registry = reconcile_findings(
+        registry,
+        findings=[],
+        finding_dispositions=[{"id": finding_id, "status": "RESOLVED", "reason": "fixed after remediation"}],
+        execution_id="exec-b",
+        cycle_label="cycle-b",
+        reviewer_id="reviewer-b",
+        reviewed_feature_sha="sha-b",
+    )
+
+    entry = registry["entries"][finding_id]
+    assert entry["status"] == STATUS_RESOLVED
+    assert entry.get("disagreement") is None
+    assert entry["reviewer_history"]["reviewer-a"]["reviewed_feature_sha"] == "sha-a"
+    assert entry["reviewer_history"]["reviewer-b"]["reviewed_feature_sha"] == "sha-b"
+
+
+def test_conflicting_reviewer_dispositions_on_same_sha_disagree():
+    registry = reconcile_findings(
+        {},
+        findings=["missing test for empty input"],
+        finding_dispositions=[],
+        execution_id="exec-a",
+        cycle_label="cycle-a",
+        reviewer_id="reviewer-a",
+        reviewed_feature_sha="same-sha",
+    )
+    finding_id = next(iter(registry["entries"]))
+
+    registry = reconcile_findings(
+        registry,
+        findings=[],
+        finding_dispositions=[{"id": finding_id, "status": "RESOLVED", "reason": "covered by test"}],
+        execution_id="exec-b",
+        cycle_label="cycle-b",
+        reviewer_id="reviewer-b",
+        reviewed_feature_sha="same-sha",
+    )
+
+    entry = registry["entries"][finding_id]
+    assert entry["status"] == STATUS_STILL_OPEN
+    assert entry["disagreement"]["reviewed_feature_sha"] == "same-sha"
+    assert set(entry["disagreement"]["reviewers"]) == {"reviewer-a", "reviewer-b"}
+
+
+def test_multiple_remediation_generations_ignore_superseded_sha_classifications():
+    registry = reconcile_findings(
+        {},
+        findings=["pagination drops the final row"],
+        finding_dispositions=[],
+        execution_id="exec-a",
+        cycle_label="cycle-a",
+        reviewer_id="reviewer-a",
+        reviewed_feature_sha="sha-a",
+    )
+    finding_id = next(iter(registry["entries"]))
+    registry = reconcile_findings(
+        registry,
+        findings=[],
+        finding_dispositions=[{"id": finding_id, "status": "STILL_OPEN", "reason": "still fails after first fix"}],
+        execution_id="exec-b",
+        cycle_label="cycle-b",
+        reviewer_id="reviewer-b",
+        reviewed_feature_sha="sha-b",
+    )
+    registry = reconcile_findings(
+        registry,
+        findings=[],
+        finding_dispositions=[{"id": finding_id, "status": "RESOLVED", "reason": "fixed after second remediation"}],
+        execution_id="exec-c",
+        cycle_label="cycle-c",
+        reviewer_id="reviewer-c",
+        reviewed_feature_sha="sha-c",
+    )
+
+    entry = registry["entries"][finding_id]
+    assert entry["status"] == STATUS_RESOLVED
+    assert entry.get("disagreement") is None
+    assert entry["reviewer_history"]["reviewer-a"]["reviewed_feature_sha"] == "sha-a"
+    assert entry["reviewer_history"]["reviewer-b"]["reviewed_feature_sha"] == "sha-b"
+    assert entry["reviewer_history"]["reviewer-c"]["reviewed_feature_sha"] == "sha-c"
+
+
+def test_audit_history_retains_reviewer_and_sha_evidence():
+    registry = reconcile_findings(
+        {},
+        findings=["missing test for empty input"],
+        finding_dispositions=[],
+        execution_id="exec-a",
+        cycle_label="cycle-a",
+        reviewer_id="reviewer-a",
+        reviewed_feature_sha="sha-a",
+    )
+    finding_id = next(iter(registry["entries"]))
+    registry = reconcile_findings(
+        registry,
+        findings=[],
+        finding_dispositions=[{"id": finding_id, "status": "RESOLVED", "reason": "fixed in remediation"}],
+        execution_id="exec-b",
+        cycle_label="cycle-b",
+        reviewer_id="reviewer-a",
+        reviewed_feature_sha="sha-b",
+    )
+
+    classifications = registry["entries"][finding_id]["reviewer_history"]["reviewer-a"]["classifications"]
+    assert [
+        (record["status"], record["execution_id"], record["reviewed_feature_sha"])
+        for record in classifications
+    ] == [
+        (STATUS_STILL_OPEN, "exec-a", "sha-a"),
+        (STATUS_RESOLVED, "exec-b", "sha-b"),
+    ]
+
+
+def test_reopened_finding_on_later_sha_keeps_reopen_semantics_without_old_disagreement():
+    registry = reconcile_findings(
+        {},
+        findings=["missing test for empty input"],
+        finding_dispositions=[],
+        execution_id="exec-a",
+        cycle_label="cycle-a",
+        reviewer_id="reviewer-a",
+        reviewed_feature_sha="sha-a",
+    )
+    finding_id = next(iter(registry["entries"]))
+    registry = reconcile_findings(
+        registry,
+        findings=[],
+        finding_dispositions=[{"id": finding_id, "status": "RESOLVED", "reason": "fixed"}],
+        execution_id="exec-b",
+        cycle_label="cycle-b",
+        reviewer_id="reviewer-b",
+        reviewed_feature_sha="sha-b",
+    )
+    registry = reconcile_findings(
+        registry,
+        findings=[],
+        finding_dispositions=[{"id": finding_id, "status": "STILL_OPEN", "reason": "regression reintroduced"}],
+        execution_id="exec-c",
+        cycle_label="cycle-c",
+        reviewer_id="reviewer-c",
+        reviewed_feature_sha="sha-c",
+    )
+
+    entry = registry["entries"][finding_id]
+    assert entry["status"] == STATUS_STILL_OPEN
+    assert entry.get("disagreement") is None
+    assert entry["history"][-1]["reopened"] is True
+    assert entry["reviewer_history"]["reviewer-c"]["reviewed_feature_sha"] == "sha-c"
+
+
 def test_escalation_evidence_reports_open_findings_only():
     registry = reconcile_findings(
         {},

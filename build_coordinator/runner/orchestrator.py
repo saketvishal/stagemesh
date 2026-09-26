@@ -5237,6 +5237,7 @@ class BuildRunner:
                     execution_id=execution.execution_id,
                     cycle_label=f"review-cycle:{execution.execution_id}",
                     reviewer_id=execution.worker_id,
+                    reviewed_feature_sha=execution.reviewed_feature_sha,
                 )
                 registry = record_convergence_generation(
                     registry,
@@ -5262,6 +5263,7 @@ class BuildRunner:
             execution_id=execution.execution_id,
             cycle_label=f"review-cycle:{execution.execution_id}",
             reviewer_id=execution.worker_id,
+            reviewed_feature_sha=execution.reviewed_feature_sha,
         )
         registry = record_convergence_generation(
             registry,

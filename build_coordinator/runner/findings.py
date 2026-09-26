@@ -110,6 +110,7 @@ def _apply_reviewer_classification(
     reason: str,
     execution_id: str | None,
     cycle_label: str,
+    reviewed_feature_sha: str | None,
 ) -> tuple[str, bool]:
     """Record which reviewer classified this finding which way, and resolve
     disagreement deterministically: if a different reviewer already
@@ -121,23 +122,62 @@ def _apply_reviewer_classification(
         return status, False
     reviewer_status = status
     reviewer_history = dict(entry.get("reviewer_history") or {})
+    current_record = {
+        "status": reviewer_status,
+        "reason": reason,
+        "execution_id": execution_id,
+        "cycle": cycle_label,
+        "reviewed_feature_sha": reviewed_feature_sha,
+    }
+    comparable_records: dict[str, dict[str, Any]] = {}
+    for rid, raw_rec in reviewer_history.items():
+        if rid == reviewer_id or not isinstance(raw_rec, dict):
+            continue
+        records = raw_rec.get("classifications")
+        if not isinstance(records, list):
+            records = [raw_rec]
+        for rec in records:
+            if not isinstance(rec, dict):
+                continue
+            rec_sha = rec.get("reviewed_feature_sha")
+            same_generation = (
+                rec_sha == reviewed_feature_sha
+                if reviewed_feature_sha is not None or rec_sha is not None
+                else True
+            )
+            if not same_generation:
+                continue
+            comparable_records[rid] = rec
     conflicting = {
         rid: rec
-        for rid, rec in reviewer_history.items()
-        if rid != reviewer_id and _status_category(rec.get("status")) != _status_category(status)
+        for rid, rec in comparable_records.items()
+        if _status_category(rec.get("status")) != _status_category(status)
     }
     disagreed = bool(conflicting)
     if disagreed:
         entry["disagreement"] = {
             "reviewers": {
-                reviewer_id: {"status": status, "reason": reason, "execution_id": execution_id},
+                reviewer_id: current_record,
                 **conflicting,
             },
             "resolved_status": STATUS_STILL_OPEN,
             "cycle": cycle_label,
+            "reviewed_feature_sha": reviewed_feature_sha,
         }
         status = STATUS_STILL_OPEN
-    reviewer_history[reviewer_id] = {"status": reviewer_status, "reason": reason, "execution_id": execution_id}
+    else:
+        existing_disagreement = entry.get("disagreement")
+        if isinstance(existing_disagreement, dict):
+            disagreement_sha = existing_disagreement.get("reviewed_feature_sha")
+            if disagreement_sha != reviewed_feature_sha:
+                entry.pop("disagreement", None)
+    reviewer_record = dict(reviewer_history.get(reviewer_id) or {})
+    classifications = list(reviewer_record.get("classifications") or [])
+    classifications = classifications[-(_HISTORY_LIMIT - 1) :]
+    classifications.append(current_record)
+    reviewer_record.update(current_record)
+    reviewer_record["classifications"] = classifications
+    reviewer_history[reviewer_id] = reviewer_record
     entry["reviewer_history"] = reviewer_history
     return status, disagreed
 
@@ -150,6 +190,7 @@ def reconcile_findings(
     execution_id: str | None,
     cycle_label: str,
     reviewer_id: str | None = None,
+    reviewed_feature_sha: str | None = None,
 ) -> dict[str, Any]:
     """Merge one review cycle's findings/dispositions into the durable
     per-task finding registry. Idempotent: reprocessing the same
@@ -217,6 +258,7 @@ def reconcile_findings(
                 reason=reason,
                 execution_id=execution_id,
                 cycle_label=cycle_label,
+                reviewed_feature_sha=reviewed_feature_sha,
             )
             if status == STATUS_STILL_OPEN:
                 if was_closed and not reason and not disagreed:
@@ -270,6 +312,7 @@ def reconcile_findings(
                 reason=reason,
                 execution_id=execution_id,
                 cycle_label=cycle_label,
+                reviewed_feature_sha=reviewed_feature_sha,
             )
             entry["status"] = status
             if status == STATUS_STILL_OPEN:
@@ -300,6 +343,7 @@ def reconcile_findings(
                 reason=reason,
                 execution_id=execution_id,
                 cycle_label=cycle_label,
+                reviewed_feature_sha=reviewed_feature_sha,
             )
             entry["status"] = status
             if status == STATUS_STILL_OPEN:
