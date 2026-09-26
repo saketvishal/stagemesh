@@ -50,6 +50,32 @@ def test_subprocess_executor_records_sanitized_evidence_when_provider_exits_with
     assert "token=<redacted>" in observation.result_data["stderr_tail"]
 
 
+def test_subprocess_executor_reports_malformed_result_file_as_typed_failure(tmp_path: Path):
+    log_dir = tmp_path / "logs"
+    result_path = tmp_path / "result.json"
+    executor = SubprocessExecutor(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys, os; "
+                "open(os.environ['BUILD_COORDINATOR_RESULT_PATH'], 'w').write('{not valid json'); "
+                "sys.exit(0)"
+            ),
+        ],
+        log_dir=log_dir,
+    )
+
+    handle = executor.launch(_launch(tmp_path, result_path=result_path))
+    observation = executor.poll(handle.execution_id)
+
+    assert observation.status == "FAILED"
+    assert observation.exit_code == 0
+    assert observation.result_data["failure_kind"] == "EXECUTOR_RESULT_INVALID_OR_MISSING"
+    assert "error" in observation.result_data
+    assert observation.result_data["detail"] == "subprocess wrote an invalid structured result file"
+
+
 def test_subprocess_executor_preserves_unicode_output_in_utf8_logs_and_evidence(tmp_path: Path):
     log_dir = tmp_path / "logs"
     result_path = tmp_path / "result.json"

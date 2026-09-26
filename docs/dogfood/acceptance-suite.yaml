@@ -85,6 +85,20 @@ scenarios:
       - replacement worker receives resume context
       - task continues without losing checkpoint metadata
 
+  - id: real-agent-end-to-end
+    demo: examples/public_dogfood/real_agent_end_to_end_demo.yaml
+    requirements:
+      - real coding-agent CLI (not a scripted stand-in worker)
+      - independent review
+      - integration on a scratch repository
+      - typed failure for malformed or missing result files
+    command_outline:
+      - "BUILD_COORDINATOR_REAL_AGENT_CLI=<real cli> pytest tests/test_real_agent_end_to_end.py -q"
+    expected_evidence:
+      - builder, reviewer, and integration executions each record provider, runtime, exit code, and result file
+      - reviewer worker id differs from builder worker id
+      - a missing or malformed result file is observed as FAILED with failure_kind EXECUTOR_RESULT_INVALID_OR_MISSING, never SUCCEEDED
+
   - id: high-risk-governance
     demo: examples/public_dogfood/high_risk_governance_demo.yaml
     requirements:
