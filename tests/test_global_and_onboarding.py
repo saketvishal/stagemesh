@@ -478,4 +478,36 @@ def test_wrapper_main_preserves_result_and_exit_when_console_rejects_unicode(mon
     code, payload, _console = run(RejectAll(), (0, verdict), "rejected")
     assert code == 0
     assert payload["status"] == "SUCCEEDED"
+
+
+def test_wrapper_main_writes_result_before_best_effort_stdout_tail(monkeypatch, tmp_path):
+    import io
+    from build_coordinator.agents import wrapper
+
+    result_path = tmp_path / "result.json"
+    monkeypatch.setenv("BUILD_COORDINATOR_ROLE", "REVIEWER")
+    monkeypatch.setenv("BUILD_COORDINATOR_RESULT_PATH", str(result_path))
+    monkeypatch.setenv("BUILD_COORDINATOR_EXECUTION_ID", "exec-after-result")
+    monkeypatch.setenv("BUILD_COORDINATOR_TASK_ID", "SM-019")
+    monkeypatch.setattr(sys, "stdin", io.StringIO("{}"))
+
+    verdict = (
+        "Review passed: \u2192 \U0001f680\n"
+        "```json\n"
+        '{"verdict": "GREEN", "findings": [], "required_remediation": [], "ready_for_integration": true}\n'
+        "```"
+    )
+    monkeypatch.setattr(wrapper, "run_agent", lambda *a, **kw: (0, verdict))
+    monkeypatch.setattr(
+        wrapper,
+        "_safe_write_stdout_tail",
+        lambda *a, **kw: (_ for _ in ()).throw(UnicodeEncodeError("cp1252", "x", 0, 1, "boom")),
+    )
+
+    code = wrapper.main(["--runtime", "codex"])
+
+    assert code == 0
+    payload = json.loads(result_path.read_text(encoding="utf-8"))
+    assert payload["status"] == "SUCCEEDED"
+    assert payload["execution_id"] == "exec-after-result"
     assert payload["verdict"] == "GREEN"
