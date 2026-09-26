@@ -41,6 +41,7 @@ CLOSED_FINDING_STATUSES = frozenset({STATUS_RESOLVED, STATUS_INVALID, STATUS_NOT
 _HISTORY_LIMIT = 20
 _PROCESSED_EXECUTION_LIMIT = 50
 _FUZZY_MATCH_THRESHOLD = 0.5
+_CONVERGENCE_HISTORY_LIMIT = 20
 
 
 def finding_fingerprint(description: str) -> str:
@@ -322,6 +323,112 @@ def reconcile_findings(
 def open_findings(registry: dict[str, Any] | None) -> list[dict[str, Any]]:
     entries = (registry or {}).get("entries") or {}
     return [entry for entry in entries.values() if entry.get("status") == STATUS_STILL_OPEN]
+
+
+def record_convergence_generation(
+    registry: dict[str, Any] | None,
+    *,
+    prior_registry: dict[str, Any] | None,
+    execution_id: str | None,
+    cycle_label: str,
+    reviewer_id: str | None,
+    comprehensive_review: bool = False,
+) -> dict[str, Any]:
+    """Record task-level finding convergence progress for one review.
+
+    This is separate from per-finding attempts: it advances only when the
+    current review meaningfully changes the open finding set by resolving a
+    prior finding, introducing a new one, or both. Reprocessing the same
+    execution_id is idempotent.
+    """
+    updated = dict(registry or {})
+    convergence = dict(updated.get("convergence") or {})
+    processed = list(convergence.get("processed_execution_ids") or [])
+    if execution_id and execution_id in processed:
+        return updated
+
+    prior_open = {str(entry.get("id")) for entry in open_findings(prior_registry)}
+    current_open = {str(entry.get("id")) for entry in open_findings(updated)}
+    introduced = sorted(current_open - prior_open)
+    resolved = sorted(prior_open - current_open)
+    if not introduced and not resolved:
+        if comprehensive_review:
+            convergence["comprehensive_used"] = True
+            convergence["comprehensive_execution_id"] = execution_id
+        if execution_id:
+            processed = processed[-(_PROCESSED_EXECUTION_LIMIT - 1) :]
+            processed.append(execution_id)
+            convergence["processed_execution_ids"] = processed
+        updated["convergence"] = convergence
+        return updated
+
+    generations = int(convergence.get("generations") or 0) + 1
+    history = list(convergence.get("history") or [])[-(_CONVERGENCE_HISTORY_LIMIT - 1) :]
+    history.append(
+        {
+            "generation": generations,
+            "execution_id": execution_id,
+            "cycle": cycle_label,
+            "reviewer_id": reviewer_id,
+            "introduced": introduced,
+            "resolved": resolved,
+            "comprehensive_review": bool(comprehensive_review),
+        }
+    )
+    convergence["generations"] = generations
+    convergence["history"] = history
+    if comprehensive_review:
+        convergence["comprehensive_used"] = True
+        convergence["comprehensive_execution_id"] = execution_id
+    if execution_id:
+        processed = processed[-(_PROCESSED_EXECUTION_LIMIT - 1) :]
+        processed.append(execution_id)
+        convergence["processed_execution_ids"] = processed
+    updated["convergence"] = convergence
+    return updated
+
+
+def comprehensive_reconciliation_missing_ids(
+    prior_registry: dict[str, Any] | None,
+    findings: list[Any] | None,
+    finding_dispositions: list[dict[str, Any]] | None,
+) -> list[str]:
+    """IDs of previously open findings that a comprehensive convergence
+    review must explicitly reconcile, but did not.
+
+    A comprehensive review exists to break serial-new-finding churn with a
+    deterministic, stronger pass, so it is required to return the complete
+    current finding set in one pass and account for every prior open finding
+    -- either by explicit `finding_dispositions` id, or by restating it in
+    `findings` (which reconciles to the same durable id by content
+    fingerprint/fuzzy match) -- rather than relying on the ordinary
+    absence-implies-resolved inference. A reviewer that simply omits prior
+    findings from its response must not silently clear them.
+    """
+    entries: dict[str, dict[str, Any]] = (prior_registry or {}).get("entries") or {}
+    prior_open_ids = {
+        finding_id for finding_id, entry in entries.items() if entry.get("status") == STATUS_STILL_OPEN
+    }
+    if not prior_open_ids:
+        return []
+    covered = {
+        str(disposition.get("id"))
+        for disposition in (finding_dispositions or ())
+        if isinstance(disposition, dict) and disposition.get("id")
+    }
+    current: dict[str, str] = {}
+    for raw in findings or ():
+        description = str(raw).strip()
+        if not description:
+            continue
+        fingerprint = finding_fingerprint(description)
+        if fingerprint in entries or fingerprint in current:
+            finding_id = fingerprint
+        else:
+            finding_id = _fuzzy_match(description, entries, exclude=set(current)) or fingerprint
+        current[finding_id] = description
+    covered |= set(current)
+    return sorted(prior_open_ids - covered)
 
 
 def escalation_evidence(registry: dict[str, Any] | None) -> list[dict[str, Any]]:
