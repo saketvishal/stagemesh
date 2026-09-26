@@ -1,0 +1,53 @@
+schema_version: 1
+demo_id: real-agent-end-to-end-demo
+description: >
+  Validates the SubprocessExecutor adapter against a real coding-agent CLI
+  (not a scripted stand-in) on a disposable scratch repository. Runs one
+  BUILDER execution, one independent REVIEWER execution, and one INTEGRATION
+  execution, each launched from the worker templates declared below plus
+  operator environment only — no per-run manual worktree or worker choice.
+project:
+  id: demo-real-agent
+  repo: /path/to/disposable-scratch-repo
+task:
+  id: DEMO-REAL-001
+  title: Prove real coding-agent execution end to end
+  description: >
+    Make a small, verifiable change to the scratch repository so the
+    structured result file and commit history can be checked as durable
+    evidence of a genuine agent execution.
+  acceptance_criteria:
+    - Builder produces a commit on the task branch and a valid result file.
+    - An independently claimed reviewer worker validates the branch.
+    - Integration merges the reviewed SHA and reports a final main SHA.
+  review_policy: INDEPENDENT
+workers:
+  - id: real-agent-builder
+    provider: operator-configured
+    stages: [BUILD]
+    # Replace with the real, installed coding-agent CLI. Do not hardcode a
+    # vendor binary name in coordinator code; this file is trusted operator
+    # configuration, matching the pattern used by every other worker
+    # template in examples/.
+    command: ["${BUILD_COORDINATOR_REAL_AGENT_CLI}"]
+  - id: real-agent-reviewer
+    provider: operator-configured
+    stages: [REVIEW]
+    command: ["${BUILD_COORDINATOR_REAL_AGENT_CLI}"]
+  - id: real-agent-integrator
+    provider: operator-configured
+    stages: [INTEGRATE]
+    command: ["${BUILD_COORDINATOR_REAL_AGENT_CLI}"]
+evidence:
+  - provider, runtime, exit code, and result file path recorded per execution
+  - builder worker id differs from reviewer worker id (independent review)
+  - a missing or malformed result file is reported as a typed FAILED
+    observation (failure_kind EXECUTOR_RESULT_INVALID_OR_MISSING), never
+    silently accepted as success
+  - reviewed SHA matches the SHA integration reads before merge
+notes: >
+  This demo intentionally has no scripted fallback: BUILD_COORDINATOR_REAL_AGENT_CLI
+  must point at a real, authenticated coding-agent CLI on the operator's
+  machine. See tests/test_real_agent_end_to_end.py for the automated harness
+  that drives this same scenario and records durable evidence, and
+  docs/evidence/REAL_AGENT_EXECUTION_ACCEPTANCE.md for what is being proven.
