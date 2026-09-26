@@ -1043,6 +1043,24 @@ class BuildRunner:
             if not verdict.findings and not verdict.finding_dispositions:
                 self._review_protocol_blocked(session, execution, verdict, result)
                 return
+            if registry.get("entries") and not open_findings(registry):
+                self._review_protocol_blocked(
+                    session,
+                    execution,
+                    verdict,
+                    result,
+                    reason="REMEDIATION_REQUIRED_WITHOUT_OPEN_FINDINGS",
+                    why_not_remediation=(
+                        "Review finding_dispositions closed all tracked findings, "
+                        "so there is no currently open finding for a remediation "
+                        "worker to target."
+                    ),
+                    transition_reason=(
+                        "review protocol blocked: remediation required without open findings"
+                    ),
+                    error="Reviewer requested remediation after closing all tracked findings",
+                )
+                return
             if self._review_disagreement_deadlocked(session, execution, registry, result):
                 return
             if self._remediation_limit_reached(session, execution, verdict, result):
@@ -1172,6 +1190,11 @@ class BuildRunner:
         execution: BuildRunnerExecution,
         verdict: ReviewVerdict,
         result: RunnerCycleResult,
+        *,
+        reason: str = "REMEDIATION_REQUIRED_WITHOUT_FINDING_SIGNAL",
+        why_not_remediation: str | None = None,
+        transition_reason: str = "review protocol blocked: remediation required without finding signal",
+        error: str = "Reviewer requested remediation without findings or finding dispositions",
     ) -> None:
         """Retry malformed REMEDIATION_REQUIRED reviews as review failures.
 
@@ -1192,9 +1215,10 @@ class BuildRunner:
             "reviewed_feature_sha": execution.reviewed_feature_sha,
             "verdict": verdict.verdict,
             "required_remediation": list(verdict.required_remediation),
-            "reason": "REMEDIATION_REQUIRED_WITHOUT_FINDING_SIGNAL",
+            "reason": reason,
             "classification": "review_protocol_blocked",
-            "why_not_remediation": (
+            "why_not_remediation": why_not_remediation
+            or (
                 "No findings or finding_dispositions were supplied, so there is no "
                 "currently open finding for a remediation worker to target."
             ),
@@ -1217,7 +1241,7 @@ class BuildRunner:
                 "REVIEW_ENVIRONMENT_BLOCKED",
                 invariant="REVIEW_PROTOCOL_BLOCKED",
                 execution=execution,
-                error="Reviewer requested remediation without findings or finding dispositions",
+                error=error,
                 recovery_classification="OPERATOR_ACTION_REQUIRED",
                 extra_data=evidence,
             )
@@ -1227,7 +1251,7 @@ class BuildRunner:
             execution.task_id,
             "REVIEW_READY",
             actor="runner",
-            reason="review protocol blocked: remediation required without finding signal",
+            reason=transition_reason,
         )
 
     def _needs_second_reviewer(self, session: Session, execution: BuildRunnerExecution) -> bool:
