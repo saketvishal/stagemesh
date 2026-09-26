@@ -8,6 +8,23 @@ from build_coordinator.watcher.authorization import AuthorizedRepository
 from build_coordinator.watcher.labels import MANAGED_LABELS, LabelSpec, provision_labels
 
 
+EXPECTED_LABEL_NAMES = {
+    "priority:P0",
+    "priority:P1",
+    "priority:P2",
+    "type:bug",
+    "type:docs",
+    "type:maintenance",
+    "type:feature",
+    "lifecycle:needs-triage",
+    "lifecycle:superseded",
+    "lifecycle:validated",
+    "roadmap:future-work",
+    "good first issue",
+    "help wanted",
+}
+
+
 class FakeLabelGateway:
     def __init__(self, initial: dict[str, LabelSpec] | None = None):
         self.labels = dict(initial or {})
@@ -34,6 +51,23 @@ def _repo(**overrides) -> AuthorizedRepository:
     )
     defaults.update(overrides)
     return AuthorizedRepository(**defaults)
+
+
+def test_managed_labels_are_the_public_housekeeping_taxonomy():
+    names = {spec.name for spec in MANAGED_LABELS}
+    assert names == EXPECTED_LABEL_NAMES
+    assert any(name.startswith("priority:") for name in names)
+    assert any(name.startswith("type:") for name in names)
+    assert any(name.startswith("lifecycle:") for name in names)
+    assert "roadmap:future-work" in names
+    assert {"good first issue", "help wanted"}.issubset(names)
+
+
+def test_managed_labels_do_not_duplicate_runtime_state_labels():
+    names = {spec.name for spec in MANAGED_LABELS}
+    forbidden_prefixes = ("stagemesh:", "status:", "coordinator:")
+    assert not any(name.startswith(forbidden_prefixes) for name in names)
+    assert not {"READY", "IN_PROGRESS", "DONE"} & {name.rsplit(":", 1)[-1] for name in names}
 
 
 def test_provision_creates_missing_labels():

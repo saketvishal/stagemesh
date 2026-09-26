@@ -9,6 +9,10 @@ When opening these as GitHub issues, apply both labels:
 - `good first issue`
 - `help wanted`
 
+Use the broader repository label taxonomy and superseded-work rules from
+[GITHUB_HOUSEKEEPING.md](GITHUB_HOUSEKEEPING.md); these contributor labels are
+only one part of that taxonomy.
+
 Do not apply those labels to lifecycle, branch-integrity, security, migration,
 or release-publishing work unless it has been separately reduced to a safe,
 standalone task with the same level of setup, acceptance criteria, and
