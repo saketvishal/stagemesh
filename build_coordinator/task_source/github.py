@@ -31,13 +31,27 @@ from build_coordinator.types import EventInput, OBJECTIVE_ROOT_COMPAT_REASON, Ob
 logger = logging.getLogger(__name__)
 
 
-def _resolve_issue_number_static(session, entity_id: str, is_objective: bool = False) -> int | None:
+def _resolve_issue_number_static(
+    session,
+    entity_id: str,
+    is_objective: bool = False,
+    repo: str | None = None,
+) -> int | None:
     """Instance-independent counterpart of `GitHubTaskSource._resolve_issue_number`."""
-    m = re.match(r"^GH-(\d+)$", entity_id)
-    if m:
-        return int(m.group(1))
-
     if not is_objective:
+        task = session.get(BuildTask, entity_id)
+        metadata = dict(task.definition_metadata or {}) if task is not None else {}
+        if metadata.get("source_type") != "github":
+            return None
+        if repo is not None and metadata.get("source_owner") != repo:
+            return None
+        source_ref = metadata.get("source_ref")
+        if source_ref is not None and re.fullmatch(r"\d+", str(source_ref)):
+            return int(source_ref)
+        issue_number = metadata.get("source_issue_number")
+        if issue_number is not None and re.fullmatch(r"\d+", str(issue_number)):
+            return int(issue_number)
+
         events = session.scalars(
             select(BuildTaskEvent)
             .where(
@@ -48,7 +62,12 @@ def _resolve_issue_number_static(session, entity_id: str, is_objective: bool = F
         ).all()
         for ev in events:
             src = (ev.event_data or {}).get("source", "")
-            sm = re.search(r"/issues/(\d+)$", src)
+            pattern = (
+                rf"^https://github\.com/{re.escape(repo)}/issues/(\d+)$"
+                if repo is not None
+                else r"/issues/(\d+)$"
+            )
+            sm = re.search(pattern, src)
             if sm:
                 return int(sm.group(1))
     else:
@@ -62,7 +81,12 @@ def _resolve_issue_number_static(session, entity_id: str, is_objective: bool = F
         ).all()
         for ev in obj_events:
             src = (ev.event_data or {}).get("source", "")
-            sm = re.search(r"/issues/(\d+)$", src)
+            pattern = (
+                rf"^https://github\.com/{re.escape(repo)}/issues/(\d+)$"
+                if repo is not None
+                else r"/issues/(\d+)$"
+            )
+            sm = re.search(pattern, src)
             if sm:
                 return int(sm.group(1))
         events = session.scalars(
@@ -75,7 +99,12 @@ def _resolve_issue_number_static(session, entity_id: str, is_objective: bool = F
         ).all()
         for ev in events:
             src = (ev.event_data or {}).get("source", "")
-            sm = re.search(r"/issues/(\d+)$", src)
+            pattern = (
+                rf"^https://github\.com/{re.escape(repo)}/issues/(\d+)$"
+                if repo is not None
+                else r"/issues/(\d+)$"
+            )
+            sm = re.search(pattern, src)
             if sm:
                 return int(sm.group(1))
 
@@ -118,7 +147,7 @@ def check_objective_fully_delivered(
         return False
     if not repo or dry_run:
         return True
-    issue_number = _resolve_issue_number_static(session, objective_id, is_objective=True)
+    issue_number = _resolve_issue_number_static(session, objective_id, is_objective=True, repo=repo)
     if issue_number is None:
         return True
     return _is_outbound_synced_static(session, objective_id, "COMPLETED", is_objective=True)
@@ -133,7 +162,7 @@ def check_task_fully_delivered(
         return False
     if not repo or dry_run:
         return True
-    issue_number = _resolve_issue_number_static(session, task_id, is_objective=False)
+    issue_number = _resolve_issue_number_static(session, task_id, is_objective=False, repo=repo)
     if issue_number is None:
         return True
     return _is_outbound_synced_static(session, task_id, "DONE", is_objective=False)
@@ -930,13 +959,21 @@ class GitHubTaskSource(TaskSource):
         return deps
 
     def _resolve_issue_number(self, session, entity_id: str, is_objective: bool = False) -> int | None:
-        # 1. Exact GH-<digits> pattern
-        m = re.match(r"^GH-(\d+)$", entity_id)
-        if m:
-            return int(m.group(1))
-
-        # 2. Check sync events in database
         if not is_objective:
+            task = session.get(BuildTask, entity_id)
+            metadata = dict(task.definition_metadata or {}) if task is not None else {}
+            if (
+                metadata.get("source_type") != "github"
+                or metadata.get("source_owner") != self.repo
+            ):
+                return None
+            source_ref = metadata.get("source_ref")
+            if source_ref is not None and re.fullmatch(r"\d+", str(source_ref)):
+                return int(source_ref)
+            issue_number = metadata.get("source_issue_number")
+            if issue_number is not None and re.fullmatch(r"\d+", str(issue_number)):
+                return int(issue_number)
+
             events = session.scalars(
                 select(BuildTaskEvent)
                 .where(
@@ -947,7 +984,7 @@ class GitHubTaskSource(TaskSource):
             ).all()
             for ev in events:
                 src = (ev.event_data or {}).get("source", "")
-                sm = re.search(r"/issues/(\d+)$", src)
+                sm = re.search(rf"^https://github\.com/{re.escape(str(self.repo or ''))}/issues/(\d+)$", src)
                 if sm:
                     return int(sm.group(1))
         else:
@@ -961,7 +998,7 @@ class GitHubTaskSource(TaskSource):
             ).all()
             for ev in obj_events:
                 src = (ev.event_data or {}).get("source", "")
-                sm = re.search(r"/issues/(\d+)$", src)
+                sm = re.search(rf"^https://github\.com/{re.escape(str(self.repo or ''))}/issues/(\d+)$", src)
                 if sm:
                     return int(sm.group(1))
             events = session.scalars(
@@ -974,7 +1011,7 @@ class GitHubTaskSource(TaskSource):
             ).all()
             for ev in events:
                 src = (ev.event_data or {}).get("source", "")
-                sm = re.search(r"/issues/(\d+)$", src)
+                sm = re.search(rf"^https://github\.com/{re.escape(str(self.repo or ''))}/issues/(\d+)$", src)
                 if sm:
                     return int(sm.group(1))
 

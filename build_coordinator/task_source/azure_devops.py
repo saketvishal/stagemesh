@@ -167,9 +167,20 @@ class AzureDevOpsTaskSource(TaskSource):
         )
 
     def _resolve_work_item_id(self, session, task_id: str) -> str | None:
-        match = re.match(r"^ADO-(\d+)$", task_id)
-        if match:
-            return match.group(1)
+        task = session.get(BuildTask, task_id)
+        metadata = dict(task.definition_metadata or {}) if task is not None else {}
+        expected_owner = f"{self.organization}/{self.project}"
+        if (
+            metadata.get("source_type") != "azure_devops"
+            or metadata.get("source_owner") != expected_owner
+        ):
+            return None
+        source_ref = metadata.get("source_ref")
+        if source_ref is not None and re.fullmatch(r"\d+", str(source_ref)):
+            return str(source_ref)
+        work_item_id = metadata.get("source_work_item_id")
+        if work_item_id is not None and re.fullmatch(r"\d+", str(work_item_id)):
+            return str(work_item_id)
         events = session.scalars(
             select(BuildTaskEvent)
             .where(BuildTaskEvent.task_id == task_id)

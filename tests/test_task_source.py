@@ -12,6 +12,7 @@ from build_coordinator.planner import planner_task_id
 from build_coordinator.service import utcnow
 from build_coordinator.task_source.base import TaskSourceConfig
 from build_coordinator.task_source.github import GitHubTaskSource
+from build_coordinator.task_source.base import source_identity_metadata
 
 
 class FakeGitHubClient:
@@ -342,6 +343,22 @@ def test_github_task_source_sync_outbound():
     client = FakeGitHubClient([])
     source = GitHubTaskSource(repo="example/repo", client=client)
     with SessionLocal() as session:
+        session.add(
+            BuildTask(
+                task_id="GH-101",
+                title="GitHub task",
+                description="Imported from GitHub",
+                acceptance_criteria=["Works"],
+                definition_metadata=source_identity_metadata(
+                    source_type="github",
+                    source_owner="example/repo",
+                    source_ref="101",
+                    source_url="https://github.com/example/repo/issues/101",
+                    legacy={"source_issue_number": 101},
+                ),
+                state="DONE",
+            )
+        )
         ok = source.sync_outbound(
             session,
             "GH-101",
@@ -357,3 +374,56 @@ def test_github_task_source_sync_outbound():
     assert client.comments[0]["number"] == "101"
     assert "GREEN" in client.comments[0]["body"]
     assert "101" in client.closed
+
+
+def test_github_outbound_ignores_prefix_without_github_source_identity():
+    client = FakeGitHubClient([])
+    source = GitHubTaskSource(repo="example/repo", client=client)
+    with SessionLocal() as session:
+        session.add(
+            BuildTask(
+                task_id="GH-202",
+                title="Local task with GitHub-looking id",
+                description="Must not sync to GitHub",
+                acceptance_criteria=["Works"],
+                definition_metadata=source_identity_metadata(
+                    source_type="local",
+                    source_owner="test-proj",
+                    source_ref=".stagemesh/tasks/backlog.yaml:GH-202",
+                    source_url=".stagemesh/tasks/backlog.yaml",
+                ),
+                state="DONE",
+            )
+        )
+        ok = source.sync_outbound(session, "GH-202", "DONE", evidence={"summary": "local"})
+
+    assert ok is True
+    assert client.comments == []
+    assert client.closed == []
+
+
+def test_github_outbound_ignores_foreign_github_owner():
+    client = FakeGitHubClient([])
+    source = GitHubTaskSource(repo="example/repo", client=client)
+    with SessionLocal() as session:
+        session.add(
+            BuildTask(
+                task_id="GH-303",
+                title="Different repo task",
+                description="Must not sync to this repo",
+                acceptance_criteria=["Works"],
+                definition_metadata=source_identity_metadata(
+                    source_type="github",
+                    source_owner="other/repo",
+                    source_ref="303",
+                    source_url="https://github.com/other/repo/issues/303",
+                    legacy={"source_issue_number": 303},
+                ),
+                state="DONE",
+            )
+        )
+        ok = source.sync_outbound(session, "GH-303", "DONE", evidence={"summary": "foreign"})
+
+    assert ok is True
+    assert client.comments == []
+    assert client.closed == []

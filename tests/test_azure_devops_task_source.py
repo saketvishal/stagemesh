@@ -14,6 +14,7 @@ from build_coordinator.project.commands import _optional_task_source
 from build_coordinator.project.definition import ProjectDefinition
 from build_coordinator.service import utcnow
 from build_coordinator.task_source import get_task_source
+from build_coordinator.task_source.base import source_identity_metadata
 from build_coordinator.task_source.azure_devops import AzureDevOpsTaskSource
 
 
@@ -235,6 +236,69 @@ def test_azure_devops_outbound_sends_lifecycle_state_and_evidence_only():
         session.commit()
 
     assert len(client.updates) == 1
+
+
+def test_azure_devops_outbound_ignores_prefix_without_azure_source_identity():
+    client = FakeAzureDevOpsClient([])
+    source = AzureDevOpsTaskSource(
+        organization="https://dev.azure.com/acme",
+        project="mesh",
+        client=client,
+    )
+
+    with SessionLocal() as session:
+        session.add(
+            BuildTask(
+                task_id="ADO-456",
+                title="Local task with Azure-looking id",
+                description="Must not sync to Azure DevOps",
+                acceptance_criteria=["Works"],
+                definition_metadata=source_identity_metadata(
+                    source_type="local",
+                    source_owner="test-proj",
+                    source_ref=".stagemesh/tasks/backlog.yaml:ADO-456",
+                    source_url=".stagemesh/tasks/backlog.yaml",
+                ),
+                state="DONE",
+            )
+        )
+        ok = source.sync_outbound(session, "ADO-456", "DONE", evidence={"summary": "local"})
+        session.commit()
+
+    assert ok is True
+    assert client.updates == []
+
+
+def test_azure_devops_outbound_ignores_foreign_azure_owner():
+    client = FakeAzureDevOpsClient([])
+    source = AzureDevOpsTaskSource(
+        organization="https://dev.azure.com/acme",
+        project="mesh",
+        client=client,
+    )
+
+    with SessionLocal() as session:
+        session.add(
+            BuildTask(
+                task_id="ADO-789",
+                title="Different Azure project task",
+                description="Must not sync to this Azure project",
+                acceptance_criteria=["Works"],
+                definition_metadata=source_identity_metadata(
+                    source_type="azure_devops",
+                    source_owner="https://dev.azure.com/acme/other",
+                    source_ref="789",
+                    source_url="https://dev.azure.com/acme/other/_workitems/edit/789",
+                    legacy={"source_work_item_id": "789"},
+                ),
+                state="DONE",
+            )
+        )
+        ok = source.sync_outbound(session, "ADO-789", "DONE", evidence={"summary": "foreign"})
+        session.commit()
+
+    assert ok is True
+    assert client.updates == []
 
 
 def test_azure_devops_cli_outbound_updates_lifecycle_state_and_discussion(monkeypatch):
