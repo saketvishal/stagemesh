@@ -404,6 +404,7 @@ def handle_continue(args: argparse.Namespace) -> None:
     idle_cycles = 0
     drained_from: str | None = None
     last_escalations: dict[str, str] = {}
+    announced_capacity_waits: set[str] = set()
     for number in range(1, max(1, args.max_cycles) + 1):
         project, config = _reload_project_runtime(project, lifecycle, runner)
         if args.timeout is not None and drained_from is None and time.monotonic() - started > args.timeout:
@@ -435,6 +436,21 @@ def handle_continue(args: argparse.Namespace) -> None:
                 _execution_row(session.get(BuildRunnerExecution, execution_id))
                 for execution_id in result.launched
             ]
+        for change in result.provider_state_changes:
+            print(_provider_state_change_line(project.project_id, change), file=sys.stderr, flush=True)
+        waiting_now = {
+            task_id
+            for task_id, reason in (result.scheduling_reasons or {}).items()
+            if reason == "provider_capacity_wait"
+        }
+        for task_id in sorted(waiting_now - announced_capacity_waits):
+            print(
+                f"[{project.project_id}] {task_id} waiting for provider capacity",
+                file=sys.stderr,
+                flush=True,
+            )
+        announced_capacity_waits.intersection_update(waiting_now)
+        announced_capacity_waits.update(waiting_now)
         for row in launched:
             print(f"[{project.project_id}] {row.get('role', '?').lower()} {row.get('task_id')} on {row.get('worker_id')}", file=sys.stderr, flush=True)
         for item in result.escalations:
@@ -449,6 +465,8 @@ def handle_continue(args: argparse.Namespace) -> None:
                 "observed": list(result.observed),
                 "recovered": list(result.recovered),
                 "escalations": list(result.escalations),
+                "scheduling_reasons": dict(result.scheduling_reasons),
+                "provider_state_changes": list(result.provider_state_changes),
                 "live_builders": len(live_builders),
                 "live_executions": len(live),
             }
@@ -538,6 +556,20 @@ def _provider_capacity_waiting(result) -> bool:
         reason == "provider_capacity_wait"
         for reason in (result.scheduling_reasons or {}).values()
     )
+
+
+def _provider_state_change_line(project_id: str, change: dict[str, Any]) -> str:
+    provider = str(change.get("provider") or change.get("runtime") or "provider")
+    task_id = str(change.get("task_id") or "").strip()
+    prefix = f"[{project_id}]"
+    if task_id:
+        prefix += f" {task_id}"
+    if str(change.get("state") or "").upper() == "AVAILABLE":
+        return f"{prefix} {provider} available again"
+    failure = str(change.get("failure") or "TEMPORARILY_UNAVAILABLE")
+    until = str(change.get("until") or "").strip()
+    suffix = f" until {until}" if until else ""
+    return f"{prefix} {provider} unavailable: {failure}{suffix}"
 
 
 def _continue_human_summary(
