@@ -14,6 +14,11 @@ Those entries are intentionally small, public-alpha friendly, and labeled for
 new contributors only when they do not require private context, provider
 credentials, paid model access, or deep coordinator internals.
 
+Repository labels and superseded issue/PR handling are maintained through the
+[GitHub housekeeping playbook](docs/GITHUB_HOUSEKEEPING.md). In short: link
+duplicates to their canonical issue, preserve discussion, and do not mark work
+validated merely because an implementation exists locally.
+
 For your first contribution:
 
 1. Choose an issue labeled both `good first issue` and `help wanted`.
