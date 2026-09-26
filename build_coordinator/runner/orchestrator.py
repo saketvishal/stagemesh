@@ -75,6 +75,7 @@ from build_coordinator.runner.git_safety import (
     capture_feature_sha,
 )
 from build_coordinator.runner.findings import (
+    comprehensive_reconciliation_missing_ids,
     escalation_evidence as finding_escalation_evidence,
     open_findings,
     record_convergence_generation,
@@ -1158,6 +1159,27 @@ class BuildRunner:
             if verdict.verdict != "REVIEW_ENVIRONMENT_BLOCKED"
             else {}
         )
+        if registry.get("comprehensive_incomplete_ids"):
+            self._review_protocol_blocked(
+                session,
+                execution,
+                verdict,
+                result,
+                reason="COMPREHENSIVE_REVIEW_MISSING_DISPOSITIONS",
+                why_not_remediation=(
+                    "The comprehensive convergence review did not return an "
+                    "explicit disposition for every previously open finding "
+                    f"({', '.join(registry['comprehensive_incomplete_ids'])}), so "
+                    "there is no evidence it is safe to reconcile them; "
+                    "retrying the review rather than clearing the registry."
+                ),
+                transition_reason=(
+                    "review protocol blocked: comprehensive convergence review "
+                    "did not reconcile all prior open findings"
+                ),
+                error="Comprehensive convergence review omitted required finding dispositions",
+            )
+            return
         blockers = [entry["description"] for entry in open_findings(registry)] if registry.get("entries") else list(verdict.findings)
         if execution.claim_id:
             checkpoint(
@@ -4757,6 +4779,14 @@ class BuildRunner:
         prior_convergence = dict((prior_registry.get("convergence") or {}))
         comprehensive_review = bool(prior_convergence.get("pending_comprehensive_review"))
         has_finding_signal = bool(verdict.findings) or bool(verdict.finding_dispositions)
+        if comprehensive_review:
+            missing_ids = comprehensive_reconciliation_missing_ids(
+                prior_registry, verdict.findings, verdict.finding_dispositions
+            )
+            if missing_ids:
+                incomplete = dict(prior_registry)
+                incomplete["comprehensive_incomplete_ids"] = missing_ids
+                return incomplete
         if not has_finding_signal:
             if comprehensive_review and verdict.integration_eligible():
                 registry = reconcile_findings(
