@@ -25,6 +25,7 @@ from build_coordinator.project.backlog import (
     persist_delivery_evidence_in_history,
     sync_backlog,
     task_priorities,
+    verify_delivery_evidence,
 )
 from build_coordinator.project.definition import (
     ProjectError,
@@ -597,6 +598,170 @@ def test_governed_integration_records_evidence_then_fresh_sync_launches_zero_exe
             assert fresh.scalars(select(BuildRunnerExecution)).all() == []
     finally:
         fresh_lifecycle.dispose()
+
+
+def test_persist_delivery_evidence_committed_to_head_returns_safe_unchanged(tmp_path):
+    root = write_project(tmp_path / "repo", tasks={"A-1": {}})
+    git(root, "init", "-b", "main")
+    git(root, "add", ".")
+    git(root, "commit", "-m", "init")
+    sha = git(root, "rev-parse", "HEAD")
+
+    project = load_project(root)
+    definitions = load_backlog(project)
+    first = persist_delivery_evidence_in_history(root, definitions, "A-1", sha=sha, version="v1")
+    assert first["status"] == "COMMITTED"
+    assert first["changed"] is True
+    evidence_commit = git(root, "rev-parse", "HEAD")
+
+    second = persist_delivery_evidence_in_history(root, definitions, "A-1", sha=sha, version="v1")
+    assert second["status"] == "UNCHANGED"
+    assert second["changed"] is False
+    assert second["evidence_commit"] == evidence_commit
+    assert git(root, "rev-parse", "HEAD") == evidence_commit
+
+
+def test_persist_delivery_evidence_uncommitted_worktree_does_not_return_unchanged(tmp_path):
+    root = write_project(tmp_path / "repo", tasks={"A-1": {}})
+    git(root, "init", "-b", "main")
+    git(root, "add", ".")
+    git(root, "commit", "-m", "init")
+    sha = git(root, "rev-parse", "HEAD")
+
+    data = yaml.safe_load((root / ".stagemesh" / "tasks" / "backlog.yaml").read_text(encoding="utf-8"))
+    data["tasks"][0]["delivered_by"] = {"sha": sha, "version": "v1"}
+    (root / ".stagemesh" / "tasks" / "backlog.yaml").write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+
+    project = load_project(root)
+    definitions = load_backlog(project)
+    result = persist_delivery_evidence_in_history(root, definitions, "A-1", sha=sha, version="v1")
+    assert result["status"] != "UNCHANGED"
+    assert result["status"] == "COMMITTED"
+    assert result["changed"] is True
+    assert git(root, "rev-parse", "HEAD") == result["evidence_commit"]
+    assert "Record delivery evidence for A-1" in git(root, "log", "-1", "--pretty=%s")
+
+
+def test_persist_delivery_evidence_commit_failure_then_retry(tmp_path, monkeypatch):
+    root = write_project(tmp_path / "repo", tasks={"A-1": {}})
+    git(root, "init", "-b", "main")
+    git(root, "add", ".")
+    git(root, "commit", "-m", "init")
+    sha = git(root, "rev-parse", "HEAD")
+
+    project = load_project(root)
+    definitions = load_backlog(project)
+
+    real_run = subprocess.run
+
+    def failing_commit_run(args, *pargs, **kwargs):
+        if isinstance(args, list) and "commit" in args:
+            return subprocess.CompletedProcess(args, 1, stdout="", stderr="simulated commit hook failure")
+        return real_run(args, *pargs, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", failing_commit_run)
+    failed = persist_delivery_evidence_in_history(root, definitions, "A-1", sha=sha, version="v1")
+    assert failed["status"] == "COMMIT_FAILED"
+    assert "simulated commit hook failure" in failed["detail"]
+    assert git(root, "rev-parse", "HEAD") == sha
+
+    monkeypatch.setattr(subprocess, "run", real_run)
+    retried = persist_delivery_evidence_in_history(root, definitions, "A-1", sha=sha, version="v1")
+    assert retried["status"] != "UNCHANGED"
+    assert retried["status"] == "COMMITTED"
+    assert retried["changed"] is True
+    assert git(root, "rev-parse", "HEAD") == retried["evidence_commit"]
+    assert "Record delivery evidence for A-1" in git(root, "log", "-1", "--pretty=%s")
+
+
+def test_persist_delivery_evidence_push_failure_then_retry(tmp_path, monkeypatch):
+    remote = tmp_path / "remote.git"
+    git(tmp_path, "init", "--bare", "-b", "main", str(remote))
+    root = write_project(tmp_path / "repo", tasks={"A-1": {}})
+    git(root, "init", "-b", "main")
+    git(root, "remote", "add", "origin", str(remote))
+    git(root, "add", ".")
+    git(root, "commit", "-m", "init")
+    git(root, "push", "-u", "origin", "main")
+    sha = git(root, "rev-parse", "HEAD")
+
+    project = load_project(root)
+    definitions = load_backlog(project)
+
+    monkeypatch.setattr(
+        "build_coordinator.project.backlog.push_branch",
+        lambda *args, **kwargs: (False, "network failure connecting to remote"),
+    )
+    failed = persist_delivery_evidence_in_history(
+        root, definitions, "A-1", sha=sha, version="v1", push_remote="origin"
+    )
+    assert failed["status"] == "PUSH_FAILED"
+    assert failed["push_status"] == "FAILED"
+    assert "network failure" in failed["detail"]
+    local_head = git(root, "rev-parse", "HEAD")
+    remote_head = git(remote, "rev-parse", "main")
+    assert local_head != remote_head
+
+    monkeypatch.undo()
+    retried = persist_delivery_evidence_in_history(
+        root, definitions, "A-1", sha=sha, version="v1", push_remote="origin"
+    )
+    assert retried["status"] != "PUSH_FAILED"
+    assert retried["push_status"] == "PUSHED"
+    assert git(remote, "rev-parse", "main") == retried["evidence_commit"]
+
+    subsequent = persist_delivery_evidence_in_history(
+        root, definitions, "A-1", sha=sha, version="v1", push_remote="origin"
+    )
+    assert subsequent["status"] == "UNCHANGED"
+    assert subsequent["changed"] is False
+    assert subsequent["push_status"] == "PUSHED"
+
+
+def test_persist_delivery_evidence_successful_retry_produces_durable_evidence(tmp_path, monkeypatch):
+    root = write_project(tmp_path / "repo", tasks={"A-1": {}})
+    git(root, "init", "-b", "main")
+    git(root, "add", ".")
+    git(root, "commit", "-m", "init")
+    sha = git(root, "rev-parse", "HEAD")
+
+    project = load_project(root)
+    definitions = load_backlog(project)
+
+    real_run = subprocess.run
+
+    def failing_commit_run(args, *pargs, **kwargs):
+        if isinstance(args, list) and "commit" in args:
+            return subprocess.CompletedProcess(args, 1, stdout="", stderr="disk error")
+        return real_run(args, *pargs, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", failing_commit_run)
+    failed = persist_delivery_evidence_in_history(root, definitions, "A-1", sha=sha, version="v1")
+    assert failed["status"] == "COMMIT_FAILED"
+
+    monkeypatch.setattr(subprocess, "run", real_run)
+    retried = persist_delivery_evidence_in_history(root, definitions, "A-1", sha=sha, version="v1")
+    assert retried["status"] == "COMMITTED"
+
+    clone = tmp_path / "clone"
+    git(tmp_path, "clone", str(root), str(clone))
+    cloned_project = load_project(clone)
+    cloned_definitions = load_backlog(cloned_project)
+    verification = verify_delivery_evidence(clone, cloned_definitions[0])
+    assert verification["status"] == "VERIFIED"
+    assert verification["sha"] == sha
+
+    lifecycle = DatabaseLifecycle(f"sqlite:///{(tmp_path / 'fresh.sqlite3').as_posix()}", data_dir=tmp_path / "fresh")
+    lifecycle.initialize_schema()
+    try:
+        with lifecycle.session() as fresh:
+            report = sync_backlog(fresh, cloned_project, cloned_definitions)
+            fresh.commit()
+            assert report.counts() == {"RECONCILED": 1}
+            assert fresh.get(BuildTask, "A-1").state == "DONE"
+            assert fresh.scalars(select(BuildRunnerExecution)).all() == []
+    finally:
+        lifecycle.dispose()
 
 
 # ---------------------------------------------------------------- legacy state
