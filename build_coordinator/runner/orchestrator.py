@@ -1772,6 +1772,14 @@ class BuildRunner:
                 )
             )
             if failure in PROVIDER_FAILURES:
+                provider_was_unavailable = (
+                    capacity_failure
+                    and _provider_capacity_is_active(
+                        session,
+                        execution.provider,
+                        now=_now(),
+                    )
+                )
                 unavailable_until = _provider_unavailable_until(
                     merged,
                     fallback_seconds=backoff_seconds,
@@ -1800,7 +1808,7 @@ class BuildRunner:
                         },
                     ),
                 )
-                if capacity_failure:
+                if capacity_failure and not provider_was_unavailable:
                     result.provider_state_changes.append(
                         {
                             "state": "UNAVAILABLE",
@@ -1922,6 +1930,14 @@ class BuildRunner:
             )
         )
         if failure in PROVIDER_FAILURES:
+            provider_was_unavailable = (
+                capacity_failure
+                and _provider_capacity_is_active(
+                    session,
+                    execution.provider,
+                    now=_now(),
+                )
+            )
             unavailable_until = _provider_unavailable_until(
                 merged,
                 fallback_seconds=backoff_seconds,
@@ -1950,7 +1966,44 @@ class BuildRunner:
                     },
                 ),
             )
-            if capacity_failure:
+        if failure in PROVIDER_FAILURES:
+            provider_was_unavailable = (
+                capacity_failure
+                and _provider_capacity_is_active(
+                    session,
+                    execution.provider,
+                    now=_now(),
+                )
+            )
+            unavailable_until = _provider_unavailable_until(
+                merged,
+                fallback_seconds=backoff_seconds,
+            )
+            record_event(
+                session,
+                EventInput(
+                    task_id=execution.task_id,
+                    event_type="runner.provider_failure",
+                    actor="runner",
+                    event_data={
+                        "provider": execution.provider,
+                        "worker_id": execution.worker_id,
+                        "runtime": next(
+                                (
+                                    worker.runtime
+                                    for worker in self._config.workers
+                                    if worker.worker_id == execution.worker_id
+                                ),
+                                None,
+                            ),
+                        "failure": failure,
+                        "until": unavailable_until.isoformat(),
+                        "provider_reset_at": merged.get("provider_reset_at"),
+                        "detail": str(merged.get("detail") or "")[:300],
+                    },
+                ),
+            )
+            if capacity_failure and not provider_was_unavailable:
                 result.provider_state_changes.append(
                     {
                         "state": "UNAVAILABLE",
@@ -5322,6 +5375,33 @@ class BuildRunner:
 
 
 _PROVIDER_CAPACITY_FAILURES = frozenset({"RATE_LIMITED", "QUOTA_EXHAUSTED"})
+
+
+def _provider_capacity_is_active(
+    session: Session,
+    provider: str | None,
+    *,
+    now: datetime | None = None,
+) -> bool:
+    if not provider:
+        return False
+    now = now or _now()
+    rows = session.scalars(
+        select(BuildTaskEvent).where(BuildTaskEvent.event_type == "runner.provider_failure")
+    ).all()
+    for row in rows:
+        data = row.event_data or {}
+        if str(data.get("provider") or "") != str(provider):
+            continue
+        if str(data.get("failure") or "").upper() not in _PROVIDER_CAPACITY_FAILURES:
+            continue
+        try:
+            until = datetime.fromisoformat(str(data.get("until")))
+        except (TypeError, ValueError):
+            continue
+        if until > now:
+            return True
+    return False
 
 
 def _provider_unavailable_until(
