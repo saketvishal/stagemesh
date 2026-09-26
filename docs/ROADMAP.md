@@ -77,6 +77,39 @@ The initial standalone release of StageMesh. All items below are
 
 > Items below are explicitly deferred from the current roadmap cut.
 
+### Evidence-based policy learning with operator approval
+
+StageMesh may use accumulated execution evidence to propose routing/policy
+improvements after 1.0. The initial implementation is intentionally a proposal
+and audit/reporting boundary, not a self-modifying policy engine.
+
+The proposal model is:
+
+- collect normalized evidence for provider/runtime success and failure rates,
+  latency, remediation frequency, review outcomes, capability fit, trustworthy
+  cost data, task/risk class, and environment/platform compatibility;
+- produce explainable candidate changes, limited initially to routing preference
+  recommendations over the existing deterministic policy inputs;
+- evaluate proposals against held-out historical evidence or controlled
+  experiments before an operator considers them;
+- require explicit operator approval before any enforced policy changes;
+- version the proposed policy and preserve rollback/audit metadata.
+
+Guardrails:
+
+- no autonomous self-modifying routing policy in the stabilization/current
+  implementation;
+- no black-box LLM provider choice: recommendations are derived from structured
+  evidence summaries and deterministic ranking;
+- learned preferences may never weaken review, security, capability, or
+  permission requirements;
+- sparse data is labeled as limited evidence and is not presented as a strong
+  recommendation.
+
+This builds on #49 evidence-driven routing and future cost/usage telemetry.
+The inert implementation boundary lives in `build_coordinator/policy_learning.py`;
+the coordinator runner does not import it to enforce policy.
+
 ### Bounded multi-model deliberation and council workflows
 
 Optional deliberation may be explored for decisions where several independent
