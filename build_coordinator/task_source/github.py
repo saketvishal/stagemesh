@@ -1096,7 +1096,7 @@ class GitHubTaskSource(TaskSource):
                 session,
                 entity_id,
                 issue_number,
-                state="DONE" if should_close else label,
+                state=synced_state,
                 is_objective=is_objective,
             )
             return True
