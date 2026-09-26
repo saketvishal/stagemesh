@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+
+_TESTS = str(Path(__file__).parent.resolve())
 _ROOT = str(Path(__file__).parent.parent.resolve())
-if sys.path[0] != _ROOT:
+if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
+if _TESTS not in sys.path:
+    sys.path.insert(0, _TESTS)
 
 """Test-suite-wide database isolation.
 
@@ -18,7 +22,7 @@ database.
 an operator's shell can't reintroduce a dependency on real coordinator config
 during the test run.
 """
-from tests._state_isolation import configure_isolated_test_state
+from _state_isolation import configure_isolated_test_state
 
 configure_isolated_test_state()
 
