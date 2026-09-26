@@ -11,7 +11,7 @@ import pytest
 from sqlalchemy import delete, select
 from sqlalchemy.exc import OperationalError
 
-from build_coordinator.db import Base, SessionLocal, engine, initialize_schema
+from build_coordinator.db import Base, DatabaseBusyError, SessionLocal, engine, initialize_schema
 from build_coordinator.execution import ExecutionHandle, ExecutionObservation, FakeExecutor
 from build_coordinator.events import record_event
 from build_coordinator.models import (
@@ -151,15 +151,87 @@ def test_persistence_failure_after_external_launch_does_not_relaunch(monkeypatch
 
     executor = RunningExecutor()
     monkeypatch.setattr(orchestrator_module, "record_event", flaky_record_event)
-    with pytest.raises(OperationalError):
-        _runner(executors={"builder-a": executor}).run_once()
 
     result = _runner(executors={"builder-a": executor}).run_once()
-    assert result.launched == []
+    assert len(result.launched) == 1
     assert len(executor.launches) == 1
     with SessionLocal() as session:
         rows = session.scalars(select(BuildRunnerExecution).where(BuildRunnerExecution.task_id == "GH-101")).all()
         assert len(rows) == 1
+        assert rows[0].process_id == "1234"
+
+
+def test_launch_exception_releases_claim_and_does_not_leave_live_execution():
+    class FailingLaunchExecutor:
+        adapter_name = "failing-launch-test"
+
+        def __init__(self) -> None:
+            self.launches = 0
+
+        def launch(self, launch):
+            self.launches += 1
+            raise RuntimeError("spawn failed")
+
+        def poll(self, execution_id: str) -> ExecutionObservation:
+            return ExecutionObservation(status="RUNNING")
+
+        def terminate(self, execution_id: str) -> ExecutionObservation:
+            return ExecutionObservation(status="TERMINATED")
+
+    with SessionLocal() as session:
+        upsert_task(session, _task("GH-101-LAUNCH"))
+        session.commit()
+
+    executor = FailingLaunchExecutor()
+    result = _runner(executors={"builder-a": executor}).run_once()
+
+    assert result.launched == []
+    assert executor.launches == 1
+    with SessionLocal() as session:
+        task = session.get(BuildTask, "GH-101-LAUNCH")
+        claim = session.scalar(select(BuildTaskClaim).where(BuildTaskClaim.task_id == "GH-101-LAUNCH"))
+        row = session.scalar(select(BuildRunnerExecution).where(BuildRunnerExecution.task_id == "GH-101-LAUNCH"))
+        assert task.state == "READY"
+        assert claim.status == "RELEASED"
+        assert row.status == "FAILED"
+        assert row.process_id is None
+        assert row.result_data["launch_failure"] == "spawn failed"
+
+
+def test_post_launch_sqlite_retry_exhaustion_is_typed_without_duplicate_launch(monkeypatch):
+    class RunningExecutor:
+        adapter_name = "running-test"
+
+        def __init__(self) -> None:
+            self.launches = []
+
+        def launch(self, launch):
+            self.launches.append(launch)
+            return ExecutionHandle(execution_id=launch.execution_id, process_id="1234", result_path=launch.result_path)
+
+        def poll(self, execution_id: str) -> ExecutionObservation:
+            return ExecutionObservation(status="RUNNING")
+
+        def terminate(self, execution_id: str) -> ExecutionObservation:
+            return ExecutionObservation(status="TERMINATED")
+
+    with SessionLocal() as session:
+        upsert_task(session, _task("GH-101-BUSY"))
+        session.commit()
+
+    original_record_event = orchestrator_module.record_event
+
+    def always_locked(session, event):
+        if event.event_type == "runner.execution_launched":
+            raise OperationalError("UPDATE build_runner_executions", None, Exception("database is locked"))
+        return original_record_event(session, event)
+
+    executor = RunningExecutor()
+    monkeypatch.setattr(orchestrator_module, "record_event", always_locked)
+
+    with pytest.raises(DatabaseBusyError, match="STAGEMESH_SQLITE_BUSY"):
+        _runner(executors={"builder-a": executor}).run_once()
+    assert len(executor.launches) == 1
 
 
 def _config(*, auto_push=False, remediation_cycles=2):

@@ -272,6 +272,9 @@ class DatabaseBusyError(RuntimeError):
     than a silent crash.
     """
 
+    def __str__(self) -> str:
+        return f"STAGEMESH_SQLITE_BUSY: {self.args[0]}" if self.args else "STAGEMESH_SQLITE_BUSY"
+
 
 def _is_transient_sqlite_lock_error(exc: OperationalError) -> bool:
     message = str(getattr(exc, "orig", exc)).lower()

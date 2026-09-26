@@ -46,8 +46,27 @@ def test_raises_database_busy_error_after_exhausting_attempts():
     def fn():
         raise _operational_error("database is locked")
 
-    with pytest.raises(DatabaseBusyError):
+    with pytest.raises(DatabaseBusyError, match="STAGEMESH_SQLITE_BUSY") as exc_info:
         with_sqlite_retry(fn, attempts=3, base_delay=0.0)
+    assert str(exc_info.value).startswith("STAGEMESH_SQLITE_BUSY:")
+
+
+def test_cli_reports_database_busy_as_typed_diagnostic(monkeypatch):
+    import sys
+
+    import build_coordinator.cli as cli
+    import build_coordinator.project.commands as project_commands
+
+    def busy(_args):
+        raise DatabaseBusyError("SQLite write contention persisted after 1 attempts")
+
+    monkeypatch.setattr(project_commands, "handle_continue", busy)
+    monkeypatch.setattr(sys, "argv", ["stagemesh", "continue", "fixture"])
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main()
+
+    assert str(exc_info.value).startswith("STAGEMESH_SQLITE_BUSY:")
 
 
 def test_non_lock_operational_error_propagates_without_retry():
