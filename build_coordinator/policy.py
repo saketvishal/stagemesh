@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from build_coordinator.models import COORDINATOR_MODES, REVIEW_POLICIES, TASK_STATES
 
 CLAIMABLE_STATES = frozenset({"READY", "STALE", "RESUMABLE", "REWORK_REQUIRED"})
@@ -37,6 +39,51 @@ class CoordinatorCapacityError(CoordinatorPolicyError):
     """Raised when active builder capacity is reached."""
 
 
+@dataclass(frozen=True)
+class ReviewPolicySpec:
+    """Deterministic review governance semantics.
+
+    `required_approvals` is the count of eligible GREEN/GREEN_WITH_NOTES
+    approvals required for the exact feature SHA. Worker/provider independence
+    are deliberately separate so cross-worker and cross-provider governance are
+    not conflated.
+    """
+
+    policy: str
+    required_approvals: int
+    independent_worker: bool = False
+    independent_provider: bool = False
+
+
+def normalize_review_policy(review_policy: str) -> str:
+    value = str(review_policy).strip().upper()
+    if value == "INDEPENDENT":
+        return "INDEPENDENT_WORKER"
+    return value
+
+
+def review_policy_spec(review_policy: str) -> ReviewPolicySpec:
+    policy = normalize_review_policy(review_policy)
+    require_valid_review_policy(policy)
+    specs = {
+        "NONE": ReviewPolicySpec("NONE", 0),
+        "SELF": ReviewPolicySpec("SELF", 1),
+        "INDEPENDENT_WORKER": ReviewPolicySpec(
+            "INDEPENDENT_WORKER", 1, independent_worker=True
+        ),
+        "INDEPENDENT_PROVIDER": ReviewPolicySpec(
+            "INDEPENDENT_PROVIDER", 1, independent_provider=True
+        ),
+        "TWO_REVIEWERS": ReviewPolicySpec(
+            "TWO_REVIEWERS", 2, independent_worker=True
+        ),
+        "TWO_PROVIDERS": ReviewPolicySpec(
+            "TWO_PROVIDERS", 2, independent_provider=True
+        ),
+    }
+    return specs[policy]
+
+
 def require_valid_mode(mode: str) -> None:
     if mode not in COORDINATOR_MODES:
         raise CoordinatorPolicyError(f"Invalid coordinator mode: {mode}")
@@ -64,10 +111,9 @@ def require_transition(from_state: str, to_state: str) -> None:
 
 
 def review_required(review_policy: str) -> bool:
-    require_valid_review_policy(review_policy)
-    return review_policy in {"SELF", "INDEPENDENT", "TWO_REVIEWERS"}
+    return review_policy_spec(review_policy).required_approvals > 0
 
 
 def independent_review_required(review_policy: str) -> bool:
-    require_valid_review_policy(review_policy)
-    return review_policy in {"INDEPENDENT", "TWO_REVIEWERS"}
+    spec = review_policy_spec(review_policy)
+    return spec.independent_worker or spec.independent_provider

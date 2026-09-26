@@ -29,7 +29,15 @@ TASK_STATES = (
     "RESUMABLE",
     "DONE",
 )
-REVIEW_POLICIES = ("NONE", "SELF", "INDEPENDENT", "TWO_REVIEWERS")
+REVIEW_POLICIES = (
+    "NONE",
+    "SELF",
+    "INDEPENDENT",
+    "INDEPENDENT_WORKER",
+    "INDEPENDENT_PROVIDER",
+    "TWO_REVIEWERS",
+    "TWO_PROVIDERS",
+)
 RISK_LEVELS = ("LOW", "MEDIUM", "HIGH", "CRITICAL")
 CLAIM_TYPES = ("IMPLEMENTATION", "REVIEW", "INTEGRATION")
 CLAIM_STATUSES = ("ACTIVE", "RELEASED", "EXPIRED", "COMPLETED")
@@ -76,7 +84,8 @@ class BuildTask(Base):
             name="chk_build_tasks_state",
         ),
         CheckConstraint(
-            "review_policy IN ('NONE','SELF','INDEPENDENT','TWO_REVIEWERS')",
+            "review_policy IN ('NONE','SELF','INDEPENDENT','INDEPENDENT_WORKER',"
+            "'INDEPENDENT_PROVIDER','TWO_REVIEWERS','TWO_PROVIDERS')",
             name="chk_build_tasks_review_policy",
         ),
         CheckConstraint(

@@ -28,13 +28,22 @@ from build_coordinator.project.definition import (
     ProjectError,
     read_yaml,
 )
+from build_coordinator.policy import normalize_review_policy
 from build_coordinator.service import transition_task, upsert_task
 from build_coordinator.task_source.base import SyncResult
 from build_coordinator.types import EventInput, TaskSpec
 
 SYNC_EVENT = "task.definition_synced"
 _TASK_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$")
-_REVIEW_POLICIES = ("NONE", "SELF", "INDEPENDENT", "TWO_REVIEWERS")
+_REVIEW_POLICIES = (
+    "NONE",
+    "SELF",
+    "INDEPENDENT",
+    "INDEPENDENT_WORKER",
+    "INDEPENDENT_PROVIDER",
+    "TWO_REVIEWERS",
+    "TWO_PROVIDERS",
+)
 _RISK_LEVELS = ("LOW", "MEDIUM", "HIGH", "CRITICAL")
 _KNOWN_KEYS = frozenset(
     {
@@ -249,7 +258,7 @@ def _definition_from_mapping(
     if not isinstance(priority, int) or isinstance(priority, bool):
         local.append("`priority` must be an integer (lower runs earlier)")
         priority = 100
-    review = str(data.get("review") or project.default_review_policy).upper()
+    review = normalize_review_policy(str(data.get("review") or project.default_review_policy).upper())
     if review not in _REVIEW_POLICIES:
         local.append(f"`review` must be one of {_REVIEW_POLICIES}")
     risk = str(data.get("risk") or "MEDIUM").upper()
@@ -445,14 +454,14 @@ def sync_backlog(
                 )
             )
             continue
-        if definition.review_policy == "TWO_REVIEWERS" and project.reviewers < 2:
+        if definition.review_policy in {"TWO_REVIEWERS", "TWO_PROVIDERS"} and project.reviewers < 2:
             report.results.append(
                 SyncResult(
                     definition.task_id,
                     definition.title,
                     "ERROR",
                     definition.source,
-                    "review TWO_REVIEWERS needs execution.reviewers >= 2 in project.yaml",
+                    f"review {definition.review_policy} needs execution.reviewers >= 2 in project.yaml",
                 )
             )
             continue
