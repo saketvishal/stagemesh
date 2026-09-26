@@ -189,6 +189,7 @@ class RunnerCycleResult:
     objectives_completed: list[str] = field(default_factory=list)
     outbound_synced: list[str] = field(default_factory=list)
     scheduling_reasons: dict[str, str] = field(default_factory=dict)
+    provider_state_changes: list[dict[str, Any]] = field(default_factory=list)
     steward: dict[str, Any] = field(default_factory=dict)
 
 
@@ -276,6 +277,7 @@ class BuildRunner:
             if task.task_id not in result.recovered:
                 result.recovered.append(task.task_id)
         self._reconcile_git_reality(session, result)
+        self._reconcile_provider_capacity_transitions(session, result)
         self._recover_diagnosed_blockers(session, result)
         self._run_steward_maintenance(session, result)
         result.observed = self._reconcile_active(session, result)
@@ -1770,6 +1772,10 @@ class BuildRunner:
                 )
             )
             if failure in PROVIDER_FAILURES:
+                unavailable_until = _provider_unavailable_until(
+                    merged,
+                    fallback_seconds=backoff_seconds,
+                )
                 record_event(
                     session,
                     EventInput(
@@ -1779,12 +1785,31 @@ class BuildRunner:
                         event_data={
                             "provider": execution.provider,
                             "worker_id": execution.worker_id,
+                            "runtime": execution.runtime,
                             "failure": failure,
-                            "until": (_now() + timedelta(seconds=backoff_seconds)).isoformat(),
+                            "until": unavailable_until.isoformat(),
+                            "provider_reset_at": merged.get("provider_reset_at"),
                             "detail": str(merged.get("detail") or "")[:300],
                         },
                     ),
                 )
+                if capacity_failure:
+                    result.provider_state_changes.append(
+                        {
+                            "state": "UNAVAILABLE",
+                            "task_id": execution.task_id,
+                            "provider": execution.provider,
+                            "runtime": execution.runtime,
+                            "worker_id": execution.worker_id,
+                            "failure": failure,
+                            "until": unavailable_until.isoformat(),
+                            "reset_source": (
+                                "provider"
+                                if merged.get("provider_reset_at")
+                                else "fallback"
+                            ),
+                        }
+                    )
             execution.status = "LOST"
             execution.completed_at = _now()
             execution.result_data = {
@@ -1883,6 +1908,10 @@ class BuildRunner:
             )
         )
         if failure in PROVIDER_FAILURES:
+            unavailable_until = _provider_unavailable_until(
+                merged,
+                fallback_seconds=backoff_seconds,
+            )
             record_event(
                 session,
                 EventInput(
@@ -1892,12 +1921,31 @@ class BuildRunner:
                     event_data={
                         "provider": execution.provider,
                         "worker_id": execution.worker_id,
+                        "runtime": execution.runtime,
                         "failure": failure,
-                        "until": (_now() + timedelta(seconds=backoff_seconds)).isoformat(),
+                        "until": unavailable_until.isoformat(),
+                        "provider_reset_at": merged.get("provider_reset_at"),
                         "detail": str(merged.get("detail") or "")[:300],
                     },
                 ),
             )
+            if capacity_failure:
+                result.provider_state_changes.append(
+                    {
+                        "state": "UNAVAILABLE",
+                        "task_id": execution.task_id,
+                        "provider": execution.provider,
+                        "runtime": execution.runtime,
+                        "worker_id": execution.worker_id,
+                        "failure": failure,
+                        "until": unavailable_until.isoformat(),
+                        "reset_source": (
+                            "provider"
+                            if merged.get("provider_reset_at")
+                            else "fallback"
+                        ),
+                    }
+                )
         execution.status = "LOST"
         execution.completed_at = _now()
         execution.result_data = {
@@ -2833,6 +2881,76 @@ class BuildRunner:
                     **(row.result_data or {}),
                     "process_tree_reaped": True,
                 }
+
+    def _reconcile_provider_capacity_transitions(
+        self,
+        session: Session,
+        result: RunnerCycleResult,
+    ) -> None:
+        """Record one provider re-entry event when a capacity window expires."""
+        now = _now()
+        failures = session.scalars(
+            select(BuildTaskEvent)
+            .where(BuildTaskEvent.event_type == "runner.provider_failure")
+            .order_by(BuildTaskEvent.created_at.desc())
+        ).all()
+        recovered = session.scalars(
+            select(BuildTaskEvent)
+            .where(BuildTaskEvent.event_type == "runner.provider_recovered")
+            .order_by(BuildTaskEvent.created_at.desc())
+        ).all()
+        latest_recovery_by_provider: dict[str, BuildTaskEvent] = {}
+        for event in recovered:
+            provider = str((event.event_data or {}).get("provider") or "")
+            if provider and provider not in latest_recovery_by_provider:
+                latest_recovery_by_provider[provider] = event
+
+        seen: set[str] = set()
+        for event in failures:
+            data = event.event_data or {}
+            provider = str(data.get("provider") or "")
+            failure = str(data.get("failure") or "").upper()
+            if not provider or provider in seen or failure not in _PROVIDER_CAPACITY_FAILURES:
+                continue
+            seen.add(provider)
+            try:
+                until = datetime.fromisoformat(str(data.get("until")))
+            except (TypeError, ValueError):
+                continue
+            if until > now:
+                continue
+            prior_recovery = latest_recovery_by_provider.get(provider)
+            if (
+                prior_recovery is not None
+                and prior_recovery.created_at is not None
+                and event.created_at is not None
+                and prior_recovery.created_at >= event.created_at
+            ):
+                continue
+            payload = {
+                "provider": provider,
+                "runtime": data.get("runtime"),
+                "worker_id": data.get("worker_id"),
+                "prior_failure": failure,
+                "available_at": now.isoformat(),
+                "prior_until": until.isoformat(),
+            }
+            record_event(
+                session,
+                EventInput(
+                    task_id=event.task_id,
+                    event_type="runner.provider_recovered",
+                    actor="runner",
+                    event_data=payload,
+                ),
+            )
+            result.provider_state_changes.append(
+                {
+                    "state": "AVAILABLE",
+                    "task_id": event.task_id,
+                    **payload,
+                }
+            )
 
     def provider_capacity_recheck_seconds(self, *, fallback_seconds: float = 30.0) -> float:
         """Return a bounded sleep before rechecking temporary provider capacity."""
@@ -5176,6 +5294,25 @@ class BuildRunner:
 
 
 _PROVIDER_CAPACITY_FAILURES = frozenset({"RATE_LIMITED", "QUOTA_EXHAUSTED"})
+
+
+def _provider_unavailable_until(
+    merged: dict[str, Any],
+    *,
+    fallback_seconds: float,
+) -> datetime:
+    reset_at = merged.get("provider_reset_at")
+    if reset_at:
+        try:
+            parsed = datetime.fromisoformat(str(reset_at).replace("Z", "+00:00"))
+        except ValueError:
+            parsed = None
+        if parsed is not None:
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=UTC)
+            if parsed > _now():
+                return parsed.astimezone(UTC)
+    return _now() + timedelta(seconds=fallback_seconds)
 
 
 def _provider_capacity_failure_from_block_reason(reason: str) -> str | None:
