@@ -78,13 +78,18 @@ def run_validation(
         except subprocess.TimeoutExpired as exc:
             exit_code = 124
             output = f"timed out after {timeout_seconds}s\n" + str(exc.stdout or "")[-500:]
+            failure_type = "TIMEOUT"
         except (OSError, ValueError) as exc:
             exit_code = 127
             output = f"could not run command: {exc}"
+            failure_type = "COMMAND_UNAVAILABLE"
+        else:
+            failure_type = "EXIT_CODE" if exit_code != 0 else None
         outcome.results.append(
             {
                 "command": command,
                 "exit_code": exit_code,
+                "failure_type": failure_type,
                 "duration_seconds": round(time.monotonic() - started, 2),
                 "output_tail": output[-OUTPUT_TAIL_CHARS:],
             }
@@ -197,6 +202,7 @@ class ValidationExecutor:
                 {
                     "command": command,
                     "exit_code": 127,
+                    "failure_type": "COMMAND_UNAVAILABLE",
                     "duration_seconds": round(time.monotonic() - started, 2),
                     "output_tail": f"could not run command: {exc}"[-OUTPUT_TAIL_CHARS:],
                 }
@@ -220,6 +226,7 @@ class ValidationExecutor:
             {
                 "command": command,
                 "exit_code": exit_code,
+                "failure_type": "TIMEOUT" if exit_code == 124 else ("EXIT_CODE" if exit_code != 0 else None),
                 "duration_seconds": round(time.monotonic() - started, 2),
                 "output_tail": output[-OUTPUT_TAIL_CHARS:],
             }

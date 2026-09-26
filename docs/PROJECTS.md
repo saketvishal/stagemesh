@@ -72,7 +72,13 @@ execution:
   concurrency: 3               # parallel builders (1..32)
   reviewers: 1
   default_review_policy: INDEPENDENT
-  setup: [npm install, pip install -r requirements.txt]  # optional; see below
+  bootstrap:                   # optional workspace preparation; see below
+    timeout_seconds: 900
+    required_tools: [npm, python]
+    commands:
+      - npm install
+      - command: python -m pip install -r requirements.txt
+        timeout_seconds: 300
 workers:                       # templates, expanded into builder-1..N, reviewer-1, integration-1
   builder:
     provider: local-agent
@@ -85,6 +91,20 @@ workers:                       # templates, expanded into builder-1..N, reviewer
 task_sources:                  # optional adapters; off unless enabled
   github: {enabled: false, repo: owner/name}
 ```
+
+`execution.bootstrap` is optional project-owned workspace preparation.
+StageMesh runs its commands in order once per prepared task workspace, without
+a shell, before the agent starts and separately from task validation commands.
+Each command records durable `runner.setup` evidence with output tails,
+duration, exit code, and failure type (`TIMEOUT`, `COMMAND_UNAVAILABLE`, or
+`EXIT_CODE`). A failing bootstrap command blocks the task (`SETUP_FAILED`)
+instead of launching the agent. `stagemesh doctor` checks declared
+`required_tools` and command executables so missing local tools are visible
+before dispatch.
+
+For compatibility, `execution.setup: [cmd, ...]` remains accepted as shorthand
+for bootstrap commands. Prefer `execution.bootstrap` for new projects because
+it can declare required tools and per-command timeouts.
 
 `execution.setup` is an optional list of commands StageMesh runs once (no
 shell, with a timeout and durable evidence recorded as a `runner.setup`

@@ -229,6 +229,7 @@ class RunnerConfig:
     run_validation: bool = True
     validation_timeout_seconds: float = 900.0
     setup_commands: tuple[str, ...] = ()
+    bootstrap_commands: tuple[dict[str, Any], ...] = ()
     max_execution_attempts: int = 3
     max_conflict_recovery_attempts: int = 2
     cleanup_branches: bool = False
@@ -394,6 +395,7 @@ class RunnerConfig:
             run_validation=bool(data.get("run_validation", True)),
             validation_timeout_seconds=float(data.get("validation_timeout_seconds", 900.0)),
             setup_commands=tuple(data.get("setup_commands") or ()),
+            bootstrap_commands=tuple(dict(item) for item in (data.get("bootstrap_commands") or ())),
             max_execution_attempts=int(data.get("max_execution_attempts", 3)),
             max_conflict_recovery_attempts=int(data.get("max_conflict_recovery_attempts", 2)),
             cleanup_branches=bool(data.get("cleanup_branches", False)),

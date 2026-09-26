@@ -3092,13 +3092,14 @@ class BuildRunner:
         return bool(norm_wt and norm_wt in active_worktrees(session, _now()))
 
     def _run_task_setup(self, session: Session, task: BuildTask, worker: WorkerConfig) -> bool:
-        """Run the project's `execution.setup` commands once per prepared task
+        """Run the project's bootstrap commands once per prepared task
         workspace, before the agent starts. The outcome, recorded as durable
         evidence, gates whether the task may launch."""
-        commands = list(self._config.setup_commands)
-        if not commands or not worker.worktree_path:
+        bootstrap_commands = self._bootstrap_command_rows()
+        if not bootstrap_commands or not worker.worktree_path:
             return True
         cwd = worker.worktree_path
+        command_strings = [str(row["command"]) for row in bootstrap_commands]
         rows = session.scalars(
             select(BuildTaskEvent)
             .where(BuildTaskEvent.task_id == task.task_id)
@@ -3107,15 +3108,24 @@ class BuildRunner:
         ).all()
         for row in rows:
             data = row.event_data or {}
-            if data.get("workspace") == str(cwd) and data.get("commands") == commands:
+            same_commands = data.get("commands") == command_strings
+            same_bootstrap = data.get("bootstrap_commands") in (None, bootstrap_commands)
+            if data.get("workspace") == str(cwd) and same_commands and same_bootstrap:
                 if data.get("passed"):
                     return True
                 break
-        outcome = run_validation(
-            commands,
-            cwd,
-            timeout_seconds=self._config.validation_timeout_seconds,
-        )
+        results: list[dict[str, object]] = []
+        passed = True
+        for row in bootstrap_commands:
+            outcome = run_validation(
+                [str(row["command"])],
+                cwd,
+                timeout_seconds=float(row.get("timeout_seconds") or 900.0),
+            )
+            results.extend(outcome.results)
+            if not outcome.passed:
+                passed = False
+                break
         record_event(
             session,
             EventInput(
@@ -3123,15 +3133,23 @@ class BuildRunner:
                 event_type="runner.setup",
                 actor="runner",
                 event_data={
-                    "passed": outcome.passed,
+                    "phase": "bootstrap",
+                    "passed": passed,
                     "workspace": str(cwd),
-                    "commands": commands,
-                    "results": outcome.results,
+                    "commands": command_strings,
+                    "bootstrap_commands": bootstrap_commands,
+                    "results": results,
                 },
             ),
         )
-        if outcome.passed:
+        if passed:
             return True
+        failure_summary = [
+            f"{item['command']} -> {item.get('failure_type') or 'EXIT_CODE'} exit {item['exit_code']}: {item['output_tail'][-500:]}"
+            for item in results
+            if item["exit_code"] != 0
+        ]
+        first_failure_type = next((str(item.get("failure_type") or "EXIT_CODE") for item in results if item["exit_code"] != 0), "EXIT_CODE")
         self._block_task(
             session,
             task.task_id,
@@ -3140,10 +3158,20 @@ class BuildRunner:
             worker=worker,
             branch=worker.branch_name,
             worktree=cwd,
-            error="; ".join(outcome.failure_summary()),
+            error="; ".join(failure_summary),
             recovery_classification="RECOVERABLE_WORKTREE",
+            extra_data={"failure_type": first_failure_type, "phase": "bootstrap"},
         )
         return False
+
+    def _bootstrap_command_rows(self) -> list[dict[str, object]]:
+        rows = [dict(row) for row in self._config.bootstrap_commands]
+        if rows:
+            return rows
+        return [
+            {"command": command, "timeout_seconds": self._config.validation_timeout_seconds, "required_tools": []}
+            for command in self._config.setup_commands
+        ]
 
     def _require_no_cross_objective_branch_collision_before_prepare(
         self, task: BuildTask, branch: str

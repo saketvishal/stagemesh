@@ -27,6 +27,7 @@ PROJECT_FILE = "project.yaml"
 TASKS_DIR = "tasks"
 SCHEMA_VERSION = 1
 MAX_CONCURRENCY = 32
+DEFAULT_BOOTSTRAP_TIMEOUT_SECONDS = 900.0
 
 REGISTRY_ENV = "STAGEMESH_PROJECT_REGISTRY"
 DEFAULT_REGISTRY_PATH = Path.home() / ".build-coordinator" / "projects.json"
@@ -49,6 +50,21 @@ class ProjectError(ValueError):
 
 
 @dataclass(frozen=True)
+class BootstrapCommand:
+    command: str
+    timeout_seconds: float = DEFAULT_BOOTSTRAP_TIMEOUT_SECONDS
+    required_tools: tuple[str, ...] = ()
+
+    def as_dict(self) -> dict[str, Any]:
+        data: dict[str, Any] = {"command": self.command}
+        if self.timeout_seconds != DEFAULT_BOOTSTRAP_TIMEOUT_SECONDS:
+            data["timeout_seconds"] = self.timeout_seconds
+        if self.required_tools:
+            data["required_tools"] = list(self.required_tools)
+        return data
+
+
+@dataclass(frozen=True)
 class ProjectDefinition:
     root: Path
     project_id: str
@@ -67,6 +83,7 @@ class ProjectDefinition:
     push_upstream: bool = False
     validation_timeout_seconds: float = 900.0
     setup_commands: tuple[str, ...] = ()
+    bootstrap_commands: tuple[BootstrapCommand, ...] = ()
     external_ci_enabled: bool = False
     external_ci_repo: str | None = None
     external_ci_max_consecutive_errors: int = 5
@@ -108,6 +125,7 @@ class ProjectDefinition:
             "upstream": {"remote": self.upstream_remote, "push": self.push_upstream},
             "worker_templates": sorted(self.worker_templates),
             "setup_commands": list(self.setup_commands),
+            "bootstrap_commands": [command.as_dict() for command in self.bootstrap_commands],
             "task_sources": sorted(self.task_sources),
         }
 
@@ -233,6 +251,10 @@ def load_project(root: str | Path) -> ProjectDefinition:
         else:
             setup_commands = tuple(item.strip() for item in raw_setup)
 
+    bootstrap_commands = _parse_bootstrap(execution.get("bootstrap"), problems)
+    if raw_setup is not None and not bootstrap_commands and setup_commands:
+        bootstrap_commands = tuple(BootstrapCommand(command=item) for item in setup_commands)
+
     external_ci = execution.get("external_ci") or {}
     if not isinstance(external_ci, dict):
         problems.append("`execution.external_ci` must be a mapping")
@@ -311,10 +333,64 @@ def load_project(root: str | Path) -> ProjectDefinition:
         push_upstream=push_upstream,
         validation_timeout_seconds=float(timeout),
         setup_commands=setup_commands,
+        bootstrap_commands=bootstrap_commands,
         external_ci_enabled=external_ci_enabled,
         external_ci_repo=external_ci_repo,
         external_ci_max_consecutive_errors=int(external_ci_max_errors),
     )
+
+
+def _parse_bootstrap(raw: Any, problems: list[str]) -> tuple[BootstrapCommand, ...]:
+    if raw is None:
+        return ()
+    if isinstance(raw, list):
+        raw_commands = raw
+        default_timeout = DEFAULT_BOOTSTRAP_TIMEOUT_SECONDS
+        default_tools: tuple[str, ...] = ()
+    elif isinstance(raw, dict):
+        raw_commands = raw.get("commands") or []
+        default_timeout = raw.get("timeout_seconds", DEFAULT_BOOTSTRAP_TIMEOUT_SECONDS)
+        if not isinstance(default_timeout, (int, float)) or isinstance(default_timeout, bool) or default_timeout <= 0:
+            problems.append("`execution.bootstrap.timeout_seconds` must be a positive number")
+            default_timeout = DEFAULT_BOOTSTRAP_TIMEOUT_SECONDS
+        default_tools = _string_tuple(raw.get("required_tools"), "`execution.bootstrap.required_tools`", problems)
+    else:
+        problems.append("`execution.bootstrap` must be a mapping or list")
+        return ()
+    if not isinstance(raw_commands, list):
+        problems.append("`execution.bootstrap.commands` must be a list")
+        return ()
+    commands: list[BootstrapCommand] = []
+    for index, item in enumerate(raw_commands):
+        label = f"`execution.bootstrap.commands[{index}]`"
+        if isinstance(item, str):
+            command = item.strip()
+            timeout = float(default_timeout)
+            required_tools = default_tools
+        elif isinstance(item, dict):
+            command = str(item.get("command") or "").strip()
+            timeout = item.get("timeout_seconds", default_timeout)
+            if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or timeout <= 0:
+                problems.append(f"{label}.timeout_seconds must be a positive number")
+                timeout = default_timeout
+            required_tools = (*default_tools, *_string_tuple(item.get("required_tools"), f"{label}.required_tools", problems))
+        else:
+            problems.append(f"{label} must be a command string or mapping")
+            continue
+        if not command:
+            problems.append(f"{label}.command must be a non-empty string")
+            continue
+        commands.append(BootstrapCommand(command=command, timeout_seconds=float(timeout), required_tools=tuple(dict.fromkeys(required_tools))))
+    return tuple(commands)
+
+
+def _string_tuple(raw: Any, label: str, problems: list[str]) -> tuple[str, ...]:
+    if raw is None:
+        return ()
+    if not isinstance(raw, list) or not all(isinstance(item, str) and item.strip() for item in raw):
+        problems.append(f"{label} must be a list of non-empty strings")
+        return ()
+    return tuple(item.strip() for item in raw)
 
 
 def registry_path() -> Path:
