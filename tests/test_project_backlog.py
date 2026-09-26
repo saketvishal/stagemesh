@@ -413,6 +413,25 @@ def test_uncommitted_structured_delivery_evidence_fails_closed(tmp_path, session
     assert "not present in committed repository history" in report.results[0].details
 
 
+def test_uncommitted_legacy_delivery_evidence_fails_closed(tmp_path, session):
+    root = write_project(tmp_path / "repo", tasks={"A-1": {}})
+    git(root, "init", "-b", "main")
+    git(root, "add", ".")
+    git(root, "commit", "-m", "init")
+    data = yaml.safe_load((root / ".stagemesh" / "tasks" / "backlog.yaml").read_text(encoding="utf-8"))
+    data["tasks"][0]["delivered_by"] = "done by hand"
+    (root / ".stagemesh" / "tasks" / "backlog.yaml").write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+
+    project = load_project(root)
+    report = sync_backlog(session, project, load_backlog(project))
+    session.commit()
+
+    assert report.counts() == {"ERROR": 1}
+    assert session.get(BuildTask, "A-1") is None
+    assert session.scalars(select(BuildRunnerExecution)).all() == []
+    assert "not present in committed repository history" in report.results[0].details
+
+
 def test_stale_delivery_evidence_fails_closed(tmp_path, session):
     root = write_project(tmp_path / "repo", tasks={"A-1": {}})
     git(root, "init", "-b", "main")
