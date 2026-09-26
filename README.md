@@ -11,9 +11,9 @@ by capability, and recovers when agents disappear.
 > final verification is pending, and operators should expect rough edges around
 > setup, provider configuration, and production hardening.
 
-**Demo:** the launch-readiness demo asset is not present in this repository yet.
-When it lands, this section should link to that artifact rather than duplicating
-the walkthrough.
+**Demo:** public-safe dogfood demos live in
+[examples/public_dogfood](examples/public_dogfood/), with the repeatable
+acceptance suite defined in [docs/dogfood](docs/dogfood/).
 
 ```bash
 git clone <repo-url>
@@ -119,6 +119,7 @@ Evidence:
 
 - [Codex Acceptance](docs/evidence/CODEX_ACCEPTANCE.md) - what has actually been demonstrated
 - [PyPI Release Evidence](docs/evidence/PYPI_RELEASE.md) - package naming and release checklist
+- [Public Dogfood Acceptance](docs/dogfood/README.md) - repeatable public demos and release checks
 
 ---
 
@@ -140,6 +141,7 @@ Evidence:
 - [Roadmap](docs/ROADMAP.md) - alpha roadmap and what comes next
 - [Contributing](CONTRIBUTING.md) - how to contribute
 - [Examples](examples/README.md) - configuration examples
+- [Public Dogfood Acceptance](docs/dogfood/README.md) - demo suite for public release evidence
 
 ---
 
