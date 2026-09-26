@@ -118,7 +118,7 @@ def test_claim_task_fails_closed_on_cross_objective_branch_collision(monkeypatch
             claim_task(session, ClaimRequest("GH-60B", worker_id="builder-a"))
 
 
-def _config(*, auto_push=False, remediation_cycles=2):
+def _config(*, auto_push=False, remediation_cycles=2, review_environment_attempts=2):
     return RunnerConfig(
         workers=(
             WorkerConfig("builder-a", "BUILDER", adapter="fake"),
@@ -127,6 +127,7 @@ def _config(*, auto_push=False, remediation_cycles=2):
             WorkerConfig("integration-1", "INTEGRATION", adapter="fake"),
         ),
         max_remediation_cycles=remediation_cycles,
+        max_review_environment_attempts=review_environment_attempts,
         auto_push_allowed=auto_push,
         result_dir=os.getenv("BUILD_COORDINATOR_RESULT_DIR"),
     )
@@ -936,7 +937,7 @@ def test_remediation_required_routes_to_rework_and_findings_are_checkpointed():
         assert remediation is not None
 
 
-def test_rework_loop_count_is_bounded():
+def test_rework_loop_without_finding_signal_uses_review_protocol_budget():
     with SessionLocal() as session:
         upsert_task(session, _task("RUN-LIMIT"))
         session.add(
@@ -965,10 +966,35 @@ def test_rework_loop_count_is_bounded():
             ]
         )
     }
-    _runner(config=_config(remediation_cycles=1), executors=executors).run_once()
-    result = _runner(config=_config(remediation_cycles=1), executors=executors).run_once()
+    _runner(
+        config=_config(remediation_cycles=1, review_environment_attempts=1),
+        executors=executors,
+    ).run_once()
+    result = _runner(
+        config=_config(remediation_cycles=1, review_environment_attempts=1),
+        executors=executors,
+    ).run_once()
 
-    assert "RUN-LIMIT:REMEDIATION_LIMIT_REACHED" in result.escalations
+    assert "RUN-LIMIT:REMEDIATION_LIMIT_REACHED" not in result.escalations
+    assert "RUN-LIMIT:REVIEW_ENVIRONMENT_BLOCKED" in result.escalations
+    with SessionLocal() as session:
+        assert session.get(BuildTask, "RUN-LIMIT").state == "BLOCKED"
+        assert (
+            session.scalar(
+                select(BuildRunnerExecution)
+                .where(BuildRunnerExecution.task_id == "RUN-LIMIT")
+                .where(BuildRunnerExecution.role == "REMEDIATION")
+                .where(BuildRunnerExecution.execution_id != "old-remediation")
+            )
+            is None
+        )
+        event = session.scalar(
+            select(BuildTaskEvent)
+            .where(BuildTaskEvent.task_id == "RUN-LIMIT")
+            .where(BuildTaskEvent.event_type == "runner.review_protocol_blocked")
+        )
+        assert event is not None
+        assert event.event_data["reason"] == "REMEDIATION_REQUIRED_WITHOUT_FINDING_SIGNAL"
 
 
 def test_same_finding_repeated_verbatim_still_converges_to_escalation():
@@ -1152,11 +1178,12 @@ def test_new_finding_after_resolution_gets_its_own_budget_not_raw_count():
         assert open_findings[0]["description"] == "defect B"
 
 
-def test_findings_omitted_after_being_tracked_still_hits_the_raw_cap():
+def test_findings_omitted_after_being_tracked_retries_review_not_remediation():
     """A reviewer that stops restating findings (but keeps returning
-    REMEDIATION_REQUIRED with an empty `findings` array) must not be able to
-    stall convergence forever: since there is no finding signal to reconcile,
-    the raw remediation-cycle cap remains the safety net for those cycles."""
+    REMEDIATION_REQUIRED with an empty `findings` array) has produced an
+    unstructured review result, not meaningful unresolved implementation
+    work. It should retry review and then block with protocol evidence
+    instead of spending remediation budget on no target finding."""
     task_id = "RUN-OMITTED-FINDINGS"
     empty_findings_review = ExecutionObservation(
         "SUCCEEDED",
@@ -1204,18 +1231,30 @@ def test_findings_omitted_after_being_tracked_still_hits_the_raw_cap():
     runner.run_once()  # launch review 1
     runner.run_once()  # review 1 (defect A) -> REWORK_REQUIRED -> launch remediation 1
     runner.run_once()  # remediation 1 -> REVIEW_READY -> launch review 2
-    result = runner.run_once()  # review 2 (no findings restated; raw count 1 < cap 2)
+    result = runner.run_once()  # review 2 (no findings restated; retry review)
 
     assert f"{task_id}:REMEDIATION_LIMIT_REACHED" not in result.escalations
     with SessionLocal() as session:
-        assert session.get(BuildTask, task_id).state == "CLAIMED"
+        assert session.get(BuildTask, task_id).state == "REVIEW_READY"
+        assert runner._remediation_cycles(session, task_id) == 1
 
-    runner.run_once()  # remediation 2 -> REVIEW_READY -> launch review 3
-    result = runner.run_once()  # review 3 (no findings restated; raw count 2 >= cap 2)
+    runner.run_once()  # launch review 3
+    result = runner.run_once()  # review 3 (no findings restated; review protocol budget exhausted)
 
-    assert f"{task_id}:REMEDIATION_LIMIT_REACHED" in result.escalations
+    assert f"{task_id}:REMEDIATION_LIMIT_REACHED" not in result.escalations
+    assert f"{task_id}:REVIEW_ENVIRONMENT_BLOCKED" in result.escalations
     with SessionLocal() as session:
         assert session.get(BuildTask, task_id).state == "BLOCKED"
+        assert runner._remediation_cycles(session, task_id) == 1
+        blocker = session.scalar(
+            select(BuildTaskEvent)
+            .where(BuildTaskEvent.task_id == task_id)
+            .where(BuildTaskEvent.event_type == "runner.coordinator_invariant_failed")
+        )
+        assert blocker is not None
+        evidence = blocker.event_data
+        assert evidence["underlying_invariant"] == "REVIEW_PROTOCOL_BLOCKED"
+        assert evidence["why_not_remediation"].startswith("No findings")
 
 
 def test_stale_builder_can_be_recovered_and_resumed_without_duplicate_launch():
