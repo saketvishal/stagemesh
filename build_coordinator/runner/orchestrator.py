@@ -1359,7 +1359,27 @@ class BuildRunner:
             except CoordinatorPolicyError:
                 pass
         if exhausted:
-            self._block_task(session, execution.task_id, "EXECUTION_RETRY_LIMIT_REACHED")
+            typed_reason = f"PROVIDER_FAILURE_RETRIES_EXHAUSTED:{failure}" if failure else "EXECUTION_RETRY_LIMIT_REACHED"
+            result.escalations.append(f"{execution.task_id}:{typed_reason}")
+            self._block_task(
+                session,
+                execution.task_id,
+                typed_reason,
+                invariant="EXECUTION_RETRY_LIMIT_REACHED",
+                execution=execution,
+                error=(
+                    f"{execution.role} retry attempts exhausted after "
+                    f"{attempts + 1}/{self._config.max_execution_attempts} attempts"
+                ),
+                extra_data={
+                    "provider_failure": failure or None,
+                    "retry_attempts": attempts + 1,
+                    "max_attempts": self._config.max_execution_attempts,
+                    "retryable_failure": retryable,
+                    "retry_generation": retry_generation,
+                    "preserved_checkpoint": bool(execution.claim_id),
+                },
+            )
         return True
 
     def _cleanup_integrated_task(self, session: Session, execution: BuildRunnerExecution) -> None:
@@ -2789,6 +2809,15 @@ class BuildRunner:
         except Exception:
             pass
 
+    def _is_execution_retry_exhausted_reason(self, task: BuildTask, reason: str) -> bool:
+        if reason == "EXECUTION_RETRY_LIMIT_REACHED":
+            return True
+        if not reason.startswith("PROVIDER_FAILURE_RETRIES_EXHAUSTED:"):
+            return False
+        waiting = task.waiting_input if isinstance(task.waiting_input, dict) else {}
+        evidence = waiting.get("failure_evidence") if isinstance(waiting.get("failure_evidence"), dict) else {}
+        return evidence.get("underlying_invariant") == "EXECUTION_RETRY_LIMIT_REACHED"
+
     def _recover_diagnosed_blockers(self, session: Session, result: RunnerCycleResult) -> None:
         blocked = session.scalars(select(BuildTask).where(BuildTask.state == "BLOCKED")).all()
         for task in blocked:
@@ -3033,7 +3062,7 @@ class BuildRunner:
                             except CoordinatorPolicyError:
                                 pass
 
-            elif reason == "EXECUTION_RETRY_LIMIT_REACHED":
+            elif self._is_execution_retry_exhausted_reason(task, reason):
                 rows = session.scalars(
                     select(BuildRunnerExecution)
                     .where(BuildRunnerExecution.task_id == task.task_id)
@@ -3065,7 +3094,8 @@ class BuildRunner:
                                 event_type="runner.blocker_recovered",
                                 actor="runner",
                                 event_data={
-                                    "reason": "EXECUTION_RETRY_LIMIT_REACHED",
+                                    "reason": reason,
+                                    "underlying_invariant": "EXECUTION_RETRY_LIMIT_REACHED",
                                     "recovery_type": "INFRASTRUCTURE_RETRY_RECOVERY",
                                     "resumed_to": target_state,
                                     "new_retry_generation": task.retry_generation,
@@ -3074,7 +3104,7 @@ class BuildRunner:
                         )
                         if task.task_id not in result.recovered:
                             result.recovered.append(task.task_id)
-                        self._release_blocker_gate(session, task, "EXECUTION_RETRY_LIMIT_REACHED")
+                        self._release_blocker_gate(session, task, reason)
                     except CoordinatorPolicyError:
                         pass
 

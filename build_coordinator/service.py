@@ -603,15 +603,39 @@ def recover_review_environment_blocked(
     return recovered_task
 
 
-def _latest_block_reason(session: Session, task_id: str) -> str | None:
-    event = session.scalar(
+def _latest_terminal_event(session: Session, task_id: str) -> BuildTaskEvent | None:
+    return session.scalar(
         select(BuildTaskEvent)
         .where(BuildTaskEvent.task_id == task_id)
         .where(BuildTaskEvent.to_state.in_(("BLOCKED", "FAILED")))
         .order_by(BuildTaskEvent.created_at.desc())
         .limit(1)
     )
+
+
+def _latest_block_reason(session: Session, task_id: str) -> str | None:
+    event = _latest_terminal_event(session, task_id)
     return (event.event_data or {}).get("reason") if event else None
+
+
+def _is_execution_retry_exhausted_terminal(event: BuildTaskEvent | None) -> bool:
+    if event is None:
+        return False
+    data = event.event_data or {}
+    reason = data.get("reason")
+    if reason == "EXECUTION_RETRY_LIMIT_REACHED":
+        return True
+    if not isinstance(reason, str) or not reason.startswith("PROVIDER_FAILURE_RETRIES_EXHAUSTED:"):
+        return False
+    evidence = data.get("failure_evidence") if isinstance(data.get("failure_evidence"), dict) else data
+    return evidence.get("underlying_invariant") == "EXECUTION_RETRY_LIMIT_REACHED"
+
+
+def _execution_retry_exhausted_reason_label(event: BuildTaskEvent | None) -> str | None:
+    if event is None:
+        return None
+    data = event.event_data or {}
+    return data.get("reason")
 
 
 def recover_execution_retry_exhausted(
@@ -627,8 +651,9 @@ def recover_execution_retry_exhausted(
         raise CoordinatorPolicyError(
             f"Cannot recover task {task_id}: state is {task.state}, expected BLOCKED or FAILED"
         )
-    latest_reason = _latest_block_reason(session, task_id)
-    if latest_reason != "EXECUTION_RETRY_LIMIT_REACHED":
+    latest_event = _latest_terminal_event(session, task_id)
+    latest_reason = _execution_retry_exhausted_reason_label(latest_event)
+    if not _is_execution_retry_exhausted_terminal(latest_event):
         raise CoordinatorPolicyError(
             f"Cannot recover task {task_id}: latest terminal reason is {latest_reason!r}, "
             "expected EXECUTION_RETRY_LIMIT_REACHED"
