@@ -1,0 +1,37 @@
+schema_version: 1
+demo_id: high-risk-governance
+description: Public-safe high-risk governance demo with two reviewers.
+project:
+  id: demo-governance
+  repo: /path/to/disposable-demo-repo
+task:
+  id: DEMO-004
+  title: Change a guarded configuration path
+  description: Modify a guarded sample setting and require two independent reviews.
+  risk_level: HIGH
+  acceptance_criteria:
+    - Guarded setting remains backwards compatible.
+    - Migration or config impact is documented.
+    - Two independent reviewers approve the reviewed SHA.
+  review_policy: TWO_REVIEWERS
+validation_injection:
+  mode: reviewed-sha-drift
+  expected_escalation: REVIEWED_SHA_CHANGED
+workers:
+  - id: builder-governance
+    provider: provider-a
+    stages: [BUILD, REMEDIATION]
+    command: [python, examples/stdin_print_cli_wrapper.py]
+  - id: reviewer-one
+    provider: provider-b
+    stages: [REVIEW]
+    command: [python, examples/stdin_print_cli_wrapper.py]
+  - id: reviewer-two
+    provider: provider-c
+    stages: [REVIEW]
+    command: [python, examples/stdin_print_cli_wrapper.py]
+evidence:
+  - implementer cannot review own work
+  - two distinct reviewers are required
+  - validation drift fails closed with durable escalation
+
