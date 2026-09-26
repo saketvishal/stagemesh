@@ -230,7 +230,8 @@ def parse_executor_result(
     elif reported_role in INTEGRATOR_ROLES:
         integrator = _parse_integrator(data)
     elif reported_role in PLANNER_ROLES:
-        plan = _parse_planner(data)
+        if status == "SUCCEEDED":
+            plan = _parse_planner(data)
     else:
         raise ExecutorResultError(f"unknown executor role: {reported_role}")
 

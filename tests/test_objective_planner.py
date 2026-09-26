@@ -7,12 +7,16 @@ planner-unavailable resume.
 from __future__ import annotations
 
 import json
+import io
 import os
+import subprocess
+import sys
 
 import pytest
 from sqlalchemy import delete, select
 
 from build_coordinator.agents.wrapper import (
+    main as wrapper_main,
     parse_planner_payload,
     planner_result_payload,
     render_prompt,
@@ -231,6 +235,113 @@ def test_planner_wrapper_extracts_plan_and_owns_lifecycle_identity():
 
 def test_planner_wrapper_rejects_bare_objective_plan():
     assert parse_planner_payload('{"tasks": []}') is None
+
+
+class _ScriptedPlannerProfile:
+    headless = True
+
+    def __init__(self, message: str):
+        self.message = message
+
+    def build_invocation(self, role, cwd, prompt, *, model=None, last_message=None):
+        script = (
+            "from pathlib import Path\n"
+            "import sys\n"
+            f"message = {self.message!r}\n"
+            "if len(sys.argv) > 1:\n"
+            "    Path(sys.argv[1]).write_text(message, encoding='utf-8')\n"
+            "print(message)\n"
+        )
+        cmd = [sys.executable, "-c", script]
+        if last_message:
+            cmd.append(last_message)
+        return cmd, None
+
+
+def _init_git_repo(path):
+    subprocess.run(["git", "init", "-q"], cwd=path, check=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=path, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=path, check=True)
+    (path / "README.md").write_text("seed\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=path, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "seed"], cwd=path, check=True)
+
+
+def _run_planner_wrapper(monkeypatch, tmp_path, final_message):
+    from build_coordinator.agents import wrapper
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _init_git_repo(repo)
+    result_path = tmp_path / "result.json"
+    monkeypatch.chdir(repo)
+    monkeypatch.setitem(wrapper.PROFILES, "scripted-planner", _ScriptedPlannerProfile(final_message))
+    monkeypatch.setenv("BUILD_COORDINATOR_RESULT_PATH", str(result_path))
+    monkeypatch.setenv("BUILD_COORDINATOR_EXECUTION_ID", "exec-planner")
+    monkeypatch.setenv("BUILD_COORDINATOR_TASK_ID", "OBJ-PLAN-PLANNER")
+    monkeypatch.setenv("BUILD_COORDINATOR_ROLE", "PLANNER")
+    monkeypatch.setenv("STAGEMESH_AGENT_TIMEOUT", "30")
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps({"task_definition": {"task_id": "OBJ-PLAN-PLANNER"}})))
+
+    code = wrapper_main(["--runtime", "scripted-planner"])
+    return code, json.loads(result_path.read_text(encoding="utf-8"))
+
+
+def test_planner_wrapper_main_writes_trusted_plan_envelope(monkeypatch, tmp_path):
+    message = json.dumps(
+        {
+            "schema_version": 1,
+            "execution_id": "untrusted",
+            "task_id": "wrong",
+            "role": "PLANNER",
+            "status": "SUCCEEDED",
+            "plan": _valid_plan_payload(),
+        }
+    )
+
+    code, payload = _run_planner_wrapper(monkeypatch, tmp_path, f"```json\n{message}\n```")
+
+    assert code == 0
+    assert payload["schema_version"] == 1
+    assert payload["execution_id"] == "exec-planner"
+    assert payload["task_id"] == "OBJ-PLAN-PLANNER"
+    assert payload["role"] == "PLANNER"
+    assert payload["status"] == "SUCCEEDED"
+    assert payload["plan"] == _valid_plan_payload()
+    assert "feature_sha" not in payload
+    assert "files_changed" not in payload
+    parsed = parse_executor_result(
+        payload,
+        execution_id="exec-planner",
+        task_id="OBJ-PLAN-PLANNER",
+        role="PLANNER",
+        require_identity=True,
+    )
+    assert parsed.plan == parse_planner_plan(_valid_plan_payload()).to_mapping()
+
+
+def test_planner_wrapper_main_malformed_output_is_typed_failure(monkeypatch, tmp_path):
+    code, payload = _run_planner_wrapper(monkeypatch, tmp_path, '{"tasks": []}')
+
+    assert code == 1
+    assert payload["schema_version"] == 1
+    assert payload["execution_id"] == "exec-planner"
+    assert payload["task_id"] == "OBJ-PLAN-PLANNER"
+    assert payload["role"] == "PLANNER"
+    assert payload["status"] == "FAILED"
+    assert payload["provider_failure"] == "PLANNER_CONTRACT_INVALID"
+    assert "plan" not in payload
+    assert "feature_sha" not in payload
+    assert "files_changed" not in payload
+    parsed = parse_executor_result(
+        payload,
+        execution_id="exec-planner",
+        task_id="OBJ-PLAN-PLANNER",
+        role="PLANNER",
+        require_identity=True,
+    )
+    assert parsed.status == "FAILED"
+    assert parsed.plan is None
 
 
 def test_planner_contract_requires_full_executor_envelope():

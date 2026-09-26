@@ -219,6 +219,50 @@ def test_backlog_loads_sorted_and_validates(tmp_path):
     assert [d.task_id for d in definitions] == ["A-1", "B-2", "C-3"]
     assert definitions[1].priority == 5 and definitions[2].review_policy == "NONE"
     assert definitions[0].review_policy == "INDEPENDENT"  # project default
+    assert definitions[0].metadata == {}
+
+
+def test_backlog_accepts_bounded_task_metadata_and_hashes_it(tmp_path):
+    root = write_project(
+        tmp_path / "repo",
+        tasks={"A-1": {"metadata": {"mvp_definition_of_done_items": [1, 2, 3]}}},
+    )
+    project = load_project(root)
+    definition = load_backlog(project)[0]
+
+    assert definition.metadata == {"mvp_definition_of_done_items": [1, 2, 3]}
+    assert definition.to_spec().definition_metadata == definition.metadata
+    original_hash = definition.content_hash()
+    with SessionLocal() as session:
+        sync_backlog(session, project, [definition])
+        assert session.get(BuildTask, "A-1").definition_metadata == definition.metadata
+
+    (root / ".stagemesh" / "tasks" / "backlog.yaml").write_text(
+        task_yaml(**{"A-1": {"metadata": {"mvp_definition_of_done_items": [1, 2, 3, 4]}}}),
+        encoding="utf-8",
+    )
+
+    assert load_backlog(project)[0].content_hash() != original_hash
+
+
+def test_backlog_rejects_top_level_project_specific_fields_and_bad_metadata(tmp_path):
+    root = write_project(tmp_path / "repo", tasks={"A-1": {"mvp_definition_of_done_items": [1, 2, 3]}})
+    with pytest.raises(BacklogError, match="unknown field"):
+        load_backlog(load_project(root))
+
+    (root / ".stagemesh" / "tasks" / "backlog.yaml").write_text(
+        task_yaml(**{"A-1": {"metadata": ["not", "a", "mapping"]}}),
+        encoding="utf-8",
+    )
+    with pytest.raises(BacklogError, match="`metadata` must be a mapping"):
+        load_backlog(load_project(root))
+
+    (root / ".stagemesh" / "tasks" / "backlog.yaml").write_text(
+        task_yaml(**{"A-1": {"metadata": {"nested": {"api_token": "nope"}}}}),
+        encoding="utf-8",
+    )
+    with pytest.raises(BacklogError, match="secret or credential keys"):
+        load_backlog(load_project(root))
 
 
 def test_backlog_rejects_structural_errors_without_partial_load(tmp_path):
@@ -641,6 +685,52 @@ def test_versioned_schema_1_database_migrates_finding_registry_column(tmp_path):
         db.commit()
         reloaded = db.get(BuildTask, "POST-MIGRATION-1")
         assert reloaded.finding_registry == {}
+    lifecycle.dispose()
+
+
+def test_versioned_schema_4_database_migrates_definition_metadata_column(tmp_path):
+    """A versioned database from before task metadata gets an explicit,
+    backup-first migration instead of being treated as current."""
+    path = tmp_path / "v4.sqlite3"
+    lifecycle = DatabaseLifecycle(f"sqlite:///{path.as_posix()}", data_dir=tmp_path)
+    lifecycle.initialize_schema()
+    with lifecycle.session() as db:
+        db.add(
+            BuildTask(
+                task_id="KEEP-1",
+                title="Keep",
+                description="preserve me",
+                acceptance_criteria=["done"],
+                dependencies=[],
+            )
+        )
+        db.commit()
+    lifecycle.dispose()
+
+    connection = sqlite3.connect(str(path))
+    connection.execute("ALTER TABLE build_tasks DROP COLUMN definition_metadata")
+    connection.execute("UPDATE build_coordinator_schema_version SET version = 4 WHERE singleton_id = 1")
+    connection.commit()
+    connection.close()
+
+    report = plan_migration(path)
+    assert report.needed
+    build_tasks_change = next(t for t in report.tables if t["table"] == "build_tasks")
+    assert "definition_metadata" in build_tasks_change["columns_added"]
+
+    applied = migrate_state(path, apply=True)
+    assert applied.applied and Path(applied.backup).is_file()
+    assert applied.preservation and all(r["identical"] for r in applied.preservation)
+    assert not plan_migration(path).needed
+
+    lifecycle = DatabaseLifecycle(f"sqlite:///{path.as_posix()}", data_dir=tmp_path)
+    lifecycle.initialize_schema()
+    with lifecycle.session() as db:
+        reloaded = db.get(BuildTask, "KEEP-1")
+        assert reloaded is not None
+        assert reloaded.title == "Keep"
+        assert reloaded.acceptance_criteria == ["done"]
+        assert reloaded.definition_metadata == {}
     lifecycle.dispose()
 
 

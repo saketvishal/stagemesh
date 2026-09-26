@@ -239,6 +239,64 @@ def test_quota_exhaustion_excludes_provider_and_falls_back_to_other_provider():
     )
 
 
+def test_no_change_deprioritization_prefers_different_worker_same_provider():
+    workers = (
+        WorkerConfig("builder-openai-a", "BUILDER", provider="openai", adapter="fake", capabilities=(CAP_CODING,), stages=("implementation",), preference=1),
+        WorkerConfig("builder-openai-b", "BUILDER", provider="openai", adapter="fake", capabilities=(CAP_CODING,), stages=("implementation",), preference=2),
+    )
+
+    decision = route_worker(
+        workers,
+        stage="implementation",
+        stage_requirement=StageRequirement("implementation", capabilities=(CAP_CODING,)),
+        providers={"openai": ProviderConfig("openai", availability="AVAILABLE")},
+        runtimes={},
+        routing_policy=RunnerConfig().routing_policy,
+        deprioritized_workers={"builder-openai-a"},
+    )
+
+    assert decision.selected_worker_id == "builder-openai-b"
+
+
+def test_no_change_event_deprioritizes_worker_on_next_attempt(tmp_path: Path):
+    config = _config(
+        tmp_path,
+        (
+            WorkerConfig("builder-openai-a", "BUILDER", provider="openai", adapter="fake", capabilities=(CAP_CODING,), stages=("implementation",), preference=1),
+            WorkerConfig("builder-openai-b", "BUILDER", provider="openai", adapter="fake", capabilities=(CAP_CODING,), stages=("implementation",), preference=2),
+        ),
+    )
+    runner = BuildRunner(SessionLocal, config, executors={}, git=FakeGit())
+    with SessionLocal() as session:
+        upsert_task(session, _task("NOCHANGE-RETRY"))
+        record_event(
+            session,
+            EventInput(
+                task_id="NOCHANGE-RETRY",
+                event_type="runner.no_changes_produced",
+                actor="runner",
+                event_data={
+                    "provider": "openai",
+                    "worker_id": "builder-openai-a",
+                    "retry_generation": 0,
+                    "attempt": 1,
+                },
+            ),
+        )
+        session.commit()
+
+        worker, availability, _decision = runner._select_worker(
+            "BUILDER",
+            task_id="NOCHANGE-RETRY",
+            session=session,
+            deprioritized_workers=runner._no_change_workers(session, "NOCHANGE-RETRY"),
+        )
+
+    assert availability == "selected"
+    assert worker is not None
+    assert worker.worker_id == "builder-openai-b"
+
+
 def test_auth_failure_blocks_fallback_to_other_provider():
     workers = (
         WorkerConfig("builder-xai", "BUILDER", provider="xai", adapter="fake", capabilities=(CAP_CODING,), stages=("implementation",), preference=1),
@@ -428,6 +486,69 @@ def test_runner_diagnostics_reports_provider_modes_usage_and_failure_reset(tmp_p
     assert diagnostics["providers"]["anthropic"]["availability"] == "RATE_LIMITED"
     assert diagnostics["providers"]["anthropic"]["active_failure"]["failure"] == "RATE_LIMITED"
     assert diagnostics["workers"][0]["active_provider_workers"] == 1
+
+
+def test_runner_diagnostics_reports_cumulative_launches_per_worker_and_provider(tmp_path: Path):
+    config = _config(
+        tmp_path,
+        (WorkerConfig("builder-a", "BUILDER", provider="openai", adapter="fake", capabilities=(CAP_CODING,), stages=("implementation",)),),
+    )
+    runner = BuildRunner(SessionLocal, config, executors={"builder-a": FakeExecutor()}, git=FakeGit())
+    with SessionLocal() as session:
+        upsert_task(session, _task("DIAG-LAUNCHES-1"))
+        session.commit()
+    runner.run_once()
+
+    with SessionLocal() as session:
+        upsert_task(session, _task("DIAG-LAUNCHES-2"))
+        session.commit()
+    runner.run_once()
+
+    with SessionLocal() as session:
+        diagnostics = runner.diagnostics(session)
+
+    worker = next(w for w in diagnostics["workers"] if w["worker_id"] == "builder-a")
+    assert worker["launches"] == 2
+    assert diagnostics["providers"]["openai"]["launches"] == 2
+
+
+def test_historical_unknown_provider_failure_is_ignored_for_provider_health(tmp_path: Path):
+    config = _config(
+        tmp_path,
+        (
+            WorkerConfig("builder-openai-a", "BUILDER", provider="openai", adapter="fake", capabilities=(CAP_CODING,), stages=("implementation",), preference=1),
+            WorkerConfig("builder-openai-b", "BUILDER", provider="openai", adapter="fake", capabilities=(CAP_CODING,), stages=("implementation",), preference=2),
+        ),
+    )
+    runner = BuildRunner(SessionLocal, config, executors={}, git=FakeGit())
+    with SessionLocal() as session:
+        record_event(
+            session,
+            EventInput(
+                task_id=None,
+                event_type="runner.provider_failure",
+                actor="test",
+                event_data={
+                    "provider": "openai",
+                    "worker_id": "builder-openai-a",
+                    "failure": "NO_CHANGES_PRODUCED",
+                    "until": (utcnow() + timedelta(minutes=30)).isoformat(),
+                },
+            ),
+        )
+        session.commit()
+
+        providers = runner._effective_providers(session)
+        worker, availability, decision = runner._select_worker("BUILDER", session=session)
+
+    assert providers["openai"].availability == "AVAILABLE"
+    assert availability == "selected"
+    assert worker is not None
+    assert worker.worker_id == "builder-openai-a"
+    assert all(
+        "provider_NO_CHANGES_PRODUCED" not in candidate.reasons
+        for candidate in decision.candidates
+    )
 
 
 def test_runner_audit_event_records_routing_without_secrets(tmp_path: Path):
