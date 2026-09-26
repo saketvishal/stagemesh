@@ -35,6 +35,18 @@ def test_windows_continue_startup_uses_unattended_logon_task():
     assert '"--dry-run"' not in text
 
 
+def test_windows_continue_startup_runs_durable_continue_after_reboot():
+    text = _script_text()
+    assert '$continueArgs = @("continue", "--project-dir", $ResolvedProjectDir, "--max-cycles", "$MaxCycles")' in text
+    assert "$continueArgs += $ProjectName" in text
+    assert '$continueArgs += "--all"' in text
+    assert '$continueArgs += "--github"' in text
+    assert "$taskRunParts" in text
+    assert "New-ScheduledTaskAction" in text
+    assert "-WorkingDirectory $ResolvedProjectDir" in text
+    assert "ExecutionTimeLimit (New-TimeSpan -Days 7)" in text
+
+
 def test_windows_continue_startup_install_and_uninstall_are_idempotent():
     text = _script_text()
     assert "Register-ScheduledTask `" in text
@@ -78,9 +90,10 @@ def test_windows_continue_startup_task_seed_distinguishes_variants():
 
 def test_windows_startup_docs_show_matching_status_and_uninstall_variants():
     docs = (REPO_ROOT / "docs" / "SETUP.md").read_text(encoding="utf-8")
+    normalized_docs = re.sub(r"\s+", " ", docs)
 
     assert "AtStartup" in docs
-    assert "without an interactive logon" in docs
+    assert "without an interactive logon" in normalized_docs
     assert "Use the same task-name-affecting flags for `status` and `uninstall`" in docs
 
     status_project_name = re.search(r"stagemesh-windows-startup\.ps1 status `\n\s+-ProjectDir .*? `\n\s+-ProjectName my-product", docs)
