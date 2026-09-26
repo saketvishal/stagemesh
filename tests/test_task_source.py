@@ -9,9 +9,16 @@ from sqlalchemy import select
 from build_coordinator.claims import task_is_claimable
 from build_coordinator.db import Base, SessionLocal, engine, initialize_schema
 from build_coordinator.models import BuildObjective, BuildObjectiveEvent, BuildTask, BuildTaskEvent
-from build_coordinator.objectives import objective_source_is_closed, run_objective_cycle
+from build_coordinator.objectives import (
+    objective_dependencies_satisfied,
+    objective_source_is_closed,
+    objective_source_is_executable,
+    run_objective_cycle,
+)
 from build_coordinator.planner import planner_task_id
+from build_coordinator.runner.scheduling import REASON_DEPENDENCY_NOT_DONE, check_task_readiness
 from build_coordinator.service import utcnow
+from build_coordinator.task_source import get_task_source
 from build_coordinator.task_source.base import TaskSourceConfig
 from build_coordinator.task_source.github import GitHubTaskSource
 from build_coordinator.task_source.base import source_identity_metadata
@@ -89,6 +96,226 @@ def test_github_task_source_syncs_standard_task():
         assert task.definition_metadata["source_owner"] == "example/repo"
         assert task.definition_metadata["source_ref"] == "101"
         assert task.definition_metadata["source_issue_number"] == 101
+
+
+def test_github_deferred_label_syncs_visible_but_non_claimable():
+    client = FakeGitHubClient(
+        [
+            {
+                "number": 124,
+                "title": "Future roadmap work",
+                "body": "Implement later.\n\n### Acceptance Criteria\n- Eventually works",
+                "labels": [{"name": "stagemesh:deferred"}],
+                "url": "https://github.com/example/repo/issues/124",
+            }
+        ]
+    )
+    source = GitHubTaskSource(repo="example/repo", client=client)
+
+    with SessionLocal() as session:
+        results = source.discover_tasks(session)
+        session.commit()
+
+    assert results[0].action == "CREATED"
+    with SessionLocal() as session:
+        task = session.get(BuildTask, "GH-124")
+        assert task is not None
+        assert task.definition_metadata["source_state"] == "OPEN"
+        assert task.definition_metadata["source_eligibility"] == "DEFERRED"
+        assert not task_is_claimable(session, task, utcnow())
+
+
+def test_github_deferred_to_eligible_is_claimable_on_next_sync():
+    issue = {
+        "number": 125,
+        "title": "Promotable work",
+        "body": "Implement now.\n\n### Acceptance Criteria\n- Works",
+        "labels": [{"name": "stagemesh:deferred"}],
+        "url": "https://github.com/example/repo/issues/125",
+    }
+    client = FakeGitHubClient([issue])
+    source = GitHubTaskSource(repo="example/repo", client=client)
+
+    with SessionLocal() as session:
+        source.discover_tasks(session)
+        session.commit()
+
+    client.issues = [{**issue, "labels": []}]
+    client.issue_by_number[125] = {**client.issue_by_number[125], "labels": []}
+    with SessionLocal() as session:
+        source.discover_tasks(session)
+        session.commit()
+        task = session.get(BuildTask, "GH-125")
+        assert task is not None
+        assert task.definition_metadata["source_eligibility"] == "ELIGIBLE"
+        assert task_is_claimable(session, task, utcnow())
+
+
+def test_github_configured_include_exclude_label_policy_is_deterministic():
+    source = GitHubTaskSource(
+        repo="example/repo",
+        eligibility_include_labels=("stagemesh:ready",),
+        eligibility_exclude_labels=("roadmap",),
+    )
+    assert source._source_eligibility_from_labels(["stagemesh:ready"]) == (
+        "ELIGIBLE",
+        "eligible by source label policy",
+    )
+    assert source._source_eligibility_from_labels(["stagemesh:ready", "roadmap"])[0] == "DEFERRED"
+    assert source._source_eligibility_from_labels(["other"])[0] == "DEFERRED"
+
+
+def test_github_task_source_config_passes_eligibility_policy():
+    source = get_task_source(
+        {
+            "type": "github",
+            "repo": "example/repo",
+            "include_labels": ["stagemesh:ready"],
+            "exclude_labels": ["stagemesh:deferred"],
+        }
+    )
+    assert isinstance(source, GitHubTaskSource)
+    assert source.eligibility_include_labels == ("stagemesh:ready",)
+    assert source.eligibility_exclude_labels == ("stagemesh:deferred",)
+
+
+def test_deferred_source_dependency_does_not_satisfy_dependents_as_done():
+    deferred_metadata = source_identity_metadata(
+        source_type="github",
+        source_owner="example/repo",
+        source_ref="126",
+        source_url="https://github.com/example/repo/issues/126",
+        source_state="OPEN",
+        source_eligibility="DEFERRED",
+        source_eligibility_reason="matched exclude label(s): stagemesh:deferred",
+        legacy={"source_issue_number": 126},
+    )
+    with SessionLocal() as session:
+        session.add(
+            BuildTask(
+                task_id="GH-126",
+                title="Deferred dependency",
+                description="Done locally, but not executable source work.",
+                acceptance_criteria=["Works"],
+                definition_metadata=deferred_metadata,
+                state="DONE",
+            )
+        )
+        session.add(
+            BuildTask(
+                task_id="GH-127",
+                title="Dependent task",
+                description="Must wait for eligible dependency.",
+                acceptance_criteria=["Works"],
+                dependencies=["GH-126"],
+                state="READY",
+            )
+        )
+        session.commit()
+
+    with SessionLocal() as session:
+        dependent = session.get(BuildTask, "GH-127")
+        assert dependent is not None
+        assert not task_is_claimable(session, dependent, utcnow())
+
+
+def test_deferred_github_objective_does_not_launch_planner():
+    issue = {
+        "number": 128,
+        "title": "Deferred objective",
+        "body": "## Objective\nPlan this later.",
+        "labels": [{"name": "objective"}, {"name": "stagemesh:deferred"}],
+        "url": "https://github.com/example/repo/issues/128",
+        "state": "OPEN",
+    }
+    client = FakeGitHubClient([issue])
+    source = GitHubTaskSource(repo="example/repo", client=client)
+
+    with SessionLocal() as session:
+        source.discover_tasks(session)
+        session.commit()
+
+    with SessionLocal() as session:
+        objective = session.get(BuildObjective, "GH-128")
+        planner = session.get(BuildTask, planner_task_id("GH-128"))
+        assert objective is not None
+        assert planner is not None
+        assert planner.definition_metadata["source_eligibility"] == "DEFERRED"
+        assert not objective_source_is_executable(session, objective)
+        assert not task_is_claimable(session, planner, utcnow())
+
+
+def test_deferred_completed_github_objective_does_not_satisfy_dependents():
+    prerequisite = {
+        "number": 129,
+        "title": "Prerequisite objective",
+        "body": "## Objective\nFinish this first.",
+        "labels": [{"name": "objective"}],
+        "url": "https://github.com/example/repo/issues/129",
+        "state": "OPEN",
+    }
+    dependent = {
+        "number": 130,
+        "title": "Dependent objective",
+        "body": "## Objective\nPlan this second.\n\n## Dependency\nRun after issue #129 is complete.",
+        "labels": [{"name": "objective"}],
+        "url": "https://github.com/example/repo/issues/130",
+        "state": "OPEN",
+    }
+    client = FakeGitHubClient([prerequisite, dependent])
+    source = GitHubTaskSource(repo="example/repo", client=client)
+
+    with SessionLocal() as session:
+        source.discover_tasks(session)
+        session.get(BuildObjective, "GH-129").state = "COMPLETED"
+        session.add(
+            BuildTask(
+                task_id="LOCAL-DEPENDS-ON-GH-129",
+                title="Task after objective",
+                description="Must wait for eligible objective completion.",
+                acceptance_criteria=["Runs after GH-129"],
+                dependencies=["GH-129"],
+                state="READY",
+            )
+        )
+        session.commit()
+
+    prerequisite["labels"] = [{"name": "objective"}, {"name": "stagemesh:deferred"}]
+    client.issue_by_number[129]["labels"] = prerequisite["labels"]
+    with SessionLocal() as session:
+        source.discover_tasks(session)
+        session.commit()
+
+    with SessionLocal() as session:
+        prerequisite_objective = session.get(BuildObjective, "GH-129")
+        dependent_objective = session.get(BuildObjective, "GH-130")
+        dependent_planner = session.get(BuildTask, planner_task_id("GH-130"))
+        dependent_task = session.get(BuildTask, "LOCAL-DEPENDS-ON-GH-129")
+
+        assert prerequisite_objective.state == "COMPLETED"
+        assert not objective_source_is_executable(session, prerequisite_objective)
+        assert not objective_dependencies_satisfied(session, dependent_objective)
+        assert not task_is_claimable(session, dependent_planner, utcnow())
+        assert not task_is_claimable(session, dependent_task, utcnow())
+        assert check_task_readiness(session, dependent_task)[0:2] == (False, REASON_DEPENDENCY_NOT_DONE)
+
+    prerequisite["labels"] = [{"name": "objective"}]
+    client.issue_by_number[129]["labels"] = prerequisite["labels"]
+    with SessionLocal() as session:
+        source.discover_tasks(session)
+        session.commit()
+
+    with SessionLocal() as session:
+        prerequisite_objective = session.get(BuildObjective, "GH-129")
+        dependent_objective = session.get(BuildObjective, "GH-130")
+        dependent_planner = session.get(BuildTask, planner_task_id("GH-130"))
+        dependent_task = session.get(BuildTask, "LOCAL-DEPENDS-ON-GH-129")
+
+        assert objective_source_is_executable(session, prerequisite_objective)
+        assert objective_dependencies_satisfied(session, dependent_objective)
+        assert task_is_claimable(session, dependent_planner, utcnow())
+        assert task_is_claimable(session, dependent_task, utcnow())
+        assert check_task_readiness(session, dependent_task)[0:2] == (True, None)
 
 
 def test_github_source_identity_does_not_import_policy_authority():
@@ -577,6 +804,36 @@ def test_github_task_source_sync_outbound():
     assert client.comments[0]["number"] == "101"
     assert "GREEN" in client.comments[0]["body"]
     assert "101" in client.closed
+
+
+def test_github_outbound_noops_for_deferred_done_task():
+    client = FakeGitHubClient([])
+    source = GitHubTaskSource(repo="example/repo", client=client)
+    with SessionLocal() as session:
+        session.add(
+            BuildTask(
+                task_id="GH-124",
+                title="Deferred GitHub task",
+                description="Imported from GitHub",
+                acceptance_criteria=["Works"],
+                definition_metadata=source_identity_metadata(
+                    source_type="github",
+                    source_owner="example/repo",
+                    source_ref="124",
+                    source_url="https://github.com/example/repo/issues/124",
+                    source_state="OPEN",
+                    source_eligibility="DEFERRED",
+                    source_eligibility_reason="matched exclude label(s): stagemesh:deferred",
+                    legacy={"source_issue_number": 124},
+                ),
+                state="DONE",
+            )
+        )
+        ok = source.sync_outbound(session, "GH-124", "DONE", evidence={"summary": "drained"})
+
+    assert ok is True
+    assert client.comments == []
+    assert client.closed == []
 
 
 def test_github_outbound_uses_legacy_sync_event_without_source_metadata():

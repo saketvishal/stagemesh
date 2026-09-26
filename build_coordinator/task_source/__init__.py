@@ -10,6 +10,14 @@ from build_coordinator.task_source.azure_devops import AzureDevOpsTaskSource
 from build_coordinator.task_source.github import GitHubTaskSource
 
 
+def _as_tuple(value: Any) -> tuple[Any, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        return (value,)
+    return tuple(value)
+
+
 def get_task_source(config: dict[str, Any] | TaskSourceConfig | None = None) -> TaskSource | None:
     if config is None:
         return None
@@ -33,10 +41,27 @@ def get_task_source(config: dict[str, Any] | TaskSourceConfig | None = None) -> 
                 "missing repository identity: 'repo' must be specified in task_sources.github "
                 "or BUILD_COORDINATOR_GITHUB_REPO environment variable"
             )
+        raw_config = config if isinstance(config, dict) else {}
+        include_labels = (
+            cfg.options.get("eligibility_include_labels")
+            or cfg.options.get("include_labels")
+            or raw_config.get("eligibility_include_labels", ())
+            or raw_config.get("include_labels", ())
+        )
+        exclude_labels = (
+            cfg.options.get("eligibility_exclude_labels")
+            or cfg.options.get("exclude_labels")
+            or cfg.options.get("deferred_labels")
+            or raw_config.get("eligibility_exclude_labels", ())
+            or raw_config.get("exclude_labels", ())
+            or raw_config.get("deferred_labels", ())
+        )
         return GitHubTaskSource(
             repo=repo,
             labels=cfg.labels,
             dry_run=cfg.dry_run,
+            eligibility_include_labels=_as_tuple(include_labels),
+            eligibility_exclude_labels=_as_tuple(exclude_labels),
         )
     if cfg.source_type.lower() in {"azure_devops", "azure-devops", "azdo"}:
         organization = cfg.options.get("organization") or cfg.options.get("org")

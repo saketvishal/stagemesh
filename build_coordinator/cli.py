@@ -16,6 +16,7 @@ from build_coordinator.coordinator_config import (
     CoordinatorConfigError,
     load_coordinator_config,
 )
+from build_coordinator.claims import task_source_eligibility
 from build_coordinator.policy import CoordinatorPolicyError
 from build_coordinator.project.commands import add_continue_command, add_project_commands
 from build_coordinator.db import DatabaseSchemaError, SessionLocal, configure_process_database
@@ -592,6 +593,15 @@ def _status(args: argparse.Namespace, session) -> None:
             "task_count": len(tasks),
             "tasks_by_state": by_state,
             "available_count": len(list_available_tasks(session)),
+            "deferred_tasks": [
+                {
+                    "task_id": t.task_id,
+                    "eligibility": task_source_eligibility(t),
+                    "reason": (t.definition_metadata or {}).get("source_eligibility_reason"),
+                }
+                for t in tasks
+                if task_source_eligibility(t) != "ELIGIBLE"
+            ],
             "active_executions": [
                 {
                     "execution_id": row.execution_id,

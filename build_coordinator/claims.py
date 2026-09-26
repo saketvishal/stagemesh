@@ -22,6 +22,7 @@ from build_coordinator.types import (
 )
 from build_coordinator.models import (
     BuildObjective,
+    BuildObjectiveEvent,
     BuildCoordinatorState,
     BuildTask,
     BuildTaskClaim,
@@ -133,6 +134,39 @@ def task_source_is_closed(task: BuildTask) -> bool:
     ).upper() == "CLOSED"
 
 
+def task_source_eligibility(task: BuildTask) -> str:
+    metadata = task.definition_metadata or {}
+    eligibility = str(metadata.get("source_eligibility") or "ELIGIBLE").upper()
+    return eligibility or "ELIGIBLE"
+
+
+def task_source_is_executable(task: BuildTask) -> bool:
+    if task_source_is_closed(task):
+        return False
+    return task_source_eligibility(task) == "ELIGIBLE"
+
+
+def objective_source_is_executable(session: Session, objective: BuildObjective) -> bool:
+    from build_coordinator.planner import planner_task_id
+
+    planner = session.get(BuildTask, planner_task_id(objective.objective_id))
+    if planner is not None:
+        return task_source_is_executable(planner)
+    latest = session.scalar(
+        select(BuildObjectiveEvent)
+        .where(BuildObjectiveEvent.objective_id == objective.objective_id)
+        .where(BuildObjectiveEvent.event_type == "objective.source_state_changed")
+        .order_by(BuildObjectiveEvent.created_at.desc())
+    )
+    if latest is not None and str((latest.event_data or {}).get("to_state") or "").upper() == "CLOSED":
+        return False
+    return True
+
+
+def objective_dependency_is_satisfied(session: Session, objective: BuildObjective) -> bool:
+    return objective_source_is_executable(session, objective) and objective.state == "COMPLETED"
+
+
 def task_is_claimable(
     session: Session,
     task: BuildTask,
@@ -142,18 +176,18 @@ def task_is_claimable(
 ) -> bool:
     if task.reason_created == "OBJECTIVE_ROOT_COMPAT":
         return False
-    if task_source_is_closed(task):
+    if not task_source_is_executable(task):
         return False
     if task.state not in CLAIMABLE_STATES:
         return False
     for dep in task.dependencies:
         objective_dependency = session.get(BuildObjective, dep)
         if objective_dependency is not None:
-            if objective_dependency.state != "COMPLETED":
+            if not objective_dependency_is_satisfied(session, objective_dependency):
                 return False
             continue
         dependency = session.get(BuildTask, dep)
-        if dependency is None or dependency.state != "DONE":
+        if dependency is None or not task_source_is_executable(dependency) or dependency.state != "DONE":
             return False
     if active_claim(session, task.task_id, "IMPLEMENTATION", now) is not None:
         return False

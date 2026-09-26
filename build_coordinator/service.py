@@ -24,6 +24,7 @@ from build_coordinator.claims import (
     next_builder_slot,
     release_active_claims,
     task_is_claimable,
+    task_source_is_executable,
     utcnow,
 )
 from build_coordinator.events import record_event
@@ -401,6 +402,8 @@ def claim_review(
         raise CoordinatorPolicyError(
             f"Task is not review-claimable: {request.task_id}"
         )
+    if not task_source_is_executable(task):
+        raise CoordinatorPolicyError(f"Task source is not executable: {request.task_id}")
     spec = review_policy_spec(task.review_policy)
     implementer = last_implementation_worker(session, request.task_id)
     implementer_provider = last_implementation_provider(session, request.task_id)
@@ -445,6 +448,8 @@ def claim_integration(
         raise CoordinatorPolicyError(
             f"Task is not integration-claimable: {request.task_id}"
         )
+    if not task_source_is_executable(task):
+        raise CoordinatorPolicyError(f"Task source is not executable: {request.task_id}")
     existing = active_claim(session, request.task_id, "INTEGRATION", now)
     if existing is not None:
         raise CoordinatorPolicyError(
