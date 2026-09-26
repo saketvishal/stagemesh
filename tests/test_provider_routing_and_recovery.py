@@ -36,7 +36,9 @@ from build_coordinator.models import (
 )
 from build_coordinator.policy import VALID_TRANSITIONS, require_transition
 from build_coordinator.project.backlog import SYNC_EVENT
+from build_coordinator.project.commands import _continue_human_summary, _provider_capacity_waiting
 from build_coordinator.runner import BuildRunner
+from build_coordinator.runner.orchestrator import RunnerCycleResult
 from build_coordinator.runner.git_safety import FakeGit
 from build_coordinator.runner.models import RunnerConfig, WorkerConfig
 from build_coordinator.runner.routing import (
@@ -386,6 +388,7 @@ def test_fallback_to_another_provider():
             "anthropic": ProviderConfig("anthropic", availability="AVAILABLE", consumption_mode="ACTIVE"),
             "openai": ProviderConfig("openai", availability="AVAILABLE", consumption_mode="FALLBACK"),
         },
+        max_execution_attempts=1,
         result_dir=os.getenv("BUILD_COORDINATOR_RESULT_DIR"),
     )
     with SessionLocal() as session:
@@ -530,10 +533,10 @@ def test_task_scoped_no_changes_failure_exhaustion_preserves_no_changes_semantic
 def test_no_infinite_fallback_respects_max_attempts():
     executors = {
         "builder-a": FakeExecutor([
-            ExecutionObservation("FAILED", result_data={"provider_failure": "RATE_LIMITED"})
+            ExecutionObservation("FAILED", result_data={"provider_failure": "UNAVAILABLE"})
         ]),
         "builder-b": FakeExecutor([
-            ExecutionObservation("FAILED", result_data={"provider_failure": "RATE_LIMITED"})
+            ExecutionObservation("FAILED", result_data={"provider_failure": "UNAVAILABLE"})
         ]),
     }
     config = RunnerConfig(
@@ -558,7 +561,7 @@ def test_no_infinite_fallback_respects_max_attempts():
     r2 = runner.run_once()  # attempt 1 failed & recovered, attempt 2 launched on builder-b
     assert len(r2.launched) == 1
     r3 = runner.run_once()  # attempt 2 failed, max attempts (2) reached -> blocked
-    assert r3.escalations == ["TASK-MAX:PROVIDER_FAILURE_RETRIES_EXHAUSTED:RATE_LIMITED"]
+    assert r3.escalations == ["TASK-MAX:PROVIDER_FAILURE_RETRIES_EXHAUSTED:UNAVAILABLE"]
     with SessionLocal() as session:
         task = session.get(BuildTask, "TASK-MAX")
         assert task.state == "BLOCKED"
@@ -625,6 +628,201 @@ def test_retryable_failure_relaunches_with_backoff_and_records_attempts():
         assert first.result_data["retry_attempt"] == 1
         assert first.result_data["retry_backoff_seconds"] > 0
         assert second.worker_id == "builder-a"
+
+
+def test_reviewer_capacity_failures_fall_through_to_healthy_provider_without_blocking():
+    executors = {
+        "reviewer-claude-1": FakeExecutor([
+            ExecutionObservation(
+                "FAILED",
+                result_data={"provider_failure": "RATE_LIMITED", "detail": "session limit"},
+            )
+        ]),
+        "reviewer-grok-1": FakeExecutor([
+            ExecutionObservation(
+                "FAILED",
+                result_data={"provider_failure": "QUOTA_EXHAUSTED", "detail": "weekly quota exhausted"},
+            )
+        ]),
+        "reviewer-codex-1": FakeExecutor([
+            ExecutionObservation(
+                "SUCCEEDED",
+                result_data={
+                    "review": {"verdict": "GREEN", "ready_for_integration": True},
+                },
+            )
+        ]),
+    }
+    config = RunnerConfig(
+        workers=(
+            WorkerConfig(
+                "reviewer-claude-1",
+                "REVIEWER",
+                adapter="fake",
+                provider="anthropic",
+                capabilities=(CAP_CODE_REVIEW,),
+                preference=1,
+            ),
+            WorkerConfig(
+                "reviewer-grok-1",
+                "REVIEWER",
+                adapter="fake",
+                provider="xai",
+                capabilities=(CAP_CODE_REVIEW,),
+                preference=2,
+            ),
+            WorkerConfig(
+                "reviewer-codex-1",
+                "REVIEWER",
+                adapter="fake",
+                provider="openai",
+                capabilities=(CAP_CODE_REVIEW,),
+                preference=3,
+            ),
+        ),
+        providers={
+            "anthropic": ProviderConfig("anthropic", availability="AVAILABLE"),
+            "xai": ProviderConfig("xai", availability="AVAILABLE"),
+            "openai": ProviderConfig("openai", availability="AVAILABLE"),
+        },
+        max_review_environment_attempts=1,
+        run_validation=False,
+        result_dir=os.getenv("BUILD_COORDINATOR_RESULT_DIR"),
+    )
+    with SessionLocal() as session:
+        task = upsert_task(session, _task("TASK-REVIEW-CAPACITY"))
+        task.state = "REVIEW_READY"
+        session.commit()
+
+    runner = BuildRunner(SessionLocal, config=config, executors=executors, git=FakeGit())
+
+    first = runner.run_once()
+    assert first.launched == ["TASK-REVIEW-CAPACITY:REVIEWER"]
+
+    second = runner.run_once()
+    assert second.launched == ["TASK-REVIEW-CAPACITY:REVIEWER"]
+
+    third = runner.run_once()
+    assert third.launched == ["TASK-REVIEW-CAPACITY:REVIEWER"]
+
+    with SessionLocal() as session:
+        task = session.get(BuildTask, "TASK-REVIEW-CAPACITY")
+        executions = session.scalars(
+            select(BuildRunnerExecution)
+            .where(BuildRunnerExecution.task_id == "TASK-REVIEW-CAPACITY")
+            .where(BuildRunnerExecution.role == "REVIEWER")
+            .order_by(BuildRunnerExecution.launched_at)
+        ).all()
+        assert task.state != "BLOCKED"
+        assert [row.worker_id for row in executions] == [
+            "reviewer-claude-1",
+            "reviewer-grok-1",
+            "reviewer-codex-1",
+        ]
+        assert executions[0].result_data["provider_capacity_failure"] is True
+        assert executions[1].result_data["provider_capacity_failure"] is True
+        assert executions[0].result_data["reviewer_attempt"] == 0
+        assert executions[1].result_data["reviewer_attempt"] == 0
+
+
+def test_legacy_provider_capacity_block_auto_recovers_to_review_and_dispatches():
+    config = RunnerConfig(
+        workers=(
+            WorkerConfig(
+                "reviewer-codex-1",
+                "REVIEWER",
+                adapter="fake",
+                provider="openai",
+                capabilities=(CAP_CODE_REVIEW,),
+            ),
+        ),
+        providers={"openai": ProviderConfig("openai", availability="AVAILABLE")},
+        run_validation=False,
+        result_dir=os.getenv("BUILD_COORDINATOR_RESULT_DIR"),
+    )
+    with SessionLocal() as session:
+        upsert_task(session, _task("TASK-LEGACY-CAPACITY-BLOCK"))
+        transition_task(
+            session,
+            "TASK-LEGACY-CAPACITY-BLOCK",
+            "BLOCKED",
+            actor="test",
+            reason="PROVIDER_FAILURE:RATE_LIMITED",
+        )
+        session.add(
+            BuildRunnerExecution(
+                execution_id="legacy-review-capacity-failure",
+                task_id="TASK-LEGACY-CAPACITY-BLOCK",
+                role="REVIEWER",
+                worker_id="reviewer-claude-1",
+                provider="anthropic",
+                adapter="fake",
+                status="LOST",
+                completed_at=utcnow(),
+                result_data={"provider_failure": "RATE_LIMITED"},
+            )
+        )
+        session.commit()
+
+    runner = BuildRunner(
+        SessionLocal,
+        config=config,
+        executors={"reviewer-codex-1": FakeExecutor()},
+        git=FakeGit(),
+        target_task_ids={"TASK-LEGACY-CAPACITY-BLOCK"},
+    )
+    result = runner.run_once()
+
+    assert "TASK-LEGACY-CAPACITY-BLOCK" in result.recovered
+    assert result.launched == ["TASK-LEGACY-CAPACITY-BLOCK:REVIEWER"]
+    with SessionLocal() as session:
+        task = session.get(BuildTask, "TASK-LEGACY-CAPACITY-BLOCK")
+        assert task.state == "REVIEWING"
+        recovery = session.scalar(
+            select(BuildTaskEvent)
+            .where(BuildTaskEvent.task_id == "TASK-LEGACY-CAPACITY-BLOCK")
+            .where(BuildTaskEvent.event_type == "runner.provider_capacity_blocker_recovered")
+        )
+        assert recovery is not None
+        assert recovery.event_data["resumed_to"] == "REVIEW_READY"
+
+
+def test_provider_capacity_wait_is_not_terminal_idle():
+    result = RunnerCycleResult(
+        mode="RUNNING",
+        scheduling_reasons={"TASK-WAIT": "provider_capacity_wait"},
+    )
+    assert _provider_capacity_waiting(result) is True
+    assert _provider_capacity_waiting(RunnerCycleResult(mode="RUNNING")) is False
+
+
+def test_targeted_human_summary_filters_unrelated_project_attention():
+    project = type("Project", (), {"project_id": "stagemesh"})()
+    final = {
+        "executions": [],
+        "tasks_by_state": {"READY": 2, "BLOCKED": 2},
+        "tasks": [
+            {"task_id": "TARGET", "state": "BLOCKED"},
+            {"task_id": "OTHER", "state": "BLOCKED"},
+        ],
+        "blocked": [
+            {"task_id": "TARGET", "reason": "TARGET_REASON"},
+            {"task_id": "OTHER", "reason": "OTHER_REASON"},
+        ],
+    }
+    summary = _continue_human_summary(
+        project,
+        [],
+        final,
+        {"TARGET": "TARGET_REASON", "OTHER": "OTHER_REASON"},
+        target_task_ids=frozenset({"TARGET"}),
+    )
+
+    assert "Target: TARGET" in summary
+    assert "TARGET_REASON" in summary
+    assert "OTHER" not in summary
+    assert "OTHER_REASON" not in summary
+    assert "Needs action: 1" in summary
 
 
 # 13. Configurable concurrency
