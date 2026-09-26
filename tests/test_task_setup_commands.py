@@ -3,6 +3,7 @@ before the agent starts, with durable evidence gating the launch."""
 
 from __future__ import annotations
 
+import subprocess
 import sys
 
 import pytest
@@ -20,6 +21,7 @@ from build_coordinator.models import (
 )
 from build_coordinator.project.definition import ProjectError, load_project
 from build_coordinator.runner import BuildRunner
+from build_coordinator.execution.fake import FakeExecutor
 from build_coordinator.runner.models import RunnerConfig, WorkerConfig
 from build_coordinator.service import TaskSpec, upsert_task
 
@@ -168,3 +170,36 @@ def test_failing_setup_command_blocks_task_with_typed_reason(tmp_path):
         ).all()
         assert len(events) == 1
         assert events[0].event_data["passed"] is False
+
+
+def test_failing_setup_blocks_dispatch_before_agent_launch(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    subprocess.run(["git", "init"], cwd=workspace, capture_output=True, text=True, check=False)
+    worker = WorkerConfig("builder-1", "BUILDER", worktree_path=str(workspace))
+    executor = FakeExecutor()
+    runner = BuildRunner(
+        SessionLocal,
+        RunnerConfig(
+            workers=(worker,),
+            setup_commands=(f"{sys.executable} -c \"import sys; sys.exit(3)\"",),
+        ),
+        executors={"builder-1": executor},
+    )
+
+    with SessionLocal() as session:
+        upsert_task(session, _task("SM-103"))
+        result = runner._run_once(session)
+        session.commit()
+
+    assert result.launched == []
+    assert executor.launches == []
+    assert result.escalations == ["SM-103:SETUP_FAILED"]
+    with SessionLocal() as session:
+        task = session.get(BuildTask, "SM-103")
+        assert task.state == "BLOCKED"
+        events = session.scalars(
+            select(BuildTaskEvent).where(BuildTaskEvent.event_type == "runner.setup")
+        ).all()
+        assert len(events) == 1
+        assert events[0].event_data["results"][0]["exit_code"] == 3

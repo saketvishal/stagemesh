@@ -226,10 +226,16 @@ class GitHubTaskSource(TaskSource):
         self.ensure_labels(session)
         issues = self._fetch_issues()
         results: list[SyncResult] = []
+        open_issue_numbers: set[int] = set()
         for issue in issues:
+            try:
+                open_issue_numbers.add(int(issue["number"]))
+            except (KeyError, TypeError, ValueError):
+                pass
             res = self._sync_issue(session, issue)
             if res is not None:
                 results.append(res)
+        results.extend(self._reconcile_source_states(session, open_issue_numbers))
         return results
 
     def _fetch_issues(self) -> list[dict[str, Any]]:
@@ -263,6 +269,119 @@ class GitHubTaskSource(TaskSource):
             raise RuntimeError(f"failed to fetch GitHub issues from {self.repo}: {err}")
         except Exception as exc:
             raise RuntimeError(f"failed to fetch GitHub issues from {self.repo}: {exc}")
+
+    def _fetch_issue_by_number(self, issue_number: int) -> dict[str, Any] | None:
+        if self._client is not None:
+            if not hasattr(self._client, "get_issue"):
+                return None
+            issue = self._client.get_issue(repo=self.repo, issue_number=issue_number)
+            if isinstance(issue, dict):
+                return issue
+            return {
+                "number": getattr(issue, "number", issue_number),
+                "state": getattr(issue, "state", ""),
+                "url": getattr(issue, "html_url", ""),
+            }
+        cmd = [
+            "gh",
+            "issue",
+            "view",
+            str(issue_number),
+            "--repo",
+            self.repo,
+            "--json",
+            "number,state,url",
+        ]
+        try:
+            res = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=True,
+            )
+            data = json.loads(res.stdout)
+            return data if isinstance(data, dict) else None
+        except Exception:
+            return None
+
+    def _reconcile_source_states(
+        self,
+        session,
+        open_issue_numbers: set[int],
+    ) -> list[SyncResult]:
+        task_ids = session.scalars(
+            select(BuildTaskEvent.task_id)
+            .where(BuildTaskEvent.actor == "github-sync")
+            .where(BuildTaskEvent.task_id.isnot(None))
+            .distinct()
+        ).all()
+        results: list[SyncResult] = []
+        for task_id in task_ids:
+            if not task_id:
+                continue
+            task = session.get(BuildTask, task_id)
+            if task is None:
+                continue
+            issue_number = self._resolve_issue_number(session, task_id, is_objective=False)
+            if issue_number is None:
+                continue
+            metadata = dict(task.definition_metadata or {})
+            previous_state = str(metadata.get("source_state") or "").upper()
+
+            if issue_number in open_issue_numbers:
+                source_state = "OPEN"
+                source_url = metadata.get("source_url") or f"https://github.com/{self.repo}/issues/{issue_number}"
+            else:
+                source = self._fetch_issue_by_number(issue_number)
+                if source is None:
+                    continue
+                source_state = str(source.get("state") or "").upper()
+                source_url = source.get("url") or metadata.get("source_url") or f"https://github.com/{self.repo}/issues/{issue_number}"
+
+            if source_state not in {"OPEN", "CLOSED"}:
+                continue
+
+            metadata.update(
+                {
+                    "task_source": "github",
+                    "source_issue_number": issue_number,
+                    "source_state": source_state,
+                    "source_url": source_url,
+                }
+            )
+            task.definition_metadata = metadata
+
+            if source_state != previous_state:
+                record_event(
+                    session,
+                    EventInput(
+                        task_id=task.task_id,
+                        event_type="task_source.source_state_changed",
+                        actor="github-sync",
+                        event_data={
+                            "source": source_url,
+                            "issue_number": issue_number,
+                            "from_state": previous_state or None,
+                            "to_state": source_state,
+                        },
+                    ),
+                )
+                results.append(
+                    SyncResult(
+                        task_id=task.task_id,
+                        title=task.title,
+                        action=f"SOURCE_{source_state}",
+                        source_ref=str(source_url),
+                        details=(
+                            "GitHub source issue closed; local task preserved but suppressed"
+                            if source_state == "CLOSED"
+                            else "GitHub source issue reopened; source suppression cleared"
+                        ),
+                    )
+                )
+        return results
 
     def _sync_issue(self, session, issue: dict[str, Any]) -> SyncResult | None:
         number = issue["number"]
@@ -339,6 +458,10 @@ class GitHubTaskSource(TaskSource):
         objective_id: str | None = None,
     ) -> SyncResult:
         existing = session.get(BuildTask, task_id)
+        source_was_closed = bool(
+            existing is not None
+            and str((existing.definition_metadata or {}).get("source_state") or "").upper() == "CLOSED"
+        )
         review_policy = self._review_policy_from_labels(labels)
         risk_level = "HIGH" if any("risk:high" in l.lower() for l in labels) else "MEDIUM"
         priority = self._parse_priority(labels, body)
@@ -365,8 +488,31 @@ class GitHubTaskSource(TaskSource):
             dependencies=deps,
             risk_level=risk_level,
             review_policy=review_policy,
+            definition_metadata={
+                **(existing.definition_metadata if existing is not None else {}),
+                "task_source": "github",
+                "source_issue_number": int(re.search(r"/issues/(\d+)$", url).group(1)) if re.search(r"/issues/(\d+)$", url) else None,
+                "source_state": "OPEN",
+                "source_url": url,
+            },
         )
         task = upsert_task(session, spec)
+        if source_was_closed:
+            action = "SOURCE_OPEN"
+            record_event(
+                session,
+                EventInput(
+                    task_id=task.task_id,
+                    event_type="task_source.source_state_changed",
+                    actor="github-sync",
+                    event_data={
+                        "source": url,
+                        "issue_number": (task.definition_metadata or {}).get("source_issue_number"),
+                        "from_state": "CLOSED",
+                        "to_state": "OPEN",
+                    },
+                ),
+            )
         if objective_id:
             task.objective_id = objective_id
             if task.reason_created == OBJECTIVE_ROOT_COMPAT_REASON:
@@ -379,7 +525,11 @@ class GitHubTaskSource(TaskSource):
         details = (
             f"in sync ({task.state})"
             if action == "SKIPPED"
-            else f"Synced from GitHub issue as {task.state} (priority: {priority})"
+            else (
+                "GitHub source issue reopened; source suppression cleared"
+                if action == "SOURCE_OPEN"
+                else f"Synced from GitHub issue as {task.state} (priority: {priority})"
+            )
         )
         return SyncResult(
             task_id=task.task_id,
@@ -946,7 +1096,7 @@ class GitHubTaskSource(TaskSource):
                 session,
                 entity_id,
                 issue_number,
-                state="DONE" if should_close else label,
+                state=synced_state,
                 is_objective=is_objective,
             )
             return True
