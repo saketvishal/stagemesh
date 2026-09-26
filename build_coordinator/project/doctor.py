@@ -124,8 +124,8 @@ def check_project(project: ProjectDefinition) -> list[Check]:
     try:
         definitions = load_backlog(project)
         checks.append(Check(area, "backlog", OK if definitions else WARN, f"{len(definitions)} task definition(s)", "" if definitions else "add tasks under .stagemesh/tasks/"))
-        if any(d.review_policy == "TWO_REVIEWERS" for d in definitions) and project.reviewers < 2:
-            checks.append(Check(area, "review policy", FAIL, "TWO_REVIEWERS tasks need execution.reviewers >= 2", "set execution.reviewers: 2 in project.yaml"))
+        if any(d.review_policy in {"TWO_REVIEWERS", "TWO_PROVIDERS"} for d in definitions) and project.reviewers < 2:
+            checks.append(Check(area, "review policy", FAIL, "two-approval review tasks need execution.reviewers >= 2", "set execution.reviewers: 2 in project.yaml"))
     except BacklogError as exc:
         checks.append(Check(area, "backlog", FAIL, "; ".join(exc.problems)[:400], "fix the task definitions listed above, then re-run doctor"))
     except ProjectError as exc:

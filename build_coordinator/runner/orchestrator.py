@@ -55,7 +55,7 @@ from build_coordinator.objectives import (
     run_objective_cycle,
 )
 from build_coordinator.planner import parse_planner_plan
-from build_coordinator.policy import CoordinatorCapacityError, CoordinatorPolicyError
+from build_coordinator.policy import CoordinatorCapacityError, CoordinatorPolicyError, review_policy_spec
 from build_coordinator.prompts import (
     BuilderPromptBuilder,
     IntegrationPromptBuilder,
@@ -88,6 +88,7 @@ from build_coordinator.runner.routing import (
     RETRYABLE_PROVIDER_FAILURES,
     RoutingDecision,
     StageRequirement,
+    approving_providers,
     approving_reviewers,
     reviewer_exclusions,
     role_to_stage,
@@ -1003,6 +1004,13 @@ class BuildRunner:
                                 reviewed_feature_sha=execution.reviewed_feature_sha,
                             )
                         ),
+                        "provider_approvals": sorted(
+                            approving_providers(
+                                session,
+                                execution.task_id,
+                                reviewed_feature_sha=execution.reviewed_feature_sha,
+                            )
+                        ),
                     },
                 ),
             )
@@ -1090,18 +1098,26 @@ class BuildRunner:
 
     def _needs_second_reviewer(self, session: Session, execution: BuildRunnerExecution) -> bool:
         task = session.get(BuildTask, execution.task_id)
-        if task is None or task.review_policy != "TWO_REVIEWERS":
+        if task is None:
             return False
-        return (
-            len(
-                approving_reviewers(
+        spec = review_policy_spec(task.review_policy)
+        if spec.required_approvals < 2:
+            return False
+        if spec.independent_provider:
+            return len(
+                approving_providers(
                     session,
                     execution.task_id,
                     reviewed_feature_sha=execution.reviewed_feature_sha,
                 )
+            ) < spec.required_approvals
+        return len(
+            approving_reviewers(
+                session,
+                execution.task_id,
+                reviewed_feature_sha=execution.reviewed_feature_sha,
             )
-            < 2
-        )
+        ) < spec.required_approvals
 
     def _integration_succeeded(
         self,
@@ -2408,6 +2424,15 @@ class BuildRunner:
                 worker for worker in self._config.workers if "implementation" in worker.stage_names()
             ]
         requirement = self._config.stage_requirements.get(stage, StageRequirement(stage))
+        exclusions = (
+            reviewer_exclusions(
+                session,
+                task_id,
+                reviewed_feature_sha=review_target_sha,
+            )
+            if role == "REVIEWER"
+            else None
+        )
         decision = route_worker(
             workers,
             stage=stage,
@@ -2417,13 +2442,8 @@ class BuildRunner:
             routing_policy=self._config.routing_policy,
             session=session,
             task_id=task_id,
-            excluded_workers=reviewer_exclusions(
-                session,
-                task_id,
-                reviewed_feature_sha=review_target_sha,
-            )
-            if role == "REVIEWER"
-            else set(),
+            excluded_workers=set(exclusions.workers) if exclusions else set(),
+            excluded_providers=set(exclusions.providers) if exclusions else set(),
             deprioritized_workers=deprioritized_workers,
         )
         worker = next(

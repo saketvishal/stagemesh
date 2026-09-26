@@ -16,6 +16,7 @@ from build_coordinator.claims import (
     create_claim,
     get_max_active_builders,
     get_task_scope,
+    last_implementation_provider,
     last_implementation_worker,
     lock_coordinator_state,
     locked_claim,
@@ -30,7 +31,10 @@ from build_coordinator.policy import (
     CoordinatorCapacityError,
     CoordinatorPolicyError,
     independent_review_required,
+    normalize_review_policy,
     require_transition,
+    require_valid_review_policy,
+    review_policy_spec,
     review_required,
 )
 from build_coordinator.types import (
@@ -124,6 +128,8 @@ def set_mode(
 
 
 def upsert_task(session: Session, spec: TaskSpec) -> BuildTask:
+    review_policy = normalize_review_policy(spec.review_policy)
+    require_valid_review_policy(review_policy)
     task = session.get(BuildTask, spec.task_id)
     scope_dict = spec.ownership_scope.to_dict() if spec.ownership_scope else {}
     if task is None:
@@ -134,7 +140,7 @@ def upsert_task(session: Session, spec: TaskSpec) -> BuildTask:
             acceptance_criteria=spec.acceptance_criteria,
             dependencies=spec.dependencies,
             risk_level=spec.risk_level,
-            review_policy=spec.review_policy,
+            review_policy=review_policy,
             permitted_scope=spec.permitted_scope,
             required_validation=spec.required_validation,
             implementation_notes=spec.implementation_notes,
@@ -161,7 +167,7 @@ def upsert_task(session: Session, spec: TaskSpec) -> BuildTask:
         task.acceptance_criteria = spec.acceptance_criteria
         task.dependencies = spec.dependencies
         task.risk_level = spec.risk_level
-        task.review_policy = spec.review_policy
+        task.review_policy = review_policy
         task.permitted_scope = spec.permitted_scope
         task.required_validation = spec.required_validation
         task.implementation_notes = spec.implementation_notes
@@ -394,11 +400,22 @@ def claim_review(
         raise CoordinatorPolicyError(
             f"Task is not review-claimable: {request.task_id}"
         )
+    spec = review_policy_spec(task.review_policy)
     implementer = last_implementation_worker(session, request.task_id)
-    if independent_review_required(task.review_policy) and implementer == request.worker_id:
+    implementer_provider = last_implementation_provider(session, request.task_id)
+    if spec.independent_worker and implementer == request.worker_id:
         raise CoordinatorPolicyError(
             "Independent review cannot be claimed by the implementer"
         )
+    if spec.independent_provider:
+        if not implementer_provider or not request.provider:
+            raise CoordinatorPolicyError(
+                "Provider-independent review requires known implementation and reviewer providers"
+            )
+        if implementer_provider == request.provider:
+            raise CoordinatorPolicyError(
+                "Provider-independent review cannot be claimed by the implementation provider"
+            )
     existing_review = active_claim(session, request.task_id, "REVIEW", now)
     if existing_review is not None:
         raise CoordinatorPolicyError(

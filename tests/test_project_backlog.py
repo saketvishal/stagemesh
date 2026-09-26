@@ -477,6 +477,7 @@ def test_legacy_state_is_refused_then_migrated_with_backup_and_history_kept(tmp_
     with lifecycle.session() as db:
         task = db.get(BuildTask, "LEGACY-1")
         assert task.state == "REVIEWING" and task.reason_created == "MANUAL" and task.parallel_safe is True
+        assert task.review_policy == "INDEPENDENT_WORKER"
     lifecycle.dispose()
     with sqlite3.connect(applied.backup) as backup:
         assert backup.execute("SELECT state FROM build_tasks").fetchone() == ("REVIEWING",)

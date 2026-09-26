@@ -423,7 +423,12 @@ def _table_digest(connection: sqlite3.Connection, table: str, columns: list[str]
     digest = hashlib.sha256()
     count = 0
     for row in connection.execute(f"SELECT {', '.join(use)} FROM {table} ORDER BY {order}"):
-        digest.update(json.dumps(row, default=str, sort_keys=True).encode("utf-8"))
+        values = list(row)
+        if table == "build_tasks" and "review_policy" in use:
+            index = use.index("review_policy")
+            if values[index] == "INDEPENDENT":
+                values[index] = "INDEPENDENT_WORKER"
+        digest.update(json.dumps(values, default=str, sort_keys=True).encode("utf-8"))
         count += 1
     return {"rows": count, "digest": digest.hexdigest(), "columns": use}
 
@@ -619,6 +624,11 @@ def _rebuild(connection: sqlite3.Connection, table: Table) -> None:
         f"INSERT INTO {staging} ({', '.join(columns)}) SELECT {', '.join(selects)} FROM {table.name}",
         params,
     )
+    if table.name == "build_tasks" and "review_policy" in have:
+        connection.execute(
+            f"UPDATE {staging} SET review_policy = 'INDEPENDENT_WORKER' "
+            "WHERE review_policy = 'INDEPENDENT'"
+        )
     connection.execute(f"DROP TABLE {table.name}")
     connection.execute(f"ALTER TABLE {staging} RENAME TO {table.name}")
     for index in table.indexes:

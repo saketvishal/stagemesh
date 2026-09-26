@@ -227,6 +227,16 @@ def last_implementation_worker(session: Session, task_id: str) -> str | None:
     )
 
 
+def last_implementation_provider(session: Session, task_id: str) -> str | None:
+    return session.scalar(
+        select(BuildTaskClaim.provider)
+        .where(BuildTaskClaim.task_id == task_id)
+        .where(BuildTaskClaim.claim_type == "IMPLEMENTATION")
+        .order_by(BuildTaskClaim.claimed_at.desc())
+        .limit(1)
+    )
+
+
 def release_active_claims(session: Session, task_id: str, *, completed: bool) -> None:
     claims = session.scalars(
         select(BuildTaskClaim)
