@@ -680,6 +680,112 @@ def test_launch_reserves_worker_slot_before_external_executor_starts(tmp_path: P
         assert active_leases[0].task_id is None
 
 
+def test_execution_and_worker_lease_are_durable_before_executor_launch(tmp_path: Path):
+    with SessionLocal() as session:
+        upsert_task(session, _task("DURABLE-LAUNCH"))
+        session.commit()
+
+    class ObservingExecutor:
+        adapter_name = "fake"
+
+        def launch(self, launch):
+            with SessionLocal() as verify:
+                execution = verify.get(BuildRunnerExecution, launch.execution_id)
+                lease = verify.scalar(
+                    select(BuildWorkerLease).where(
+                        BuildWorkerLease.execution_id == launch.execution_id,
+                        BuildWorkerLease.status == "ACTIVE",
+                    )
+                )
+                assert execution is not None
+                assert execution.task_id == "DURABLE-LAUNCH"
+                assert execution.status == "LAUNCHED"
+                assert lease is not None
+                assert lease.worker_id == launch.worker_id
+            return ExecutionHandle(
+                execution_id=launch.execution_id,
+                process_id="observed",
+                result_path=launch.result_path,
+            )
+
+        def poll(self, execution_id):
+            raise AssertionError("poll not expected")
+
+    worker = WorkerConfig(
+        "builder-openai",
+        "BUILDER",
+        provider="openai",
+        adapter="fake",
+        capabilities=(CAP_CODING,),
+        stages=("implementation",),
+        max_concurrency=1,
+    )
+    runner = BuildRunner(
+        SessionLocal,
+        _config(tmp_path, (worker,)),
+        executors={"builder-openai": ObservingExecutor()},
+        git=FakeGit(),
+    )
+
+    result = runner.run_once()
+
+    assert len(result.launched) == 1
+    with SessionLocal() as session:
+        execution = session.get(BuildRunnerExecution, result.launched[0])
+        lease = session.scalar(
+            select(BuildWorkerLease).where(BuildWorkerLease.execution_id == result.launched[0])
+        )
+        assert execution is not None
+        assert execution.process_id == "observed"
+        assert lease is not None
+        assert lease.status == "ACTIVE"
+
+
+def test_expired_active_worker_lease_does_not_block_slot_reuse(tmp_path: Path):
+    now = utcnow()
+    with SessionLocal() as session:
+        upsert_task(session, _task("STALE-SLOT"))
+        session.add(
+            BuildWorkerLease(
+                worker_id="builder-openai",
+                provider="openai",
+                slot_index=0,
+                machine_id="dead-host",
+                process_id="dead",
+                task_id="OLD-TASK",
+                execution_id="old-exec",
+                lease_expires_at=now - timedelta(minutes=5),
+                status="ACTIVE",
+            )
+        )
+        session.commit()
+
+    worker = WorkerConfig(
+        "builder-openai",
+        "BUILDER",
+        provider="openai",
+        adapter="fake",
+        capabilities=(CAP_CODING,),
+        stages=("implementation",),
+        max_concurrency=1,
+    )
+    executor = FakeExecutor()
+    runner = BuildRunner(SessionLocal, _config(tmp_path, (worker,)), executors={"builder-openai": executor}, git=FakeGit())
+
+    result = runner.run_once()
+
+    assert len(result.launched) == 1
+    assert result.capacity_full is False
+    with SessionLocal() as session:
+        old_lease = session.scalar(select(BuildWorkerLease).where(BuildWorkerLease.execution_id == "old-exec"))
+        new_lease = session.scalar(select(BuildWorkerLease).where(BuildWorkerLease.execution_id == result.launched[0]))
+        assert old_lease is not None
+        assert old_lease.status == "EXPIRED"
+        assert new_lease is not None
+        assert new_lease.status == "ACTIVE"
+        assert new_lease.task_id == "STALE-SLOT"
+
+
 def test_launch_failure_releases_reserved_worker_slot(tmp_path: Path):
     class FailingExecutor:
         adapter_name = "fake"
