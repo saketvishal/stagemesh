@@ -20,6 +20,10 @@ The initial standalone release of StageMesh. All items below are
 - [x] Capability-based deterministic stage routing
 - [x] SubprocessExecutor (stdin-prompt delivery, result-file contract)
 - [x] Codex CLI worker execution proven
+- [x] Claude Code worker execution path accepted through the headless runtime profile and structured result contract
+- [x] Provider failover and cross-provider recovery
+- [x] Cross-provider independent review enforcement
+- [x] Concurrent execution under configured capacity
 
 ### Autonomous objective lifecycle (complete)
 - [x] Planner agent decomposes goal into child tasks
@@ -30,9 +34,12 @@ The initial standalone release of StageMesh. All items below are
 - [x] Works from any working directory (not just repo root)
 - [x] Launcher scripts for Linux/macOS/Windows
 
-### Pending final acceptance
-- [ ] Final independent release verification
-- [ ] Cross-provider independent review execution when provider runtimes are available
+### Public alpha evidence complete
+- [x] Independent release review
+- [x] Global invocation across registered projects
+- [x] Cleanup after integration
+- [x] Deterministic validation before review
+- [x] Sanitized GitHub delivery dry-run
 
 ---
 
@@ -47,7 +54,8 @@ The initial standalone release of StageMesh. All items below are
 
 ### Expanded provider support
 - [ ] Additional runtime adapters
-- [ ] Formal multi-provider acceptance matrix
+- [ ] Published live GitHub delivery evidence beyond dry-run payload validation
+- [ ] Antigravity or other GUI-first runtime support, only after reliable headless automation is proven
 
 ### Observability
 - [ ] Structured event streaming
@@ -84,7 +92,7 @@ consuming product layers:
 Publication requires an explicit human approval decision. The remaining blockers
 before v0.1-alpha publication are:
 
-1. Final independent release verification
-2. Human approval gate
+1. Human approval gate
+2. PyPI release checklist completion
 
 StageMesh will not be published automatically when acceptance completes.

@@ -7,9 +7,9 @@ by capability, and recovers when agents disappear.
 > **Status: v0.2.0a1 public alpha**
 >
 > StageMesh is Apache-2.0 and usable for alpha testing, but it is still early:
-> PyPI publication is gated by the release checklist, cross-provider independent
-> final verification is pending, and operators should expect rough edges around
-> setup, provider configuration, and production hardening.
+> PyPI publication is gated by the release checklist, and operators should
+> expect rough edges around setup, provider configuration, and production
+> hardening. Public alpha evidence is limited to the accepted scenarios below.
 
 **Demo:** public-safe dogfood demos live in
 [examples/public_dogfood](examples/public_dogfood/), with the repeatable
@@ -96,8 +96,8 @@ and capability routing, never by you. See [Project-owned backlogs](docs/PROJECTS
 
 > [!IMPORTANT]
 > Only claims backed by execution evidence appear below. StageMesh does not claim
-> `SELF_HOSTING_PROVEN`, and cross-provider independent final verification is
-> still pending.
+> `SELF_HOSTING_PROVEN`, published GitHub delivery, or GUI/headless support for
+> runtimes whose live headless probes have not succeeded.
 
 | Capability | Status |
 |---|---|
@@ -113,7 +113,15 @@ and capability routing, never by you. See [Project-owned backlogs](docs/PROJECTS
 | Location-independent CLI | **IMPLEMENTED AND PROVEN** |
 | SQLite and PostgreSQL support | **IMPLEMENTED AND PROVEN** |
 | Codex CLI worker execution (OpenAI) | **IMPLEMENTED AND PROVEN** - authenticated CLI, smoke, JSON ingestion |
-| Cross-provider independent review | **IMPLEMENTED; FINAL INDEPENDENT VERIFICATION PENDING** |
+| Claude Code worker execution (Anthropic) | **IMPLEMENTED AND ACCEPTANCE-COVERED** - headless runtime profile, structured result contract, routing |
+| Provider failover | **IMPLEMENTED AND PROVEN** - provider failure preserves history/checkpoints and routes replacement work |
+| Cross-provider recovery | **IMPLEMENTED AND PROVEN** - replacement provider resumes from durable context |
+| Cross-provider independent review | **IMPLEMENTED AND PROVEN** - different-provider reviewer is enforced and audited |
+| Concurrent execution | **IMPLEMENTED AND PROVEN** - multiple builder claims launch under configured capacity |
+| Cleanup after integration | **IMPLEMENTED AND PROVEN** - merged task branches are removed; unmerged branches are refused |
+| Deterministic validation | **IMPLEMENTED AND PROVEN** - validation gates run before review and fail closed |
+| GitHub delivery | **DRY-RUN ONLY** - sanitized outbound payload path is accepted; live publication is not claimed |
+| Antigravity IDE runtime | **NOT PROVEN / UNSUPPORTED** - excluded until a reliable headless automation path is proven |
 
 Evidence:
 

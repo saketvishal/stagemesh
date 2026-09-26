@@ -1,9 +1,13 @@
 # Codex Execution Acceptance Evidence
 
-## Status: PROVEN for Codex execution; published under v0.1.0-alpha
+## Status: PROVEN for accepted public alpha execution
 
-Real Codex CLI execution through StageMesh has been proven. This document
-records what was actually demonstrated.
+Real Codex CLI execution through StageMesh has been proven. The accepted
+post-alpha public evidence also covers the multi-provider coordinator behavior
+that does not require secrets or network access: Claude runtime support through
+the headless profile/result contract, provider failover, cross-provider
+recovery, independent review, concurrency, cleanup, global invocation, and
+deterministic validation.
 
 ---
 
@@ -38,23 +42,45 @@ Multiple Codex worker instances were launched concurrently by the coordinator.
 Capacity enforcement (`max_active_builders`) and claim isolation were verified
 under concurrent execution.
 
+### 6. Claude Code runtime support
+
+Claude Code is represented as a supported headless runtime profile for the
+Anthropic provider. Acceptance coverage verifies the profile, stage matrix,
+structured result contract, provider routing, and recovery semantics. Readiness
+on an operator machine still requires `stagemesh agent setup` to complete a
+live headless probe.
+
+### 7. Provider failover and interruption recovery
+
+Accepted public dogfood coverage proves that a provider failure preserves
+claim history and checkpoints, then lets a replacement provider receive resume
+context and continue without losing prior work.
+
+### 8. Cross-provider independent review
+
+Cross-provider independent review is implemented and acceptance-covered. The
+coordinator rejects same-provider review for `INDEPENDENT_PROVIDER`, counts
+distinct providers for `TWO_PROVIDERS`, records exact reviewed SHAs, and audits
+the routing preference for a reviewer from a different provider.
+
+### 9. Global invocation, cleanup, and deterministic validation
+
+Accepted public dogfood coverage proves global capacity allocation across
+registered projects, post-integration cleanup that refuses unmerged branches,
+and deterministic validation gates that run before review and fail closed.
+
 ---
 
-## What remains pending
+## Claims not made
 
-### Final independent release verification
-
-This baseline completed independent final verification prior to publication of v0.1.0-alpha.
-
-### Cross-provider independent review
-
-Cross-provider independent review execution has not been completed for this
-candidate. StageMesh is designed to be provider-neutral; the independent review
-gate applies equally to any provider once that provider is configured and
-available.
-
-**Claim NOT made:** `SELF_HOSTING_PROVEN`. That claim requires additional
-acceptance evidence and is not asserted for this release candidate.
+- **Self-hosting proven:** not claimed. `SELF_HOSTING_PROVEN` requires
+  additional acceptance evidence.
+- **Live GitHub delivery:** not claimed. Public evidence covers sanitized
+  dry-run outbound payloads only.
+- **Antigravity/headless support:** not claimed. GUI-only runtimes remain
+  unsupported until a reliable headless automation path is proven.
+- **Universal provider readiness:** not claimed. Each operator machine must
+  pass runtime-specific live headless probes before a runtime is marked ready.
 
 ---
 
