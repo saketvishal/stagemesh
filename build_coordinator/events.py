@@ -90,7 +90,12 @@ def decode_cursor(cursor: str) -> str:
     if not isinstance(cursor, str) or "-" not in cursor:
         raise ValueError(f"invalid event cursor: {cursor!r}")
     timestamp_part, _, seq_part = cursor.partition("-")
-    if not (timestamp_part.isdigit() and seq_part.isdigit()):
+    if not (
+        len(timestamp_part) == 20
+        and len(seq_part) == 12
+        and timestamp_part.isdigit()
+        and seq_part.isdigit()
+    ):
         raise ValueError(f"invalid event cursor: {cursor!r}")
     return cursor
 
@@ -126,7 +131,7 @@ def stream_events(
             from_state=row.from_state,
             to_state=row.to_state,
             claim_id=row.claim_id,
-            event_data=row.event_data,
+            event_data=row.event_data or {},
             created_at=row.created_at,
         )
         for row in rows
