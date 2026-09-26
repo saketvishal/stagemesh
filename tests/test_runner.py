@@ -1287,7 +1287,14 @@ def test_retryable_failure_relaunches_after_backoff_then_escalates_when_exhauste
             .where(BuildTaskEvent.event_type == "task.transitioned")
             .where(BuildTaskEvent.to_state == "BLOCKED")
         ).all()[-1]
-        assert blocked_event.event_data["reason"] == "EXECUTION_RETRY_LIMIT_REACHED"
+        assert blocked_event.event_data["reason"] == "PROVIDER_FAILURE_RETRIES_EXHAUSTED:RATE_LIMITED"
+        evidence = blocked_event.event_data["failure_evidence"]
+        assert evidence["underlying_invariant"] == "EXECUTION_RETRY_LIMIT_REACHED"
+        assert evidence["provider_failure"] == "RATE_LIMITED"
+        assert evidence["retry_attempts"] == 3
+        assert evidence["max_attempts"] == 3
+        assert evidence["retryable_failure"] is True
+        assert evidence["preserved_checkpoint"] is True
 
 
 def test_operator_retry_recovery_opens_new_durable_generation(monkeypatch):

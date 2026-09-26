@@ -1351,7 +1351,27 @@ class BuildRunner:
             except CoordinatorPolicyError:
                 pass
         if exhausted:
-            self._block_task(session, execution.task_id, "EXECUTION_RETRY_LIMIT_REACHED")
+            typed_reason = f"PROVIDER_FAILURE_RETRIES_EXHAUSTED:{failure}" if failure else "EXECUTION_RETRY_LIMIT_REACHED"
+            result.escalations.append(f"{execution.task_id}:{typed_reason}")
+            self._block_task(
+                session,
+                execution.task_id,
+                typed_reason,
+                invariant="EXECUTION_RETRY_LIMIT_REACHED",
+                execution=execution,
+                error=(
+                    f"{execution.role} retry attempts exhausted after "
+                    f"{attempts + 1}/{self._config.max_execution_attempts} attempts"
+                ),
+                extra_data={
+                    "provider_failure": failure or None,
+                    "retry_attempts": attempts + 1,
+                    "max_attempts": self._config.max_execution_attempts,
+                    "retryable_failure": retryable,
+                    "retry_generation": retry_generation,
+                    "preserved_checkpoint": bool(execution.claim_id),
+                },
+            )
         return True
 
     def _cleanup_integrated_task(self, session: Session, execution: BuildRunnerExecution) -> None:
