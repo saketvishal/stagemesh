@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
+import subprocess
+from pathlib import Path
 from datetime import timedelta
 
 import pytest
@@ -20,6 +23,7 @@ from build_coordinator.models import (
 )
 from build_coordinator.runner import BuildRunner
 import build_coordinator.runner.orchestrator as orchestrator_module
+from build_coordinator.runner.clone_pool import is_standalone_clone, repo_identity
 from build_coordinator.runner.git_safety import FakeGit, MechanicalMergeAssessment
 from build_coordinator.runner.models import RunnerConfig, WorkerConfig
 from build_coordinator.runner.routing import ProviderConfig
@@ -147,6 +151,74 @@ def _runner(config=None, executors=None, git=None):
         executors=executors,
         git=git if git is not None else FakeGit(),
     )
+
+
+def _git(cwd: Path, *args: str) -> str:
+    result = subprocess.run(
+        ["git", *args],
+        cwd=str(cwd),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return result.stdout.strip()
+
+
+def _repo_with_origin(tmp_path: Path) -> tuple[Path, Path]:
+    bare = tmp_path / "origin.git"
+    repo = tmp_path / "repo"
+    _git(tmp_path, "init", "--bare", str(bare))
+    repo.mkdir()
+    _git(repo, "init")
+    _git(repo, "config", "user.name", "Test")
+    _git(repo, "config", "user.email", "test@example.com")
+    (repo / "README.md").write_text("# Repo\n", encoding="utf-8")
+    _git(repo, "add", "README.md")
+    _git(repo, "commit", "-m", "initial")
+    _git(repo, "branch", "-M", "main")
+    _git(repo, "remote", "add", "origin", str(bare))
+    _git(repo, "push", "-u", "origin", "main")
+    return repo, bare
+
+
+def test_clone_pool_dispatch_provisions_without_legacy_worker_worktree(tmp_path):
+    repo, _bare = _repo_with_origin(tmp_path)
+    pool_root = tmp_path / "clone-pool"
+    config = RunnerConfig(
+        workers=(WorkerConfig("builder-a", "BUILDER", adapter="fake"),),
+        task_branches=True,
+        use_clone_pool=True,
+        clone_pool_root=str(pool_root),
+        allowed_workspace_roots=(str(tmp_path),),
+        main_ref="main",
+        remote_name="origin",
+        result_dir=os.getenv("BUILD_COORDINATOR_RESULT_DIR"),
+    )
+    runner = _runner(config=config, git=FakeGit())
+    runner._settings = dataclasses.replace(runner._settings, repo_root=repo, data_dir=tmp_path)
+
+    with SessionLocal() as session:
+        upsert_task(session, _task("GH-56"))
+        session.commit()
+
+    runner.run_once()
+
+    expected_clone = pool_root / repo_identity(repo) / "builder-a"
+    with SessionLocal() as session:
+        task = session.get(BuildTask, "GH-56")
+        claim = session.scalars(select(BuildTaskClaim).where(BuildTaskClaim.task_id == "GH-56")).one()
+        execution = session.scalars(
+            select(BuildRunnerExecution).where(BuildRunnerExecution.task_id == "GH-56")
+        ).one()
+
+    assert is_standalone_clone(expected_clone)
+    assert str(expected_clone) not in _git(repo, "worktree", "list", "--porcelain")
+    assert task.branch_name == "stagemesh/GH-56"
+    assert task.worktree_path == str(expected_clone)
+    assert claim.branch_name == "stagemesh/GH-56"
+    assert claim.worktree_path == str(expected_clone)
+    assert execution.branch_name == "stagemesh/GH-56"
+    assert execution.worktree_path == str(expected_clone)
 
 
 def _targeted_runner(task_id: str, config=None, executors=None, git=None):

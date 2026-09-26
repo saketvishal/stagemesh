@@ -1446,7 +1446,10 @@ class BuildRunner:
                 continue
 
             try:
-                if self._config.task_branches and worker.worktree_path:
+                if self._config.task_branches and (
+                    worker.worktree_path
+                    or (self._config.use_clone_pool and self._config.clone_pool_root)
+                ):
                     worker = self._prepare_task_worker(worker, task)
                 else:
                     self._validate_worker_worktree(worker)
