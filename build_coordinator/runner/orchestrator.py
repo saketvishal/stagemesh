@@ -2999,6 +2999,8 @@ class BuildRunner:
         for task in blocked:
             if not self._target_allows(task.task_id):
                 continue
+            if task_source_is_closed(task):
+                continue
             reason = self._latest_block_reason(session, task.task_id)
             if not reason:
                 continue
