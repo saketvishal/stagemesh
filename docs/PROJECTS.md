@@ -174,7 +174,10 @@ Reviewer and integration workers get managed worktrees too.
 machine-local execution environment (`--path-prepend <dir>`, `--env K=V`, e.g. a
 virtualenv); it is never the backlog. `stagemesh continue` outside any project
 starts one process per registered project, so state, workspaces and failures never
-cross projects and a broken or blocked project does not stop the others.
+cross projects and a broken or blocked project does not stop the others. Add
+`--capacity N` to allocate a bounded global builder budget fairly across those
+registered project backlogs for one run; each project still treats its own
+`execution.concurrency` as the maximum.
 
 ## Agents
 

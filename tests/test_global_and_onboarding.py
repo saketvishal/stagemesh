@@ -46,6 +46,39 @@ def test_global_continue_from_an_empty_directory_coordinates_every_registered_pr
     assert not (empty / ".build-coordinator").exists()
 
 
+def test_global_continue_allocates_configured_capacity_across_registered_projects(tmp_path, registry):
+    alpha, _ = make_project_repo(
+        tmp_path,
+        {f"A-{i}": {"review": "NONE"} for i in range(1, 3)},
+        concurrency=2,
+        subdir="alpha",
+        project_id="alpha",
+        name="Alpha",
+    )
+    beta, _ = make_project_repo(
+        tmp_path,
+        {f"B-{i}": {"review": "NONE"} for i in range(1, 3)},
+        concurrency=2,
+        subdir="beta",
+        project_id="beta",
+        name="Beta",
+    )
+    register_project(alpha)
+    register_project(beta)
+
+    out = payload(stagemesh(["continue", "--capacity", "2"], cwd=tmp_path, registry=registry))
+
+    assert out["mode"] == "global"
+    assert out["capacity"] == 2
+    assert out["allocations"] == {"alpha": 1, "beta": 1}
+    assert out["projects"]["alpha"]["concurrency"] == 2
+    assert out["projects"]["beta"]["concurrency"] == 2
+    assert out["projects"]["alpha"]["peak_parallel_builders"] == 1
+    assert out["projects"]["beta"]["peak_parallel_builders"] == 1
+    assert out["projects"]["alpha"]["tasks_by_state"] == {"DONE": 2}
+    assert out["projects"]["beta"]["tasks_by_state"] == {"DONE": 2}
+
+
 def test_a_broken_project_does_not_stop_unrelated_projects(tmp_path, registry):
     good, _ = make_project_repo(tmp_path, {"G-1": {"review": "NONE"}}, concurrency=1, subdir="good", project_id="good", name="Good")
     bad, _ = make_project_repo(tmp_path, {"X-1": {}}, concurrency=1, subdir="bad", project_id="bad", name="Bad")
