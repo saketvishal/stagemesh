@@ -271,7 +271,9 @@ class GitHubTaskSource(TaskSource):
             raise RuntimeError(f"failed to fetch GitHub issues from {self.repo}: {exc}")
 
     def _fetch_issue_by_number(self, issue_number: int) -> dict[str, Any] | None:
-        if self._client is not None and hasattr(self._client, "get_issue"):
+        if self._client is not None:
+            if not hasattr(self._client, "get_issue"):
+                return None
             issue = self._client.get_issue(repo=self.repo, issue_number=issue_number)
             if isinstance(issue, dict):
                 return issue
