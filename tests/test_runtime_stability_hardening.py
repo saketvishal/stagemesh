@@ -452,6 +452,20 @@ def test_scenario_6_builder_zero_changes_when_not_satisfied_retries(tmp_path: Pa
         assert refreshed.state == "RESUMABLE"
         assert "GH-UNSAT:NO_CHANGES_PRODUCED" not in result.escalations
 
+        provider_failures = session.scalars(
+            select(BuildTaskEvent)
+            .where(BuildTaskEvent.task_id == "GH-UNSAT")
+            .where(BuildTaskEvent.event_type == "runner.provider_failure")
+        ).all()
+        no_change_events = session.scalars(
+            select(BuildTaskEvent)
+            .where(BuildTaskEvent.task_id == "GH-UNSAT")
+            .where(BuildTaskEvent.event_type == "runner.no_changes_produced")
+        ).all()
+        assert provider_failures == []
+        assert len(no_change_events) == 1
+        assert (no_change_events[0].event_data or {}).get("worker_id") == "b-1"
+
 
 # ---------------------------------------------------------------------------
 # SCENARIO 7: Reviewer Dies Repeatedly Does Not Consume Implementation Budget
