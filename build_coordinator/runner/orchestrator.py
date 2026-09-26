@@ -97,7 +97,7 @@ from build_coordinator.runner.routing import (
 from build_coordinator.project.backlog import task_priorities
 from build_coordinator.execution.git_integrator import GitIntegrationExecutor
 from build_coordinator.runner.ci_reconciliation import reconcile_awaiting_ci
-from build_coordinator.runner.validation import run_validation
+from build_coordinator.runner.validation import ValidationExecutor, ValidationOutcome, run_validation
 from build_coordinator.runner.worktree import (
     cleanup_task_branch,
     WorktreeValidationError,
@@ -195,6 +195,9 @@ class BuildRunner:
         self._settings = get_settings()
         self._task_source = task_source
         self._target_task_ids = frozenset(str(task_id) for task_id in (target_task_ids or ()))
+        self._validation_executor = ValidationExecutor(
+            timeout_seconds=self._config.validation_timeout_seconds
+        )
 
     def reload_config(
         self,
@@ -263,6 +266,7 @@ class BuildRunner:
         self._kill_reconciled_process_trees(session)
         if state.mode == "PAUSED":
             return result
+        self._dispatch_validation(session, result)
         self._dispatch_reviews(session, result)
         if state.mode == "RUNNING":
             self._dispatch_planners(session, result)
@@ -474,6 +478,9 @@ class BuildRunner:
         observation: ExecutionObservation,
     ) -> None:
         raw_result = observation.result_data if observation.result_data is not None else execution.result_data
+        if execution.adapter == "validation":
+            self._apply_validation_result(session, execution, result, observation)
+            return
         if observation.human_escalation_type == "COORDINATOR_INVARIANT_FAILURE":
             execution.status = (
                 observation.status if observation.status in TERMINAL_EXECUTION_STATUSES else "FAILED"
@@ -732,6 +739,7 @@ class BuildRunner:
                     .select_from(BuildRunnerExecution)
                     .where(BuildRunnerExecution.task_id == execution.task_id)
                     .where(BuildRunnerExecution.role.in_(("BUILDER", "REMEDIATION")))
+                    .where(BuildRunnerExecution.adapter != "validation")
                     .where(BuildRunnerExecution.status.notin_(("LOST", "TERMINATED")))
                     .where(
                         or_(
@@ -890,10 +898,163 @@ class BuildRunner:
         if not commands or not self._config.run_validation:
             return True
         cwd = execution.worktree_path or self._git_cwd_for_execution(execution)
-        outcome = run_validation(
-            commands,
-            cwd,
-            timeout_seconds=self._config.validation_timeout_seconds,
+        self._launch_validation(
+            session,
+            result,
+            task=task,
+            source_execution=execution,
+            commands=commands,
+            cwd=str(cwd),
+            next_state="REVIEW_READY" if task and task.review_policy != "NONE" else "DONE",
+            success_reason=None,
+        )
+        return False
+
+    def _launch_validation(
+        self,
+        session: Session,
+        result: RunnerCycleResult,
+        *,
+        task: BuildTask | None,
+        source_execution: BuildRunnerExecution,
+        commands: list[str],
+        cwd: str,
+        next_state: str,
+        success_reason: str | None,
+    ) -> None:
+        if self._active_validation(session, source_execution.task_id) is not None:
+            return
+        execution_id = new_uuid()
+        handle = self._validation_executor.launch(
+            ExecutionLaunch(
+                task_id=source_execution.task_id,
+                role="BUILDER",
+                worker_id="runner-validation",
+                provider="runner",
+                worktree_path=cwd,
+                branch_name=source_execution.branch_name,
+                prompt="",
+                execution_id=execution_id,
+                reviewed_feature_sha=(source_execution.result_data or {}).get("feature_sha")
+                or source_execution.reviewed_feature_sha,
+                metadata={"commands": commands},
+            )
+        )
+        row = BuildRunnerExecution(
+            execution_id=handle.execution_id,
+            task_id=source_execution.task_id,
+            role="BUILDER",
+            worker_id="runner-validation",
+            provider="runner",
+            adapter="validation",
+            claim_id=source_execution.claim_id,
+            worktree_path=cwd,
+            branch_name=source_execution.branch_name,
+            process_id=handle.process_id,
+            reviewed_feature_sha=(source_execution.result_data or {}).get("feature_sha")
+            or source_execution.reviewed_feature_sha,
+            prompt_hash=hashlib.sha256("|".join(commands).encode("utf-8")).hexdigest(),
+            status="LAUNCHED",
+            launched_at=_now(),
+            result_data={
+                "commands": commands,
+                "workspace": str(cwd),
+                "source_execution_id": source_execution.execution_id,
+                "feature_sha": (source_execution.result_data or {}).get("feature_sha")
+                or source_execution.reviewed_feature_sha,
+                "next_state": next_state,
+                "success_reason": success_reason,
+            },
+        )
+        session.add(row)
+        record_event(
+            session,
+            EventInput(
+                task_id=source_execution.task_id,
+                event_type="runner.validation_launched",
+                actor="runner",
+                claim_id=source_execution.claim_id,
+                event_data={
+                    "workspace": str(cwd),
+                    "commands": commands,
+                    "source_execution_id": source_execution.execution_id,
+                    "validation_execution_id": handle.execution_id,
+                },
+            ),
+        )
+        result.launched.append(handle.execution_id)
+
+    def _active_validation(self, session: Session, task_id: str) -> BuildRunnerExecution | None:
+        return session.scalar(
+            select(BuildRunnerExecution)
+            .where(BuildRunnerExecution.task_id == task_id)
+            .where(BuildRunnerExecution.adapter == "validation")
+            .where(BuildRunnerExecution.status.in_(LIVE_EXECUTION_STATUSES))
+            .limit(1)
+        )
+
+    def _dispatch_validation(self, session: Session, result: RunnerCycleResult) -> None:
+        tasks = session.scalars(select(BuildTask).where(BuildTask.state == "VALIDATING")).all()
+        for task in tasks:
+            if not self._target_allows(task.task_id):
+                continue
+            if self._active_validation(session, task.task_id) is not None:
+                continue
+            source = session.scalars(
+                select(BuildRunnerExecution)
+                .where(BuildRunnerExecution.task_id == task.task_id)
+                .where(BuildRunnerExecution.role.in_(("BUILDER", "REMEDIATION")))
+                .where(BuildRunnerExecution.adapter != "validation")
+                .where(BuildRunnerExecution.status == "SUCCEEDED")
+                .order_by(BuildRunnerExecution.completed_at.desc())
+            ).first()
+            if source is None:
+                continue
+            commands = list(task.required_validation or [])
+            if not commands or not self._config.run_validation:
+                transition_task(
+                    session,
+                    task.task_id,
+                    "REVIEW_READY" if task.review_policy != "NONE" else "DONE",
+                    actor="runner",
+                )
+                continue
+            cwd = source.worktree_path or task.worktree_path or self._git_cwd_for_execution(source)
+            self._launch_validation(
+                session,
+                result,
+                task=task,
+                source_execution=source,
+                commands=commands,
+                cwd=str(cwd),
+                next_state="REVIEW_READY" if task.review_policy != "NONE" else "DONE",
+                success_reason=None,
+            )
+
+    def _apply_validation_result(
+        self,
+        session: Session,
+        execution: BuildRunnerExecution,
+        result: RunnerCycleResult,
+        observation: ExecutionObservation,
+    ) -> None:
+        merged = {**(execution.result_data or {}), **(observation.result_data or {})}
+        execution.exit_code = observation.exit_code
+        execution.human_escalation_type = observation.human_escalation_type
+        execution.completed_at = _now()
+        if observation.status in {"LOST", "TERMINATED"}:
+            execution.status = observation.status
+            execution.result_data = {
+                **merged,
+                "reconciliation_state": "LOST" if observation.status == "LOST" else "TERMINATED",
+            }
+            return
+        passed = observation.status == "SUCCEEDED" and bool(merged.get("passed", True))
+        execution.status = "SUCCEEDED" if passed else "FAILED"
+        execution.result_data = merged
+        outcome = ValidationOutcome(
+            passed=passed,
+            results=list(merged.get("results") or []),
         )
         record_event(
             session,
@@ -903,11 +1064,10 @@ class BuildRunner:
                 actor="runner",
                 claim_id=execution.claim_id,
                 event_data={
-                    "passed": outcome.passed,
-                    "workspace": str(cwd),
+                    "passed": passed,
+                    "workspace": str(merged.get("workspace") or execution.worktree_path),
                     "execution_id": execution.execution_id,
-                    "feature_sha": (execution.result_data or {}).get("feature_sha")
-                    or execution.reviewed_feature_sha,
+                    "feature_sha": merged.get("feature_sha") or execution.reviewed_feature_sha,
                     "results": outcome.results,
                 },
             ),
@@ -924,14 +1084,33 @@ class BuildRunner:
                 ),
             )
         if outcome.passed:
-            return True
+            task = session.get(BuildTask, execution.task_id)
+            transition_task(
+                session,
+                execution.task_id,
+                str(merged.get("next_state") or ("REVIEW_READY" if task and task.review_policy != "NONE" else "DONE")),
+                actor="runner",
+                reason=merged.get("success_reason") or None,
+            )
+            conflict_rec = (
+                (task.waiting_input or {}).get("conflict_recovery")
+                if task is not None and isinstance(task.waiting_input, dict)
+                else None
+            )
+            if conflict_rec and isinstance(conflict_rec, dict) and task is not None:
+                waiting = dict(task.waiting_input or {})
+                updated_conflict = dict(waiting.get("conflict_recovery") or conflict_rec)
+                updated_conflict["validation_completed_for_sha"] = updated_conflict.get("conflict_resolved_sha")
+                waiting["conflict_recovery"] = updated_conflict
+                task.waiting_input = waiting
+            return
         if self._remediation_cycles(session, execution.task_id) >= self._config.max_remediation_cycles:
             result.escalations.append(f"{execution.task_id}:REMEDIATION_LIMIT_REACHED")
             transition_task(
                 session, execution.task_id, "REWORK_REQUIRED", actor="runner", reason="deterministic validation failed"
             )
             self._block_task(session, execution.task_id, "REMEDIATION_LIMIT_REACHED")
-            return False
+            return
         transition_task(
             session,
             execution.task_id,
@@ -939,7 +1118,6 @@ class BuildRunner:
             actor="runner",
             reason="deterministic validation failed",
         )
-        return False
 
     def _git_cwd_for_execution(self, execution: BuildRunnerExecution) -> str:
         return str(self._settings.repo_root)
@@ -1370,6 +1548,7 @@ class BuildRunner:
                 .select_from(BuildRunnerExecution)
                 .where(BuildRunnerExecution.task_id == execution.task_id)
                 .where(BuildRunnerExecution.role == execution.role)
+                .where(BuildRunnerExecution.adapter != "validation")
                 .where(BuildRunnerExecution.status.in_(("LOST", "FAILED")))
                 .where(
                     or_(
@@ -1539,6 +1718,7 @@ class BuildRunner:
             .select_from(BuildRunnerExecution)
             .where(BuildRunnerExecution.task_id == execution.task_id)
             .where(BuildRunnerExecution.role == execution.role)
+            .where(BuildRunnerExecution.adapter != "validation")
             .where(BuildRunnerExecution.status.in_(("LOST", "FAILED")))
             .where(
                 or_(
@@ -2661,6 +2841,8 @@ class BuildRunner:
         return executor
 
     def _executor_for_execution(self, execution: BuildRunnerExecution) -> WorkerExecutor:
+        if execution.adapter == "validation":
+            return self._validation_executor
         executor = self._executors.get(execution.worker_id)
         if executor is not None:
             if isinstance(executor, SubprocessExecutor):
@@ -3376,6 +3558,7 @@ class BuildRunner:
                             .select_from(BuildRunnerExecution)
                             .where(BuildRunnerExecution.task_id == task.task_id)
                             .where(BuildRunnerExecution.role.in_(("BUILDER", "REMEDIATION")))
+                            .where(BuildRunnerExecution.adapter != "validation")
                             .where(BuildRunnerExecution.status.in_(("FAILED", "SUCCEEDED")))
                         ) or 0
                         if builder_attempts < self._config.max_execution_attempts:

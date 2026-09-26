@@ -4,6 +4,7 @@ import dataclasses
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 from datetime import timedelta
 
@@ -657,6 +658,122 @@ def test_targeted_task_keeps_normal_review_and_integration_lifecycle():
         assert session.scalars(
             select(BuildRunnerExecution).where(BuildRunnerExecution.task_id == "OTHER")
         ).all() == []
+
+
+def test_validation_runs_in_background_while_ready_tasks_dispatch():
+    slow_validation = f"{sys.executable} -c \"import time; time.sleep(1)\""
+    with SessionLocal() as session:
+        task = upsert_task(
+            session,
+            TaskSpec(
+                **{
+                    **_task("RUN-VALIDATING").__dict__,
+                    "required_validation": [slow_validation],
+                }
+            ),
+        )
+        task.state = "VALIDATING"
+        session.add(
+            BuildRunnerExecution(
+                execution_id="builder-done",
+                task_id="RUN-VALIDATING",
+                role="BUILDER",
+                worker_id="builder-a",
+                provider="local",
+                adapter="fake",
+                status="SUCCEEDED",
+                result_data={"feature_sha": "feature-sha"},
+            )
+        )
+        upsert_task(session, _task("RUN-READY"))
+        session.commit()
+
+    result = _runner(executors={"builder-a": FakeExecutor()}).run_once()
+
+    with SessionLocal() as session:
+        validation = session.scalar(
+            select(BuildRunnerExecution)
+            .where(BuildRunnerExecution.task_id == "RUN-VALIDATING")
+            .where(BuildRunnerExecution.adapter == "validation")
+        )
+        ready_builder = session.scalar(
+            select(BuildRunnerExecution)
+            .where(BuildRunnerExecution.task_id == "RUN-READY")
+            .where(BuildRunnerExecution.adapter == "fake")
+        )
+
+        assert validation is not None
+        assert validation.status in {"LAUNCHED", "RUNNING"}
+        assert ready_builder is not None
+        assert ready_builder.status == "LAUNCHED"
+        assert validation.execution_id in result.launched
+        assert ready_builder.execution_id in result.launched
+
+
+def test_validation_restarts_are_rerun_instead_of_trusted():
+    validation_command = f"{sys.executable} -c \"print('ok')\""
+    with SessionLocal() as session:
+        task = upsert_task(
+            session,
+            TaskSpec(
+                **{
+                    **_task("RUN-VALIDATION-RESTART").__dict__,
+                    "required_validation": [validation_command],
+                }
+            ),
+        )
+        task.state = "VALIDATING"
+        session.add(
+            BuildRunnerExecution(
+                execution_id="builder-done",
+                task_id="RUN-VALIDATION-RESTART",
+                role="BUILDER",
+                worker_id="builder-a",
+                provider="local",
+                adapter="fake",
+                status="SUCCEEDED",
+                result_data={"feature_sha": "feature-sha"},
+            )
+        )
+        session.add(
+            BuildRunnerExecution(
+                execution_id="validation-before-restart",
+                task_id="RUN-VALIDATION-RESTART",
+                role="BUILDER",
+                worker_id="runner-validation",
+                provider="runner",
+                adapter="validation",
+                status="LAUNCHED",
+                result_data={
+                    "commands": [validation_command],
+                    "workspace": str(Path.cwd()),
+                    "feature_sha": "feature-sha",
+                    "next_state": "REVIEW_READY",
+                },
+            )
+        )
+        session.commit()
+
+    result = _runner().run_once()
+
+    with SessionLocal() as session:
+        rows = session.scalars(
+            select(BuildRunnerExecution)
+            .where(BuildRunnerExecution.task_id == "RUN-VALIDATION-RESTART")
+            .where(BuildRunnerExecution.adapter == "validation")
+            .order_by(BuildRunnerExecution.execution_id)
+        ).all()
+
+        assert {row.execution_id for row in rows} == {
+            "validation-before-restart",
+            *set(result.launched),
+        }
+        old = next(row for row in rows if row.execution_id == "validation-before-restart")
+        new = next(row for row in rows if row.execution_id != "validation-before-restart")
+        assert old.status == "LOST"
+        assert old.result_data["validation_lost"] is True
+        assert new.status in {"LAUNCHED", "RUNNING"}
+        assert session.get(BuildTask, "RUN-VALIDATION-RESTART").state == "VALIDATING"
 
 
 def test_branch_assigned_builder_success_without_feature_sha_blocks_for_rework():
