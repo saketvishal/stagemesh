@@ -3344,11 +3344,11 @@ class BuildRunner:
         already_satisfied = bool(satisfaction.get("satisfied"))
         recent_integrations = self._recent_integration_evidence(session, execution.task_id)
         superseding_integration = self._find_superseding_integration(repo_root, scope, recent_integrations)
-        stale_by_scope_reconciliation = bool(scope_changed and superseding_integration is not None)
+        scope_touched_by_recent_integration = bool(scope_changed and superseding_integration is not None)
         outcome = "UNRESOLVED"
         if already_satisfied:
             outcome = "ALREADY_SATISFIED"
-        elif marked_stale or stale_by_scope_reconciliation:
+        elif marked_stale:
             outcome = "STALE_OR_OBSOLETE"
         return {
             "outcome": outcome,
@@ -3357,7 +3357,8 @@ class BuildRunner:
             "acceptance_appears_satisfied": already_satisfied,
             "acceptance_satisfaction_evidence": satisfaction,
             "definition_marked_stale": marked_stale,
-            "stale_by_scope_reconciliation": stale_by_scope_reconciliation,
+            "stale_by_scope_reconciliation": bool(marked_stale and scope_touched_by_recent_integration),
+            "scope_touched_by_recent_integration": scope_touched_by_recent_integration,
             "superseding_integration": superseding_integration,
             "scope_changed_since_base": scope_changed,
             "changed_paths_since_base": changed_paths[:50],
