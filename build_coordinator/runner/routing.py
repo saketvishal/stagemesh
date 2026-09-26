@@ -310,6 +310,7 @@ def route_worker(
     workers = list(workers)
     all_workers = workers
     active_by_worker = _active_implementation_counts(session)
+    builder_provider = _builder_provider_for_review(session, task_id, workers) if stage == "review" else None
     candidates: list[CandidateExplanation] = []
     eligible: list[WorkerLike] = []
     for worker in workers:
@@ -362,6 +363,24 @@ def route_worker(
             candidates=tuple(candidates),
             routing_policy=routing_policy,
         )
+    prefer_different_provider = (
+        builder_provider is not None
+        and any(worker.provider != builder_provider for worker in eligible)
+    )
+    if prefer_different_provider:
+        candidates = [
+            CandidateExplanation(
+                candidate.worker_id,
+                candidate.eligible,
+                (
+                    candidate.reasons + ("preferred_different_provider_than_builder",)
+                    if candidate.eligible
+                    and _worker_provider(candidate.worker_id, workers) != builder_provider
+                    else candidate.reasons
+                ),
+            )
+            for candidate in candidates
+        ]
     provider_load = {
         provider: sum(active_by_worker.get(w.worker_id, 0) for w in all_workers if w.provider == provider)
         for provider in {w.provider for w in all_workers}
@@ -370,6 +389,7 @@ def route_worker(
         eligible,
         key=lambda worker: (
             1 if worker.worker_id in deprioritized_workers else 0,
+            0 if (prefer_different_provider and worker.provider != builder_provider) else 1,
             0 if worker.worker_id in stage_requirement.preferred_workers else 1,
             0 if (providers.get(worker.provider) and providers[worker.provider].consumption_mode == "ACTIVE") else 1,
             worker.preference,
@@ -387,6 +407,35 @@ def route_worker(
         candidates=tuple(candidates),
         routing_policy=routing_policy,
     )
+
+
+def _builder_provider_for_review(
+    session: Session | None,
+    task_id: str | None,
+    workers: Iterable[WorkerLike],
+) -> str | None:
+    if session is None or not task_id:
+        return None
+    implementer = last_implementation_worker(session, task_id)
+    if not implementer:
+        return None
+    provider = session.scalar(
+        select(BuildTaskClaim.provider)
+        .where(BuildTaskClaim.task_id == task_id)
+        .where(BuildTaskClaim.claim_type == "IMPLEMENTATION")
+        .order_by(BuildTaskClaim.claimed_at.desc())
+        .limit(1)
+    )
+    if provider:
+        return provider
+    return _worker_provider(implementer, workers)
+
+
+def _worker_provider(worker_id: str, workers: Iterable[WorkerLike]) -> str | None:
+    for worker in workers:
+        if worker.worker_id == worker_id:
+            return worker.provider
+    return None
 
 
 def reviewer_exclusions(
