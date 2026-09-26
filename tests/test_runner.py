@@ -1868,6 +1868,54 @@ def test_reviewer_disagreement_deadlocks_instead_of_spending_remediation_budget(
         assert open_findings[0]["disagreement"]["resolved_status"] == "STILL_OPEN"
 
 
+def test_reviewer_disagreement_deadlock_ignores_stale_sha_disagreement():
+    runner = _runner(config=_config())
+    finding = "missing regression coverage for the scheduler"
+    finding_id = finding_fingerprint(finding)
+    registry = {
+        "entries": {
+            finding_id: {
+                "id": finding_id,
+                "description": finding,
+                "status": "STILL_OPEN",
+                "attempts": 2,
+                "history": [],
+                "disagreement": {
+                    "reviewers": {
+                        "reviewer-a": {
+                            "status": "STILL_OPEN",
+                            "reviewed_feature_sha": "sha-a",
+                        },
+                        "reviewer-b": {
+                            "status": "RESOLVED",
+                            "reviewed_feature_sha": "sha-a",
+                        },
+                    },
+                    "resolved_status": "STILL_OPEN",
+                    "cycle": "review-cycle:old",
+                    "reviewed_feature_sha": "sha-a",
+                },
+            }
+        }
+    }
+    execution = BuildRunnerExecution(
+        execution_id="review-new",
+        task_id="RUN-STALE-REVIEW-DISAGREEMENT",
+        role="REVIEWER",
+        worker_id="reviewer-c",
+        provider="local",
+        adapter="fake",
+        reviewed_feature_sha="sha-b",
+    )
+    result = orchestrator_module.RunnerCycleResult(mode="RUNNING")
+
+    with SessionLocal() as session:
+        deadlocked = runner._review_disagreement_deadlocked(session, execution, registry, result)
+
+    assert deadlocked is False
+    assert result.escalations == []
+
+
 def test_findings_omitted_after_being_tracked_retries_review_not_remediation():
     """A reviewer that stops restating findings (but keeps returning
     REMEDIATION_REQUIRED with an empty `findings` array) has produced an
