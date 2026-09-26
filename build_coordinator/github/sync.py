@@ -17,11 +17,14 @@ from build_coordinator.objectives import (
     objective_work_tasks,
     open_gates,
 )
+from build_coordinator.task_source.github import check_objective_fully_delivered
 
 logger = logging.getLogger(__name__)
 
 
-def compute_objective_github_status(session: Session, objective: BuildObjective) -> str:
+def compute_objective_github_status(
+    session: Session, objective: BuildObjective, repo: str | None = None
+) -> str:
     """Derive the human-meaningful status of an objective for GitHub reporting."""
     if open_gates(session, objective.objective_id):
         return "HUMAN_GATE"
@@ -34,6 +37,12 @@ def compute_objective_github_status(session: Session, objective: BuildObjective)
     if objective.state in {"FAILED", "ABORTED"}:
         return "FAILED"
     if objective.state in {"COMPLETED", "DONE"}:
+        # #87: never report GitHub-visible "DONE" unless the completion side
+        # effect (label apply / issue close) has actually succeeded -- an
+        # internally COMPLETED objective whose delivery is still pending/failed
+        # must stay in a retryable, non-terminal status.
+        if not check_objective_fully_delivered(session, objective.objective_id, repo=repo):
+            return "REMEDIATING"
         return "DONE"
     if objective.state == "PAUSED":
         return "BLOCKED"
@@ -68,7 +77,7 @@ def sync_objective_status_to_github(
     objective: BuildObjective,
 ) -> str | None:
     """Synchronize meaningful state transitions to GitHub without heartbeat noise."""
-    status = compute_objective_github_status(session, objective)
+    status = compute_objective_github_status(session, objective, repo)
 
     # Get last reported status
     last_event = session.scalar(

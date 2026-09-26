@@ -31,6 +31,114 @@ from build_coordinator.types import EventInput, OBJECTIVE_ROOT_COMPAT_REASON, Ob
 logger = logging.getLogger(__name__)
 
 
+def _resolve_issue_number_static(session, entity_id: str, is_objective: bool = False) -> int | None:
+    """Instance-independent counterpart of `GitHubTaskSource._resolve_issue_number`."""
+    m = re.match(r"^GH-(\d+)$", entity_id)
+    if m:
+        return int(m.group(1))
+
+    if not is_objective:
+        events = session.scalars(
+            select(BuildTaskEvent)
+            .where(
+                BuildTaskEvent.task_id == entity_id,
+                BuildTaskEvent.actor == "github-sync",
+            )
+            .order_by(BuildTaskEvent.created_at.asc())
+        ).all()
+        for ev in events:
+            src = (ev.event_data or {}).get("source", "")
+            sm = re.search(r"/issues/(\d+)$", src)
+            if sm:
+                return int(sm.group(1))
+    else:
+        obj_events = session.scalars(
+            select(BuildObjectiveEvent)
+            .where(
+                BuildObjectiveEvent.objective_id == entity_id,
+                BuildObjectiveEvent.actor == "github-sync",
+            )
+            .order_by(BuildObjectiveEvent.created_at.asc())
+        ).all()
+        for ev in obj_events:
+            src = (ev.event_data or {}).get("source", "")
+            sm = re.search(r"/issues/(\d+)$", src)
+            if sm:
+                return int(sm.group(1))
+        events = session.scalars(
+            select(BuildTaskEvent)
+            .where(
+                BuildTaskEvent.task_id == entity_id,
+                BuildTaskEvent.actor == "github-sync",
+            )
+            .order_by(BuildTaskEvent.created_at.asc())
+        ).all()
+        for ev in events:
+            src = (ev.event_data or {}).get("source", "")
+            sm = re.search(r"/issues/(\d+)$", src)
+            if sm:
+                return int(sm.group(1))
+
+    return None
+
+
+def _is_outbound_synced_static(session, entity_id: str, state: str, is_objective: bool = False) -> bool:
+    """Instance-independent counterpart of `GitHubTaskSource._is_outbound_synced`."""
+    if is_objective:
+        events = session.scalars(
+            select(BuildObjectiveEvent).where(
+                BuildObjectiveEvent.objective_id == entity_id,
+                BuildObjectiveEvent.event_type == "objective.outbound_synced",
+            )
+        ).all()
+        return any((e.event_data or {}).get("state") == state for e in events)
+    else:
+        events = session.scalars(
+            select(BuildTaskEvent).where(
+                BuildTaskEvent.task_id == entity_id,
+                BuildTaskEvent.event_type == "task.outbound_synced",
+            )
+        ).all()
+        return any((e.event_data or {}).get("state") == state for e in events)
+
+
+def check_objective_fully_delivered(
+    session, objective_id: str, *, repo: str | None = None, dry_run: bool = False
+) -> bool:
+    """Whether a GitHub-backed objective's internal COMPLETED state has actually
+    been mirrored onto the source issue (label + close).
+
+    Standalone counterpart of `GitHubTaskSource.is_objective_fully_delivered`,
+    usable by callers (e.g. `github/sync.py`) that don't hold a `GitHubTaskSource`
+    instance. #87: internal `COMPLETED` reflects implementation truth only -- it
+    must never be read as "fully synchronized/delivered" on its own.
+    """
+    obj = session.get(BuildObjective, objective_id)
+    if obj is None or obj.state != "COMPLETED":
+        return False
+    if not repo or dry_run:
+        return True
+    issue_number = _resolve_issue_number_static(session, objective_id, is_objective=True)
+    if issue_number is None:
+        return True
+    return _is_outbound_synced_static(session, objective_id, "COMPLETED", is_objective=True)
+
+
+def check_task_fully_delivered(
+    session, task_id: str, *, repo: str | None = None, dry_run: bool = False
+) -> bool:
+    """Standalone counterpart of `GitHubTaskSource.is_task_fully_delivered`. See #87."""
+    task = session.get(BuildTask, task_id)
+    if task is None or task.state != "DONE":
+        return False
+    if not repo or dry_run:
+        return True
+    issue_number = _resolve_issue_number_static(session, task_id, is_objective=False)
+    if issue_number is None:
+        return True
+    return _is_outbound_synced_static(session, task_id, "DONE", is_objective=False)
+
+
 class GitHubTaskSource(TaskSource):
     """Discovers and synchronizes tasks from GitHub issues."""
 
@@ -585,6 +693,22 @@ class GitHubTaskSource(TaskSource):
 
         return None
 
+    def is_objective_fully_delivered(self, session, objective_id: str) -> bool:
+        """Whether a GitHub-backed objective's internal COMPLETED state has
+        actually been mirrored onto the source issue (label + close).
+
+        #87: internal `COMPLETED` reflects implementation truth only -- it
+        must never be read as "fully synchronized/delivered" on its own.
+        Callers that need to know whether the objective is *durably* done
+        from GitHub's perspective (not just locally) must consult this
+        instead of `BuildObjective.state`.
+        """
+        return check_objective_fully_delivered(session, objective_id, repo=self.repo, dry_run=self.dry_run)
+
+    def is_task_fully_delivered(self, session, task_id: str) -> bool:
+        """Task-level counterpart of `is_objective_fully_delivered`. See #87."""
+        return check_task_fully_delivered(session, task_id, repo=self.repo, dry_run=self.dry_run)
+
     def _is_outbound_synced(self, session, entity_id: str, state: str, is_objective: bool = False) -> bool:
         if is_objective:
             events = session.scalars(
@@ -670,14 +794,21 @@ class GitHubTaskSource(TaskSource):
         comment_body: str,
         label: str,
         should_close: bool,
+        synced_state: str,
         is_objective: bool = False,
     ) -> bool:
+        # #87: the recorded `synced_state` must match the value idempotency
+        # checks look up (the caller's lifecycle `state`, e.g. "COMPLETED"
+        # for an objective) -- not a value derived from `should_close`/
+        # `label` here. A mismatch would make `_is_outbound_synced` never
+        # recognize a prior success, causing side effects (comment/close) to
+        # be re-attempted forever instead of becoming a stable no-op.
         if not self.repo or self.dry_run:
             self._record_outbound_synced(
                 session,
                 entity_id,
                 issue_number,
-                state="DONE" if should_close else label,
+                state=synced_state,
                 is_objective=is_objective,
             )
             return True
@@ -709,7 +840,7 @@ class GitHubTaskSource(TaskSource):
                     session,
                     entity_id,
                     issue_number,
-                    state="DONE" if should_close else label,
+                    state=synced_state,
                     is_objective=is_objective,
                 )
                 return True
@@ -869,6 +1000,7 @@ class GitHubTaskSource(TaskSource):
             comment_body=comment_body,
             label=label,
             should_close=should_close,
+            synced_state=state,
             is_objective=False,
         )
 
@@ -925,6 +1057,7 @@ class GitHubTaskSource(TaskSource):
             comment_body=comment_body,
             label=label,
             should_close=should_close,
+            synced_state=state,
             is_objective=True,
         )
 
