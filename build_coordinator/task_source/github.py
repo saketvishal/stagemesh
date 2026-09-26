@@ -219,6 +219,50 @@ class GitHubTaskSource(TaskSource):
             check=True,
         )
 
+    def _remove_stale_lifecycle_labels(self, issue_number: int, current_label: str) -> bool:
+        stale_labels = tuple(label for label in self.LIFECYCLE_LABELS if label != current_label)
+        if not stale_labels:
+            return True
+
+        if self._client is not None:
+            if not hasattr(self._client, "remove_label"):
+                return True
+            for label in stale_labels:
+                self._client.remove_label(repo=self.repo, number=str(issue_number), label=label)
+            return True
+
+        present_labels = self._issue_label_names(issue_number)
+        for label in stale_labels:
+            if label not in present_labels:
+                continue
+            proc_remove = subprocess.run(
+                ["gh", "issue", "edit", str(issue_number), "--repo", self.repo, "--remove-label", label],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+            )
+            if proc_remove.returncode != 0:
+                err = (proc_remove.stderr or proc_remove.stdout or "gh issue edit --remove-label failed").strip()
+                raise RuntimeError(err)
+        return True
+
+    def _issue_label_names(self, issue_number: int) -> set[str]:
+        proc = subprocess.run(
+            ["gh", "issue", "view", str(issue_number), "--repo", self.repo, "--json", "labels"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+        if proc.returncode != 0:
+            err = (proc.stderr or proc.stdout or "gh issue view failed").strip()
+            raise RuntimeError(err)
+        data = json.loads(proc.stdout or "{}")
+        return {label.get("name", "") for label in data.get("labels", []) if isinstance(label, dict)}
+
     def discover_tasks(self, session) -> list[SyncResult]:
         """Fetch open issues from the repository and ingest into the durable queue."""
         if not self.repo:
@@ -847,6 +891,7 @@ class GitHubTaskSource(TaskSource):
                 if not already_commented:
                     self._client.add_comment(repo=self.repo, number=str(issue_number), body=comment_body)
 
+                self._remove_stale_lifecycle_labels(issue_number, label)
                 if hasattr(self._client, "add_label"):
                     self._client.add_label(repo=self.repo, number=str(issue_number), label=label)
 
@@ -898,6 +943,21 @@ class GitHubTaskSource(TaskSource):
                 return False
 
             # 2. gh issue edit --add-label
+            try:
+                self._remove_stale_lifecycle_labels(issue_number, label)
+            except Exception as exc:
+                err = str(exc)
+                logger.warning("Failed to remove stale lifecycle labels from GitHub issue #%s: %s", issue_number, err)
+                self._record_outbound_failed(
+                    session,
+                    entity_id,
+                    issue_number,
+                    error=err,
+                    action="gh_remove_stale_labels",
+                    is_objective=is_objective,
+                )
+                return False
+
             proc_label = subprocess.run(
                 ["gh", "issue", "edit", str(issue_number), "--repo", self.repo, "--add-label", label],
                 capture_output=True,
