@@ -1243,14 +1243,40 @@ class BuildRunner:
                 except CoordinatorPolicyError:
                     pass
             if reviewer_attempts + 1 >= self._config.max_review_environment_attempts:
-                self._block_task(
-                    session,
-                    execution.task_id,
-                    "REVIEW_ENVIRONMENT_BLOCKED",
-                    invariant="REVIEW_ENVIRONMENT",
-                    execution=execution,
-                    error=f"Reviewer repeatedly failed due to {failure or 'worker exit'}",
-                )
+                if failure:
+                    self._block_task(
+                        session,
+                        execution.task_id,
+                        f"PROVIDER_FAILURE:{failure}",
+                        invariant="REVIEWER_PROVIDER_FAILURE",
+                        execution=execution,
+                        error=f"Reviewer provider repeatedly failed due to {failure}",
+                        extra_data={
+                            "provider_failure": failure,
+                            "reviewer_attempts": reviewer_attempts + 1,
+                            "retryable_failure": retryable,
+                        },
+                    )
+                else:
+                    self._block_task(
+                        session,
+                        execution.task_id,
+                        "REVIEW_ENVIRONMENT_BLOCKED",
+                        invariant="REVIEW_ENVIRONMENT",
+                        execution=execution,
+                        error="Reviewer repeatedly failed due to worker exit",
+                    )
+            else:
+                try:
+                    transition_task(
+                        session,
+                        execution.task_id,
+                        "REVIEW_READY",
+                        actor="runner",
+                        reason=f"reviewer provider failure retry: {failure or 'WORKER_EXIT'}",
+                    )
+                except CoordinatorPolicyError:
+                    release_active_claims(session, execution.task_id, completed=False)
             return True
 
         # 2. BUILDER / REMEDIATION roles:
