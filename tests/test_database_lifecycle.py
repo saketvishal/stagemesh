@@ -145,3 +145,14 @@ def test_test_guard_refuses_active_project_durable_state(monkeypatch):
         raise AssertionError("expected TestStateIsolationError")
     except TestStateIsolationError as exc:
         assert "active project durable state" in str(exc)
+
+
+def test_test_guard_refuses_relative_sqlite_url_to_active_project_state(monkeypatch):
+    monkeypatch.chdir(REPO_ROOT)
+    monkeypatch.setenv("STAGEMESH_TEST_STATE_GUARD", "1")
+
+    try:
+        DatabaseLifecycle("sqlite:///.build-coordinator/coordinator.sqlite3")
+        raise AssertionError("expected TestStateIsolationError")
+    except TestStateIsolationError as exc:
+        assert "active project durable state" in str(exc)
