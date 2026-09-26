@@ -209,6 +209,49 @@ class WorkerConfig:
 
 
 @dataclass(frozen=True)
+class StewardConfig:
+    enabled: bool = False
+    interval_seconds: float = 300.0
+    apply: bool = False
+    responsibilities: tuple[str, ...] = (
+        "stale_claims",
+        "stale_executions",
+        "lost_execution_claims",
+        "worker_leases",
+        "orphaned_worktrees",
+        "waiting_conditions",
+        "health_audits",
+        "evidence_retention",
+        "hygiene",
+        "resumption_checks",
+    )
+
+    @classmethod
+    def from_mapping(cls, data: dict[str, Any] | None) -> "StewardConfig":
+        row = data or {}
+        responsibilities = row.get("responsibilities")
+        default_responsibilities = cls().responsibilities
+        return cls(
+            enabled=bool(row.get("enabled", False)),
+            interval_seconds=float(row.get("interval_seconds", 300.0)),
+            apply=bool(row.get("apply", False)),
+            responsibilities=(
+                default_responsibilities
+                if responsibilities is None
+                else _normal_tuple(responsibilities)
+            ),
+        )
+
+    def to_public_dict(self) -> dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "interval_seconds": self.interval_seconds,
+            "apply": self.apply,
+            "responsibilities": list(self.responsibilities),
+        }
+
+
+@dataclass(frozen=True)
 class RunnerConfig:
     workers: tuple[WorkerConfig, ...] = field(default_factory=tuple)
     providers: dict[str, ProviderConfig] = field(default_factory=dict)
@@ -252,6 +295,7 @@ class RunnerConfig:
     # provisioning behaves exactly as it did before this was added.
     use_clone_pool: bool = False
     clone_pool_root: str | None = None
+    steward: StewardConfig = field(default_factory=StewardConfig)
 
     @classmethod
     def default(cls, *, dry_run: bool = False) -> "RunnerConfig":
@@ -407,6 +451,7 @@ class RunnerConfig:
             ),
             use_clone_pool=bool((data.get("clone_pool") or {}).get("enabled", False)),
             clone_pool_root=(data.get("clone_pool") or {}).get("root"),
+            steward=StewardConfig.from_mapping(data.get("steward") or data.get("maintenance")),
         )
 
     def public_summary(self) -> dict[str, Any]:
@@ -422,6 +467,7 @@ class RunnerConfig:
                 "repo": self.external_ci_repo,
                 "max_consecutive_errors": self.external_ci_max_consecutive_errors,
             },
+            "steward": self.steward.to_public_dict(),
         }
 
 
@@ -536,6 +582,7 @@ def _role_for_stages(stages: tuple[str, ...]) -> str:
         "remediation": "REMEDIATION",
         "review": "REVIEWER",
         "integration": "INTEGRATION",
+        "maintenance": "STEWARD",
     }
     for stage in stages:
         if stage in preferred:
