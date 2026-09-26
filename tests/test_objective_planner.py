@@ -11,6 +11,7 @@ import os
 import pytest
 from sqlalchemy import delete, select
 
+from build_coordinator.agents.wrapper import parse_planner_payload, planner_result_payload
 from build_coordinator.db import Base, SessionLocal, engine, initialize_schema
 from build_coordinator.execution import ExecutionObservation, FakeExecutor
 from build_coordinator.execution.results import (
@@ -151,6 +152,47 @@ def _valid_plan_payload():
 
 def _planner_success_observation(plan=None):
     return ExecutionObservation("SUCCEEDED", result_data={"plan": plan or _valid_plan_payload()})
+
+
+def test_planner_wrapper_extracts_plan_and_owns_lifecycle_identity():
+    raw = """
+    Some planner commentary.
+
+    ```json
+    {
+      "schema_version": 1,
+      "execution_id": "untrusted-model-value",
+      "task_id": "untrusted-task",
+      "role": "PLANNER",
+      "status": "SUCCEEDED",
+      "plan": {
+        "tasks": []
+      }
+    }
+    ```
+    """
+    plan = parse_planner_payload(raw)
+    assert plan == {"tasks": []}
+
+    trusted = {
+        "schema_version": 1,
+        "execution_id": "exec-trusted",
+        "task_id": "OBJ-PLAN-PLANNER",
+        "role": "PLANNER",
+    }
+    payload = planner_result_payload(trusted, plan, runtime="codex")
+
+    assert payload["execution_id"] == "exec-trusted"
+    assert payload["task_id"] == "OBJ-PLAN-PLANNER"
+    assert payload["role"] == "PLANNER"
+    assert payload["status"] == "SUCCEEDED"
+    assert payload["plan"] == {"tasks": []}
+    assert "feature_sha" not in payload
+    assert "files_changed" not in payload
+
+
+def test_planner_wrapper_rejects_bare_objective_plan():
+    assert parse_planner_payload('{"tasks": []}') is None
 
 
 def test_planner_contract_requires_full_executor_envelope():
