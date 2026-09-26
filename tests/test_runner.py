@@ -9,9 +9,10 @@ from datetime import timedelta
 
 import pytest
 from sqlalchemy import delete, select
+from sqlalchemy.exc import OperationalError
 
 from build_coordinator.db import Base, SessionLocal, engine, initialize_schema
-from build_coordinator.execution import ExecutionObservation, FakeExecutor
+from build_coordinator.execution import ExecutionHandle, ExecutionObservation, FakeExecutor
 from build_coordinator.events import record_event
 from build_coordinator.models import (
     BuildCoordinatorState,
@@ -116,6 +117,49 @@ def test_claim_task_fails_closed_on_cross_objective_branch_collision(monkeypatch
     with SessionLocal() as session:
         with pytest.raises(CoordinatorPolicyError, match="refusing cross-objective collision"):
             claim_task(session, ClaimRequest("GH-60B", worker_id="builder-a"))
+
+
+def test_persistence_failure_after_external_launch_does_not_relaunch(monkeypatch):
+    class RunningExecutor:
+        adapter_name = "running-test"
+
+        def __init__(self) -> None:
+            self.launches = []
+
+        def launch(self, launch):
+            self.launches.append(launch)
+            return ExecutionHandle(execution_id=launch.execution_id, process_id="1234", result_path=launch.result_path)
+
+        def poll(self, execution_id: str) -> ExecutionObservation:
+            return ExecutionObservation(status="RUNNING")
+
+        def terminate(self, execution_id: str) -> ExecutionObservation:
+            return ExecutionObservation(status="TERMINATED")
+
+    with SessionLocal() as session:
+        upsert_task(session, _task("GH-101"))
+        session.commit()
+
+    original_record_event = orchestrator_module.record_event
+    injected = {"done": False}
+
+    def flaky_record_event(session, event):
+        if event.event_type == "runner.execution_launched" and not injected["done"]:
+            injected["done"] = True
+            raise OperationalError("UPDATE build_runner_executions", None, Exception("database is locked"))
+        return original_record_event(session, event)
+
+    executor = RunningExecutor()
+    monkeypatch.setattr(orchestrator_module, "record_event", flaky_record_event)
+    with pytest.raises(OperationalError):
+        _runner(executors={"builder-a": executor}).run_once()
+
+    result = _runner(executors={"builder-a": executor}).run_once()
+    assert result.launched == []
+    assert len(executor.launches) == 1
+    with SessionLocal() as session:
+        rows = session.scalars(select(BuildRunnerExecution).where(BuildRunnerExecution.task_id == "GH-101")).all()
+        assert len(rows) == 1
 
 
 def _config(*, auto_push=False, remediation_cycles=2):

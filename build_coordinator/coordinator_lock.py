@@ -19,6 +19,7 @@ import os
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
 from build_coordinator.models import BuildCoordinatorLock, new_uuid
@@ -90,7 +91,20 @@ def acquire_coordinator_lock(
             heartbeat_at=now,
         )
         session.add(record)
-        session.flush()
+        try:
+            session.flush()
+        except (IntegrityError, OperationalError) as exc:
+            session.rollback()
+            try:
+                winner = session.get(BuildCoordinatorLock, 1)
+            except OperationalError:
+                winner = None
+            if winner is not None:
+                _raise_lock_held(winner, now=_now(), stale_after_seconds=stale_after_seconds)
+            raise CoordinatorLockHeld(
+                "another coordinator acquired this project while this process was starting; "
+                "refusing to start a second coordinator against the same database"
+            ) from exc
         return CoordinatorLockAcquisition(record=record, recovered_stale=False)
 
     same_instance = record.instance_id == instance_id and record.process_id == pid and record.host_name == _host_name()
@@ -132,6 +146,27 @@ def acquire_coordinator_lock(
     record.heartbeat_at = now
     session.flush()
     return CoordinatorLockAcquisition(record=record, recovered_stale=True, recovery_reason=recovery_reason)
+
+
+def _raise_lock_held(record: BuildCoordinatorLock, *, now: datetime, stale_after_seconds: float) -> None:
+    age = _heartbeat_age_seconds(record, now=now)
+    if record.process_id is not None and record.host_name == _host_name():
+        if is_pid_alive(record.process_id) and not (age is None or age > stale_after_seconds):
+            raise CoordinatorLockHeld(
+                f"a coordinator is already running against this project as PID "
+                f"{record.process_id} on {record.host_name!r} "
+                f"(heartbeat {age:.1f}s ago); refusing to start a second "
+                "`stagemesh continue` against the same database",
+                owner={
+                    "process_id": record.process_id,
+                    "host_name": record.host_name,
+                    "heartbeat_age_seconds": age,
+                },
+            )
+    raise CoordinatorLockHeld(
+        "another coordinator owns this project database; refusing to start a second coordinator",
+        owner={"process_id": record.process_id, "host_name": record.host_name, "heartbeat_age_seconds": age},
+    )
 
 
 def heartbeat_coordinator_lock(session: Session, *, instance_id: str) -> None:

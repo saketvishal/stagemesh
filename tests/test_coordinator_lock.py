@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import delete
+from sqlalchemy.exc import IntegrityError
 
 from build_coordinator import coordinator_lock
 from build_coordinator.db import Base, SessionLocal, engine, initialize_schema
@@ -127,3 +128,39 @@ def test_heartbeat_refreshes_lease():
         session.commit()
         record = session.get(BuildCoordinatorLock, 1)
         assert record.heartbeat_at >= first_heartbeat
+
+
+def test_first_acquisition_race_reports_typed_lock_held(monkeypatch):
+    winner = BuildCoordinatorLock(
+        singleton_id=1,
+        instance_id="winner",
+        host_name=coordinator_lock._host_name(),
+        process_id=os.getpid(),
+        started_at=datetime.now(UTC),
+        heartbeat_at=datetime.now(UTC),
+    )
+
+    class RacingSession:
+        def __init__(self) -> None:
+            self.get_calls = 0
+            self.rolled_back = False
+
+        def get(self, _model, _pk):
+            self.get_calls += 1
+            return None if self.get_calls == 1 else winner
+
+        def add(self, _record) -> None:
+            pass
+
+        def flush(self) -> None:
+            raise IntegrityError("lock singleton already inserted", None, None)
+
+        def rollback(self) -> None:
+            self.rolled_back = True
+
+    session = RacingSession()
+    monkeypatch.setattr(coordinator_lock, "is_pid_alive", lambda _pid: True)
+
+    with pytest.raises(coordinator_lock.CoordinatorLockHeld, match="already running"):
+        coordinator_lock.acquire_coordinator_lock(session, pid=os.getpid() + 1, instance_id="loser")
+    assert session.rolled_back
