@@ -530,6 +530,7 @@ def main(argv: list[str] | None = None) -> int:
                 {
                     **identity,
                     "status": "FAILED",
+                    "provider_failure": "PLANNER_CONTRACT_INVALID",
                     "detail": (
                         "planner produced no parseable full executor envelope "
                         "containing a top-level plan"
