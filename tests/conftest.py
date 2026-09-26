@@ -18,25 +18,9 @@ database.
 an operator's shell can't reintroduce a dependency on real coordinator config
 during the test run.
 """
+from tests._state_isolation import configure_isolated_test_state
 
-
-import os
-import tempfile
-from pathlib import Path
-
-_TEST_DATA_DIR = Path(tempfile.mkdtemp(prefix="build-coordinator-pytest-"))
-_TEST_DB_PATH = _TEST_DATA_DIR / "test-coordinator.sqlite3"
-
-os.environ["BUILD_COORDINATOR_DATABASE_URL"] = f"sqlite:///{_TEST_DB_PATH.as_posix()}"
-os.environ["BUILD_COORDINATOR_DATA_DIR"] = str(_TEST_DATA_DIR)
-os.environ.pop("BUILD_COORDINATOR_CONFIG", None)
-
-from build_coordinator.db import configure_process_database
-
-configure_process_database(
-    database_url=os.environ["BUILD_COORDINATOR_DATABASE_URL"],
-    data_dir=_TEST_DATA_DIR,
-)
+configure_isolated_test_state()
 
 
 import pytest  # noqa: E402

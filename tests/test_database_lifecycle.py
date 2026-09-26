@@ -12,6 +12,7 @@ from build_coordinator.db import (
     DatabaseSchemaError,
     DatabaseUnconfiguredError,
     SCHEMA_VERSION_TABLE,
+    TestStateIsolationError,
     engine_from_url,
     get_process_database,
     reset_process_database,
@@ -130,3 +131,17 @@ def test_process_default_requires_explicit_configure_without_env(monkeypatch):
         from build_coordinator.db import configure_process_database
 
         configure_process_database(database_url=url, data_dir=data_dir)
+
+
+def test_test_guard_refuses_active_project_durable_state(monkeypatch):
+    active_state_dir = REPO_ROOT / ".build-coordinator"
+    monkeypatch.setenv("STAGEMESH_TEST_STATE_GUARD", "1")
+
+    try:
+        DatabaseLifecycle(
+            f"sqlite:///{(active_state_dir / 'coordinator.sqlite3').as_posix()}",
+            data_dir=active_state_dir,
+        )
+        raise AssertionError("expected TestStateIsolationError")
+    except TestStateIsolationError as exc:
+        assert "active project durable state" in str(exc)

@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from urllib.parse import urlparse
+from urllib.request import url2pathname
 
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.engine import Engine
@@ -32,6 +34,49 @@ class DatabaseSchemaError(RuntimeError):
     """Raised when coordinator persistence is missing or incompatible."""
 
 
+class TestStateIsolationError(RuntimeError):
+    """Raised when tests try to bind the real project durable state."""
+
+
+def _sqlite_path_from_url(database_url: str) -> Path | None:
+    parsed = urlparse(database_url)
+    if parsed.scheme != "sqlite":
+        return None
+    if parsed.path in {"", "/:memory:"}:
+        return None
+    path = url2pathname(parsed.path)
+    if parsed.netloc:
+        return Path(f"//{parsed.netloc}{path}").expanduser().resolve()
+    return Path(path).expanduser().resolve()
+
+
+def _active_project_state_dirs() -> set[Path]:
+    candidates: set[Path] = set()
+    roots = [Path.cwd(), Path(__file__).resolve()]
+    for root in roots:
+        parts = root.resolve().parts
+        for index, part in enumerate(parts):
+            if part == ".build-coordinator":
+                candidates.add(Path(*parts[: index + 1]).resolve())
+        candidates.add((root.resolve().parents[1] / ".build-coordinator").resolve())
+    return candidates
+
+
+def _assert_test_state_isolated(database_url: str, data_dir: Path | str | None) -> None:
+    if os.getenv("STAGEMESH_TEST_STATE_GUARD") != "1":
+        return
+
+    db_path = _sqlite_path_from_url(database_url)
+    resolved_data_dir = Path(data_dir).expanduser().resolve() if data_dir is not None else None
+    active_state_dirs = _active_project_state_dirs()
+    for state_dir in active_state_dirs:
+        if resolved_data_dir == state_dir or db_path == (state_dir / "coordinator.sqlite3").resolve():
+            raise TestStateIsolationError(
+                "Refusing to run tests against the active project durable state: "
+                f"database_url={database_url!r}, data_dir={str(data_dir)!r}"
+            )
+
+
 class DatabaseLifecycle:
     """Engine/session factory bound to one explicit database configuration."""
 
@@ -45,6 +90,7 @@ class DatabaseLifecycle:
             raise ValueError("database_url must be non-empty")
         self.database_url = str(database_url).strip()
         self.data_dir = Path(data_dir) if data_dir else None
+        _assert_test_state_isolated(self.database_url, self.data_dir)
         self.engine = engine_from_url(self.database_url, data_dir=self.data_dir)
         self.session_factory = sessionmaker(
             bind=self.engine,
