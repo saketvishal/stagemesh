@@ -323,3 +323,37 @@ def test_outbound_records_task_specific_failure_when_label_provisioning_fails():
         ).all()
         assert len(events) == 1
         assert events[0].event_data.get("action") == "label_provisioning"
+
+
+def test_local_backlog_outbound_sync_never_depends_on_label_provisioning():
+    """Local backlog tasks are not GitHub-originating and never need repo labels."""
+    client = LabelAwareMockClient(issues=[], existing_labels=[], fail_on="list_labels")
+    source = GitHubTaskSource(repo="example/repo", client=client)
+
+    with SessionLocal() as session:
+        session.add(
+            BuildTask(
+                task_id="LOCAL-204",
+                title="Local backlog task",
+                description="No GitHub source identity.",
+                acceptance_criteria=["Done"],
+                state="DONE",
+            )
+        )
+        ok = source.sync_outbound(session, "LOCAL-204", "DONE")
+        session.commit()
+
+    assert ok is True
+    assert client.created_labels == []
+    assert client.comments == []
+    assert client.labels == []
+    assert client.closed == []
+
+    with SessionLocal() as session:
+        assert session.get(BuildTask, "LOCAL-204").state == "DONE"
+        failures = session.scalars(
+            select(BuildTaskEvent).where(
+                BuildTaskEvent.event_type == "task_source.label_provisioning_failed",
+            )
+        ).all()
+        assert failures == []
