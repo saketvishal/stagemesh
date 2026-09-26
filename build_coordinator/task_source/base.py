@@ -40,6 +40,38 @@ class TaskSourceConfig:
     options: dict[str, Any] = field(default_factory=dict)
 
 
+def source_identity_metadata(
+    *,
+    source_type: str,
+    source_ref: str,
+    source_owner: str | None = None,
+    source_url: str | None = None,
+    source_state: str | None = None,
+    legacy: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return the provider-neutral task-source identity envelope.
+
+    Task-source identity is only provenance/idempotency metadata. Routing,
+    review policy, validation, permissions, and protected paths remain owned by
+    StageMesh project/config policy even when source text mentions them.
+    """
+
+    metadata: dict[str, Any] = {
+        "task_source": source_type,
+        "source_type": source_type,
+        "source_ref": str(source_ref),
+    }
+    if source_owner:
+        metadata["source_owner"] = str(source_owner)
+    if source_url:
+        metadata["source_url"] = str(source_url)
+    if source_state:
+        metadata["source_state"] = str(source_state).upper()
+    if legacy:
+        metadata.update(legacy)
+    return metadata
+
+
 class TaskSource(ABC):
     """Abstract interface for external task discovery and state synchronization."""
 
