@@ -793,6 +793,92 @@ def test_concurrent_scope_change_stays_unresolved_when_acceptance_not_satisfied(
         assert reconciled.event_data["acceptance_appears_satisfied"] is False
 
 
+def test_concurrent_integration_can_obsolete_ready_task_without_premarked_metadata(tmp_path: Path):
+    repo, _ = _setup_test_repo(tmp_path)
+    session_factory, runner = _setup_runner(tmp_path, repo)
+    base_sha = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    (repo / "README.md").write_text("# Test Repo\n\nReplacement sibling implementation\n", encoding="utf-8")
+    _git(repo, "add", "README.md")
+    _git(repo, "commit", "-m", "integrate replacement sibling task")
+    integrated_sha = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    with session_factory() as session:
+        ensure_state(session)
+        task = BuildTask(
+            task_id="GH-OBSOLETED-BY-INTEGRATION",
+            title="Task obsoleted by sibling integration",
+            description="desc",
+            state="CLAIMED",
+            review_policy="INDEPENDENT",
+            base_sha=base_sha,
+            permitted_scope=["README.md"],
+            acceptance_criteria=["README.md contains Original requested text"],
+        )
+        session.add(task)
+        record_event(
+            session,
+            EventInput(
+                task_id="GH-OTHER",
+                event_type="runner.integration_completed",
+                actor="runner",
+                event_data={
+                    "feature_sha": integrated_sha,
+                    "obsolete_task_ids": ["GH-OBSOLETED-BY-INTEGRATION"],
+                },
+            ),
+        )
+        exec_row = BuildRunnerExecution(
+            execution_id="exec-obsoleted-by-integration-1",
+            task_id="GH-OBSOLETED-BY-INTEGRATION",
+            role="BUILDER",
+            worker_id="b-1",
+            provider="test",
+            adapter="fake",
+            status="SUCCEEDED",
+            worktree_path=str(repo),
+        )
+        session.add(exec_row)
+        session.commit()
+
+        parsed = parse_executor_result(
+            {
+                "schema_version": 1,
+                "role": "BUILDER",
+                "feature_sha": "dummy",
+                "blockers": ["the agent produced no changes on the task branch"],
+                "identity": {"provider": "test", "runtime": "fake"},
+            },
+            execution_id="exec-obsoleted-by-integration-1",
+            task_id="GH-OBSOLETED-BY-INTEGRATION",
+            role="BUILDER",
+            require_identity=False,
+        )
+
+        result = RunnerCycleResult(mode="RUNNING")
+        runner._builder_succeeded(session, exec_row, result, parsed)
+        session.commit()
+
+        refreshed = session.get(BuildTask, "GH-OBSOLETED-BY-INTEGRATION")
+        assert refreshed.state == "BLOCKED"
+        assert result.escalations == [
+            "GH-OBSOLETED-BY-INTEGRATION:STALE_OR_OBSOLETE_TASK_DEFINITION"
+        ]
+        reconciled = session.scalar(
+            select(BuildTaskEvent)
+            .where(BuildTaskEvent.task_id == "GH-OBSOLETED-BY-INTEGRATION")
+            .where(BuildTaskEvent.event_type == "runner.no_changes_reconciled")
+        )
+        assert reconciled is not None
+        assert reconciled.event_data["outcome"] == "STALE_OR_OBSOLETE"
+        assert reconciled.event_data["definition_marked_stale"] is False
+        assert reconciled.event_data["stale_by_scope_reconciliation"] is True
+        assert reconciled.event_data["scope_touched_by_recent_integration"] is True
+        assert reconciled.event_data["superseding_integration"]["task_id"] == "GH-OTHER"
+        assert reconciled.event_data["superseding_integration"]["obsolete_task_ids"] == [
+            "GH-OBSOLETED-BY-INTEGRATION"
+        ]
+
+
 def test_integration_event_with_merge_commit_stays_unresolved_when_scope_changed(tmp_path: Path):
     repo, _ = _setup_test_repo(tmp_path)
     session_factory, runner = _setup_runner(tmp_path, repo)

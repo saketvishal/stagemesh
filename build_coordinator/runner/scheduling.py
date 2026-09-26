@@ -31,6 +31,7 @@ from build_coordinator.models import (
     BuildTask,
     BuildTaskClaim,
     BuildTaskEvent,
+    BuildWorkerLease,
 )
 from build_coordinator.objectives import open_gates
 from build_coordinator.types import EventInput, TaskOwnershipScope
@@ -136,12 +137,28 @@ def active_worker_counts(session: Session, now: datetime | None = None) -> dict[
     ).all()
     for w in claim_workers:
         counts[w] = counts.get(w, 0) + 1
-    exec_workers = session.scalars(
-        select(BuildRunnerExecution.worker_id)
+    exec_rows = session.execute(
+        select(BuildRunnerExecution.worker_id, BuildRunnerExecution.execution_id)
         .where(BuildRunnerExecution.status.in_(("LAUNCHED", "RUNNING")))
     ).all()
-    for w in exec_workers:
-        counts[w] = max(counts.get(w, 0), exec_workers.count(w))
+    exec_counts: dict[str, int] = {}
+    live_execution_ids = {execution_id for _worker_id, execution_id in exec_rows}
+    for worker_id, _execution_id in exec_rows:
+        exec_counts[worker_id] = exec_counts.get(worker_id, 0) + 1
+    for worker_id, count in exec_counts.items():
+        counts[worker_id] = max(counts.get(worker_id, 0), count)
+    lease_rows = session.execute(
+        select(BuildWorkerLease.worker_id, BuildWorkerLease.execution_id)
+        .where(BuildWorkerLease.status == "ACTIVE")
+        .where(BuildWorkerLease.lease_expires_at > now)
+    ).all()
+    lease_counts: dict[str, int] = {}
+    for worker_id, execution_id in lease_rows:
+        if execution_id in live_execution_ids:
+            continue
+        lease_counts[worker_id] = lease_counts.get(worker_id, 0) + 1
+    for worker_id, count in lease_counts.items():
+        counts[worker_id] = max(counts.get(worker_id, 0), count)
     return counts
 
 
