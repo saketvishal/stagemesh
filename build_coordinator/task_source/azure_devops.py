@@ -170,17 +170,19 @@ class AzureDevOpsTaskSource(TaskSource):
         task = session.get(BuildTask, task_id)
         metadata = dict(task.definition_metadata or {}) if task is not None else {}
         expected_owner = f"{self.organization}/{self.project}"
-        if (
-            metadata.get("source_type") != "azure_devops"
-            or metadata.get("source_owner") != expected_owner
-        ):
-            return None
-        source_ref = metadata.get("source_ref")
-        if source_ref is not None and re.fullmatch(r"\d+", str(source_ref)):
-            return str(source_ref)
-        work_item_id = metadata.get("source_work_item_id")
-        if work_item_id is not None and re.fullmatch(r"\d+", str(work_item_id)):
-            return str(work_item_id)
+        has_source_identity = metadata.get("source_type") is not None or metadata.get("source_owner") is not None
+        if has_source_identity:
+            if (
+                metadata.get("source_type") != "azure_devops"
+                or metadata.get("source_owner") != expected_owner
+            ):
+                return None
+            source_ref = metadata.get("source_ref")
+            if source_ref is not None and re.fullmatch(r"\d+", str(source_ref)):
+                return str(source_ref)
+            work_item_id = metadata.get("source_work_item_id")
+            if work_item_id is not None and re.fullmatch(r"\d+", str(work_item_id)):
+                return str(work_item_id)
         events = session.scalars(
             select(BuildTaskEvent)
             .where(BuildTaskEvent.task_id == task_id)
@@ -189,8 +191,15 @@ class AzureDevOpsTaskSource(TaskSource):
         ).all()
         for event in events:
             data = event.event_data or {}
-            if data.get("work_item_id"):
-                return str(data["work_item_id"])
+            work_item_id = data.get("work_item_id")
+            source = str(data.get("source") or "")
+            expected_prefix = f"{expected_owner}/_workitems/edit/"
+            if (
+                work_item_id is not None
+                and re.fullmatch(r"\d+", str(work_item_id))
+                and source.startswith(expected_prefix)
+            ):
+                return str(work_item_id)
         return None
 
     def _is_outbound_synced(self, session, task_id: str, state: str) -> bool:

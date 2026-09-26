@@ -238,6 +238,52 @@ def test_azure_devops_outbound_sends_lifecycle_state_and_evidence_only():
     assert len(client.updates) == 1
 
 
+def test_azure_devops_outbound_uses_legacy_sync_event_without_source_metadata():
+    client = FakeAzureDevOpsClient([])
+    source = AzureDevOpsTaskSource(
+        organization="https://dev.azure.com/acme",
+        project="mesh",
+        client=client,
+    )
+
+    with SessionLocal() as session:
+        session.add(
+            BuildTask(
+                task_id="ADO-404",
+                title="Legacy Azure DevOps task",
+                description="Imported before source metadata existed",
+                acceptance_criteria=["Works"],
+                definition_metadata={},
+                state="DONE",
+            )
+        )
+        session.add(
+            BuildTaskEvent(
+                task_id="ADO-404",
+                event_type="task.synced_from_source",
+                actor="azure-devops-sync",
+                event_data={
+                    "source": "https://dev.azure.com/acme/mesh/_workitems/edit/404",
+                    "work_item_id": "404",
+                    "action": "CREATED",
+                },
+            )
+        )
+        ok = source.sync_outbound(session, "ADO-404", "DONE", evidence={"summary": "legacy"})
+        session.commit()
+
+    assert ok is True
+    assert client.updates == [
+        {
+            "organization": "https://dev.azure.com/acme",
+            "project": "mesh",
+            "work_item_id": "404",
+            "state": "DONE",
+            "evidence": {"summary": "legacy"},
+        }
+    ]
+
+
 def test_azure_devops_outbound_ignores_prefix_without_azure_source_identity():
     client = FakeAzureDevOpsClient([])
     source = AzureDevOpsTaskSource(
@@ -263,6 +309,32 @@ def test_azure_devops_outbound_ignores_prefix_without_azure_source_identity():
             )
         )
         ok = source.sync_outbound(session, "ADO-456", "DONE", evidence={"summary": "local"})
+        session.commit()
+
+    assert ok is True
+    assert client.updates == []
+
+
+def test_azure_devops_outbound_ignores_raw_prefix_without_sync_event():
+    client = FakeAzureDevOpsClient([])
+    source = AzureDevOpsTaskSource(
+        organization="https://dev.azure.com/acme",
+        project="mesh",
+        client=client,
+    )
+
+    with SessionLocal() as session:
+        session.add(
+            BuildTask(
+                task_id="ADO-505",
+                title="Raw Azure-looking task",
+                description="Must not infer work item authority from id",
+                acceptance_criteria=["Works"],
+                definition_metadata={},
+                state="DONE",
+            )
+        )
+        ok = source.sync_outbound(session, "ADO-505", "DONE", evidence={"summary": "raw"})
         session.commit()
 
     assert ok is True

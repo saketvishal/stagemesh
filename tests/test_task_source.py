@@ -7,7 +7,7 @@ from pathlib import Path
 
 from build_coordinator.claims import task_is_claimable
 from build_coordinator.db import Base, SessionLocal, engine, initialize_schema
-from build_coordinator.models import BuildObjective, BuildTask
+from build_coordinator.models import BuildObjective, BuildTask, BuildTaskEvent
 from build_coordinator.planner import planner_task_id
 from build_coordinator.service import utcnow
 from build_coordinator.task_source.base import TaskSourceConfig
@@ -376,6 +376,40 @@ def test_github_task_source_sync_outbound():
     assert "101" in client.closed
 
 
+def test_github_outbound_uses_legacy_sync_event_without_source_metadata():
+    client = FakeGitHubClient([])
+    source = GitHubTaskSource(repo="example/repo", client=client)
+    with SessionLocal() as session:
+        session.add(
+            BuildTask(
+                task_id="GH-404",
+                title="Legacy GitHub task",
+                description="Imported before source metadata existed",
+                acceptance_criteria=["Works"],
+                definition_metadata={},
+                state="DONE",
+            )
+        )
+        session.add(
+            BuildTaskEvent(
+                task_id="GH-404",
+                event_type="task.synced_from_source",
+                actor="github-sync",
+                event_data={
+                    "source": "https://github.com/example/repo/issues/404",
+                    "action": "CREATED",
+                },
+            )
+        )
+
+        ok = source.sync_outbound(session, "GH-404", "DONE", evidence={"summary": "legacy"})
+
+    assert ok is True
+    assert len(client.comments) == 1
+    assert client.comments[0]["number"] == "404"
+    assert "404" in client.closed
+
+
 def test_github_outbound_ignores_prefix_without_github_source_identity():
     client = FakeGitHubClient([])
     source = GitHubTaskSource(repo="example/repo", client=client)
@@ -396,6 +430,27 @@ def test_github_outbound_ignores_prefix_without_github_source_identity():
             )
         )
         ok = source.sync_outbound(session, "GH-202", "DONE", evidence={"summary": "local"})
+
+    assert ok is True
+    assert client.comments == []
+    assert client.closed == []
+
+
+def test_github_outbound_ignores_raw_prefix_without_sync_event():
+    client = FakeGitHubClient([])
+    source = GitHubTaskSource(repo="example/repo", client=client)
+    with SessionLocal() as session:
+        session.add(
+            BuildTask(
+                task_id="GH-505",
+                title="Raw GitHub-looking task",
+                description="Must not infer issue authority from id",
+                acceptance_criteria=["Works"],
+                definition_metadata={},
+                state="DONE",
+            )
+        )
+        ok = source.sync_outbound(session, "GH-505", "DONE", evidence={"summary": "raw"})
 
     assert ok is True
     assert client.comments == []
