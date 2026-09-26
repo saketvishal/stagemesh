@@ -727,6 +727,36 @@ def test_github_task_source_sync_outbound():
     assert "101" in client.closed
 
 
+def test_github_outbound_noops_for_deferred_done_task():
+    client = FakeGitHubClient([])
+    source = GitHubTaskSource(repo="example/repo", client=client)
+    with SessionLocal() as session:
+        session.add(
+            BuildTask(
+                task_id="GH-124",
+                title="Deferred GitHub task",
+                description="Imported from GitHub",
+                acceptance_criteria=["Works"],
+                definition_metadata=source_identity_metadata(
+                    source_type="github",
+                    source_owner="example/repo",
+                    source_ref="124",
+                    source_url="https://github.com/example/repo/issues/124",
+                    source_state="OPEN",
+                    source_eligibility="DEFERRED",
+                    source_eligibility_reason="matched exclude label(s): stagemesh:deferred",
+                    legacy={"source_issue_number": 124},
+                ),
+                state="DONE",
+            )
+        )
+        ok = source.sync_outbound(session, "GH-124", "DONE", evidence={"summary": "drained"})
+
+    assert ok is True
+    assert client.comments == []
+    assert client.closed == []
+
+
 def test_github_outbound_uses_legacy_sync_event_without_source_metadata():
     client = FakeGitHubClient([])
     source = GitHubTaskSource(repo="example/repo", client=client)

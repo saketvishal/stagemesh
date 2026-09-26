@@ -343,6 +343,9 @@ class BuildRunner:
                 for obj in completed_objectives:
                     if not self._target_allows(obj.objective_id):
                         continue
+                    planner_task = get_planner_task(session, obj.objective_id)
+                    if planner_task is not None and not task_source_is_executable(planner_task):
+                        continue
                     evidence = self._collect_objective_evidence(session, obj.objective_id)
                     synced = sync_obj_fn(
                         session,
@@ -375,6 +378,8 @@ class BuildRunner:
                     continue
                 # If this task represents an objective issue itself, skip task-level sync
                 if session.get(BuildObjective, task.task_id) is not None:
+                    continue
+                if not task_source_is_executable(task):
                     continue
                 evidence = self._collect_task_evidence(session, task.task_id)
                 synced = self._task_source.sync_outbound(
