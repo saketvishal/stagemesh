@@ -7,13 +7,14 @@ worker and it only records configuration references, not credential material.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any, Iterable, Protocol
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from build_coordinator.claims import last_implementation_provider, last_implementation_worker
-from build_coordinator.models import BuildRunnerExecution, BuildTask, BuildTaskClaim
+from build_coordinator.models import BuildRunnerExecution, BuildTask, BuildTaskClaim, BuildWorkerLease
 from build_coordinator.policy import review_policy_spec
 
 CAP_CHEAP = "CHEAP"
@@ -214,6 +215,41 @@ class StageRequirement:
 
 
 @dataclass(frozen=True)
+class WorkerEvidence:
+    reliability: float | None = None
+    latency_ms: float | None = None
+    capability_fit: float | None = None
+    failure_rate: float | None = None
+    cost: float | None = None
+    sample_size: int = 0
+    source: str = "none"
+
+    @classmethod
+    def from_mapping(cls, data: dict[str, Any] | None) -> "WorkerEvidence":
+        row = data or {}
+        return cls(
+            reliability=_float_or_none(row.get("reliability")),
+            latency_ms=_float_or_none(row.get("latency_ms", row.get("latency"))),
+            capability_fit=_float_or_none(row.get("capability_fit")),
+            failure_rate=_float_or_none(row.get("failure_rate")),
+            cost=_float_or_none(row.get("cost")),
+            sample_size=int(row.get("sample_size") or 0),
+            source=str(row.get("source") or "configured"),
+        )
+
+    def to_public_dict(self) -> dict[str, Any]:
+        return {
+            "reliability": self.reliability,
+            "latency_ms": self.latency_ms,
+            "capability_fit": self.capability_fit,
+            "failure_rate": self.failure_rate,
+            "cost": self.cost,
+            "sample_size": self.sample_size,
+            "source": self.source,
+        }
+
+
+@dataclass(frozen=True)
 class RoutingPolicy:
     policy_id: str = "deterministic-v1"
     version: str = "1"
@@ -251,6 +287,9 @@ class CandidateExplanation:
     runtime_availability: str = "AVAILABLE"
     active_workers: int = 0
     active_provider_workers: int = 0
+    evidence: WorkerEvidence = field(default_factory=WorkerEvidence)
+    routing_score: float | None = None
+    score_reasons: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -264,6 +303,9 @@ class CandidateExplanation:
             "runtime_availability": self.runtime_availability,
             "active_workers": self.active_workers,
             "active_provider_workers": self.active_provider_workers,
+            "evidence": self.evidence.to_public_dict(),
+            "routing_score": self.routing_score,
+            "score_reasons": list(self.score_reasons),
         }
 
 
@@ -330,10 +372,12 @@ def route_worker(
     excluded_workers: set[str] | None = None,
     excluded_providers: set[str] | None = None,
     deprioritized_workers: set[str] | None = None,
+    evidence_by_worker: dict[str, WorkerEvidence] | None = None,
 ) -> RoutingDecision:
     excluded_workers = excluded_workers or set()
     excluded_providers = excluded_providers or set()
     deprioritized_workers = deprioritized_workers or set()
+    evidence_by_worker = evidence_by_worker or {}
     workers = list(workers)
     all_workers = workers
     active_by_worker = _active_implementation_counts(session)
@@ -353,6 +397,8 @@ def route_worker(
             excluded_providers=excluded_providers,
         )
         ok = not reasons
+        evidence = evidence_by_worker.get(worker.worker_id, WorkerEvidence())
+        score, score_reasons = _routing_score(worker, stage_requirement, evidence)
         candidates.append(
             CandidateExplanation(
                 worker.worker_id,
@@ -365,6 +411,9 @@ def route_worker(
                 runtime_availability=_runtime_availability(worker.runtime, runtimes),
                 active_workers=active_by_worker.get(worker.worker_id, 0),
                 active_provider_workers=active_by_provider.get(worker.provider, 0),
+                evidence=evidence,
+                routing_score=score,
+                score_reasons=score_reasons,
             )
         )
         if ok:
@@ -427,9 +476,13 @@ def route_worker(
                 runtime_availability=candidate.runtime_availability,
                 active_workers=candidate.active_workers,
                 active_provider_workers=candidate.active_provider_workers,
+                evidence=candidate.evidence,
+                routing_score=candidate.routing_score,
+                score_reasons=candidate.score_reasons,
             )
             for candidate in candidates
         ]
+    scores = {candidate.worker_id: candidate.routing_score for candidate in candidates}
     selected = sorted(
         eligible,
         key=lambda worker: (
@@ -438,6 +491,7 @@ def route_worker(
             0 if worker.worker_id in stage_requirement.preferred_workers else 1,
             0 if _provider_mode(worker.provider, providers) == "ACTIVE" else 1,
             worker.preference,
+            -(scores.get(worker.worker_id) or 0.0),
             active_by_provider.get(worker.provider, 0),
             active_by_worker.get(worker.worker_id, 0),
             worker.worker_id,
@@ -656,6 +710,7 @@ def _runtime_availability(runtime_id: str, runtimes: dict[str, RuntimeConfig]) -
 def _active_implementation_counts(session: Session | None) -> dict[str, int]:
     if session is None:
         return {}
+    now = datetime.now(UTC)
     rows = session.scalars(
         select(BuildTaskClaim.worker_id)
         .where(BuildTaskClaim.claim_type == "IMPLEMENTATION")
@@ -666,14 +721,121 @@ def _active_implementation_counts(session: Session | None) -> dict[str, int]:
         counts[worker_id] = counts.get(worker_id, 0) + 1
     # Reviewer, integration and planner workers hold no IMPLEMENTATION claim;
     # their live executions occupy the worker's slots the same way.
-    live = session.scalars(
-        select(BuildRunnerExecution.worker_id)
+    live = session.execute(
+        select(BuildRunnerExecution.worker_id, BuildRunnerExecution.execution_id)
         .where(BuildRunnerExecution.status.in_(("LAUNCHED", "RUNNING")))
         .where(BuildRunnerExecution.role.in_(("REVIEWER", "INTEGRATION", "PLANNER")))
     ).all()
-    for worker_id in live:
+    live_execution_ids = {execution_id for _worker_id, execution_id in live}
+    for worker_id, _execution_id in live:
         counts[worker_id] = counts.get(worker_id, 0) + 1
+    leases = session.execute(
+        select(BuildWorkerLease.worker_id, BuildWorkerLease.execution_id)
+        .where(BuildWorkerLease.status == "ACTIVE")
+        .where(BuildWorkerLease.lease_expires_at > now)
+    ).all()
+    lease_counts: dict[str, int] = {}
+    for worker_id, execution_id in leases:
+        if execution_id in live_execution_ids:
+            continue
+        lease_counts[worker_id] = lease_counts.get(worker_id, 0) + 1
+    for worker_id, lease_count in lease_counts.items():
+        counts[worker_id] = max(counts.get(worker_id, 0), lease_count)
     return counts
+
+
+def execution_evidence_by_worker(session: Session | None, workers: Iterable[WorkerLike]) -> dict[str, WorkerEvidence]:
+    if session is None:
+        return {}
+    worker_ids = {worker.worker_id for worker in workers}
+    if not worker_ids:
+        return {}
+    rows = session.scalars(
+        select(BuildRunnerExecution)
+        .where(BuildRunnerExecution.worker_id.in_(worker_ids))
+        .where(BuildRunnerExecution.status.in_(("SUCCEEDED", "FAILED", "HUMAN_ACTION_REQUIRED", "TERMINATED", "LOST")))
+    ).all()
+    grouped: dict[str, list[BuildRunnerExecution]] = {}
+    for row in rows:
+        grouped.setdefault(row.worker_id, []).append(row)
+    evidence: dict[str, WorkerEvidence] = {}
+    for worker_id, worker_rows in grouped.items():
+        sample_size = len(worker_rows)
+        successes = sum(1 for row in worker_rows if row.status == "SUCCEEDED")
+        failures = sample_size - successes
+        latencies = [
+            (_naive(row.completed_at) - _naive(row.launched_at)).total_seconds() * 1000.0
+            for row in worker_rows
+            if row.completed_at is not None and row.launched_at is not None
+        ]
+        evidence[worker_id] = WorkerEvidence(
+            reliability=successes / sample_size if sample_size else None,
+            latency_ms=(sum(latencies) / len(latencies)) if latencies else None,
+            failure_rate=failures / sample_size if sample_size else None,
+            sample_size=sample_size,
+            source="execution_history",
+        )
+    return evidence
+
+
+def merge_worker_evidence(configured: WorkerEvidence, observed: WorkerEvidence, worker: WorkerLike, requirement: StageRequirement) -> WorkerEvidence:
+    capability_fit = configured.capability_fit
+    if capability_fit is None:
+        required = set(requirement.capabilities)
+        if required:
+            caps = set(worker.capability_names())
+            capability_fit = len(required & caps) / len(required)
+    cost = configured.cost
+    raw_cost = getattr(worker, "cost", None)
+    if cost is None and isinstance(raw_cost, dict):
+        cost = _float_or_none(raw_cost.get("score", raw_cost.get("relative", raw_cost.get("per_1k_tokens"))))
+    return WorkerEvidence(
+        reliability=observed.reliability if observed.reliability is not None else configured.reliability,
+        latency_ms=observed.latency_ms if observed.latency_ms is not None else configured.latency_ms,
+        capability_fit=capability_fit,
+        failure_rate=observed.failure_rate if observed.failure_rate is not None else configured.failure_rate,
+        cost=cost,
+        sample_size=observed.sample_size or configured.sample_size,
+        source="execution_history+configured" if observed.sample_size and configured.source != "none" else (observed.source if observed.sample_size else configured.source),
+    )
+
+
+def _routing_score(worker: WorkerLike, requirement: StageRequirement, evidence: WorkerEvidence) -> tuple[float | None, tuple[str, ...]]:
+    if evidence == WorkerEvidence():
+        return None, ()
+    score = 0.0
+    reasons: list[str] = []
+    if evidence.reliability is not None:
+        score += _clamp01(evidence.reliability) * 45.0
+        reasons.append(f"reliability:{evidence.reliability:.3f}")
+    if evidence.failure_rate is not None:
+        score += (1.0 - _clamp01(evidence.failure_rate)) * 20.0
+        reasons.append(f"failure_rate:{evidence.failure_rate:.3f}")
+    if evidence.capability_fit is not None:
+        score += _clamp01(evidence.capability_fit) * 20.0
+        reasons.append(f"capability_fit:{evidence.capability_fit:.3f}")
+    if evidence.latency_ms is not None:
+        latency_score = 1.0 / (1.0 + max(evidence.latency_ms, 0.0) / 60000.0)
+        score += latency_score * 10.0
+        reasons.append(f"latency_ms:{evidence.latency_ms:.1f}")
+    if evidence.cost is not None:
+        cost_score = 1.0 / (1.0 + max(evidence.cost, 0.0))
+        score += cost_score * 5.0
+        reasons.append(f"cost:{evidence.cost:.3f}")
+    return round(score, 6), tuple(reasons)
+
+
+def _clamp01(value: float) -> float:
+    return min(1.0, max(0.0, float(value)))
+
+
+def _float_or_none(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _reason_matches_no_fallback(reason: str, no_fallback_on: tuple[str, ...]) -> bool:

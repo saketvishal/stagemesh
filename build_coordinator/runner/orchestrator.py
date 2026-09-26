@@ -6,6 +6,8 @@ import dataclasses
 
 import hashlib
 import json
+import os
+import socket
 import subprocess
 import sys
 import time
@@ -40,6 +42,7 @@ from build_coordinator.models import (
     BuildTaskCheckpoint,
     BuildTaskClaim,
     BuildTaskEvent,
+    BuildWorkerLease,
     new_uuid,
 )
 from build_coordinator.objectives import (
@@ -91,6 +94,8 @@ from build_coordinator.runner.routing import (
     StageRequirement,
     approving_providers,
     approving_reviewers,
+    execution_evidence_by_worker,
+    merge_worker_evidence,
     reviewer_exclusions,
     role_to_stage,
     route_worker,
@@ -145,6 +150,7 @@ from build_coordinator.service import (
     reconcile_stale_executions,
     recover_expired,
     recover_lost_execution_claims,
+    release_worker_leases_for_execution,
     release_active_claims,
     request_task_input,
     transition_task,
@@ -470,6 +476,7 @@ class BuildRunner:
                     row.result_data = {**(row.result_data or {}), **observation.result_data}
             else:
                 self._apply_terminal_result(session, row, result, observation)
+                self._release_worker_lease(session, row.execution_id)
             observed.append(row.execution_id)
         return observed
 
@@ -2528,26 +2535,8 @@ class BuildRunner:
         execution_id = new_uuid()
         result_path = str(self._result_dir() / f"{execution_id}.json")
         executor = self._executor_for_worker(worker)
-        if isinstance(executor, SubprocessExecutor):
-            executor.remember_result_path(execution_id, result_path)
-        handle = executor.launch(
-            ExecutionLaunch(
-                task_id=task_id,
-                role=role,
-                worker_id=worker.worker_id,
-                provider=worker.provider,
-                worktree_path=worker.worktree_path,
-                branch_name=worker.branch_name,
-                prompt=prompt,
-                execution_id=execution_id,
-                result_path=result_path,
-                reviewed_feature_sha=reviewed_feature_sha,
-                timeout_seconds=worker.timeout_seconds,
-                extra_env=worker.resolved_env(),
-            )
-        )
         row = BuildRunnerExecution(
-            execution_id=handle.execution_id,
+            execution_id=execution_id,
             task_id=task_id,
             role=role,
             worker_id=worker.worker_id,
@@ -2556,8 +2545,7 @@ class BuildRunner:
             claim_id=str(claim_id) if claim_id else None,
             worktree_path=worker.worktree_path,
             branch_name=worker.branch_name,
-            process_id=handle.process_id,
-            result_path=handle.result_path or result_path,
+            result_path=result_path,
             reviewed_feature_sha=reviewed_feature_sha,
             prompt_hash=hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
             status="LAUNCHED",
@@ -2571,12 +2559,80 @@ class BuildRunner:
                 ),
             },
         )
+        slot_count = max(1, int(worker.max_concurrency or 1))
+        reserved_slot: int | None = None
+        for slot_index in range(slot_count):
+            now = _now()
+            stale_leases = session.scalars(
+                select(BuildWorkerLease)
+                .where(BuildWorkerLease.worker_id == worker.worker_id)
+                .where(BuildWorkerLease.slot_index == slot_index)
+                .where(BuildWorkerLease.status == "ACTIVE")
+                .where(BuildWorkerLease.lease_expires_at <= now)
+            ).all()
+            for stale in stale_leases:
+                stale.status = "EXPIRED"
+                stale.lease_expires_at = now
+            if stale_leases:
+                session.flush()
+            lease = BuildWorkerLease(
+                worker_id=worker.worker_id,
+                provider=worker.provider,
+                slot_index=slot_index,
+                machine_id=socket.gethostname(),
+                process_id=str(os.getpid()),
+                task_id=task_id,
+                execution_id=execution_id,
+                lease_expires_at=now + timedelta(seconds=worker.timeout_seconds or 3600),
+                status="ACTIVE",
+            )
+            try:
+                with session.begin_nested():
+                    session.add(lease)
+                    session.flush()
+                reserved_slot = slot_index
+                break
+            except IntegrityError:
+                continue
+        if reserved_slot is None:
+            result.capacity_full = True
+            return
         try:
             with session.begin_nested():
                 session.add(row)
                 session.flush()
         except IntegrityError:
+            release_worker_leases_for_execution(session, execution_id)
+            session.commit()
             return
+        session.commit()
+        try:
+            if isinstance(executor, SubprocessExecutor):
+                executor.remember_result_path(execution_id, result_path)
+            handle = executor.launch(
+                ExecutionLaunch(
+                    task_id=task_id,
+                    role=role,
+                    worker_id=worker.worker_id,
+                    provider=worker.provider,
+                    worktree_path=worker.worktree_path,
+                    branch_name=worker.branch_name,
+                    prompt=prompt,
+                    execution_id=execution_id,
+                    result_path=result_path,
+                    reviewed_feature_sha=reviewed_feature_sha,
+                    timeout_seconds=worker.timeout_seconds,
+                    extra_env=worker.resolved_env(),
+                )
+            )
+        except Exception:
+            release_worker_leases_for_execution(session, execution_id)
+            session.delete(row)
+            session.commit()
+            raise
+        row.execution_id = handle.execution_id
+        row.process_id = handle.process_id
+        row.result_path = handle.result_path or result_path
         record_event(
             session,
             EventInput(
@@ -2599,6 +2655,9 @@ class BuildRunner:
             ),
         )
         result.launched.append(handle.execution_id)
+
+    def _release_worker_lease(self, session: Session, execution_id: str) -> None:
+        release_worker_leases_for_execution(session, execution_id)
 
     def _kill_reconciled_process_trees(self, session: Session) -> None:
         from build_coordinator.execution.process_tree import kill_process_tree
@@ -2696,9 +2755,18 @@ class BuildRunner:
             active_by_provider[worker.provider] = active_by_provider.get(worker.provider, 0) + active_counts.get(worker.worker_id, 0)
             launches_by_provider[worker.provider] = launches_by_provider.get(worker.provider, 0) + launches.get(worker.worker_id, 0)
         failure_visibility = self._provider_failure_visibility(session)
+        observed_evidence = execution_evidence_by_worker(session, self._config.workers)
         worker_summary = []
         for w in self._config.workers:
             p = effective_providers.get(w.provider)
+            stage = role_to_stage(w.role)
+            requirement = self._config.stage_requirements.get(stage, StageRequirement(stage))
+            evidence = merge_worker_evidence(
+                w.evidence,
+                observed_evidence.get(w.worker_id, w.evidence),
+                w,
+                requirement,
+            )
             worker_summary.append({
                 "worker_id": w.worker_id,
                 "role": w.role,
@@ -2709,6 +2777,7 @@ class BuildRunner:
                 "active_workers": active_counts.get(w.worker_id, 0),
                 "active_provider_workers": active_by_provider.get(w.provider, 0),
                 "launches": launches.get(w.worker_id, 0),
+                "evidence": evidence.to_public_dict(),
                 "mode": p.consumption_mode if p else "ACTIVE",
                 "consumption_mode": p.consumption_mode if p else "ACTIVE",
                 "availability": p.availability if p else "AVAILABLE",
@@ -2779,6 +2848,16 @@ class BuildRunner:
             if role == "REVIEWER"
             else None
         )
+        observed_evidence = execution_evidence_by_worker(session, workers)
+        evidence_by_worker = {
+            worker.worker_id: merge_worker_evidence(
+                worker.evidence,
+                observed_evidence.get(worker.worker_id, worker.evidence),
+                worker,
+                requirement,
+            )
+            for worker in workers
+        }
         decision = route_worker(
             workers,
             stage=stage,
@@ -2791,6 +2870,7 @@ class BuildRunner:
             excluded_workers=set(exclusions.workers) if exclusions else set(),
             excluded_providers=set(exclusions.providers) if exclusions else set(),
             deprioritized_workers=deprioritized_workers,
+            evidence_by_worker=evidence_by_worker,
         )
         worker = next(
             (candidate for candidate in workers if candidate.worker_id == decision.selected_worker_id),

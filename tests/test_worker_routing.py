@@ -17,8 +17,10 @@ from build_coordinator.models import (
     BuildTaskCheckpoint,
     BuildTaskClaim,
     BuildTaskEvent,
+    BuildWorkerLease,
 )
 from build_coordinator.runner import BuildRunner
+from build_coordinator.runner.orchestrator import RunnerCycleResult
 from build_coordinator.runner.git_safety import FakeGit
 from build_coordinator.runner.models import RunnerConfig, WorkerConfig
 from build_coordinator.runner.routing import (
@@ -29,12 +31,24 @@ from build_coordinator.runner.routing import (
     RETRYABLE_PROVIDER_FAILURES,
     ProviderConfig,
     StageRequirement,
+    WorkerEvidence,
     approving_providers,
     approving_reviewers,
     route_worker,
 )
 from build_coordinator.policy import CoordinatorPolicyError
-from build_coordinator.service import CheckpointInput, ClaimRequest, checkpoint, claim_review, claim_task, recover_expired, upsert_task, utcnow
+from build_coordinator.service import (
+    CheckpointInput,
+    ClaimRequest,
+    checkpoint,
+    claim_review,
+    claim_task,
+    reconcile_stale_executions,
+    recover_expired,
+    recover_lost_execution_claims,
+    upsert_task,
+    utcnow,
+)
 from build_coordinator.types import EventInput, TaskSpec
 
 
@@ -47,6 +61,7 @@ def setup_function() -> None:
             BuildTaskEvent,
             BuildTaskCheckpoint,
             BuildTaskClaim,
+            BuildWorkerLease,
             BuildTask,
             BuildCoordinatorState,
         ):
@@ -212,6 +227,53 @@ def test_route_explain_reports_eligible_and_ineligible_reasons():
     reasons = {item.worker_id: item.reasons for item in decision.candidates}
     assert reasons["builder-fast"] == ("eligible",)
     assert "stage_not_allowed" in reasons["reviewer"]
+
+
+def test_evidence_score_prefers_more_reliable_faster_worker_when_policy_ties():
+    workers = (
+        WorkerConfig("builder-a", "BUILDER", adapter="fake", capabilities=(CAP_CODING,), stages=("implementation",), preference=10),
+        WorkerConfig("builder-b", "BUILDER", adapter="fake", capabilities=(CAP_CODING,), stages=("implementation",), preference=10),
+    )
+
+    decision = route_worker(
+        workers,
+        stage="implementation",
+        stage_requirement=StageRequirement("implementation", capabilities=(CAP_CODING,)),
+        providers={},
+        runtimes={},
+        routing_policy=RunnerConfig().routing_policy,
+        evidence_by_worker={
+            "builder-a": WorkerEvidence(reliability=0.80, latency_ms=120000, capability_fit=1.0, failure_rate=0.20, cost=1.0, sample_size=10, source="test"),
+            "builder-b": WorkerEvidence(reliability=0.95, latency_ms=30000, capability_fit=1.0, failure_rate=0.05, cost=0.2, sample_size=10, source="test"),
+        },
+    )
+
+    assert decision.selected_worker_id == "builder-b"
+    candidates = {candidate.worker_id: candidate.to_dict() for candidate in decision.candidates}
+    assert candidates["builder-b"]["routing_score"] > candidates["builder-a"]["routing_score"]
+    assert "reliability:0.950" in candidates["builder-b"]["score_reasons"]
+
+
+def test_operator_preferred_worker_wins_before_evidence_score():
+    workers = (
+        WorkerConfig("builder-a", "BUILDER", adapter="fake", capabilities=(CAP_CODING,), stages=("implementation",), preference=10),
+        WorkerConfig("builder-b", "BUILDER", adapter="fake", capabilities=(CAP_CODING,), stages=("implementation",), preference=10),
+    )
+
+    decision = route_worker(
+        workers,
+        stage="implementation",
+        stage_requirement=StageRequirement("implementation", capabilities=(CAP_CODING,), preferred_workers=("builder-a",)),
+        providers={},
+        runtimes={},
+        routing_policy=RunnerConfig().routing_policy,
+        evidence_by_worker={
+            "builder-a": WorkerEvidence(reliability=0.50, latency_ms=120000, capability_fit=1.0, failure_rate=0.50, cost=5.0, sample_size=10, source="test"),
+            "builder-b": WorkerEvidence(reliability=0.99, latency_ms=1000, capability_fit=1.0, failure_rate=0.01, cost=0.1, sample_size=10, source="test"),
+        },
+    )
+
+    assert decision.selected_worker_id == "builder-a"
 
 
 def test_fallback_provider_preserves_capacity_while_active_provider_is_eligible():
@@ -519,6 +581,353 @@ def test_routing_audit_reports_active_worker_and_provider_usage(tmp_path: Path):
     assert candidates["builder-openai"]["provider_mode"] == "ACTIVE"
 
 
+def test_active_sql_worker_lease_occupies_distributed_worker_slot(tmp_path: Path):
+    with SessionLocal() as session:
+        session.add(
+            BuildWorkerLease(
+                worker_id="builder-openai",
+                provider="openai",
+                slot_index=0,
+                machine_id="remote-host",
+                process_id="1234",
+                lease_expires_at=utcnow() + timedelta(minutes=5),
+                status="ACTIVE",
+            )
+        )
+        session.commit()
+
+        workers = (
+            WorkerConfig("builder-openai", "BUILDER", provider="openai", adapter="fake", capabilities=(CAP_CODING,), stages=("implementation",), max_concurrency=1),
+            WorkerConfig("builder-openai-2", "BUILDER", provider="openai", adapter="fake", capabilities=(CAP_CODING,), stages=("implementation",), max_concurrency=1),
+        )
+        decision = route_worker(
+            workers,
+            stage="implementation",
+            stage_requirement=StageRequirement("implementation", capabilities=(CAP_CODING,)),
+            providers={"openai": ProviderConfig("openai", consumption_mode="ACTIVE")},
+            runtimes={},
+            routing_policy=RunnerConfig().routing_policy,
+            session=session,
+        )
+
+    assert decision.selected_worker_id == "builder-openai-2"
+    candidates = {candidate.worker_id: candidate.to_dict() for candidate in decision.candidates}
+    assert "max_concurrency_reached" in candidates["builder-openai"]["reasons"]
+    assert candidates["builder-openai"]["active_workers"] == 1
+
+
+def test_launch_reserves_worker_slot_before_external_executor_starts(tmp_path: Path):
+    with SessionLocal() as session:
+        upsert_task(session, _task("ATOMIC-SLOT"))
+        claim = claim_task(session, ClaimRequest("ATOMIC-SLOT", worker_id="builder-openai", provider="openai"))
+        claim_id = claim.claim_id
+        session.add(
+            BuildWorkerLease(
+                worker_id="builder-openai",
+                provider="openai",
+                slot_index=0,
+                machine_id="remote-host",
+                process_id="1234",
+                lease_expires_at=utcnow() + timedelta(minutes=5),
+                status="ACTIVE",
+            )
+        )
+        session.commit()
+
+    class ShouldNotLaunch:
+        adapter_name = "fake"
+
+        def launch(self, launch):
+            raise AssertionError("executor launch must not run when SQL worker slots are full")
+
+        def poll(self, execution_id):
+            raise AssertionError("poll not expected")
+
+    worker = WorkerConfig(
+        "builder-openai",
+        "BUILDER",
+        provider="openai",
+        adapter="fake",
+        capabilities=(CAP_CODING,),
+        stages=("implementation",),
+        max_concurrency=1,
+    )
+    runner = BuildRunner(SessionLocal, _config(tmp_path, (worker,)), executors={"builder-openai": ShouldNotLaunch()}, git=FakeGit())
+    result = RunnerCycleResult(mode="RUNNING")
+    with SessionLocal() as session:
+        runner._launch(
+            session,
+            result,
+            "ATOMIC-SLOT",
+            "BUILDER",
+            worker,
+            claim_id,
+            "do work",
+        )
+        session.commit()
+
+    assert result.launched == []
+    assert result.capacity_full is True
+    with SessionLocal() as session:
+        assert session.scalar(select(BuildRunnerExecution).where(BuildRunnerExecution.task_id == "ATOMIC-SLOT")) is None
+        active_leases = session.scalars(
+            select(BuildWorkerLease).where(
+                BuildWorkerLease.worker_id == "builder-openai",
+                BuildWorkerLease.status == "ACTIVE",
+            )
+        ).all()
+        assert len(active_leases) == 1
+        assert active_leases[0].task_id is None
+
+
+def test_execution_and_worker_lease_are_durable_before_executor_launch(tmp_path: Path):
+    with SessionLocal() as session:
+        upsert_task(session, _task("DURABLE-LAUNCH"))
+        session.commit()
+
+    class ObservingExecutor:
+        adapter_name = "fake"
+
+        def launch(self, launch):
+            with SessionLocal() as verify:
+                execution = verify.get(BuildRunnerExecution, launch.execution_id)
+                lease = verify.scalar(
+                    select(BuildWorkerLease).where(
+                        BuildWorkerLease.execution_id == launch.execution_id,
+                        BuildWorkerLease.status == "ACTIVE",
+                    )
+                )
+                assert execution is not None
+                assert execution.task_id == "DURABLE-LAUNCH"
+                assert execution.status == "LAUNCHED"
+                assert lease is not None
+                assert lease.worker_id == launch.worker_id
+            return ExecutionHandle(
+                execution_id=launch.execution_id,
+                process_id="observed",
+                result_path=launch.result_path,
+            )
+
+        def poll(self, execution_id):
+            raise AssertionError("poll not expected")
+
+    worker = WorkerConfig(
+        "builder-openai",
+        "BUILDER",
+        provider="openai",
+        adapter="fake",
+        capabilities=(CAP_CODING,),
+        stages=("implementation",),
+        max_concurrency=1,
+    )
+    runner = BuildRunner(
+        SessionLocal,
+        _config(tmp_path, (worker,)),
+        executors={"builder-openai": ObservingExecutor()},
+        git=FakeGit(),
+    )
+
+    result = runner.run_once()
+
+    assert len(result.launched) == 1
+    with SessionLocal() as session:
+        execution = session.get(BuildRunnerExecution, result.launched[0])
+        lease = session.scalar(
+            select(BuildWorkerLease).where(BuildWorkerLease.execution_id == result.launched[0])
+        )
+        assert execution is not None
+        assert execution.process_id == "observed"
+        assert lease is not None
+        assert lease.status == "ACTIVE"
+
+
+def test_expired_active_worker_lease_does_not_block_slot_reuse(tmp_path: Path):
+    now = utcnow()
+    with SessionLocal() as session:
+        upsert_task(session, _task("STALE-SLOT"))
+        session.add(
+            BuildWorkerLease(
+                worker_id="builder-openai",
+                provider="openai",
+                slot_index=0,
+                machine_id="dead-host",
+                process_id="dead",
+                task_id="OLD-TASK",
+                execution_id="old-exec",
+                lease_expires_at=now - timedelta(minutes=5),
+                status="ACTIVE",
+            )
+        )
+        session.commit()
+
+    worker = WorkerConfig(
+        "builder-openai",
+        "BUILDER",
+        provider="openai",
+        adapter="fake",
+        capabilities=(CAP_CODING,),
+        stages=("implementation",),
+        max_concurrency=1,
+    )
+    executor = FakeExecutor()
+    runner = BuildRunner(SessionLocal, _config(tmp_path, (worker,)), executors={"builder-openai": executor}, git=FakeGit())
+
+    result = runner.run_once()
+
+    assert len(result.launched) == 1
+    assert result.capacity_full is False
+    with SessionLocal() as session:
+        old_lease = session.scalar(select(BuildWorkerLease).where(BuildWorkerLease.execution_id == "old-exec"))
+        new_lease = session.scalar(select(BuildWorkerLease).where(BuildWorkerLease.execution_id == result.launched[0]))
+        assert old_lease is not None
+        assert old_lease.status == "EXPIRED"
+        assert new_lease is not None
+        assert new_lease.status == "ACTIVE"
+        assert new_lease.task_id == "STALE-SLOT"
+
+
+def test_launch_failure_releases_reserved_worker_slot(tmp_path: Path):
+    class FailingExecutor:
+        adapter_name = "fake"
+
+        def launch(self, launch):
+            raise RuntimeError("boom")
+
+        def poll(self, execution_id):
+            raise AssertionError("poll not expected")
+
+    with SessionLocal() as session:
+        upsert_task(session, _task("LAUNCH-FAIL"))
+        session.commit()
+
+    worker = WorkerConfig(
+        "builder-openai",
+        "BUILDER",
+        provider="openai",
+        adapter="fake",
+        capabilities=(CAP_CODING,),
+        stages=("implementation",),
+        max_concurrency=1,
+    )
+    runner = BuildRunner(SessionLocal, _config(tmp_path, (worker,)), executors={"builder-openai": FailingExecutor()}, git=FakeGit())
+
+    try:
+        runner.run_once()
+    except RuntimeError as exc:
+        assert str(exc) == "boom"
+    else:
+        raise AssertionError("expected executor launch failure")
+
+    with SessionLocal() as session:
+        assert session.scalars(select(BuildRunnerExecution).where(BuildRunnerExecution.task_id == "LAUNCH-FAIL")).all() == []
+        leases = session.scalars(select(BuildWorkerLease).where(BuildWorkerLease.worker_id == "builder-openai")).all()
+        assert leases == []
+
+
+def test_recovery_paths_release_worker_leases(tmp_path: Path):
+    now = utcnow()
+    with SessionLocal() as session:
+        upsert_task(session, _task("LEASE-EXPIRED"))
+        expired_claim = claim_task(session, ClaimRequest("LEASE-EXPIRED", worker_id="builder-a"))
+        expired_claim.lease_expires_at = now - timedelta(seconds=1)
+        session.add(
+            BuildRunnerExecution(
+                execution_id="exec-expired",
+                task_id="LEASE-EXPIRED",
+                role="BUILDER",
+                worker_id="builder-a",
+                provider="openai",
+                adapter="fake",
+                claim_id=expired_claim.claim_id,
+                status="RUNNING",
+            )
+        )
+        session.add(
+            BuildWorkerLease(
+                worker_id="builder-a",
+                provider="openai",
+                slot_index=0,
+                task_id="LEASE-EXPIRED",
+                execution_id="exec-expired",
+                lease_expires_at=now + timedelta(minutes=5),
+                status="ACTIVE",
+            )
+        )
+
+        upsert_task(session, _task("LEASE-STALE"))
+        stale_claim = claim_task(session, ClaimRequest("LEASE-STALE", worker_id="builder-b"))
+        stale_claim.status = "EXPIRED"
+        stale_claim.lease_expires_at = now - timedelta(seconds=1)
+        session.add(
+            BuildRunnerExecution(
+                execution_id="exec-stale",
+                task_id="LEASE-STALE",
+                role="BUILDER",
+                worker_id="builder-b",
+                provider="openai",
+                adapter="fake",
+                claim_id=stale_claim.claim_id,
+                status="RUNNING",
+            )
+        )
+        session.add(
+            BuildWorkerLease(
+                worker_id="builder-b",
+                provider="openai",
+                slot_index=0,
+                task_id="LEASE-STALE",
+                execution_id="exec-stale",
+                lease_expires_at=now + timedelta(minutes=5),
+                status="ACTIVE",
+            )
+        )
+
+        upsert_task(session, _task("LEASE-LOST"))
+        lost_claim = claim_task(session, ClaimRequest("LEASE-LOST", worker_id="builder-c"))
+        session.add(
+            BuildRunnerExecution(
+                execution_id="exec-lost",
+                task_id="LEASE-LOST",
+                role="BUILDER",
+                worker_id="builder-c",
+                provider="openai",
+                adapter="fake",
+                claim_id=lost_claim.claim_id,
+                status="LOST",
+                completed_at=now,
+                result_data={"reconciliation_state": "LOST"},
+            )
+        )
+        session.add(
+            BuildWorkerLease(
+                worker_id="builder-c",
+                provider="openai",
+                slot_index=0,
+                task_id="LEASE-LOST",
+                execution_id="exec-lost",
+                lease_expires_at=now + timedelta(minutes=5),
+                status="ACTIVE",
+            )
+        )
+        session.commit()
+
+        recover_expired(session)
+        reconcile_stale_executions(session)
+        recover_lost_execution_claims(session)
+        session.commit()
+
+    with SessionLocal() as session:
+        statuses = {
+            lease.execution_id: lease.status
+            for lease in session.scalars(select(BuildWorkerLease)).all()
+        }
+        assert statuses == {
+            "exec-expired": "EXPIRED",
+            "exec-stale": "EXPIRED",
+            "exec-lost": "RELEASED",
+        }
+
+
 def test_runner_diagnostics_reports_provider_modes_usage_and_failure_reset(tmp_path: Path):
     config = _config(
         tmp_path,
@@ -651,9 +1060,12 @@ def test_runner_audit_event_records_routing_without_secrets(tmp_path: Path):
 
     with SessionLocal() as session:
         event = session.scalar(select(BuildTaskEvent).where(BuildTaskEvent.event_type == "runner.execution_launched"))
+        lease = session.scalar(select(BuildWorkerLease).where(BuildWorkerLease.worker_id == "builder-a"))
         payload = event.event_data
         assert payload["routing"]["required_capabilities"] == [CAP_CODING]
         assert payload["provider"] == "xai"
+        assert lease is not None
+        assert lease.status == "ACTIVE"
         assert "XAI_API_KEY" not in json.dumps(payload)
 
 
