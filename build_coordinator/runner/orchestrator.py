@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 
 import hashlib
+import json
 import subprocess
 import sys
 import time
@@ -28,6 +29,7 @@ from build_coordinator.execution.results import (
     RESULT_STATUSES,
     ExecutorResultError,
     parse_executor_result,
+    result_file_contract_for_role,
 )
 from build_coordinator.execution.subprocess_executor import SubprocessExecutor
 from build_coordinator.models import (
@@ -542,7 +544,10 @@ class BuildRunner:
                 )
             except (ExecutorResultError, ReviewVerdictContradiction) as exc:
                 execution.status = "FAILED"
-                execution.result_data = {"error": str(exc)}
+                execution.result_data = {
+                    **(execution.result_data or {}),
+                    "error": str(exc),
+                }
                 execution.human_escalation_type = "MALFORMED_EXECUTOR_RESULT"
                 execution.completed_at = _now()
                 result.escalations.append(f"{execution.task_id}:MALFORMED_EXECUTOR_RESULT")
@@ -580,7 +585,10 @@ class BuildRunner:
                 )
             except (ExecutorResultError, ReviewVerdictContradiction) as exc:
                 execution.status = "FAILED"
-                execution.result_data = {"error": str(exc)}
+                execution.result_data = {
+                    **(execution.result_data or {}),
+                    "error": str(exc),
+                }
                 execution.human_escalation_type = "MALFORMED_EXECUTOR_RESULT"
                 execution.completed_at = _now()
                 result.escalations.append(f"{execution.task_id}:MALFORMED_EXECUTOR_RESULT")
@@ -1690,18 +1698,13 @@ class BuildRunner:
             },
         )
 
-    def _planner_prompt_hash(
-        self,
-        session: Session,
-        planner_task: BuildTask,
-    ) -> str | None:
-        if not planner_task.objective_id:
-            return None
-        objective = session.get(BuildObjective, planner_task.objective_id)
-        if objective is None:
-            return None
-        prompt = self._planner_prompt(session, objective, planner_task)
-        return hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+    def _planner_contract_hash(self) -> str:
+        payload = {
+            "role_policy": PlannerPromptBuilder.role_policy,
+            "result_file_contract": result_file_contract_for_role("PLANNER"),
+        }
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
     def _dispatch_planners(self, session: Session, result: RunnerCycleResult) -> None:
         if self._target_task_ids:
@@ -1786,6 +1789,9 @@ class BuildRunner:
                 claim.claim_id,
                 prompt,
                 routing_decision=decision,
+                extra_result={
+                    "planner_contract_hash": self._planner_contract_hash(),
+                },
             )
 
     def _dispatch_reviews(self, session: Session, result: RunnerCycleResult) -> None:
@@ -2801,12 +2807,21 @@ class BuildRunner:
                     .order_by(BuildRunnerExecution.completed_at.desc())
                     .limit(1)
                 )
-                current_prompt_hash = self._planner_prompt_hash(session, task)
-                prior_prompt_hash = latest.prompt_hash if latest is not None else None
+                current_contract_hash = self._planner_contract_hash()
+                prior_contract_hash = (
+                    (latest.result_data or {}).get("planner_contract_hash")
+                    if latest is not None
+                    else None
+                )
+                # Legacy malformed planner executions did not persist a
+                # planner_contract_hash. Treat them as an older contract so
+                # deployment of this hardening change gets exactly one retry.
                 if (
-                    current_prompt_hash
-                    and prior_prompt_hash
-                    and current_prompt_hash != prior_prompt_hash
+                    latest is not None
+                    and (
+                        not prior_contract_hash
+                        or current_contract_hash != prior_contract_hash
+                    )
                 ):
                     try:
                         transition_task(
@@ -2826,8 +2841,8 @@ class BuildRunner:
                                 event_type="runner.planner_contract_recovered",
                                 actor="runner",
                                 event_data={
-                                    "prior_prompt_hash": prior_prompt_hash,
-                                    "current_prompt_hash": current_prompt_hash,
+                                    "prior_contract_hash": prior_contract_hash,
+                                    "current_contract_hash": current_contract_hash,
                                     "resumed_to": "READY",
                                 },
                             ),
