@@ -162,12 +162,72 @@ Common fields:
   "execution_id": "<must match BUILD_COORDINATOR_EXECUTION_ID>",
   "task_id": "<must match BUILD_COORDINATOR_TASK_ID>",
   "role": "<must match BUILD_COORDINATOR_ROLE>",
-  "status": "SUCCEEDED | FAILED | HUMAN_ACTION_REQUIRED | TERMINATED | LOST",
+  "status": "SUCCEEDED | FAILED | HUMAN_ACTION_REQUIRED | WAITING_FOR_INPUT | TERMINATED | LOST",
   "completed_at": "<ISO-8601>"
 }
 ```
 
 See [examples/README.md](../examples/README.md) for role-specific fields.
+
+## Provider/runtime adapter SDK
+
+The importable adapter SDK contract lives in
+`build_coordinator.execution.sdk`. It defines protocol version 1, result
+semantics, the provider/runtime error taxonomy, and the acceptance matrix below.
+Adapters are intentionally narrow: they launch a headless runtime, observe it,
+request termination when asked, and return typed observations. They do not own
+task state, routing, retry budgets, review policy, or integration decisions.
+
+### Result semantics
+
+- Workers must write the structured executor-result envelope to
+  `BUILD_COORDINATOR_RESULT_PATH`.
+- Free-form stdout/stderr are diagnostics only and must not drive lifecycle
+  transitions.
+- Result identity must match `schema_version`, `execution_id`, `task_id`, and
+  `role`; mismatches fail closed.
+- Result status must be one of `SUCCEEDED`, `FAILED`,
+  `HUMAN_ACTION_REQUIRED`, `WAITING_FOR_INPUT`, `TERMINATED`, or `LOST`.
+- Secrets, credentials, API keys, cookies, hidden reasoning, scratchpads, and
+  similar private material are stripped before persistence.
+
+### Error semantics
+
+Adapters classify failures using the shared taxonomy:
+
+```
+AUTH_FAILURE
+QUOTA_EXHAUSTED
+RATE_LIMITED
+UNAVAILABLE
+NETWORK_FAILURE
+EXECUTION_FAILURE
+PLANNER_CONTRACT_INVALID
+NO_CHANGES_PRODUCED
+```
+
+`RATE_LIMITED`, `UNAVAILABLE`, and `NETWORK_FAILURE` are retryable provider
+failures with bounded backoff. `AUTH_FAILURE` and `QUOTA_EXHAUSTED` are
+operator/action or failover signals; they must not silently loop. Exhausted
+retry budgets create typed blockers with preserved checkpoints.
+
+### Acceptance matrix
+
+| Stage | Role | Structured result | Cancellation/resume | Auth/exhaustion | Headless requirement |
+| --- | --- | --- | --- | --- | --- |
+| planning | `PLANNER` | Executor envelope with validated `ObjectivePlan` in `plan` | Lost planning execution is recovered by durable objective state and replanned | Auth/quota failures block or fail over without consuming task work | Only runtimes with a proven non-interactive result path are eligible |
+| coding | `BUILDER` | Executor envelope with builder fields such as `feature_sha`, tests, blockers | Lost builder execution preserves checkpoints/worktree and resumes on a replacement worker | Retryable provider failures use bounded backoff; exhausted attempts create a typed blocker | Runtime must run in workspace-write headless mode and return a result |
+| review | `REVIEWER` | Executor envelope with validated verdict for the exact reviewed SHA | Lost reviewer execution returns task to review-ready without spending build budget | Review provider failures are isolated from implementation retry budgets | Runtime must run read-only headlessly; GUI-only review is unsupported |
+
+### Runtime support
+
+`codex`, `claude`, and `grok` are supported only when their live setup probe
+proves a headless run can return the expected result. A runtime is not ready
+merely because its executable exists or authentication succeeds.
+
+GUI-only runtimes remain unsupported until reliable headless automation is
+proven. The current `antigravity` profile is therefore marked
+`UNSUPPORTED_GUI_ONLY`/`NOT_HEADLESS` and is excluded from worker routing.
 
 ## Extension architecture
 
