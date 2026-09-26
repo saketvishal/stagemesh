@@ -29,6 +29,7 @@ from build_coordinator.project.definition import (
     load_project,
 )
 from build_coordinator.project.state_migration import plan_migration
+from build_coordinator.runner.validation import split_command
 
 OK, WARN, FAIL, INFO = "OK", "WARN", "FAIL", "INFO"
 
@@ -121,6 +122,28 @@ def check_project(project: ProjectDefinition) -> list[Check]:
     checks.append(
         Check(area, "concurrency", INFO, f"{project.concurrency} builder(s), {project.reviewers} reviewer(s), default review {project.default_review_policy}")
     )
+    if project.bootstrap_commands:
+        checks.append(Check(area, "bootstrap", INFO, f"{len(project.bootstrap_commands)} command(s) configured"))
+        tools = []
+        for command in project.bootstrap_commands:
+            tools.extend(command.required_tools)
+            try:
+                tools.append(split_command(command.command)[0])
+            except ValueError:
+                pass
+        for tool in sorted(set(tools)):
+            if shutil.which(tool):
+                checks.append(Check(area, f"bootstrap tool {tool}", OK, "available on PATH"))
+            else:
+                checks.append(
+                    Check(
+                        area,
+                        f"bootstrap tool {tool}",
+                        FAIL,
+                        "not available on PATH",
+                        f"install `{tool}` or update execution.bootstrap.required_tools/commands",
+                    )
+                )
     try:
         definitions = load_backlog(project)
         checks.append(Check(area, "backlog", OK if definitions else WARN, f"{len(definitions)} task definition(s)", "" if definitions else "add tasks under .stagemesh/tasks/"))
