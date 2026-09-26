@@ -41,6 +41,7 @@ CLOSED_FINDING_STATUSES = frozenset({STATUS_RESOLVED, STATUS_INVALID, STATUS_NOT
 _HISTORY_LIMIT = 20
 _PROCESSED_EXECUTION_LIMIT = 50
 _FUZZY_MATCH_THRESHOLD = 0.5
+_CONVERGENCE_HISTORY_LIMIT = 20
 
 
 def finding_fingerprint(description: str) -> str:
@@ -322,6 +323,69 @@ def reconcile_findings(
 def open_findings(registry: dict[str, Any] | None) -> list[dict[str, Any]]:
     entries = (registry or {}).get("entries") or {}
     return [entry for entry in entries.values() if entry.get("status") == STATUS_STILL_OPEN]
+
+
+def record_convergence_generation(
+    registry: dict[str, Any] | None,
+    *,
+    prior_registry: dict[str, Any] | None,
+    execution_id: str | None,
+    cycle_label: str,
+    reviewer_id: str | None,
+    comprehensive_review: bool = False,
+) -> dict[str, Any]:
+    """Record task-level finding convergence progress for one review.
+
+    This is separate from per-finding attempts: it advances only when the
+    current review meaningfully changes the open finding set by resolving a
+    prior finding, introducing a new one, or both. Reprocessing the same
+    execution_id is idempotent.
+    """
+    updated = dict(registry or {})
+    convergence = dict(updated.get("convergence") or {})
+    processed = list(convergence.get("processed_execution_ids") or [])
+    if execution_id and execution_id in processed:
+        return updated
+
+    prior_open = {str(entry.get("id")) for entry in open_findings(prior_registry)}
+    current_open = {str(entry.get("id")) for entry in open_findings(updated)}
+    introduced = sorted(current_open - prior_open)
+    resolved = sorted(prior_open - current_open)
+    if not introduced and not resolved:
+        if comprehensive_review:
+            convergence["comprehensive_used"] = True
+            convergence["comprehensive_execution_id"] = execution_id
+        if execution_id:
+            processed = processed[-(_PROCESSED_EXECUTION_LIMIT - 1) :]
+            processed.append(execution_id)
+            convergence["processed_execution_ids"] = processed
+        updated["convergence"] = convergence
+        return updated
+
+    generations = int(convergence.get("generations") or 0) + 1
+    history = list(convergence.get("history") or [])[-(_CONVERGENCE_HISTORY_LIMIT - 1) :]
+    history.append(
+        {
+            "generation": generations,
+            "execution_id": execution_id,
+            "cycle": cycle_label,
+            "reviewer_id": reviewer_id,
+            "introduced": introduced,
+            "resolved": resolved,
+            "comprehensive_review": bool(comprehensive_review),
+        }
+    )
+    convergence["generations"] = generations
+    convergence["history"] = history
+    if comprehensive_review:
+        convergence["comprehensive_used"] = True
+        convergence["comprehensive_execution_id"] = execution_id
+    if execution_id:
+        processed = processed[-(_PROCESSED_EXECUTION_LIMIT - 1) :]
+        processed.append(execution_id)
+        convergence["processed_execution_ids"] = processed
+    updated["convergence"] = convergence
+    return updated
 
 
 def escalation_evidence(registry: dict[str, Any] | None) -> list[dict[str, Any]]:
