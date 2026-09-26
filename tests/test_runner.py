@@ -29,6 +29,7 @@ from build_coordinator.runner.clone_pool import is_standalone_clone, repo_identi
 from build_coordinator.runner.git_safety import FakeGit, MechanicalMergeAssessment
 from build_coordinator.runner.models import RunnerConfig, WorkerConfig
 from build_coordinator.runner.routing import ProviderConfig
+from build_coordinator.runner.validation import ValidationExecutor
 from build_coordinator.policy import CoordinatorPolicyError
 from build_coordinator.service import (
     ClaimRequest,
@@ -711,6 +712,13 @@ def test_validation_runs_in_background_while_ready_tasks_dispatch():
 
         assert validation is not None
         assert validation.status in {"LAUNCHED", "RUNNING"}
+        assert validation.result_data["commands"] == [slow_validation]
+        assert validation.result_data["workspace"]
+        assert validation.result_data["validated_sha"]
+        assert validation.result_data["environment_fingerprint"]
+        assert validation.result_data["validation_context_hash"] == validation.prompt_hash
+        assert validation.result_data["source_execution_id"] == "builder-done"
+        assert validation.result_data["started_at"]
         assert ready_builder is not None
         assert ready_builder.status == "LAUNCHED"
         assert validation.execution_id in result.launched
@@ -779,8 +787,45 @@ def test_validation_restarts_are_rerun_instead_of_trusted():
         new = next(row for row in rows if row.execution_id != "validation-before-restart")
         assert old.status == "LOST"
         assert old.result_data["validation_lost"] is True
+        assert old.result_data["validation_terminal_type"] == "LOST"
+        assert old.result_data["ended_at"]
         assert new.status in {"LAUNCHED", "RUNNING"}
         assert session.get(BuildTask, "RUN-VALIDATION-RESTART").state == "VALIDATING"
+
+
+def test_validation_timeout_is_typed_with_start_end_and_exit_evidence():
+    executor = ValidationExecutor(timeout_seconds=0.01)
+    command = f"{sys.executable} -c \"import time; time.sleep(1)\""
+    handle = executor.launch(
+        orchestrator_module.ExecutionLaunch(
+            task_id="RUN-VALIDATION-TIMEOUT",
+            role="BUILDER",
+            worker_id="runner-validation",
+            provider="runner",
+            worktree_path=str(Path.cwd()),
+            branch_name=None,
+            prompt="",
+            execution_id="validation-timeout",
+            metadata={"commands": [command]},
+        )
+    )
+
+    observation = executor.poll(handle.execution_id)
+    for _ in range(20):
+        if observation.status != "RUNNING":
+            break
+        time.sleep(0.02)
+        observation = executor.poll(handle.execution_id)
+
+    assert observation.status == "FAILED"
+    assert observation.exit_code == 124
+    assert observation.result_data["validation_terminal_type"] == "TIMEOUT"
+    result = observation.result_data["results"][0]
+    assert result["command"] == command
+    assert result["exit_code"] == 124
+    assert result["failure_type"] == "TIMEOUT"
+    assert result["started_at"]
+    assert result["completed_at"]
 
 
 def test_branch_assigned_builder_success_without_feature_sha_blocks_for_rework():
