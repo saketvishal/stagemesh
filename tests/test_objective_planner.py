@@ -13,7 +13,11 @@ from sqlalchemy import delete, select
 
 from build_coordinator.db import Base, SessionLocal, engine, initialize_schema
 from build_coordinator.execution import ExecutionObservation, FakeExecutor
-from build_coordinator.execution.results import parse_executor_result, sanitize_result_mapping
+from build_coordinator.execution.results import (
+    parse_executor_result,
+    result_file_contract_for_role,
+    sanitize_result_mapping,
+)
 from build_coordinator.models import (
     BuildCoordinatorState,
     BuildObjective,
@@ -36,7 +40,9 @@ from build_coordinator.objectives import (
 from build_coordinator.planner import parse_planner_plan, planner_task_id
 from build_coordinator.runner import BuildRunner
 from build_coordinator.runner.git_safety import FakeGit
+from build_coordinator.prompts import PlannerPromptBuilder
 from build_coordinator.runner.models import RunnerConfig, WorkerConfig
+from build_coordinator.runner.routing import ProviderConfig
 from build_coordinator.types import (
     ObjectivePlan,
     ObjectiveSpec,
@@ -145,6 +151,22 @@ def _valid_plan_payload():
 
 def _planner_success_observation(plan=None):
     return ExecutionObservation("SUCCEEDED", result_data={"plan": plan or _valid_plan_payload()})
+
+
+def test_planner_contract_requires_full_executor_envelope():
+    contract = result_file_contract_for_role("PLANNER")
+
+    assert contract["required_top_level_fields"] == [
+        "schema_version",
+        "execution_id",
+        "task_id",
+        "role",
+        "status",
+        "plan",
+    ]
+    assert "full executor-result envelope" in contract["plan"]["instructions"]
+    assert "FULL executor-result JSON object" in PlannerPromptBuilder.role_policy
+    assert "Do NOT write a bare ObjectivePlan object" in PlannerPromptBuilder.role_policy
 
 
 # -- free-text invokes planner ---------------------------------------------------
@@ -423,9 +445,72 @@ def test_malformed_planner_execution_fails_closed_without_creating_work():
         assert objective_work_tasks(session, "OBJ-PLAN") == []
         gates = open_gates(session, "OBJ-PLAN")
         assert any(gate.gate_type == "UNRESOLVABLE_CONFLICT" for gate in gates)
+        planner_task = session.get(BuildTask, planner_task_id("OBJ-PLAN"))
+        assert planner_task is not None
+        assert planner_task.state == "BLOCKED"
+        exec_count_before = len(
+            list(
+                session.scalars(
+                    select(BuildRunnerExecution).where(
+                        BuildRunnerExecution.role == "PLANNER"
+                    )
+                )
+            )
+        )
+
+    # An unchanged malformed planner prompt stays suppressed instead of
+    # repeatedly consuming provider quota.
+    runner.run_once()
+    with SessionLocal() as session:
+        exec_count_after = len(
+            list(
+                session.scalars(
+                    select(BuildRunnerExecution).where(
+                        BuildRunnerExecution.role == "PLANNER"
+                    )
+                )
+            )
+        )
+        assert exec_count_after == exec_count_before
+        planner_task = session.get(BuildTask, planner_task_id("OBJ-PLAN"))
+        assert planner_task is not None
+        assert planner_task.state == "BLOCKED"
 
 
 # -- planner unavailable ---------------------------------------------------------
+
+
+def test_temporarily_unavailable_planner_provider_is_not_misreported_as_unconfigured():
+    with SessionLocal() as session:
+        create_objective(session, _spec())
+        session.commit()
+
+    config = _config()
+    config = RunnerConfig(
+        **{
+            **config.__dict__,
+            "providers": {
+                "local": ProviderConfig(
+                    "local",
+                    availability="QUOTA_EXHAUSTED",
+                    consumption_mode="FALLBACK",
+                )
+            },
+        }
+    )
+    runner = _runner(config=config)
+    result = runner.run_once()
+
+    assert not any(
+        "EXTERNAL_EXECUTOR_CONFIGURATION_REQUIRED" in item
+        for item in result.escalations
+    )
+    assert result.launched == []
+
+    with SessionLocal() as session:
+        objective = session.get(BuildObjective, "OBJ-PLAN")
+        assert objective.state == "PLANNING"
+        assert planner_status(session, objective) == "UNAVAILABLE"
 
 
 def test_planner_unavailable_is_explicit_and_resumable():
