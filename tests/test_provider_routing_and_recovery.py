@@ -414,7 +414,13 @@ def test_fallback_to_another_provider():
 def test_task_scoped_no_changes_failure_does_not_emit_provider_failure():
     executors = {
         "builder-codex-1": FakeExecutor([
-            ExecutionObservation("FAILED", result_data={"provider_failure": "NO_CHANGES_PRODUCED"})
+            ExecutionObservation(
+                "FAILED",
+                result_data={
+                    "provider_failure": "NO_CHANGES_PRODUCED",
+                    "detail": "no diff after attempting task",
+                },
+            )
         ]),
         "builder-codex-2": FakeExecutor(),
     }
@@ -434,6 +440,8 @@ def test_task_scoped_no_changes_failure_does_not_emit_provider_failure():
     runner = BuildRunner(SessionLocal, config=config, executors=executors, git=FakeGit())
     assert len(runner.run_once().launched) == 1
     runner.run_once()
+    retry = runner.run_once()
+    assert len(retry.launched) == 1
 
     with SessionLocal() as session:
         provider_failures = session.scalars(
@@ -441,8 +449,68 @@ def test_task_scoped_no_changes_failure_does_not_emit_provider_failure():
             .where(BuildTaskEvent.task_id == "TASK-NO-CHANGES-FAILURE")
             .where(BuildTaskEvent.event_type == "runner.provider_failure")
         ).all()
+        no_changes = session.scalars(
+            select(BuildTaskEvent)
+            .where(BuildTaskEvent.task_id == "TASK-NO-CHANGES-FAILURE")
+            .where(BuildTaskEvent.event_type == "runner.no_changes_produced")
+        ).all()
+        executions = session.scalars(
+            select(BuildRunnerExecution)
+            .where(BuildRunnerExecution.task_id == "TASK-NO-CHANGES-FAILURE")
+            .order_by(BuildRunnerExecution.execution_id)
+        ).all()
 
     assert provider_failures == []
+    assert len(no_changes) == 1
+    assert no_changes[0].event_data["worker_id"] == "builder-codex-1"
+    assert no_changes[0].event_data["provider"] == "openai"
+    assert no_changes[0].event_data["retry_generation"] == 0
+    assert no_changes[0].event_data["attempt"] == 1
+    assert no_changes[0].event_data["detail"] == "no diff after attempting task"
+    assert [execution.worker_id for execution in executions] == ["builder-codex-1", "builder-codex-2"]
+
+
+def test_task_scoped_no_changes_failure_exhaustion_preserves_no_changes_semantics():
+    executors = {
+        "builder-codex-1": FakeExecutor([
+            ExecutionObservation("FAILED", result_data={"provider_failure": "NO_CHANGES_PRODUCED"})
+        ]),
+    }
+    config = RunnerConfig(
+        workers=(
+            WorkerConfig("builder-codex-1", "BUILDER", adapter="fake", provider="openai", capabilities=(CAP_CODING,)),
+        ),
+        providers={"openai": ProviderConfig("openai", availability="AVAILABLE", consumption_mode="ACTIVE")},
+        max_execution_attempts=1,
+        result_dir=os.getenv("BUILD_COORDINATOR_RESULT_DIR"),
+    )
+    with SessionLocal() as session:
+        upsert_task(session, _task("TASK-NO-CHANGES-EXHAUSTED"))
+        session.commit()
+
+    runner = BuildRunner(SessionLocal, config=config, executors=executors, git=FakeGit())
+    assert len(runner.run_once().launched) == 1
+    result = runner.run_once()
+
+    assert result.escalations == ["TASK-NO-CHANGES-EXHAUSTED:NO_CHANGES_PRODUCED"]
+    with SessionLocal() as session:
+        task = session.get(BuildTask, "TASK-NO-CHANGES-EXHAUSTED")
+        provider_failures = session.scalars(
+            select(BuildTaskEvent)
+            .where(BuildTaskEvent.task_id == "TASK-NO-CHANGES-EXHAUSTED")
+            .where(BuildTaskEvent.event_type == "runner.provider_failure")
+        ).all()
+        blocked_event = session.scalar(
+            select(BuildTaskEvent)
+            .where(BuildTaskEvent.task_id == "TASK-NO-CHANGES-EXHAUSTED")
+            .where(BuildTaskEvent.to_state == "BLOCKED")
+        )
+
+    assert task is not None
+    assert task.state == "BLOCKED"
+    assert provider_failures == []
+    assert blocked_event is not None
+    assert blocked_event.event_data["reason"] == "NO_CHANGES_PRODUCED"
 
 
 # 12. No infinite fallback respects max attempts
