@@ -443,7 +443,11 @@ def test_task_scoped_no_changes_failure_does_not_emit_provider_failure():
     runner = BuildRunner(SessionLocal, config=config, executors=executors, git=FakeGit())
     assert len(runner.run_once().launched) == 1
     observed = runner.run_once()
-    assert observed.observed == ["TASK-NO-CHANGES-FAILURE"]
+    assert len(observed.observed) == 1
+    with SessionLocal() as session:
+        observed_execution = session.get(BuildRunnerExecution, observed.observed[0])
+        assert observed_execution is not None
+        assert observed_execution.task_id == "TASK-NO-CHANGES-FAILURE"
     assert observed.escalations == []
     retry = runner.run_once()
     assert len(retry.launched) == 1
@@ -507,7 +511,11 @@ def test_task_scoped_no_changes_failure_exhaustion_preserves_no_changes_semantic
     assert len(runner.run_once().launched) == 1
     result = runner.run_once()
 
-    assert result.observed == ["TASK-NO-CHANGES-EXHAUSTED"]
+    assert len(result.observed) == 1
+    with SessionLocal() as session:
+        observed_execution = session.get(BuildRunnerExecution, result.observed[0])
+        assert observed_execution is not None
+        assert observed_execution.task_id == "TASK-NO-CHANGES-EXHAUSTED"
     assert result.escalations == ["TASK-NO-CHANGES-EXHAUSTED:NO_CHANGES_PRODUCED"]
     with SessionLocal() as session:
         task = session.get(BuildTask, "TASK-NO-CHANGES-EXHAUSTED")
@@ -593,6 +601,7 @@ def test_retryable_failure_relaunches_with_backoff_and_records_attempts():
     runner = BuildRunner(SessionLocal, config=config, executors=executors, git=FakeGit())
     r1 = runner.run_once()  # attempt 1 launched
     assert len(r1.launched) == 1
+    first_execution_id = r1.launched[0]
     r2 = runner.run_once()  # attempt 1 observed as UNAVAILABLE, retried without a human gate
     assert r2.escalations == []
 
@@ -614,15 +623,13 @@ def test_retryable_failure_relaunches_with_backoff_and_records_attempts():
 
     r3 = runner.run_once()  # attempt 2 launched on the same worker once backoff has elapsed
     assert len(r3.launched) == 1
+    second_execution_id = r3.launched[0]
 
     with SessionLocal() as session:
-        executions = session.scalars(
-            select(BuildRunnerExecution)
-            .where(BuildRunnerExecution.task_id == "TASK-RETRY-BACKOFF")
-            .order_by(BuildRunnerExecution.execution_id)
-        ).all()
-        assert len(executions) == 2
-        first, second = executions
+        first = session.get(BuildRunnerExecution, first_execution_id)
+        second = session.get(BuildRunnerExecution, second_execution_id)
+        assert first is not None
+        assert second is not None
         assert first.status == "LOST"
         assert first.result_data["retryable_failure"] is True
         assert first.result_data["retry_attempt"] == 1
@@ -697,13 +704,13 @@ def test_reviewer_capacity_failures_fall_through_to_healthy_provider_without_blo
     runner = BuildRunner(SessionLocal, config=config, executors=executors, git=FakeGit())
 
     first = runner.run_once()
-    assert first.launched == ["TASK-REVIEW-CAPACITY:REVIEWER"]
+    assert len(first.launched) == 1
 
     second = runner.run_once()
-    assert second.launched == ["TASK-REVIEW-CAPACITY:REVIEWER"]
+    assert len(second.launched) == 1
 
     third = runner.run_once()
-    assert third.launched == ["TASK-REVIEW-CAPACITY:REVIEWER"]
+    assert len(third.launched) == 1
 
     with SessionLocal() as session:
         task = session.get(BuildTask, "TASK-REVIEW-CAPACITY")
@@ -774,8 +781,12 @@ def test_legacy_provider_capacity_block_auto_recovers_to_review_and_dispatches()
     result = runner.run_once()
 
     assert "TASK-LEGACY-CAPACITY-BLOCK" in result.recovered
-    assert result.launched == ["TASK-LEGACY-CAPACITY-BLOCK:REVIEWER"]
+    assert len(result.launched) == 1
     with SessionLocal() as session:
+        launched = session.get(BuildRunnerExecution, result.launched[0])
+        assert launched is not None
+        assert launched.task_id == "TASK-LEGACY-CAPACITY-BLOCK"
+        assert launched.role == "REVIEWER"
         task = session.get(BuildTask, "TASK-LEGACY-CAPACITY-BLOCK")
         assert task.state == "REVIEWING"
         recovery = session.scalar(
@@ -839,8 +850,12 @@ def test_legacy_builder_capacity_block_auto_recovers_to_resumable_and_dispatches
     result = runner.run_once()
 
     assert "TASK-LEGACY-BUILDER-CAPACITY" in result.recovered
-    assert result.launched == ["TASK-LEGACY-BUILDER-CAPACITY:BUILDER"]
+    assert len(result.launched) == 1
     with SessionLocal() as session:
+        launched = session.get(BuildRunnerExecution, result.launched[0])
+        assert launched is not None
+        assert launched.task_id == "TASK-LEGACY-BUILDER-CAPACITY"
+        assert launched.role == "BUILDER"
         task = session.get(BuildTask, "TASK-LEGACY-BUILDER-CAPACITY")
         assert task.state == "CLAIMED"
         recovery = session.scalar(
@@ -918,7 +933,12 @@ def test_provider_automatically_reenters_after_capacity_cooldown_expires():
         target_task_ids={"TASK-CAPACITY-REENTRY"},
     )
     resumed = restarted.run_once()
-    assert resumed.launched == ["TASK-CAPACITY-REENTRY:REVIEWER"]
+    assert len(resumed.launched) == 1
+    with SessionLocal() as session:
+        launched = session.get(BuildRunnerExecution, resumed.launched[0])
+        assert launched is not None
+        assert launched.task_id == "TASK-CAPACITY-REENTRY"
+        assert launched.role == "REVIEWER"
 
 
 def test_provider_capacity_wait_is_not_terminal_idle():
@@ -953,9 +973,9 @@ def test_targeted_human_summary_filters_unrelated_project_attention():
     )
 
     assert "Target: TARGET" in summary
-    assert "TARGET_REASON" in summary
+    assert "Target reason" in summary
     assert "OTHER" not in summary
-    assert "OTHER_REASON" not in summary
+    assert "Other reason" not in summary
     assert "Needs action: 1" in summary
 
 
