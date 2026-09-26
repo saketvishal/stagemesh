@@ -347,6 +347,9 @@ def _run(args: argparse.Namespace, session) -> None:
     if args.command == "events":
         _events(args, session)
         return
+    if args.command == "watcher":
+        _watcher(args, session)
+        return
     handlers = {
         "status": _status,
         "list": _list,
@@ -1000,11 +1003,25 @@ def _watcher_status(args: argparse.Namespace, session) -> None:
             "last_cycle_at": record.last_cycle_at.isoformat() if record and record.last_cycle_at else None,
             "last_cycle_summary": record.last_cycle_summary if record else {},
             "last_error_type": record.last_error_type if record else None,
+            "last_error_message_redacted": record.last_error_message_redacted if record else None,
             "restart_count": record.restart_count if record else 0,
+            "consecutive_failure_count": record.consecutive_failure_count if record else 0,
             "backoff_until": record.backoff_until.isoformat() if record and record.backoff_until else None,
             "stop_requested": record.stop_requested if record else False,
+            "metrics": _watcher_metrics(record),
         }
     )
+
+
+def _watcher_metrics(record) -> dict:
+    last_cycle_summary = record.last_cycle_summary if record else {}
+    return {
+        "restart_count": record.restart_count if record else 0,
+        "consecutive_failure_count": record.consecutive_failure_count if record else 0,
+        "last_cycle_summary": last_cycle_summary,
+        "backing_off": bool(record and record.backoff_until),
+        "config_reload": (last_cycle_summary or {}).get("config_reload"),
+    }
 
 
 def _watcher_running_health(
