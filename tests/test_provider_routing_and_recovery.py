@@ -468,6 +468,16 @@ def test_task_scoped_no_changes_failure_does_not_emit_provider_failure():
     assert no_changes[0].event_data["attempt"] == 1
     assert no_changes[0].event_data["detail"] == "no diff after attempting task"
     assert [execution.worker_id for execution in executions] == ["builder-codex-1", "builder-codex-2"]
+    with SessionLocal() as session:
+        reconciliations = session.scalars(
+            select(BuildTaskEvent)
+            .where(BuildTaskEvent.task_id == "TASK-NO-CHANGES-FAILURE")
+            .where(BuildTaskEvent.event_type == "runner.no_changes_reconciled")
+        ).all()
+    assert len(reconciliations) == 1
+    assert reconciliations[0].event_data["outcome"] == "UNRESOLVED"
+    assert reconciliations[0].event_data["deterministic_recheck"] is True
+    assert reconciliations[0].event_data["retry_generation"] == 0
 
 
 def test_task_scoped_no_changes_failure_exhaustion_preserves_no_changes_semantics():
