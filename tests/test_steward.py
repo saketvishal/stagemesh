@@ -179,6 +179,22 @@ def test_steward_dry_run_respects_configured_responsibilities():
         assert result.audits == ["health:active_leases=1:live_executions=1"]
 
 
+def test_steward_config_preserves_explicit_empty_responsibilities():
+    config = StewardConfig.from_mapping({"enabled": True, "apply": True, "responsibilities": []})
+
+    assert config.enabled is True
+    assert config.apply is True
+    assert config.responsibilities == ()
+
+
+def test_steward_config_defaults_responsibilities_when_omitted_or_null():
+    omitted = StewardConfig.from_mapping({"enabled": True})
+    explicit_null = StewardConfig.from_mapping({"enabled": True, "responsibilities": None})
+
+    assert omitted.responsibilities == StewardConfig().responsibilities
+    assert explicit_null.responsibilities == StewardConfig().responsibilities
+
+
 def test_steward_apply_recovers_stale_claims_idempotently():
     now = utcnow()
     with SessionLocal() as session:
@@ -220,6 +236,54 @@ def test_steward_apply_recovers_stale_claims_idempotently():
         assert task is not None and task.state == "STALE"
         assert claim is not None and claim.status == "EXPIRED"
         assert execution is not None and execution.status == "TERMINATED"
+
+
+def test_steward_apply_expires_active_worker_lease_with_missing_execution():
+    now = utcnow()
+    with SessionLocal() as session:
+        upsert_task(session, _task("MISSING-EXEC-LEASE"))
+        session.add(
+            BuildWorkerLease(
+                lease_id="lease-missing-execution",
+                worker_id="builder-missing-exec",
+                task_id="MISSING-EXEC-LEASE",
+                execution_id="exec-does-not-exist",
+                lease_expires_at=now + timedelta(minutes=5),
+                status="ACTIVE",
+            )
+        )
+        session.commit()
+
+    with SessionLocal() as session:
+        first = run_steward_cycle(
+            session,
+            workers=(_steward(),),
+            config=StewardConfig(
+                enabled=True,
+                apply=True,
+                interval_seconds=0,
+                responsibilities=("worker_leases",),
+            ),
+            now=now,
+        )
+        second = run_steward_cycle(
+            session,
+            workers=(_steward(),),
+            config=StewardConfig(
+                enabled=True,
+                apply=True,
+                interval_seconds=0,
+                responsibilities=("worker_leases",),
+            ),
+            now=now,
+        )
+        lease = session.get(BuildWorkerLease, "lease-missing-execution")
+
+        assert first.released_worker_leases == ["lease-missing-execution"]
+        assert second.released_worker_leases == []
+        assert lease is not None
+        assert lease.status == "EXPIRED"
+        assert lease.heartbeat_at == now
 
 
 def test_runner_steward_hook_does_not_dispatch_feature_work_without_normal_task_lifecycle():
