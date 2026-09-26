@@ -13,6 +13,7 @@ from typing import Any
 
 from sqlalchemy import select
 
+from build_coordinator.claims import task_source_is_closed
 from build_coordinator.db import DatabaseSchemaError, SessionLocal, configure_process_database
 from build_coordinator.models import BuildRunnerExecution, BuildTask, BuildTaskEvent
 from build_coordinator.project.backlog import (
@@ -328,6 +329,8 @@ def _blocked_reasons(session) -> list[dict[str, Any]]:
     """Tasks waiting for a human, with the reason StageMesh recorded."""
     rows = []
     for task in session.scalars(select(BuildTask).where(BuildTask.state == "BLOCKED").order_by(BuildTask.task_id)):
+        if task_source_is_closed(task):
+            continue
         event = session.scalars(
             select(BuildTaskEvent)
             .where(BuildTaskEvent.task_id == task.task_id)
