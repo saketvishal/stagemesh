@@ -160,8 +160,13 @@ class PlannerPromptBuilder(_PromptBuilder):
         "OBJECTIVE_PLAN). "
         "You must NOT choose worktrees, assign workers, authorize remote "
         "main push, weaken review policy, use credentials, or persist "
-        "chain-of-thought. Write only the structured plan JSON to the "
-        "runner-supplied result path."
+        "chain-of-thought. Write one FULL executor-result JSON object to the "
+        "runner-supplied result path. The top-level object MUST include "
+        "schema_version, execution_id, task_id, role, status, and plan. "
+        "Use the runner-supplied identity environment values for execution_id, "
+        "task_id, and role; role MUST be PLANNER and successful completion MUST "
+        "use status SUCCEEDED. Put the ObjectivePlan under the top-level plan "
+        "field. Do NOT write a bare ObjectivePlan object."
     )
 
 
