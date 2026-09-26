@@ -1665,6 +1665,44 @@ class BuildRunner:
         if current is not None and current.state == "VALIDATING":
             transition_task(session, execution.task_id, "DONE", actor="runner", reason="planner plan applied")
 
+    def _planner_prompt(
+        self,
+        session: Session,
+        objective: BuildObjective,
+        planner_task: BuildTask,
+    ) -> str:
+        context = get_resume_context(session, planner_task.task_id)
+        return PlannerPromptBuilder().build(
+            context,
+            extra={
+                "objective": {
+                    "objective_id": objective.objective_id,
+                    "goal": objective.goal,
+                    "constraints": list(objective.constraints),
+                    "allowed_scope": list(objective.allowed_scope),
+                    "prohibited_scope": list(objective.prohibited_scope),
+                    "completion_criteria": list(objective.completion_criteria),
+                },
+                "planner_policy": (
+                    "Propose work only. Do not mutate coordinator state, "
+                    "choose worktrees, or authorize remote main push."
+                ),
+            },
+        )
+
+    def _planner_prompt_hash(
+        self,
+        session: Session,
+        planner_task: BuildTask,
+    ) -> str | None:
+        if not planner_task.objective_id:
+            return None
+        objective = session.get(BuildObjective, planner_task.objective_id)
+        if objective is None:
+            return None
+        prompt = self._planner_prompt(session, objective, planner_task)
+        return hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+
     def _dispatch_planners(self, session: Session, result: RunnerCycleResult) -> None:
         if self._target_task_ids:
             return
@@ -1695,6 +1733,17 @@ class BuildRunner:
                 .where(BuildRunnerExecution.status == "SUCCEEDED")
             )
             if succeeded is not None:
+                continue
+            if availability in {"providers_unavailable", "provider_backoff"}:
+                result.capacity_full = True
+                record_planner_unavailable(
+                    session,
+                    objective,
+                    reason=(
+                        "planner executor is configured but its provider is temporarily "
+                        f"unavailable ({availability}); retry on the next run cycle"
+                    ),
+                )
                 continue
             if worker is None or worker.adapter == "unconfigured":
                 record_planner_unavailable(
@@ -1727,24 +1776,7 @@ class BuildRunner:
                 return
             except CoordinatorPolicyError:
                 continue
-            context = get_resume_context(session, planner_task.task_id)
-            prompt = PlannerPromptBuilder().build(
-                context,
-                extra={
-                    "objective": {
-                        "objective_id": objective.objective_id,
-                        "goal": objective.goal,
-                        "constraints": list(objective.constraints),
-                        "allowed_scope": list(objective.allowed_scope),
-                        "prohibited_scope": list(objective.prohibited_scope),
-                        "completion_criteria": list(objective.completion_criteria),
-                    },
-                    "planner_policy": (
-                        "Propose work only. Do not mutate coordinator state, "
-                        "choose worktrees, or authorize remote main push."
-                    ),
-                },
-            )
+            prompt = self._planner_prompt(session, objective, planner_task)
             self._launch(
                 session,
                 result,
@@ -2758,6 +2790,58 @@ class BuildRunner:
                 continue
             reason = self._latest_block_reason(session, task.task_id)
             if not reason:
+                continue
+
+            if is_planner_task(task) and reason == "MALFORMED_EXECUTOR_RESULT":
+                latest = session.scalar(
+                    select(BuildRunnerExecution)
+                    .where(BuildRunnerExecution.task_id == task.task_id)
+                    .where(BuildRunnerExecution.role == "PLANNER")
+                    .where(BuildRunnerExecution.status == "FAILED")
+                    .order_by(BuildRunnerExecution.completed_at.desc())
+                    .limit(1)
+                )
+                current_prompt_hash = self._planner_prompt_hash(session, task)
+                prior_prompt_hash = latest.prompt_hash if latest is not None else None
+                if (
+                    current_prompt_hash
+                    and prior_prompt_hash
+                    and current_prompt_hash != prior_prompt_hash
+                ):
+                    try:
+                        transition_task(
+                            session,
+                            task.task_id,
+                            "READY",
+                            actor="runner",
+                            reason=(
+                                "planner prompt/contract changed after malformed result; "
+                                "retrying once with the new contract"
+                            ),
+                        )
+                        record_event(
+                            session,
+                            EventInput(
+                                task_id=task.task_id,
+                                event_type="runner.planner_contract_recovered",
+                                actor="runner",
+                                event_data={
+                                    "prior_prompt_hash": prior_prompt_hash,
+                                    "current_prompt_hash": current_prompt_hash,
+                                    "resumed_to": "READY",
+                                },
+                            ),
+                        )
+                        if task.task_id not in result.recovered:
+                            result.recovered.append(task.task_id)
+                        self._release_blocker_gate(
+                            session, task, "MALFORMED_EXECUTOR_RESULT"
+                        )
+                    except CoordinatorPolicyError:
+                        pass
+                # An unchanged malformed planner prompt is deliberately left
+                # blocked so the same bad contract cannot burn provider quota
+                # on every orchestration cycle.
                 continue
 
             if reason == "WORKING_CHECKOUT_DIRTY":
