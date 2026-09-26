@@ -388,6 +388,49 @@ def record_convergence_generation(
     return updated
 
 
+def comprehensive_reconciliation_missing_ids(
+    prior_registry: dict[str, Any] | None,
+    findings: list[Any] | None,
+    finding_dispositions: list[dict[str, Any]] | None,
+) -> list[str]:
+    """IDs of previously open findings that a comprehensive convergence
+    review must explicitly reconcile, but did not.
+
+    A comprehensive review exists to break serial-new-finding churn with a
+    deterministic, stronger pass, so it is required to return the complete
+    current finding set in one pass and account for every prior open finding
+    -- either by explicit `finding_dispositions` id, or by restating it in
+    `findings` (which reconciles to the same durable id by content
+    fingerprint/fuzzy match) -- rather than relying on the ordinary
+    absence-implies-resolved inference. A reviewer that simply omits prior
+    findings from its response must not silently clear them.
+    """
+    entries: dict[str, dict[str, Any]] = (prior_registry or {}).get("entries") or {}
+    prior_open_ids = {
+        finding_id for finding_id, entry in entries.items() if entry.get("status") == STATUS_STILL_OPEN
+    }
+    if not prior_open_ids:
+        return []
+    covered = {
+        str(disposition.get("id"))
+        for disposition in (finding_dispositions or ())
+        if isinstance(disposition, dict) and disposition.get("id")
+    }
+    current: dict[str, str] = {}
+    for raw in findings or ():
+        description = str(raw).strip()
+        if not description:
+            continue
+        fingerprint = finding_fingerprint(description)
+        if fingerprint in entries or fingerprint in current:
+            finding_id = fingerprint
+        else:
+            finding_id = _fuzzy_match(description, entries, exclude=set(current)) or fingerprint
+        current[finding_id] = description
+    covered |= set(current)
+    return sorted(prior_open_ids - covered)
+
+
 def escalation_evidence(registry: dict[str, Any] | None) -> list[dict[str, Any]]:
     return [
         {

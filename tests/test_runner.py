@@ -1366,7 +1366,20 @@ def test_serial_new_findings_trigger_comprehensive_review_then_clean_converges()
                 ),
                 ExecutionObservation(
                     "SUCCEEDED",
-                    result_data={"review": {"verdict": "GREEN", "ready_for_integration": True, "findings": []}},
+                    result_data={
+                        "review": {
+                            "verdict": "GREEN",
+                            "ready_for_integration": True,
+                            "findings": [],
+                            "finding_dispositions": [
+                                {
+                                    "id": finding_fingerprint("F3"),
+                                    "status": "RESOLVED",
+                                    "reason": "verified fixed in comprehensive pass",
+                                }
+                            ],
+                        }
+                    },
                 ),
             ]
         ),
@@ -1423,6 +1436,78 @@ def test_serial_new_findings_trigger_comprehensive_review_then_clean_converges()
         assert task.state == "REVIEWING"
         assert task.finding_registry["convergence"]["comprehensive_used"] is True
         assert task.finding_registry["convergence"]["pending_comprehensive_review"] is False
+
+
+def test_malformed_comprehensive_clean_response_does_not_clear_open_findings():
+    task_id = "RUN-SERIAL-FINDINGS-MALFORMED-CLEAN"
+    executors = {
+        "reviewer-1": FakeExecutor(
+            [
+                ExecutionObservation(
+                    "SUCCEEDED",
+                    result_data={"review": {"verdict": "REMEDIATION_REQUIRED", "findings": ["F1"], "required_remediation": ["fix F1"]}},
+                ),
+                ExecutionObservation(
+                    "SUCCEEDED",
+                    result_data={"review": {"verdict": "REMEDIATION_REQUIRED", "findings": ["F2"], "required_remediation": ["fix F2"]}},
+                ),
+                ExecutionObservation(
+                    "SUCCEEDED",
+                    result_data={"review": {"verdict": "REMEDIATION_REQUIRED", "findings": ["F3"], "required_remediation": ["fix F3"]}},
+                ),
+                # Malformed comprehensive response: claims clean with no
+                # findings and no finding_dispositions, so it never
+                # explicitly reconciles the still-open "F3".
+                ExecutionObservation(
+                    "SUCCEEDED",
+                    result_data={"review": {"verdict": "GREEN", "ready_for_integration": True, "findings": []}},
+                ),
+            ]
+        ),
+        "builder-a": FakeExecutor(
+            [
+                ExecutionObservation("SUCCEEDED", result_data={"feature_sha": "fix-F1"}),
+                ExecutionObservation("SUCCEEDED", result_data={"feature_sha": "fix-F2"}),
+            ]
+        ),
+    }
+    with SessionLocal() as session:
+        upsert_task(session, TaskSpec(**{**_task(task_id).__dict__, "required_validation": []}))
+        claim_task(session, ClaimRequest(task_id, worker_id="builder-a"))
+        transition_task(session, task_id, "IN_PROGRESS")
+        transition_task(session, task_id, "VALIDATING")
+        transition_task(session, task_id, "REVIEW_READY")
+        session.commit()
+
+    runner = _runner(config=_config(remediation_cycles=2, convergence_generations=3), executors=executors)
+    runner.run_once()  # launch review 1
+    runner.run_once()  # F1 -> remediation 1
+    runner.run_once()  # remediation 1 -> review 2
+    runner.run_once()  # F2 -> remediation 2
+    runner.run_once()  # remediation 2 -> review 3
+    runner.run_once()  # F3 reaches serial convergence threshold -> comprehensive review requested
+    runner.run_once()  # launch comprehensive review
+    result = runner.run_once()  # comprehensive review returns malformed clean GREEN
+
+    assert f"{task_id}:REMEDIATION_LIMIT_REACHED" not in result.escalations
+    assert f"{task_id}:COORDINATOR_INVARIANT_FAILURE" not in result.escalations
+    with SessionLocal() as session:
+        task = session.get(BuildTask, task_id)
+        assert task.state == "REVIEW_READY"
+        registry = task.finding_registry
+        f3_id = finding_fingerprint("F3")
+        assert registry["entries"][f3_id]["status"] == "STILL_OPEN"
+        convergence = registry["convergence"]
+        assert convergence["pending_comprehensive_review"] is True
+        assert not convergence.get("comprehensive_used")
+        event = session.scalar(
+            select(BuildTaskEvent)
+            .where(BuildTaskEvent.task_id == task_id)
+            .where(BuildTaskEvent.event_type == "runner.review_protocol_blocked")
+        )
+        assert event is not None
+        assert event.event_data["reason"] == "COMPREHENSIVE_REVIEW_MISSING_DISPOSITIONS"
+        assert f3_id in event.event_data["why_not_remediation"]
 
 
 def test_comprehensive_review_with_unresolved_findings_escalates_with_evidence():
