@@ -1645,12 +1645,13 @@ class BuildRunner:
         worker resumes the task. Transient provider failures (RATE_LIMITED,
         UNAVAILABLE, NETWORK_FAILURE, per the routing taxonomy's
         RETRYABLE_PROVIDER_FAILURES) and worker deaths are retried: the failing
-        provider is routed around for a bounded, exponentially growing cooldown
-        (see `_retry_backoff_seconds`) instead of being relaunched every poll
-        cycle, while other workers/providers remain free to pick the task up
-        immediately. Attempts are bounded and each one is recorded on its own
-        execution row; once exhausted the task escalates with a typed reason and
-        the checkpoint is preserved instead of looping forever."""
+        provider is routed around for a bounded cooldown instead of being
+        relaunched every poll cycle, while other workers/providers remain free
+        to pick the task up immediately. RATE_LIMITED and QUOTA_EXHAUSTED are
+        provider-capacity observations and therefore do not consume substantive
+        task/reviewer retry budgets. Other failures remain bounded; once their
+        budget is exhausted the task escalates with typed evidence and preserved
+        checkpoints instead of looping forever."""
         failure = str(merged.get("provider_failure") or "").upper()
         died = observation.exit_code not in (None, 0) and not merged.get("schema_version")
         if not failure and not died:
@@ -2332,6 +2333,7 @@ class BuildRunner:
                 continue
             if availability in {"providers_unavailable", "provider_backoff"}:
                 result.capacity_full = True
+                result.scheduling_reasons[planner_task.task_id] = "provider_capacity_wait"
                 record_planner_unavailable(
                     session,
                     objective,
