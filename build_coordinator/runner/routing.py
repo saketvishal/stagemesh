@@ -25,6 +25,7 @@ CAP_CODE_REVIEW = "CODE_REVIEW"
 CAP_SECURITY_REVIEW = "SECURITY_REVIEW"
 CAP_SCM_OPERATOR = "SCM_OPERATOR"
 CAP_ARCHITECTURE = "ARCHITECTURE"
+CAP_MAINTENANCE = "MAINTENANCE"
 
 PROVIDER_FAILURES = frozenset(
     {
@@ -51,6 +52,7 @@ DEFAULT_ROLE_CAPABILITIES: dict[str, tuple[str, ...]] = {
     "REMEDIATION": (CAP_CODING,),
     "REVIEWER": (CAP_CODE_REVIEW,),
     "INTEGRATION": (CAP_SCM_OPERATOR,),
+    "STEWARD": (CAP_MAINTENANCE,),
 }
 
 DEFAULT_ROLE_STAGES: dict[str, tuple[str, ...]] = {
@@ -59,10 +61,12 @@ DEFAULT_ROLE_STAGES: dict[str, tuple[str, ...]] = {
     "REMEDIATION": ("remediation",),
     "REVIEWER": ("review",),
     "INTEGRATION": ("integration",),
+    "STEWARD": ("maintenance",),
 }
 
 DEFAULT_ROLE_PERMISSIONS: dict[str, tuple[str, ...]] = {
     "INTEGRATION": ("SCM_WRITE",),
+    "STEWARD": ("COORDINATOR_MAINTENANCE",),
 }
 
 
@@ -346,6 +350,11 @@ def default_stage_requirements() -> dict[str, StageRequirement]:
         "remediation": StageRequirement("remediation", capabilities=(CAP_CODING,)),
         "review": StageRequirement("review", capabilities=(CAP_CODE_REVIEW,)),
         "integration": StageRequirement("integration", capabilities=(CAP_SCM_OPERATOR,), permissions=("SCM_WRITE",)),
+        "maintenance": StageRequirement(
+            "maintenance",
+            capabilities=(CAP_MAINTENANCE,),
+            permissions=("COORDINATOR_MAINTENANCE",),
+        ),
     }
 
 
@@ -356,6 +365,7 @@ def role_to_stage(role: str) -> str:
         "REMEDIATION": "remediation",
         "REVIEWER": "review",
         "INTEGRATION": "integration",
+        "STEWARD": "maintenance",
     }.get(role, role.lower())
 
 
