@@ -2989,7 +2989,8 @@ class BuildRunner:
         satisfaction = self._task_satisfaction_evidence(session, task)
         already_satisfied = bool(satisfaction.get("satisfied"))
         recent_integrations = self._recent_integration_evidence(session, execution.task_id)
-        stale_by_scope_reconciliation = bool(scope_changed and recent_integrations)
+        superseding_integration = self._find_superseding_integration(repo_root, scope, recent_integrations)
+        stale_by_scope_reconciliation = bool(scope_changed and superseding_integration is not None)
         outcome = "UNRESOLVED"
         if already_satisfied:
             outcome = "ALREADY_SATISFIED"
@@ -3003,6 +3004,7 @@ class BuildRunner:
             "acceptance_satisfaction_evidence": satisfaction,
             "definition_marked_stale": marked_stale,
             "stale_by_scope_reconciliation": stale_by_scope_reconciliation,
+            "superseding_integration": superseding_integration,
             "scope_changed_since_base": scope_changed,
             "changed_paths_since_base": changed_paths[:50],
             "permitted_scope": scope,
@@ -3034,6 +3036,34 @@ class BuildRunner:
                 }
             )
         return evidence
+
+    def _find_superseding_integration(
+        self, repo_root: Path, scope: list[str], recent_integrations: list[dict]
+    ) -> dict | None:
+        """Scope files changing since base_sha is only *evidence* something moved;
+        it is not proof this task's definition is stale/obsolete. Require a concrete
+        tie: a different task's integration whose own commit actually touched a file
+        within this task's permitted scope. Without that tie the outcome must stay
+        UNRESOLVED so genuine no-change cases keep retrying with a bounded budget
+        instead of being blocked as STALE_OR_OBSOLETE."""
+        if not scope:
+            return None
+        for integration in recent_integrations:
+            if integration.get("same_task"):
+                continue
+            feature_sha = integration.get("feature_sha")
+            if not isinstance(feature_sha, str) or not feature_sha:
+                continue
+            integration_paths = self._changed_paths_for_commit(repo_root, feature_sha)
+            if self._scope_changed(scope, integration_paths):
+                return integration
+        return None
+
+    def _changed_paths_for_commit(self, repo_root: Path, sha: str) -> list[str]:
+        proc = _git(repo_root, "diff-tree", "--no-commit-id", "--name-only", "-r", sha)
+        if proc.returncode != 0:
+            return []
+        return [line.strip().replace("\\", "/") for line in proc.stdout.splitlines() if line.strip()]
 
     def _rev_parse(self, repo_root: Path, ref: str | None) -> str | None:
         if not ref:
