@@ -310,7 +310,12 @@ def propose_policy_change(
             f"{role}: prefer {best.worker_id} based on success/failure rate, latency, remediation/review outcomes, capability fit, and trustworthy cost where present"
         )
     _validate_proposed_changes(changes)
-    evaluation = evaluate_proposal(held_out_evidence, proposed_worker_order=tuple(change["worker_id"] for change in changes))
+    proposed_workers_by_role = {
+        str(change["role"]): str(change["worker_id"])
+        for change in changes
+        if change.get("field") == "worker.preference" and change.get("suggested_preference") == 1
+    }
+    evaluation = evaluate_proposal(held_out_evidence, proposed_workers_by_role=proposed_workers_by_role)
     proposal_version = _next_version(current_policy.version)
     proposal_payload = {
         "base_policy_id": current_policy.policy_id,
@@ -343,7 +348,7 @@ def propose_policy_change(
 def evaluate_proposal(
     held_out_evidence: Iterable[NormalizedEvidence],
     *,
-    proposed_worker_order: tuple[str, ...],
+    proposed_workers_by_role: dict[str, str],
 ) -> PolicyEvaluation:
     rows = tuple(held_out_evidence)
     if not rows:
@@ -356,10 +361,21 @@ def evaluate_proposal(
             proposed_mean_latency_ms=None,
             limitations=("no held-out evidence supplied; controlled experiment still required",),
         )
-    proposed_workers = set(proposed_worker_order)
     baseline = rows
-    proposed = tuple(row for row in rows if row.worker_id in proposed_workers) or rows
+    proposed = tuple(
+        row
+        for row in rows
+        if proposed_workers_by_role.get(row.role) == row.worker_id
+    )
     limitations = []
+    missing_roles = sorted({row.role for row in rows if row.role in proposed_workers_by_role} - {row.role for row in proposed})
+    unevaluated_roles = sorted(set(proposed_workers_by_role) - {row.role for row in rows})
+    if not proposed:
+        limitations.append("held-out evidence contains no observations for the proposed preferred workers; controlled experiment still required")
+    if missing_roles:
+        limitations.append(f"no held-out observations matched proposed preferred workers for roles: {', '.join(missing_roles)}")
+    if unevaluated_roles:
+        limitations.append(f"held-out evidence contains no observations for proposed roles: {', '.join(unevaluated_roles)}")
     if len(proposed) < MIN_STRONG_SAMPLE_SIZE:
         limitations.append("proposed policy replay has sparse evidence; do not treat as strong proof")
     return PolicyEvaluation(
@@ -407,6 +423,7 @@ def _normalize_execution(execution: BuildRunnerExecution, task: BuildTask) -> No
     cost_data = data.get("cost") if isinstance(data.get("cost"), dict) else {}
     cost_source = str(cost_data.get("source") or "").lower()
     metadata = data.get("routing") if isinstance(data.get("routing"), dict) else {}
+    capability_fit = _routing_capability_fit(metadata, execution.worker_id)
     return NormalizedEvidence(
         execution_id=execution.execution_id,
         task_id=execution.task_id,
@@ -418,7 +435,7 @@ def _normalize_execution(execution: BuildRunnerExecution, task: BuildTask) -> No
         latency_ms=_latency_ms(execution),
         review_outcome=verdict,
         remediation_required=verdict in REMEDIATION_REVIEW_VERDICTS or bool(review.get("required_remediation")),
-        capability_fit=_float_or_none(metadata.get("capability_fit")),
+        capability_fit=capability_fit,
         cost=_float_or_none(cost_data.get("amount", cost_data.get("score"))),
         cost_trustworthy=cost_source in TRUSTWORTHY_COST_SOURCES,
         task_risk_class=task.risk_level,
@@ -426,6 +443,24 @@ def _normalize_execution(execution: BuildRunnerExecution, task: BuildTask) -> No
         platform=str(data.get("platform")) if data.get("platform") else None,
         compatibility=str(data.get("compatibility")) if data.get("compatibility") else None,
     )
+
+
+def _routing_capability_fit(routing_data: dict[str, Any], worker_id: str) -> float | None:
+    direct = _float_or_none(routing_data.get("capability_fit"))
+    if direct is not None:
+        return direct
+    selected_worker = str(routing_data.get("selected_worker") or worker_id)
+    candidates = routing_data.get("candidates")
+    if not isinstance(candidates, list):
+        return None
+    for candidate in candidates:
+        if not isinstance(candidate, dict) or str(candidate.get("worker_id") or "") != selected_worker:
+            continue
+        evidence = candidate.get("evidence")
+        if isinstance(evidence, dict):
+            return _float_or_none(evidence.get("capability_fit"))
+        return _float_or_none(candidate.get("capability_fit"))
+    return None
 
 
 def _summary_rank_key(summary: EvidenceSummary) -> tuple[float, float, float, float, float, str]:

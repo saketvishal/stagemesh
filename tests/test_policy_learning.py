@@ -94,6 +94,7 @@ def test_policy_learning_collects_normalized_evidence_and_trusts_only_verified_c
     assert observed["builder-a"].task_risk_class == "HIGH"
     assert observed["builder-a"].review_policy == "TWO_PROVIDERS"
     assert observed["builder-a"].latency_ms == 10000.0
+    assert observed["builder-a"].capability_fit == 1.0
     assert observed["builder-a"].cost == 0.42
     assert observed["builder-a"].cost_trustworthy is True
     assert observed["builder-b"].cost == 0.01
@@ -135,7 +136,77 @@ def test_policy_learning_proposes_explainable_unapproved_preference_changes_with
     }
     assert proposal.evaluation.method == "held_out_replay"
     assert proposal.evaluation.sample_size == 3
+    assert proposal.evaluation.baseline_success_rate == pytest.approx(2 / 3)
+    assert proposal.evaluation.proposed_success_rate == 1.0
+    assert proposal.evaluation.baseline_mean_latency_ms == pytest.approx(12000)
+    assert proposal.evaluation.proposed_mean_latency_ms == 8000
     assert proposal.to_dict()["changes"][0]["reason"]["success_rate"] == 1.0
+
+
+def test_policy_learning_held_out_replay_selects_proposed_top_worker_per_role():
+    training = []
+    for idx in range(10):
+        training.append(_synthetic_observation(f"a-train-{idx}", "builder-a", status="SUCCEEDED", latency_ms=5000))
+        training.append(_synthetic_observation(f"b-train-{idx}", "builder-b", status="FAILED", latency_ms=20000))
+    held_out = (
+        _synthetic_observation("a-held-1", "builder-a", status="SUCCEEDED", latency_ms=7000),
+        _synthetic_observation("b-held-1", "builder-b", status="SUCCEEDED", latency_ms=1000),
+        _synthetic_observation("b-held-2", "builder-b", status="FAILED", latency_ms=1000),
+    )
+
+    proposal = propose_policy_change(
+        summarize_evidence(training),
+        current_policy=RoutingPolicy(),
+        held_out_evidence=held_out,
+    )
+
+    assert proposal.changes[0]["worker_id"] == "builder-a"
+    assert proposal.evaluation.baseline_success_rate == pytest.approx(2 / 3)
+    assert proposal.evaluation.proposed_success_rate == 1.0
+    assert proposal.evaluation.baseline_mean_latency_ms == 3000
+    assert proposal.evaluation.proposed_mean_latency_ms == 7000
+
+
+def test_policy_learning_collects_capability_fit_from_routing_audit_selected_candidate():
+    with SessionLocal() as session:
+        upsert_task(session, _task("PL-ROUTE"))
+        session.add(
+            _execution(
+                "PL-ROUTE",
+                "builder-a",
+                provider="openai",
+                result_data={
+                    "routing": {
+                        "selected_worker": "builder-a",
+                        "candidates": [
+                            {
+                                "worker_id": "builder-a",
+                                "eligible": True,
+                                "evidence": {
+                                    "reliability": 0.9,
+                                    "latency_ms": 12000,
+                                    "capability_fit": 0.5,
+                                    "failure_rate": 0.1,
+                                    "sample_size": 12,
+                                    "source": "execution_history+configured",
+                                },
+                            },
+                            {
+                                "worker_id": "builder-b",
+                                "eligible": True,
+                                "evidence": {"capability_fit": 1.0},
+                            },
+                        ],
+                    }
+                },
+            )
+        )
+        session.commit()
+
+        observations = collect_normalized_evidence(session)
+
+    assert len(observations) == 1
+    assert observations[0].capability_fit == 0.5
 
 
 def test_sparse_data_is_labeled_limited_and_not_ranked_as_strong_recommendation():
