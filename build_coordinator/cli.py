@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import UUID
@@ -79,7 +80,7 @@ def main() -> None:
         if args.command == "continue":
             handle_continue(args)
             return
-        lifecycle = configure_process_database()
+        lifecycle = _legacy_command_lifecycle(args)
         lifecycle.initialize_schema()
         with lifecycle.session() as session:
             _run(args, session)
@@ -115,6 +116,36 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_watcher_commands(sub)
     _add_events_commands(sub)
     return parser
+
+
+def _legacy_command_lifecycle(args: argparse.Namespace):
+    """Open the project database for legacy commands invoked inside a project."""
+    if os.getenv("BUILD_COORDINATOR_DATABASE_URL"):
+        return configure_process_database()
+    if not _should_bind_legacy_command_to_project(args):
+        return configure_process_database()
+
+    from build_coordinator.project.commands import _open
+    from build_coordinator.project.definition import find_project_root, load_project
+
+    root = find_project_root(Path.cwd())
+    if root is None:
+        return configure_process_database()
+    return _open(load_project(root))
+
+
+def _should_bind_legacy_command_to_project(args: argparse.Namespace) -> bool:
+    if hasattr(args, "to_state"):
+        return True
+    return args.command in {
+        "status",
+        "list",
+        "recover-expired",
+        "request-input",
+        "provide-input",
+        "recover-review-environment",
+        "recover-execution-retry",
+    }
 
 
 def _add_simple_commands(sub) -> None:
