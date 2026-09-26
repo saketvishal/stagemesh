@@ -6,6 +6,8 @@ import dataclasses
 
 import hashlib
 import json
+import os
+import socket
 import subprocess
 import sys
 import time
@@ -39,6 +41,7 @@ from build_coordinator.models import (
     BuildTaskCheckpoint,
     BuildTaskClaim,
     BuildTaskEvent,
+    BuildWorkerLease,
     new_uuid,
 )
 from build_coordinator.objectives import (
@@ -90,6 +93,8 @@ from build_coordinator.runner.routing import (
     StageRequirement,
     approving_providers,
     approving_reviewers,
+    execution_evidence_by_worker,
+    merge_worker_evidence,
     reviewer_exclusions,
     role_to_stage,
     route_worker,
@@ -463,6 +468,7 @@ class BuildRunner:
                     row.result_data = {**(row.result_data or {}), **observation.result_data}
             else:
                 self._apply_terminal_result(session, row, result, observation)
+                self._release_worker_lease(session, row.execution_id)
             observed.append(row.execution_id)
         return observed
 
@@ -2225,9 +2231,20 @@ class BuildRunner:
                 ),
             },
         )
+        lease = BuildWorkerLease(
+            worker_id=worker.worker_id,
+            provider=worker.provider,
+            machine_id=socket.gethostname(),
+            process_id=str(os.getpid()),
+            task_id=task_id,
+            execution_id=handle.execution_id,
+            lease_expires_at=_now() + timedelta(seconds=worker.timeout_seconds or 3600),
+            status="ACTIVE",
+        )
         try:
             with session.begin_nested():
                 session.add(row)
+                session.add(lease)
                 session.flush()
         except IntegrityError:
             return
@@ -2253,6 +2270,17 @@ class BuildRunner:
             ),
         )
         result.launched.append(handle.execution_id)
+
+    def _release_worker_lease(self, session: Session, execution_id: str) -> None:
+        leases = session.scalars(
+            select(BuildWorkerLease)
+            .where(BuildWorkerLease.execution_id == execution_id)
+            .where(BuildWorkerLease.status == "ACTIVE")
+        ).all()
+        now = _now()
+        for lease in leases:
+            lease.status = "RELEASED"
+            lease.heartbeat_at = now
 
     def _kill_reconciled_process_trees(self, session: Session) -> None:
         from build_coordinator.execution.process_tree import kill_process_tree
@@ -2350,9 +2378,18 @@ class BuildRunner:
             active_by_provider[worker.provider] = active_by_provider.get(worker.provider, 0) + active_counts.get(worker.worker_id, 0)
             launches_by_provider[worker.provider] = launches_by_provider.get(worker.provider, 0) + launches.get(worker.worker_id, 0)
         failure_visibility = self._provider_failure_visibility(session)
+        observed_evidence = execution_evidence_by_worker(session, self._config.workers)
         worker_summary = []
         for w in self._config.workers:
             p = effective_providers.get(w.provider)
+            stage = role_to_stage(w.role)
+            requirement = self._config.stage_requirements.get(stage, StageRequirement(stage))
+            evidence = merge_worker_evidence(
+                w.evidence,
+                observed_evidence.get(w.worker_id, w.evidence),
+                w,
+                requirement,
+            )
             worker_summary.append({
                 "worker_id": w.worker_id,
                 "role": w.role,
@@ -2363,6 +2400,7 @@ class BuildRunner:
                 "active_workers": active_counts.get(w.worker_id, 0),
                 "active_provider_workers": active_by_provider.get(w.provider, 0),
                 "launches": launches.get(w.worker_id, 0),
+                "evidence": evidence.to_public_dict(),
                 "mode": p.consumption_mode if p else "ACTIVE",
                 "consumption_mode": p.consumption_mode if p else "ACTIVE",
                 "availability": p.availability if p else "AVAILABLE",
@@ -2433,6 +2471,16 @@ class BuildRunner:
             if role == "REVIEWER"
             else None
         )
+        observed_evidence = execution_evidence_by_worker(session, workers)
+        evidence_by_worker = {
+            worker.worker_id: merge_worker_evidence(
+                worker.evidence,
+                observed_evidence.get(worker.worker_id, worker.evidence),
+                worker,
+                requirement,
+            )
+            for worker in workers
+        }
         decision = route_worker(
             workers,
             stage=stage,
@@ -2445,6 +2493,7 @@ class BuildRunner:
             excluded_workers=set(exclusions.workers) if exclusions else set(),
             excluded_providers=set(exclusions.providers) if exclusions else set(),
             deprioritized_workers=deprioritized_workers,
+            evidence_by_worker=evidence_by_worker,
         )
         worker = next(
             (candidate for candidate in workers if candidate.worker_id == decision.selected_worker_id),

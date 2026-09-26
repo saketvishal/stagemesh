@@ -88,10 +88,19 @@ Deterministic worker selection for a stage. The routing policy evaluates:
 3. Does the worker have the required capabilities for the stage?
 4. Does the worker have the required permissions?
 5. Is the worker pinned (explicit worker/provider/model constraint)?
-6. If there are multiple eligible workers, preference order and fallback policy apply.
+6. If there are multiple eligible workers, explicit preferred workers,
+   active-before-fallback provider mode, operator preference, and then
+   evidence score apply.
+
+Evidence is optional and explainable. When present, the score is derived from
+recorded execution reliability, latency, failure rate, capability fit, and
+configured cost hints. The audit payload records each candidate's evidence,
+numeric score, and score reasons. Evidence never overrides pins, provider
+availability, permissions, independence policy, or other eligibility gates.
 
 **No LLM makes routing decisions.** Routing is a pure function of operator
-configuration and current worker availability.
+configuration, current worker availability, SQL leases, and recorded execution
+evidence.
 
 ### Provider neutrality
 
