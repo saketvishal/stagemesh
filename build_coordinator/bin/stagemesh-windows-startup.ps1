@@ -1,8 +1,8 @@
 # Install/remove an unattended Windows Task Scheduler entry for `stagemesh continue`.
 #
-# The task runs at the current user's logon with limited privileges. It stores
-# only local paths and StageMesh command arguments; credentials must come from
-# the user's normal environment, credential manager, or project configuration.
+# The task runs at system startup as the current user with S4U logon semantics.
+# It stores only local paths and StageMesh command arguments; credentials must
+# come from machine-accessible credential stores or project configuration.
 
 [CmdletBinding()]
 param(
@@ -45,8 +45,12 @@ function Quote-TaskArgument {
 function Test-TaskInstalled {
     param([string]$Name)
 
-    $result = & schtasks.exe /Query /TN $Name /FO LIST 2>&1
-    return $LASTEXITCODE -eq 0
+    $task = Get-ScheduledTask -TaskName $Name -ErrorAction SilentlyContinue
+    return $null -ne $task
+}
+
+function Get-CurrentUserId {
+    return [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
 }
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -67,10 +71,7 @@ if ($Action -eq "status") {
 
 if ($Action -eq "uninstall") {
     if (Test-TaskInstalled $EffectiveTaskName) {
-        & schtasks.exe /Delete /TN $EffectiveTaskName /F | Out-Null
-        if ($LASTEXITCODE -ne 0) {
-            throw "failed to delete scheduled task '$EffectiveTaskName'"
-        }
+        Unregister-ScheduledTask -TaskName $EffectiveTaskName -Confirm:$false
     }
     [pscustomobject]@{
         task_name = $EffectiveTaskName
@@ -92,7 +93,6 @@ if ($Github) {
 }
 
 $taskRunParts = @(
-    "powershell.exe",
     "-NoProfile",
     "-ExecutionPolicy",
     "Bypass",
@@ -101,15 +101,24 @@ $taskRunParts = @(
 ) + $continueArgs
 $taskRun = ($taskRunParts | ForEach-Object { Quote-TaskArgument $_ }) -join " "
 
-& schtasks.exe /Create /F /TN $EffectiveTaskName /TR $taskRun /SC ONLOGON /RL LIMITED | Out-Null
-if ($LASTEXITCODE -ne 0) {
-    throw "failed to create/update scheduled task '$EffectiveTaskName'"
-}
+$trigger = New-ScheduledTaskTrigger -AtStartup
+$action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $taskRun -WorkingDirectory $ResolvedProjectDir
+$principal = New-ScheduledTaskPrincipal -UserId (Get-CurrentUserId) -LogonType S4U -RunLevel LeastPrivilege
+$settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Days 7)
+
+Register-ScheduledTask `
+    -TaskName $EffectiveTaskName `
+    -Action $action `
+    -Trigger $trigger `
+    -Principal $principal `
+    -Settings $settings `
+    -Force | Out-Null
 
 [pscustomobject]@{
     task_name = $EffectiveTaskName
     installed = $true
-    trigger = "ONLOGON"
+    trigger = "AtStartup"
+    logon_type = "S4U"
     project_dir = $ResolvedProjectDir
-    command = $taskRun
+    command = "powershell.exe $taskRun"
 } | ConvertTo-Json
