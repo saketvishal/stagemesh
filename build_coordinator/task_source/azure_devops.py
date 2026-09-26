@@ -247,6 +247,8 @@ class AzureDevOpsTaskSource(TaskSource):
                 self.project,
                 "--id",
                 work_item_id,
+                "--fields",
+                f"System.State={payload['state']}",
                 "--discussion",
                 comment,
             ],

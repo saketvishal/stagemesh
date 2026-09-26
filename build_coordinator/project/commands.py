@@ -652,29 +652,50 @@ def _optional_task_source(
     from build_coordinator.task_source import get_task_source
 
     diagnostics: list[dict[str, Any]] = []
-    github = project.task_sources.get("github")
+    supported_sources = {"github", "azure_devops", "azure-devops", "azdo"}
+    source_configs: list[tuple[str, dict[str, Any]]] = []
 
-    for src_name in project.task_sources:
-        if src_name != "github":
+    for src_name, src_cfg in project.task_sources.items():
+        if src_name not in supported_sources:
             diagnostics.append({
                 "source": src_name,
                 "action": "ERROR",
                 "details": f"unsupported task source: '{src_name}'",
             })
+            continue
+        if src_cfg is not None:
+            source_configs.append((src_name, dict(src_cfg)))
 
-    if github is None and not force:
+    if force and not any(src_name == "github" for src_name, _ in source_configs):
+        source_configs.append(("github", {}))
+
+    if not source_configs:
         return None, diagnostics
 
-    if github is not None and not github.get("enabled", False) and not force:
+    enabled_sources = [
+        (src_name, cfg)
+        for src_name, cfg in source_configs
+        if cfg.get("enabled", False) or (force and src_name == "github")
+    ]
+    for src_name, cfg in source_configs:
+        if cfg.get("enabled", False) or (force and src_name == "github"):
+            continue
         diagnostics.append({
-            "source": "github",
+            "source": src_name,
             "action": "DISABLED",
-            "details": "task source 'github' is disabled in project configuration (enabled: false)",
+            "details": f"task source '{src_name}' is disabled in project configuration (enabled: false)",
         })
+
+    if not enabled_sources:
         return None, diagnostics
 
-    cfg = dict(github or {})
-    if not cfg.get("repo") and not os.getenv("BUILD_COORDINATOR_GITHUB_REPO"):
+    src_name, cfg = enabled_sources[0]
+    source_type = cfg.pop("type", src_name)
+    normalized_source_type = source_type.lower()
+    options = dict(cfg.get("options") or {})
+    options.update({key: value for key, value in cfg.items() if key not in {"enabled", "repo", "labels", "options"}})
+
+    if normalized_source_type == "github" and not cfg.get("repo") and not os.getenv("BUILD_COORDINATOR_GITHUB_REPO"):
         detected_repo = _detect_repo_from_git(project.root)
         if detected_repo:
             cfg["repo"] = detected_repo
@@ -687,11 +708,11 @@ def _optional_task_source(
             return None, diagnostics
 
     try:
-        source = get_task_source({"type": "github", **cfg, "dry_run": dry_run})
+        source = get_task_source({"type": source_type, **cfg, "options": options, "dry_run": dry_run})
         return source, diagnostics
     except Exception as exc:
         diagnostics.append({
-            "source": "github",
+            "source": src_name,
             "action": "ERROR",
             "details": f"adapter construction failure: {exc}",
         })

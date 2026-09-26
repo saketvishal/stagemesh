@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+import subprocess
+
 import pytest
 
 from build_coordinator.db import Base, SessionLocal, engine, initialize_schema
 from build_coordinator.models import BuildTask, BuildTaskEvent
+from build_coordinator.project.commands import _optional_task_source
+from build_coordinator.project.definition import ProjectDefinition
 from build_coordinator.task_source import get_task_source
 from build_coordinator.task_source.azure_devops import AzureDevOpsTaskSource
 
@@ -45,6 +50,22 @@ def clean_db():
     yield
 
 
+def _make_project(task_sources: dict) -> ProjectDefinition:
+    return ProjectDefinition(
+        root=Path("."),
+        project_id="test-proj",
+        name="Test Project",
+        aliases=[],
+        concurrency=2,
+        reviewers=1,
+        default_review_policy="INDEPENDENT",
+        main_ref="main",
+        remote_name="origin",
+        state_dir=Path(".build-coordinator"),
+        task_sources=task_sources,
+    )
+
+
 def test_azure_devops_source_is_disabled_by_default():
     assert get_task_source(None) is None
 
@@ -66,6 +87,28 @@ def test_configured_azure_devops_source_creates_adapter():
     assert isinstance(source, AzureDevOpsTaskSource)
     assert source.organization == "https://dev.azure.com/acme"
     assert source.project == "mesh"
+
+
+def test_project_azure_devops_config_loads_and_activates():
+    proj = _make_project(
+        {
+            "azure_devops": {
+                "enabled": True,
+                "organization": "https://dev.azure.com/acme",
+                "project": "mesh",
+                "query": "Select [System.Id] From WorkItems",
+            }
+        }
+    )
+
+    adapter, diags = _optional_task_source(proj, force=False, dry_run=True)
+
+    assert isinstance(adapter, AzureDevOpsTaskSource)
+    assert adapter.organization == "https://dev.azure.com/acme"
+    assert adapter.project == "mesh"
+    assert adapter.query == "Select [System.Id] From WorkItems"
+    assert adapter.dry_run is True
+    assert diags == []
 
 
 
@@ -159,3 +202,39 @@ def test_azure_devops_outbound_sends_lifecycle_state_and_evidence_only():
         session.commit()
 
     assert len(client.updates) == 1
+
+
+def test_azure_devops_cli_outbound_updates_lifecycle_state_and_discussion(monkeypatch):
+    commands = []
+
+    def fake_run(cmd, **kwargs):
+        commands.append({"cmd": cmd, "kwargs": kwargs})
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr("build_coordinator.task_source.azure_devops.subprocess.run", fake_run)
+    source = AzureDevOpsTaskSource(
+        organization="https://dev.azure.com/acme",
+        project="mesh",
+    )
+
+    source._update_work_item(
+        "123",
+        {
+            "state": "DONE",
+            "evidence": {
+                "worker_id": "builder-1",
+                "summary": "completed cleanly",
+            },
+        },
+    )
+
+    assert len(commands) == 1
+    cmd = commands[0]["cmd"]
+    assert cmd[:4] == ["az", "boards", "work-item", "update"]
+    assert "--fields" in cmd
+    assert cmd[cmd.index("--fields") + 1] == "System.State=DONE"
+    assert "--discussion" in cmd
+    discussion = cmd[cmd.index("--discussion") + 1]
+    assert "StageMesh lifecycle update: DONE" in discussion
+    assert "worker_id: builder-1" in discussion
+    assert "summary: completed cleanly" in discussion
