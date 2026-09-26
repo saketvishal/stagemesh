@@ -16,6 +16,7 @@ from build_coordinator.runner.routing import (
     RoutingPolicy,
     RuntimeConfig,
     StageRequirement,
+    WorkerEvidence,
     WorkerModelConfig,
     default_stage_requirements,
 )
@@ -142,6 +143,7 @@ class WorkerConfig:
     env: dict[str, Any] = field(default_factory=dict)
     preference: int = 100
     cost: dict[str, Any] = field(default_factory=dict)
+    evidence: WorkerEvidence = field(default_factory=WorkerEvidence)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "capabilities", _normal_tuple(self.capabilities))
@@ -180,6 +182,7 @@ class WorkerConfig:
             "poll_seconds": self.poll_seconds,
             "preference": self.preference,
             "cost": self.cost,
+            "evidence": self.evidence.to_public_dict(),
             "env": _public_env_refs(self.env),
         }
 
@@ -337,6 +340,7 @@ class RunnerConfig:
                     env=dict(row.get("env") or row.get("env_refs") or {}),
                     preference=int(row.get("preference", row.get("routing_preference", 100))),
                     cost=dict(row.get("cost") or {}),
+                    evidence=WorkerEvidence.from_mapping(row.get("evidence") or {}),
                 )
             )
         allowed_roots = tuple(data.get("allowed_workspace_roots") or ())

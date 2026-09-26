@@ -17,6 +17,7 @@ from build_coordinator.models import (
     BuildTaskCheckpoint,
     BuildTaskClaim,
     BuildTaskEvent,
+    BuildWorkerLease,
 )
 from build_coordinator.runner import BuildRunner
 from build_coordinator.runner.git_safety import FakeGit
@@ -29,6 +30,7 @@ from build_coordinator.runner.routing import (
     RETRYABLE_PROVIDER_FAILURES,
     ProviderConfig,
     StageRequirement,
+    WorkerEvidence,
     approving_providers,
     approving_reviewers,
     route_worker,
@@ -47,6 +49,7 @@ def setup_function() -> None:
             BuildTaskEvent,
             BuildTaskCheckpoint,
             BuildTaskClaim,
+            BuildWorkerLease,
             BuildTask,
             BuildCoordinatorState,
         ):
@@ -212,6 +215,53 @@ def test_route_explain_reports_eligible_and_ineligible_reasons():
     reasons = {item.worker_id: item.reasons for item in decision.candidates}
     assert reasons["builder-fast"] == ("eligible",)
     assert "stage_not_allowed" in reasons["reviewer"]
+
+
+def test_evidence_score_prefers_more_reliable_faster_worker_when_policy_ties():
+    workers = (
+        WorkerConfig("builder-a", "BUILDER", adapter="fake", capabilities=(CAP_CODING,), stages=("implementation",), preference=10),
+        WorkerConfig("builder-b", "BUILDER", adapter="fake", capabilities=(CAP_CODING,), stages=("implementation",), preference=10),
+    )
+
+    decision = route_worker(
+        workers,
+        stage="implementation",
+        stage_requirement=StageRequirement("implementation", capabilities=(CAP_CODING,)),
+        providers={},
+        runtimes={},
+        routing_policy=RunnerConfig().routing_policy,
+        evidence_by_worker={
+            "builder-a": WorkerEvidence(reliability=0.80, latency_ms=120000, capability_fit=1.0, failure_rate=0.20, cost=1.0, sample_size=10, source="test"),
+            "builder-b": WorkerEvidence(reliability=0.95, latency_ms=30000, capability_fit=1.0, failure_rate=0.05, cost=0.2, sample_size=10, source="test"),
+        },
+    )
+
+    assert decision.selected_worker_id == "builder-b"
+    candidates = {candidate.worker_id: candidate.to_dict() for candidate in decision.candidates}
+    assert candidates["builder-b"]["routing_score"] > candidates["builder-a"]["routing_score"]
+    assert "reliability:0.950" in candidates["builder-b"]["score_reasons"]
+
+
+def test_operator_preferred_worker_wins_before_evidence_score():
+    workers = (
+        WorkerConfig("builder-a", "BUILDER", adapter="fake", capabilities=(CAP_CODING,), stages=("implementation",), preference=10),
+        WorkerConfig("builder-b", "BUILDER", adapter="fake", capabilities=(CAP_CODING,), stages=("implementation",), preference=10),
+    )
+
+    decision = route_worker(
+        workers,
+        stage="implementation",
+        stage_requirement=StageRequirement("implementation", capabilities=(CAP_CODING,), preferred_workers=("builder-a",)),
+        providers={},
+        runtimes={},
+        routing_policy=RunnerConfig().routing_policy,
+        evidence_by_worker={
+            "builder-a": WorkerEvidence(reliability=0.50, latency_ms=120000, capability_fit=1.0, failure_rate=0.50, cost=5.0, sample_size=10, source="test"),
+            "builder-b": WorkerEvidence(reliability=0.99, latency_ms=1000, capability_fit=1.0, failure_rate=0.01, cost=0.1, sample_size=10, source="test"),
+        },
+    )
+
+    assert decision.selected_worker_id == "builder-a"
 
 
 def test_fallback_provider_preserves_capacity_while_active_provider_is_eligible():
@@ -519,6 +569,40 @@ def test_routing_audit_reports_active_worker_and_provider_usage(tmp_path: Path):
     assert candidates["builder-openai"]["provider_mode"] == "ACTIVE"
 
 
+def test_active_sql_worker_lease_occupies_distributed_worker_slot(tmp_path: Path):
+    with SessionLocal() as session:
+        session.add(
+            BuildWorkerLease(
+                worker_id="builder-openai",
+                provider="openai",
+                machine_id="remote-host",
+                process_id="1234",
+                lease_expires_at=utcnow() + timedelta(minutes=5),
+                status="ACTIVE",
+            )
+        )
+        session.commit()
+
+        workers = (
+            WorkerConfig("builder-openai", "BUILDER", provider="openai", adapter="fake", capabilities=(CAP_CODING,), stages=("implementation",), max_concurrency=1),
+            WorkerConfig("builder-openai-2", "BUILDER", provider="openai", adapter="fake", capabilities=(CAP_CODING,), stages=("implementation",), max_concurrency=1),
+        )
+        decision = route_worker(
+            workers,
+            stage="implementation",
+            stage_requirement=StageRequirement("implementation", capabilities=(CAP_CODING,)),
+            providers={"openai": ProviderConfig("openai", consumption_mode="ACTIVE")},
+            runtimes={},
+            routing_policy=RunnerConfig().routing_policy,
+            session=session,
+        )
+
+    assert decision.selected_worker_id == "builder-openai-2"
+    candidates = {candidate.worker_id: candidate.to_dict() for candidate in decision.candidates}
+    assert "max_concurrency_reached" in candidates["builder-openai"]["reasons"]
+    assert candidates["builder-openai"]["active_workers"] == 1
+
+
 def test_runner_diagnostics_reports_provider_modes_usage_and_failure_reset(tmp_path: Path):
     config = _config(
         tmp_path,
@@ -651,9 +735,12 @@ def test_runner_audit_event_records_routing_without_secrets(tmp_path: Path):
 
     with SessionLocal() as session:
         event = session.scalar(select(BuildTaskEvent).where(BuildTaskEvent.event_type == "runner.execution_launched"))
+        lease = session.scalar(select(BuildWorkerLease).where(BuildWorkerLease.worker_id == "builder-a"))
         payload = event.event_data
         assert payload["routing"]["required_capabilities"] == [CAP_CODING]
         assert payload["provider"] == "xai"
+        assert lease is not None
+        assert lease.status == "ACTIVE"
         assert "XAI_API_KEY" not in json.dumps(payload)
 
 
