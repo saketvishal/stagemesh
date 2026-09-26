@@ -439,7 +439,9 @@ def test_task_scoped_no_changes_failure_does_not_emit_provider_failure():
 
     runner = BuildRunner(SessionLocal, config=config, executors=executors, git=FakeGit())
     assert len(runner.run_once().launched) == 1
-    runner.run_once()
+    observed = runner.run_once()
+    assert observed.observed == ["TASK-NO-CHANGES-FAILURE"]
+    assert observed.escalations == []
     retry = runner.run_once()
     assert len(retry.launched) == 1
 
@@ -502,6 +504,7 @@ def test_task_scoped_no_changes_failure_exhaustion_preserves_no_changes_semantic
     assert len(runner.run_once().launched) == 1
     result = runner.run_once()
 
+    assert result.observed == ["TASK-NO-CHANGES-EXHAUSTED"]
     assert result.escalations == ["TASK-NO-CHANGES-EXHAUSTED:NO_CHANGES_PRODUCED"]
     with SessionLocal() as session:
         task = session.get(BuildTask, "TASK-NO-CHANGES-EXHAUSTED")
