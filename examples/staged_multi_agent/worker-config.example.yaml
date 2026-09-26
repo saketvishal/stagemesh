@@ -67,6 +67,13 @@ workers:
     branch_name: feature/builder-a-branch
     command: ["your-builder-cli", "--print"]
     timeout_seconds: 3600
+    # Optional routing evidence. Historical execution evidence recorded in SQL
+    # takes precedence when available; configured values are transparent hints.
+    evidence:
+      reliability: 0.95
+      latency_ms: 45000
+      failure_rate: 0.05
+      cost: 0.4
 
   - id: builder-b
     enabled: true
