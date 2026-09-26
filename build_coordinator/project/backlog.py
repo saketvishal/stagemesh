@@ -328,13 +328,14 @@ def _definition_from_mapping(
     return definition
 
 
-def load_backlog(project: ProjectDefinition) -> list[TaskDefinition]:
+def load_backlog(project: ProjectDefinition, *, allow_duplicates: bool = False) -> list[TaskDefinition]:
     """Load and validate every definition under `.stagemesh/tasks/`, sorted by id."""
     tasks_dir = project.tasks_dir
     if not tasks_dir.is_dir():
         return []
     problems: list[str] = []
     definitions: dict[str, TaskDefinition] = {}
+    all_definitions: list[TaskDefinition] = []
     files = sorted(
         (p for p in tasks_dir.rglob("*") if p.suffix.lower() in {".yaml", ".yml"} and p.is_file()),
         key=lambda p: p.relative_to(tasks_dir).as_posix(),
@@ -355,12 +356,15 @@ def load_backlog(project: ProjectDefinition) -> list[TaskDefinition]:
             if definition is None:
                 continue
             if definition.task_id in definitions:
-                problems.append(
-                    f"duplicate task id {definition.task_id!r} in {rel} "
-                    f"and {definitions[definition.task_id].source}"
-                )
+                if not allow_duplicates:
+                    problems.append(
+                        f"duplicate task id {definition.task_id!r} in {rel} "
+                        f"and {definitions[definition.task_id].source}"
+                    )
+                all_definitions.append(definition)
                 continue
             definitions[definition.task_id] = definition
+            all_definitions.append(definition)
 
     for definition in definitions.values():
         if len(definition.dependencies) != len(set(definition.dependencies)):
@@ -368,6 +372,8 @@ def load_backlog(project: ProjectDefinition) -> list[TaskDefinition]:
     problems.extend(_dependency_cycles(definitions))
     if problems:
         raise BacklogError(problems)
+    if allow_duplicates:
+        return sorted(all_definitions, key=lambda d: (d.task_id, d.source))
     return [definitions[key] for key in sorted(definitions)]
 
 
@@ -652,6 +658,12 @@ def verify_delivery_evidence(repo_root: Path, definition: TaskDefinition) -> dic
         return {"status": "MISSING", "detail": "no delivered_by evidence"}
     if not isinstance(definition.delivered_by, dict):
         return {"status": "LEGACY", "detail": str(definition.delivered_by)}
+    committed = _committed_delivered_by(repo_root, definition)
+    if committed != definition.delivered_by:
+        return {
+            "status": "STALE",
+            "detail": "delivered_by evidence is not present in committed repository history",
+        }
     sha = definition.delivered_sha
     if not sha:
         return {"status": "STALE", "detail": "structured delivered_by is missing sha"}
@@ -674,6 +686,29 @@ def verify_delivery_evidence(repo_root: Path, definition: TaskDefinition) -> dic
     if contains.returncode != 0:
         return {"status": "STALE", "detail": f"delivery sha {sha} is not reachable from HEAD"}
     return {"status": "VERIFIED", "detail": f"delivered by {sha}", "sha": sha}
+
+
+def _committed_delivered_by(repo_root: Path, definition: TaskDefinition) -> Any:
+    if not definition.source:
+        return None
+    proc = subprocess.run(
+        ["git", "show", f"HEAD:{definition.source}"],
+        cwd=str(repo_root),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        return None
+    try:
+        data = yaml.safe_load(proc.stdout) or {}
+    except yaml.YAMLError:
+        return None
+    entries = data.get("tasks") if isinstance(data, dict) and isinstance(data.get("tasks"), list) else [data]
+    for entry in entries:
+        if isinstance(entry, dict) and str(entry.get("id") or "").strip() == definition.task_id:
+            return entry.get("delivered_by")
+    return None
 
 
 def persist_delivery_evidence(

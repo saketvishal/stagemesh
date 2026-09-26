@@ -220,7 +220,7 @@ def handle_project(args: argparse.Namespace) -> None:
             session.commit()
             _print(report.as_dict())
         elif command == "audit-delivery":
-            _print(audit_delivery_evidence(session, project, load_backlog(project)))
+            _print(audit_delivery_evidence(session, project, load_backlog(project, allow_duplicates=True)))
         elif command == "status":
             _print(project_status(session, project))
 
