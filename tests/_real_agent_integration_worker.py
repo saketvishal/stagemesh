@@ -43,6 +43,7 @@ def main() -> int:
         "execution_id": os.environ["BUILD_COORDINATOR_EXECUTION_ID"],
         "task_id": os.environ["BUILD_COORDINATOR_TASK_ID"],
         "role": role,
+        "runtime": "claude",
     }
     reviewed_sha = os.environ.get("BUILD_COORDINATOR_REVIEWED_FEATURE_SHA") or None
     main_ref = os.environ.get("STAGEMESH_MAIN_REF", "main")

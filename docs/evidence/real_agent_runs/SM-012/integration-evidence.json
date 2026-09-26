@@ -1,7 +1,10 @@
 {
-  "command": [],
-  "exit_code": null,
-  "provider": "stagemesh",
+  "command": [
+    "C:\\Program Files\\Python313\\python.exe",
+    "C:/stagemesh/.build-coordinator/worktrees/builder-codex-1/tests/_real_agent_integration_worker.py"
+  ],
+  "exit_code": 0,
+  "provider": "anthropic",
   "result_data": {
     "current_main_sha": "08e0ee367f1e02deeecfd7871e442f82b8d2ccf4",
     "execution_id": "exec-integration-SM-012-REAL",
@@ -12,6 +15,7 @@
     "push_status": "NOT_REQUIRED",
     "reviewed_feature_sha": "fe62bc9772b5b35a41ff9852adb473a9b99f1e8d",
     "role": "INTEGRATION",
+    "runtime": "claude",
     "schema_version": 1,
     "status": "SUCCEEDED",
     "task_id": "SM-012-REAL",
@@ -20,7 +24,7 @@
   "result_file_present": true,
   "result_path": "C:\\Users\\saket\\AppData\\Local\\Temp\\sm012_pytest\\pytest-of-saket\\pytest-3\\test_real_agent_builder_review0\\integration-result.json",
   "role": "INTEGRATION",
-  "runtime": "local",
+  "runtime": "claude",
   "status": "SUCCEEDED",
   "worker_id": "integration-1"
 }

@@ -156,6 +156,16 @@ def _wait(executor: SubprocessExecutor, execution_id: str, *, timeout: float = 3
     return observation
 
 
+def _runtime_from_execution_result(execution: BuildRunnerExecution, command: tuple[str, ...]) -> str:
+    if isinstance(execution.result_data, dict) and execution.result_data.get("runtime"):
+        return str(execution.result_data["runtime"])
+    if "--runtime" in command:
+        runtime_index = command.index("--runtime") + 1
+        if runtime_index < len(command):
+            return command[runtime_index]
+    return "unknown"
+
+
 def _record_evidence(role: str, execution: BuildRunnerExecution, command: tuple[str, ...]) -> Path:
     """Persist durable evidence for a single real, managed execution.
 
@@ -177,6 +187,7 @@ def _record_evidence(role: str, execution: BuildRunnerExecution, command: tuple[
         "worker_id": execution.worker_id,
         "provider": execution.provider,
         "adapter": execution.adapter,
+        "runtime": _runtime_from_execution_result(execution, command),
         "command": list(command),
         "exit_code": execution.exit_code,
         "status": execution.status,
@@ -303,6 +314,19 @@ def test_real_agent_builder_reviewer_integration_on_scratch_repo(tmp_path: Path,
         assert by_role["INTEGRATION"].worker_id == integration_worker.worker_id
         assert by_role["INTEGRATION"].adapter == "subprocess"
         assert by_role["INTEGRATION"].exit_code == 0
+
+        evidence = {
+            role: json.loads((EVIDENCE_DIR / f"{role.lower()}-evidence.json").read_text(encoding="utf-8"))
+            for role in ("BUILDER", "REVIEWER", "INTEGRATION")
+        }
+        for role, record in evidence.items():
+            assert record["provider"] == "anthropic"
+            assert record["adapter"] == "subprocess"
+            assert record["runtime"] == "claude"
+            assert record["exit_code"] == 0
+            assert record["result_file_present"] is True
+            assert record["result_data"]["status"] == "SUCCEEDED"
+            assert record["command"], f"{role} evidence must preserve the resolved worker command"
 
         feature_sha = by_role["BUILDER"].result_data.get("feature_sha")
         assert feature_sha, by_role["BUILDER"].result_data
