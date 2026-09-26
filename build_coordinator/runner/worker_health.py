@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Iterable, Protocol
 
+from build_coordinator.runner.routing import PROVIDER_FAILURES
+
 
 class WorkerLike(Protocol):
     worker_id: str
@@ -55,6 +57,8 @@ def derive_worker_health(
             continue
         until = until_raw if isinstance(until_raw, datetime) else datetime.fromisoformat(str(until_raw))
         failure = str(event.get("failure") or "UNKNOWN").upper()
+        if failure not in PROVIDER_FAILURES:
+            continue
         existing = cooldowns.get(provider)
         if existing is None or until > existing[0]:
             cooldowns[provider] = (until, failure)
