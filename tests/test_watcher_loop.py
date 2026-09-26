@@ -52,7 +52,11 @@ from build_coordinator.types import TaskSpec
 
 from build_coordinator.watcher import authorization as auth
 
-from build_coordinator.watcher.loop import run_foreground_cycle
+from build_coordinator.watcher.loop import (
+    initial_config_reload_state,
+    refresh_config_reload_state,
+    run_foreground_cycle,
+)
 
 from build_coordinator.watcher.safe_logging import WatcherLogger
 
@@ -555,6 +559,72 @@ def test_stale_lock_recovery_runs_github_ingestion(authorized_repo, tmp_path, mo
         assert record.watcher_id == "new-owner"
 
         assert record.last_cycle_summary["github_issues_ingested"] == 1
+
+
+def test_config_reload_state_loads_changed_worker_config(tmp_path, monkeypatch):
+    config_path = tmp_path / "runner-config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "workers": [
+                    {"worker_id": "builder-a", "role": "BUILDER", "adapter": "fake"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("BUILD_COORDINATOR_RUNNER_CONFIG", str(config_path))
+
+    state = initial_config_reload_state()
+    assert [worker.worker_id for worker in state.config.workers] == ["builder-a", "planner-1"]
+
+    config_path.write_text(
+        json.dumps(
+            {
+                "workers": [
+                    {"worker_id": "builder-b", "role": "BUILDER", "adapter": "fake"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    reloaded = refresh_config_reload_state(
+        state,
+        logger=_logger(),
+        repository_slug="stagemesh-orchestrator",
+    )
+
+    assert reloaded.status["state"] == "reloaded"
+    assert [worker.worker_id for worker in reloaded.config.workers] == ["builder-b", "planner-1"]
+
+
+def test_config_reload_keeps_last_good_config_when_edit_is_invalid(tmp_path, monkeypatch):
+    config_path = tmp_path / "runner-config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "workers": [
+                    {"worker_id": "builder-a", "role": "BUILDER", "adapter": "fake"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("BUILD_COORDINATOR_RUNNER_CONFIG", str(config_path))
+    state = initial_config_reload_state()
+
+    config_path.write_text("{not valid json", encoding="utf-8")
+
+    reloaded = refresh_config_reload_state(
+        state,
+        logger=_logger(),
+        repository_slug="stagemesh-orchestrator",
+    )
+
+    assert reloaded.status["state"] == "failed"
+    assert reloaded.status["using_previous"] is True
+    assert reloaded.config is state.config
 
 
 
