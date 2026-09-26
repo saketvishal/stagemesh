@@ -103,6 +103,11 @@ def add_continue_command(sub: argparse._SubParsersAction) -> None:
     p.add_argument("--no-sync", action="store_true", help="skip project backlog synchronization")
     p.add_argument("--github", action="store_true", help="also run the optional GitHub task-source adapter")
     p.add_argument("--all", action="store_true", dest="all_projects", help="coordinate every registered project (default outside a project)")
+    p.add_argument(
+        "--capacity",
+        type=int,
+        help="global builder capacity to allocate across registered projects in global mode",
+    )
     p.add_argument("--task", dest="task_id", help="run only this explicit task id; unrelated backlog is not claimable")
     p.add_argument("--json", action="store_true", help="print the complete structured result instead of the concise human summary")
 
@@ -567,6 +572,13 @@ def handle_global_continue(args: argparse.Namespace) -> None:
             "no StageMesh projects are registered; register one with `stagemesh project add <path>` "
             "(or run `stagemesh init` inside a repository)"
         )
+    requested_capacity = getattr(args, "capacity", None)
+    capacity_batches = _global_capacity_batches(projects, requested_capacity)
+    allocations = {
+        project_id: slots
+        for batch in capacity_batches
+        for project_id, slots in batch.items()
+    }
     flags = [flag for flag, on in (("--dry-run", args.dry_run), ("--once", args.once), ("--no-sync", args.no_sync), ("--github", args.github)) if on]
     flags.append("--json")
     if getattr(args, "task_id", None):
@@ -578,7 +590,9 @@ def handle_global_continue(args: argparse.Namespace) -> None:
             env[key] = os.environ[key]
     runs: dict[str, dict[str, Any]] = {}
 
-    def drive(project: ProjectDefinition) -> None:
+    def drive(project: ProjectDefinition, slots: int) -> None:
+        child_env = dict(env)
+        child_env["STAGEMESH_PROJECT_CAPACITY_OVERRIDE"] = str(slots)
         proc = subprocess.Popen(
             [sys.executable, "-m", "build_coordinator", "continue", "--project-dir", str(project.root), *flags],
             stdout=subprocess.PIPE,
@@ -586,7 +600,7 @@ def handle_global_continue(args: argparse.Namespace) -> None:
             text=True,
             encoding="utf-8",
             errors="replace",
-            env=env,
+            env=child_env,
             stdin=subprocess.DEVNULL,
         )
 
@@ -602,15 +616,63 @@ def handle_global_continue(args: argparse.Namespace) -> None:
             detail = {"error": (out or "").strip()[-400:]}
         runs[project.project_id] = {"returncode": proc.returncode, **_summarize_run(detail)}
 
-    threads = [threading.Thread(target=drive, args=(project,)) for project in projects]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join()
+    by_id = {project.project_id: project for project in projects}
+    for batch in capacity_batches:
+        threads = [
+            threading.Thread(target=drive, args=(by_id[project_id], slots))
+            for project_id, slots in batch.items()
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
     ordered = {p.project_id: runs.get(p.project_id, {"returncode": None}) for p in projects}
-    _print({"mode": "global", "projects": ordered})
+    _print(
+        {
+            "mode": "global",
+            "capacity": requested_capacity if requested_capacity is not None else sum(allocations.values()),
+            "allocations": allocations,
+            "capacity_batches": capacity_batches,
+            "projects": ordered,
+        }
+    )
     if any(run.get("returncode") not in (0, None) for run in ordered.values()):
         raise SystemExit(1)
+
+
+def _global_capacity_batches(
+    projects: list[ProjectDefinition],
+    capacity: int | None,
+) -> list[dict[str, int]]:
+    if capacity is None:
+        return [{project.project_id: project.concurrency for project in projects}]
+    if capacity < 1:
+        raise ProjectError("--capacity must be a positive integer")
+    pending = list(projects)
+    batches: list[dict[str, int]] = []
+    while pending:
+        allocations = {project.project_id: 0 for project in pending}
+        remaining = capacity
+        progressed = False
+        for project in pending:
+            allocations[project.project_id] += 1
+            remaining -= 1
+            progressed = True
+            if remaining == 0:
+                break
+        if remaining > 0:
+            for project in pending:
+                while allocations[project.project_id] < project.concurrency and remaining > 0:
+                    allocations[project.project_id] += 1
+                    remaining -= 1
+                if remaining == 0:
+                    break
+        if not progressed:
+            break
+        batch = {project_id: slots for project_id, slots in allocations.items() if slots > 0}
+        batches.append(batch)
+        pending = [project for project in pending if project.project_id not in batch]
+    return batches
 
 
 def _summarize_run(detail: dict[str, Any]) -> dict[str, Any]:
