@@ -50,6 +50,7 @@ from build_coordinator.objectives import (
     apply_validated_plan,
     get_objective,
     get_planner_task,
+    objective_source_is_closed,
     is_planner_task,
     list_objectives,
     objective_dependencies_satisfied,
@@ -2284,6 +2285,8 @@ class BuildRunner:
             return
         for objective in list_objectives(session):
             if objective.state != "PLANNING":
+                continue
+            if objective_source_is_closed(session, objective):
                 continue
             if not objective_dependencies_satisfied(session, objective):
                 continue
