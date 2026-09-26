@@ -21,6 +21,7 @@ from build_coordinator.models import (
     BuildObjectiveEvent,
     BuildTask,
     BuildTaskEvent,
+    TASK_STATES,
 )
 from build_coordinator.objectives import _ensure_planner_task, create_objective, get_planner_task
 from build_coordinator.service import upsert_task
@@ -33,8 +34,8 @@ logger = logging.getLogger(__name__)
 class GitHubTaskSource(TaskSource):
     """Discovers and synchronizes tasks from GitHub issues."""
 
-    # Every stagemesh:* label this adapter may apply to a GitHub issue.
-    LIFECYCLE_LABELS: tuple[str, ...] = ("stagemesh:done",)
+    # Every stagemesh:* task lifecycle label this adapter may apply to a GitHub issue.
+    LIFECYCLE_LABELS: tuple[str, ...] = tuple(f"stagemesh:{state.lower()}" for state in TASK_STATES)
 
     def __init__(
         self,
