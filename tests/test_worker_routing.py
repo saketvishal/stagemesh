@@ -29,9 +29,12 @@ from build_coordinator.runner.routing import (
     RETRYABLE_PROVIDER_FAILURES,
     ProviderConfig,
     StageRequirement,
+    approving_providers,
+    approving_reviewers,
     route_worker,
 )
-from build_coordinator.service import CheckpointInput, ClaimRequest, checkpoint, claim_task, recover_expired, upsert_task, utcnow
+from build_coordinator.policy import CoordinatorPolicyError
+from build_coordinator.service import CheckpointInput, ClaimRequest, checkpoint, claim_review, claim_task, recover_expired, upsert_task, utcnow
 from build_coordinator.types import EventInput, TaskSpec
 
 
@@ -58,6 +61,26 @@ def _task(task_id: str) -> TaskSpec:
         description="routing test task",
         acceptance_criteria=["passes"],
         review_policy="INDEPENDENT",
+    )
+
+
+def _approval(task_id: str, worker_id: str, provider: str, sha: str = "feature-sha") -> BuildRunnerExecution:
+    return BuildRunnerExecution(
+        execution_id=f"exec-{task_id}-{worker_id}",
+        task_id=task_id,
+        role="REVIEWER",
+        worker_id=worker_id,
+        provider=provider,
+        adapter="fake",
+        reviewed_feature_sha=sha,
+        status="SUCCEEDED",
+        result_data={
+            "review": {
+                "verdict": "GREEN",
+                "ready_for_integration": True,
+                "required_remediation": [],
+            }
+        },
     )
 
 
@@ -378,6 +401,58 @@ def test_independent_review_still_routes_when_only_builders_provider_exists(tmp_
     assert decision.selected_worker_id == "reviewer-xai"
     reasons = {candidate.worker_id: candidate.reasons for candidate in decision.candidates}
     assert reasons["reviewer-xai"] == ("eligible",)
+
+
+def test_provider_independent_review_rejects_builders_provider(tmp_path: Path):
+    with SessionLocal() as session:
+        upsert_task(
+            session,
+            TaskSpec(
+                task_id="REVIEW-PROVIDER",
+                title="Task REVIEW-PROVIDER",
+                description="provider independence",
+                acceptance_criteria=["passes"],
+                review_policy="INDEPENDENT_PROVIDER",
+            ),
+        )
+        claim_task(session, ClaimRequest("REVIEW-PROVIDER", worker_id="builder-a", provider="openai"))
+        session.get(BuildTask, "REVIEW-PROVIDER").state = "REVIEW_READY"
+
+        try:
+            claim_review(session, ClaimRequest("REVIEW-PROVIDER", worker_id="reviewer-b", provider="openai"))
+        except CoordinatorPolicyError as exc:
+            assert "Provider-independent review" in str(exc)
+        else:
+            raise AssertionError("same-provider reviewer should be rejected")
+
+        claim = claim_review(session, ClaimRequest("REVIEW-PROVIDER", worker_id="reviewer-c", provider="anthropic"))
+
+    assert claim.worker_id == "reviewer-c"
+
+
+def test_two_provider_approvals_count_distinct_providers_and_exact_sha(tmp_path: Path):
+    with SessionLocal() as session:
+        upsert_task(
+            session,
+            TaskSpec(
+                task_id="TWO-PROVIDERS",
+                title="Task TWO-PROVIDERS",
+                description="approval counting",
+                acceptance_criteria=["passes"],
+                review_policy="TWO_PROVIDERS",
+            ),
+        )
+        claim_task(session, ClaimRequest("TWO-PROVIDERS", worker_id="builder-a", provider="openai"))
+        session.add(_approval("TWO-PROVIDERS", "reviewer-a", "anthropic"))
+        session.add(_approval("TWO-PROVIDERS", "reviewer-b", "anthropic"))
+        session.add(_approval("TWO-PROVIDERS", "reviewer-c", "xai", sha="old-sha"))
+        session.commit()
+
+        assert approving_reviewers(session, "TWO-PROVIDERS", reviewed_feature_sha="feature-sha") == {
+            "reviewer-a",
+            "reviewer-b",
+        }
+        assert approving_providers(session, "TWO-PROVIDERS", reviewed_feature_sha="feature-sha") == {"anthropic"}
 
 
 def test_cross_provider_resume_state_can_route_to_different_eligible_worker(tmp_path: Path):

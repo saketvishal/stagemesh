@@ -12,8 +12,9 @@ from typing import Any, Iterable, Protocol
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from build_coordinator.claims import last_implementation_worker
-from build_coordinator.models import BuildRunnerExecution, BuildTaskClaim
+from build_coordinator.claims import last_implementation_provider, last_implementation_worker
+from build_coordinator.models import BuildRunnerExecution, BuildTask, BuildTaskClaim
+from build_coordinator.policy import review_policy_spec
 
 CAP_CHEAP = "CHEAP"
 CAP_FAST = "FAST"
@@ -327,9 +328,11 @@ def route_worker(
     session: Session | None = None,
     task_id: str | None = None,
     excluded_workers: set[str] | None = None,
+    excluded_providers: set[str] | None = None,
     deprioritized_workers: set[str] | None = None,
 ) -> RoutingDecision:
     excluded_workers = excluded_workers or set()
+    excluded_providers = excluded_providers or set()
     deprioritized_workers = deprioritized_workers or set()
     workers = list(workers)
     all_workers = workers
@@ -347,6 +350,7 @@ def route_worker(
             runtimes=runtimes,
             active_by_worker=active_by_worker,
             excluded_workers=excluded_workers,
+            excluded_providers=excluded_providers,
         )
         ok = not reasons
         candidates.append(
@@ -479,19 +483,35 @@ def _worker_provider(worker_id: str, workers: Iterable[WorkerLike]) -> str | Non
     return None
 
 
+@dataclass(frozen=True)
+class ReviewerExclusions:
+    workers: frozenset[str] = frozenset()
+    providers: frozenset[str] = frozenset()
+
+
 def reviewer_exclusions(
     session: Session | None,
     task_id: str | None,
     *,
     reviewed_feature_sha: str | None = None,
-) -> set[str]:
+) -> ReviewerExclusions:
     if session is None or not task_id:
-        return set()
+        return ReviewerExclusions()
+    build_task = session.get(BuildTask, task_id)
+    if build_task is None:
+        return ReviewerExclusions()
+    spec = review_policy_spec(build_task.review_policy)
     excluded = set(approving_reviewers(session, task_id, reviewed_feature_sha=reviewed_feature_sha))
-    implementer = last_implementation_worker(session, task_id)
-    if implementer:
+    excluded_providers = set()
+    if spec.independent_worker and (implementer := last_implementation_worker(session, task_id)):
         excluded.add(implementer)
-    return excluded
+    if spec.independent_provider:
+        excluded_providers.update(
+            approving_providers(session, task_id, reviewed_feature_sha=reviewed_feature_sha)
+        )
+        if provider := last_implementation_provider(session, task_id):
+            excluded_providers.add(provider)
+    return ReviewerExclusions(frozenset(excluded), frozenset(excluded_providers))
 
 
 def approving_reviewers(
@@ -501,6 +521,30 @@ def approving_reviewers(
     reviewed_feature_sha: str | None = None,
 ) -> set[str]:
     """Distinct workers that approved this task at the requested feature SHA."""
+    return {row.worker_id for row in approving_review_executions(session, task_id, reviewed_feature_sha=reviewed_feature_sha)}
+
+
+def approving_providers(
+    session: Session,
+    task_id: str,
+    *,
+    reviewed_feature_sha: str | None = None,
+) -> set[str]:
+    """Distinct providers that approved this task at the requested feature SHA."""
+    return {
+        row.provider
+        for row in approving_review_executions(session, task_id, reviewed_feature_sha=reviewed_feature_sha)
+        if row.provider
+    }
+
+
+def approving_review_executions(
+    session: Session,
+    task_id: str,
+    *,
+    reviewed_feature_sha: str | None = None,
+) -> list[BuildRunnerExecution]:
+    """Review executions that are eligible approvals for the exact feature SHA."""
     since = session.scalar(
         select(BuildTaskClaim.claimed_at)
         .where(BuildTaskClaim.task_id == task_id)
@@ -514,7 +558,7 @@ def approving_reviewers(
         .where(BuildRunnerExecution.role == "REVIEWER")
         .where(BuildRunnerExecution.status == "SUCCEEDED")
     ).all()
-    approvers: set[str] = set()
+    approvals: list[BuildRunnerExecution] = []
     for row in rows:
         if since is not None and row.launched_at is not None and _naive(row.launched_at) < _naive(since):
             continue
@@ -527,8 +571,8 @@ def approving_reviewers(
             and review.get("ready_for_integration") is True
             and not review.get("required_remediation")
         ):
-            approvers.add(row.worker_id)
-    return approvers
+            approvals.append(row)
+    return approvals
 
 
 def _naive(value):
@@ -544,6 +588,7 @@ def _candidate_reasons(
     runtimes: dict[str, RuntimeConfig],
     active_by_worker: dict[str, int],
     excluded_workers: set[str],
+    excluded_providers: set[str],
 ) -> list[str]:
     reasons: list[str] = []
     if not worker.enabled:
@@ -552,6 +597,8 @@ def _candidate_reasons(
         reasons.append("worker_unconfigured")
     if worker.worker_id in excluded_workers:
         reasons.append("worker_excluded_for_independence")
+    if worker.provider in excluded_providers:
+        reasons.append("provider_excluded_for_independence")
     if requirement.pinned_worker and worker.worker_id != requirement.pinned_worker:
         reasons.append(f"pinned_worker:{requirement.pinned_worker}")
     if stage not in worker.stage_names():

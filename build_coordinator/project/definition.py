@@ -20,6 +20,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from build_coordinator.policy import normalize_review_policy
+
 PROJECT_DIR = ".stagemesh"
 PROJECT_FILE = "project.yaml"
 TASKS_DIR = "tasks"
@@ -30,7 +32,15 @@ REGISTRY_ENV = "STAGEMESH_PROJECT_REGISTRY"
 DEFAULT_REGISTRY_PATH = Path.home() / ".build-coordinator" / "projects.json"
 
 _PROJECT_ID = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
-_REVIEW_POLICIES = ("NONE", "SELF", "INDEPENDENT", "TWO_REVIEWERS")
+_REVIEW_POLICIES = (
+    "NONE",
+    "SELF",
+    "INDEPENDENT",
+    "INDEPENDENT_WORKER",
+    "INDEPENDENT_PROVIDER",
+    "TWO_REVIEWERS",
+    "TWO_PROVIDERS",
+)
 _WORKER_ROLES = ("builder", "reviewer", "integration", "planner")
 
 
@@ -193,7 +203,7 @@ def load_project(root: str | Path) -> ProjectDefinition:
     if not isinstance(reviewers, int) or isinstance(reviewers, bool) or not 1 <= reviewers <= MAX_CONCURRENCY:
         problems.append(f"`execution.reviewers` must be an integer in 1..{MAX_CONCURRENCY}")
         reviewers = 1
-    review_policy = str(execution.get("default_review_policy") or "INDEPENDENT").upper()
+    review_policy = normalize_review_policy(str(execution.get("default_review_policy") or "INDEPENDENT").upper())
     if review_policy not in _REVIEW_POLICIES:
         problems.append(f"`execution.default_review_policy` must be one of {_REVIEW_POLICIES}")
 

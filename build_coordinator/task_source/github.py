@@ -339,7 +339,7 @@ class GitHubTaskSource(TaskSource):
         objective_id: str | None = None,
     ) -> SyncResult:
         existing = session.get(BuildTask, task_id)
-        review_policy = "SELF" if any("review:self" in l.lower() for l in labels) else "INDEPENDENT"
+        review_policy = self._review_policy_from_labels(labels)
         risk_level = "HIGH" if any("risk:high" in l.lower() for l in labels) else "MEDIUM"
         priority = self._parse_priority(labels, body)
         criteria = ac or ["Satisfy all requirements stated in issue."]
@@ -388,6 +388,23 @@ class GitHubTaskSource(TaskSource):
             source_ref=url,
             details=details,
         )
+
+    @staticmethod
+    def _review_policy_from_labels(labels: list[str]) -> str:
+        normalized = {label.strip().lower() for label in labels}
+        mapping = (
+            ("review:none", "NONE"),
+            ("review:self", "SELF"),
+            ("review:independent-worker", "INDEPENDENT_WORKER"),
+            ("review:independent_provider", "INDEPENDENT_PROVIDER"),
+            ("review:independent-provider", "INDEPENDENT_PROVIDER"),
+            ("review:two-reviewers", "TWO_REVIEWERS"),
+            ("review:two-providers", "TWO_PROVIDERS"),
+        )
+        for label, policy in mapping:
+            if label in normalized:
+                return policy
+        return "INDEPENDENT_WORKER"
 
     def _record_sync_event(
         self,
