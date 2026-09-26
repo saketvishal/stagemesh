@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import dataclasses
 import subprocess
+import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -342,11 +343,20 @@ def test_scenario_4_failed_integration_clean_guarantee(tmp_path: Path):
 # ---------------------------------------------------------------------------
 # SCENARIO 5: Builder Zero-Changes When Already Satisfied
 # ---------------------------------------------------------------------------
-def test_scenario_5_builder_zero_changes_when_already_satisfied(tmp_path: Path):
+def test_scenario_5_builder_zero_changes_when_already_satisfied(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     """Builder returns no changes but task already satisfied -> validation/review
     -> no operator escalation."""
     repo, _ = _setup_test_repo(tmp_path)
     session_factory, runner = _setup_runner(tmp_path, repo)
+    monkeypatch.setattr(runner, "_check_task_already_satisfied", lambda _session, task_id: task_id == "GH-SATISFIED")
+    validation_script = repo / "validate_already_satisfied.py"
+    validation_script.write_text(
+        "from pathlib import Path\n"
+        "Path('validation-marker.txt').write_text('validated', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
 
     with session_factory() as session:
         ensure_state(session)
@@ -357,6 +367,7 @@ def test_scenario_5_builder_zero_changes_when_already_satisfied(tmp_path: Path):
             state="CLAIMED",
             review_policy="INDEPENDENT",
             acceptance_criteria=["Existing implementation is valid"],
+            required_validation=[f'"{sys.executable}" validate_already_satisfied.py'],
         )
         session.add(task)
         session.commit()
@@ -369,6 +380,7 @@ def test_scenario_5_builder_zero_changes_when_already_satisfied(tmp_path: Path):
             provider="test",
             adapter="fake",
             status="SUCCEEDED",
+            worktree_path=str(repo),
         )
         session.add(exec_row)
         session.commit()
@@ -393,8 +405,20 @@ def test_scenario_5_builder_zero_changes_when_already_satisfied(tmp_path: Path):
 
         # Task does NOT become blocked with NO_CHANGES_PRODUCED on attempt 1
         refreshed = session.get(BuildTask, "GH-SATISFIED")
-        assert refreshed.state != "BLOCKED"
+        assert refreshed.state == "REVIEW_READY"
+        verification_sha = _git(repo, "rev-parse", "HEAD").stdout.strip()
+        assert exec_row.reviewed_feature_sha == verification_sha
+        assert exec_row.reviewed_feature_sha
+        assert (repo / "validation-marker.txt").read_text(encoding="utf-8") == "validated"
         assert "GH-SATISFIED:NO_CHANGES_PRODUCED" not in result.escalations
+        validation_events = session.scalars(
+            select(BuildTaskEvent)
+            .where(BuildTaskEvent.task_id == "GH-SATISFIED")
+            .where(BuildTaskEvent.event_type == "runner.validation")
+        ).all()
+        assert len(validation_events) == 1
+        assert validation_events[0].event_data["passed"] is True
+        assert validation_events[0].event_data["feature_sha"] == verification_sha
 
 
 # ---------------------------------------------------------------------------
