@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -116,6 +117,7 @@ def reconcile_awaiting_ci(
     client: CIClient | None = None,
     max_consecutive_errors: int = 5,
     actor: str = "runner",
+    delivery_evidence_recorder: Callable[[str, str], dict[str, Any] | None] | None = None,
 ) -> list[dict[str, Any]]:
     """Reconcile every task in AWAITING_EXTERNAL_CI against its recorded SHA.
 
@@ -149,6 +151,25 @@ def reconcile_awaiting_ci(
             ),
         )
         if observation.status == "SUCCESS":
+            if delivery_evidence_recorder is not None:
+                evidence = delivery_evidence_recorder(task.task_id, sha)
+                if evidence is not None and evidence.get("status") in {"COMMIT_FAILED", "PUSH_FAILED"}:
+                    detail = evidence.get("detail") or evidence.get("status")
+                    transition_task(
+                        session,
+                        task.task_id,
+                        "BLOCKED",
+                        actor=actor,
+                        reason=f"project delivery evidence failed: {detail}",
+                    )
+                    outcomes.append(
+                        {
+                            "task_id": task.task_id,
+                            "status": "UNREACHABLE",
+                            "detail": f"project delivery evidence failed: {detail}",
+                        }
+                    )
+                    continue
             transition_task(session, task.task_id, "DONE", actor=actor, reason="external CI passed")
         elif observation.status == "FAILURE":
             transition_task(session, task.task_id, "REWORK_REQUIRED", actor=actor, reason="external CI failed")

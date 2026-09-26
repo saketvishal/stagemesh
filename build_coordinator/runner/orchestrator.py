@@ -104,7 +104,8 @@ from build_coordinator.runner.routing import (
     role_to_stage,
     route_worker,
 )
-from build_coordinator.project.backlog import task_priorities
+from build_coordinator.project.backlog import load_backlog, persist_delivery_evidence_in_history, task_priorities
+from build_coordinator.project.definition import find_project_root, load_project
 from build_coordinator.execution.git_integrator import GitIntegrationExecutor
 from build_coordinator.runner.ci_reconciliation import reconcile_awaiting_ci
 from build_coordinator.runner.validation import (
@@ -323,6 +324,12 @@ class BuildRunner:
             session,
             repo=self._config.external_ci_repo,
             max_consecutive_errors=self._config.external_ci_max_consecutive_errors,
+            delivery_evidence_recorder=lambda task_id, sha: self._persist_project_delivery_evidence(
+                session,
+                task_id,
+                sha,
+                push_required=True,
+            ),
         )
         for outcome in outcomes:
             if outcome["status"] in {"DONE", "SUCCESS"}:
@@ -1621,6 +1628,17 @@ class BuildRunner:
                 ),
             )
             return
+        evidence = self._persist_project_delivery_evidence(
+            session,
+            execution.task_id,
+            (execution.result_data or {}).get("merge_commit_sha")
+            or (execution.result_data or {}).get("final_main_sha"),
+            push_required=bool((execution.result_data or {}).get("push_status") == "PUSHED"),
+        )
+        if evidence is not None and evidence.get("status") in {"COMMIT_FAILED", "PUSH_FAILED"}:
+            result_detail = evidence.get("detail") or evidence.get("status")
+            self._block_task(session, execution.task_id, f"PROJECT_DELIVERY_EVIDENCE_FAILED: {result_detail}")
+            return
         transition_task(session, execution.task_id, "DONE", actor="runner", reason="integration completed")
         record_event(
             session,
@@ -1631,6 +1649,59 @@ class BuildRunner:
                 event_data=execution.result_data,
             ),
         )
+
+    def _persist_project_delivery_evidence(
+        self,
+        session: Session,
+        task_id: str,
+        sha: Any,
+        *,
+        push_required: bool = False,
+    ) -> dict[str, Any] | None:
+        if not isinstance(sha, str) or not sha:
+            return None
+        repo_root = find_project_root(Path(self._settings.repo_root))
+        if repo_root is None:
+            return None
+        try:
+            project = load_project(repo_root)
+            expected_url = None
+            if push_required:
+                try:
+                    expected_url = expected_remote_url(repo_root, remote=self._config.git_remote)
+                except Exception:
+                    expected_url = None
+            result = persist_delivery_evidence_in_history(
+                repo_root,
+                load_backlog(project),
+                task_id,
+                sha=sha,
+                push_remote=self._config.git_remote if push_required else None,
+                push_branch_name=self._config.git_main_branch,
+                expected_remote_url=expected_url,
+            )
+        except Exception as exc:
+            record_event(
+                session,
+                EventInput(
+                    task_id=task_id,
+                    event_type="project.delivery_evidence_failed",
+                    actor="runner",
+                    event_data={"sha": sha, "error": str(exc)},
+                ),
+            )
+            return {"status": "COMMIT_FAILED", "detail": str(exc), "sha": sha}
+        if result.get("changed"):
+            record_event(
+                session,
+                EventInput(
+                    task_id=task_id,
+                    event_type="project.delivery_evidence_persisted",
+                    actor="runner",
+                    event_data=result,
+                ),
+            )
+        return result
 
     def _recoverable_failure(
         self,

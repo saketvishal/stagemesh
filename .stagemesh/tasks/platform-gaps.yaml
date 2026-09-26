@@ -2,6 +2,9 @@
 # TWO_REVIEWERS enforcement is SM-011 (v0.2-roadmap.yaml).
 tasks:
   - id: SM-012
+    delivered_by:
+      sha: 598a57c019a83492b0af5af987b5e31634d6c8a6
+      version: StageMesh 0.2.0a1
     title: Validate real coding-agent execution end to end
     priority: 30
     risk: HIGH
@@ -70,6 +73,9 @@ tasks:
       allowed_paths: [build_coordinator/runner/, examples/, tests/]
 
   - id: SM-016
+    delivered_by:
+      sha: 598a57c019a83492b0af5af987b5e31634d6c8a6
+      version: StageMesh 0.2.0a1
     title: Workspace setup commands for dependency-heavy projects
     priority: 20
     risk: MEDIUM
@@ -87,6 +93,9 @@ tasks:
       allowed_paths: [build_coordinator/project/, build_coordinator/runner/, tests/, docs/]
 
   - id: SM-017
+    delivered_by:
+      sha: 598a57c019a83492b0af5af987b5e31634d6c8a6
+      version: StageMesh 0.2.0a1
     title: Run validation commands without blocking the coordination loop
     priority: 30
     dependencies: [SM-016]
@@ -103,6 +112,9 @@ tasks:
       allowed_paths: [build_coordinator/runner/, tests/]
 
   - id: SM-018
+    delivered_by:
+      sha: 598a57c019a83492b0af5af987b5e31634d6c8a6
+      version: StageMesh 0.2.0a1
     title: Prefer a different provider for independent review
     priority: 40
     risk: LOW
@@ -118,6 +130,9 @@ tasks:
       allowed_paths: [build_coordinator/runner/routing.py, tests/]
 
   - id: SM-019
+    delivered_by:
+      sha: 598a57c019a83492b0af5af987b5e31634d6c8a6
+      version: StageMesh 0.2.0a1
     title: Agent wrapper non-ASCII Unicode console output safety
     priority: 10
     risk: LOW

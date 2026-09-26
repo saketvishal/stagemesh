@@ -23,6 +23,9 @@ tasks:
       - python -m pytest tests/test_worktree_auto_provision.py tests/test_runner.py -q
 
   - id: SM-002
+    delivered_by:
+      sha: 598a57c019a83492b0af5af987b5e31634d6c8a6
+      version: StageMesh 0.2.0a1
     title: Transient provider failure backoff and retry
     priority: 20
     risk: MEDIUM
@@ -37,6 +40,9 @@ tasks:
       allowed_paths: [build_coordinator/runner/, build_coordinator/execution/, tests/]
 
   - id: SM-003
+    delivered_by:
+      sha: 598a57c019a83492b0af5af987b5e31634d6c8a6
+      version: StageMesh 0.2.0a1
     title: Worker health checks
     priority: 5
     risk: LOW
@@ -57,6 +63,9 @@ tasks:
       - python -m pytest tests/test_worker_health.py -q
 
   - id: SM-004
+    delivered_by:
+      sha: 598a57c019a83492b0af5af987b5e31634d6c8a6
+      version: StageMesh 0.2.0a1
     title: Hot-reload worker and project configuration without restart
     priority: 30
     risk: LOW
@@ -68,6 +77,9 @@ tasks:
       allowed_paths: [build_coordinator/project/, build_coordinator/runner/, tests/]
 
   - id: SM-005
+    delivered_by:
+      sha: 598a57c019a83492b0af5af987b5e31634d6c8a6
+      version: StageMesh 0.2.0a1
     title: Structured event streaming
     priority: 30
     risk: LOW
@@ -78,6 +90,9 @@ tasks:
       allowed_paths: [build_coordinator/events.py, build_coordinator/cli.py, tests/]
 
   - id: SM-006
+    delivered_by:
+      sha: 598a57c019a83492b0af5af987b5e31634d6c8a6
+      version: StageMesh 0.2.0a1
     title: Coordinator metrics endpoint
     priority: 40
     dependencies: [SM-005]
@@ -89,6 +104,9 @@ tasks:
       allowed_paths: [build_coordinator/, tests/]
 
   - id: SM-007
+    delivered_by:
+      sha: 598a57c019a83492b0af5af987b5e31634d6c8a6
+      version: StageMesh 0.2.0a1
     title: Windows Task Scheduler unattended startup
     priority: 40
     dependencies: [SM-002]
@@ -101,6 +119,9 @@ tasks:
       allowed_paths: [build_coordinator/bin/, docs/, tests/]
 
   - id: SM-008
+    delivered_by:
+      sha: 598a57c019a83492b0af5af987b5e31634d6c8a6
+      version: StageMesh 0.2.0a1
     title: GitHub label provisioning for the optional task-source adapter
     priority: 10
     risk: LOW
@@ -121,6 +142,9 @@ tasks:
       allowed_paths: [build_coordinator/task_source/, tests/]
 
   - id: SM-009
+    delivered_by:
+      sha: 598a57c019a83492b0af5af987b5e31634d6c8a6
+      version: StageMesh 0.2.0a1
     title: Azure DevOps task-source adapter
     priority: 60
     risk: MEDIUM
