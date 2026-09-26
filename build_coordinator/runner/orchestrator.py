@@ -625,7 +625,7 @@ class BuildRunner:
             elif execution.role == "PLANNER":
                 self._planner_succeeded(session, execution, result, parsed)
             return
-        if observation.status == "FAILED" and self._recoverable_failure(session, execution, merged, observation):
+        if observation.status == "FAILED" and self._recoverable_failure(session, execution, merged, observation, result):
             return
         if observation.status == "FAILED":
             execution.status = "FAILED"
@@ -1175,6 +1175,7 @@ class BuildRunner:
         execution: BuildRunnerExecution,
         merged: dict,
         observation: ExecutionObservation,
+        result: RunnerCycleResult | None = None,
     ) -> bool:
         """A worker that died, or a provider that failed, must not strand the task.
 
@@ -1193,6 +1194,8 @@ class BuildRunner:
         died = observation.exit_code not in (None, 0) and not merged.get("schema_version")
         if not failure and not died:
             return False
+        if result is None:
+            result = RunnerCycleResult(mode=self._state(session).mode)
         retryable = died or failure in RETRYABLE_PROVIDER_FAILURES
         task = session.get(BuildTask, execution.task_id)
         retry_generation = int((task.retry_generation if task is not None else 0) or 0)
