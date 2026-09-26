@@ -160,6 +160,35 @@ def test_public_dogfood_assets_are_public_safe():
     assert not offenders, offenders
 
 
+def test_public_alpha_claims_match_accepted_evidence():
+    """Public docs should claim only accepted post-alpha evidence and keep
+    unproven delivery/runtime support explicit."""
+    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    roadmap = (REPO_ROOT / "docs" / "ROADMAP.md").read_text(encoding="utf-8")
+    evidence = (REPO_ROOT / "docs" / "evidence" / "CODEX_ACCEPTANCE.md").read_text(
+        encoding="utf-8"
+    )
+    public_claims = "\n".join([readme, roadmap, evidence])
+
+    for required in (
+        "Claude Code worker execution",
+        "Provider failover",
+        "Cross-provider recovery",
+        "Cross-provider independent review",
+        "Concurrent execution",
+        "Cleanup after integration",
+        "Deterministic validation",
+        "Global invocation",
+    ):
+        assert required in public_claims
+
+    assert "GitHub delivery | **DRY-RUN ONLY**" in readme
+    assert "Antigravity IDE runtime | **NOT PROVEN / UNSUPPORTED**" in readme
+    assert "SELF_HOSTING_PROVEN" in evidence and "not claimed" in evidence.lower()
+    assert "cross-provider independent final verification is\n> still pending" not in readme
+    assert "Cross-provider independent review execution when provider runtimes are available" not in roadmap
+
+
 # ---------------------------------------------------------------------------
 # New behavioral coverage: actually exercise the described scenarios.
 # ---------------------------------------------------------------------------
