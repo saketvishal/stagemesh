@@ -11,7 +11,11 @@ import os
 import pytest
 from sqlalchemy import delete, select
 
-from build_coordinator.agents.wrapper import parse_planner_payload, planner_result_payload
+from build_coordinator.agents.wrapper import (
+    parse_planner_payload,
+    planner_result_payload,
+    render_prompt,
+)
 from build_coordinator.db import Base, SessionLocal, engine, initialize_schema
 from build_coordinator.execution import ExecutionObservation, FakeExecutor
 from build_coordinator.execution.results import (
@@ -152,6 +156,39 @@ def _valid_plan_payload():
 
 def _planner_success_observation(plan=None):
     return ExecutionObservation("SUCCEEDED", result_data={"plan": plan or _valid_plan_payload()})
+
+
+def test_planner_wrapper_preserves_planner_contract_in_rendered_prompt():
+    raw = json.dumps(
+        {
+            "role_policy": "PLANNER_ROLE_POLICY_SENTINEL",
+            "resume_context": {
+                "objective": {
+                    "objective_id": "OBJ-X",
+                    "goal": "Decompose the alpha objective",
+                }
+            },
+            "result_file_contract": {
+                "required_top_level_fields": [
+                    "schema_version",
+                    "execution_id",
+                    "task_id",
+                    "role",
+                    "status",
+                    "plan",
+                ]
+            },
+        }
+    )
+
+    rendered = render_prompt("PLANNER", raw, base_ref="main", reviewed_sha=None)
+
+    assert "StageMesh planning agent" in rendered
+    assert "PLANNER_ROLE_POLICY_SENTINEL" in rendered
+    assert "Decompose the alpha objective" in rendered
+    assert "required_top_level_fields" in rendered
+    assert "senior software engineer working autonomously" not in rendered
+    assert "do not modify repository files" in rendered
 
 
 def test_planner_wrapper_extracts_plan_and_owns_lifecycle_identity():
