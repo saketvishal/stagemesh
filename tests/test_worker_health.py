@@ -104,3 +104,19 @@ def test_latest_expiring_cooldown_wins_for_same_provider() -> None:
 
     assert health["w1"].status == "UNAVAILABLE"
     assert health["w1"].failure_class == "NETWORK_FAILURE"
+
+
+def test_non_provider_failure_event_does_not_poison_provider_health() -> None:
+    workers = [_Worker("w1", "openai")]
+    events = [
+        {
+            "provider": "openai",
+            "failure": "NO_CHANGES_PRODUCED",
+            "until": (NOW + timedelta(minutes=30)).isoformat(),
+        }
+    ]
+
+    health = derive_worker_health(workers, events, now=NOW)
+
+    assert health["w1"].status == "AVAILABLE"
+    assert health["w1"].failure_class is None
