@@ -18,10 +18,14 @@ execution:
 
 upstream:
   remote: origin
-  push: false
+  push: true
 
 task_sources:
   github:
     enabled: true
     repo: saketvishal/stagemesh
 
+
+workers:
+  planner:
+    runtime: codex
