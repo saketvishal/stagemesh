@@ -73,6 +73,48 @@ The initial standalone release of StageMesh. All items below are
 
 ---
 
+## Post-1.0 research / future work
+
+> Items below are explicitly deferred from the current roadmap cut.
+
+### Bounded multi-model deliberation and council workflows
+
+Optional deliberation may be explored for decisions where several independent
+reasoning paths could improve operator confidence, without turning ordinary
+implementation work into an expensive council.
+
+Principles for any future design:
+
+- Opt-in and policy-driven, never the default for ordinary implementation.
+- Bounded participant and round counts.
+- Exact task, context, and version identity for every participant.
+- Separately preserved participant proposals and evidence.
+- Deterministic, coordinator-owned final lifecycle decision.
+- Explicit disagreement as evidence, not something silently averaged away.
+- Operator policy controls when deliberation is allowed or required.
+- Enforceable cost and latency budgets.
+- Consensus is not proof of correctness; deterministic validation, exact-SHA
+  review, and existing governance gates remain authoritative.
+
+Candidate use cases:
+
+- Architecture or security review.
+- Ambiguous remediation findings.
+- Planning alternatives for high-risk objectives.
+- Tie-break review after documented reviewer disagreement.
+
+Out of scope:
+
+- Unconstrained swarm behavior.
+- Recursive self-delegation.
+- Replacing deterministic validation or exact-SHA review.
+- Automatic consensus being treated as proof of correctness.
+
+This should compose with review governance (#44) and later evidence/routing
+work, while remaining a distinct optional workflow capability.
+
+---
+
 ## Not planned for this project
 
 The following are out of scope for the generic coordinator and belong in
