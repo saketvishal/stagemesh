@@ -123,10 +123,14 @@ def run_steward_cycle(
         if "worker_leases" in responsibilities:
             result.released_worker_leases.extend(_expire_orphan_worker_leases(session, now))
     else:
-        result.cleanup_candidates.extend(_stale_claim_candidates(session, now))
-        result.cleanup_candidates.extend(_stale_execution_candidates(session, now))
-        result.cleanup_candidates.extend(_lost_execution_claim_candidates(session))
-        result.cleanup_candidates.extend(_orphan_worker_lease_candidates(session, now))
+        if "stale_claims" in responsibilities:
+            result.cleanup_candidates.extend(_stale_claim_candidates(session, now))
+        if "stale_executions" in responsibilities:
+            result.cleanup_candidates.extend(_stale_execution_candidates(session, now))
+        if "lost_execution_claims" in responsibilities:
+            result.cleanup_candidates.extend(_lost_execution_claim_candidates(session))
+        if "worker_leases" in responsibilities:
+            result.cleanup_candidates.extend(_orphan_worker_lease_candidates(session, now))
 
     if "orphaned_worktrees" in responsibilities:
         result.cleanup_candidates.extend(_orphaned_worktree_candidates(session, now))
