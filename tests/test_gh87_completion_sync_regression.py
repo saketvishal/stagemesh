@@ -19,6 +19,7 @@ import pytest
 from sqlalchemy import select
 
 from build_coordinator.db import Base, SessionLocal, engine, initialize_schema
+from build_coordinator.github.sync import compute_objective_github_status
 from build_coordinator.models import BuildObjective, BuildObjectiveEvent, BuildTask
 from build_coordinator.objectives import (
     apply_validated_plan,
@@ -138,8 +139,14 @@ def test_failed_completion_label_update_does_not_report_false_delivery():
     assert client.comments == []
 
     with SessionLocal() as session:
-        assert session.get(BuildObjective, "GH-87").state == "COMPLETED"
+        objective = session.get(BuildObjective, "GH-87")
+        assert objective.state == "COMPLETED"
         assert source.is_objective_fully_delivered(session, "GH-87") is False
+
+        # The objective-level GitHub status surface (used by the periodic
+        # controller status sync) must not report "DONE" either -- it must
+        # stay in a non-terminal, retryable status until delivery succeeds.
+        assert compute_objective_github_status(session, objective, "example/repo") == "REMEDIATING"
 
         failures = session.scalars(
             select(BuildObjectiveEvent).where(
@@ -165,7 +172,9 @@ def test_failed_completion_label_update_does_not_report_false_delivery():
     assert client.closed == ["87"]
 
     with SessionLocal() as session:
+        objective = session.get(BuildObjective, "GH-87")
         assert source.is_objective_fully_delivered(session, "GH-87") is True
+        assert compute_objective_github_status(session, objective, "example/repo") == "DONE"
 
     # Further cycles/restarts must not close or comment again.
     runner.run_once()
