@@ -18,6 +18,7 @@ from build_coordinator.db import DatabaseSchemaError, SessionLocal, configure_pr
 from build_coordinator.models import BuildRunnerExecution, BuildTask, BuildTaskEvent
 from build_coordinator.project.backlog import (
     TaskDefinition,
+    audit_delivery_evidence,
     load_backlog,
     sync_backlog,
     task_priorities,
@@ -76,6 +77,8 @@ def add_project_commands(sub: argparse._SubParsersAction) -> None:
     sync = project_sub.add_parser("sync", help="reconcile .stagemesh/tasks/ into the durable queue")
     common(sync)
     sync.add_argument("--dry-run", action="store_true", help="report what would change without writing")
+    audit = project_sub.add_parser("audit-delivery", help="audit project backlog delivery evidence")
+    common(audit)
     status = project_sub.add_parser("status", help="queue and execution state for the project")
     common(status)
     retry = project_sub.add_parser("retry-push", help="retry delivery of work integrated locally but not yet pushed")
@@ -216,6 +219,8 @@ def handle_project(args: argparse.Namespace) -> None:
             report = sync_backlog(session, project, load_backlog(project), dry_run=args.dry_run)
             session.commit()
             _print(report.as_dict())
+        elif command == "audit-delivery":
+            _print(audit_delivery_evidence(session, project, load_backlog(project)))
         elif command == "status":
             _print(project_status(session, project))
 

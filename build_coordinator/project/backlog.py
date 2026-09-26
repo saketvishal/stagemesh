@@ -15,8 +15,12 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import subprocess
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
+
+import yaml
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -104,7 +108,14 @@ class TaskDefinition:
     metadata: dict[str, Any]
     source: str = ""
     source_owner: str = ""
-    delivered_by: str | None = None
+    delivered_by: Any = None
+
+    @property
+    def delivered_sha(self) -> str | None:
+        if isinstance(self.delivered_by, dict):
+            value = self.delivered_by.get("sha") or self.delivered_by.get("integrated_sha")
+            return str(value).strip() if value else None
+        return None
 
     def description(self) -> str:
         parts = [self.objective.strip()]
@@ -307,7 +318,7 @@ def _definition_from_mapping(
         metadata=metadata,
         source=source,
         source_owner=project.project_id,
-        delivered_by=str(data.get("delivered_by")).strip() if data.get("delivered_by") else None,
+        delivered_by=data.get("delivered_by"),
     )
     if task_id in definition.dependencies:
         local.append("a task cannot depend on itself")
@@ -480,6 +491,18 @@ def sync_backlog(
             )
             continue
         digest = definition.content_hash()
+        evidence = verify_delivery_evidence(project.root, definition)
+        if definition.delivered_by and evidence["status"] == "STALE":
+            report.results.append(
+                SyncResult(
+                    definition.task_id,
+                    definition.title,
+                    "ERROR",
+                    definition.source,
+                    evidence["detail"],
+                )
+            )
+            continue
         if definition.delivered_by and (task is None or task.state == "READY"):
             if not dry_run:
                 if task is None:
@@ -614,3 +637,109 @@ def task_priorities(session: Session, task_ids: list[str]) -> dict[str, int]:
         if row.task_id and isinstance(value, int):
             priorities[row.task_id] = value
     return priorities
+
+
+def verify_delivery_evidence(repo_root: Path, definition: TaskDefinition) -> dict[str, Any]:
+    """Verify structured delivery evidence against authoritative git history.
+
+    Legacy string `delivered_by` declarations remain compatible. They are
+    accepted as manually declared evidence but cannot be git-verified until
+    migrated to the structured form written by `persist_delivery_evidence`.
+    """
+    if not definition.delivered_by:
+        return {"status": "MISSING", "detail": "no delivered_by evidence"}
+    if not isinstance(definition.delivered_by, dict):
+        return {"status": "LEGACY", "detail": str(definition.delivered_by)}
+    sha = definition.delivered_sha
+    if not sha:
+        return {"status": "STALE", "detail": "structured delivered_by is missing sha"}
+    proc = subprocess.run(
+        ["git", "rev-parse", "--verify", f"{sha}^{{commit}}"],
+        cwd=str(repo_root),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        return {"status": "STALE", "detail": f"delivery sha {sha} is not present in repository history"}
+    contains = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", sha, "HEAD"],
+        cwd=str(repo_root),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if contains.returncode != 0:
+        return {"status": "STALE", "detail": f"delivery sha {sha} is not reachable from HEAD"}
+    return {"status": "VERIFIED", "detail": f"delivered by {sha}", "sha": sha}
+
+
+def persist_delivery_evidence(
+    repo_root: Path,
+    definitions: list[TaskDefinition],
+    task_id: str,
+    *,
+    sha: str,
+    version: str | None = None,
+) -> bool:
+    definition = next((item for item in definitions if item.task_id == task_id), None)
+    if definition is None or not definition.source:
+        return False
+    path = repo_root / definition.source
+    if not path.is_file():
+        return False
+    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    tasks = data.get("tasks") if isinstance(data, dict) and isinstance(data.get("tasks"), list) else [data]
+    changed = False
+    for entry in tasks:
+        if isinstance(entry, dict) and str(entry.get("id") or "").strip() == task_id:
+            current = entry.get("delivered_by")
+            if isinstance(current, dict) and (current.get("sha") == sha or current.get("integrated_sha") == sha):
+                return False
+            evidence: dict[str, Any] = {"sha": sha}
+            if version:
+                evidence["version"] = version
+            entry["delivered_by"] = evidence
+            changed = True
+            break
+    if not changed:
+        return False
+    path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+    return True
+
+
+def audit_delivery_evidence(session: Session, project: ProjectDefinition, definitions: list[TaskDefinition]) -> dict[str, Any]:
+    seen: set[str] = set()
+    tasks: list[dict[str, Any]] = []
+    duplicates: set[str] = set()
+    for definition in definitions:
+        if definition.task_id in seen:
+            duplicates.add(definition.task_id)
+        seen.add(definition.task_id)
+    for definition in definitions:
+        task = session.get(BuildTask, definition.task_id)
+        evidence = verify_delivery_evidence(project.root, definition)
+        if definition.task_id in duplicates:
+            status = "SUPERSEDED"
+        elif evidence["status"] == "STALE":
+            status = "SUPERSEDED"
+        elif definition.delivered_by:
+            status = "DELIVERED_WITH_EVIDENCE"
+        elif task is not None and task.state == "DONE":
+            status = "DELIVERED_MISSING_LEDGER_ENTRY"
+        else:
+            status = "STILL_OPEN"
+        tasks.append(
+            {
+                "task_id": definition.task_id,
+                "title": definition.title,
+                "status": status,
+                "source": definition.source,
+                "runtime_state": task.state if task is not None else None,
+                "evidence": evidence,
+            }
+        )
+    counts: dict[str, int] = {}
+    for row in tasks:
+        counts[row["status"]] = counts.get(row["status"], 0) + 1
+    return {"project_id": project.project_id, "counts": dict(sorted(counts.items())), "tasks": tasks}
