@@ -20,6 +20,7 @@ from build_coordinator.policy import CoordinatorPolicyError
 from build_coordinator.project.commands import add_continue_command, add_project_commands
 from build_coordinator.db import DatabaseSchemaError, SessionLocal, configure_process_database
 from build_coordinator.events import stream_events
+from build_coordinator.metrics import coordinator_metrics
 from build_coordinator.service import (
     CheckpointInput,
     ClaimRequest,
@@ -116,6 +117,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_routing_commands(sub)
     _add_watcher_commands(sub)
     _add_events_commands(sub)
+    _add_metrics_commands(sub)
     return parser
 
 
@@ -146,6 +148,7 @@ def _should_bind_legacy_command_to_project(args: argparse.Namespace) -> bool:
         "provide-input",
         "recover-review-environment",
         "recover-execution-retry",
+        "metrics",
     }
 
 
@@ -323,6 +326,10 @@ def _add_events_commands(sub) -> None:
     stream.add_argument("--limit", type=int, help="maximum number of events to emit")
 
 
+def _add_metrics_commands(sub) -> None:
+    sub.add_parser("metrics")
+
+
 def _add_routing_commands(sub) -> None:
     routing = sub.add_parser("routing")
     routing_sub = routing.add_subparsers(dest="routing_command", required=True)
@@ -346,6 +353,9 @@ def _run(args: argparse.Namespace, session) -> None:
         return
     if args.command == "events":
         _events(args, session)
+        return
+    if args.command == "metrics":
+        _metrics(args, session)
         return
     if args.command == "watcher":
         _watcher(args, session)
@@ -410,6 +420,10 @@ def _events_stream(args: argparse.Namespace, session) -> None:
         raise SystemExit(str(exc)) from exc
     for record in records:
         print(json.dumps(record.to_dict()))
+
+
+def _metrics(args: argparse.Namespace, session) -> None:
+    _print(coordinator_metrics(session))
 
 
 def _routing(args: argparse.Namespace, session) -> None:

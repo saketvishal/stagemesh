@@ -22,6 +22,7 @@ from build_coordinator.claims import (
     active_claim,
     active_migration_claim,
     get_task_scope,
+    task_source_is_closed,
     utcnow,
 )
 from build_coordinator.models import (
@@ -43,6 +44,7 @@ REASON_MIGRATION_SERIALIZATION = "migration_serialization"
 REASON_WORKER_UNAVAILABLE = "worker_unavailable"
 REASON_HUMAN_GATE_OPEN = "human_gate_open"
 REASON_WORKTREE_OR_WORKER_OWNED = "worktree_or_worker_owned"
+REASON_SOURCE_CLOSED = "source_closed"
 
 SCHEDULER_REASONS = frozenset({
     REASON_DEPENDENCY_NOT_DONE,
@@ -54,6 +56,7 @@ SCHEDULER_REASONS = frozenset({
     REASON_WORKER_UNAVAILABLE,
     REASON_HUMAN_GATE_OPEN,
     REASON_WORKTREE_OR_WORKER_OWNED,
+    REASON_SOURCE_CLOSED,
 })
 
 
@@ -249,6 +252,9 @@ def check_task_readiness(
     now = now or utcnow()
     if active_tasks is None:
         active_tasks = active_implementation_tasks(session, now)
+
+    if task_source_is_closed(task):
+        return False, REASON_SOURCE_CLOSED
 
     # 1. Dependency readiness
     for dep in task.dependencies:

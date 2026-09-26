@@ -125,6 +125,11 @@ class AzureDevOpsTaskSource(TaskSource):
                 description=description[:2000],
                 acceptance_criteria=criteria,
                 dependencies=list(item.get("dependencies") or []),
+                definition_metadata={
+                    "task_source": "azure_devops",
+                    "source_work_item_id": work_item_id,
+                    "source_url": url,
+                },
             ),
         )
         session.flush()

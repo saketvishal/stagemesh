@@ -206,6 +206,11 @@ C:\path\to\repo\build_coordinator\bin\stagemesh-windows-startup.ps1 uninstall `
   -ProjectDir C:\path\to\project
 ```
 
+`status` prints JSON with the deterministic `task_name`, whether the task is
+currently installed, and the resolved `project_dir`. Re-running `install` is
+the supported way to update the scheduled action after moving the repo,
+changing projects, or changing `-MaxCycles`.
+
 Use the same task-name-affecting flags for `status` and `uninstall` that were
 used at install time. For example:
 
