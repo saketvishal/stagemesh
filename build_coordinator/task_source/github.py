@@ -458,6 +458,10 @@ class GitHubTaskSource(TaskSource):
         objective_id: str | None = None,
     ) -> SyncResult:
         existing = session.get(BuildTask, task_id)
+        source_was_closed = bool(
+            existing is not None
+            and str((existing.definition_metadata or {}).get("source_state") or "").upper() == "CLOSED"
+        )
         review_policy = self._review_policy_from_labels(labels)
         risk_level = "HIGH" if any("risk:high" in l.lower() for l in labels) else "MEDIUM"
         priority = self._parse_priority(labels, body)
@@ -493,6 +497,22 @@ class GitHubTaskSource(TaskSource):
             },
         )
         task = upsert_task(session, spec)
+        if source_was_closed:
+            action = "SOURCE_OPEN"
+            record_event(
+                session,
+                EventInput(
+                    task_id=task.task_id,
+                    event_type="task_source.source_state_changed",
+                    actor="github-sync",
+                    event_data={
+                        "source": url,
+                        "issue_number": (task.definition_metadata or {}).get("source_issue_number"),
+                        "from_state": "CLOSED",
+                        "to_state": "OPEN",
+                    },
+                ),
+            )
         if objective_id:
             task.objective_id = objective_id
             if task.reason_created == OBJECTIVE_ROOT_COMPAT_REASON:
@@ -505,7 +525,11 @@ class GitHubTaskSource(TaskSource):
         details = (
             f"in sync ({task.state})"
             if action == "SKIPPED"
-            else f"Synced from GitHub issue as {task.state} (priority: {priority})"
+            else (
+                "GitHub source issue reopened; source suppression cleared"
+                if action == "SOURCE_OPEN"
+                else f"Synced from GitHub issue as {task.state} (priority: {priority})"
+            )
         )
         return SyncResult(
             task_id=task.task_id,
