@@ -18,6 +18,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from build_coordinator.config import get_settings
+from build_coordinator.db import with_sqlite_retry
 from build_coordinator.events import record_event
 from build_coordinator.execution.base import (
     ExecutionLaunch,
@@ -227,10 +228,17 @@ class BuildRunner:
             time.sleep(self._config.poll_seconds)
 
     def run_once(self) -> RunnerCycleResult:
-        with self._session_factory() as session:
-            result = self._run_once(session)
-            session.commit()
-            return result
+        def _cycle() -> RunnerCycleResult:
+            with self._session_factory() as session:
+                result = self._run_once(session)
+                session.commit()
+                return result
+
+        # The whole cycle (including the autoflush a later query in
+        # `_run_once` can trigger) is retried from a fresh session on
+        # transient SQLite writer contention, since a partially flushed,
+        # now-failed session cannot be resumed safely.
+        return with_sqlite_retry(_cycle)
 
     def _run_once(self, session: Session) -> RunnerCycleResult:
         state = ensure_state(session)

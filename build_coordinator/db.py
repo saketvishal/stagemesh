@@ -8,18 +8,31 @@ URL. Separate lifecycles in one process stay isolated.
 from __future__ import annotations
 
 import os
+import random
+import time
 from pathlib import Path
+from typing import Callable, TypeVar
 from urllib.parse import urlparse
 from urllib.request import url2pathname
 
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from build_coordinator.config import BuildCoordinatorSettings, get_settings
 
-CURRENT_SCHEMA_VERSION = 5
+CURRENT_SCHEMA_VERSION = 6
 SCHEMA_VERSION_TABLE = "build_coordinator_schema_version"
+
+# Bounded wait a single SQLite connection will block for another writer's
+# transaction before raising "database is locked". This is deliberately
+# short: a valid single coordinator lifecycle should never hold a write
+# transaction this long, so a timeout this size only absorbs the momentary
+# contention SQLite itself imposes around a single writer, not sustained
+# multi-writer contention (that is what the coordinator lock in
+# `coordinator_lock.py` exists to prevent).
+SQLITE_BUSY_TIMEOUT_MS = 5_000
 
 
 class Base(DeclarativeBase):
@@ -214,12 +227,90 @@ def engine_from_url(database_url: str, *, data_dir: Path | None = None) -> Engin
             sqlite_path = Path(database_url.replace("sqlite:///", "", 1))
             if sqlite_path.parent and str(sqlite_path.parent) not in {".", ""}:
                 sqlite_path.parent.mkdir(parents=True, exist_ok=True)
-        return create_engine(
+        engine = create_engine(
             database_url,
             connect_args={"check_same_thread": False},
             future=True,
         )
+        _configure_sqlite_pragmas(engine, in_memory=":memory:" in database_url)
+        return engine
     return create_engine(database_url, future=True)
+
+
+def _configure_sqlite_pragmas(engine: Engine, *, in_memory: bool) -> None:
+    """StageMesh's SQLite access pattern is one coordinator process issuing
+    short, discrete write transactions per orchestration cycle, with
+    occasional concurrent readers (CLI status/inspection commands) against
+    the same file. WAL lets readers proceed without blocking on the
+    coordinator's writer, and a short `busy_timeout` absorbs the brief
+    window where SQLite itself briefly holds the write lock -- it is not a
+    substitute for the single-coordinator lock (`coordinator_lock.py`),
+    which is what prevents sustained multi-writer contention in the first
+    place.
+    """
+
+    @event.listens_for(engine, "connect")
+    def _set_sqlite_pragma(dbapi_connection, _connection_record) -> None:
+        cursor = dbapi_connection.cursor()
+        try:
+            if not in_memory:
+                cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA synchronous=NORMAL")
+            cursor.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}")
+            cursor.execute("PRAGMA foreign_keys=ON")
+        finally:
+            cursor.close()
+
+
+class DatabaseBusyError(RuntimeError):
+    """Raised when SQLite write contention persisted through every retry.
+
+    A transient "database is locked"/"database is busy" error inside one
+    valid coordinator lifecycle is retried with bounded backoff (see
+    `with_sqlite_retry`); this is only raised once that budget is
+    exhausted, so callers can treat it as a real, observable failure rather
+    than a silent crash.
+    """
+
+
+def _is_transient_sqlite_lock_error(exc: OperationalError) -> bool:
+    message = str(getattr(exc, "orig", exc)).lower()
+    return "database is locked" in message or "database is busy" in message
+
+
+_T = TypeVar("_T")
+
+
+def with_sqlite_retry(
+    fn: Callable[[], _T],
+    *,
+    attempts: int = 5,
+    base_delay: float = 0.05,
+    max_delay: float = 1.0,
+) -> _T:
+    """Run `fn`, retrying with bounded exponential backoff if it fails on
+    transient SQLite writer contention.
+
+    `fn` must be safe to call more than once from scratch (e.g. open its own
+    session/transaction internally) since a failed attempt is abandoned
+    entirely, not resumed. Any other exception, or lock contention that
+    outlasts `attempts`, propagates (lock contention becomes
+    `DatabaseBusyError` so it is distinguishable from a real query/logic
+    bug).
+    """
+    for attempt in range(1, attempts + 1):
+        try:
+            return fn()
+        except OperationalError as exc:
+            if not _is_transient_sqlite_lock_error(exc):
+                raise
+            if attempt == attempts:
+                raise DatabaseBusyError(
+                    f"SQLite write contention persisted after {attempts} attempts: {exc}"
+                ) from exc
+            delay = min(max_delay, base_delay * (2 ** (attempt - 1)))
+            time.sleep(delay + random.uniform(0, base_delay))
+    raise AssertionError("unreachable")  # pragma: no cover
 
 
 _process_database: DatabaseLifecycle | None = None
