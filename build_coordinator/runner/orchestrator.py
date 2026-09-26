@@ -2216,6 +2216,19 @@ class BuildRunner:
         slot_count = max(1, int(worker.max_concurrency or 1))
         reserved_slot: int | None = None
         for slot_index in range(slot_count):
+            now = _now()
+            stale_leases = session.scalars(
+                select(BuildWorkerLease)
+                .where(BuildWorkerLease.worker_id == worker.worker_id)
+                .where(BuildWorkerLease.slot_index == slot_index)
+                .where(BuildWorkerLease.status == "ACTIVE")
+                .where(BuildWorkerLease.lease_expires_at <= now)
+            ).all()
+            for stale in stale_leases:
+                stale.status = "EXPIRED"
+                stale.lease_expires_at = now
+            if stale_leases:
+                session.flush()
             lease = BuildWorkerLease(
                 worker_id=worker.worker_id,
                 provider=worker.provider,
@@ -2224,7 +2237,7 @@ class BuildRunner:
                 process_id=str(os.getpid()),
                 task_id=task_id,
                 execution_id=execution_id,
-                lease_expires_at=_now() + timedelta(seconds=worker.timeout_seconds or 3600),
+                lease_expires_at=now + timedelta(seconds=worker.timeout_seconds or 3600),
                 status="ACTIVE",
             )
             try:
@@ -2244,7 +2257,9 @@ class BuildRunner:
                 session.flush()
         except IntegrityError:
             release_worker_leases_for_execution(session, execution_id)
+            session.commit()
             return
+        session.commit()
         try:
             if isinstance(executor, SubprocessExecutor):
                 executor.remember_result_path(execution_id, result_path)
@@ -2267,6 +2282,7 @@ class BuildRunner:
         except Exception:
             release_worker_leases_for_execution(session, execution_id)
             session.delete(row)
+            session.commit()
             raise
         row.execution_id = handle.execution_id
         row.process_id = handle.process_id
