@@ -13,7 +13,7 @@ from typing import Any
 
 from sqlalchemy import select
 
-from build_coordinator.claims import task_source_is_closed
+from build_coordinator.claims import task_source_eligibility, task_source_is_closed
 from build_coordinator.db import DatabaseSchemaError, SessionLocal, configure_process_database
 from build_coordinator.models import BuildRunnerExecution, BuildTask, BuildTaskEvent
 from build_coordinator.project.backlog import (
@@ -297,10 +297,20 @@ def project_status(session, project: ProjectDefinition) -> dict[str, Any]:
         "concurrency": project.concurrency,
         "tasks_by_state": dict(sorted(by_state.items())),
         "blocked": _blocked_reasons(session),
+        "deferred": [
+            {
+                "task_id": t.task_id,
+                "eligibility": task_source_eligibility(t),
+                "reason": (t.definition_metadata or {}).get("source_eligibility_reason"),
+            }
+            for t in tasks
+            if task_source_eligibility(t) != "ELIGIBLE"
+        ],
         "tasks": [
             {
                 "task_id": t.task_id,
                 "state": t.state,
+                "source_eligibility": task_source_eligibility(t),
                 "priority": priorities.get(t.task_id),
                 "review_policy": t.review_policy,
                 "dependencies": list(t.dependencies or []),

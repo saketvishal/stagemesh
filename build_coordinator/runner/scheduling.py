@@ -22,7 +22,8 @@ from build_coordinator.claims import (
     active_claim,
     active_migration_claim,
     get_task_scope,
-    task_source_is_closed,
+    objective_dependency_is_satisfied,
+    task_source_is_executable,
     utcnow,
 )
 from build_coordinator.models import (
@@ -46,6 +47,7 @@ REASON_WORKER_UNAVAILABLE = "worker_unavailable"
 REASON_HUMAN_GATE_OPEN = "human_gate_open"
 REASON_WORKTREE_OR_WORKER_OWNED = "worktree_or_worker_owned"
 REASON_SOURCE_CLOSED = "source_closed"
+REASON_SOURCE_DEFERRED = "source_deferred"
 
 SCHEDULER_REASONS = frozenset({
     REASON_DEPENDENCY_NOT_DONE,
@@ -58,6 +60,7 @@ SCHEDULER_REASONS = frozenset({
     REASON_HUMAN_GATE_OPEN,
     REASON_WORKTREE_OR_WORKER_OWNED,
     REASON_SOURCE_CLOSED,
+    REASON_SOURCE_DEFERRED,
 })
 
 
@@ -270,13 +273,21 @@ def check_task_readiness(
     if active_tasks is None:
         active_tasks = active_implementation_tasks(session, now)
 
-    if task_source_is_closed(task):
-        return False, REASON_SOURCE_CLOSED
+    if not task_source_is_executable(task):
+        metadata = task.definition_metadata or {}
+        if str(metadata.get("source_state") or "").upper() == "CLOSED":
+            return False, REASON_SOURCE_CLOSED
+        return False, REASON_SOURCE_DEFERRED
 
     # 1. Dependency readiness
     for dep in task.dependencies:
+        objective_dependency = session.get(BuildObjective, dep)
+        if objective_dependency is not None:
+            if not objective_dependency_is_satisfied(session, objective_dependency):
+                return False, REASON_DEPENDENCY_NOT_DONE
+            continue
         dependency = session.get(BuildTask, dep)
-        if dependency is None or dependency.state != "DONE":
+        if dependency is None or not task_source_is_executable(dependency) or dependency.state != "DONE":
             return False, REASON_DEPENDENCY_NOT_DONE
 
     # 2. Objective human gates

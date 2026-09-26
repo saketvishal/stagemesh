@@ -15,6 +15,7 @@ from typing import Any
 
 from sqlalchemy import select
 
+from build_coordinator.claims import task_source_is_executable
 from build_coordinator.events import record_event
 from build_coordinator.models import (
     BuildObjective,
@@ -25,10 +26,20 @@ from build_coordinator.models import (
 )
 from build_coordinator.objectives import _ensure_planner_task, create_objective, get_planner_task
 from build_coordinator.service import upsert_task, utcnow
-from build_coordinator.task_source.base import SyncResult, TaskSource, source_identity_metadata
+from build_coordinator.task_source.base import (
+    SOURCE_DEFERRED,
+    SOURCE_ELIGIBLE,
+    SyncResult,
+    TaskSource,
+    source_identity_metadata,
+)
 from build_coordinator.types import EventInput, OBJECTIVE_ROOT_COMPAT_REASON, ObjectiveSpec, TaskSpec
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_label(label: Any) -> str:
+    return str(label or "").strip().lower()
 
 
 def _resolve_issue_number_static(
@@ -183,11 +194,16 @@ class GitHubTaskSource(TaskSource):
         labels: tuple[str, ...] = (),
         dry_run: bool = False,
         client: Any = None,
+        eligibility_include_labels: tuple[str, ...] = (),
+        eligibility_exclude_labels: tuple[str, ...] = (),
     ) -> None:
         self.repo = repo or os.getenv("BUILD_COORDINATOR_GITHUB_REPO")
         self.labels = labels
         self.dry_run = dry_run
         self._client = client  # For mocking/testing
+        self.eligibility_include_labels = tuple(_normalize_label(l) for l in eligibility_include_labels if str(l).strip())
+        configured_excludes = tuple(_normalize_label(l) for l in eligibility_exclude_labels if str(l).strip())
+        self.eligibility_exclude_labels = configured_excludes or ("stagemesh:deferred",)
         self._outbound_events: list[dict[str, Any]] = []
         self._labels_ensured = False
 
@@ -568,21 +584,19 @@ class GitHubTaskSource(TaskSource):
         source_url: str,
         source_state: str,
         previous_state: str,
+        eligibility: str = SOURCE_ELIGIBLE,
+        eligibility_reason: str | None = None,
     ) -> None:
         planner = get_planner_task(session, objective.objective_id)
         if planner is not None:
-            metadata = dict(planner.definition_metadata or {})
-            metadata.update(
-                source_identity_metadata(
-                    source_type="github",
-                    source_owner=self.repo,
-                    source_ref=str(issue_number),
-                    source_url=source_url,
-                    source_state=source_state,
-                    legacy={"source_issue_number": issue_number},
-                )
+            self._apply_planner_source_metadata(
+                planner,
+                issue_number=issue_number,
+                source_url=source_url,
+                source_state=source_state,
+                eligibility=eligibility,
+                eligibility_reason=eligibility_reason,
             )
-            planner.definition_metadata = metadata
         if source_state == previous_state:
             return
         session.add(
@@ -605,6 +619,7 @@ class GitHubTaskSource(TaskSource):
         body = issue.get("body", "")
         labels = [l.get("name", "") if isinstance(l, dict) else str(l) for l in issue.get("labels", [])]
         url = issue.get("url", f"https://github.com/{self.repo}/issues/{number}")
+        eligibility, eligibility_reason = self._source_eligibility_from_labels(labels)
 
         # Check for explicit task_id in body e.g. <!-- task_id: ... -->
         task_id_match = re.search(r"<!--\s*task_id:\s*([A-Za-z0-9_-]+)\s*-->", body)
@@ -621,6 +636,7 @@ class GitHubTaskSource(TaskSource):
             direct_execution = self._objective_direct_execution_enabled(labels, body)
             was_current = self._objective_sync_is_current(session, task_id, title, body, ac, deps)
             existed = session.get(BuildObjective, task_id) is not None
+            previous_eligibility = self._objective_source_eligibility(session, task_id)
             objective = self._sync_objective(
                 session,
                 task_id,
@@ -629,16 +645,25 @@ class GitHubTaskSource(TaskSource):
                 ac,
                 deps,
                 url,
+                eligibility=eligibility,
+                eligibility_reason=eligibility_reason,
                 reconcile_historical_root=not direct_execution,
             )
             if not direct_execution:
-                action = "SKIPPED" if was_current else ("UPDATED" if existed else "CREATED")
+                current_eligibility = self._objective_source_eligibility(session, task_id)
+                if existed and previous_eligibility != current_eligibility:
+                    action = "SOURCE_ELIGIBILITY_CHANGED"
+                else:
+                    action = "SKIPPED" if was_current else ("UPDATED" if existed else "CREATED")
                 return SyncResult(
                     task_id=task_id,
                     title=title,
                     action=action,
                     source_ref=url,
-                    details="Synced from GitHub issue as authoritative objective; no root implementation task created",
+                    details=(
+                        "Synced from GitHub issue as authoritative objective; "
+                        f"eligibility: {current_eligibility or eligibility}; no root implementation task created"
+                    ),
                 )
             deps = list(objective.dependencies)
 
@@ -651,8 +676,21 @@ class GitHubTaskSource(TaskSource):
             deps,
             labels,
             url,
+            eligibility=eligibility,
+            eligibility_reason=eligibility_reason,
             objective_id=task_id if is_objective else None,
         )
+
+    def _source_eligibility_from_labels(self, labels: list[str]) -> tuple[str, str | None]:
+        normalized = {_normalize_label(label) for label in labels}
+        excludes = set(self.eligibility_exclude_labels)
+        matched_excludes = sorted(normalized & excludes)
+        if matched_excludes:
+            return SOURCE_DEFERRED, f"matched exclude label(s): {', '.join(matched_excludes)}"
+        includes = set(self.eligibility_include_labels)
+        if includes and not (normalized & includes):
+            return SOURCE_DEFERRED, f"missing include label(s): {', '.join(sorted(includes))}"
+        return SOURCE_ELIGIBLE, "eligible by source label policy"
 
     @staticmethod
     def _objective_direct_execution_enabled(labels: list[str], body: str) -> bool:
@@ -671,6 +709,8 @@ class GitHubTaskSource(TaskSource):
         deps: list[str],
         labels: list[str],
         url: str,
+        eligibility: str = SOURCE_ELIGIBLE,
+        eligibility_reason: str | None = None,
         objective_id: str | None = None,
     ) -> SyncResult:
         existing = session.get(BuildTask, task_id)
@@ -695,6 +735,10 @@ class GitHubTaskSource(TaskSource):
             action = "SKIPPED" if unchanged else "UPDATED"
         else:
             action = "CREATED"
+        previous_eligibility = str(
+            ((existing.definition_metadata or {}) if existing is not None else {}).get("source_eligibility")
+            or "ELIGIBLE"
+        ).upper()
 
         issue_match = re.search(r"/issues/(\d+)$", url)
         issue_number = int(issue_match.group(1)) if issue_match else None
@@ -714,11 +758,16 @@ class GitHubTaskSource(TaskSource):
                     source_ref=str(issue_number if issue_number is not None else task_id),
                     source_url=url,
                     source_state="OPEN",
+                    source_eligibility=eligibility,
+                    source_eligibility_reason=eligibility_reason,
                     legacy={"source_issue_number": issue_number},
                 ),
             },
         )
         task = upsert_task(session, spec)
+        current_eligibility = str((task.definition_metadata or {}).get("source_eligibility") or "ELIGIBLE").upper()
+        if existing is not None and action == "SKIPPED" and previous_eligibility != current_eligibility:
+            action = "SOURCE_ELIGIBILITY_CHANGED"
         if source_was_closed:
             action = "SOURCE_OPEN"
             record_event(
@@ -751,7 +800,7 @@ class GitHubTaskSource(TaskSource):
             else (
                 "GitHub source issue reopened; source suppression cleared"
                 if action == "SOURCE_OPEN"
-                else f"Synced from GitHub issue as {task.state} (priority: {priority})"
+                else f"Synced from GitHub issue as {task.state} (priority: {priority}; eligibility: {eligibility})"
             )
         )
         return SyncResult(
@@ -906,6 +955,8 @@ class GitHubTaskSource(TaskSource):
         deps: list[str],
         url: str,
         *,
+        eligibility: str = SOURCE_ELIGIBLE,
+        eligibility_reason: str | None = None,
         reconcile_historical_root: bool = True,
     ) -> BuildObjective:
         existing = session.get(BuildObjective, objective_id)
@@ -927,6 +978,14 @@ class GitHubTaskSource(TaskSource):
                 planner = _ensure_planner_task(session, existing)
             if planner is not None:
                 planner.dependencies = authoritative_deps
+                self._apply_planner_source_metadata(
+                    planner,
+                    issue_number=self._issue_number_from_url(url),
+                    source_url=url,
+                    source_state="OPEN",
+                    eligibility=eligibility,
+                    eligibility_reason=eligibility_reason,
+                )
             return existing
         obj = create_objective(
             session,
@@ -962,12 +1021,50 @@ class GitHubTaskSource(TaskSource):
                 source_url=url,
                 source_state="OPEN",
                 previous_state="",
+                eligibility=eligibility,
+                eligibility_reason=eligibility_reason,
             )
         planner = get_planner_task(session, objective_id)
         if planner is not None:
             planner.dependencies = list(deps)
         session.flush()
         return obj
+
+    @staticmethod
+    def _issue_number_from_url(url: str) -> int | None:
+        issue_match = re.search(r"/issues/(\d+)$", url)
+        return int(issue_match.group(1)) if issue_match else None
+
+    def _apply_planner_source_metadata(
+        self,
+        planner: BuildTask,
+        *,
+        issue_number: int | None,
+        source_url: str,
+        source_state: str,
+        eligibility: str = SOURCE_ELIGIBLE,
+        eligibility_reason: str | None = None,
+    ) -> None:
+        metadata = dict(planner.definition_metadata or {})
+        metadata.update(
+            source_identity_metadata(
+                source_type="github",
+                source_owner=self.repo,
+                source_ref=str(issue_number if issue_number is not None else planner.task_id),
+                source_url=source_url,
+                source_state=source_state,
+                source_eligibility=eligibility,
+                source_eligibility_reason=eligibility_reason,
+                legacy={"source_issue_number": issue_number},
+            )
+        )
+        planner.definition_metadata = metadata
+
+    def _objective_source_eligibility(self, session, objective_id: str) -> str | None:
+        planner = get_planner_task(session, objective_id)
+        if planner is None:
+            return None
+        return str((planner.definition_metadata or {}).get("source_eligibility") or "ELIGIBLE").upper()
 
     def _objective_sync_is_current(
         self,
@@ -1427,6 +1524,10 @@ class GitHubTaskSource(TaskSource):
         if session.get(BuildObjective, task_id) is not None:
             return True
 
+        task = session.get(BuildTask, task_id)
+        if task is not None and not task_source_is_executable(task):
+            return True
+
         # Check source identity: Only GitHub-originating tasks can update GitHub!
         issue_number = self._resolve_issue_number(session, task_id, is_objective=False)
         if issue_number is None:
@@ -1482,6 +1583,9 @@ class GitHubTaskSource(TaskSource):
         # Only sync when objective is actually COMPLETED
         obj = session.get(BuildObjective, objective_id)
         if obj is None or obj.state != "COMPLETED":
+            return True
+        objective_eligibility = self._objective_source_eligibility(session, objective_id)
+        if objective_eligibility is not None and objective_eligibility != SOURCE_ELIGIBLE:
             return True
 
         # Resolve issue number

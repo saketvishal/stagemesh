@@ -33,6 +33,7 @@ from build_coordinator.models import (
     BuildTask,
     BuildTaskEvent,
 )
+from build_coordinator.claims import objective_dependency_is_satisfied, task_source_is_executable
 from build_coordinator.policy import CoordinatorPolicyError
 from build_coordinator.service import upsert_task, utcnow
 from build_coordinator.planner import planner_task_id
@@ -150,11 +151,11 @@ def objective_dependencies_satisfied(session: Session, objective: BuildObjective
     for dep_id in objective.dependencies or []:
         dep_objective = session.get(BuildObjective, dep_id)
         if dep_objective is not None:
-            if dep_objective.state != "COMPLETED":
+            if not objective_dependency_is_satisfied(session, dep_objective):
                 return False
             continue
         dep_task = session.get(BuildTask, dep_id)
-        if dep_task is None or dep_task.state != "DONE":
+        if dep_task is None or not task_source_is_executable(dep_task) or dep_task.state != "DONE":
             return False
     return True
 
@@ -205,6 +206,13 @@ def objective_source_is_closed(session: Session, objective: BuildObjective) -> b
     if latest is None:
         return False
     return str((latest.event_data or {}).get("to_state") or "").upper() == "CLOSED"
+
+
+def objective_source_is_executable(session: Session, objective: BuildObjective) -> bool:
+    planner = get_planner_task(session, objective.objective_id)
+    if planner is not None:
+        return task_source_is_executable(planner)
+    return not objective_source_is_closed(session, objective)
 
 
 def open_gates(session: Session, objective_id: str) -> list[BuildObjectiveGate]:
@@ -676,7 +684,7 @@ def run_objective_cycle(session: Session) -> list[ObjectiveReconcileSummary]:
     restart) converges rather than duplicating work."""
     summaries: list[ObjectiveReconcileSummary] = []
     for objective in list_objectives(session):
-        if objective_source_is_closed(session, objective):
+        if not objective_source_is_executable(session, objective):
             continue
         # HUMAN_GATE still reconciles: later blocked-task reasons (especially
         # REMOTE_PUSH_APPROVAL_REQUIRED) must surface as additional typed

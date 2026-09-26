@@ -24,6 +24,8 @@ task_sources:
   github:
     enabled: true
     repo: saketvishal/stagemesh
+    exclude_labels:
+      - stagemesh:deferred
 
 
 workers:
