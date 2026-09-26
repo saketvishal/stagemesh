@@ -22,6 +22,7 @@ from build_coordinator.claims import (
     active_claim,
     active_migration_claim,
     get_task_scope,
+    objective_dependency_is_satisfied,
     task_source_is_executable,
     utcnow,
 )
@@ -282,7 +283,7 @@ def check_task_readiness(
     for dep in task.dependencies:
         objective_dependency = session.get(BuildObjective, dep)
         if objective_dependency is not None:
-            if objective_dependency.state != "COMPLETED":
+            if not objective_dependency_is_satisfied(session, objective_dependency):
                 return False, REASON_DEPENDENCY_NOT_DONE
             continue
         dependency = session.get(BuildTask, dep)

@@ -22,6 +22,7 @@ from build_coordinator.types import (
 )
 from build_coordinator.models import (
     BuildObjective,
+    BuildObjectiveEvent,
     BuildCoordinatorState,
     BuildTask,
     BuildTaskClaim,
@@ -145,6 +146,27 @@ def task_source_is_executable(task: BuildTask) -> bool:
     return task_source_eligibility(task) == "ELIGIBLE"
 
 
+def objective_source_is_executable(session: Session, objective: BuildObjective) -> bool:
+    from build_coordinator.planner import planner_task_id
+
+    planner = session.get(BuildTask, planner_task_id(objective.objective_id))
+    if planner is not None:
+        return task_source_is_executable(planner)
+    latest = session.scalar(
+        select(BuildObjectiveEvent)
+        .where(BuildObjectiveEvent.objective_id == objective.objective_id)
+        .where(BuildObjectiveEvent.event_type == "objective.source_state_changed")
+        .order_by(BuildObjectiveEvent.created_at.desc())
+    )
+    if latest is not None and str((latest.event_data or {}).get("to_state") or "").upper() == "CLOSED":
+        return False
+    return True
+
+
+def objective_dependency_is_satisfied(session: Session, objective: BuildObjective) -> bool:
+    return objective_source_is_executable(session, objective) and objective.state == "COMPLETED"
+
+
 def task_is_claimable(
     session: Session,
     task: BuildTask,
@@ -161,7 +183,7 @@ def task_is_claimable(
     for dep in task.dependencies:
         objective_dependency = session.get(BuildObjective, dep)
         if objective_dependency is not None:
-            if objective_dependency.state != "COMPLETED":
+            if not objective_dependency_is_satisfied(session, objective_dependency):
                 return False
             continue
         dependency = session.get(BuildTask, dep)
