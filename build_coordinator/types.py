@@ -105,6 +105,7 @@ class TaskSpec:
     base_sha: str | None = None
     migration_allowed: bool = False
     ownership_scope: TaskOwnershipScope | None = None
+    definition_metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if isinstance(self.ownership_scope, dict):

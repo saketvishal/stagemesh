@@ -54,7 +54,12 @@ _KNOWN_KEYS = frozenset(
         "migration_allowed",
         "ownership",
         "delivered_by",
+        "metadata",
     }
+)
+_METADATA_MAX_BYTES = 16 * 1024
+_SECRET_METADATA_KEY = re.compile(
+    r"(secret|token|credential|password|passwd|api[_-]?key|private[_-]?key)", re.IGNORECASE
 )
 # Definition refreshes are only applied while the task has no live or
 # finished work attached; anything else is deferred, never disturbed.
@@ -87,6 +92,7 @@ class TaskDefinition:
     program_key: str
     migration_allowed: bool
     ownership: dict[str, Any] | None
+    metadata: dict[str, Any]
     source: str = ""
     delivered_by: str | None = None
 
@@ -111,6 +117,7 @@ class TaskDefinition:
             program_key=self.program_key,
             migration_allowed=self.migration_allowed,
             ownership_scope=self.ownership,  # type: ignore[arg-type]
+            definition_metadata=self.metadata,
         )
 
     def content_hash(self) -> str:
@@ -128,6 +135,7 @@ class TaskDefinition:
                 "program_key": self.program_key,
                 "migration_allowed": self.migration_allowed,
                 "ownership": self.ownership,
+                "metadata": self.metadata,
                 "delivered_by": self.delivered_by,
             },
             "priority": self.priority,
@@ -156,6 +164,64 @@ def _str_list(value: Any, where: str, problems: list[str]) -> tuple[str, ...]:
         return tuple(s for s in out if s)
     problems.append(f"{where} must be a list of strings")
     return ()
+
+
+def _metadata(value: Any, where: str, problems: list[str]) -> dict[str, Any]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        problems.append(f"{where} must be a mapping")
+        return {}
+    non_string_keys = _non_string_metadata_key_paths(value)
+    if non_string_keys:
+        problems.append(f"{where} keys must be strings: {non_string_keys}")
+    try:
+        encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    except (TypeError, ValueError):
+        problems.append(f"{where} must contain only JSON/YAML-safe values")
+        return {}
+    if len(encoded.encode("utf-8")) > _METADATA_MAX_BYTES:
+        problems.append(f"{where} must be at most {_METADATA_MAX_BYTES} bytes when encoded as JSON")
+    secret_keys = _secret_metadata_paths(value)
+    if secret_keys:
+        problems.append(f"{where} must not contain secret or credential keys: {secret_keys}")
+    return value
+
+
+def _non_string_metadata_key_paths(value: Any, prefix: str = "") -> list[str]:
+    if isinstance(value, dict):
+        paths: list[str] = []
+        for key, child in value.items():
+            key_text = str(key)
+            path = f"{prefix}.{key_text}" if prefix else key_text
+            if not isinstance(key, str):
+                paths.append(path)
+            paths.extend(_non_string_metadata_key_paths(child, path))
+        return paths
+    if isinstance(value, list):
+        paths = []
+        for index, child in enumerate(value):
+            paths.extend(_non_string_metadata_key_paths(child, f"{prefix}[{index}]"))
+        return paths
+    return []
+
+
+def _secret_metadata_paths(value: Any, prefix: str = "") -> list[str]:
+    if isinstance(value, dict):
+        paths: list[str] = []
+        for key, child in value.items():
+            key_text = str(key)
+            path = f"{prefix}.{key_text}" if prefix else key_text
+            if _SECRET_METADATA_KEY.search(key_text):
+                paths.append(path)
+            paths.extend(_secret_metadata_paths(child, path))
+        return paths
+    if isinstance(value, list):
+        paths = []
+        for index, child in enumerate(value):
+            paths.extend(_secret_metadata_paths(child, f"{prefix}[{index}]"))
+        return paths
+    return []
 
 
 def _definition_from_mapping(
@@ -199,6 +265,7 @@ def _definition_from_mapping(
         local.append("`ownership` must be a mapping")
         ownership = None
     notes = data.get("notes")
+    metadata = _metadata(data.get("metadata"), "`metadata`", local)
     definition = TaskDefinition(
         task_id=task_id,
         title=title,
@@ -215,6 +282,7 @@ def _definition_from_mapping(
         program_key=str(data.get("program") or project.project_id),
         migration_allowed=bool(data.get("migration_allowed", False)),
         ownership=ownership,
+        metadata=metadata,
         source=source,
         delivered_by=str(data.get("delivered_by")).strip() if data.get("delivered_by") else None,
     )
@@ -303,6 +371,7 @@ def _matches_definition(task: BuildTask, definition: TaskDefinition) -> bool:
         and (task.implementation_notes or None) == spec.implementation_notes
         and task.program_key == spec.program_key
         and bool(task.migration_allowed) == spec.migration_allowed
+        and dict(task.definition_metadata or {}) == spec.definition_metadata
     )
 
 
