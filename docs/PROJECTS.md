@@ -89,7 +89,10 @@ workers:                       # templates, expanded into builder-1..N, reviewer
   reviewer:    {...}
   integration: {...}
 task_sources:                  # optional adapters; off unless enabled
-  github: {enabled: false, repo: owner/name}
+  github:
+    enabled: false
+    repo: owner/name
+    exclude_labels: [stagemesh:deferred]
 ```
 
 `execution.bootstrap` is optional project-owned workspace preparation.
