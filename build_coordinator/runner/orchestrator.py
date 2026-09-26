@@ -685,25 +685,17 @@ class BuildRunner:
         if builder and builder.blockers:
             blocker_list = list(builder.blockers)
             if blocker_list == ["the agent produced no changes on the task branch"]:
-                # Check if acceptance criteria / tests are already met for this task
-                if self._check_task_already_satisfied(session, execution.task_id):
-                    sha = self._ensure_task_verification_commit(execution)
-                    if sha:
-                        execution.reviewed_feature_sha = sha
-                        transition_task(session, execution.task_id, "IN_PROGRESS", actor="runner")
-                        transition_task(session, execution.task_id, "VALIDATING", actor="runner")
-                        task = session.get(BuildTask, execution.task_id)
-                        if not self._validation_gate(session, task, execution, result):
-                            return
-                        transition_task(
-                            session,
-                            execution.task_id,
-                            "REVIEW_READY" if task and task.review_policy != "NONE" else "DONE",
-                            actor="runner",
-                            reason="task already satisfied; verification commit validated",
-                        )
-                        return
                 task = session.get(BuildTask, execution.task_id)
+                retry_generation = int((task.retry_generation if task is not None else 0) or 0)
+                outcome = self._reconcile_no_changes_produced(
+                    session,
+                    execution,
+                    result,
+                    detail="Agent produced no changes on task branch",
+                    retry_generation=retry_generation,
+                )
+                if outcome != "UNRESOLVED":
+                    return
                 # Check if existing task branch already has useful commits ahead of base
                 repo_root = Path(self._settings.repo_root)
                 branch = task.branch_name or task_branch_name(task.task_id) if task else None
@@ -1206,6 +1198,26 @@ class BuildRunner:
         retry_generation = int((task.retry_generation if task is not None else 0) or 0)
 
         if failure == "NO_CHANGES_PRODUCED" and execution.role in {"BUILDER", "REMEDIATION"}:
+            detail = str(merged.get("detail") or "Agent produced no changes on task branch")[:300]
+            outcome = self._reconcile_no_changes_produced(
+                session,
+                execution,
+                result,
+                detail=detail,
+                retry_generation=retry_generation,
+            )
+            if outcome != "UNRESOLVED":
+                execution.status = "LOST"
+                execution.completed_at = _now()
+                execution.result_data = {
+                    **(execution.result_data or {}),
+                    **merged,
+                    "reconciliation_state": outcome,
+                    "retry_generation": retry_generation,
+                    "retryable_failure": False,
+                    "retry_backoff_seconds": None,
+                }
+                return True
             attempts = session.scalar(
                 select(func.count())
                 .select_from(BuildRunnerExecution)
@@ -1546,6 +1558,7 @@ class BuildRunner:
                 task_id=task.task_id,
                 session=session,
                 deprioritized_workers=self._no_change_workers(session, task.task_id),
+                deprioritized_providers=self._no_change_providers(session, task.task_id),
             )
             if availability == "slots_occupied":
                 result.capacity_full = True
@@ -2408,6 +2421,7 @@ class BuildRunner:
         task_id: str | None = None,
         session: Session | None = None,
         deprioritized_workers: set[str] | None = None,
+        deprioritized_providers: set[str] | None = None,
         review_target_sha: str | None = None,
     ) -> tuple[WorkerConfig | None, str, RoutingDecision]:
         """Return (worker, availability, deterministic routing decision).
@@ -2445,6 +2459,7 @@ class BuildRunner:
             excluded_workers=set(exclusions.workers) if exclusions else set(),
             excluded_providers=set(exclusions.providers) if exclusions else set(),
             deprioritized_workers=deprioritized_workers,
+            deprioritized_providers=deprioritized_providers,
         )
         worker = next(
             (candidate for candidate in workers if candidate.worker_id == decision.selected_worker_id),
@@ -2842,6 +2857,26 @@ class BuildRunner:
                 workers.add(worker_id)
         return workers
 
+    def _no_change_providers(self, session: Session, task_id: str) -> set[str]:
+        task = session.get(BuildTask, task_id)
+        retry_generation = int((task.retry_generation if task is not None else 0) or 0)
+        rows = session.scalars(
+            select(BuildTaskEvent)
+            .where(BuildTaskEvent.task_id == task_id)
+            .where(BuildTaskEvent.event_type == "runner.no_changes_produced")
+        ).all()
+        providers: set[str] = set()
+        for row in rows:
+            data = row.event_data or {}
+            try:
+                event_generation = int(data.get("retry_generation", 0) or 0)
+            except (TypeError, ValueError):
+                event_generation = 0
+            provider = str(data.get("provider") or "").strip()
+            if provider and event_generation == retry_generation:
+                providers.add(provider)
+        return providers
+
     def _record_no_changes_produced(
         self,
         session: Session,
@@ -2866,6 +2901,157 @@ class BuildRunner:
                 },
             ),
         )
+
+    def _reconcile_no_changes_produced(
+        self,
+        session: Session,
+        execution: BuildRunnerExecution,
+        result: RunnerCycleResult,
+        *,
+        detail: str,
+        retry_generation: int,
+    ) -> str:
+        task = session.get(BuildTask, execution.task_id)
+        evidence = self._no_change_reconciliation_evidence(session, task, execution, detail=detail)
+        evidence["retry_generation"] = retry_generation
+        record_event(
+            session,
+            EventInput(
+                task_id=execution.task_id,
+                event_type="runner.no_changes_reconciled",
+                actor="runner",
+                claim_id=execution.claim_id,
+                event_data=evidence,
+            ),
+        )
+        outcome = str(evidence.get("outcome") or "UNRESOLVED")
+        if task is None:
+            return outcome
+        if outcome == "ALREADY_SATISFIED":
+            sha = evidence.get("reviewed_feature_sha")
+            if isinstance(sha, str) and sha:
+                execution.reviewed_feature_sha = sha
+                execution.result_data = {
+                    **(execution.result_data or {}),
+                    "feature_sha": sha,
+                    "reviewed_feature_sha": sha,
+                    "reconciliation_state": outcome,
+                    "satisfied_by_existing_implementation": True,
+                    "reconciliation_evidence": evidence,
+                }
+                transition_task(session, execution.task_id, "IN_PROGRESS", actor="runner")
+                transition_task(session, execution.task_id, "VALIDATING", actor="runner")
+                if not self._validation_gate(session, task, execution, result):
+                    return outcome
+                transition_task(
+                    session,
+                    execution.task_id,
+                    "REVIEW_READY" if task.review_policy != "NONE" else "DONE",
+                    actor="runner",
+                    reason="task already satisfied by existing implementation; deterministic validation passed",
+                    event_data=evidence,
+                )
+            return outcome
+        if outcome == "STALE_OR_OBSOLETE":
+            result.escalations.append(f"{execution.task_id}:STALE_OR_OBSOLETE_TASK_DEFINITION")
+            self._block_task(
+                session,
+                execution.task_id,
+                "STALE_OR_OBSOLETE_TASK_DEFINITION",
+                invariant="TASK_DEFINITION_RECONCILIATION",
+                execution=execution,
+                error="Task definition is stale or obsolete after reconciliation with current main",
+                recovery_classification="TASK_REDESIGN_REQUIRED",
+                extra_data=evidence,
+            )
+            return outcome
+        return outcome
+
+    def _no_change_reconciliation_evidence(
+        self,
+        session: Session,
+        task: BuildTask | None,
+        execution: BuildRunnerExecution,
+        *,
+        detail: str,
+    ) -> dict:
+        repo_root = Path(self._settings.repo_root)
+        current_sha = self._rev_parse(repo_root, "HEAD") or self._rev_parse(repo_root, self._config.main_ref)
+        task_base = task.base_sha if task is not None else None
+        changed_paths = self._changed_paths_since_base(repo_root, task_base, current_sha)
+        scope = list(task.permitted_scope or []) if task is not None else []
+        scope_changed = self._scope_changed(scope, changed_paths)
+        metadata = task.definition_metadata if task is not None and isinstance(task.definition_metadata, dict) else {}
+        marked_stale = bool(metadata.get("stale") or metadata.get("obsolete") or metadata.get("superseded_by"))
+        already_satisfied = self._check_task_already_satisfied(session, execution.task_id)
+        outcome = "UNRESOLVED"
+        if already_satisfied:
+            outcome = "ALREADY_SATISFIED"
+        elif marked_stale:
+            outcome = "STALE_OR_OBSOLETE"
+        return {
+            "outcome": outcome,
+            "detail": detail,
+            "deterministic_recheck": True,
+            "acceptance_appears_satisfied": already_satisfied,
+            "definition_marked_stale": marked_stale,
+            "scope_changed_since_base": scope_changed,
+            "changed_paths_since_base": changed_paths[:50],
+            "permitted_scope": scope,
+            "base_sha": task_base,
+            "current_main_sha": current_sha,
+            "reviewed_feature_sha": current_sha if already_satisfied else None,
+            "reconciled_against": {
+                "main_ref": self._config.main_ref,
+                "recent_integrations": self._recent_integration_evidence(session, execution.task_id),
+            },
+        }
+
+    def _recent_integration_evidence(self, session: Session, task_id: str) -> list[dict]:
+        rows = session.scalars(
+            select(BuildTaskEvent)
+            .where(BuildTaskEvent.event_type == "runner.integration_completed")
+            .order_by(BuildTaskEvent.created_at.desc())
+            .limit(5)
+        ).all()
+        evidence: list[dict] = []
+        for row in rows:
+            data = row.event_data or {}
+            evidence.append(
+                {
+                    "task_id": row.task_id,
+                    "created_at": row.created_at.isoformat() if row.created_at else None,
+                    "feature_sha": data.get("feature_sha") or data.get("reviewed_feature_sha"),
+                    "same_task": row.task_id == task_id,
+                }
+            )
+        return evidence
+
+    def _rev_parse(self, repo_root: Path, ref: str | None) -> str | None:
+        if not ref:
+            return None
+        proc = _git(repo_root, "rev-parse", "--verify", ref)
+        if proc.returncode != 0:
+            return None
+        return proc.stdout.strip() or None
+
+    def _changed_paths_since_base(self, repo_root: Path, base_sha: str | None, current_sha: str | None) -> list[str]:
+        if not base_sha or not current_sha:
+            return []
+        proc = _git(repo_root, "diff", "--name-only", f"{base_sha}..{current_sha}")
+        if proc.returncode != 0:
+            return []
+        return [line.strip().replace("\\", "/") for line in proc.stdout.splitlines() if line.strip()]
+
+    def _scope_changed(self, scope: list[str], changed_paths: list[str]) -> bool:
+        if not scope or not changed_paths:
+            return False
+        normalized_scope = [item.strip().replace("\\", "/").rstrip("/") for item in scope if str(item).strip()]
+        for changed in changed_paths:
+            for item in normalized_scope:
+                if changed == item or changed.startswith(item + "/"):
+                    return True
+        return False
 
     def _environment_blocked_reviewers(self, session: Session, task_id: str) -> set[str]:
         since = session.scalar(
@@ -3924,17 +4110,6 @@ class BuildRunner:
                 )
                 return proc.returncode == 0
         return False
-
-    def _ensure_task_verification_commit(self, execution: BuildRunnerExecution) -> str | None:
-        wt = Path(execution.worktree_path) if execution.worktree_path else Path(self._settings.repo_root)
-        identity_args = resolve_git_identity_args(wt)
-        cmd = [
-            "git", *identity_args,
-            "commit", "--allow-empty", "-m", f"{execution.task_id}: verify existing implementation meets acceptance criteria",
-        ]
-        subprocess.run(cmd, cwd=str(wt), capture_output=True, text=True, check=False)
-        sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(wt), capture_output=True, text=True, check=False).stdout.strip()
-        return sha or None
 
     def _recover_worktree_for_task(self, session: Session, task: BuildTask) -> bool:
         root = Path(self._settings.repo_root)

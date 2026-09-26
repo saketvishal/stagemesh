@@ -330,10 +330,12 @@ def route_worker(
     excluded_workers: set[str] | None = None,
     excluded_providers: set[str] | None = None,
     deprioritized_workers: set[str] | None = None,
+    deprioritized_providers: set[str] | None = None,
 ) -> RoutingDecision:
     excluded_workers = excluded_workers or set()
     excluded_providers = excluded_providers or set()
     deprioritized_workers = deprioritized_workers or set()
+    deprioritized_providers = deprioritized_providers or set()
     workers = list(workers)
     all_workers = workers
     active_by_worker = _active_implementation_counts(session)
@@ -434,6 +436,7 @@ def route_worker(
         eligible,
         key=lambda worker: (
             1 if worker.worker_id in deprioritized_workers else 0,
+            1 if worker.provider in deprioritized_providers else 0,
             0 if (prefer_different_provider and worker.provider != builder_provider) else 1,
             0 if worker.worker_id in stage_requirement.preferred_workers else 1,
             0 if _provider_mode(worker.provider, providers) == "ACTIVE" else 1,

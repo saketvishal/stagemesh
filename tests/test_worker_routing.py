@@ -281,6 +281,30 @@ def test_no_change_deprioritization_prefers_different_worker_same_provider():
     assert decision.selected_worker_id == "builder-openai-b"
 
 
+def test_no_change_deprioritization_prefers_different_provider_when_available():
+    workers = (
+        WorkerConfig("builder-openai-a", "BUILDER", provider="openai", adapter="fake", capabilities=(CAP_CODING,), stages=("implementation",), preference=1),
+        WorkerConfig("builder-openai-b", "BUILDER", provider="openai", adapter="fake", capabilities=(CAP_CODING,), stages=("implementation",), preference=2),
+        WorkerConfig("builder-anthropic", "BUILDER", provider="anthropic", adapter="fake", capabilities=(CAP_CODING,), stages=("implementation",), preference=99),
+    )
+
+    decision = route_worker(
+        workers,
+        stage="implementation",
+        stage_requirement=StageRequirement("implementation", capabilities=(CAP_CODING,)),
+        providers={
+            "openai": ProviderConfig("openai", availability="AVAILABLE"),
+            "anthropic": ProviderConfig("anthropic", availability="AVAILABLE"),
+        },
+        runtimes={},
+        routing_policy=RunnerConfig().routing_policy,
+        deprioritized_workers={"builder-openai-a"},
+        deprioritized_providers={"openai"},
+    )
+
+    assert decision.selected_worker_id == "builder-anthropic"
+
+
 def test_no_change_event_deprioritizes_worker_on_next_attempt(tmp_path: Path):
     config = _config(
         tmp_path,
