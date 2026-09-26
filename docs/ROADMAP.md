@@ -57,6 +57,12 @@ The initial standalone release of StageMesh. All items below are
 - [ ] Hot-reload worker config without restart
 - [ ] Worker health checks
 
+### Optimization experiments (research)
+- [ ] Optional Google Ax adapter for controlled routing/policy experiments,
+      built on evidence-driven routing (#49); see
+      [docs/design/GOOGLE_AX_INTEGRATION.md](design/GOOGLE_AX_INTEGRATION.md).
+      Google Ax is not, and will not become, a required StageMesh dependency.
+
 ---
 
 ## Not planned for this project
