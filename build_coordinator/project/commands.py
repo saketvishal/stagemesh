@@ -347,11 +347,31 @@ def handle_continue(args: argparse.Namespace) -> None:
     project = _project_from_args(args)
     definitions = [] if args.no_sync else load_backlog(project)
     lifecycle = _open(project)
+    instance_id = new_uuid()
+    lock_acquired = False
+    config = build_runner_config(project, dry_run=False)
+    if not args.dry_run and not any(w.role == "BUILDER" and w.adapter != "unconfigured" for w in config.workers):
+        print(
+            f"[{project.project_id}] EXTERNAL_EXECUTOR_CONFIGURATION_REQUIRED: "
+            f"No executable builders are configured for {project.project_id}. "
+            f"Run 'stagemesh agent setup' to verify installed agent runtimes.",
+            file=sys.stderr,
+            flush=True,
+        )
+        return
 
     sync_payload: dict[str, Any] | None = None
     task_source, initial_diagnostics = _optional_task_source(project, force=args.github, dry_run=args.dry_run)
     adapter_payload: list[dict[str, Any]] = list(initial_diagnostics)
     with lifecycle.session() as session:
+        if not args.dry_run:
+            try:
+                acquire_coordinator_lock(session, instance_id=instance_id)
+            except CoordinatorLockHeld as exc:
+                session.rollback()
+                raise ProjectError(str(exc)) from exc
+            lock_acquired = True
+            session.commit()
         if not args.no_sync:
             report = sync_backlog(session, project, definitions, dry_run=args.dry_run)
             sync_payload = report.as_dict()
@@ -373,25 +393,6 @@ def handle_continue(args: argparse.Namespace) -> None:
             )
             session.rollback()
             return
-        session.commit()
-
-    config = build_runner_config(project, dry_run=False)
-    if not any(w.role == "BUILDER" and w.adapter != "unconfigured" for w in config.workers):
-        print(
-            f"[{project.project_id}] EXTERNAL_EXECUTOR_CONFIGURATION_REQUIRED: "
-            f"No executable builders are configured for {project.project_id}. "
-            f"Run 'stagemesh agent setup' to verify installed agent runtimes.",
-            file=sys.stderr,
-            flush=True,
-        )
-        return
-    instance_id = new_uuid()
-    with lifecycle.session() as session:
-        try:
-            acquire_coordinator_lock(session, instance_id=instance_id)
-        except CoordinatorLockHeld as exc:
-            session.rollback()
-            raise ProjectError(str(exc)) from exc
         session.commit()
 
     runner = BuildRunner(SessionLocal, config, task_source=task_source, target_task_ids=target_task_ids)
@@ -466,9 +467,10 @@ def handle_continue(args: argparse.Namespace) -> None:
                 set_mode(session, "RUNNING")
                 session.commit()
     finally:
-        with lifecycle.session() as session:
-            release_coordinator_lock(session, instance_id=instance_id)
-            session.commit()
+        if lock_acquired:
+            with lifecycle.session() as session:
+                release_coordinator_lock(session, instance_id=instance_id)
+                session.commit()
 
     with lifecycle.session() as session:
         final = project_status(session, project)

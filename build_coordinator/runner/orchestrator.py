@@ -18,7 +18,7 @@ from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
 from build_coordinator.config import get_settings
-from build_coordinator.db import _is_transient_sqlite_lock_error, with_sqlite_retry
+from build_coordinator.db import DatabaseBusyError, _is_transient_sqlite_lock_error, with_sqlite_retry
 from build_coordinator.events import record_event
 from build_coordinator.execution.base import (
     ExecutionLaunch,
@@ -239,10 +239,6 @@ class BuildRunner:
         return with_sqlite_retry(
             _attempt,
             attempts=5,
-            # Once `_run_once` has kicked off a non-idempotent external launch
-            # (e.g. spawned a worker process), retrying from scratch would
-            # duplicate that launch -- surface the lock error immediately
-            # instead of retrying past that point.
             is_retryable=lambda exc: not self._external_launch_started and _is_transient_sqlite_lock_error(exc),
         )
 
@@ -2230,46 +2226,91 @@ class BuildRunner:
         session.commit()
         if isinstance(executor, SubprocessExecutor):
             executor.remember_result_path(execution_id, result_path)
-        self._external_launch_started = True
-        handle = executor.launch(
-            ExecutionLaunch(
-                task_id=task_id,
-                role=role,
-                worker_id=worker.worker_id,
-                provider=worker.provider,
-                worktree_path=worker.worktree_path,
-                branch_name=worker.branch_name,
-                prompt=prompt,
-                execution_id=execution_id,
-                result_path=result_path,
-                reviewed_feature_sha=reviewed_feature_sha,
-                timeout_seconds=worker.timeout_seconds,
-                extra_env=worker.resolved_env(),
+        try:
+            self._external_launch_started = True
+            handle = executor.launch(
+                ExecutionLaunch(
+                    task_id=task_id,
+                    role=role,
+                    worker_id=worker.worker_id,
+                    provider=worker.provider,
+                    worktree_path=worker.worktree_path,
+                    branch_name=worker.branch_name,
+                    prompt=prompt,
+                    execution_id=execution_id,
+                    result_path=result_path,
+                    reviewed_feature_sha=reviewed_feature_sha,
+                    timeout_seconds=worker.timeout_seconds,
+                    extra_env=worker.resolved_env(),
+                )
             )
-        )
-        row.process_id = handle.process_id
-        row.result_path = handle.result_path or result_path
-        record_event(
-            session,
-            EventInput(
-                task_id=task_id,
-                event_type="runner.execution_launched",
-                actor="runner",
-                claim_id=claim_id,
-                event_data={
-                    "role": role,
-                    "worker_id": worker.worker_id,
-                    "provider": worker.provider,
-                    "runtime": worker.runtime,
-                    "model": worker.model,
-                    "adapter": executor.adapter_name,
-                    "reviewed_feature_sha": reviewed_feature_sha,
-                    "routing": routing_decision.to_audit_dict(worker)
-                    if routing_decision is not None
-                    else None,
-                },
-            ),
-        )
+        except Exception as exc:
+            row.status = "FAILED"
+            row.exit_code = 1
+            row.completed_at = _now()
+            row.result_data = {**(row.result_data or {}), "launch_failure": str(exc)}
+            release_active_claims(session, task_id, completed=False)
+            task = session.get(BuildTask, task_id)
+            if task is not None:
+                from_state = task.state
+                task.state = "READY"
+                record_event(
+                    session,
+                    EventInput(
+                        task_id=task_id,
+                        event_type="task.transitioned",
+                        actor="runner",
+                        from_state=from_state,
+                        to_state="READY",
+                        event_data={"reason": "external worker launch failed before ownership was established"},
+                    ),
+                )
+            record_event(
+                session,
+                EventInput(
+                    task_id=task_id,
+                    event_type="runner.execution_launch_failed",
+                    actor="runner",
+                    claim_id=claim_id,
+                    event_data={"role": role, "worker_id": worker.worker_id, "error": str(exc)},
+                ),
+            )
+            return
+
+        def _persist_launch() -> None:
+            row.process_id = handle.process_id
+            row.result_path = handle.result_path or result_path
+            record_event(
+                session,
+                EventInput(
+                    task_id=task_id,
+                    event_type="runner.execution_launched",
+                    actor="runner",
+                    claim_id=claim_id,
+                    event_data={
+                        "role": role,
+                        "worker_id": worker.worker_id,
+                        "provider": worker.provider,
+                        "runtime": worker.runtime,
+                        "model": worker.model,
+                        "adapter": executor.adapter_name,
+                        "reviewed_feature_sha": reviewed_feature_sha,
+                        "routing": routing_decision.to_audit_dict(worker)
+                        if routing_decision is not None
+                        else None,
+                    },
+                ),
+            )
+            session.commit()
+
+        try:
+            with_sqlite_retry(
+                _persist_launch,
+                attempts=5,
+                is_retryable=lambda exc: (session.rollback() is None) and _is_transient_sqlite_lock_error(exc),
+            )
+        except DatabaseBusyError:
+            raise
         result.launched.append(handle.execution_id)
 
     def _kill_reconciled_process_trees(self, session: Session) -> None:

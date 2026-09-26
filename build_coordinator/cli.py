@@ -24,7 +24,7 @@ from build_coordinator.coordinator_lock import (
 )
 from build_coordinator.policy import CoordinatorPolicyError
 from build_coordinator.project.commands import add_continue_command, add_project_commands
-from build_coordinator.db import DatabaseSchemaError, SessionLocal, configure_process_database
+from build_coordinator.db import DatabaseBusyError, DatabaseSchemaError, SessionLocal, configure_process_database
 from build_coordinator.events import stream_events
 from build_coordinator.service import (
     CheckpointInput,
@@ -96,6 +96,7 @@ def main() -> None:
     except (
         CoordinatorPolicyError,
         CoordinatorConfigError,
+        DatabaseBusyError,
         DatabaseSchemaError,
         StructuredContractError,
         ProjectError,
