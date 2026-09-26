@@ -792,6 +792,95 @@ def test_concurrent_scope_change_classifies_stale_when_acceptance_not_satisfied(
         assert reconciled.event_data["acceptance_appears_satisfied"] is False
 
 
+def test_scope_change_without_superseding_integration_stays_unresolved(tmp_path: Path):
+    """A permitted-scope file changing since base_sha, alongside some unrelated
+    recent integration, is only evidence -- not proof the task definition is
+    stale/obsolete. Unless a recorded integration's own commit concretely
+    touched the scoped file, the task must stay UNRESOLVED and keep the bounded
+    builder retry path instead of being blocked as STALE_OR_OBSOLETE_TASK_DEFINITION."""
+    repo, _ = _setup_test_repo(tmp_path)
+    session_factory, runner = _setup_runner(tmp_path, repo)
+    base_sha = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    # README.md (this task's permitted scope) changes due to unrecorded/prep work.
+    (repo / "README.md").write_text("# Test Repo\n\nUnrelated prep edit\n", encoding="utf-8")
+    _git(repo, "add", "README.md")
+    _git(repo, "commit", "-m", "unrelated prep work touching README")
+
+    # A separate, unrelated integration lands too, but it never touches README.md.
+    (repo / "OTHER.md").write_text("other file\n", encoding="utf-8")
+    _git(repo, "add", "OTHER.md")
+    _git(repo, "commit", "-m", "integrate unrelated sibling task")
+    integrated_sha = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    with session_factory() as session:
+        ensure_state(session)
+        task = BuildTask(
+            task_id="GH-UNRESOLVED-SCOPE",
+            title="Task still requiring genuine implementation work",
+            description="desc",
+            state="CLAIMED",
+            review_policy="INDEPENDENT",
+            base_sha=base_sha,
+            permitted_scope=["README.md"],
+            acceptance_criteria=["README.md contains Genuinely required change"],
+        )
+        session.add(task)
+        record_event(
+            session,
+            EventInput(
+                task_id="GH-OTHER",
+                event_type="runner.integration_completed",
+                actor="runner",
+                event_data={"feature_sha": integrated_sha},
+            ),
+        )
+        exec_row = BuildRunnerExecution(
+            execution_id="exec-unresolved-scope-1",
+            task_id="GH-UNRESOLVED-SCOPE",
+            role="BUILDER",
+            worker_id="b-1",
+            provider="test",
+            adapter="fake",
+            status="SUCCEEDED",
+            worktree_path=str(repo),
+        )
+        session.add(exec_row)
+        session.commit()
+
+        parsed = parse_executor_result(
+            {
+                "schema_version": 1,
+                "role": "BUILDER",
+                "feature_sha": "dummy",
+                "blockers": ["the agent produced no changes on the task branch"],
+                "identity": {"provider": "test", "runtime": "fake"},
+            },
+            execution_id="exec-unresolved-scope-1",
+            task_id="GH-UNRESOLVED-SCOPE",
+            role="BUILDER",
+            require_identity=False,
+        )
+
+        result = RunnerCycleResult(mode="RUNNING")
+        runner._builder_succeeded(session, exec_row, result, parsed)
+        session.commit()
+
+        refreshed = session.get(BuildTask, "GH-UNRESOLVED-SCOPE")
+        assert refreshed.state != "BLOCKED"
+        assert result.escalations == []
+        reconciled = session.scalar(
+            select(BuildTaskEvent)
+            .where(BuildTaskEvent.task_id == "GH-UNRESOLVED-SCOPE")
+            .where(BuildTaskEvent.event_type == "runner.no_changes_reconciled")
+        )
+        assert reconciled is not None
+        assert reconciled.event_data["outcome"] == "UNRESOLVED"
+        assert reconciled.event_data["scope_changed_since_base"] is True
+        assert reconciled.event_data["stale_by_scope_reconciliation"] is False
+        assert reconciled.event_data["superseding_integration"] is None
+
+
 # ---------------------------------------------------------------------------
 # SCENARIO 7: Reviewer Dies Repeatedly Does Not Consume Implementation Budget
 # ---------------------------------------------------------------------------
