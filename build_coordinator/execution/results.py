@@ -229,8 +229,9 @@ def parse_executor_result(
         reviewer = _parse_reviewer(data, captured_sha=reviewed_feature_sha)
     elif reported_role in INTEGRATOR_ROLES:
         integrator = _parse_integrator(data)
-    elif reported_role in PLANNER_ROLES and status == "SUCCEEDED":
-        plan = _parse_planner(data)
+    elif reported_role in PLANNER_ROLES:
+        if status == "SUCCEEDED":
+            plan = _parse_planner(data)
     else:
         raise ExecutorResultError(f"unknown executor role: {reported_role}")
 
