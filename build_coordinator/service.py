@@ -775,7 +775,23 @@ def request_task_input(
     }
     task.waiting_input = payload
     if task.state in {"CLAIMED", "IN_PROGRESS"}:
-        terminate_executions_for_claim(session, task.current_claim_id, reason="WAITING_FOR_INPUT")
+        # Moving to WAITING_FOR_INPUT releases claim/lease ownership so the
+        # builder slot is not held open, but that is only ever ownership
+        # bookkeeping -- it says nothing about whether the OS process a
+        # worker launched (or, since validation shares this same claim_id,
+        # a concurrently-running validator) has actually exited. Apply the
+        # same identity-aware exclusion recover_expired uses: never kill a
+        # confirmed- or ambiguously-alive row here, and never kill a live
+        # validation-adapter row on this transition alone (it shares the
+        # claim but is not the execution asking the question).
+        confirmed_alive_ids = _confirmed_alive_execution_ids(session, task.current_claim_id)
+        terminate_executions_for_claim(
+            session,
+            task.current_claim_id,
+            reason="WAITING_FOR_INPUT",
+            exclude_adapters=frozenset({"validation"}),
+            exclude_execution_ids=confirmed_alive_ids,
+        )
         transition_task(
             session,
             task_id,
@@ -1162,6 +1178,13 @@ def reconcile_stale_executions(session: Session) -> list[BuildRunnerExecution]:
         if row.adapter == "validation":
             continue
         if not row.claim_id:
+            # No claim at all is stronger evidence than a merely-stale
+            # claim, but it is still lease/ownership bookkeeping, not
+            # process evidence -- apply the same identity check as the
+            # claim-present branch below before killing a row whose
+            # underlying OS process might still be alive.
+            if _execution_confirmed_alive(row):
+                continue
             row.status = "TERMINATED"
             row.completed_at = now
             row.last_observed_at = now
