@@ -41,6 +41,7 @@ CLOSED_FINDING_STATUSES = frozenset({STATUS_RESOLVED, STATUS_INVALID, STATUS_NOT
 _HISTORY_LIMIT = 20
 _PROCESSED_EXECUTION_LIMIT = 50
 _FUZZY_MATCH_THRESHOLD = 0.5
+_CONVERGENCE_HISTORY_LIMIT = 20
 
 
 def finding_fingerprint(description: str) -> str:
@@ -109,6 +110,7 @@ def _apply_reviewer_classification(
     reason: str,
     execution_id: str | None,
     cycle_label: str,
+    reviewed_feature_sha: str | None,
 ) -> tuple[str, bool]:
     """Record which reviewer classified this finding which way, and resolve
     disagreement deterministically: if a different reviewer already
@@ -118,24 +120,64 @@ def _apply_reviewer_classification(
     of one silently overwriting the other."""
     if not reviewer_id:
         return status, False
+    reviewer_status = status
     reviewer_history = dict(entry.get("reviewer_history") or {})
+    current_record = {
+        "status": reviewer_status,
+        "reason": reason,
+        "execution_id": execution_id,
+        "cycle": cycle_label,
+        "reviewed_feature_sha": reviewed_feature_sha,
+    }
+    comparable_records: dict[str, dict[str, Any]] = {}
+    for rid, raw_rec in reviewer_history.items():
+        if rid == reviewer_id or not isinstance(raw_rec, dict):
+            continue
+        records = raw_rec.get("classifications")
+        if not isinstance(records, list):
+            records = [raw_rec]
+        for rec in records:
+            if not isinstance(rec, dict):
+                continue
+            rec_sha = rec.get("reviewed_feature_sha")
+            same_generation = (
+                rec_sha == reviewed_feature_sha
+                if reviewed_feature_sha is not None or rec_sha is not None
+                else True
+            )
+            if not same_generation:
+                continue
+            comparable_records[rid] = rec
     conflicting = {
         rid: rec
-        for rid, rec in reviewer_history.items()
-        if rid != reviewer_id and _status_category(rec.get("status")) != _status_category(status)
+        for rid, rec in comparable_records.items()
+        if _status_category(rec.get("status")) != _status_category(status)
     }
     disagreed = bool(conflicting)
     if disagreed:
         entry["disagreement"] = {
             "reviewers": {
-                reviewer_id: {"status": status, "reason": reason, "execution_id": execution_id},
+                reviewer_id: current_record,
                 **conflicting,
             },
             "resolved_status": STATUS_STILL_OPEN,
             "cycle": cycle_label,
+            "reviewed_feature_sha": reviewed_feature_sha,
         }
         status = STATUS_STILL_OPEN
-    reviewer_history[reviewer_id] = {"status": status, "reason": reason, "execution_id": execution_id}
+    else:
+        existing_disagreement = entry.get("disagreement")
+        if isinstance(existing_disagreement, dict):
+            disagreement_sha = existing_disagreement.get("reviewed_feature_sha")
+            if disagreement_sha != reviewed_feature_sha:
+                entry.pop("disagreement", None)
+    reviewer_record = dict(reviewer_history.get(reviewer_id) or {})
+    classifications = list(reviewer_record.get("classifications") or [])
+    classifications = classifications[-(_HISTORY_LIMIT - 1) :]
+    classifications.append(current_record)
+    reviewer_record.update(current_record)
+    reviewer_record["classifications"] = classifications
+    reviewer_history[reviewer_id] = reviewer_record
     entry["reviewer_history"] = reviewer_history
     return status, disagreed
 
@@ -148,6 +190,7 @@ def reconcile_findings(
     execution_id: str | None,
     cycle_label: str,
     reviewer_id: str | None = None,
+    reviewed_feature_sha: str | None = None,
 ) -> dict[str, Any]:
     """Merge one review cycle's findings/dispositions into the durable
     per-task finding registry. Idempotent: reprocessing the same
@@ -215,6 +258,7 @@ def reconcile_findings(
                 reason=reason,
                 execution_id=execution_id,
                 cycle_label=cycle_label,
+                reviewed_feature_sha=reviewed_feature_sha,
             )
             if status == STATUS_STILL_OPEN:
                 if was_closed and not reason and not disagreed:
@@ -268,6 +312,7 @@ def reconcile_findings(
                 reason=reason,
                 execution_id=execution_id,
                 cycle_label=cycle_label,
+                reviewed_feature_sha=reviewed_feature_sha,
             )
             entry["status"] = status
             if status == STATUS_STILL_OPEN:
@@ -291,8 +336,20 @@ def reconcile_findings(
                 )
                 entries[finding_id] = entry
                 continue
-            entry["status"] = STATUS_STILL_OPEN
-            entry["attempts"] = int(entry.get("attempts") or 0) + 1
+            status, disagreed = _apply_reviewer_classification(
+                entry,
+                reviewer_id=reviewer_id,
+                status=STATUS_STILL_OPEN,
+                reason=reason,
+                execution_id=execution_id,
+                cycle_label=cycle_label,
+                reviewed_feature_sha=reviewed_feature_sha,
+            )
+            entry["status"] = status
+            if status == STATUS_STILL_OPEN:
+                entry["attempts"] = int(entry.get("attempts") or 0) + 1
+                if disagreed:
+                    reason = reason or "reviewer disagreement"
         entry["description"] = description
         entry["last_seen_cycle"] = cycle_label
         _append_history(entry, status=entry["status"], reason=reason, reopened=was_closed and entry["status"] == STATUS_STILL_OPEN)
@@ -310,6 +367,158 @@ def reconcile_findings(
 def open_findings(registry: dict[str, Any] | None) -> list[dict[str, Any]]:
     entries = (registry or {}).get("entries") or {}
     return [entry for entry in entries.values() if entry.get("status") == STATUS_STILL_OPEN]
+
+
+def record_convergence_generation(
+    registry: dict[str, Any] | None,
+    *,
+    prior_registry: dict[str, Any] | None,
+    execution_id: str | None,
+    cycle_label: str,
+    reviewer_id: str | None,
+    comprehensive_review: bool = False,
+) -> dict[str, Any]:
+    """Record task-level finding convergence progress for one review.
+
+    This is separate from per-finding attempts: it advances only when the
+    current review meaningfully changes the open finding set by resolving a
+    prior finding, introducing a new one, or both. Reprocessing the same
+    execution_id is idempotent.
+    """
+    updated = dict(registry or {})
+    convergence = dict(updated.get("convergence") or {})
+    processed = list(convergence.get("processed_execution_ids") or [])
+    if execution_id and execution_id in processed:
+        return updated
+
+    prior_open = {str(entry.get("id")) for entry in open_findings(prior_registry)}
+    current_open = {str(entry.get("id")) for entry in open_findings(updated)}
+    introduced = sorted(current_open - prior_open)
+    resolved = sorted(prior_open - current_open)
+    if not introduced and not resolved:
+        if comprehensive_review:
+            convergence["comprehensive_used"] = True
+            convergence["comprehensive_execution_id"] = execution_id
+        if execution_id:
+            processed = processed[-(_PROCESSED_EXECUTION_LIMIT - 1) :]
+            processed.append(execution_id)
+            convergence["processed_execution_ids"] = processed
+        updated["convergence"] = convergence
+        return updated
+
+    generations = int(convergence.get("generations") or 0) + 1
+    history = list(convergence.get("history") or [])[-(_CONVERGENCE_HISTORY_LIMIT - 1) :]
+    history.append(
+        {
+            "generation": generations,
+            "execution_id": execution_id,
+            "cycle": cycle_label,
+            "reviewer_id": reviewer_id,
+            "introduced": introduced,
+            "resolved": resolved,
+            "comprehensive_review": bool(comprehensive_review),
+        }
+    )
+    convergence["generations"] = generations
+    convergence["history"] = history
+    if comprehensive_review:
+        convergence["comprehensive_used"] = True
+        convergence["comprehensive_execution_id"] = execution_id
+    if execution_id:
+        processed = processed[-(_PROCESSED_EXECUTION_LIMIT - 1) :]
+        processed.append(execution_id)
+        convergence["processed_execution_ids"] = processed
+    updated["convergence"] = convergence
+    return updated
+
+
+def start_new_convergence_epoch(
+    registry: dict[str, Any] | None,
+    *,
+    resumed_feature_sha: str | None,
+    stop_feature_sha: str | None,
+    reason: str,
+    execution_id: str | None = None,
+) -> dict[str, Any]:
+    """Open a new bounded convergence epoch after authoritative evidence
+    (an advanced task branch feature SHA) shows an operator/external
+    remediation followed a prior hard convergence stop.
+
+    Only the *current* epoch's counters (generations, comprehensive-review
+    state) are reset -- finding entries, dispositions, and reviewer history
+    are left untouched, so the next reviewer must explicitly resolve or
+    restate prior open findings against the new SHA rather than inheriting a
+    silently-cleared slate. The prior epoch's convergence history and stop
+    reason are retained under `convergence.epoch_history` for audit.
+    """
+    updated = dict(registry or {})
+    prior_convergence = dict(updated.get("convergence") or {})
+    epoch_history = list(prior_convergence.get("epoch_history") or [])[-(_CONVERGENCE_HISTORY_LIMIT - 1) :]
+    epoch_history.append(
+        {
+            "generations": prior_convergence.get("generations"),
+            "comprehensive_used": prior_convergence.get("comprehensive_used"),
+            "comprehensive_execution_id": prior_convergence.get("comprehensive_execution_id"),
+            "stop_reason": prior_convergence.get("stop_reason"),
+            "history": prior_convergence.get("history"),
+            "stop_feature_sha": stop_feature_sha,
+            "resumed_feature_sha": resumed_feature_sha,
+            "resume_reason": reason,
+            "resume_execution_id": execution_id,
+        }
+    )
+    updated["convergence"] = {
+        "generations": 0,
+        "pending_comprehensive_review": False,
+        "comprehensive_used": False,
+        "processed_execution_ids": [],
+        "epoch_history": epoch_history,
+        "epoch_started_feature_sha": resumed_feature_sha,
+    }
+    return updated
+
+
+def comprehensive_reconciliation_missing_ids(
+    prior_registry: dict[str, Any] | None,
+    findings: list[Any] | None,
+    finding_dispositions: list[dict[str, Any]] | None,
+) -> list[str]:
+    """IDs of previously open findings that a comprehensive convergence
+    review must explicitly reconcile, but did not.
+
+    A comprehensive review exists to break serial-new-finding churn with a
+    deterministic, stronger pass, so it is required to return the complete
+    current finding set in one pass and account for every prior open finding
+    -- either by explicit `finding_dispositions` id, or by restating it in
+    `findings` (which reconciles to the same durable id by content
+    fingerprint/fuzzy match) -- rather than relying on the ordinary
+    absence-implies-resolved inference. A reviewer that simply omits prior
+    findings from its response must not silently clear them.
+    """
+    entries: dict[str, dict[str, Any]] = (prior_registry or {}).get("entries") or {}
+    prior_open_ids = {
+        finding_id for finding_id, entry in entries.items() if entry.get("status") == STATUS_STILL_OPEN
+    }
+    if not prior_open_ids:
+        return []
+    covered = {
+        str(disposition.get("id"))
+        for disposition in (finding_dispositions or ())
+        if isinstance(disposition, dict) and disposition.get("id")
+    }
+    current: dict[str, str] = {}
+    for raw in findings or ():
+        description = str(raw).strip()
+        if not description:
+            continue
+        fingerprint = finding_fingerprint(description)
+        if fingerprint in entries or fingerprint in current:
+            finding_id = fingerprint
+        else:
+            finding_id = _fuzzy_match(description, entries, exclude=set(current)) or fingerprint
+        current[finding_id] = description
+    covered |= set(current)
+    return sorted(prior_open_ids - covered)
 
 
 def escalation_evidence(registry: dict[str, Any] | None) -> list[dict[str, Any]]:

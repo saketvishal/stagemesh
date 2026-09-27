@@ -7,9 +7,11 @@ resumable-from-cursor emission of durable coordinator events) and the
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
-from build_coordinator.cli import _build_parser
+from build_coordinator.cli import _build_parser, _events_stream
 from build_coordinator.db import DatabaseLifecycle
 from build_coordinator.events import decode_cursor, record_event, stream_events
 from build_coordinator.types import EventInput
@@ -89,6 +91,9 @@ def test_decode_cursor_rejects_malformed_input():
     with pytest.raises(ValueError):
         decode_cursor("not-a-real-cursor")
 
+    with pytest.raises(ValueError):
+        decode_cursor("1-2")
+
 
 def test_stream_events_rejects_malformed_cursor(session):
     with pytest.raises(ValueError):
@@ -112,3 +117,27 @@ def test_events_stream_command_accepts_options():
     assert args.after_cursor == "abc"
     assert args.task_id == "task-1"
     assert args.limit == 5
+
+
+def test_events_stream_cli_emits_jsonl_structured_records(session, capsys):
+    _record(session, "task.claimed", task_id="task-1")
+    parser = _build_parser()
+    args = parser.parse_args(["events", "stream", "--task-id", "task-1"])
+
+    _events_stream(args, session)
+
+    payloads = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert len(payloads) == 1
+    assert payloads[0]["cursor"] == payloads[0]["event_id"]
+    assert payloads[0]["task_id"] == "task-1"
+    assert payloads[0]["event_type"] == "task.claimed"
+    assert payloads[0]["event_data"] == {}
+    assert payloads[0]["created_at"]
+
+
+def test_events_stream_cli_rejects_malformed_cursor(session):
+    parser = _build_parser()
+    args = parser.parse_args(["events", "stream", "--after-cursor", "not-a-real-cursor"])
+
+    with pytest.raises(SystemExit, match="invalid event cursor"):
+        _events_stream(args, session)

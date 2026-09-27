@@ -4,11 +4,12 @@ import dataclasses
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 from datetime import timedelta
 
 import pytest
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.exc import OperationalError
 
 from build_coordinator.db import Base, DatabaseBusyError, SessionLocal, engine, initialize_schema
@@ -23,11 +24,13 @@ from build_coordinator.models import (
     BuildTaskEvent,
 )
 from build_coordinator.runner import BuildRunner
+from build_coordinator.runner.findings import finding_fingerprint
 import build_coordinator.runner.orchestrator as orchestrator_module
 from build_coordinator.runner.clone_pool import is_standalone_clone, repo_identity
 from build_coordinator.runner.git_safety import FakeGit, MechanicalMergeAssessment
 from build_coordinator.runner.models import RunnerConfig, WorkerConfig
 from build_coordinator.runner.routing import ProviderConfig
+from build_coordinator.runner.validation import ValidationExecutor
 from build_coordinator.policy import CoordinatorPolicyError
 from build_coordinator.service import (
     ClaimRequest,
@@ -40,6 +43,7 @@ from build_coordinator.service import (
     upsert_task,
     utcnow,
 )
+from build_coordinator.task_source.base import source_identity_metadata
 from build_coordinator.types import EventInput
 
 
@@ -276,7 +280,13 @@ def test_post_launch_final_commit_lock_is_typed_not_raw(monkeypatch):
     assert len(executor.launches) == 1
 
 
-def _config(*, auto_push=False, remediation_cycles=2):
+def _config(
+    *,
+    auto_push=False,
+    remediation_cycles=2,
+    review_environment_attempts=2,
+    convergence_generations=3,
+):
     return RunnerConfig(
         workers=(
             WorkerConfig("builder-a", "BUILDER", adapter="fake"),
@@ -285,6 +295,8 @@ def _config(*, auto_push=False, remediation_cycles=2):
             WorkerConfig("integration-1", "INTEGRATION", adapter="fake"),
         ),
         max_remediation_cycles=remediation_cycles,
+        max_convergence_generations=convergence_generations,
+        max_review_environment_attempts=review_environment_attempts,
         auto_push_allowed=auto_push,
         result_dir=os.getenv("BUILD_COORDINATOR_RESULT_DIR"),
     )
@@ -309,6 +321,20 @@ def _runner(config=None, executors=None, git=None):
         executors=executors,
         git=git if git is not None else FakeGit(),
     )
+
+
+class RecordingTaskSource:
+    def __init__(self):
+        self.outbound: list[tuple[str, str]] = []
+        self.discoveries = 0
+
+    def discover_tasks(self, session):
+        self.discoveries += 1
+        return []
+
+    def sync_outbound(self, session, task_id: str, state: str, *, evidence=None) -> bool:
+        self.outbound.append((task_id, state))
+        return True
 
 
 def _git(cwd: Path, *args: str) -> str:
@@ -815,6 +841,239 @@ def test_targeted_task_keeps_normal_review_and_integration_lifecycle():
         ).all() == []
 
 
+def test_live_builder_drains_after_task_becomes_deferred_without_outbound_done_sync():
+    task_source = RecordingTaskSource()
+    config = RunnerConfig(
+        workers=(
+            WorkerConfig("builder-a", "BUILDER", adapter="fake"),
+            WorkerConfig("reviewer-1", "REVIEWER", adapter="fake"),
+            WorkerConfig("integration-1", "INTEGRATION", adapter="fake"),
+        ),
+        run_validation=False,
+        result_dir=os.getenv("BUILD_COORDINATOR_RESULT_DIR"),
+    )
+    executors = {
+        "builder-a": FakeExecutor([
+            ExecutionObservation("SUCCEEDED", result_data={"feature_sha": "feature-sha"})
+        ]),
+    }
+    with SessionLocal() as session:
+        task = upsert_task(
+            session,
+            TaskSpec(
+                task_id="GH-124",
+                title="Task GH-124",
+                description="Runner test task",
+                acceptance_criteria=["passes"],
+                review_policy="NONE",
+                required_validation=[],
+            ),
+        )
+        task.definition_metadata = source_identity_metadata(
+            source_type="github",
+            source_owner="example/repo",
+            source_ref="124",
+            source_url="https://github.com/example/repo/issues/124",
+            source_state="OPEN",
+            source_eligibility="ELIGIBLE",
+            legacy={"source_issue_number": 124},
+        )
+        session.commit()
+
+    runner = BuildRunner(
+        SessionLocal,
+        config,
+        executors=executors,
+        git=FakeGit(),
+        task_source=task_source,
+    )
+    launched = runner.run_once()
+    assert launched.launched == ["GH-124:BUILDER"]
+
+    with SessionLocal() as session:
+        task = session.get(BuildTask, "GH-124")
+        metadata = dict(task.definition_metadata or {})
+        metadata["source_eligibility"] = "DEFERRED"
+        metadata["source_eligibility_reason"] = "matched exclude label(s): stagemesh:deferred"
+        task.definition_metadata = metadata
+        session.commit()
+
+    drained = runner.run_once()
+
+    assert "GH-124" not in drained.outbound_synced
+    assert ("GH-124", "DONE") not in task_source.outbound
+    with SessionLocal() as session:
+        task = session.get(BuildTask, "GH-124")
+        assert task.state == "DONE"
+        roles = [
+            row.role
+            for row in session.scalars(
+                select(BuildRunnerExecution).where(BuildRunnerExecution.task_id == "GH-124")
+            )
+        ]
+        assert roles == ["BUILDER"]
+
+
+def test_validation_runs_in_background_while_ready_tasks_dispatch():
+    slow_validation = f"{sys.executable} -c \"import time; time.sleep(1)\""
+    with SessionLocal() as session:
+        task = upsert_task(
+            session,
+            TaskSpec(
+                **{
+                    **_task("RUN-VALIDATING").__dict__,
+                    "required_validation": [slow_validation],
+                }
+            ),
+        )
+        task.state = "VALIDATING"
+        session.add(
+            BuildRunnerExecution(
+                execution_id="builder-done",
+                task_id="RUN-VALIDATING",
+                role="BUILDER",
+                worker_id="builder-a",
+                provider="local",
+                adapter="fake",
+                status="SUCCEEDED",
+                result_data={"feature_sha": "feature-sha"},
+            )
+        )
+        upsert_task(session, _task("RUN-READY"))
+        session.commit()
+
+    result = _runner(executors={"builder-a": FakeExecutor()}).run_once()
+
+    with SessionLocal() as session:
+        validation = session.scalar(
+            select(BuildRunnerExecution)
+            .where(BuildRunnerExecution.task_id == "RUN-VALIDATING")
+            .where(BuildRunnerExecution.adapter == "validation")
+        )
+        ready_builder = session.scalar(
+            select(BuildRunnerExecution)
+            .where(BuildRunnerExecution.task_id == "RUN-READY")
+            .where(BuildRunnerExecution.adapter == "fake")
+        )
+
+        assert validation is not None
+        assert validation.status in {"LAUNCHED", "RUNNING"}
+        assert validation.result_data["commands"] == [slow_validation]
+        assert validation.result_data["workspace"]
+        assert validation.result_data["validated_sha"]
+        assert validation.result_data["environment_fingerprint"]
+        assert validation.result_data["validation_context_hash"] == validation.prompt_hash
+        assert validation.result_data["source_execution_id"] == "builder-done"
+        assert validation.result_data["started_at"]
+        assert ready_builder is not None
+        assert ready_builder.status == "LAUNCHED"
+        assert validation.execution_id in result.launched
+        assert ready_builder.execution_id in result.launched
+
+
+def test_validation_restarts_are_rerun_instead_of_trusted():
+    validation_command = f"{sys.executable} -c \"print('ok')\""
+    with SessionLocal() as session:
+        task = upsert_task(
+            session,
+            TaskSpec(
+                **{
+                    **_task("RUN-VALIDATION-RESTART").__dict__,
+                    "required_validation": [validation_command],
+                }
+            ),
+        )
+        task.state = "VALIDATING"
+        session.add(
+            BuildRunnerExecution(
+                execution_id="builder-done",
+                task_id="RUN-VALIDATION-RESTART",
+                role="BUILDER",
+                worker_id="builder-a",
+                provider="local",
+                adapter="fake",
+                status="SUCCEEDED",
+                result_data={"feature_sha": "feature-sha"},
+            )
+        )
+        session.add(
+            BuildRunnerExecution(
+                execution_id="validation-before-restart",
+                task_id="RUN-VALIDATION-RESTART",
+                role="BUILDER",
+                worker_id="runner-validation",
+                provider="runner",
+                adapter="validation",
+                status="LAUNCHED",
+                result_data={
+                    "commands": [validation_command],
+                    "workspace": str(Path.cwd()),
+                    "feature_sha": "feature-sha",
+                    "next_state": "REVIEW_READY",
+                },
+            )
+        )
+        session.commit()
+
+    result = _runner().run_once()
+
+    with SessionLocal() as session:
+        rows = session.scalars(
+            select(BuildRunnerExecution)
+            .where(BuildRunnerExecution.task_id == "RUN-VALIDATION-RESTART")
+            .where(BuildRunnerExecution.adapter == "validation")
+            .order_by(BuildRunnerExecution.execution_id)
+        ).all()
+
+        assert {row.execution_id for row in rows} == {
+            "validation-before-restart",
+            *set(result.launched),
+        }
+        old = next(row for row in rows if row.execution_id == "validation-before-restart")
+        new = next(row for row in rows if row.execution_id != "validation-before-restart")
+        assert old.status == "LOST"
+        assert old.result_data["validation_lost"] is True
+        assert old.result_data["validation_terminal_type"] == "LOST"
+        assert old.result_data["ended_at"]
+        assert new.status in {"LAUNCHED", "RUNNING"}
+        assert session.get(BuildTask, "RUN-VALIDATION-RESTART").state == "VALIDATING"
+
+
+def test_validation_timeout_is_typed_with_start_end_and_exit_evidence():
+    executor = ValidationExecutor(timeout_seconds=0.01)
+    command = f"{sys.executable} -c \"import time; time.sleep(1)\""
+    handle = executor.launch(
+        orchestrator_module.ExecutionLaunch(
+            task_id="RUN-VALIDATION-TIMEOUT",
+            role="BUILDER",
+            worker_id="runner-validation",
+            provider="runner",
+            worktree_path=str(Path.cwd()),
+            branch_name=None,
+            prompt="",
+            execution_id="validation-timeout",
+            metadata={"commands": [command]},
+        )
+    )
+
+    observation = executor.poll(handle.execution_id)
+    for _ in range(20):
+        if observation.status != "RUNNING":
+            break
+        time.sleep(0.02)
+        observation = executor.poll(handle.execution_id)
+
+    assert observation.status == "FAILED"
+    assert observation.exit_code == 124
+    assert observation.result_data["validation_terminal_type"] == "TIMEOUT"
+    result = observation.result_data["results"][0]
+    assert result["command"] == command
+    assert result["exit_code"] == 124
+    assert result["failure_type"] == "TIMEOUT"
+    assert result["started_at"]
+    assert result["completed_at"]
+
+
 def test_branch_assigned_builder_success_without_feature_sha_blocks_for_rework():
     executors = {
         "builder-a": FakeExecutor([ExecutionObservation("SUCCEEDED", result_data={})]),
@@ -867,6 +1126,50 @@ def test_runner_reload_keeps_live_executor_and_replaces_it_when_idle():
 
     runner.reload_config(updated, live_worker_ids=set())
     assert "builder-a" not in runner._executors
+
+
+def test_runner_reload_reconciles_live_subprocess_with_preserved_worker_config():
+    runner = _runner(
+        config=RunnerConfig(
+            workers=(
+                WorkerConfig(
+                    "builder-a",
+                    "BUILDER",
+                    adapter="subprocess",
+                    command=("old-worker", "--run"),
+                ),
+            ),
+            result_dir=os.getenv("BUILD_COORDINATOR_RESULT_DIR"),
+        )
+    )
+    updated = RunnerConfig(
+        workers=(
+            WorkerConfig(
+                "builder-a",
+                "BUILDER",
+                adapter="subprocess",
+                command=("new-worker", "--run"),
+            ),
+        ),
+        result_dir=os.getenv("BUILD_COORDINATOR_RESULT_DIR"),
+    )
+    execution = BuildRunnerExecution(
+        execution_id="live-exec",
+        task_id="LIVE-1",
+        role="BUILDER",
+        worker_id="builder-a",
+        provider="local",
+        adapter="subprocess",
+        status="RUNNING",
+        result_path=str(Path(os.environ["BUILD_COORDINATOR_RESULT_DIR"]) / "live-exec.json"),
+    )
+
+    runner.reload_config(updated, live_worker_ids={"builder-a"})
+    runner._executors.pop("builder-a", None)
+
+    executor = runner._executor_for_execution(execution)
+
+    assert executor._command == ["old-worker", "--run"]
 
 
 def test_worker_saturation_is_backpressure_not_configuration_escalation():
@@ -1094,7 +1397,7 @@ def test_remediation_required_routes_to_rework_and_findings_are_checkpointed():
         assert remediation is not None
 
 
-def test_rework_loop_count_is_bounded():
+def test_rework_loop_without_finding_signal_uses_review_protocol_budget():
     with SessionLocal() as session:
         upsert_task(session, _task("RUN-LIMIT"))
         session.add(
@@ -1123,10 +1426,35 @@ def test_rework_loop_count_is_bounded():
             ]
         )
     }
-    _runner(config=_config(remediation_cycles=1), executors=executors).run_once()
-    result = _runner(config=_config(remediation_cycles=1), executors=executors).run_once()
+    _runner(
+        config=_config(remediation_cycles=1, review_environment_attempts=1),
+        executors=executors,
+    ).run_once()
+    result = _runner(
+        config=_config(remediation_cycles=1, review_environment_attempts=1),
+        executors=executors,
+    ).run_once()
 
-    assert "RUN-LIMIT:REMEDIATION_LIMIT_REACHED" in result.escalations
+    assert "RUN-LIMIT:REMEDIATION_LIMIT_REACHED" not in result.escalations
+    assert "RUN-LIMIT:REVIEW_ENVIRONMENT_BLOCKED" in result.escalations
+    with SessionLocal() as session:
+        assert session.get(BuildTask, "RUN-LIMIT").state == "BLOCKED"
+        assert (
+            session.scalar(
+                select(BuildRunnerExecution)
+                .where(BuildRunnerExecution.task_id == "RUN-LIMIT")
+                .where(BuildRunnerExecution.role == "REMEDIATION")
+                .where(BuildRunnerExecution.execution_id != "old-remediation")
+            )
+            is None
+        )
+        event = session.scalar(
+            select(BuildTaskEvent)
+            .where(BuildTaskEvent.task_id == "RUN-LIMIT")
+            .where(BuildTaskEvent.event_type == "runner.review_protocol_blocked")
+        )
+        assert event is not None
+        assert event.event_data["reason"] == "REMEDIATION_REQUIRED_WITHOUT_FINDING_SIGNAL"
 
 
 def test_same_finding_repeated_verbatim_still_converges_to_escalation():
@@ -1185,7 +1513,7 @@ def test_same_finding_repeated_verbatim_still_converges_to_escalation():
         transition_task(session, task_id, "REVIEW_READY")
         session.commit()
 
-    runner = _runner(config=_config(remediation_cycles=2), executors=executors)
+    runner = _runner(config=_config(remediation_cycles=2, convergence_generations=99), executors=executors)
     runner.run_once()  # launch review 1
     runner.run_once()  # review 1 -> REWORK_REQUIRED -> launch remediation 1
     runner.run_once()  # remediation 1 -> VALIDATING -> REVIEW_READY -> launch review 2
@@ -1310,11 +1638,448 @@ def test_new_finding_after_resolution_gets_its_own_budget_not_raw_count():
         assert open_findings[0]["description"] == "defect B"
 
 
-def test_findings_omitted_after_being_tracked_still_hits_the_raw_cap():
+def test_serial_new_findings_trigger_comprehensive_review_then_clean_converges():
+    task_id = "RUN-SERIAL-FINDINGS-CLEAN"
+    executors = {
+        "reviewer-1": FakeExecutor(
+            [
+                ExecutionObservation(
+                    "SUCCEEDED",
+                    result_data={"review": {"verdict": "REMEDIATION_REQUIRED", "findings": ["F1"], "required_remediation": ["fix F1"]}},
+                ),
+                ExecutionObservation(
+                    "SUCCEEDED",
+                    result_data={"review": {"verdict": "REMEDIATION_REQUIRED", "findings": ["F2"], "required_remediation": ["fix F2"]}},
+                ),
+                ExecutionObservation(
+                    "SUCCEEDED",
+                    result_data={"review": {"verdict": "REMEDIATION_REQUIRED", "findings": ["F3"], "required_remediation": ["fix F3"]}},
+                ),
+                ExecutionObservation(
+                    "SUCCEEDED",
+                    result_data={
+                        "review": {
+                            "verdict": "GREEN",
+                            "ready_for_integration": True,
+                            "findings": [],
+                            "finding_dispositions": [
+                                {
+                                    "id": finding_fingerprint("F3"),
+                                    "status": "RESOLVED",
+                                    "reason": "verified fixed in comprehensive pass",
+                                }
+                            ],
+                        }
+                    },
+                ),
+            ]
+        ),
+        "builder-a": FakeExecutor(
+            [
+                ExecutionObservation("SUCCEEDED", result_data={"feature_sha": "fix-F1"}),
+                ExecutionObservation("SUCCEEDED", result_data={"feature_sha": "fix-F2"}),
+            ]
+        ),
+    }
+    with SessionLocal() as session:
+        upsert_task(session, TaskSpec(**{**_task(task_id).__dict__, "required_validation": []}))
+        claim_task(session, ClaimRequest(task_id, worker_id="builder-a"))
+        transition_task(session, task_id, "IN_PROGRESS")
+        transition_task(session, task_id, "VALIDATING")
+        transition_task(session, task_id, "REVIEW_READY")
+        session.commit()
+
+    runner = _runner(config=_config(remediation_cycles=2, convergence_generations=3), executors=executors)
+    runner.run_once()  # launch review 1
+    runner.run_once()  # F1 -> remediation 1
+    runner.run_once()  # remediation 1 -> review 2
+    runner.run_once()  # F2 -> remediation 2
+    runner.run_once()  # remediation 2 -> review 3
+    result = runner.run_once()  # F3 reaches serial convergence threshold -> comprehensive review
+
+    assert f"{task_id}:COMPREHENSIVE_CONVERGENCE_REVIEW_REQUIRED" in result.escalations
+    assert f"{task_id}:REMEDIATION_LIMIT_REACHED" not in result.escalations
+
+    with SessionLocal() as session:
+        task = session.get(BuildTask, task_id)
+        assert task.state in {"REVIEW_READY", "REVIEWING"}
+        convergence = task.finding_registry["convergence"]
+        assert convergence["generations"] == 3
+        assert convergence["pending_comprehensive_review"] is True
+        assert [row["introduced"] for row in convergence["history"]] == [
+            [finding_fingerprint("F1")],
+            [finding_fingerprint("F2")],
+            [finding_fingerprint("F3")],
+        ]
+        event = session.scalar(
+            select(BuildTaskEvent)
+            .where(BuildTaskEvent.task_id == task_id)
+            .where(BuildTaskEvent.event_type == "runner.comprehensive_convergence_review_requested")
+        )
+        assert event is not None
+
+    runner.run_once()  # launch comprehensive review
+    result = runner.run_once()  # comprehensive review returns GREEN
+
+    assert f"{task_id}:REMEDIATION_LIMIT_REACHED" not in result.escalations
+    with SessionLocal() as session:
+        task = session.get(BuildTask, task_id)
+        assert task.state == "REVIEWING"
+        assert task.finding_registry["convergence"]["comprehensive_used"] is True
+        assert task.finding_registry["convergence"]["pending_comprehensive_review"] is False
+
+
+def test_malformed_comprehensive_clean_response_does_not_clear_open_findings():
+    task_id = "RUN-SERIAL-FINDINGS-MALFORMED-CLEAN"
+    executors = {
+        "reviewer-1": FakeExecutor(
+            [
+                ExecutionObservation(
+                    "SUCCEEDED",
+                    result_data={"review": {"verdict": "REMEDIATION_REQUIRED", "findings": ["F1"], "required_remediation": ["fix F1"]}},
+                ),
+                ExecutionObservation(
+                    "SUCCEEDED",
+                    result_data={"review": {"verdict": "REMEDIATION_REQUIRED", "findings": ["F2"], "required_remediation": ["fix F2"]}},
+                ),
+                ExecutionObservation(
+                    "SUCCEEDED",
+                    result_data={"review": {"verdict": "REMEDIATION_REQUIRED", "findings": ["F3"], "required_remediation": ["fix F3"]}},
+                ),
+                # Malformed comprehensive response: claims clean with no
+                # findings and no finding_dispositions, so it never
+                # explicitly reconciles the still-open "F3".
+                ExecutionObservation(
+                    "SUCCEEDED",
+                    result_data={"review": {"verdict": "GREEN", "ready_for_integration": True, "findings": []}},
+                ),
+            ]
+        ),
+        "builder-a": FakeExecutor(
+            [
+                ExecutionObservation("SUCCEEDED", result_data={"feature_sha": "fix-F1"}),
+                ExecutionObservation("SUCCEEDED", result_data={"feature_sha": "fix-F2"}),
+            ]
+        ),
+    }
+    with SessionLocal() as session:
+        upsert_task(session, TaskSpec(**{**_task(task_id).__dict__, "required_validation": []}))
+        claim_task(session, ClaimRequest(task_id, worker_id="builder-a"))
+        transition_task(session, task_id, "IN_PROGRESS")
+        transition_task(session, task_id, "VALIDATING")
+        transition_task(session, task_id, "REVIEW_READY")
+        session.commit()
+
+    runner = _runner(config=_config(remediation_cycles=2, convergence_generations=3), executors=executors)
+    runner.run_once()  # launch review 1
+    runner.run_once()  # F1 -> remediation 1
+    runner.run_once()  # remediation 1 -> review 2
+    runner.run_once()  # F2 -> remediation 2
+    runner.run_once()  # remediation 2 -> review 3
+    runner.run_once()  # F3 reaches serial convergence threshold -> comprehensive review requested
+    runner.run_once()  # launch comprehensive review
+    result = runner.run_once()  # comprehensive review returns malformed clean GREEN
+
+    assert f"{task_id}:REMEDIATION_LIMIT_REACHED" not in result.escalations
+    assert f"{task_id}:COORDINATOR_INVARIANT_FAILURE" not in result.escalations
+    with SessionLocal() as session:
+        task = session.get(BuildTask, task_id)
+        assert task.state == "REVIEW_READY"
+        registry = task.finding_registry
+        f3_id = finding_fingerprint("F3")
+        assert registry["entries"][f3_id]["status"] == "STILL_OPEN"
+        convergence = registry["convergence"]
+        assert convergence["pending_comprehensive_review"] is True
+        assert not convergence.get("comprehensive_used")
+        event = session.scalar(
+            select(BuildTaskEvent)
+            .where(BuildTaskEvent.task_id == task_id)
+            .where(BuildTaskEvent.event_type == "runner.review_protocol_blocked")
+        )
+        assert event is not None
+        assert event.event_data["reason"] == "COMPREHENSIVE_REVIEW_MISSING_DISPOSITIONS"
+        assert f3_id in event.event_data["why_not_remediation"]
+
+
+def test_comprehensive_review_with_unresolved_findings_escalates_with_evidence():
+    task_id = "RUN-SERIAL-FINDINGS-BLOCK"
+    executors = {
+        "reviewer-1": FakeExecutor(
+            [
+                ExecutionObservation(
+                    "SUCCEEDED",
+                    result_data={"review": {"verdict": "REMEDIATION_REQUIRED", "findings": ["F1"], "required_remediation": ["fix F1"]}},
+                ),
+                ExecutionObservation(
+                    "SUCCEEDED",
+                    result_data={"review": {"verdict": "REMEDIATION_REQUIRED", "findings": ["F2"], "required_remediation": ["fix F2"]}},
+                ),
+                ExecutionObservation(
+                    "SUCCEEDED",
+                    result_data={"review": {"verdict": "REMEDIATION_REQUIRED", "findings": ["F3"], "required_remediation": ["fix F3"]}},
+                ),
+                ExecutionObservation(
+                    "SUCCEEDED",
+                    result_data={
+                        "review": {
+                            "verdict": "REMEDIATION_REQUIRED",
+                            "findings": ["F3"],
+                            "required_remediation": ["fix F3"],
+                        }
+                    },
+                ),
+            ]
+        ),
+        "builder-a": FakeExecutor(
+            [
+                ExecutionObservation("SUCCEEDED", result_data={"feature_sha": "fix-F1"}),
+                ExecutionObservation("SUCCEEDED", result_data={"feature_sha": "fix-F2"}),
+            ]
+        ),
+    }
+    with SessionLocal() as session:
+        upsert_task(session, TaskSpec(**{**_task(task_id).__dict__, "required_validation": []}))
+        claim_task(session, ClaimRequest(task_id, worker_id="builder-a"))
+        transition_task(session, task_id, "IN_PROGRESS")
+        transition_task(session, task_id, "VALIDATING")
+        transition_task(session, task_id, "REVIEW_READY")
+        session.commit()
+
+    runner = _runner(config=_config(remediation_cycles=2, convergence_generations=3), executors=executors)
+    for _ in range(8):
+        result = runner.run_once()
+
+    assert f"{task_id}:REMEDIATION_LIMIT_REACHED" in result.escalations
+    with SessionLocal() as session:
+        assert session.get(BuildTask, task_id).state == "BLOCKED"
+        event = session.scalar(
+            select(BuildTaskEvent)
+            .where(BuildTaskEvent.task_id == task_id)
+            .where(BuildTaskEvent.event_type == "runner.remediation_limit_reached")
+            .order_by(BuildTaskEvent.created_at.desc())
+        )
+        assert event.event_data["convergence"]["comprehensive_used"] is True
+        assert event.event_data["why_autonomous_convergence_stopped"] == (
+            "comprehensive_convergence_review_still_found_unresolved_work"
+        )
+
+
+def test_review_environment_failures_do_not_advance_convergence_generations():
+    task_id = "RUN-CONVERGENCE-ENV"
+    executors = {
+        "reviewer-1": FakeExecutor(
+            [
+                ExecutionObservation(
+                    "SUCCEEDED",
+                    result_data={"review": {"verdict": "REMEDIATION_REQUIRED", "findings": ["F1"], "required_remediation": ["fix F1"]}},
+                ),
+                ExecutionObservation(
+                    "SUCCEEDED",
+                    result_data={"review": {"verdict": "REVIEW_ENVIRONMENT_BLOCKED", "findings": ["tmp unavailable"]}},
+                ),
+                ExecutionObservation(
+                    "SUCCEEDED",
+                    result_data={"review": {"verdict": "REMEDIATION_REQUIRED", "findings": ["F2"], "required_remediation": ["fix F2"]}},
+                ),
+            ]
+        ),
+        "builder-a": FakeExecutor(
+            [ExecutionObservation("SUCCEEDED", result_data={"feature_sha": "fix-F1"})]
+        ),
+    }
+    with SessionLocal() as session:
+        upsert_task(session, TaskSpec(**{**_task(task_id).__dict__, "required_validation": []}))
+        claim_task(session, ClaimRequest(task_id, worker_id="builder-a"))
+        transition_task(session, task_id, "IN_PROGRESS")
+        transition_task(session, task_id, "VALIDATING")
+        transition_task(session, task_id, "REVIEW_READY")
+        session.commit()
+
+    runner = _runner(
+        config=_config(remediation_cycles=2, convergence_generations=2, review_environment_attempts=3),
+        executors=executors,
+    )
+    runner.run_once()  # launch review 1
+    runner.run_once()  # F1 -> remediation
+    runner.run_once()  # remediation -> review 2
+    runner.run_once()  # environment failure -> review retry
+    runner.run_once()  # launch review 3
+    result = runner.run_once()  # F2 is only generation 2, threshold now requests comprehensive review
+
+    assert f"{task_id}:COMPREHENSIVE_CONVERGENCE_REVIEW_REQUIRED" in result.escalations
+    with SessionLocal() as session:
+        convergence = session.get(BuildTask, task_id).finding_registry["convergence"]
+        assert convergence["generations"] == 2
+        assert all("tmp unavailable" not in row["introduced"] for row in convergence["history"])
+
+
+def test_reviewer_disagreement_deadlocks_instead_of_spending_remediation_budget():
+    """#119 follow-up to #81: finding-aware accounting still churned when
+    independent reviewers disagreed about the same durable finding. That is
+    not meaningful unresolved builder work, so it needs a tie-break gate
+    instead of another remediation attempt."""
+    task_id = "RUN-REVIEW-DISAGREEMENT"
+    finding = "missing regression coverage for the scheduler"
+    finding_id = finding_fingerprint(finding)
+    executors = {
+        "reviewer-2": FakeExecutor(
+            [
+                ExecutionObservation(
+                    "SUCCEEDED",
+                    result_data={
+                        "review": {
+                            "verdict": "REMEDIATION_REQUIRED",
+                            "findings": [],
+                            "finding_dispositions": [
+                                {
+                                    "id": finding_id,
+                                    "status": "RESOLVED",
+                                    "reason": "the new scheduler regression test covers it",
+                                }
+                            ],
+                            "required_remediation": ["reviewer-1 may still want changes"],
+                        }
+                    },
+                )
+            ]
+        ),
+    }
+    config = RunnerConfig(
+        workers=(
+            WorkerConfig("builder-a", "BUILDER", adapter="fake"),
+            WorkerConfig("reviewer-2", "REVIEWER", adapter="fake"),
+        ),
+        max_remediation_cycles=2,
+        result_dir=os.getenv("BUILD_COORDINATOR_RESULT_DIR"),
+    )
+    with SessionLocal() as session:
+        upsert_task(session, TaskSpec(**{**_task(task_id).__dict__, "required_validation": []}))
+        task = session.get(BuildTask, task_id)
+        task.finding_registry = {
+            "entries": {
+                finding_id: {
+                    "id": finding_id,
+                    "description": finding,
+                    "status": "STILL_OPEN",
+                    "attempts": 1,
+                    "first_seen_cycle": "review-cycle:reviewer-1-opened",
+                    "last_seen_cycle": "review-cycle:reviewer-1-opened",
+                    "history": [
+                        {
+                            "execution_id": "reviewer-1-opened",
+                            "cycle": "review-cycle:reviewer-1-opened",
+                            "status": "STILL_OPEN",
+                            "reason": "",
+                            "reopened": False,
+                        }
+                    ],
+                    "reviewer_history": {
+                        "reviewer-1": {
+                            "status": "STILL_OPEN",
+                            "reason": "",
+                            "execution_id": "reviewer-1-opened",
+                            "cycle": "review-cycle:reviewer-1-opened",
+                            "reviewed_feature_sha": "feature-sha",
+                            "classifications": [
+                                {
+                                    "status": "STILL_OPEN",
+                                    "reason": "",
+                                    "execution_id": "reviewer-1-opened",
+                                    "cycle": "review-cycle:reviewer-1-opened",
+                                    "reviewed_feature_sha": "feature-sha",
+                                }
+                            ],
+                        }
+                    },
+                }
+            },
+            "processed_execution_ids": ["reviewer-1-opened"],
+        }
+        task.state = "REVIEW_READY"
+        session.commit()
+
+    runner = _runner(config=config, executors=executors)
+    runner.run_once()  # launch reviewer-2
+    result = runner.run_once()  # reviewer-2 disagrees -> deadlock, not remediation
+
+    assert f"{task_id}:REVIEWER_DISAGREEMENT_DEADLOCK" in result.escalations
+    assert f"{task_id}:REMEDIATION_LIMIT_REACHED" not in result.escalations
+    with SessionLocal() as session:
+        assert session.get(BuildTask, task_id).state == "BLOCKED"
+        assert runner._remediation_cycles(session, task_id) == 0
+        remediation_count = session.scalar(
+            select(func.count())
+            .select_from(BuildRunnerExecution)
+            .where(BuildRunnerExecution.task_id == task_id)
+            .where(BuildRunnerExecution.role == "REMEDIATION")
+        )
+        assert remediation_count == 0
+        event = session.scalar(
+            select(BuildTaskEvent)
+            .where(BuildTaskEvent.task_id == task_id)
+            .where(BuildTaskEvent.event_type == "runner.review_disagreement_deadlock")
+        )
+        assert event is not None
+        assert event.event_data["why_not_remediation"].startswith("Independent reviewers disagree")
+        open_findings = event.event_data["open_findings"]
+        assert open_findings[0]["id"] == finding_id
+        assert open_findings[0]["disagreement"]["resolved_status"] == "STILL_OPEN"
+
+
+def test_reviewer_disagreement_deadlock_ignores_stale_sha_disagreement():
+    runner = _runner(config=_config())
+    finding = "missing regression coverage for the scheduler"
+    finding_id = finding_fingerprint(finding)
+    registry = {
+        "entries": {
+            finding_id: {
+                "id": finding_id,
+                "description": finding,
+                "status": "STILL_OPEN",
+                "attempts": 2,
+                "history": [],
+                "disagreement": {
+                    "reviewers": {
+                        "reviewer-a": {
+                            "status": "STILL_OPEN",
+                            "reviewed_feature_sha": "sha-a",
+                        },
+                        "reviewer-b": {
+                            "status": "RESOLVED",
+                            "reviewed_feature_sha": "sha-a",
+                        },
+                    },
+                    "resolved_status": "STILL_OPEN",
+                    "cycle": "review-cycle:old",
+                    "reviewed_feature_sha": "sha-a",
+                },
+            }
+        }
+    }
+    execution = BuildRunnerExecution(
+        execution_id="review-new",
+        task_id="RUN-STALE-REVIEW-DISAGREEMENT",
+        role="REVIEWER",
+        worker_id="reviewer-c",
+        provider="local",
+        adapter="fake",
+        reviewed_feature_sha="sha-b",
+    )
+    result = orchestrator_module.RunnerCycleResult(mode="RUNNING")
+
+    with SessionLocal() as session:
+        deadlocked = runner._review_disagreement_deadlocked(session, execution, registry, result)
+
+    assert deadlocked is False
+    assert result.escalations == []
+
+
+def test_findings_omitted_after_being_tracked_retries_review_not_remediation():
     """A reviewer that stops restating findings (but keeps returning
-    REMEDIATION_REQUIRED with an empty `findings` array) must not be able to
-    stall convergence forever: since there is no finding signal to reconcile,
-    the raw remediation-cycle cap remains the safety net for those cycles."""
+    REMEDIATION_REQUIRED with an empty `findings` array) has produced an
+    unstructured review result, not meaningful unresolved implementation
+    work. It should retry review and then block with protocol evidence
+    instead of spending remediation budget on no target finding."""
     task_id = "RUN-OMITTED-FINDINGS"
     empty_findings_review = ExecutionObservation(
         "SUCCEEDED",
@@ -1362,18 +2127,127 @@ def test_findings_omitted_after_being_tracked_still_hits_the_raw_cap():
     runner.run_once()  # launch review 1
     runner.run_once()  # review 1 (defect A) -> REWORK_REQUIRED -> launch remediation 1
     runner.run_once()  # remediation 1 -> REVIEW_READY -> launch review 2
-    result = runner.run_once()  # review 2 (no findings restated; raw count 1 < cap 2)
+    result = runner.run_once()  # review 2 (no findings restated; retry review)
 
     assert f"{task_id}:REMEDIATION_LIMIT_REACHED" not in result.escalations
     with SessionLocal() as session:
-        assert session.get(BuildTask, task_id).state == "CLAIMED"
+        assert session.get(BuildTask, task_id).state == "REVIEW_READY"
+        assert runner._remediation_cycles(session, task_id) == 1
 
-    runner.run_once()  # remediation 2 -> REVIEW_READY -> launch review 3
-    result = runner.run_once()  # review 3 (no findings restated; raw count 2 >= cap 2)
+    runner.run_once()  # launch review 3
+    result = runner.run_once()  # review 3 (no findings restated; review protocol budget exhausted)
 
-    assert f"{task_id}:REMEDIATION_LIMIT_REACHED" in result.escalations
+    assert f"{task_id}:REMEDIATION_LIMIT_REACHED" not in result.escalations
+    assert f"{task_id}:REVIEW_ENVIRONMENT_BLOCKED" in result.escalations
     with SessionLocal() as session:
         assert session.get(BuildTask, task_id).state == "BLOCKED"
+        assert runner._remediation_cycles(session, task_id) == 1
+        blocker = session.scalar(
+            select(BuildTaskEvent)
+            .where(BuildTaskEvent.task_id == task_id)
+            .where(BuildTaskEvent.event_type == "runner.coordinator_invariant_failed")
+        )
+        assert blocker is not None
+        evidence = blocker.event_data
+        assert evidence["underlying_invariant"] == "REVIEW_PROTOCOL_BLOCKED"
+        assert evidence["why_not_remediation"].startswith("No findings")
+
+
+def test_resolved_disposition_with_remediation_required_retries_review_not_remediation():
+    """A review can close the prior finding through finding_dispositions yet
+    still return REMEDIATION_REQUIRED. After reconciliation there is no open
+    target, so the runner must treat that as review protocol failure instead
+    of dispatching a no-op remediation cycle."""
+    task_id = "RUN-RESOLVED-DISPOSITION"
+    finding = "missing regression coverage for retry accounting"
+    finding_id = finding_fingerprint(finding)
+    resolved_review = ExecutionObservation(
+        "SUCCEEDED",
+        result_data={
+            "review": {
+                "verdict": "REMEDIATION_REQUIRED",
+                "findings": [],
+                "finding_dispositions": [
+                    {
+                        "id": finding_id,
+                        "status": "RESOLVED",
+                        "reason": "new regression test covers retry accounting",
+                    }
+                ],
+                "required_remediation": ["nothing open remains, but please remediate"],
+            }
+        },
+    )
+    executors = {
+        "reviewer-1": FakeExecutor(
+            [
+                ExecutionObservation(
+                    "SUCCEEDED",
+                    result_data={
+                        "review": {
+                            "verdict": "REMEDIATION_REQUIRED",
+                            "findings": [finding],
+                            "required_remediation": ["add retry-accounting coverage"],
+                        }
+                    },
+                ),
+                resolved_review,
+                resolved_review,
+            ]
+        ),
+        "builder-a": FakeExecutor(
+            [
+                ExecutionObservation("SUCCEEDED", result_data={"feature_sha": "remediated-sha-1"}),
+                ExecutionObservation("SUCCEEDED", result_data={"feature_sha": "remediated-sha-2"}),
+            ]
+        ),
+    }
+    with SessionLocal() as session:
+        upsert_task(session, TaskSpec(**{**_task(task_id).__dict__, "required_validation": []}))
+        claim_task(session, ClaimRequest(task_id, worker_id="builder-a"))
+        transition_task(session, task_id, "IN_PROGRESS")
+        transition_task(session, task_id, "VALIDATING")
+        transition_task(session, task_id, "REVIEW_READY")
+        session.commit()
+
+    runner = _runner(config=_config(remediation_cycles=2), executors=executors)
+    runner.run_once()  # launch review 1
+    runner.run_once()  # review 1 opens finding -> remediation 1
+    runner.run_once()  # remediation 1 -> REVIEW_READY -> launch review 2
+    result = runner.run_once()  # review 2 resolves finding but still asks for remediation
+
+    assert f"{task_id}:REMEDIATION_LIMIT_REACHED" not in result.escalations
+    with SessionLocal() as session:
+        task = session.get(BuildTask, task_id)
+        assert task.state == "REVIEW_READY"
+        assert task.finding_registry["entries"][finding_id]["status"] == "RESOLVED"
+        assert runner._remediation_cycles(session, task_id) == 1
+
+    runner.run_once()  # launch review 3
+    result = runner.run_once()  # review 3 repeats malformed resolved-only request -> block
+
+    assert f"{task_id}:REMEDIATION_LIMIT_REACHED" not in result.escalations
+    assert f"{task_id}:REVIEW_ENVIRONMENT_BLOCKED" in result.escalations
+    with SessionLocal() as session:
+        assert session.get(BuildTask, task_id).state == "BLOCKED"
+        assert runner._remediation_cycles(session, task_id) == 1
+        remediation_count = session.scalar(
+            select(func.count())
+            .select_from(BuildRunnerExecution)
+            .where(BuildRunnerExecution.task_id == task_id)
+            .where(BuildRunnerExecution.role == "REMEDIATION")
+        )
+        assert remediation_count == 1
+        blocker = session.scalar(
+            select(BuildTaskEvent)
+            .where(BuildTaskEvent.task_id == task_id)
+            .where(BuildTaskEvent.event_type == "runner.coordinator_invariant_failed")
+        )
+        assert blocker is not None
+        evidence = blocker.event_data
+        assert evidence["underlying_invariant"] == "REVIEW_PROTOCOL_BLOCKED"
+        assert evidence["reason"] == "REMEDIATION_REQUIRED_WITHOUT_OPEN_FINDINGS"
+        assert evidence["why_not_remediation"].startswith("Review finding_dispositions closed")
 
 
 def test_stale_builder_can_be_recovered_and_resumed_without_duplicate_launch():

@@ -19,6 +19,7 @@ from build_coordinator.coordinator_lock import (
     heartbeat_coordinator_lock,
     release_coordinator_lock,
 )
+from build_coordinator.claims import task_source_eligibility, task_source_is_closed
 from build_coordinator.db import (
     DatabaseSchemaError,
     SessionLocal,
@@ -29,6 +30,7 @@ from build_coordinator.db import (
 from build_coordinator.models import BuildRunnerExecution, BuildTask, BuildTaskEvent, new_uuid
 from build_coordinator.project.backlog import (
     TaskDefinition,
+    audit_delivery_evidence,
     load_backlog,
     sync_backlog,
     task_priorities,
@@ -87,6 +89,8 @@ def add_project_commands(sub: argparse._SubParsersAction) -> None:
     sync = project_sub.add_parser("sync", help="reconcile .stagemesh/tasks/ into the durable queue")
     common(sync)
     sync.add_argument("--dry-run", action="store_true", help="report what would change without writing")
+    audit = project_sub.add_parser("audit-delivery", help="audit project backlog delivery evidence")
+    common(audit)
     status = project_sub.add_parser("status", help="queue and execution state for the project")
     common(status)
     retry = project_sub.add_parser("retry-push", help="retry delivery of work integrated locally but not yet pushed")
@@ -115,6 +119,11 @@ def add_continue_command(sub: argparse._SubParsersAction) -> None:
     p.add_argument("--no-sync", action="store_true", help="skip project backlog synchronization")
     p.add_argument("--github", action="store_true", help="also run the optional GitHub task-source adapter")
     p.add_argument("--all", action="store_true", dest="all_projects", help="coordinate every registered project (default outside a project)")
+    p.add_argument(
+        "--capacity",
+        type=int,
+        help="global builder capacity to allocate across registered projects in global mode",
+    )
     p.add_argument("--task", dest="task_id", help="run only this explicit task id; unrelated backlog is not claimable")
     p.add_argument("--json", action="store_true", help="print the complete structured result instead of the concise human summary")
 
@@ -231,7 +240,9 @@ def handle_project(args: argparse.Namespace) -> None:
         _print(with_sqlite_retry(sync_once))
         return
     with lifecycle.session() as session:
-        if command == "status":
+        if command == "audit-delivery":
+            _print(audit_delivery_evidence(session, project, load_backlog(project, allow_duplicates=True)))
+        elif command == "status":
             _print(project_status(session, project))
 
 
@@ -312,10 +323,20 @@ def project_status(session, project: ProjectDefinition) -> dict[str, Any]:
         "concurrency": project.concurrency,
         "tasks_by_state": dict(sorted(by_state.items())),
         "blocked": _blocked_reasons(session),
+        "deferred": [
+            {
+                "task_id": t.task_id,
+                "eligibility": task_source_eligibility(t),
+                "reason": (t.definition_metadata or {}).get("source_eligibility_reason"),
+            }
+            for t in tasks
+            if task_source_eligibility(t) != "ELIGIBLE"
+        ],
         "tasks": [
             {
                 "task_id": t.task_id,
                 "state": t.state,
+                "source_eligibility": task_source_eligibility(t),
                 "priority": priorities.get(t.task_id),
                 "review_policy": t.review_policy,
                 "dependencies": list(t.dependencies or []),
@@ -344,6 +365,8 @@ def _blocked_reasons(session) -> list[dict[str, Any]]:
     """Tasks waiting for a human, with the reason StageMesh recorded."""
     rows = []
     for task in session.scalars(select(BuildTask).where(BuildTask.state == "BLOCKED").order_by(BuildTask.task_id)):
+        if task_source_is_closed(task):
+            continue
         event = session.scalars(
             select(BuildTaskEvent)
             .where(BuildTaskEvent.task_id == task.task_id)
@@ -424,6 +447,7 @@ def handle_continue(args: argparse.Namespace) -> None:
     idle_cycles = 0
     drained_from: str | None = None
     last_escalations: dict[str, str] = {}
+    announced_capacity_waits: set[str] = set()
     try:
         for number in range(1, max(1, args.max_cycles) + 1):
             project, config = _reload_project_runtime(project, lifecycle, runner)
@@ -452,6 +476,7 @@ def handle_continue(args: argparse.Namespace) -> None:
 
                 with_sqlite_retry(retry_pending_pushes_once)
             result = runner.run_once()
+            provider_capacity_waiting = _provider_capacity_waiting(result)
             with lifecycle.session() as session:
                 live = session.scalars(
                     select(BuildRunnerExecution).where(BuildRunnerExecution.status.in_(_LIVE_EXECUTION))
@@ -468,6 +493,21 @@ def handle_continue(args: argparse.Namespace) -> None:
                     commit_or_busy(session)
 
             with_sqlite_retry(heartbeat_once)
+            for change in getattr(result, "provider_state_changes", []) or []:
+                print(_provider_state_change_line(project.project_id, change), file=sys.stderr, flush=True)
+            waiting_now = {
+                task_id
+                for task_id, reason in (getattr(result, "scheduling_reasons", {}) or {}).items()
+                if reason == "provider_capacity_wait"
+            }
+            for task_id in sorted(waiting_now - announced_capacity_waits):
+                print(
+                    f"[{project.project_id}] {task_id} waiting for provider capacity",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            announced_capacity_waits.intersection_update(waiting_now)
+            announced_capacity_waits.update(waiting_now)
             for row in launched:
                 print(f"[{project.project_id}] {row.get('role', '?').lower()} {row.get('task_id')} on {row.get('worker_id')}", file=sys.stderr, flush=True)
             for item in result.escalations:
@@ -482,6 +522,8 @@ def handle_continue(args: argparse.Namespace) -> None:
                     "observed": list(result.observed),
                     "recovered": list(result.recovered),
                     "escalations": list(result.escalations),
+                    "scheduling_reasons": dict(getattr(result, "scheduling_reasons", {}) or {}),
+                    "provider_state_changes": list(getattr(result, "provider_state_changes", []) or []),
                     "live_builders": len(live_builders),
                     "live_executions": len(live),
                 }
@@ -489,12 +531,18 @@ def handle_continue(args: argparse.Namespace) -> None:
             if args.once:
                 break
             if not live and not result.launched:
-                idle_cycles += 1
-                if idle_cycles >= 2:
-                    break
+                if provider_capacity_waiting and drained_from is None:
+                    idle_cycles = 0
+                else:
+                    idle_cycles += 1
+                    if idle_cycles >= 2:
+                        break
             else:
                 idle_cycles = 0
-            time.sleep(config.poll_seconds)
+            sleep_seconds = config.poll_seconds
+            if provider_capacity_waiting and not live and not result.launched and drained_from is None:
+                sleep_seconds = runner.provider_capacity_recheck_seconds()
+            time.sleep(sleep_seconds)
         if drained_from == "RUNNING":
             def restore_running_once():
                 with lifecycle.session() as session:
@@ -529,7 +577,16 @@ def handle_continue(args: argparse.Namespace) -> None:
     if getattr(args, "json", False):
         _print(payload)
     else:
-        print(_continue_human_summary(project, cycles, final, last_escalations), flush=True)
+        print(
+            _continue_human_summary(
+                project,
+                cycles,
+                final,
+                last_escalations,
+                target_task_ids=target_task_ids,
+            ),
+            flush=True,
+        )
 
 
 def _reload_project_runtime(
@@ -554,6 +611,7 @@ def _reload_project_runtime(
 
 _ESCALATION_LABELS = {
     "EXTERNAL_EXECUTOR_CONFIGURATION_REQUIRED": "External executor configuration required",
+    "SETUP_FAILED": "Workspace setup failed",
 }
 
 
@@ -561,34 +619,73 @@ def _escalation_label(reason: str) -> str:
     return _ESCALATION_LABELS.get(reason, reason.replace("_", " ").capitalize())
 
 
+def _provider_capacity_waiting(result) -> bool:
+    return any(
+        reason == "provider_capacity_wait"
+        for reason in (getattr(result, "scheduling_reasons", {}) or {}).values()
+    )
+
+
+def _provider_state_change_line(project_id: str, change: dict[str, Any]) -> str:
+    provider = str(change.get("provider") or change.get("runtime") or "provider")
+    task_id = str(change.get("task_id") or "").strip()
+    prefix = f"[{project_id}]"
+    if task_id:
+        prefix += f" {task_id}"
+    if str(change.get("state") or "").upper() == "AVAILABLE":
+        return f"{prefix} {provider} available again"
+    failure = str(change.get("failure") or "TEMPORARILY_UNAVAILABLE")
+    until = str(change.get("until") or "").strip()
+    suffix = f" until {until}" if until else ""
+    return f"{prefix} {provider} unavailable: {failure}{suffix}"
+
+
 def _continue_human_summary(
     project: ProjectDefinition,
     cycles: list[dict[str, Any]],
     final: dict[str, Any],
     outstanding_escalations: dict[str, str] | None = None,
+    *,
+    target_task_ids: frozenset[str] | set[str] | tuple[str, ...] = frozenset(),
 ) -> str:
     """A bounded, operator-facing summary: current state and what needs attention,
     never a dump of historical execution/routing evidence (that's `--json`)."""
+    targets = frozenset(str(task_id) for task_id in target_task_ids)
     live_by_task = {
         e["task_id"]: e
         for e in final.get("executions", [])
         if e.get("status") in _LIVE_EXECUTION
+        and (not targets or e.get("task_id") in targets)
     }
-    by_state = final.get("tasks_by_state", {})
-    ready_count = by_state.get("READY", 0)
+    if targets:
+        ready_count = sum(
+            1
+            for task in final.get("tasks", [])
+            if task.get("task_id") in targets and task.get("state") == "READY"
+        )
+    else:
+        by_state = final.get("tasks_by_state", {})
+        ready_count = by_state.get("READY", 0)
 
     # Durable BLOCKED tasks plus same-run escalations (e.g. PLANNER configuration
     # gates) that never reach BLOCKED task state but still need an operator.
     attention: dict[str, str] = {
         item["task_id"]: item.get("reason") or "human action required"
         for item in final.get("blocked", [])
+        if not targets or item.get("task_id") in targets
     }
     for gate_id, reason in (outstanding_escalations or {}).items():
+        if targets and gate_id not in targets:
+            continue
         attention.setdefault(gate_id, reason)
 
     lines = [
         f"StageMesh - {project.project_id}",
         f"Cycle: {len(cycles)}",
+    ]
+    if targets:
+        lines.append(f"Target: {', '.join(sorted(targets))}")
+    lines += [
         "",
         f"Active:       {len(live_by_task)}",
         f"Needs action: {len(attention)}",
@@ -630,6 +727,13 @@ def handle_global_continue(args: argparse.Namespace) -> None:
             "no StageMesh projects are registered; register one with `stagemesh project add <path>` "
             "(or run `stagemesh init` inside a repository)"
         )
+    requested_capacity = getattr(args, "capacity", None)
+    capacity_batches = _global_capacity_batches(projects, requested_capacity)
+    allocations = {
+        project_id: slots
+        for batch in capacity_batches
+        for project_id, slots in batch.items()
+    }
     flags = [flag for flag, on in (("--dry-run", args.dry_run), ("--once", args.once), ("--no-sync", args.no_sync), ("--github", args.github)) if on]
     flags.append("--json")
     if getattr(args, "task_id", None):
@@ -641,7 +745,9 @@ def handle_global_continue(args: argparse.Namespace) -> None:
             env[key] = os.environ[key]
     runs: dict[str, dict[str, Any]] = {}
 
-    def drive(project: ProjectDefinition) -> None:
+    def drive(project: ProjectDefinition, slots: int) -> None:
+        child_env = dict(env)
+        child_env["STAGEMESH_PROJECT_CAPACITY_OVERRIDE"] = str(slots)
         proc = subprocess.Popen(
             [sys.executable, "-m", "build_coordinator", "continue", "--project-dir", str(project.root), *flags],
             stdout=subprocess.PIPE,
@@ -649,7 +755,7 @@ def handle_global_continue(args: argparse.Namespace) -> None:
             text=True,
             encoding="utf-8",
             errors="replace",
-            env=env,
+            env=child_env,
             stdin=subprocess.DEVNULL,
         )
 
@@ -665,15 +771,63 @@ def handle_global_continue(args: argparse.Namespace) -> None:
             detail = {"error": (out or "").strip()[-400:]}
         runs[project.project_id] = {"returncode": proc.returncode, **_summarize_run(detail)}
 
-    threads = [threading.Thread(target=drive, args=(project,)) for project in projects]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join()
+    by_id = {project.project_id: project for project in projects}
+    for batch in capacity_batches:
+        threads = [
+            threading.Thread(target=drive, args=(by_id[project_id], slots))
+            for project_id, slots in batch.items()
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
     ordered = {p.project_id: runs.get(p.project_id, {"returncode": None}) for p in projects}
-    _print({"mode": "global", "projects": ordered})
+    _print(
+        {
+            "mode": "global",
+            "capacity": requested_capacity if requested_capacity is not None else sum(allocations.values()),
+            "allocations": allocations,
+            "capacity_batches": capacity_batches,
+            "projects": ordered,
+        }
+    )
     if any(run.get("returncode") not in (0, None) for run in ordered.values()):
         raise SystemExit(1)
+
+
+def _global_capacity_batches(
+    projects: list[ProjectDefinition],
+    capacity: int | None,
+) -> list[dict[str, int]]:
+    if capacity is None:
+        return [{project.project_id: project.concurrency for project in projects}]
+    if capacity < 1:
+        raise ProjectError("--capacity must be a positive integer")
+    pending = list(projects)
+    batches: list[dict[str, int]] = []
+    while pending:
+        allocations = {project.project_id: 0 for project in pending}
+        remaining = capacity
+        progressed = False
+        for project in pending:
+            allocations[project.project_id] += 1
+            remaining -= 1
+            progressed = True
+            if remaining == 0:
+                break
+        if remaining > 0:
+            for project in pending:
+                while allocations[project.project_id] < project.concurrency and remaining > 0:
+                    allocations[project.project_id] += 1
+                    remaining -= 1
+                if remaining == 0:
+                    break
+        if not progressed:
+            break
+        batch = {project_id: slots for project_id, slots in allocations.items() if slots > 0}
+        batches.append(batch)
+        pending = [project for project in pending if project.project_id not in batch]
+    return batches
 
 
 def _summarize_run(detail: dict[str, Any]) -> dict[str, Any]:

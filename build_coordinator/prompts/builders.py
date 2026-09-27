@@ -103,6 +103,29 @@ class ReviewerPromptBuilder(_PromptBuilder):
         "itself violates requirements."
     )
 
+    def build(
+        self,
+        context: ResumeContext,
+        *,
+        extra: dict[str, Any] | None = None,
+        repo_root: Any | None = None,
+    ) -> str:
+        extra = extra or {}
+        convergence = extra.get("convergence_review")
+        original_policy = self.role_policy
+        if isinstance(convergence, dict) and convergence.get("pending_comprehensive_review"):
+            self.role_policy = (
+                original_policy
+                + " This is a comprehensive convergence review after serial finding churn. "
+                "Return the complete current substantive finding set in one pass, explicitly "
+                "reconcile every prior finding id in finding_dispositions, and do not drip-feed "
+                "one new finding at a time."
+            )
+        try:
+            return super().build(context, extra=extra, repo_root=repo_root)
+        finally:
+            self.role_policy = original_policy
+
 
 class RemediationPromptBuilder(_PromptBuilder):
     role = "REMEDIATION"

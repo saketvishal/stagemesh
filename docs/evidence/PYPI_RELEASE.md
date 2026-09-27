@@ -19,6 +19,30 @@ exact artifacts, and publishes them to PyPI with PyPI Trusted Publishing through
 GitHub Actions OIDC. No long-lived PyPI token is required or stored in the
 repository.
 
+## Artifact provenance baseline
+
+Release artifacts are produced only from the repository contents checked out by
+GitHub Actions for `.github/workflows/publish-pypi.yml`. The build job uses
+Python 3.12 on `ubuntu-latest`, installs the `build` frontend, and runs
+`python -m build` against `pyproject.toml`. The declared build backend is
+`hatchling.build`; wheel package contents come from the `build_coordinator`
+package selected under `[tool.hatch.build.targets.wheel]`.
+
+The workflow expects exactly one `stagemesh-*.tar.gz` source distribution and
+one `stagemesh-*.whl` wheel in `dist/`. Before upload, it verifies that the
+wheel metadata names the `stagemesh` distribution, that both console scripts
+resolve to `build_coordinator.cli:main`, and that the source distribution
+contains `pyproject.toml`. The publish job downloads the
+`python-package-distributions` artifact produced by the build job and publishes
+those files to PyPI.
+
+CI provenance for the source tree is limited to `.github/workflows/ci.yml`,
+which runs tests on Ubuntu and Windows for Python 3.11 and 3.12, performs the
+OSS boundary scan, and imports representative runtime modules. The current
+release process does not claim an SBOM, SLSA provenance attestation, signed
+artifact bundle, or reproducible-build guarantee; add those only after the
+corresponding workflow evidence exists.
+
 ## Local verification log
 
 2026-09-25 worktree verification:

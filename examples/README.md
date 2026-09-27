@@ -20,6 +20,8 @@ All examples use generic placeholder paths. Replace `/path/to/your-repo`,
 | [staged_multi_agent/](staged_multi_agent/) | Separate agents for building and reviewing |
 | [recovery_checkpoint/](recovery_checkpoint/) | How checkpoint/resume works |
 | [validation_review_model/](validation_review_model/) | Independent review and result validation |
+| [public_dogfood/](public_dogfood/) | Public-safe demo manifests for release dogfood |
+| [public_dogfood/real_agent_end_to_end_demo.yaml](public_dogfood/real_agent_end_to_end_demo.yaml) | Real coding-agent CLI validation on a scratch repo (SM-012) |
 
 ## Other files
 

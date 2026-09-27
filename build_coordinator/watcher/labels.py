@@ -5,10 +5,10 @@ repository labels, create a label, update a label. The adapter is a small
 `Protocol` so tests can supply a fake and never touch the network, and the
 default implementation shells out to the authenticated `gh` CLI.
 
-Labels are deterministic, documented constants, namespaced `coordinator:*`
-to avoid colliding with other issue-status labels a repository may already
-have provisioned -- this is watcher-lifecycle-facing labeling only, not a
-replacement for existing issue-status labels.
+Labels are deterministic, documented constants for public repository
+triage. They intentionally avoid StageMesh runtime state: task lifecycle
+mirroring remains the job of the GitHub task-source adapter's `stagemesh:*`
+labels, not this repository taxonomy.
 """
 
 from __future__ import annotations
@@ -33,13 +33,19 @@ class LabelSpec:
 
 
 MANAGED_LABELS: tuple[LabelSpec, ...] = (
-    LabelSpec("coordinator:objective", "5319e7", "StageMesh build-coordinator objective"),
-    LabelSpec("coordinator:task", "1d76db", "StageMesh build-coordinator task"),
-    LabelSpec("coordinator:human-gate", "b60205", "Blocked on a required human approval gate"),
-    LabelSpec("coordinator:blocked", "d93f0b", "Blocked pending remediation or an external dependency"),
-    LabelSpec("coordinator:review-ready", "0e8a16", "Ready for independent review"),
-    LabelSpec("coordinator:integration-ready", "0e8a16", "Reviewed and ready for integration"),
-    LabelSpec("coordinator:done", "cfd3d7", "Completed"),
+    LabelSpec("priority:P0", "b60205", "Critical stabilization or release-blocking work"),
+    LabelSpec("priority:P1", "d93f0b", "Important work planned for the active stabilization window"),
+    LabelSpec("priority:P2", "fbca04", "Useful work that can wait behind active stabilization"),
+    LabelSpec("type:bug", "d73a4a", "Incorrect behavior or regression"),
+    LabelSpec("type:docs", "0075ca", "Documentation-only change"),
+    LabelSpec("type:maintenance", "5319e7", "Repository, tooling, dependency, or housekeeping work"),
+    LabelSpec("type:feature", "1d76db", "New or expanded user-visible capability"),
+    LabelSpec("lifecycle:needs-triage", "cfd3d7", "Needs owner review before it is treated as active backlog"),
+    LabelSpec("lifecycle:superseded", "ededed", "Replaced by a canonical issue or pull request"),
+    LabelSpec("lifecycle:validated", "0e8a16", "Integrated or otherwise validated with durable evidence"),
+    LabelSpec("roadmap:future-work", "bfdadc", "Accepted direction, deferred beyond the current roadmap cut"),
+    LabelSpec("good first issue", "7057ff", "Small, well-scoped task suitable for a first contribution"),
+    LabelSpec("help wanted", "008672", "External contributor help is welcome"),
 )
 
 

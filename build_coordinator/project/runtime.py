@@ -131,6 +131,7 @@ def build_runner_config(project: ProjectDefinition, *, dry_run: bool = False) ->
 
     workers: list[WorkerConfig] = []
     templates = project.worker_templates
+    builder_count = _effective_builder_count(project)
 
     def templates_for(role_key: str) -> list[dict[str, Any]]:
         entries = templates.get(role_key)
@@ -152,7 +153,7 @@ def build_runner_config(project: ProjectDefinition, *, dry_run: bool = False) ->
                 worker_id = f"{prefix}-{label}-{index}" if label else f"{prefix}-{index}"
                 workers.append(_expand_template(project, role_key, worker_id, entry, dry_run=dry_run))
 
-    pool("builder", "builder", project.concurrency)
+    pool("builder", "builder", builder_count)
     pool("reviewer", "reviewer", project.reviewers)
     integration_template = (templates.get("integration") or [{"adapter": "builtin-git", "provider": "stagemesh"}])[0]
     workers.append(
@@ -178,6 +179,7 @@ def build_runner_config(project: ProjectDefinition, *, dry_run: bool = False) ->
         push_upstream=project.push_upstream,
         validation_timeout_seconds=project.validation_timeout_seconds,
         setup_commands=project.setup_commands,
+        bootstrap_commands=tuple(command.as_dict() for command in project.bootstrap_commands),
         cleanup_branches=True,
         task_branches=True,
         routing_policy=_project_routing_policy(),
@@ -185,6 +187,19 @@ def build_runner_config(project: ProjectDefinition, *, dry_run: bool = False) ->
         external_ci_repo=project.external_ci_repo,
         external_ci_max_consecutive_errors=project.external_ci_max_consecutive_errors,
     )
+
+
+def _effective_builder_count(project: ProjectDefinition) -> int:
+    override = os.getenv("STAGEMESH_PROJECT_CAPACITY_OVERRIDE")
+    if not override:
+        return project.concurrency
+    try:
+        requested = int(override)
+    except ValueError as exc:
+        raise ProjectError("STAGEMESH_PROJECT_CAPACITY_OVERRIDE must be a positive integer") from exc
+    if requested < 1:
+        raise ProjectError("STAGEMESH_PROJECT_CAPACITY_OVERRIDE must be a positive integer")
+    return max(1, min(project.concurrency, requested))
 
 
 def _project_routing_policy():
@@ -213,6 +228,7 @@ def _with_project_defaults(
         providers=config.providers or machine_providers(),
         result_dir=config.result_dir or str(project.state_dir / "results"),
         setup_commands=config.setup_commands or project.setup_commands,
+        bootstrap_commands=config.bootstrap_commands or tuple(command.as_dict() for command in project.bootstrap_commands),
         task_branches=True,
         remote_name=None,
         upstream_remote=project.upstream_remote,

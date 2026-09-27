@@ -22,7 +22,7 @@ from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from build_coordinator.config import BuildCoordinatorSettings, get_settings
 
-CURRENT_SCHEMA_VERSION = 6
+CURRENT_SCHEMA_VERSION = 8
 SCHEMA_VERSION_TABLE = "build_coordinator_schema_version"
 
 # Bounded wait a single SQLite connection will block for another writer's
@@ -257,7 +257,6 @@ def _configure_sqlite_pragmas(engine: Engine, *, in_memory: bool) -> None:
                 cursor.execute("PRAGMA journal_mode=WAL")
             cursor.execute("PRAGMA synchronous=NORMAL")
             cursor.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}")
-            cursor.execute("PRAGMA foreign_keys=ON")
         finally:
             cursor.close()
 
@@ -311,7 +310,7 @@ def with_sqlite_retry(
         try:
             return fn()
         except DatabaseBusyError as exc:
-            if attempt == attempts:
+            if not is_retryable(exc) or attempt == attempts:
                 raise
             delay = min(max_delay, base_delay * (2 ** (attempt - 1)))
             time.sleep(delay + random.uniform(0, base_delay))

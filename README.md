@@ -7,13 +7,13 @@ by capability, and recovers when agents disappear.
 > **Status: v0.2.0a1 public alpha**
 >
 > StageMesh is Apache-2.0 and usable for alpha testing, but it is still early:
-> PyPI publication is gated by the release checklist, cross-provider independent
-> final verification is pending, and operators should expect rough edges around
-> setup, provider configuration, and production hardening.
+> PyPI publication is gated by the release checklist, and operators should
+> expect rough edges around setup, provider configuration, and production
+> hardening. Public alpha evidence is limited to the accepted scenarios below.
 
-**Demo:** the launch-readiness demo asset is not present in this repository yet.
-When it lands, this section should link to that artifact rather than duplicating
-the walkthrough.
+**Demo:** public-safe dogfood demos live in
+[examples/public_dogfood](examples/public_dogfood/), with the repeatable
+acceptance suite defined in [docs/dogfood](docs/dogfood/).
 
 ```bash
 git clone <repo-url>
@@ -84,6 +84,8 @@ engineering tasks. It:
 Run `stagemesh continue` from any directory: inside a project it works that
 project; anywhere else it coordinates every registered project at once, each in
 its own process and workspaces, up to that project's configured concurrency.
+Use `stagemesh continue --capacity N` outside a project to allocate a bounded
+global builder budget fairly across registered project backlogs for that run.
 `stagemesh "Continue <project> development."` works too. Workers, worktrees,
 branches, providers, and execution directories are chosen by StageMesh's queue
 and capability routing, never by you. See [Project-owned backlogs](docs/PROJECTS.md).
@@ -94,8 +96,8 @@ and capability routing, never by you. See [Project-owned backlogs](docs/PROJECTS
 
 > [!IMPORTANT]
 > Only claims backed by execution evidence appear below. StageMesh does not claim
-> `SELF_HOSTING_PROVEN`, and cross-provider independent final verification is
-> still pending.
+> `SELF_HOSTING_PROVEN`, published GitHub delivery, or GUI/headless support for
+> runtimes whose live headless probes have not succeeded.
 
 | Capability | Status |
 |---|---|
@@ -111,12 +113,21 @@ and capability routing, never by you. See [Project-owned backlogs](docs/PROJECTS
 | Location-independent CLI | **IMPLEMENTED AND PROVEN** |
 | SQLite and PostgreSQL support | **IMPLEMENTED AND PROVEN** |
 | Codex CLI worker execution (OpenAI) | **IMPLEMENTED AND PROVEN** - authenticated CLI, smoke, JSON ingestion |
-| Cross-provider independent review | **IMPLEMENTED; FINAL INDEPENDENT VERIFICATION PENDING** |
+| Claude Code worker execution (Anthropic) | **IMPLEMENTED AND ACCEPTANCE-COVERED** - headless runtime profile, structured result contract, routing |
+| Provider failover | **IMPLEMENTED AND PROVEN** - provider failure preserves history/checkpoints and routes replacement work |
+| Cross-provider recovery | **IMPLEMENTED AND PROVEN** - replacement provider resumes from durable context |
+| Cross-provider independent review | **IMPLEMENTED AND PROVEN** - different-provider reviewer is enforced and audited |
+| Concurrent execution | **IMPLEMENTED AND PROVEN** - multiple builder claims launch under configured capacity |
+| Cleanup after integration | **IMPLEMENTED AND PROVEN** - merged task branches are removed; unmerged branches are refused |
+| Deterministic validation | **IMPLEMENTED AND PROVEN** - validation gates run before review and fail closed |
+| GitHub delivery | **DRY-RUN ONLY** - sanitized outbound payload path is accepted; live publication is not claimed |
+| Antigravity IDE runtime | **NOT PROVEN / UNSUPPORTED** - excluded until a reliable headless automation path is proven |
 
 Evidence:
 
 - [Codex Acceptance](docs/evidence/CODEX_ACCEPTANCE.md) - what has actually been demonstrated
 - [PyPI Release Evidence](docs/evidence/PYPI_RELEASE.md) - package naming and release checklist
+- [Public Dogfood Acceptance](docs/dogfood/README.md) - repeatable public demos and release checks
 
 ---
 
@@ -138,6 +149,7 @@ Evidence:
 - [Roadmap](docs/ROADMAP.md) - alpha roadmap and what comes next
 - [Contributing](CONTRIBUTING.md) - how to contribute
 - [Examples](examples/README.md) - configuration examples
+- [Public Dogfood Acceptance](docs/dogfood/README.md) - demo suite for public release evidence
 
 ---
 

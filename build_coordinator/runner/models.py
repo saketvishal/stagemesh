@@ -16,6 +16,7 @@ from build_coordinator.runner.routing import (
     RoutingPolicy,
     RuntimeConfig,
     StageRequirement,
+    WorkerEvidence,
     WorkerModelConfig,
     default_stage_requirements,
 )
@@ -41,6 +42,7 @@ HUMAN_ESCALATION_TYPES = (
     "EXECUTION_RETRY_LIMIT_REACHED",
     "GIT_SAFETY_FAILURE",
     "WORKTREE_INVALID",
+    "SETUP_FAILED",
     "NO_CHANGES_PRODUCED",
     "BUILDER_BLOCKER",
     "MISSING_REVIEWED_SHA",
@@ -142,6 +144,7 @@ class WorkerConfig:
     env: dict[str, Any] = field(default_factory=dict)
     preference: int = 100
     cost: dict[str, Any] = field(default_factory=dict)
+    evidence: WorkerEvidence = field(default_factory=WorkerEvidence)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "capabilities", _normal_tuple(self.capabilities))
@@ -180,6 +183,7 @@ class WorkerConfig:
             "poll_seconds": self.poll_seconds,
             "preference": self.preference,
             "cost": self.cost,
+            "evidence": self.evidence.to_public_dict(),
             "env": _public_env_refs(self.env),
         }
 
@@ -205,6 +209,49 @@ class WorkerConfig:
 
 
 @dataclass(frozen=True)
+class StewardConfig:
+    enabled: bool = False
+    interval_seconds: float = 300.0
+    apply: bool = False
+    responsibilities: tuple[str, ...] = (
+        "stale_claims",
+        "stale_executions",
+        "lost_execution_claims",
+        "worker_leases",
+        "orphaned_worktrees",
+        "waiting_conditions",
+        "health_audits",
+        "evidence_retention",
+        "hygiene",
+        "resumption_checks",
+    )
+
+    @classmethod
+    def from_mapping(cls, data: dict[str, Any] | None) -> "StewardConfig":
+        row = data or {}
+        responsibilities = row.get("responsibilities")
+        default_responsibilities = cls().responsibilities
+        return cls(
+            enabled=bool(row.get("enabled", False)),
+            interval_seconds=float(row.get("interval_seconds", 300.0)),
+            apply=bool(row.get("apply", False)),
+            responsibilities=(
+                default_responsibilities
+                if responsibilities is None
+                else _normal_tuple(responsibilities)
+            ),
+        )
+
+    def to_public_dict(self) -> dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "interval_seconds": self.interval_seconds,
+            "apply": self.apply,
+            "responsibilities": list(self.responsibilities),
+        }
+
+
+@dataclass(frozen=True)
 class RunnerConfig:
     workers: tuple[WorkerConfig, ...] = field(default_factory=tuple)
     providers: dict[str, ProviderConfig] = field(default_factory=dict)
@@ -214,6 +261,7 @@ class RunnerConfig:
     routing_policy: RoutingPolicy = field(default_factory=RoutingPolicy)
     poll_seconds: float = 5.0
     max_remediation_cycles: int = 2
+    max_convergence_generations: int = 3
     max_review_environment_attempts: int = 2
     auto_push_allowed: bool = False
     allowed_workspace_roots: tuple[str, ...] = ()
@@ -225,6 +273,7 @@ class RunnerConfig:
     run_validation: bool = True
     validation_timeout_seconds: float = 900.0
     setup_commands: tuple[str, ...] = ()
+    bootstrap_commands: tuple[dict[str, Any], ...] = ()
     max_execution_attempts: int = 3
     max_conflict_recovery_attempts: int = 2
     cleanup_branches: bool = False
@@ -247,6 +296,7 @@ class RunnerConfig:
     # provisioning behaves exactly as it did before this was added.
     use_clone_pool: bool = False
     clone_pool_root: str | None = None
+    steward: StewardConfig = field(default_factory=StewardConfig)
 
     @classmethod
     def default(cls, *, dry_run: bool = False) -> "RunnerConfig":
@@ -337,6 +387,7 @@ class RunnerConfig:
                     env=dict(row.get("env") or row.get("env_refs") or {}),
                     preference=int(row.get("preference", row.get("routing_preference", 100))),
                     cost=dict(row.get("cost") or {}),
+                    evidence=WorkerEvidence.from_mapping(row.get("evidence") or {}),
                 )
             )
         allowed_roots = tuple(data.get("allowed_workspace_roots") or ())
@@ -378,6 +429,7 @@ class RunnerConfig:
             routing_policy=routing_policy,
             poll_seconds=float(data.get("poll_seconds", 5.0)),
             max_remediation_cycles=int(data.get("max_remediation_cycles", 2)),
+            max_convergence_generations=int(data.get("max_convergence_generations", 3)),
             max_review_environment_attempts=int(data.get("max_review_environment_attempts", 2)),
             auto_push_allowed=bool(data.get("auto_push_allowed", False)),
             allowed_workspace_roots=allowed_roots,
@@ -389,6 +441,7 @@ class RunnerConfig:
             run_validation=bool(data.get("run_validation", True)),
             validation_timeout_seconds=float(data.get("validation_timeout_seconds", 900.0)),
             setup_commands=tuple(data.get("setup_commands") or ()),
+            bootstrap_commands=tuple(dict(item) for item in (data.get("bootstrap_commands") or ())),
             max_execution_attempts=int(data.get("max_execution_attempts", 3)),
             max_conflict_recovery_attempts=int(data.get("max_conflict_recovery_attempts", 2)),
             cleanup_branches=bool(data.get("cleanup_branches", False)),
@@ -400,6 +453,7 @@ class RunnerConfig:
             ),
             use_clone_pool=bool((data.get("clone_pool") or {}).get("enabled", False)),
             clone_pool_root=(data.get("clone_pool") or {}).get("root"),
+            steward=StewardConfig.from_mapping(data.get("steward") or data.get("maintenance")),
         )
 
     def public_summary(self) -> dict[str, Any]:
@@ -415,6 +469,7 @@ class RunnerConfig:
                 "repo": self.external_ci_repo,
                 "max_consecutive_errors": self.external_ci_max_consecutive_errors,
             },
+            "steward": self.steward.to_public_dict(),
         }
 
 
@@ -529,6 +584,7 @@ def _role_for_stages(stages: tuple[str, ...]) -> str:
         "remediation": "REMEDIATION",
         "review": "REVIEWER",
         "integration": "INTEGRATION",
+        "maintenance": "STEWARD",
     }
     for stage in stages:
         if stage in preferred:
