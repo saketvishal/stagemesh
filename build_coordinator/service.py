@@ -857,6 +857,22 @@ def recover_expired(session: Session, *, actor: str = "cli") -> list[BuildTask]:
         task.lease_expires_at = None
         if task.state in {"WAITING_FOR_INPUT", "BLOCKED"}:
             task.updated_at = now
+        elif task.state == "VALIDATING":
+            # Validation executions are launched against the same claim_id as
+            # the BUILDER (or REMEDIATION) claim that produced the feature SHA
+            # under validation -- there is no dedicated VALIDATION claim_type.
+            # If that claim's lease expires or its execution is reconciled as
+            # lost/terminated (e.g. the coordinator/validation executor was
+            # down long enough to miss a heartbeat), the generic fallback
+            # below would flip the task to STALE, which is claimable and
+            # would send an already-successfully-implemented candidate back
+            # to a fresh builder even though only validation was
+            # outstanding. Leave the task in VALIDATING (not claimable)
+            # instead: the same runner cycle's validation dispatch sweep
+            # (_dispatch_validation) will see no active validation execution
+            # for this task and safely relaunch validation against the
+            # correct, already-recorded feature SHA.
+            pass
         elif claim.claim_type == "REVIEW":
             task.state = "REVIEW_READY"
         elif claim.claim_type == "INTEGRATION":
