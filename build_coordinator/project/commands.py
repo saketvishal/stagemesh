@@ -13,9 +13,21 @@ from typing import Any
 
 from sqlalchemy import select
 
+from build_coordinator.coordinator_lock import (
+    CoordinatorLockHeld,
+    acquire_coordinator_lock,
+    heartbeat_coordinator_lock,
+    release_coordinator_lock,
+)
 from build_coordinator.claims import task_source_eligibility, task_source_is_closed
-from build_coordinator.db import DatabaseSchemaError, SessionLocal, configure_process_database
-from build_coordinator.models import BuildRunnerExecution, BuildTask, BuildTaskEvent
+from build_coordinator.db import (
+    DatabaseSchemaError,
+    SessionLocal,
+    commit_or_busy,
+    configure_process_database,
+    with_sqlite_retry,
+)
+from build_coordinator.models import BuildRunnerExecution, BuildTask, BuildTaskEvent, new_uuid
 from build_coordinator.project.backlog import (
     TaskDefinition,
     audit_delivery_evidence,
@@ -198,11 +210,15 @@ def handle_project(args: argparse.Namespace) -> None:
         if not project.push_upstream:
             raise ProjectError(f"{project.project_id} has no upstream push configured (project.yaml: upstream)")
         lifecycle = _open(project)
-        with lifecycle.session() as session:
-            outcomes = retry_pending_pushes(
-                session, repo_root=project.root, remote=project.upstream_remote, main_ref=project.main_ref, actor="human:retry-push"
-            )
-            session.commit()
+        def retry_push_once():
+            with lifecycle.session() as session:
+                outcomes = retry_pending_pushes(
+                    session, repo_root=project.root, remote=project.upstream_remote, main_ref=project.main_ref, actor="human:retry-push"
+                )
+                commit_or_busy(session)
+                return outcomes
+
+        outcomes = with_sqlite_retry(retry_push_once)
         _print({"retried": outcomes})
         return
     if command == "migrate-state":
@@ -214,12 +230,17 @@ def handle_project(args: argparse.Namespace) -> None:
         _print(_migrate_database(db_path, apply=args.apply))
         return
     lifecycle = _open(project)
+    if command == "sync":
+        def sync_once():
+            with lifecycle.session() as session:
+                report = sync_backlog(session, project, load_backlog(project), dry_run=args.dry_run)
+                commit_or_busy(session)
+                return report.as_dict()
+
+        _print(with_sqlite_retry(sync_once))
+        return
     with lifecycle.session() as session:
-        if command == "sync":
-            report = sync_backlog(session, project, load_backlog(project), dry_run=args.dry_run)
-            session.commit()
-            _print(report.as_dict())
-        elif command == "audit-delivery":
+        if command == "audit-delivery":
             _print(audit_delivery_evidence(session, project, load_backlog(project, allow_duplicates=True)))
         elif command == "status":
             _print(project_status(session, project))
@@ -364,36 +385,10 @@ def handle_continue(args: argparse.Namespace) -> None:
     project = _project_from_args(args)
     definitions = [] if args.no_sync else load_backlog(project)
     lifecycle = _open(project)
-
-    sync_payload: dict[str, Any] | None = None
-    task_source, initial_diagnostics = _optional_task_source(project, force=args.github, dry_run=args.dry_run)
-    adapter_payload: list[dict[str, Any]] = list(initial_diagnostics)
-    with lifecycle.session() as session:
-        if not args.no_sync:
-            report = sync_backlog(session, project, definitions, dry_run=args.dry_run)
-            sync_payload = report.as_dict()
-        if task_source is not None:
-            try:
-                adapter_payload.extend([r.as_dict() for r in task_source.discover_tasks(session)])
-            except Exception as exc:  # optional adapter: never blocks local execution
-                adapter_payload.append({"source": "github", "action": "ERROR", "details": str(exc)})
-        if args.dry_run:
-            _print(
-                _dry_run_plan(
-                    session,
-                    project,
-                    definitions,
-                    sync_payload,
-                    target_task_ids=target_task_ids,
-                    adapter_payload=adapter_payload,
-                )
-            )
-            session.rollback()
-            return
-        session.commit()
-
+    instance_id = new_uuid()
+    lock_acquired = False
     config = build_runner_config(project, dry_run=False)
-    if not any(w.role == "BUILDER" and w.adapter != "unconfigured" for w in config.workers):
+    if not args.dry_run and not any(w.role == "BUILDER" and w.adapter != "unconfigured" for w in config.workers):
         print(
             f"[{project.project_id}] EXTERNAL_EXECUTOR_CONFIGURATION_REQUIRED: "
             f"No executable builders are configured for {project.project_id}. "
@@ -402,6 +397,49 @@ def handle_continue(args: argparse.Namespace) -> None:
             flush=True,
         )
         return
+
+    sync_payload: dict[str, Any] | None = None
+    task_source, initial_diagnostics = _optional_task_source(project, force=args.github, dry_run=args.dry_run)
+    adapter_payload: list[dict[str, Any]] = list(initial_diagnostics)
+    def initial_reconcile_once():
+        nonlocal sync_payload, adapter_payload, lock_acquired
+        local_adapter_payload: list[dict[str, Any]] = list(initial_diagnostics)
+        with lifecycle.session() as session:
+            if not args.dry_run:
+                try:
+                    acquire_coordinator_lock(session, instance_id=instance_id)
+                except CoordinatorLockHeld as exc:
+                    session.rollback()
+                    raise ProjectError(str(exc)) from exc
+                lock_acquired = True
+            if not args.no_sync:
+                report = sync_backlog(session, project, definitions, dry_run=args.dry_run)
+                sync_payload = report.as_dict()
+            if task_source is not None:
+                try:
+                    local_adapter_payload.extend([r.as_dict() for r in task_source.discover_tasks(session)])
+                except Exception as exc:  # optional adapter: never blocks local execution
+                    local_adapter_payload.append({"source": "github", "action": "ERROR", "details": str(exc)})
+            adapter_payload = local_adapter_payload
+            if args.dry_run:
+                _print(
+                    _dry_run_plan(
+                        session,
+                        project,
+                        definitions,
+                        sync_payload,
+                        target_task_ids=target_task_ids,
+                        adapter_payload=adapter_payload,
+                    )
+                )
+                session.rollback()
+                return False
+            commit_or_busy(session)
+            return True
+
+    if not with_sqlite_retry(initial_reconcile_once):
+        return
+
     runner = BuildRunner(SessionLocal, config, task_source=task_source, target_task_ids=target_task_ids)
     started = time.monotonic()
     cycles: list[dict[str, Any]] = []
@@ -410,91 +448,116 @@ def handle_continue(args: argparse.Namespace) -> None:
     drained_from: str | None = None
     last_escalations: dict[str, str] = {}
     announced_capacity_waits: set[str] = set()
-    for number in range(1, max(1, args.max_cycles) + 1):
-        project, config = _reload_project_runtime(project, lifecycle, runner)
-        if args.timeout is not None and drained_from is None and time.monotonic() - started > args.timeout:
+    try:
+        for number in range(1, max(1, args.max_cycles) + 1):
+            project, config = _reload_project_runtime(project, lifecycle, runner)
+            if args.timeout is not None and drained_from is None and time.monotonic() - started > args.timeout:
+                def set_draining_once():
+                    nonlocal drained_from
+                    with lifecycle.session() as session:
+                        state = ensure_state(session)
+                        drained_from = state.mode
+                        if drained_from == "RUNNING":
+                            set_mode(session, "DRAINING")
+                        commit_or_busy(session)
+
+                with_sqlite_retry(set_draining_once)
+                print(f"[{project.project_id}] time budget reached: finishing in-flight work, starting nothing new", file=sys.stderr, flush=True)
+            if project.push_upstream and (number == 1 or number % 10 == 0):
+                def retry_pending_pushes_once():
+                    with lifecycle.session() as session:
+                        retry_pending_pushes(
+                            session,
+                            repo_root=project.root,
+                            remote=project.upstream_remote,
+                            main_ref=project.main_ref,
+                        )
+                        commit_or_busy(session)
+
+                with_sqlite_retry(retry_pending_pushes_once)
+            result = runner.run_once()
+            provider_capacity_waiting = _provider_capacity_waiting(result)
             with lifecycle.session() as session:
-                state = ensure_state(session)
-                drained_from = state.mode
-                if drained_from == "RUNNING":
-                    set_mode(session, "DRAINING")
-                session.commit()
-            print(f"[{project.project_id}] time budget reached: finishing in-flight work, starting nothing new", file=sys.stderr, flush=True)
-        if project.push_upstream and (number == 1 or number % 10 == 0):
-            with lifecycle.session() as session:
-                retry_pending_pushes(
-                    session,
-                    repo_root=project.root,
-                    remote=project.upstream_remote,
-                    main_ref=project.main_ref,
-                )
-                session.commit()
-        result = runner.run_once()
-        provider_capacity_waiting = _provider_capacity_waiting(result)
-        with lifecycle.session() as session:
-            live = session.scalars(
-                select(BuildRunnerExecution).where(BuildRunnerExecution.status.in_(_LIVE_EXECUTION))
-            ).all()
-            live_builders = [e for e in live if e.role in _BUILD_ROLES]
-            peak_parallel = max(peak_parallel, len(live_builders))
-            launched = [
-                _execution_row(session.get(BuildRunnerExecution, execution_id))
-                for execution_id in result.launched
-            ]
-        for change in getattr(result, "provider_state_changes", []) or []:
-            print(_provider_state_change_line(project.project_id, change), file=sys.stderr, flush=True)
-        waiting_now = {
-            task_id
-            for task_id, reason in (getattr(result, "scheduling_reasons", {}) or {}).items()
-            if reason == "provider_capacity_wait"
-        }
-        for task_id in sorted(waiting_now - announced_capacity_waits):
-            print(
-                f"[{project.project_id}] {task_id} waiting for provider capacity",
-                file=sys.stderr,
-                flush=True,
-            )
-        announced_capacity_waits.intersection_update(waiting_now)
-        announced_capacity_waits.update(waiting_now)
-        for row in launched:
-            print(f"[{project.project_id}] {row.get('role', '?').lower()} {row.get('task_id')} on {row.get('worker_id')}", file=sys.stderr, flush=True)
-        for item in result.escalations:
-            gate_id, _, reason = item.partition(":")
-            if last_escalations.get(gate_id) != reason:
-                print(f"[{project.project_id}] needs attention: {item}", file=sys.stderr, flush=True)
-                last_escalations[gate_id] = reason
-        cycles.append(
-            {
-                "cycle": number,
-                "launched": launched,
-                "observed": list(result.observed),
-                "recovered": list(result.recovered),
-                "escalations": list(result.escalations),
-                "scheduling_reasons": dict(getattr(result, "scheduling_reasons", {}) or {}),
-                "provider_state_changes": list(getattr(result, "provider_state_changes", []) or []),
-                "live_builders": len(live_builders),
-                "live_executions": len(live),
+                live = session.scalars(
+                    select(BuildRunnerExecution).where(BuildRunnerExecution.status.in_(_LIVE_EXECUTION))
+                ).all()
+                live_builders = [e for e in live if e.role in _BUILD_ROLES]
+                peak_parallel = max(peak_parallel, len(live_builders))
+                launched = [
+                    _execution_row(session.get(BuildRunnerExecution, execution_id))
+                    for execution_id in result.launched
+                ]
+            def heartbeat_once():
+                with lifecycle.session() as session:
+                    heartbeat_coordinator_lock(session, instance_id=instance_id)
+                    commit_or_busy(session)
+
+            with_sqlite_retry(heartbeat_once)
+            for change in getattr(result, "provider_state_changes", []) or []:
+                print(_provider_state_change_line(project.project_id, change), file=sys.stderr, flush=True)
+            waiting_now = {
+                task_id
+                for task_id, reason in (getattr(result, "scheduling_reasons", {}) or {}).items()
+                if reason == "provider_capacity_wait"
             }
-        )
-        if args.once:
-            break
-        if not live and not result.launched:
-            if provider_capacity_waiting and drained_from is None:
-                idle_cycles = 0
+            for task_id in sorted(waiting_now - announced_capacity_waits):
+                print(
+                    f"[{project.project_id}] {task_id} waiting for provider capacity",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            announced_capacity_waits.intersection_update(waiting_now)
+            announced_capacity_waits.update(waiting_now)
+            for row in launched:
+                print(f"[{project.project_id}] {row.get('role', '?').lower()} {row.get('task_id')} on {row.get('worker_id')}", file=sys.stderr, flush=True)
+            for item in result.escalations:
+                gate_id, _, reason = item.partition(":")
+                if last_escalations.get(gate_id) != reason:
+                    print(f"[{project.project_id}] needs attention: {item}", file=sys.stderr, flush=True)
+                    last_escalations[gate_id] = reason
+            cycles.append(
+                {
+                    "cycle": number,
+                    "launched": launched,
+                    "observed": list(result.observed),
+                    "recovered": list(result.recovered),
+                    "escalations": list(result.escalations),
+                    "scheduling_reasons": dict(getattr(result, "scheduling_reasons", {}) or {}),
+                    "provider_state_changes": list(getattr(result, "provider_state_changes", []) or []),
+                    "live_builders": len(live_builders),
+                    "live_executions": len(live),
+                }
+            )
+            if args.once:
+                break
+            if not live and not result.launched:
+                if provider_capacity_waiting and drained_from is None:
+                    idle_cycles = 0
+                else:
+                    idle_cycles += 1
+                    if idle_cycles >= 2:
+                        break
             else:
-                idle_cycles += 1
-                if idle_cycles >= 2:
-                    break
-        else:
-            idle_cycles = 0
-        sleep_seconds = config.poll_seconds
-        if provider_capacity_waiting and not live and not result.launched and drained_from is None:
-            sleep_seconds = runner.provider_capacity_recheck_seconds()
-        time.sleep(sleep_seconds)
-    if drained_from == "RUNNING":
-        with lifecycle.session() as session:
-            set_mode(session, "RUNNING")
-            session.commit()
+                idle_cycles = 0
+            sleep_seconds = config.poll_seconds
+            if provider_capacity_waiting and not live and not result.launched and drained_from is None:
+                sleep_seconds = runner.provider_capacity_recheck_seconds()
+            time.sleep(sleep_seconds)
+        if drained_from == "RUNNING":
+            def restore_running_once():
+                with lifecycle.session() as session:
+                    set_mode(session, "RUNNING")
+                    commit_or_busy(session)
+
+            with_sqlite_retry(restore_running_once)
+    finally:
+        if lock_acquired:
+            def release_lock_once():
+                with lifecycle.session() as session:
+                    release_coordinator_lock(session, instance_id=instance_id)
+                    commit_or_busy(session)
+
+            with_sqlite_retry(release_lock_once)
 
     with lifecycle.session() as session:
         final = project_status(session, project)

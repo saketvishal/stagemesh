@@ -16,6 +16,7 @@ import pytest
 import yaml
 from sqlalchemy import select
 
+from build_coordinator.coordinator_lock import acquire_coordinator_lock, release_coordinator_lock
 from build_coordinator.db import DatabaseLifecycle, DatabaseSchemaError
 from build_coordinator.models import BuildRunnerExecution, BuildTask, BuildTaskClaim, BuildTaskEvent
 from build_coordinator.project.backlog import (
@@ -1285,6 +1286,59 @@ def test_top_level_task_commands_bind_to_current_project_state(tmp_path, registr
     }
 
 
+def test_project_sync_lock_contention_is_typed_not_raw(tmp_path, registry, monkeypatch):
+    """GH-101: `project sync` retries a transient typed SQLite busy commit
+    from a clean session instead of surfacing a raw SQLite error."""
+    from argparse import Namespace
+    from types import SimpleNamespace
+
+    from build_coordinator.db import DatabaseBusyError
+    from build_coordinator.project import commands
+
+    class Session:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+    class Lifecycle:
+        def __init__(self):
+            self.sessions = []
+
+        def session(self):
+            session = Session()
+            self.sessions.append(session)
+            return session
+
+    class Report:
+        def as_dict(self):
+            return {"ok": True}
+
+    lifecycle = Lifecycle()
+    commits = {"count": 0}
+
+    def flaky_commit(_session):
+        commits["count"] += 1
+        if commits["count"] == 1:
+            raise DatabaseBusyError("SQLite write contention on commit")
+
+    monkeypatch.setattr(commands, "_project_from_args", lambda _args: SimpleNamespace())
+    monkeypatch.setattr(commands, "_open", lambda _project: lifecycle)
+    monkeypatch.setattr(commands, "load_backlog", lambda _project: [])
+    monkeypatch.setattr(commands, "sync_backlog", lambda *_args, **_kwargs: Report())
+    monkeypatch.setattr(commands, "commit_or_busy", flaky_commit)
+    printed = []
+    monkeypatch.setattr(commands, "_print", printed.append)
+
+    args = Namespace(project_command="sync", name=["fixture"], project_dir=None, dry_run=False)
+    commands.handle_project(args)
+
+    assert commits["count"] == 2
+    assert len(lifecycle.sessions) == 2
+    assert printed == [{"ok": True}]
+
+
 def test_continue_runs_project_backlog_in_parallel_from_any_directory(tmp_path, registry):
     root, origin = make_project_repo(
         tmp_path,
@@ -1359,6 +1413,42 @@ def test_continue_needs_no_github_and_dry_run_is_readonly(tmp_path, registry):
     assert payload["dry_run"] and payload["eligible_now"] == ["G-1"]
     assert payload["backlog_sync"]["counts"] == {"CREATED": 1}
     status = stagemesh(["project", "status", "fixture"], cwd=tmp_path, registry=registry)
+    assert json.loads(status.stdout)["tasks"] == []
+
+
+def test_continue_rejects_second_coordinator_before_backlog_mutation(tmp_path, registry):
+    root, _ = make_project_repo(tmp_path, {"LOCKED-1": {"review": "NONE"}})
+    register_project(root)
+    state_dir = root / ".build-coordinator"
+    db_path = state_dir / "coordinator.sqlite3"
+    lifecycle = DatabaseLifecycle(f"sqlite:///{db_path.as_posix()}", data_dir=state_dir)
+    lifecycle.initialize_schema()
+    instance_id = "held-by-test"
+    with lifecycle.session() as session:
+        acquire_coordinator_lock(session, instance_id=instance_id)
+        session.commit()
+
+    try:
+        run = stagemesh(
+            ["continue", "fixture", "--once", "--json"],
+            cwd=tmp_path,
+            registry=registry,
+            extra_env={"STAGEMESH_TEST_STATE_GUARD": "0"},
+        )
+    finally:
+        with lifecycle.session() as session:
+            release_coordinator_lock(session, instance_id=instance_id)
+            session.commit()
+
+    assert run.returncode != 0
+    assert "coordinator is already running" in run.stderr.lower()
+    status = stagemesh(
+        ["project", "status", "fixture"],
+        cwd=tmp_path,
+        registry=registry,
+        extra_env={"STAGEMESH_TEST_STATE_GUARD": "0"},
+    )
+    assert status.returncode == 0, status.stderr
     assert json.loads(status.stdout)["tasks"] == []
 
 

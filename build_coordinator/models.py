@@ -452,6 +452,34 @@ class BuildObjectiveEvent(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 
+class BuildCoordinatorLock(Base):
+    """Single-coordinator-per-project ownership lease (GH-101).
+
+    One row (`singleton_id=1`) records which process last acquired the
+    `stagemesh continue` orchestration loop against this database. A live
+    PID on the same host holding a fresh heartbeat blocks a second
+    coordinator from starting against the same SQLite file; a dead process
+    or an expired heartbeat is reclaimed. This is separate from
+    `BuildTaskClaim` -- task ownership is unaffected -- and from
+    `BuildWatcherRecord`, which guards the unattended watcher, not the
+    orchestration loop.
+    """
+
+    __tablename__ = "build_coordinator_lock"
+    __table_args__ = (
+        CheckConstraint("singleton_id = 1", name="chk_build_coord_lock_singleton"),
+    )
+
+    singleton_id: Mapped[int] = mapped_column(primary_key=True, default=1)
+    instance_id: Mapped[str] = mapped_column(String(36), nullable=False, default=new_uuid)
+    host_name: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    process_id: Mapped[int | None] = mapped_column(nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
 class BuildWatcherRecord(Base):
     """Durable identity/lease metadata for one persistent watcher process
     bound to a single authorized repository."""
