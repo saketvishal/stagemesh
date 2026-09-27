@@ -52,6 +52,8 @@ class LabelAwareMockClient:
     def list_labels(self, repo: str):
         if self.fail_on == "list_labels":
             raise RuntimeError("permission denied: cannot list labels")
+        if self.fail_on == "rate_limit_labels":
+            raise RuntimeError("secondary rate limit exceeded while listing labels")
         return sorted(self.known_labels)
 
     def create_label(self, repo: str, name: str):
@@ -166,6 +168,35 @@ def test_provisioning_failure_recorded_durably_and_does_not_raise():
         ).all()
         assert len(events) == 1
         assert "permission denied" in events[0].event_data.get("error", "")
+
+
+def test_rate_limited_label_provisioning_warning_is_suppressed_within_run(caplog):
+    """Repeated rate-limited label checks record evidence but log one warning per adapter run."""
+    client = LabelAwareMockClient(issues=[], existing_labels=[], fail_on="rate_limit_labels")
+    source = GitHubTaskSource(repo="example/repo", client=client)
+
+    with caplog.at_level("WARNING", logger="build_coordinator.task_source.github"):
+        with SessionLocal() as session:
+            source.discover_tasks(session)
+            source.discover_tasks(session)
+            source.discover_tasks(session)
+            session.commit()
+
+    warnings = [
+        record
+        for record in caplog.records
+        if "Failed to provision GitHub lifecycle labels" in record.getMessage()
+    ]
+    assert len(warnings) == 1
+
+    with SessionLocal() as session:
+        events = session.scalars(
+            select(BuildTaskEvent).where(
+                BuildTaskEvent.event_type == "task_source.label_provisioning_failed",
+            )
+        ).all()
+        assert len(events) == 3
+        assert events[0].event_data["capacity"]["reason"] == "RATE_LIMITED"
 
 
 def test_provisioning_retries_on_next_cycle_after_failure():
