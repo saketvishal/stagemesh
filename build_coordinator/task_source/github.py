@@ -236,12 +236,26 @@ class GitHubTaskSource(TaskSource):
         network, permissions) are recorded as durable outbound-sync evidence
         and never raised, so missing labels can never block local task
         execution -- provisioning is simply retried on the next sync.
+
+        A rate-limit failure records a "labels"-surface cooldown
+        (`_record_source_capacity_wait`); this method must actually consult
+        that cooldown -- read back from durable storage, so it holds across
+        an executor/client restart, not just an in-memory flag -- before
+        making another real GitHub request, and *not* set `_labels_ensured`
+        on that path, so provisioning is naturally retried once the
+        cooldown expires, even in a long-lived process that never restarts.
         """
         if not self.repo or self._labels_ensured:
             return True
         if self.dry_run:
             self._labels_ensured = True
             return True
+        if self._capacity_cooldown_active(session, surface="labels"):
+            # Suppress the actual repeated GitHub request during a known
+            # cooldown -- not merely the warning log -- while leaving
+            # `_labels_ensured` False so this is retried automatically once
+            # `_capacity_cooldown_active` reports the window has cleared.
+            return False
         try:
             existing = self._list_labels()
             for label in self.LIFECYCLE_LABELS:
@@ -397,7 +411,8 @@ class GitHubTaskSource(TaskSource):
         try:
             issues = self._fetch_issues()
         except TaskSourceCapacityError as exc:
-            self._record_source_capacity_wait(session, exc, surface="discovery")
+            primary = self._is_primary_capacity_message(str(exc))
+            self._record_source_capacity_wait(session, exc, surface="discovery", primary=primary)
             return self._cached_discovery_results(session, str(exc))
         results: list[SyncResult] = []
         open_issue_numbers: set[int] = set()
@@ -547,6 +562,20 @@ class GitHubTaskSource(TaskSource):
         except ValueError:
             return None
 
+    # Pseudo-surface used to record a *primary*, account-wide REST quota
+    # exhaustion. GitHub's primary REST rate limit is one shared bucket per
+    # token: when it is genuinely exhausted, every REST-backed surface
+    # (discovery's REST fallback, label provisioning, outbound sync) is
+    # truly blocked, not just the one that happened to observe it first --
+    # so that one observation must gate all of them together. GitHub's
+    # *secondary* rate limit (abuse detection) is a different, narrower
+    # throttle keyed to request pattern/endpoint, not the whole account, so
+    # it deliberately stays scoped to the surface that triggered it (the
+    # existing per-surface isolation below), and never blocks an
+    # independent, genuinely-not-yet-exhausted fallback such as GraphQL
+    # discovery.
+    _SHARED_PRIMARY_SURFACE = "__rest_primary__"
+
     @staticmethod
     def _is_rate_limit_message(message: str) -> bool:
         lowered = message.lower()
@@ -557,6 +586,24 @@ class GitHubTaskSource(TaskSource):
             or "api rate limit exceeded" in lowered
             or "too many requests" in lowered
         )
+
+    @staticmethod
+    def _is_primary_capacity_message(message: str, headers: Any = None) -> bool:
+        """True when the evidence indicates the shared, account-wide
+        primary REST quota is exhausted (as opposed to GitHub's narrower,
+        per-endpoint secondary/abuse-detection throttle). A confirmed
+        `X-RateLimit-Remaining: 0` header is the strongest signal; absent
+        headers (e.g. `gh` CLI stderr text), default to primary unless the
+        message explicitly names the secondary/abuse-detection limiter,
+        since an unqualified "rate limit"/"too many requests" report is,
+        in GitHub's own terminology, ordinarily the primary limit.
+        """
+        if headers is not None and headers.get("X-RateLimit-Remaining") == "0":
+            return True
+        lowered = message.lower()
+        if "secondary rate" in lowered or "abuse detection" in lowered:
+            return False
+        return GitHubTaskSource._is_rate_limit_message(message)
 
     @staticmethod
     def _is_rate_limited_http_response(code: int, headers: Any, message: str) -> bool:
@@ -582,16 +629,28 @@ class GitHubTaskSource(TaskSource):
         )
 
     def _record_source_capacity_wait(
-        self, session, exc: TaskSourceCapacityError, *, surface: str = "discovery"
+        self,
+        session,
+        exc: TaskSourceCapacityError,
+        *,
+        surface: str = "discovery",
+        primary: bool = False,
     ) -> None:
         wait = exc.retry_after_seconds if exc.retry_after_seconds is not None else 60
+        backoff_seconds = min(max(wait, 5), 900)
         current = self._capacity_backoff_until_by_surface.get(surface, 0.0)
-        backoff_until = max(current, time.time() + min(max(wait, 5), 900))
+        backoff_until = max(current, time.time() + backoff_seconds)
         self._capacity_backoff_until_by_surface[surface] = backoff_until
+        if primary:
+            shared_current = self._capacity_backoff_until_by_surface.get(self._SHARED_PRIMARY_SURFACE, 0.0)
+            backoff_until = max(backoff_until, shared_current, time.time() + backoff_seconds)
+            self._capacity_backoff_until_by_surface[self._SHARED_PRIMARY_SURFACE] = backoff_until
+            self._capacity_backoff_until_by_surface[surface] = backoff_until
         self._last_capacity_wait = {
             "repo": self.repo,
             **exc.as_dict(),
             "surface": surface,
+            "primary": primary,
             "backoff_until": backoff_until,
         }
         record_event(
@@ -606,29 +665,35 @@ class GitHubTaskSource(TaskSource):
         session.flush()
 
     def _maybe_record_capacity_wait_from_error(
-        self, session, err: str, *, surface: str = "discovery"
+        self, session, err: str, *, surface: str = "discovery", headers: Any = None
     ) -> bool:
         """If `err` looks like a GitHub rate-limit response, persist it as a
         typed source-capacity wait scoped to `surface` and return True.
         Non-rate-limit failures (auth, permissions, network, not-found, ...)
         are left untouched so they remain distinct, actionable diagnostics
-        rather than being folded into capacity handling. Each surface
-        (discovery, labels, outbound) tracks its own independent cooldown:
-        a rate limit hit while provisioning labels or syncing outbound
-        state must never gate issue discovery or task execution -- label
-        provisioning is explicitly not a prerequisite for reading or
-        executing work -- while still suppressing that surface's own
-        repeated requests and automatically recovering once its own window
-        clears."""
+        rather than being folded into capacity handling. A *secondary*
+        (abuse-detection) limit stays scoped to `surface` alone -- it must
+        never gate issue discovery or task execution merely because label
+        provisioning or outbound sync tripped it. A *primary*, account-wide
+        REST quota exhaustion is genuinely shared, so it additionally gates
+        every other REST-backed surface until the same cooldown clears
+        (see `_is_primary_capacity_message` / `_SHARED_PRIMARY_SURFACE`)."""
         if not self._is_rate_limit_message(err):
             return False
-        self._record_source_capacity_wait(session, self._capacity_error_from_message(err), surface=surface)
+        primary = self._is_primary_capacity_message(err, headers)
+        self._record_source_capacity_wait(
+            session, self._capacity_error_from_message(err), surface=surface, primary=primary
+        )
         return True
 
-    def _load_capacity_backoff(self, session, *, surface: str = "discovery") -> float:
-        """Return the still-active backoff_until timestamp for `surface`
-        (0.0 if none), reloading persisted state if the in-memory value has
-        already expired or was never set in this process."""
+    def _load_capacity_backoff_for_surface(self, session, *, surface: str) -> float:
+        """Return the still-active backoff_until timestamp persisted for
+        exactly `surface` (0.0 if none), reloading from durable storage if
+        the in-memory value has expired or was never set in this process
+        -- this is what makes a freshly restarted process (a fresh
+        GitHubTaskSource instance with an empty in-memory dict) correctly
+        honor a cooldown a previous process instance recorded before it
+        exited, instead of hammering GitHub again immediately."""
         current = self._capacity_backoff_until_by_surface.get(surface, 0.0)
         if current > time.time():
             return current
@@ -643,11 +708,16 @@ class GitHubTaskSource(TaskSource):
             data = event.event_data or {}
             if data.get("repo") != self.repo or data.get("provider") != "github":
                 continue
-            # Events recorded before the "surface" field existed are all
-            # discovery-origin (the only surface that recorded them then).
-            event_surface = data.get("surface") or "discovery"
-            if event_surface != surface:
-                continue
+            if surface == self._SHARED_PRIMARY_SURFACE:
+                if not data.get("primary"):
+                    continue
+            else:
+                # Events recorded before the "surface" field existed are
+                # all discovery-origin (the only surface that recorded
+                # them then).
+                event_surface = data.get("surface") or "discovery"
+                if event_surface != surface:
+                    continue
             try:
                 backoff_until = float(data.get("backoff_until") or 0)
             except (TypeError, ValueError):
@@ -658,11 +728,27 @@ class GitHubTaskSource(TaskSource):
             return 0.0
         return 0.0
 
+    def _load_capacity_backoff(self, session, *, surface: str = "discovery") -> float:
+        """Return the later of `surface`'s own backoff_until and the shared
+        primary-quota backoff_until (0.0 if neither is active): a genuinely
+        shared, account-wide primary REST exhaustion gates every REST
+        -backed surface together, on top of each surface's own independent
+        cooldown for its narrower secondary/abuse-detection limits."""
+        own = self._load_capacity_backoff_for_surface(session, surface=surface)
+        shared = (
+            0.0
+            if surface == self._SHARED_PRIMARY_SURFACE
+            else self._load_capacity_backoff_for_surface(session, surface=self._SHARED_PRIMARY_SURFACE)
+        )
+        return max(own, shared)
+
     def _capacity_cooldown_active(self, session, *, surface: str = "discovery") -> bool:
         """True while GitHub task-source capacity (rate limiting) is known
-        to be cooling down for `surface` specifically. See
-        `_maybe_record_capacity_wait_from_error` for why surfaces are kept
-        independent rather than sharing one global cooldown."""
+        to be cooling down for `surface` -- either its own independent
+        cooldown, or a shared primary-quota exhaustion recorded by any
+        surface. See `_maybe_record_capacity_wait_from_error` for why
+        secondary/abuse-detection limits are kept independent instead of
+        sharing one global cooldown."""
         return self._load_capacity_backoff(session, surface=surface) > time.time()
 
     def _cached_discovery_results(self, session, detail: str) -> list[SyncResult]:

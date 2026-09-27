@@ -222,3 +222,123 @@ def test_auth_failure_in_outbound_sync_is_not_classified_as_capacity_wait():
         assert failures[-1].event_data.get("action") == "client_sync"
         assert "401" in failures[-1].event_data.get("error", "")
         assert source._capacity_cooldown_active(session, surface="outbound") is False
+
+
+def test_primary_capacity_message_gates_other_rest_surfaces_via_shared_backoff():
+    """A *primary*, account-wide REST quota message (no 'secondary rate' or
+    'abuse detection' phrasing) hit while provisioning labels must gate
+    every other REST-backed surface (discovery, outbound) through the
+    shared backoff, on top of its own "labels" cooldown -- unlike a
+    genuinely secondary/abuse-detection limit (see
+    test_label_provisioning_rate_limit_does_not_block_discovery_or_outbound),
+    which stays scoped to its own surface alone."""
+    client = RateLimitableClient([_issue(210)])
+    client.fail_calls["list_labels"] = "API rate limit exceeded for installation"
+    source = GitHubTaskSource(repo="example/repo", client=client)
+
+    with SessionLocal() as session:
+        source.discover_tasks(session)
+        session.commit()
+        assert len(_capacity_wait_events(session, surface="labels")) == 1
+        # The shared, account-wide quota is now exhausted: every other
+        # REST-backed surface must honor the same cooldown, even though
+        # nothing failed on those surfaces directly.
+        assert source._capacity_cooldown_active(session, surface="discovery") is True
+        assert source._capacity_cooldown_active(session, surface="outbound") is True
+        assert source._capacity_cooldown_active(session, surface="labels") is True
+
+    # Discovery genuinely honors the shared gate: a second discover_tasks()
+    # call must not re-invoke list_issues at all while the shared primary
+    # cooldown is active, even though list_issues itself never failed.
+    calls_before = client.fail_calls.copy()
+    client.fail_calls.clear()  # list_issues would now succeed if actually called
+    with SessionLocal() as session:
+        results = source.discover_tasks(session)
+        session.commit()
+    # Deferred by the shared cooldown -- not a real (and therefore
+    # cache-refreshing) discovery attempt, so it is reported as a capacity
+    # wait rather than as a genuinely empty queue.
+    assert len(results) == 1
+    assert results[0].action == "SOURCE_CAPACITY_WAIT"
+    client.fail_calls.update(calls_before)
+
+
+def test_secondary_capacity_message_does_not_gate_shared_rest_surfaces():
+    """The inverse of the shared-primary case: a message explicitly
+    identified as a secondary/abuse-detection limit must never propagate to
+    the shared surface, so independent, genuinely permitted work (discovery,
+    outbound sync) keeps running while only the tripped surface cools down."""
+    client = RateLimitableClient([_issue(211)])
+    client.fail_calls["list_labels"] = "secondary rate limit exceeded while listing labels"
+    source = GitHubTaskSource(repo="example/repo", client=client)
+
+    with SessionLocal() as session:
+        source.discover_tasks(session)
+        session.commit()
+        assert len(_capacity_wait_events(session, surface="labels")) == 1
+        assert source._capacity_cooldown_active(session, surface="labels") is True
+        assert source._capacity_cooldown_active(session, surface="discovery") is False
+        assert source._capacity_cooldown_active(session, surface="outbound") is False
+
+
+def test_actual_client_request_count_is_suppressed_during_cooldown():
+    """Directly counts real client-side calls (not just recorded events) to
+    verify the cooldown suppresses the actual outbound GitHub request, not
+    merely the warning/log line, across repeated attempts within the
+    cooldown window, and resumes making real requests once it genuinely
+    elapses."""
+    client = RateLimitableClient([_issue(212)])
+    call_count = {"add_comment": 0}
+    real_add_comment = client.add_comment
+
+    def counting_add_comment(repo, number, body):
+        call_count["add_comment"] += 1
+        return real_add_comment(repo, number, body)
+
+    client.add_comment = counting_add_comment
+    source = GitHubTaskSource(repo="example/repo", client=client)
+    task_id = _discover_one_task(source)
+
+    with SessionLocal() as session:
+        task = session.get(BuildTask, task_id)
+        task.state = "DONE"
+        session.commit()
+
+    client.fail_calls["add_comment"] = "API rate limit exceeded for installation"
+    with SessionLocal() as session:
+        assert source.sync_outbound(session, task_id, "DONE") is False
+        session.commit()
+    assert call_count["add_comment"] == 1
+
+    # Three more attempts land within the still-active cooldown: none of
+    # them may reach the client's add_comment at all.
+    for _ in range(3):
+        with SessionLocal() as session:
+            assert source.sync_outbound(session, task_id, "DONE") is False
+            session.commit()
+    assert call_count["add_comment"] == 1
+
+    # Once the cooldown has genuinely elapsed, the next attempt makes a
+    # real request again. The recorded failure message ("API rate limit
+    # exceeded for installation") is classified as *primary*, so it also
+    # set the shared cross-surface backoff -- that must be cleared too, not
+    # just "outbound"'s own entry, or the shared gate would still suppress
+    # this attempt.
+    client.fail_calls.pop("add_comment")
+    with SessionLocal() as session:
+        source._capacity_backoff_until_by_surface["outbound"] = 0.0
+        source._capacity_backoff_until_by_surface[source._SHARED_PRIMARY_SURFACE] = 0.0
+        events = session.scalars(
+            select(BuildTaskEvent).where(BuildTaskEvent.event_type == "task_source.capacity_wait")
+        ).all()
+        for event in events:
+            data = dict(event.event_data or {})
+            if data.get("surface") == "outbound" or data.get("primary"):
+                data["backoff_until"] = 0.0
+                event.event_data = data
+                session.add(event)
+        session.commit()
+
+        assert source.sync_outbound(session, task_id, "DONE") is True
+        session.commit()
+    assert call_count["add_comment"] == 2
