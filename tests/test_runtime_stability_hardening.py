@@ -1875,3 +1875,92 @@ def test_remediation_limit_reached_resumes_legacy_task_missing_reviewed_feature_
         epoch_history = convergence["epoch_history"]
         assert epoch_history[-1]["stop_feature_sha"] == stop_sha_a
         assert epoch_history[-1]["resumed_feature_sha"] == sha_b
+
+
+def test_remediation_limit_reached_resumes_from_failed_validation_sha_when_blocker_lacks_shas(tmp_path: Path):
+    """A validation-exhausted remediation limit can predate useful
+    waiting_input SHA evidence. Recovery may reconstruct the stop SHA from
+    the failed validation result, but must still require the task branch to
+    have advanced as a descendant of that SHA before resuming."""
+    repo, _ = _setup_test_repo(tmp_path)
+    branch = "stagemesh/GH-129-validation"
+    wt = tmp_path / "worktrees" / "gh-129-validation"
+    ensure_worktree(
+        wt,
+        repo_root=repo,
+        branch_name=branch,
+        base_sha=_git(repo, "rev-parse", "HEAD").stdout.strip(),
+        allowed_roots=[str(tmp_path)],
+    )
+    (wt / "feature.txt").write_text("validation failed at this sha\n", encoding="utf-8")
+    _git(wt, "add", "feature.txt")
+    _git(wt, "commit", "-m", "feature work failed validation")
+    failed_validation_sha = _git(wt, "rev-parse", "HEAD").stdout.strip()
+
+    (wt / "feature.txt").write_text("operator fixed validation contract\n", encoding="utf-8")
+    _git(wt, "add", "feature.txt")
+    _git(wt, "commit", "-m", "operator validation fix")
+    resumed_sha = _git(wt, "rev-parse", "HEAD").stdout.strip()
+
+    session_factory, runner = _setup_runner(tmp_path, repo)
+    with session_factory() as session:
+        ensure_state(session)
+        task = BuildTask(
+            task_id="GH-129-VALIDATION",
+            title="Validation remediation limit task",
+            description="d",
+            state="BLOCKED",
+            branch_name=branch,
+            finding_registry={
+                "entries": {},
+                "convergence": {"generations": 3, "comprehensive_used": False},
+            },
+            waiting_input={
+                "failure_evidence": {
+                    "underlying_invariant": "REMEDIATION_LIMIT_REACHED",
+                    "relevant_shas": {"reviewed_feature_sha": None, "feature_sha": None},
+                }
+            },
+        )
+        session.add(task)
+        record_event(
+            session,
+            EventInput(
+                task_id="GH-129-VALIDATION",
+                event_type="runner.validation",
+                actor="runner",
+                event_data={
+                    "passed": False,
+                    "execution_id": "validation-failed",
+                    "source_execution_id": "remediation-before-validation",
+                    "feature_sha": failed_validation_sha,
+                    "validated_sha": failed_validation_sha,
+                },
+            ),
+        )
+        record_event(
+            session,
+            EventInput(
+                task_id="GH-129-VALIDATION",
+                event_type="task.transitioned",
+                actor="runner",
+                from_state="REWORK_REQUIRED",
+                to_state="BLOCKED",
+                event_data={"reason": "REMEDIATION_LIMIT_REACHED"},
+            ),
+        )
+        session.commit()
+
+    result = RunnerCycleResult(mode="RUNNING")
+    with session_factory() as session:
+        runner._recover_diagnosed_blockers(session, result)
+        session.commit()
+
+    assert "GH-129-VALIDATION" in result.recovered
+    with session_factory() as session:
+        task = session.get(BuildTask, "GH-129-VALIDATION")
+        assert task.state == "REVIEW_READY"
+        convergence = task.finding_registry["convergence"]
+        assert convergence["generations"] == 0
+        assert convergence["epoch_history"][-1]["stop_feature_sha"] == failed_validation_sha
+        assert convergence["epoch_history"][-1]["resumed_feature_sha"] == resumed_sha
