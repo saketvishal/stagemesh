@@ -42,9 +42,9 @@ def clean_db():
     engine.dispose()
 
 
-def _make_project(task_sources: dict) -> ProjectDefinition:
+def _make_project(task_sources: dict, *, root: Path | None = None) -> ProjectDefinition:
     return ProjectDefinition(
-        root=Path("."),
+        root=root or Path("."),
         project_id="test-proj",
         name="Test Project",
         aliases=[],
@@ -56,6 +56,19 @@ def _make_project(task_sources: dict) -> ProjectDefinition:
         state_dir=Path(".build-coordinator"),
         task_sources=task_sources,
     )
+
+
+def _git_repo_with_github_origin(tmp_path: Path) -> Path:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / ".git").mkdir()
+    config = repo / ".git" / "config"
+    config.write_text(
+        "[remote \"origin\"]\n"
+        "\turl = https://github.com/example/onboarding.git\n",
+        encoding="utf-8",
+    )
+    return repo
 
 
 def test_configured_github_source_creates_adapter():
@@ -109,6 +122,53 @@ def test_zero_adapter_silent_failure_is_prevented():
     assert adapter is None
     # Must NOT be empty when task_sources contains github
     assert len(diags) > 0
+
+
+def test_empty_unconfigured_project_infers_github_from_origin(tmp_path):
+    repo = _git_repo_with_github_origin(tmp_path)
+    proj = _make_project({}, root=repo)
+
+    adapter, diags = _optional_task_source(
+        proj,
+        force=False,
+        dry_run=False,
+        local_backlog_empty=True,
+    )
+
+    assert diags == []
+    assert isinstance(adapter, GitHubTaskSource)
+    assert adapter.repo == "example/onboarding"
+
+
+def test_inferred_github_does_not_override_explicit_opt_out(tmp_path):
+    repo = _git_repo_with_github_origin(tmp_path)
+    proj = _make_project({"github": {"enabled": False}}, root=repo)
+
+    adapter, diags = _optional_task_source(
+        proj,
+        force=False,
+        dry_run=False,
+        local_backlog_empty=True,
+    )
+
+    assert adapter is None
+    assert len(diags) == 1
+    assert diags[0]["action"] == "DISABLED"
+
+
+def test_inferred_github_does_not_override_local_backlog(tmp_path):
+    repo = _git_repo_with_github_origin(tmp_path)
+    proj = _make_project({}, root=repo)
+
+    adapter, diags = _optional_task_source(
+        proj,
+        force=False,
+        dry_run=False,
+        local_backlog_empty=False,
+    )
+
+    assert adapter is None
+    assert diags == []
 
 
 def test_project_github_config_loads_and_activates():
