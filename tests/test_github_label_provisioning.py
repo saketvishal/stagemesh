@@ -409,6 +409,14 @@ def test_reopened_issue_runner_cycle_replaces_stale_done_label_with_ready():
                 description="Closed before regression evidence arrived.",
                 acceptance_criteria=["Done"],
                 state="DONE",
+                definition_metadata={
+                    "source_type": "github",
+                    "source_owner": "example/repo",
+                    "source_ref": "205",
+                    "source_url": "https://github.com/example/repo/issues/205",
+                    "source_state": "CLOSED",
+                    "source_issue_number": 205,
+                },
             )
         )
         record_event(

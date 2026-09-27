@@ -83,11 +83,22 @@ def test_configured_github_source_creates_adapter():
     assert len(diags) == 0
 
 
-def test_missing_required_configuration_fails_clearly():
+def test_missing_direct_github_source_repo_fails_clearly():
     with pytest.raises(ValueError, match="missing repository identity"):
         get_task_source({"type": "github", "repo": ""})
 
-    proj = _make_project({"github": {"enabled": True}})
+
+def test_explicit_github_config_infers_repo_from_origin(tmp_path):
+    repo = _git_repo_with_github_origin(tmp_path)
+    proj = _make_project({"github": {"enabled": True}}, root=repo)
+    adapter, diags = _optional_task_source(proj, force=False, dry_run=False)
+    assert diags == []
+    assert isinstance(adapter, GitHubTaskSource)
+    assert adapter.repo == "example/onboarding"
+
+
+def test_missing_github_repo_and_origin_fails_clearly(tmp_path):
+    proj = _make_project({"github": {"enabled": True}}, root=tmp_path)
     adapter, diags = _optional_task_source(proj, force=False, dry_run=False)
     assert adapter is None
     assert len(diags) == 1

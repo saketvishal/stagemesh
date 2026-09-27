@@ -628,7 +628,7 @@ def test_github_source_identity_does_not_import_policy_authority():
     with SessionLocal() as session:
         task = session.get(BuildTask, "GH-102")
         assert task is not None
-        assert task.review_policy == "SELF"
+        assert task.review_policy == "INDEPENDENT_WORKER"
         assert task.definition_metadata["source_type"] == "github"
         assert task.definition_metadata["source_ref"] == "102"
         for forbidden in ("routing_policy", "protected_paths", "permissions", "validation"):
