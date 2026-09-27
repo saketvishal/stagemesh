@@ -212,7 +212,13 @@ class GitHubTaskSource(TaskSource):
         self._outbound_events: list[dict[str, Any]] = []
         self._labels_ensured = False
         self._label_warning_emitted = False
-        self._capacity_backoff_until = 0.0
+        # Keyed by surface ("discovery", "labels", "outbound") so a rate
+        # limit hit while provisioning labels or syncing outbound state never
+        # gates issue discovery/execution -- label provisioning must never be
+        # a prerequisite for reading or executing work -- while each surface
+        # still independently suppresses its own repeated requests during its
+        # own cooldown and recovers automatically once that window clears.
+        self._capacity_backoff_until_by_surface: dict[str, float] = {}
         self._last_capacity_wait: dict[str, Any] | None = None
 
     def begin_sync_cycle(self) -> None:
@@ -246,6 +252,7 @@ class GitHubTaskSource(TaskSource):
             return True
         except Exception as exc:
             err = str(exc)
+            is_capacity = self._maybe_record_capacity_wait_from_error(session, err, surface="labels")
             if not self._label_warning_emitted:
                 logger.warning("Failed to provision GitHub lifecycle labels for %s: %s", self.repo, err)
                 self._label_warning_emitted = True
@@ -258,9 +265,7 @@ class GitHubTaskSource(TaskSource):
                     event_data={
                         "error": err,
                         "repo": self.repo,
-                        "capacity": self._capacity_error_from_message(err).as_dict()
-                        if self._is_rate_limit_message(err)
-                        else None,
+                        "capacity": self._capacity_error_from_message(err).as_dict() if is_capacity else None,
                     },
                 ),
             )
@@ -375,24 +380,24 @@ class GitHubTaskSource(TaskSource):
         self._last_capacity_wait = None
         if not self.repo:
             return []
-        self._load_capacity_backoff(session)
-        if self._capacity_backoff_until > time.time():
+        discovery_backoff_until = self._load_capacity_backoff(session, surface="discovery")
+        if discovery_backoff_until > time.time():
             self._last_capacity_wait = {
                 "provider": "github",
                 "reason": "RATE_LIMITED",
-                "message": f"GitHub task-source capacity is cooling down until {self._capacity_backoff_until:.0f}",
+                "message": f"GitHub task-source capacity is cooling down until {discovery_backoff_until:.0f}",
                 "repo": self.repo,
-                "backoff_until": self._capacity_backoff_until,
+                "backoff_until": discovery_backoff_until,
             }
             return self._cached_discovery_results(
                 session,
-                f"GitHub task-source capacity is cooling down until {self._capacity_backoff_until:.0f}",
+                f"GitHub task-source capacity is cooling down until {discovery_backoff_until:.0f}",
             )
         self.ensure_labels(session)
         try:
             issues = self._fetch_issues()
         except TaskSourceCapacityError as exc:
-            self._record_source_capacity_wait(session, exc)
+            self._record_source_capacity_wait(session, exc, surface="discovery")
             return self._cached_discovery_results(session, str(exc))
         results: list[SyncResult] = []
         open_issue_numbers: set[int] = set()
@@ -576,10 +581,19 @@ class GitHubTaskSource(TaskSource):
             retry_after_seconds=retry_after,
         )
 
-    def _record_source_capacity_wait(self, session, exc: TaskSourceCapacityError) -> None:
+    def _record_source_capacity_wait(
+        self, session, exc: TaskSourceCapacityError, *, surface: str = "discovery"
+    ) -> None:
         wait = exc.retry_after_seconds if exc.retry_after_seconds is not None else 60
-        self._capacity_backoff_until = max(self._capacity_backoff_until, time.time() + min(max(wait, 5), 900))
-        self._last_capacity_wait = {"repo": self.repo, **exc.as_dict(), "backoff_until": self._capacity_backoff_until}
+        current = self._capacity_backoff_until_by_surface.get(surface, 0.0)
+        backoff_until = max(current, time.time() + min(max(wait, 5), 900))
+        self._capacity_backoff_until_by_surface[surface] = backoff_until
+        self._last_capacity_wait = {
+            "repo": self.repo,
+            **exc.as_dict(),
+            "surface": surface,
+            "backoff_until": backoff_until,
+        }
         record_event(
             session,
             EventInput(
@@ -591,27 +605,65 @@ class GitHubTaskSource(TaskSource):
         )
         session.flush()
 
-    def _load_capacity_backoff(self, session) -> None:
-        if self._capacity_backoff_until > time.time():
-            return
+    def _maybe_record_capacity_wait_from_error(
+        self, session, err: str, *, surface: str = "discovery"
+    ) -> bool:
+        """If `err` looks like a GitHub rate-limit response, persist it as a
+        typed source-capacity wait scoped to `surface` and return True.
+        Non-rate-limit failures (auth, permissions, network, not-found, ...)
+        are left untouched so they remain distinct, actionable diagnostics
+        rather than being folded into capacity handling. Each surface
+        (discovery, labels, outbound) tracks its own independent cooldown:
+        a rate limit hit while provisioning labels or syncing outbound
+        state must never gate issue discovery or task execution -- label
+        provisioning is explicitly not a prerequisite for reading or
+        executing work -- while still suppressing that surface's own
+        repeated requests and automatically recovering once its own window
+        clears."""
+        if not self._is_rate_limit_message(err):
+            return False
+        self._record_source_capacity_wait(session, self._capacity_error_from_message(err), surface=surface)
+        return True
+
+    def _load_capacity_backoff(self, session, *, surface: str = "discovery") -> float:
+        """Return the still-active backoff_until timestamp for `surface`
+        (0.0 if none), reloading persisted state if the in-memory value has
+        already expired or was never set in this process."""
+        current = self._capacity_backoff_until_by_surface.get(surface, 0.0)
+        if current > time.time():
+            return current
         events = session.scalars(
             select(BuildTaskEvent)
             .where(BuildTaskEvent.event_type == "task_source.capacity_wait")
             .where(BuildTaskEvent.task_id.is_(None))
             .order_by(BuildTaskEvent.created_at.desc())
-            .limit(20)
+            .limit(50)
         )
         for event in events:
             data = event.event_data or {}
             if data.get("repo") != self.repo or data.get("provider") != "github":
+                continue
+            # Events recorded before the "surface" field existed are all
+            # discovery-origin (the only surface that recorded them then).
+            event_surface = data.get("surface") or "discovery"
+            if event_surface != surface:
                 continue
             try:
                 backoff_until = float(data.get("backoff_until") or 0)
             except (TypeError, ValueError):
                 backoff_until = 0.0
             if backoff_until > time.time():
-                self._capacity_backoff_until = backoff_until
-            return
+                self._capacity_backoff_until_by_surface[surface] = backoff_until
+                return backoff_until
+            return 0.0
+        return 0.0
+
+    def _capacity_cooldown_active(self, session, *, surface: str = "discovery") -> bool:
+        """True while GitHub task-source capacity (rate limiting) is known
+        to be cooling down for `surface` specifically. See
+        `_maybe_record_capacity_wait_from_error` for why surfaces are kept
+        independent rather than sharing one global cooldown."""
+        return self._load_capacity_backoff(session, surface=surface) > time.time()
 
     def _cached_discovery_results(self, session, detail: str) -> list[SyncResult]:
         tasks = session.scalars(select(BuildTask)).all()
@@ -1638,6 +1690,7 @@ class GitHubTaskSource(TaskSource):
                 return True
             except Exception as exc:
                 err = str(exc)
+                self._maybe_record_capacity_wait_from_error(session, err, surface="outbound")
                 logger.warning("Failed to sync outbound to GitHub via client for #%s: %s", issue_number, err)
                 self._record_outbound_failed(
                     session,
@@ -1661,6 +1714,7 @@ class GitHubTaskSource(TaskSource):
             )
             if proc_comment.returncode != 0:
                 err = (proc_comment.stderr or proc_comment.stdout or "gh issue comment failed").strip()
+                self._maybe_record_capacity_wait_from_error(session, err, surface="outbound")
                 logger.warning("Failed to comment on GitHub issue #%s: %s", issue_number, err)
                 self._record_outbound_failed(
                     session,
@@ -1677,6 +1731,7 @@ class GitHubTaskSource(TaskSource):
                 self._remove_stale_lifecycle_labels(issue_number, label)
             except Exception as exc:
                 err = str(exc)
+                self._maybe_record_capacity_wait_from_error(session, err, surface="outbound")
                 logger.warning("Failed to remove stale lifecycle labels from GitHub issue #%s: %s", issue_number, err)
                 self._record_outbound_failed(
                     session,
@@ -1698,6 +1753,7 @@ class GitHubTaskSource(TaskSource):
             )
             if proc_label.returncode != 0:
                 err = (proc_label.stderr or proc_label.stdout or "gh issue edit --add-label failed").strip()
+                self._maybe_record_capacity_wait_from_error(session, err, surface="outbound")
                 logger.warning("Failed to add label to GitHub issue #%s: %s", issue_number, err)
                 self._record_outbound_failed(
                     session,
@@ -1721,6 +1777,7 @@ class GitHubTaskSource(TaskSource):
                 )
                 if proc_close.returncode != 0:
                     err = (proc_close.stderr or proc_close.stdout or "gh issue close failed").strip()
+                    self._maybe_record_capacity_wait_from_error(session, err, surface="outbound")
                     logger.warning("Failed to close GitHub issue #%s: %s", issue_number, err)
                     self._record_outbound_failed(
                         session,
@@ -1742,6 +1799,7 @@ class GitHubTaskSource(TaskSource):
             return True
         except Exception as exc:
             err = str(exc)
+            self._maybe_record_capacity_wait_from_error(session, err, surface="outbound")
             logger.warning("Subprocess exception syncing outbound to GitHub issue #%s: %s", issue_number, err)
             self._record_outbound_failed(
                 session,
@@ -1788,6 +1846,20 @@ class GitHubTaskSource(TaskSource):
         # Check idempotency: already synced for this state?
         if self._is_outbound_synced(session, task_id, state, is_objective=False):
             return True
+
+        if self.repo and not self.dry_run and self._capacity_cooldown_active(session, surface="outbound"):
+            self._record_outbound_failed(
+                session,
+                task_id,
+                issue_number,
+                error=(
+                    "GitHub task-source capacity is cooling down until "
+                    f"{self._capacity_backoff_until_by_surface.get('outbound', 0.0):.0f}; deferring outbound sync"
+                ),
+                action="task_source_capacity_wait",
+                is_objective=False,
+            )
+            return False
 
         comment_body = self._format_status_comment(task_id, state, evidence)
         label = f"stagemesh:{state.lower()}"
@@ -1848,6 +1920,20 @@ class GitHubTaskSource(TaskSource):
         # Idempotency check
         if self._is_outbound_synced(session, objective_id, state, is_objective=True):
             return True
+
+        if self.repo and not self.dry_run and self._capacity_cooldown_active(session, surface="outbound"):
+            self._record_outbound_failed(
+                session,
+                objective_id,
+                issue_number,
+                error=(
+                    "GitHub task-source capacity is cooling down until "
+                    f"{self._capacity_backoff_until_by_surface.get('outbound', 0.0):.0f}; deferring outbound sync"
+                ),
+                action="task_source_capacity_wait",
+                is_objective=True,
+            )
+            return False
 
         comment_body = self._format_objective_status_comment(objective_id, state, evidence)
         label = "stagemesh:done"
