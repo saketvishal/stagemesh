@@ -392,9 +392,9 @@ class GitHubTaskSource(TaskSource):
                 if not self._is_rate_limit_message(str(exc)):
                     raise
                 if hasattr(self._client, "list_issues_rest"):
-                    return self._client.list_issues_rest(repo=self.repo, labels=self.labels, authenticated=True)
+                    return self._fetch_client_issues_rest(exc)
                 if hasattr(self._client, "list_public_issues_rest"):
-                    return self._client.list_public_issues_rest(repo=self.repo, labels=self.labels)
+                    return self._fetch_client_public_issues_rest(exc)
                 raise self._capacity_error_from_message(str(exc)) from exc
         cmd = [
             "gh",
@@ -427,8 +427,8 @@ class GitHubTaskSource(TaskSource):
             if self._is_rate_limit_message(err):
                 try:
                     return self._fetch_issues_public_rest()
-                except TaskSourceCapacityError:
-                    raise self._capacity_error_from_message(err) from exc
+                except TaskSourceCapacityError as rest_exc:
+                    raise rest_exc from exc
                 except RuntimeError:
                     raise self._capacity_error_from_message(err) from exc
             raise RuntimeError(f"failed to fetch GitHub issues from {self.repo}: {err}")
@@ -460,7 +460,7 @@ class GitHubTaskSource(TaskSource):
             retry_after = self._parse_retry_after(exc.headers.get("Retry-After"))
             reset_at = exc.headers.get("X-RateLimit-Reset")
             message = body or str(exc)
-            if exc.code in {403, 429} and self._is_rate_limit_message(message):
+            if self._is_rate_limited_http_response(exc.code, exc.headers, message):
                 raise TaskSourceCapacityError(
                     f"GitHub REST rate limited for {self.repo}: {message}",
                     provider="github",
@@ -470,6 +470,8 @@ class GitHubTaskSource(TaskSource):
                 ) from exc
             raise RuntimeError(f"GitHub public REST fallback failed for {self.repo}: HTTP {exc.code}: {message}") from exc
         except Exception as exc:
+            if isinstance(exc, TaskSourceCapacityError):
+                raise
             raise RuntimeError(f"GitHub public REST fallback failed for {self.repo}: {exc}") from exc
 
         if not isinstance(payload, list):
@@ -490,6 +492,22 @@ class GitHubTaskSource(TaskSource):
             )
         return issues
 
+    def _fetch_client_issues_rest(self, original_exc: Exception) -> list[dict[str, Any]]:
+        try:
+            return self._client.list_issues_rest(repo=self.repo, labels=self.labels, authenticated=True)
+        except Exception as rest_exc:
+            if self._is_rate_limit_message(str(rest_exc)):
+                raise self._capacity_error_from_message(str(rest_exc)) from rest_exc
+            raise self._capacity_error_from_message(str(original_exc)) from rest_exc
+
+    def _fetch_client_public_issues_rest(self, original_exc: Exception) -> list[dict[str, Any]]:
+        try:
+            return self._client.list_public_issues_rest(repo=self.repo, labels=self.labels)
+        except Exception as rest_exc:
+            if self._is_rate_limit_message(str(rest_exc)):
+                raise self._capacity_error_from_message(str(rest_exc)) from rest_exc
+            raise self._capacity_error_from_message(str(original_exc)) from rest_exc
+
     @staticmethod
     def _parse_retry_after(value: str | None) -> int | None:
         if not value:
@@ -509,6 +527,17 @@ class GitHubTaskSource(TaskSource):
             or "api rate limit exceeded" in lowered
             or "too many requests" in lowered
         )
+
+    @staticmethod
+    def _is_rate_limited_http_response(code: int, headers: Any, message: str) -> bool:
+        if code == 429:
+            return True
+        if code != 403:
+            return False
+        remaining = None
+        if headers is not None:
+            remaining = headers.get("X-RateLimit-Remaining")
+        return remaining == "0" or GitHubTaskSource._is_rate_limit_message(message)
 
     def _capacity_error_from_message(self, message: str) -> TaskSourceCapacityError:
         retry_after = None
