@@ -48,3 +48,77 @@ jobs:
           print("CLI import: OK")
           print("routing import: OK")
           print("FakeExecutor import: OK")
+
+  # Narrowly-scoped acceptance job for the SM-133 follow-up fixes (durable
+  # process identity across claim-lease recovery, and header-evidenced
+  # GitHub rate-limit capacity classification). Runs only the tests that
+  # exercise those two contracts, on native Windows -- this repo's process
+  # identity and lease-recovery paths have Windows-specific branches
+  # (_windows_process_start_key etc.) that the Linux `test` job above never
+  # touches. Deliberately does not run or replace the full suite above:
+  # this job is additive evidence for one candidate SHA, not a substitute
+  # for full-matrix CI. All workers here are FakeExecutor/synthetic or
+  # short-lived local subprocess children in disposable pytest tmp dirs --
+  # no operational database, provider credentials, private data, or paid
+  # model calls.
+  windows-identity-and-capacity-acceptance:
+    name: Windows acceptance (process identity, lease recovery, capacity classification)
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -e ".[dev,postgres]"
+
+      - name: Record environment evidence
+        shell: python
+        run: |
+          import platform
+          import sys
+          import build_coordinator
+
+          print(f"platform: {platform.platform()}")
+          print(f"runner_image: windows-latest (GitHub-hosted)")
+          print(f"interpreter: {sys.version} ({sys.executable})")
+          print(f"imported_package_path: {build_coordinator.__file__}")
+          print(f"candidate_sha: {'${{ github.sha }}'}")
+
+      - name: Collect test list (no execution)
+        run: >
+          pytest
+          tests/test_executor_restart_identity.py
+          tests/test_process_tree.py
+          tests/test_claim_expiry_preserves_live_worker.py
+          tests/test_validation_claim_recovery.py
+          tests/test_github_rate_limit_capacity_surfaces.py
+          tests/test_github_label_provisioning.py
+          --collect-only -q > collected.txt
+        shell: bash
+
+      - name: Run process-identity, lease-recovery, and capacity-classification acceptance tests
+        run: >
+          pytest
+          tests/test_executor_restart_identity.py
+          tests/test_process_tree.py
+          tests/test_claim_expiry_preserves_live_worker.py
+          tests/test_validation_claim_recovery.py
+          tests/test_github_rate_limit_capacity_surfaces.py
+          tests/test_github_label_provisioning.py
+          -v --tb=long
+          --junitxml=windows-acceptance-results.xml
+
+      - name: Upload retained results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-acceptance-results-${{ github.sha }}
+          path: |
+            windows-acceptance-results.xml
+            collected.txt
+          if-no-files-found: warn
