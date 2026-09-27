@@ -289,6 +289,18 @@ class BuildRunner:
         if self._task_source is not None and state.mode != "PAUSED":
             try:
                 self._task_source.discover_tasks(session)
+                source_capacity_wait = getattr(self._task_source, "last_capacity_wait", None)
+                if source_capacity_wait:
+                    result.capacity_full = True
+                    record_event(
+                        session,
+                        EventInput(
+                            task_id=None,
+                            event_type="runner.task_source_capacity_wait",
+                            actor="runner",
+                            event_data=dict(source_capacity_wait),
+                        ),
+                    )
             except TaskSourceCapacityError as exc:
                 result.capacity_full = True
                 record_event(

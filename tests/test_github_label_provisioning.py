@@ -196,7 +196,32 @@ def test_rate_limited_label_provisioning_warning_is_suppressed_within_run(caplog
             )
         ).all()
         assert len(events) == 3
-        assert events[0].event_data["capacity"]["reason"] == "RATE_LIMITED"
+    assert events[0].event_data["capacity"]["reason"] == "RATE_LIMITED"
+
+
+def test_label_provisioning_warning_resets_after_success(caplog):
+    """A long-lived adapter logs a later provisioning failure after recovery."""
+    client = LabelAwareMockClient(issues=[], existing_labels=[], fail_on="rate_limit_labels")
+    source = GitHubTaskSource(repo="example/repo", client=client)
+
+    with caplog.at_level("WARNING", logger="build_coordinator.task_source.github"):
+        with SessionLocal() as session:
+            source.discover_tasks(session)
+            client.fail_on = None
+            source.discover_tasks(session)
+            source._labels_ensured = False
+            client.fail_on = "list_labels"
+            source.discover_tasks(session)
+            session.commit()
+
+    warnings = [
+        record
+        for record in caplog.records
+        if "Failed to provision GitHub lifecycle labels" in record.getMessage()
+    ]
+    assert len(warnings) == 2
+    assert "rate limit" in warnings[0].getMessage().lower()
+    assert "permission denied" in warnings[1].getMessage().lower()
 
 
 def test_provisioning_retries_on_next_cycle_after_failure():
