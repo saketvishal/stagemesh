@@ -1179,6 +1179,7 @@ class BuildRunner:
                     "passed": passed,
                     "workspace": str(merged.get("workspace") or execution.worktree_path),
                     "execution_id": execution.execution_id,
+                    "source_execution_id": merged.get("source_execution_id"),
                     "feature_sha": merged.get("feature_sha") or execution.reviewed_feature_sha,
                     "validated_sha": merged.get("validated_sha") or execution.reviewed_feature_sha,
                     "environment_fingerprint": merged.get("environment_fingerprint"),
@@ -1191,10 +1192,11 @@ class BuildRunner:
             ),
         )
         if execution.claim_id:
+            claim = session.get(BuildTaskClaim, execution.claim_id)
             checkpoint(
                 session,
                 execution.claim_id,
-                worker_id=execution.worker_id,
+                worker_id=claim.worker_id if claim is not None else execution.worker_id,
                 data=CheckpointInput(
                     current_step="runner validation " + ("passed" if outcome.passed else "failed"),
                     last_successful_tests=[r["command"] for r in outcome.results if r["exit_code"] == 0],

@@ -36,6 +36,7 @@ from build_coordinator.service import (
     ClaimRequest,
     TaskSpec,
     claim_task,
+    checkpoint,
     recover_expired,
     recover_execution_retry_exhausted,
     set_mode,
@@ -44,7 +45,7 @@ from build_coordinator.service import (
     utcnow,
 )
 from build_coordinator.task_source.base import source_identity_metadata
-from build_coordinator.types import EventInput
+from build_coordinator.types import CheckpointInput, EventInput
 
 
 @pytest.fixture(autouse=True)
@@ -1042,6 +1043,94 @@ def test_validation_runs_in_background_while_ready_tasks_dispatch():
         assert ready_builder.status == "LAUNCHED"
         assert validation.execution_id in result.launched
         assert ready_builder.execution_id in result.launched
+
+
+def test_validation_completion_checkpoints_as_active_claim_owner():
+    with SessionLocal() as session:
+        task = upsert_task(
+            session,
+            TaskSpec(
+                **{
+                    **_task("RUN-VALIDATION-OWNER").__dict__,
+                    "required_validation": ["pytest -q"],
+                }
+            ),
+        )
+        claim = claim_task(session, ClaimRequest("RUN-VALIDATION-OWNER", worker_id="builder-a"))
+        claim_id = claim.claim_id
+        task.state = "VALIDATING"
+        session.add(
+            BuildRunnerExecution(
+                execution_id="validation-owner",
+                task_id="RUN-VALIDATION-OWNER",
+                role="BUILDER",
+                worker_id="runner-validation",
+                provider="runner",
+                adapter="validation",
+                claim_id=claim_id,
+                status="LAUNCHED",
+                worktree_path=str(Path.cwd()),
+                reviewed_feature_sha="feature-sha",
+                result_data={
+                    "commands": ["pytest -q"],
+                    "workspace": str(Path.cwd()),
+                    "source_execution_id": "builder-source",
+                    "validated_sha": "feature-sha",
+                    "next_state": "REVIEW_READY",
+                },
+            )
+        )
+        session.commit()
+
+    runner = _runner()
+    runner._validation_executor = FakeExecutor(
+        [
+            ExecutionObservation(
+                "SUCCEEDED",
+                result_data={
+                    "passed": True,
+                    "results": [{"command": "pytest -q", "exit_code": 0, "output_tail": ""}],
+                    "validation_terminal_type": "PASSED",
+                },
+            )
+        ]
+    )
+
+    runner.run_once()
+
+    with SessionLocal() as session:
+        validation = session.get(BuildRunnerExecution, "validation-owner")
+        checkpoint_row = session.scalar(
+            select(BuildTaskCheckpoint).where(BuildTaskCheckpoint.task_id == "RUN-VALIDATION-OWNER")
+        )
+        validation_event = session.scalar(
+            select(BuildTaskEvent)
+            .where(BuildTaskEvent.task_id == "RUN-VALIDATION-OWNER")
+            .where(BuildTaskEvent.event_type == "runner.validation")
+        )
+
+        assert session.get(BuildTask, "RUN-VALIDATION-OWNER").state == "REVIEW_READY"
+        assert validation.worker_id == "runner-validation"
+        assert validation.claim_id == claim_id
+        assert checkpoint_row.worker_id == "builder-a"
+        assert checkpoint_row.current_step == "runner validation passed"
+        assert checkpoint_row.last_successful_tests == ["pytest -q"]
+        assert validation_event.event_data["source_execution_id"] == "builder-source"
+        assert validation_event.event_data["validated_sha"] == "feature-sha"
+
+
+def test_checkpoint_ownership_invariant_rejects_unrelated_worker():
+    with SessionLocal() as session:
+        upsert_task(session, _task("RUN-CHECKPOINT-OWNER"))
+        claim = claim_task(session, ClaimRequest("RUN-CHECKPOINT-OWNER", worker_id="builder-a"))
+
+        with pytest.raises(CoordinatorPolicyError, match="Only the active claiming worker may checkpoint"):
+            checkpoint(
+                session,
+                claim.claim_id,
+                worker_id="builder-b",
+                data=CheckpointInput(current_step="wrong worker"),
+            )
 
 
 def test_validation_restarts_are_rerun_instead_of_trusted():
