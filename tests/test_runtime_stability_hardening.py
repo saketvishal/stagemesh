@@ -1438,7 +1438,7 @@ def test_branch_moved_concurrently_retries_exact_reviewed_sha(tmp_path: Path):
         )
         session.commit()
 
-    result = RunnerCycleResult()
+    result = RunnerCycleResult(mode="RUNNING")
     with session_factory() as session:
         runner._recover_diagnosed_blockers(session, result)
         assert "GH-108-B" in result.recovered
@@ -1509,6 +1509,7 @@ def _blocked_remediation_limit_task(
             "convergence": {
                 "generations": 3,
                 "comprehensive_used": True,
+                "comprehensive_execution_id": "exec-comprehensive-stop",
                 "pending_comprehensive_review": False,
                 "stop_reason": "serial_new_finding_convergence_threshold_reached",
                 "history": [{"generation": 1}, {"generation": 2}, {"generation": 3}],
@@ -1569,7 +1570,7 @@ def test_remediation_limit_reached_resumes_new_epoch_when_feature_sha_advances(t
     _git(wt, "commit", "-m", "operator remediation")
     new_sha = _git(wt, "rev-parse", "HEAD").stdout.strip()
 
-    result = RunnerCycleResult()
+    result = RunnerCycleResult(mode="RUNNING")
     with session_factory() as session:
         runner._recover_diagnosed_blockers(session, result)
         session.commit()
@@ -1590,6 +1591,7 @@ def test_remediation_limit_reached_resumes_new_epoch_when_feature_sha_advances(t
         assert epoch_history[-1]["resumed_feature_sha"] == new_sha
         assert epoch_history[-1]["generations"] == 3
         assert epoch_history[-1]["comprehensive_used"] is True
+        assert epoch_history[-1]["comprehensive_execution_id"] == "exec-comprehensive-stop"
 
         event = session.scalar(
             select(BuildTaskEvent)
@@ -1653,7 +1655,7 @@ def test_remediation_limit_reached_fails_closed_when_feature_sha_unchanged(tmp_p
         session.commit()
 
     # No new commit lands on the branch -- feature SHA has not advanced.
-    result = RunnerCycleResult()
+    result = RunnerCycleResult(mode="RUNNING")
     with session_factory() as session:
         runner._recover_diagnosed_blockers(session, result)
         session.commit()
@@ -1745,7 +1747,7 @@ def test_remediation_limit_reached_resumes_after_reblock_on_post_remediation_rev
         )
         session.commit()
 
-    result = RunnerCycleResult()
+    result = RunnerCycleResult(mode="RUNNING")
     with session_factory() as session:
         runner._recover_diagnosed_blockers(session, result)
         session.commit()
