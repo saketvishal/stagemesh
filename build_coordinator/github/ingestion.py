@@ -8,7 +8,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from build_coordinator.db import commit_or_busy
+from build_coordinator.db import commit_or_busy, with_sqlite_retry
 from build_coordinator.github.client import GitHubClient, GitHubIssue
 from build_coordinator.github.sanitizer import (
     sanitize_issue_to_spec,
@@ -54,30 +54,37 @@ def ingest_github_issue(
 
     existing = session.get(BuildObjective, spec.objective_id)
     if existing is not None:
-        repaired = _repair_goal_if_unplanned(session, existing, spec)
-        _requeue_stale_failed_planner_if_unplanned(session, existing)
-        if repaired and existing.state == "PAUSED":
-            resume_objective(session, existing.objective_id, actor="github_reconciler")
-        commit_or_busy(session)
+
+        def _reconcile_existing() -> None:
+            repaired = _repair_goal_if_unplanned(session, existing, spec)
+            _requeue_stale_failed_planner_if_unplanned(session, existing)
+            if repaired and existing.state == "PAUSED":
+                resume_objective(session, existing.objective_id, actor="github_reconciler")
+            commit_or_busy(session)
+
+        with_sqlite_retry(_reconcile_existing)
         return existing, False
 
-    objective = create_objective(session, spec)
-
-    session.add(
-        BuildObjectiveEvent(
-            objective_id=objective.objective_id,
-            event_type="github.issue_ingested",
-            actor=f"gh:{issue.author}",
-            event_data={
-                "repo": validated_repo,
-                "issue_number": issue.number,
-                "author": issue.author,
-                "html_url": issue.html_url,
-                "title": issue.title,
-            },
+    def _create_and_record() -> BuildObjective:
+        obj = create_objective(session, spec)
+        session.add(
+            BuildObjectiveEvent(
+                objective_id=obj.objective_id,
+                event_type="github.issue_ingested",
+                actor=f"gh:{issue.author}",
+                event_data={
+                    "repo": validated_repo,
+                    "issue_number": issue.number,
+                    "author": issue.author,
+                    "html_url": issue.html_url,
+                    "title": issue.title,
+                },
+            )
         )
-    )
-    commit_or_busy(session)
+        commit_or_busy(session)
+        return obj
+
+    objective = with_sqlite_retry(_create_and_record)
 
     # Synchronize initial state to GitHub
     try:

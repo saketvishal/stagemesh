@@ -21,7 +21,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from build_coordinator.db import commit_or_busy
+from build_coordinator.db import commit_or_busy, with_sqlite_retry
 from build_coordinator.github.client import GitHubClient, GitHubIssue
 from build_coordinator.github.gates import (
     poll_and_ingest_gate_approvals,
@@ -250,15 +250,18 @@ class GitHubAutonomousController:
                 pr_url = pr.get("url") or pr.get("html_url", "")
                 result.prs_created.append(f"{task.task_id}:{pr_url}")
 
-                session.add(
-                    BuildObjectiveEvent(
-                        objective_id=task.objective_id,
-                        event_type="github.pr_created",
-                        actor=task.task_id,
-                        event_data={"task_id": task.task_id, "branch": branch, "pr_url": pr_url},
+                def _record_pr_created() -> None:
+                    session.add(
+                        BuildObjectiveEvent(
+                            objective_id=task.objective_id,
+                            event_type="github.pr_created",
+                            actor=task.task_id,
+                            event_data={"task_id": task.task_id, "branch": branch, "pr_url": pr_url},
+                        )
                     )
-                )
-                commit_or_busy(session)
+                    commit_or_busy(session)
+
+                with_sqlite_retry(_record_pr_created)
 
                 self._github.add_issue_comment(
                     target_repo,
