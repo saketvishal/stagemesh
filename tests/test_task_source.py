@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import subprocess
+import urllib.error
+from email.message import Message
 
 import pytest
 from pathlib import Path
@@ -222,6 +224,87 @@ def test_github_rate_limit_without_cache_reports_capacity_not_empty_queue():
     assert len(results) == 1
     assert results[0].action == "SOURCE_CAPACITY_WAIT"
     assert results[0].task_id == ""
+
+
+def test_client_rest_rate_limit_after_graphql_reuses_cached_state():
+    cached = {
+        "number": 134,
+        "title": "Cached through REST capacity",
+        "body": "Keep runnable while all live GitHub discovery paths are limited.",
+        "labels": [],
+        "url": "https://github.com/example/repo/issues/134",
+    }
+    with SessionLocal() as session:
+        GitHubTaskSource(repo="example/repo", client=FakeGitHubClient([cached])).discover_tasks(session)
+        session.commit()
+
+    class RestAlsoRateLimitedClient(FakeGitHubClient):
+        def list_issues(self, repo: str, labels: tuple[str, ...]):
+            raise RuntimeError("GraphQL API rate limit exceeded")
+
+        def list_issues_rest(self, repo: str, labels: tuple[str, ...], authenticated: bool = True):
+            raise RuntimeError("REST API rate limit exceeded; retry-after: 45")
+
+    source = GitHubTaskSource(repo="example/repo", client=RestAlsoRateLimitedClient([]))
+    with SessionLocal() as session:
+        results = source.discover_tasks(session)
+        session.commit()
+
+    assert [r.task_id for r in results] == ["GH-134"]
+    assert results[0].action == "SOURCE_CAPACITY_WAIT"
+
+    with SessionLocal() as session:
+        event = session.scalars(
+            select(BuildTaskEvent).where(BuildTaskEvent.event_type == "task_source.capacity_wait")
+        ).one()
+        assert event.event_data["retry_after_seconds"] == 45
+
+
+def test_public_rest_rate_limit_detected_from_headers_without_magic_body(monkeypatch):
+    source = GitHubTaskSource(repo="example/repo")
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:3] == ["gh", "label", "list"]:
+            return SimpleNamespace(stdout="[]", stderr="", returncode=0)
+        if cmd[:3] == ["gh", "label", "create"]:
+            return SimpleNamespace(stdout="", stderr="", returncode=0)
+        raise subprocess.CalledProcessError(
+            1,
+            cmd,
+            output="",
+            stderr="GraphQL API rate limit exceeded",
+        )
+
+    headers = Message()
+    headers["X-RateLimit-Remaining"] = "0"
+    headers["X-RateLimit-Reset"] = "1800000000"
+    headers["Retry-After"] = "30"
+
+    def fake_urlopen(req, timeout=15):
+        raise urllib.error.HTTPError(
+            req.full_url,
+            403,
+            "Forbidden",
+            headers,
+            fp=SimpleNamespace(read=lambda: b'{"message":"Forbidden"}'),
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    with SessionLocal() as session:
+        results = source.discover_tasks(session)
+        session.commit()
+
+    assert len(results) == 1
+    assert results[0].action == "SOURCE_CAPACITY_WAIT"
+
+    with SessionLocal() as session:
+        event = session.scalars(
+            select(BuildTaskEvent).where(BuildTaskEvent.event_type == "task_source.capacity_wait")
+        ).one()
+        assert event.event_data["retry_after_seconds"] == 30
+        assert event.event_data["reset_at"] == "1800000000"
 
 
 def test_true_zero_issue_repository_still_reports_empty_discovery():
