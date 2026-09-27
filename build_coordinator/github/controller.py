@@ -21,6 +21,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from build_coordinator.db import commit_or_busy
 from build_coordinator.github.client import GitHubClient, GitHubIssue
 from build_coordinator.github.gates import (
     poll_and_ingest_gate_approvals,
@@ -257,7 +258,7 @@ class GitHubAutonomousController:
                         event_data={"task_id": task.task_id, "branch": branch, "pr_url": pr_url},
                     )
                 )
-                session.commit()
+                commit_or_busy(session)
 
                 self._github.add_issue_comment(
                     target_repo,

@@ -8,6 +8,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from build_coordinator.db import commit_or_busy
 from build_coordinator.github.client import GitHubClient, GitHubIssue
 from build_coordinator.github.sanitizer import (
     sanitize_issue_to_spec,
@@ -57,7 +58,7 @@ def ingest_github_issue(
         _requeue_stale_failed_planner_if_unplanned(session, existing)
         if repaired and existing.state == "PAUSED":
             resume_objective(session, existing.objective_id, actor="github_reconciler")
-        session.commit()
+        commit_or_busy(session)
         return existing, False
 
     objective = create_objective(session, spec)
@@ -76,7 +77,7 @@ def ingest_github_issue(
             },
         )
     )
-    session.commit()
+    commit_or_busy(session)
 
     # Synchronize initial state to GitHub
     try:

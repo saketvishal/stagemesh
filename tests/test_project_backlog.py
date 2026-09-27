@@ -899,29 +899,56 @@ def test_top_level_task_commands_bind_to_current_project_state(tmp_path, registr
 
 
 def test_project_sync_lock_contention_is_typed_not_raw(tmp_path, registry, monkeypatch):
-    """GH-101: `project sync`'s commit must not surface a raw SQLite
-    OperationalError when another StageMesh writer holds the lock."""
+    """GH-101: `project sync` retries a transient typed SQLite busy commit
+    from a clean session instead of surfacing a raw SQLite error."""
     from argparse import Namespace
-
-    from sqlalchemy.exc import OperationalError
-    from sqlalchemy.orm import Session as SASession
+    from types import SimpleNamespace
 
     from build_coordinator.db import DatabaseBusyError
-    from build_coordinator.project.commands import handle_project
+    from build_coordinator.project import commands
 
-    root, _ = make_project_repo(tmp_path, {"T-1": {}})
-    register_project(root)
+    class Session:
+        def __enter__(self):
+            return self
 
-    original_commit = SASession.commit
+        def __exit__(self, *_exc):
+            return False
 
-    def flaky_commit(self, *args, **kwargs):
-        raise OperationalError("UPDATE build_tasks", None, Exception("database is locked"))
+    class Lifecycle:
+        def __init__(self):
+            self.sessions = []
 
-    monkeypatch.setattr(SASession, "commit", flaky_commit)
+        def session(self):
+            session = Session()
+            self.sessions.append(session)
+            return session
+
+    class Report:
+        def as_dict(self):
+            return {"ok": True}
+
+    lifecycle = Lifecycle()
+    commits = {"count": 0}
+
+    def flaky_commit(_session):
+        commits["count"] += 1
+        if commits["count"] == 1:
+            raise DatabaseBusyError("SQLite write contention on commit")
+
+    monkeypatch.setattr(commands, "_project_from_args", lambda _args: SimpleNamespace())
+    monkeypatch.setattr(commands, "_open", lambda _project: lifecycle)
+    monkeypatch.setattr(commands, "load_backlog", lambda _project: [])
+    monkeypatch.setattr(commands, "sync_backlog", lambda *_args, **_kwargs: Report())
+    monkeypatch.setattr(commands, "commit_or_busy", flaky_commit)
+    printed = []
+    monkeypatch.setattr(commands, "_print", printed.append)
 
     args = Namespace(project_command="sync", name=["fixture"], project_dir=None, dry_run=False)
-    with pytest.raises(DatabaseBusyError, match="STAGEMESH_SQLITE_BUSY"):
-        handle_project(args)
+    commands.handle_project(args)
+
+    assert commits["count"] == 2
+    assert len(lifecycle.sessions) == 2
+    assert printed == [{"ok": True}]
 
 
 def test_continue_runs_project_backlog_in_parallel_from_any_directory(tmp_path, registry):

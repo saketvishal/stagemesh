@@ -632,9 +632,8 @@ def test_config_reload_keeps_last_good_config_when_edit_is_invalid(tmp_path, mon
 
 def test_run_foreground_cycle_converts_watcher_lock_commit_contention_to_typed_outcome(authorized_repo, monkeypatch):
     """A transient SQLite writer-lock failure on the watcher's own lock-
-    acquisition commit must surface as a bounded, typed `CycleOutcome`
-    (GH-101) rather than an untyped `sqlalchemy.exc.OperationalError`
-    crashing the watcher process."""
+    acquisition commit is retried from a clean transaction boundary (GH-101)
+    rather than crashing the watcher process."""
     from build_coordinator.db import DatabaseBusyError
     from build_coordinator.watcher import loop as loop_module
 
@@ -659,8 +658,9 @@ def test_run_foreground_cycle_converts_watcher_lock_commit_contention_to_typed_o
         github_client=_github_no_issues(),
     )
 
-    assert not outcome.ok
-    assert outcome.failure_class == "TRANSIENT_DATABASE_FAILURE"
+    assert outcome.ok
+    assert outcome.failure_class is None
+    assert calls["count"] > 1
 
 
 def _logger():
