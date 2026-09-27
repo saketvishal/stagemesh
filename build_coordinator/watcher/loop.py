@@ -24,6 +24,12 @@ from pathlib import Path
 from typing import Any, Callable
 from uuid import uuid4
 
+from build_coordinator.coordinator_lock import (
+    CoordinatorLockHeld,
+    acquire_coordinator_lock,
+    release_coordinator_lock,
+)
+from build_coordinator.db import DatabaseBusyError, commit_or_busy, with_sqlite_retry
 from build_coordinator.github.controller import GitHubAutonomousController
 from build_coordinator.runner.models import RunnerConfig
 from build_coordinator.watcher import lock as watcher_lock
@@ -176,60 +182,122 @@ def run_foreground_cycle(
             )
 
         task_name = stable_task_name(str(repo.control_repo_root), repo.slug)
-        try:
-            acquisition = watcher_lock.acquire_lock(
-                session,
-                task_name=task_name,
-                control_repo_root=str(repo.control_repo_root),
-                repository_slug=repo.slug,
-                instance_id=instance_id,
-            )
-            session.commit()
-        except watcher_lock.WatcherLockHeld as exc:
-            logger.log(
-                "watcher.lock_held",
-                repository_slug=repo.slug,
-                cycle_id=cycle_id,
-                message=str(exc),
-                extra=exc.owner_health,
-            )
-            return CycleOutcome(task_name=task_name, cycle_id=cycle_id, ok=False, failure_class="POLICY_FAILURE")
+    try:
+        def acquire_watcher_lock_once():
+            with session_factory() as session:
+                acquisition = watcher_lock.acquire_lock(
+                    session,
+                    task_name=task_name,
+                    control_repo_root=str(repo.control_repo_root),
+                    repository_slug=repo.slug,
+                    instance_id=instance_id,
+                )
+                commit_or_busy(session)
+                return acquisition
 
-        if acquisition.recovered_stale:
+        acquisition = with_sqlite_retry(acquire_watcher_lock_once)
+    except DatabaseBusyError as exc:
+        logger.log(
+            "watcher.cycle_failed",
+            repository_slug=repo.slug,
+            cycle_id=cycle_id,
+            error_type="TRANSIENT_DATABASE_FAILURE",
+            message=str(exc),
+        )
+        return CycleOutcome(
+            task_name=task_name,
+            cycle_id=cycle_id,
+            ok=False,
+            failure_class="TRANSIENT_DATABASE_FAILURE",
+        )
+    except watcher_lock.WatcherLockHeld as exc:
+        logger.log(
+            "watcher.lock_held",
+            repository_slug=repo.slug,
+            cycle_id=cycle_id,
+            message=str(exc),
+            extra=exc.owner_health,
+        )
+        return CycleOutcome(task_name=task_name, cycle_id=cycle_id, ok=False, failure_class="POLICY_FAILURE")
+
+    if acquisition.recovered_stale:
+        logger.log(
+            "watcher.lock_recovered",
+            repository_slug=repo.slug,
+            cycle_id=cycle_id,
+            extra={
+                "current_instance_id": instance_id,
+                "recorded_owner_instance_id": acquisition.record.watcher_id,
+                "current_pid": acquisition.record.process_id,
+                "recovery_reason": acquisition.recovery_reason,
+            },
+        )
+
+    if provision_labels_on_cycle and repo.labels:
+        try:
+            result = provision_labels(repo)
             logger.log(
-                "watcher.lock_recovered",
+                "watcher.labels_provisioned",
                 repository_slug=repo.slug,
                 cycle_id=cycle_id,
                 extra={
-                    "current_instance_id": instance_id,
-                    "recorded_owner_instance_id": acquisition.record.watcher_id,
-                    "current_pid": acquisition.record.process_id,
-                    "recovery_reason": acquisition.recovery_reason,
+                    "created": list(result.created),
+                    "updated": list(result.updated),
                 },
             )
+        except Exception as exc:
+            failure_class = classify_failure(exc)
 
-        if provision_labels_on_cycle and repo.labels:
-            try:
-                result = provision_labels(repo)
-                logger.log(
-                    "watcher.labels_provisioned",
-                    repository_slug=repo.slug,
-                    cycle_id=cycle_id,
-                    extra={
-                        "created": list(result.created),
-                        "updated": list(result.updated),
-                    },
-                )
-            except Exception as exc:
-                failure_class = classify_failure(exc)
-                _record_failure(session, task_name, failure_class, str(exc), backoff_policy, logger, repo.slug, cycle_id)
-                session.commit()
-                return CycleOutcome(
-                    task_name=task_name,
-                    cycle_id=cycle_id,
-                    ok=False,
-                    failure_class=failure_class,
-                )
+            def record_label_failure_once():
+                with session_factory() as session:
+                    _record_failure(session, task_name, failure_class, str(exc), backoff_policy, logger, repo.slug, cycle_id)
+                    commit_or_busy(session)
+
+            with_sqlite_retry(record_label_failure_once)
+            return CycleOutcome(
+                task_name=task_name,
+                cycle_id=cycle_id,
+                ok=False,
+                failure_class=failure_class,
+            )
+
+    # The watcher drives `BuildRunner.run_once()` (via `GitHubAutonomousController`)
+    # against the same project database as `stagemesh continue`. It must hold the
+    # same single-coordinator lock while it writes, or a concurrently running
+    # `continue` (or a second watcher cycle) could mutate BuildTask/
+    # BuildRunnerExecution rows at the same time -- exactly the unguarded
+    # concurrent-writer scenario GH-101 closes for the CLI entry point.
+    coordinator_instance_id = instance_id or task_name
+    try:
+        def acquire_coordinator_lock_once():
+            with session_factory() as session:
+                acquire_coordinator_lock(session, instance_id=coordinator_instance_id)
+                commit_or_busy(session)
+
+        with_sqlite_retry(acquire_coordinator_lock_once)
+    except CoordinatorLockHeld as exc:
+        logger.log(
+            "watcher.coordinator_lock_held",
+            repository_slug=repo.slug,
+            cycle_id=cycle_id,
+            message=str(exc),
+            extra=exc.owner,
+        )
+        return CycleOutcome(task_name=task_name, cycle_id=cycle_id, ok=False, failure_class="POLICY_FAILURE")
+    except DatabaseBusyError as exc:
+        logger.log(
+            "watcher.cycle_failed",
+            repository_slug=repo.slug,
+            cycle_id=cycle_id,
+            error_type="TRANSIENT_DATABASE_FAILURE",
+            message=str(exc),
+        )
+        return CycleOutcome(
+            task_name=task_name,
+            cycle_id=cycle_id,
+            ok=False,
+            failure_class="TRANSIENT_DATABASE_FAILURE",
+        )
 
     try:
         controller = GitHubAutonomousController(
@@ -243,31 +311,45 @@ def run_foreground_cycle(
         result = controller.run_once()
     except Exception as exc:
         failure_class = classify_failure(exc)
-        with session_factory() as session:
-            _record_failure(session, task_name, failure_class, str(exc), backoff_policy, logger, repo.slug, cycle_id)
-            session.commit()
-        return CycleOutcome(task_name=task_name, cycle_id=cycle_id, ok=False, failure_class=failure_class)
+        def record_controller_failure_once():
+            with session_factory() as session:
+                _record_failure(session, task_name, failure_class, str(exc), backoff_policy, logger, repo.slug, cycle_id)
+                commit_or_busy(session)
 
-    with session_factory() as session:
-        runner_result = result.runner_result
-        watcher_lock.heartbeat(session, task_name)
-        watcher_lock.record_cycle(
-            session,
-            task_name,
-            summary={
-                "mode": runner_result.mode,
-                "recovered": len(runner_result.recovered),
-                "launched": len(runner_result.launched),
-                "observed": len(runner_result.observed),
-                "escalations": len(runner_result.escalations),
-                "github_issues_ingested": len(result.issues_ingested),
-                "github_gates_approved": len(result.gates_approved),
-                "github_gates_published": len(result.gates_published),
-                "github_prs_created": len(result.prs_created),
-                "github_statuses_synced": len(result.statuses_synced),
-            },
-        )
-        session.commit()
+        with_sqlite_retry(record_controller_failure_once)
+        return CycleOutcome(task_name=task_name, cycle_id=cycle_id, ok=False, failure_class=failure_class)
+    finally:
+        def release_coordinator_lock_once():
+            with session_factory() as session:
+                release_coordinator_lock(session, instance_id=coordinator_instance_id)
+                commit_or_busy(session)
+
+        with_sqlite_retry(release_coordinator_lock_once)
+
+    runner_result = result.runner_result
+
+    def record_success_once():
+        with session_factory() as session:
+            watcher_lock.heartbeat(session, task_name)
+            watcher_lock.record_cycle(
+                session,
+                task_name,
+                summary={
+                    "mode": runner_result.mode,
+                    "recovered": len(runner_result.recovered),
+                    "launched": len(runner_result.launched),
+                    "observed": len(runner_result.observed),
+                    "escalations": len(runner_result.escalations),
+                    "github_issues_ingested": len(result.issues_ingested),
+                    "github_gates_approved": len(result.gates_approved),
+                    "github_gates_published": len(result.gates_published),
+                    "github_prs_created": len(result.prs_created),
+                    "github_statuses_synced": len(result.statuses_synced),
+                },
+            )
+            commit_or_busy(session)
+
+    with_sqlite_retry(record_success_once)
     logger.log(
         "watcher.cycle_succeeded",
         repository_slug=repo.slug,
@@ -383,15 +465,18 @@ def run_foreground(
             instance_id=instance_id,
         )
         if outcome.task_name and reload_state.status:
-            with session_factory() as session:
-                from build_coordinator.models import BuildWatcherRecord
+            def record_config_reload_once():
+                with session_factory() as session:
+                    from build_coordinator.models import BuildWatcherRecord
 
-                record = session.get(BuildWatcherRecord, outcome.task_name)
-                if record is not None:
-                    summary = dict(record.last_cycle_summary or {})
-                    summary["config_reload"] = reload_state.status
-                    record.last_cycle_summary = summary
-                    session.commit()
+                    record = session.get(BuildWatcherRecord, outcome.task_name)
+                    if record is not None:
+                        summary = dict(record.last_cycle_summary or {})
+                        summary["config_reload"] = reload_state.status
+                        record.last_cycle_summary = summary
+                        commit_or_busy(session)
+
+            with_sqlite_retry(record_config_reload_once)
         if once:
             return
         with session_factory() as session:
@@ -399,8 +484,12 @@ def run_foreground(
 
             record = session.get(BuildWatcherRecord, outcome.task_name) if outcome.task_name else None
             if record is not None and record.stop_requested:
-                watcher_lock.release_lock(session, outcome.task_name)
-                session.commit()
+                def release_watcher_lock_once():
+                    with session_factory() as release_session:
+                        watcher_lock.release_lock(release_session, outcome.task_name)
+                        commit_or_busy(release_session)
+
+                with_sqlite_retry(release_watcher_lock_once)
                 return
             delay = (
                 next_sleep_seconds(session, outcome.task_name, default_poll_seconds=config.poll_seconds)

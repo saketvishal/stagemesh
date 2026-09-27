@@ -17,10 +17,11 @@ from pathlib import Path
 from typing import Any
 
 from sqlalchemy import func, or_, select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
 from build_coordinator.config import get_settings
+from build_coordinator.db import DatabaseBusyError, _is_transient_sqlite_lock_error, with_sqlite_retry
 from build_coordinator.events import record_event
 from build_coordinator.execution.base import (
     ExecutionLaunch,
@@ -216,6 +217,7 @@ class BuildRunner:
         self._settings = get_settings()
         self._task_source = task_source
         self._target_task_ids = frozenset(str(task_id) for task_id in (target_task_ids or ()))
+        self._external_launch_started = False
         self._validation_executor = ValidationExecutor(
             timeout_seconds=self._config.validation_timeout_seconds
         )
@@ -251,10 +253,34 @@ class BuildRunner:
             time.sleep(self._config.poll_seconds)
 
     def run_once(self) -> RunnerCycleResult:
-        with self._session_factory() as session:
-            result = self._run_once(session)
-            session.commit()
-            return result
+        def _attempt() -> RunnerCycleResult:
+            self._external_launch_started = False
+            with self._session_factory() as session:
+                try:
+                    result = self._run_once(session)
+                    session.commit()
+                    return result
+                except OperationalError as exc:
+                    # Once an external worker has actually been launched this
+                    # cycle, redoing `_attempt` from scratch could dispatch a
+                    # second, duplicate launch -- so any lock contention from
+                    # here on (a later autoflush, the final commit, or
+                    # launch-failure cleanup writes) is bounded to this one
+                    # attempt and surfaced as a typed error instead of being
+                    # retried or left as a raw crash.
+                    if self._external_launch_started and _is_transient_sqlite_lock_error(exc):
+                        session.rollback()
+                        raise DatabaseBusyError(
+                            f"SQLite write contention after external launch could not be "
+                            f"committed safely: {exc}"
+                        ) from exc
+                    raise
+
+        return with_sqlite_retry(
+            _attempt,
+            attempts=5,
+            is_retryable=lambda exc: not self._external_launch_started and _is_transient_sqlite_lock_error(exc),
+        )
 
     def _run_once(self, session: Session) -> RunnerCycleResult:
         state = ensure_state(session)
@@ -2869,6 +2895,7 @@ class BuildRunner:
             claim_id=str(claim_id) if claim_id else None,
             worktree_path=worker.worktree_path,
             branch_name=worker.branch_name,
+            process_id=None,
             result_path=result_path,
             reviewed_feature_sha=reviewed_feature_sha,
             prompt_hash=hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
@@ -2930,9 +2957,10 @@ class BuildRunner:
             session.commit()
             return
         session.commit()
+        if isinstance(executor, SubprocessExecutor):
+            executor.remember_result_path(execution_id, result_path)
         try:
-            if isinstance(executor, SubprocessExecutor):
-                executor.remember_result_path(execution_id, result_path)
+            self._external_launch_started = True
             handle = executor.launch(
                 ExecutionLaunch(
                     task_id=task_id,
@@ -2949,35 +2977,73 @@ class BuildRunner:
                     extra_env=worker.resolved_env(),
                 )
             )
-        except Exception:
-            release_worker_leases_for_execution(session, execution_id)
-            session.delete(row)
+        except Exception as exc:
+            row.status = "FAILED"
+            row.exit_code = 1
+            row.completed_at = _now()
+            row.result_data = {**(row.result_data or {}), "launch_failure": str(exc)}
+            release_active_claims(session, task_id, completed=False)
+            task = session.get(BuildTask, task_id)
+            if task is not None:
+                from_state = task.state
+                task.state = "READY"
+                record_event(
+                    session,
+                    EventInput(
+                        task_id=task_id,
+                        event_type="task.transitioned",
+                        actor="runner",
+                        from_state=from_state,
+                        to_state="READY",
+                        event_data={"reason": "external worker launch failed before ownership was established"},
+                    ),
+                )
+            record_event(
+                session,
+                EventInput(
+                    task_id=task_id,
+                    event_type="runner.execution_launch_failed",
+                    actor="runner",
+                    claim_id=claim_id,
+                    event_data={"role": role, "worker_id": worker.worker_id, "error": str(exc)},
+                ),
+            )
+            return
+
+        def _persist_launch() -> None:
+            row.process_id = handle.process_id
+            row.result_path = handle.result_path or result_path
+            record_event(
+                session,
+                EventInput(
+                    task_id=task_id,
+                    event_type="runner.execution_launched",
+                    actor="runner",
+                    claim_id=claim_id,
+                    event_data={
+                        "role": role,
+                        "worker_id": worker.worker_id,
+                        "provider": worker.provider,
+                        "runtime": worker.runtime,
+                        "model": worker.model,
+                        "adapter": executor.adapter_name,
+                        "reviewed_feature_sha": reviewed_feature_sha,
+                        "routing": routing_decision.to_audit_dict(worker)
+                        if routing_decision is not None
+                        else None,
+                    },
+                ),
+            )
             session.commit()
+
+        try:
+            with_sqlite_retry(
+                _persist_launch,
+                attempts=5,
+                is_retryable=lambda exc: (session.rollback() is None) and _is_transient_sqlite_lock_error(exc),
+            )
+        except DatabaseBusyError:
             raise
-        row.execution_id = handle.execution_id
-        row.process_id = handle.process_id
-        row.result_path = handle.result_path or result_path
-        record_event(
-            session,
-            EventInput(
-                task_id=task_id,
-                event_type="runner.execution_launched",
-                actor="runner",
-                claim_id=claim_id,
-                event_data={
-                    "role": role,
-                    "worker_id": worker.worker_id,
-                    "provider": worker.provider,
-                    "runtime": worker.runtime,
-                    "model": worker.model,
-                    "adapter": executor.adapter_name,
-                    "reviewed_feature_sha": reviewed_feature_sha,
-                    "routing": routing_decision.to_audit_dict(worker)
-                    if routing_decision is not None
-                    else None,
-                },
-            ),
-        )
         result.launched.append(handle.execution_id)
 
     def _release_worker_lease(self, session: Session, execution_id: str) -> None:

@@ -16,10 +16,23 @@ from build_coordinator.coordinator_config import (
     CoordinatorConfigError,
     load_coordinator_config,
 )
+from build_coordinator.coordinator_lock import (
+    CoordinatorLockHeld,
+    acquire_coordinator_lock,
+    heartbeat_coordinator_lock,
+    release_coordinator_lock,
+)
 from build_coordinator.claims import task_source_eligibility
 from build_coordinator.policy import CoordinatorPolicyError
 from build_coordinator.project.commands import add_continue_command, add_project_commands
-from build_coordinator.db import DatabaseSchemaError, SessionLocal, configure_process_database
+from build_coordinator.db import (
+    DatabaseBusyError,
+    DatabaseSchemaError,
+    SessionLocal,
+    commit_or_busy,
+    configure_process_database,
+    with_sqlite_retry,
+)
 from build_coordinator.events import stream_events
 from build_coordinator.metrics import coordinator_metrics
 from build_coordinator.service import (
@@ -44,6 +57,7 @@ from build_coordinator.models import (
     BuildRunnerExecution,
     BuildTask,
     BuildTaskEvent,
+    new_uuid,
 )
 from build_coordinator.objectives import (
     ObjectiveError,
@@ -87,10 +101,11 @@ def main() -> None:
         lifecycle.initialize_schema()
         with lifecycle.session() as session:
             _run(args, session)
-            session.commit()
+            commit_or_busy(session)
     except (
         CoordinatorPolicyError,
         CoordinatorConfigError,
+        DatabaseBusyError,
         DatabaseSchemaError,
         StructuredContractError,
         ProjectError,
@@ -149,6 +164,7 @@ def _should_bind_legacy_command_to_project(args: argparse.Namespace) -> bool:
         "provide-input",
         "recover-review-environment",
         "recover-execution-retry",
+        "run",
         "metrics",
     }
 
@@ -819,28 +835,45 @@ def _recover_execution_retry(args: argparse.Namespace, session) -> None:
 
 
 def _runner(args: argparse.Namespace, session) -> None:
-    session.commit()
+    commit_or_busy(session)
+    instance_id = new_uuid()
+
+    def acquire_lock_once() -> None:
+        acquire_coordinator_lock(session, instance_id=instance_id)
+        commit_or_busy(session)
+
+    try:
+        with_sqlite_retry(acquire_lock_once)
+    except CoordinatorLockHeld as exc:
+        session.rollback()
+        raise SystemExit(str(exc)) from exc
     runner = BuildRunner(SessionLocal, RunnerConfig.default(dry_run=args.dry_run))
-    if args.once:
-        result = runner.run_once()
-        _print(
-            {
-                "mode": result.mode,
-                "recovered": result.recovered,
-                "launched": result.launched,
-                "observed": result.observed,
-                "escalations": result.escalations,
-                "capacity_full": result.capacity_full,
-                "objectives_reconciled": result.objectives_reconciled,
-                "objective_follow_ups_created": result.objective_follow_ups_created,
-                "objective_unrelated_tasks_created": result.objective_unrelated_tasks_created,
-                "objective_gates_raised": result.objective_gates_raised,
-                "objectives_completed": result.objectives_completed,
-            }
-        )
-        return
-    runner.run_forever()
-    _print({"runner": "stopped"})
+    try:
+        if args.once:
+            result = runner.run_once()
+            heartbeat_coordinator_lock(session, instance_id=instance_id)
+            commit_or_busy(session)
+            _print(
+                {
+                    "mode": result.mode,
+                    "recovered": result.recovered,
+                    "launched": result.launched,
+                    "observed": result.observed,
+                    "escalations": result.escalations,
+                    "capacity_full": result.capacity_full,
+                    "objectives_reconciled": result.objectives_reconciled,
+                    "objective_follow_ups_created": result.objective_follow_ups_created,
+                    "objective_unrelated_tasks_created": result.objective_unrelated_tasks_created,
+                    "objective_gates_raised": result.objective_gates_raised,
+                    "objectives_completed": result.objectives_completed,
+                }
+            )
+            return
+        runner.run_forever()
+        _print({"runner": "stopped"})
+    finally:
+        release_coordinator_lock(session, instance_id=instance_id)
+        commit_or_busy(session)
 
 
 def _transition(args: argparse.Namespace, session) -> None:
@@ -981,7 +1014,7 @@ def _watcher_stop(args: argparse.Namespace, session) -> None:
     repo = authorize(_watcher_resolve_repo_slug(args))
     task_name = stable_task_name(str(repo.control_repo_root), repo.slug)
     record = watcher_lock.request_stop(session, task_name)
-    session.commit()
+    commit_or_busy(session)
     _print({"task_name": task_name, "repository_slug": repo.slug, "stop_requested": record is not None})
 
 
@@ -1075,7 +1108,7 @@ def _watcher_run(args: argparse.Namespace, session) -> None:
     from build_coordinator.watcher.loop import run_foreground
     from build_coordinator.watcher.safe_logging import WatcherLogger
 
-    session.commit()
+    commit_or_busy(session)
     repo_slug = _watcher_resolve_repo_slug(args)
     logger = WatcherLogger(get_settings().data_dir)
     run_foreground(SessionLocal, repository_slug=repo_slug, logger=logger, once=args.once)

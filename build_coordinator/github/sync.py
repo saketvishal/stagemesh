@@ -6,6 +6,7 @@ import logging
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from build_coordinator.db import commit_or_busy, with_sqlite_retry
 from build_coordinator.github.client import GitHubClient
 from build_coordinator.models import (
     BuildObjective,
@@ -105,13 +106,16 @@ def sync_objective_status_to_github(
     except Exception as exc:
         logger.warning("failed to update GitHub status for %s: %s", objective.objective_id, exc)
 
-    session.add(
-        BuildObjectiveEvent(
-            objective_id=objective.objective_id,
-            event_type="github.status_synced",
-            actor="github_sync",
-            event_data={"status": status, "issue_number": issue_number, "repo": repo},
+    def _record_status_synced() -> None:
+        session.add(
+            BuildObjectiveEvent(
+                objective_id=objective.objective_id,
+                event_type="github.status_synced",
+                actor="github_sync",
+                event_data={"status": status, "issue_number": issue_number, "repo": repo},
+            )
         )
-    )
-    session.commit()
+        commit_or_busy(session)
+
+    with_sqlite_retry(_record_status_synced)
     return status
