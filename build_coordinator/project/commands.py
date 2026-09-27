@@ -987,16 +987,6 @@ def _optional_task_source(
     options.update({key: value for key, value in cfg.items() if key not in {"enabled", "repo", "labels", "options", "_inferred"}})
 
     if normalized_source_type == "github" and not cfg.get("repo") and not os.getenv("BUILD_COORDINATOR_GITHUB_REPO"):
-        explicit_config = not cfg.get("_inferred") and any(
-            configured_name == "github" for configured_name, _ in project.task_sources.items()
-        )
-        if explicit_config and not force:
-            diagnostics.append({
-                "source": "github",
-                "action": "ERROR",
-                "details": "missing repo identity: 'repo' must be specified in task_sources.github or detectable from git remote",
-            })
-            return None, diagnostics
         detected_repo = _detect_repo_from_git(project.root)
         if detected_repo:
             cfg["repo"] = detected_repo
