@@ -29,6 +29,7 @@ from build_coordinator.claims import (
     utcnow,
 )
 from build_coordinator.events import record_event
+from build_coordinator.execution.process_tree import process_identity_status
 from build_coordinator.policy import (
     CoordinatorCapacityError,
     CoordinatorPolicyError,
@@ -855,6 +856,14 @@ def recover_expired(session: Session, *, actor: str = "cli") -> list[BuildTask]:
         task.current_claim_id = None
         task.last_heartbeat_at = None
         task.lease_expires_at = None
+        # A claim's lease expiring is only ever bookkeeping evidence
+        # (a missed heartbeat/renewal) -- it says nothing about whether the
+        # OS process a worker actually launched under this claim has
+        # exited. Check durable process identity (pid + platform start-time
+        # token, never bare pid) for every LAUNCHED/RUNNING row under this
+        # claim, for every role, before assuming any of them are gone.
+        confirmed_alive_ids = _confirmed_alive_execution_ids(session, claim.claim_id)
+
         if task.state in {"WAITING_FOR_INPUT", "BLOCKED"}:
             task.updated_at = now
         elif task.state == "VALIDATING":
@@ -873,6 +882,18 @@ def recover_expired(session: Session, *, actor: str = "cli") -> list[BuildTask]:
             # for this task and safely relaunch validation against the
             # correct, already-recorded feature SHA.
             pass
+        elif confirmed_alive_ids:
+            # A worker under this claim (BUILDER/REMEDIATION/REVIEWER/
+            # INTEGRATION -- any role) is confirmed, or ambiguously might
+            # be, still genuinely running per durable process identity.
+            # Leave the task in its current (non-claimable) from_state so
+            # no replacement worker is dispatched while the original may
+            # still be alive; terminate_executions_for_claim below will
+            # likewise not kill these specific rows. The orchestrator's own
+            # liveness-aware poll (_reconcile_active), which runs later in
+            # this same cycle, is what actually resolves them to a terminal
+            # state once -- and only once -- the process is confirmed gone.
+            pass
         elif claim.claim_type == "REVIEW":
             task.state = "REVIEW_READY"
         elif claim.claim_type == "INTEGRATION":
@@ -880,16 +901,19 @@ def recover_expired(session: Session, *, actor: str = "cli") -> list[BuildTask]:
         else:
             task.state = "STALE"
         task.updated_at = now
-        # Only VALIDATING preserves a live validation execution across the
-        # claim's lease expiry (see terminate_executions_for_claim
-        # docstring): for every other from_state, a LAUNCHED/RUNNING
-        # validation-adapter row under this claim would be an orphaned
-        # anomaly (the state machine does not leave validation running
-        # once the task has left VALIDATING), so the prior unconditional
-        # termination behavior is preserved there.
+        # Validation additionally keeps its adapter-wide exclusion (a
+        # LAUNCHED/RUNNING validation-adapter row is only ever legitimate
+        # while the task is VALIDATING -- the state machine never leaves
+        # one running otherwise, so it would be an orphaned anomaly, not a
+        # row to protect, once the task has left VALIDATING regardless of
+        # what confirmed_alive_ids says about it).
         exclude_adapters = frozenset({"validation"}) if from_state == "VALIDATING" else frozenset()
         terminated = terminate_executions_for_claim(
-            session, claim.claim_id, reason="STALE_CLAIM", exclude_adapters=exclude_adapters
+            session,
+            claim.claim_id,
+            reason="STALE_CLAIM",
+            exclude_adapters=exclude_adapters,
+            exclude_execution_ids=confirmed_alive_ids,
         )
         for execution in terminated:
             release_worker_leases_for_execution(session, execution.execution_id, status="EXPIRED")
@@ -980,12 +1004,62 @@ def recover_lost_execution_claims(
     return recovered
 
 
+def _execution_confirmed_alive(row: "BuildRunnerExecution") -> bool:
+    """True when `row`'s underlying OS process is confirmed, or ambiguously
+    might be, still running -- via durable process identity (pid + platform
+    start-time token), never bare pid.
+
+    Only rows that persisted a `process_id` (real subprocess-backed
+    executions; a FakeExecutor-based test double or a legacy
+    pre-identity-tracking row never does) can be checked at all; anything
+    else returns False here and is left to the caller's existing
+    (non-identity-aware) behavior.
+    """
+    if row.process_id is None:
+        return False
+    try:
+        pid = int(row.process_id)
+    except (TypeError, ValueError):
+        return False
+    if pid <= 0:
+        return False
+    status = process_identity_status(pid, row.process_start_key)
+    return status in ("MATCH", "ALIVE_UNVERIFIED")
+
+
+def _confirmed_alive_execution_ids(session: Session, claim_id: str | None) -> frozenset[str]:
+    """Execution ids under `claim_id` whose underlying OS process is
+    confirmed, or ambiguously might be, still running -- via durable
+    process identity (pid + platform start-time token), never bare pid --
+    independent of claim-lease bookkeeping.
+
+    A claim's lease expiring is only ever evidence that heartbeat/renewal
+    bookkeeping lapsed (the coordinator was down, a renewal was missed);
+    on its own it says nothing about whether the actual OS process a
+    worker launched has exited. Only rows that persisted a `process_id`
+    (real subprocess-backed executions; a FakeExecutor-based test double
+    or a legacy pre-identity-tracking row never does) can be checked here
+    at all -- everything else is left to today's existing behavior in
+    `terminate_executions_for_claim`.
+    """
+    if not claim_id:
+        return frozenset()
+    rows = session.scalars(
+        select(BuildRunnerExecution)
+        .where(BuildRunnerExecution.claim_id == str(claim_id))
+        .where(BuildRunnerExecution.status.in_(("LAUNCHED", "RUNNING")))
+        .where(BuildRunnerExecution.process_id.isnot(None))
+    ).all()
+    return frozenset(row.execution_id for row in rows if _execution_confirmed_alive(row))
+
+
 def terminate_executions_for_claim(
     session: Session,
     claim_id: str | None,
     *,
     reason: str,
     exclude_adapters: frozenset[str] = frozenset(),
+    exclude_execution_ids: frozenset[str] = frozenset(),
 ) -> list[BuildRunnerExecution]:
     """Terminate LAUNCHED/RUNNING executions under `claim_id`.
 
@@ -1003,6 +1077,15 @@ def terminate_executions_for_claim(
     determines whether the excluded row is still running, and reconciles
     it to a terminal state on this same runner cycle if -- and only if --
     the process is confirmed gone or its identity no longer matches.
+
+    `exclude_execution_ids` is the same protection generalized to every
+    role (BUILDER/REMEDIATION/REVIEWER/INTEGRATION), not just validation:
+    pass `_confirmed_alive_execution_ids(session, claim_id)` so a row whose
+    OS process is demonstrably (or ambiguously) still running is never
+    killed on claim-lease-expiry evidence alone, regardless of adapter.
+    The caller (`recover_expired`) is responsible for also leaving the
+    task's own state unchanged for those rows, so no replacement worker is
+    dispatched against a task that still has a live execution.
     """
     if not claim_id:
         return []
@@ -1013,6 +1096,8 @@ def terminate_executions_for_claim(
     )
     if exclude_adapters:
         query = query.where(BuildRunnerExecution.adapter.not_in(exclude_adapters))
+    if exclude_execution_ids:
+        query = query.where(BuildRunnerExecution.execution_id.not_in(exclude_execution_ids))
     rows = session.scalars(query).all()
     now = utcnow()
     for row in rows:
@@ -1093,6 +1178,19 @@ def reconcile_stale_executions(session: Session) -> list[BuildRunnerExecution]:
             and claim.status == "ACTIVE"
             and _as_utc(claim.lease_expires_at) > now
         ):
+            continue
+        # The claim backing this row is gone or stale, but that is only
+        # ever evidence about lease *bookkeeping* -- never evidence that
+        # the underlying OS process a worker launched has actually
+        # exited. Check durable process identity (pid + platform
+        # start-time token, never bare pid) before killing a row on
+        # claim-staleness alone: this is the same identity check
+        # `recover_expired` already applies for the claim that is
+        # expiring in the same cycle, but this sweep also revisits every
+        # other still-live row in the system (e.g. one whose claim
+        # expired in an earlier cycle), so it needs its own check rather
+        # than relying solely on that caller's `exclude_execution_ids`.
+        if _execution_confirmed_alive(row):
             continue
         row.status = "TERMINATED"
         row.completed_at = now

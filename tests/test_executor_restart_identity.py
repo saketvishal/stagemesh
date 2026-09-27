@@ -60,6 +60,13 @@ def _wait_alive(pid: int, expected: bool, timeout: float = 2.0) -> bool:
     return subprocess.run(["kill", "-0", str(pid)]).returncode == 0
 
 
+def _spawn_and_wait_dead() -> int:
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    proc.wait()
+    _wait_alive(proc.pid, False)
+    return proc.pid
+
+
 def test_restart_while_worker_alive_reports_running_not_lost(tmp_path: Path):
     """Coordinator/executor restart while the worker is genuinely alive."""
     original = SubprocessExecutor(_sleep_command(5), log_dir=tmp_path / "logs")
@@ -160,5 +167,20 @@ def test_process_identity_status_contract():
     key = capture_process_identity(pid)
     assert key is not None
     assert process_identity_status(pid, key) == "MATCH"
-    assert process_identity_status(pid, None) == "UNKNOWN"
+    # A currently-alive pid with no remembered identity to compare against
+    # (e.g. capture_process_identity() returned None right at launch time,
+    # a real, reachable platform-probe-failure case -- see
+    # test_missing_identity_capture_at_launch_does_not_get_treated_as_dead
+    # below) must be reported as ALIVE_UNVERIFIED, never as a status a
+    # caller could mistake for "confirmed gone": this process (the test
+    # runner itself) is unambiguously still running.
+    assert process_identity_status(pid, None) == "ALIVE_UNVERIFIED"
     assert process_identity_status(pid, "not-a-real-key") == "MISMATCH"
+
+
+def test_unknown_only_when_no_remembered_identity_and_pid_is_actually_gone():
+    """UNKNOWN is now reserved for the case that actually cannot be
+    resolved either way: no identity was ever captured, AND the pid is not
+    currently alive. It must never be returned for a pid that is alive."""
+    dead = _spawn_and_wait_dead()
+    assert process_identity_status(dead, None) == "UNKNOWN"
