@@ -232,9 +232,25 @@ class BuildRunner:
         def _attempt() -> RunnerCycleResult:
             self._external_launch_started = False
             with self._session_factory() as session:
-                result = self._run_once(session)
-                session.commit()
-                return result
+                try:
+                    result = self._run_once(session)
+                    session.commit()
+                    return result
+                except OperationalError as exc:
+                    # Once an external worker has actually been launched this
+                    # cycle, redoing `_attempt` from scratch could dispatch a
+                    # second, duplicate launch -- so any lock contention from
+                    # here on (a later autoflush, the final commit, or
+                    # launch-failure cleanup writes) is bounded to this one
+                    # attempt and surfaced as a typed error instead of being
+                    # retried or left as a raw crash.
+                    if self._external_launch_started and _is_transient_sqlite_lock_error(exc):
+                        session.rollback()
+                        raise DatabaseBusyError(
+                            f"SQLite write contention after external launch could not be "
+                            f"committed safely: {exc}"
+                        ) from exc
+                    raise
 
         return with_sqlite_retry(
             _attempt,

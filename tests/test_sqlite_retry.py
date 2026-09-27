@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 from sqlalchemy.exc import OperationalError
 
-from build_coordinator.db import DatabaseBusyError, with_sqlite_retry
+from build_coordinator.db import DatabaseBusyError, commit_or_busy, with_sqlite_retry
 
 
 class _FakeDBAPIError(Exception):
@@ -87,3 +87,39 @@ def test_non_operational_error_propagates_immediately():
 
     with pytest.raises(ValueError):
         with_sqlite_retry(fn, attempts=5, base_delay=0.0)
+
+
+class _FakeSession:
+    def __init__(self, commit_error: Exception | None) -> None:
+        self._commit_error = commit_error
+        self.committed = False
+        self.rolled_back = False
+
+    def commit(self):
+        if self._commit_error is not None:
+            raise self._commit_error
+        self.committed = True
+
+    def rollback(self):
+        self.rolled_back = True
+
+
+def test_commit_or_busy_succeeds_when_no_contention():
+    session = _FakeSession(commit_error=None)
+    commit_or_busy(session)
+    assert session.committed is True
+    assert session.rolled_back is False
+
+
+def test_commit_or_busy_converts_lock_contention_to_typed_error():
+    session = _FakeSession(commit_error=_operational_error("database is locked"))
+    with pytest.raises(DatabaseBusyError, match="STAGEMESH_SQLITE_BUSY"):
+        commit_or_busy(session)
+    assert session.rolled_back is True
+
+
+def test_commit_or_busy_propagates_non_lock_operational_error():
+    session = _FakeSession(commit_error=_operational_error("no such table: foo"))
+    with pytest.raises(OperationalError):
+        commit_or_busy(session)
+    assert session.rolled_back is True

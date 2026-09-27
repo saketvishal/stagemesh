@@ -24,7 +24,13 @@ from build_coordinator.coordinator_lock import (
 )
 from build_coordinator.policy import CoordinatorPolicyError
 from build_coordinator.project.commands import add_continue_command, add_project_commands
-from build_coordinator.db import DatabaseBusyError, DatabaseSchemaError, SessionLocal, configure_process_database
+from build_coordinator.db import (
+    DatabaseBusyError,
+    DatabaseSchemaError,
+    SessionLocal,
+    commit_or_busy,
+    configure_process_database,
+)
 from build_coordinator.events import stream_events
 from build_coordinator.service import (
     CheckpointInput,
@@ -92,7 +98,7 @@ def main() -> None:
         lifecycle.initialize_schema()
         with lifecycle.session() as session:
             _run(args, session)
-            session.commit()
+            commit_or_busy(session)
     except (
         CoordinatorPolicyError,
         CoordinatorConfigError,
@@ -804,20 +810,20 @@ def _recover_execution_retry(args: argparse.Namespace, session) -> None:
 
 
 def _runner(args: argparse.Namespace, session) -> None:
-    session.commit()
+    commit_or_busy(session)
     instance_id = new_uuid()
     try:
         acquire_coordinator_lock(session, instance_id=instance_id)
     except CoordinatorLockHeld as exc:
         session.rollback()
         raise SystemExit(str(exc)) from exc
-    session.commit()
+    commit_or_busy(session)
     runner = BuildRunner(SessionLocal, RunnerConfig.default(dry_run=args.dry_run))
     try:
         if args.once:
             result = runner.run_once()
             heartbeat_coordinator_lock(session, instance_id=instance_id)
-            session.commit()
+            commit_or_busy(session)
             _print(
                 {
                     "mode": result.mode,
@@ -838,7 +844,7 @@ def _runner(args: argparse.Namespace, session) -> None:
         _print({"runner": "stopped"})
     finally:
         release_coordinator_lock(session, instance_id=instance_id)
-        session.commit()
+        commit_or_busy(session)
 
 
 def _transition(args: argparse.Namespace, session) -> None:
@@ -979,7 +985,7 @@ def _watcher_stop(args: argparse.Namespace, session) -> None:
     repo = authorize(_watcher_resolve_repo_slug(args))
     task_name = stable_task_name(str(repo.control_repo_root), repo.slug)
     record = watcher_lock.request_stop(session, task_name)
-    session.commit()
+    commit_or_busy(session)
     _print({"task_name": task_name, "repository_slug": repo.slug, "stop_requested": record is not None})
 
 
@@ -1073,7 +1079,7 @@ def _watcher_run(args: argparse.Namespace, session) -> None:
     from build_coordinator.watcher.loop import run_foreground
     from build_coordinator.watcher.safe_logging import WatcherLogger
 
-    session.commit()
+    commit_or_busy(session)
     repo_slug = _watcher_resolve_repo_slug(args)
     logger = WatcherLogger(get_settings().data_dir)
     run_foreground(SessionLocal, repository_slug=repo_slug, logger=logger, once=args.once)

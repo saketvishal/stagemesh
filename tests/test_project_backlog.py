@@ -898,6 +898,32 @@ def test_top_level_task_commands_bind_to_current_project_state(tmp_path, registr
     }
 
 
+def test_project_sync_lock_contention_is_typed_not_raw(tmp_path, registry, monkeypatch):
+    """GH-101: `project sync`'s commit must not surface a raw SQLite
+    OperationalError when another StageMesh writer holds the lock."""
+    from argparse import Namespace
+
+    from sqlalchemy.exc import OperationalError
+    from sqlalchemy.orm import Session as SASession
+
+    from build_coordinator.db import DatabaseBusyError
+    from build_coordinator.project.commands import handle_project
+
+    root, _ = make_project_repo(tmp_path, {"T-1": {}})
+    register_project(root)
+
+    original_commit = SASession.commit
+
+    def flaky_commit(self, *args, **kwargs):
+        raise OperationalError("UPDATE build_tasks", None, Exception("database is locked"))
+
+    monkeypatch.setattr(SASession, "commit", flaky_commit)
+
+    args = Namespace(project_command="sync", name=["fixture"], project_dir=None, dry_run=False)
+    with pytest.raises(DatabaseBusyError, match="STAGEMESH_SQLITE_BUSY"):
+        handle_project(args)
+
+
 def test_continue_runs_project_backlog_in_parallel_from_any_directory(tmp_path, registry):
     root, origin = make_project_repo(
         tmp_path,
