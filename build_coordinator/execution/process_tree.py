@@ -341,20 +341,41 @@ def process_identity_status(pid: int, remembered_start_key: str | None) -> str:
                        remembered_start_key. Safe to treat as the original
                        process, still running.
       "MISMATCH"   -- pid exists but its start identity differs (the pid was
-                       reused by a different process) or pid no longer
-                       exists at all. The original process is gone.
-      "ALIVE_UNVERIFIED" -- pid is alive but current identity could not be
-                       captured for comparison (platform probe failed), and
-                       there is no positive evidence the original process is
-                       gone. Treated as still running, not redispatched, but
-                       distinguishable in evidence from a confirmed MATCH.
-      "UNKNOWN"    -- remembered_start_key is None (identity was never
-                       captured for this execution, e.g. a row that predates
-                       durable identity tracking). No liveness claim can be
-                       made from identity alone.
+                       reused by a different process), or pid no longer
+                       exists at all *and* there was a remembered identity
+                       to compare against. The original process is gone.
+      "ALIVE_UNVERIFIED" -- pid is alive right now but no start-identity
+                       comparison could be made -- either the current probe
+                       failed (platform probe failure) or no identity was
+                       ever captured for this execution at all
+                       (`remembered_start_key is None`, e.g. `launch()`'s own
+                       `capture_process_identity()` call returned None at
+                       launch time, or this is a row that predates durable
+                       identity tracking). Either way there is no positive
+                       evidence the original process is gone, so this is
+                       treated as still running -- never redispatched, never
+                       terminated as unrelated -- but distinguishable in
+                       evidence from a confirmed MATCH.
+      "UNKNOWN"    -- remembered_start_key is None AND the pid is not
+                       currently alive either. No identity was ever
+                       captured, and there is nothing running under that
+                       pid right now to treat as "still alive" -- but
+                       without a remembered identity to compare, this
+                       cannot be reported as a confirmed MISMATCH (a
+                       positive "this exact process is gone" claim); it
+                       is a distinct, weaker terminal condition, still
+                       failing closed against blindly assuming which
+                       execution (if any) that pid belonged to.
+
+    A missing remembered identity (e.g. captured as None at launch because
+    the platform probe failed right after the process was spawned) must
+    never, on its own, be treated as evidence the process is dead: a live
+    pid with no identity to compare is exactly the ambiguous case this
+    function exists to fail closed on, so it is always checked for current
+    liveness before falling back to a terminal classification.
     """
     if remembered_start_key is None:
-        return "UNKNOWN"
+        return "ALIVE_UNVERIFIED" if _process_exists(pid) else "UNKNOWN"
     current_key = capture_process_identity(pid)
     if current_key is not None:
         return "MATCH" if current_key == remembered_start_key else "MISMATCH"
