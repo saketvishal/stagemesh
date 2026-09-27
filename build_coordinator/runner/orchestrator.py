@@ -82,6 +82,7 @@ from build_coordinator.runner.findings import (
     open_findings,
     record_convergence_generation,
     reconcile_findings,
+    start_new_convergence_epoch,
 )
 from build_coordinator.runner.models import (
     ReviewVerdict,
@@ -4108,6 +4109,96 @@ class BuildRunner:
             result.recovered.append(task_id)
         self._release_sha_drift_conflict_gate(session, task)
 
+    def _recover_remediation_limit_reached(
+        self,
+        session: Session,
+        task: BuildTask,
+        result: RunnerCycleResult,
+    ) -> None:
+        """Resumes a REMEDIATION_LIMIT_REACHED stop only on authoritative
+        evidence that an operator/external remediation advanced the task
+        branch feature SHA beyond the SHA the comprehensive review/stop was
+        evaluated against (GH-128). Fails closed -- leaving the task BLOCKED
+        -- if that evidence is unavailable or the branch tip is not a
+        descendant of the stop SHA, since a plain SHA inequality (e.g. a
+        force-push to unrelated history) is not adequate evidence of a real
+        fix. Opens a new bounded convergence epoch: current-epoch generations
+        and comprehensive-review flags reset, while all finding entries,
+        dispositions, reviewer history, and the prior epoch's stop evidence
+        are retained for audit under `convergence.epoch_history`."""
+        registry = task.finding_registry if isinstance(task.finding_registry, dict) else {}
+        convergence = registry.get("convergence") if isinstance(registry.get("convergence"), dict) else {}
+        # The comprehensive review/stop's SHA is recorded once, when
+        # comprehensive_used is first set (see _reconcile_review_findings),
+        # and is never overwritten by a later re-block. The waiting_input
+        # failure_evidence, in contrast, is rewritten by every _block_task
+        # call -- including the re-block after an operator remediation was
+        # reviewed -- so it reflects the *new* review's SHA, not the SHA the
+        # original hard stop was evaluated against. Preferring the
+        # convergence-recorded SHA is what makes GH-101/GH-128 recoverable:
+        # otherwise stop_sha == current_sha and recovery always refuses.
+        stop_sha = convergence.get("comprehensive_reviewed_feature_sha")
+        if not stop_sha:
+            waiting = task.waiting_input if isinstance(task.waiting_input, dict) else {}
+            evidence = waiting.get("failure_evidence") if isinstance(waiting.get("failure_evidence"), dict) else {}
+            relevant_shas = evidence.get("relevant_shas") if isinstance(evidence.get("relevant_shas"), dict) else {}
+            stop_sha = relevant_shas.get("reviewed_feature_sha") or relevant_shas.get("feature_sha")
+        if not stop_sha:
+            return
+
+        repo_root = Path(self._settings.repo_root)
+        branch = task.branch_name or task_branch_name(task.task_id)
+        if not branch:
+            return
+        proc = _git(repo_root, "rev-parse", "--verify", f"{branch}^{{commit}}")
+        if proc.returncode != 0:
+            return
+        current_sha = proc.stdout.strip()
+        if not current_sha or current_sha == stop_sha:
+            return
+
+        ancestor_check = _git(repo_root, "merge-base", "--is-ancestor", stop_sha, current_sha)
+        if ancestor_check.returncode != 0:
+            return
+
+        registry = start_new_convergence_epoch(
+            dict(task.finding_registry or {}),
+            resumed_feature_sha=current_sha,
+            stop_feature_sha=stop_sha,
+            reason="operator_remediation_advanced_feature_sha",
+        )
+        task.finding_registry = registry
+        try:
+            release_active_claims(session, task.task_id, completed=False)
+        except CoordinatorPolicyError:
+            pass
+        try:
+            transition_task(
+                session,
+                task.task_id,
+                "REVIEW_READY",
+                actor="runner",
+                reason="operator remediation advanced feature SHA past prior convergence stop; new bounded convergence epoch opened",
+            )
+        except CoordinatorPolicyError:
+            return
+        record_event(
+            session,
+            EventInput(
+                task_id=task.task_id,
+                event_type="runner.convergence_epoch_resumed",
+                actor="runner",
+                event_data={
+                    "stop_feature_sha": stop_sha,
+                    "resumed_feature_sha": current_sha,
+                    "reason": "REMEDIATION_LIMIT_REACHED",
+                },
+            ),
+        )
+        if task.task_id not in result.recovered:
+            result.recovered.append(task.task_id)
+        self._release_blocker_gate(session, task, "REMEDIATION_LIMIT_REACHED")
+
     def _release_blocker_gate(self, session: Session, task: BuildTask, reason: str) -> None:
         if not task.objective_id:
             return
@@ -4538,6 +4629,9 @@ class BuildRunner:
 
             elif reason == "REVIEWED_SHA_CHANGED":
                 self._request_rereview(session, task.task_id, result, reason="REVIEWED_SHA_CHANGED")
+
+            elif reason == "REMEDIATION_LIMIT_REACHED":
+                self._recover_remediation_limit_reached(session, task, result)
 
             elif reason == "BRANCH_MOVED_CONCURRENTLY":
                 reviewed_sha = session.scalar(
@@ -5260,6 +5354,7 @@ class BuildRunner:
                 convergence["pending_comprehensive_review"] = False
                 convergence["comprehensive_used"] = True
                 convergence["comprehensive_execution_id"] = execution.execution_id
+                convergence["comprehensive_reviewed_feature_sha"] = execution.reviewed_feature_sha
                 registry["convergence"] = convergence
                 if task is not None:
                     task.finding_registry = registry
@@ -5287,6 +5382,7 @@ class BuildRunner:
             convergence["pending_comprehensive_review"] = False
             convergence["comprehensive_used"] = True
             convergence["comprehensive_execution_id"] = execution.execution_id
+            convergence["comprehensive_reviewed_feature_sha"] = execution.reviewed_feature_sha
             registry["convergence"] = convergence
         if task is not None:
             task.finding_registry = registry
@@ -5406,7 +5502,7 @@ class BuildRunner:
                 },
             ),
         )
-        self._block_task(session, task_id, "REMEDIATION_LIMIT_REACHED")
+        self._block_task(session, task_id, "REMEDIATION_LIMIT_REACHED", execution=execution)
         return True
 
     def _remediation_cycles(self, session: Session, task_id: str) -> int:
