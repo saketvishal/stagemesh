@@ -1231,16 +1231,17 @@ class BuildRunner:
         )
         if execution.claim_id and merged.get("validation_terminal_type") != "STALE_VALIDATION_CONTEXT":
             claim = session.get(BuildTaskClaim, execution.claim_id)
-            checkpoint(
-                session,
-                execution.claim_id,
-                worker_id=claim.worker_id if claim is not None else execution.worker_id,
-                data=CheckpointInput(
-                    current_step="runner validation " + ("passed" if outcome.passed else "failed"),
-                    last_successful_tests=[r["command"] for r in outcome.results if r["exit_code"] == 0],
-                    known_failures=outcome.failure_summary(),
-                ),
-            )
+            if claim is not None and claim.status == "ACTIVE":
+                checkpoint(
+                    session,
+                    execution.claim_id,
+                    worker_id=claim.worker_id,
+                    data=CheckpointInput(
+                        current_step="runner validation " + ("passed" if outcome.passed else "failed"),
+                        last_successful_tests=[r["command"] for r in outcome.results if r["exit_code"] == 0],
+                        known_failures=outcome.failure_summary(),
+                    ),
+                )
         if outcome.passed:
             task = session.get(BuildTask, execution.task_id)
             transition_task(
