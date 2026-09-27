@@ -4109,6 +4109,79 @@ class BuildRunner:
             result.recovered.append(task_id)
         self._release_sha_drift_conflict_gate(session, task)
 
+    def _reconstruct_legacy_comprehensive_stop_sha(
+        self,
+        session: Session,
+        task: BuildTask,
+        convergence: dict,
+    ) -> str | None:
+        """Recovers the original comprehensive-review stop SHA for task
+        registries created before GH-128 started recording
+        `convergence.comprehensive_reviewed_feature_sha` directly.
+
+        `convergence.comprehensive_execution_id` is set by
+        `record_convergence_generation` and predates GH-128, so legacy
+        registries already carry it even though they lack the newer field --
+        it is durable across later re-blocks because it is only overwritten
+        when a *new* comprehensive review actually runs (which starts a fresh
+        convergence epoch), never by `_block_task` rewriting
+        `waiting_input.failure_evidence`. Falls back to the `history` list's
+        last comprehensive-review entry, then to the original
+        `runner.remediation_limit_reached`/comprehensive-review-request event
+        tied to the exhausted epoch, in case the execution row itself was
+        purged."""
+
+        def _reviewed_sha_for_execution(execution_id: str | None) -> str | None:
+            if not execution_id:
+                return None
+            execution = session.get(BuildRunnerExecution, execution_id)
+            if execution is not None and execution.reviewed_feature_sha:
+                return execution.reviewed_feature_sha
+            return None
+
+        stop_sha = _reviewed_sha_for_execution(convergence.get("comprehensive_execution_id"))
+        if stop_sha:
+            return stop_sha
+
+        for entry in reversed(convergence.get("history") or []):
+            if isinstance(entry, dict) and entry.get("comprehensive_review"):
+                stop_sha = _reviewed_sha_for_execution(entry.get("execution_id"))
+                if stop_sha:
+                    return stop_sha
+
+        for entry in reversed(convergence.get("epoch_history") or []):
+            if not isinstance(entry, dict):
+                continue
+            stop_sha = _reviewed_sha_for_execution(entry.get("comprehensive_execution_id"))
+            if stop_sha:
+                return stop_sha
+            for hist_entry in reversed(entry.get("history") or []):
+                if isinstance(hist_entry, dict) and hist_entry.get("comprehensive_review"):
+                    stop_sha = _reviewed_sha_for_execution(hist_entry.get("execution_id"))
+                    if stop_sha:
+                        return stop_sha
+
+        events = session.scalars(
+            select(BuildTaskEvent)
+            .where(BuildTaskEvent.task_id == task.task_id)
+            .where(
+                BuildTaskEvent.event_type.in_(
+                    (
+                        "runner.remediation_limit_reached",
+                        "runner.comprehensive_convergence_review_requested",
+                    )
+                )
+            )
+            .order_by(BuildTaskEvent.created_at.desc())
+        ).all()
+        for event in events:
+            data = event.event_data or {}
+            event_convergence = data.get("convergence") if isinstance(data.get("convergence"), dict) else {}
+            stop_sha = _reviewed_sha_for_execution(event_convergence.get("comprehensive_execution_id"))
+            if stop_sha:
+                return stop_sha
+        return None
+
     def _recover_remediation_limit_reached(
         self,
         session: Session,
@@ -4138,6 +4211,8 @@ class BuildRunner:
         # convergence-recorded SHA is what makes GH-101/GH-128 recoverable:
         # otherwise stop_sha == current_sha and recovery always refuses.
         stop_sha = convergence.get("comprehensive_reviewed_feature_sha")
+        if not stop_sha:
+            stop_sha = self._reconstruct_legacy_comprehensive_stop_sha(session, task, convergence)
         if not stop_sha:
             waiting = task.waiting_input if isinstance(task.waiting_input, dict) else {}
             evidence = waiting.get("failure_evidence") if isinstance(waiting.get("failure_evidence"), dict) else {}
