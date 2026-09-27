@@ -137,6 +137,7 @@ from build_coordinator.runner.clone_pool import (
 )
 from build_coordinator.runner.git_safety import resolve_git_identity_args
 from build_coordinator.claims import CLAIMABLE_STATES, task_source_is_executable
+from build_coordinator.task_source.base import TaskSourceCapacityError
 from build_coordinator.runner.scheduling import (
     SCHEDULER_REASONS,
     active_implementation_tasks,
@@ -288,6 +289,17 @@ class BuildRunner:
         if self._task_source is not None and state.mode != "PAUSED":
             try:
                 self._task_source.discover_tasks(session)
+            except TaskSourceCapacityError as exc:
+                result.capacity_full = True
+                record_event(
+                    session,
+                    EventInput(
+                        task_id=None,
+                        event_type="runner.task_source_capacity_wait",
+                        actor="runner",
+                        event_data=exc.as_dict(),
+                    ),
+                )
             except Exception as exc:
                 record_event(
                     session,

@@ -45,6 +45,34 @@ class SyncResult:
         }
 
 
+class TaskSourceCapacityError(RuntimeError):
+    """Recoverable source-side capacity condition, distinct from auth/config errors."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        provider: str,
+        reason: str = "RATE_LIMITED",
+        retry_after_seconds: int | None = None,
+        reset_at: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.provider = provider
+        self.reason = reason
+        self.retry_after_seconds = retry_after_seconds
+        self.reset_at = reset_at
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "provider": self.provider,
+            "reason": self.reason,
+            "retry_after_seconds": self.retry_after_seconds,
+            "reset_at": self.reset_at,
+            "message": str(self),
+        }
+
+
 @dataclass(frozen=True)
 class TaskSourceConfig:
     source_type: str = "github"

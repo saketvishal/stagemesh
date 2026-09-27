@@ -22,6 +22,7 @@ from build_coordinator.coordinator_lock import (
     release_coordinator_lock,
 )
 from build_coordinator.claims import task_source_eligibility, task_source_is_closed
+from build_coordinator.task_source.base import TaskSourceCapacityError
 from build_coordinator.db import (
     DatabaseSchemaError,
     SessionLocal,
@@ -426,12 +427,22 @@ def handle_continue(args: argparse.Namespace) -> None:
                 try:
                     discovered = [r.as_dict() for r in task_source.discover_tasks(session)]
                     local_adapter_payload.extend(discovered)
-                    if not discovered and not definitions:
+                    source_capacity_wait = any(
+                        str(item.get("action") or "").upper() == "SOURCE_CAPACITY_WAIT"
+                        for item in discovered
+                    )
+                    if not discovered and not definitions and not source_capacity_wait:
                         local_adapter_payload.append({
                             "source": "github",
                             "action": "NO_ELIGIBLE_OPEN_ISSUES",
                             "details": f"No eligible open GitHub issues found in {getattr(task_source, 'repo', 'the configured repository')}",
                         })
+                except TaskSourceCapacityError as exc:
+                    local_adapter_payload.append({
+                        "source": "github",
+                        "action": "SOURCE_CAPACITY_WAIT",
+                        "details": str(exc),
+                    })
                 except Exception as exc:  # optional adapter: never blocks local execution
                     local_adapter_payload.append({
                         "source": "github",
