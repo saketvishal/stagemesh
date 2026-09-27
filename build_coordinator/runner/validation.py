@@ -26,6 +26,10 @@ from build_coordinator.execution.base import (
     ExecutionLaunch,
     ExecutionObservation,
 )
+from build_coordinator.execution.process_tree import (
+    capture_process_identity,
+    process_identity_status,
+)
 
 OUTPUT_TAIL_CHARS = 2000
 
@@ -132,10 +136,27 @@ class ValidationExecutor:
         self._timeout_seconds = timeout_seconds
         self._runs: dict[str, dict[str, Any]] = {}
         self._result_paths: dict[str, str] = {}
+        self._process_identities: dict[str, tuple[str, str | None]] = {}
 
     def remember_result_path(self, execution_id: str, result_path: str | None) -> None:
         if result_path:
             self._result_paths[execution_id] = result_path
+
+    def remember_process_identity(
+        self, execution_id: str, process_id: str | None, process_start_key: str | None
+    ) -> None:
+        """Seed durable process identity for an execution this instance did not launch.
+
+        Mirrors SubprocessExecutor.remember_process_identity. Without this,
+        a coordinator/executor restart wipes `self._runs` (process-local
+        memory) and poll() would fall through to `_lost_observation()` for
+        a validation subprocess that is still genuinely running -- exactly
+        the class of bug durable process identity fixed for BUILDER/
+        REVIEWER/INTEGRATION executions, but which validation's own
+        executor never previously participated in.
+        """
+        if process_id:
+            self._process_identities[execution_id] = (str(process_id), process_start_key)
 
     def launch(self, launch: ExecutionLaunch) -> ExecutionHandle:
         execution_id = launch.execution_id or str(uuid4())
@@ -186,6 +207,10 @@ class ValidationExecutor:
                 **_popen_kwargs(),
             )
             self._runs[execution_id] = {"process": process}
+            self._process_identities[execution_id] = (
+                str(process.pid),
+                capture_process_identity(process.pid),
+            )
         else:
             self._runs[execution_id] = {
                 "commands": commands,
@@ -200,10 +225,12 @@ class ValidationExecutor:
             }
             self._start_next(execution_id)
         process = self._runs[execution_id].get("process")
+        identity = self._process_identities.get(execution_id)
         return ExecutionHandle(
             execution_id=execution_id,
             process_id=str(process.pid) if process is not None else None,
             result_path=result_path,
+            process_start_key=identity[1] if identity is not None else None,
         )
 
     def poll(self, execution_id: str) -> ExecutionObservation:
@@ -212,6 +239,34 @@ class ValidationExecutor:
             reconciled = self._observation_from_result_file(execution_id)
             if reconciled is not None:
                 return reconciled
+            # No in-memory run state (e.g. after a coordinator/executor
+            # restart -- `self._runs` is process-local) and no result file
+            # yet. Before declaring the execution LOST, check whether the
+            # original OS process durable identity says it is still
+            # genuinely alive: a verified-live validator must not be
+            # reported lost -- and consequently terminated/relaunched by
+            # the caller -- solely because this executor instance's
+            # in-memory bookkeeping did not survive a restart.
+            identity = self._process_identities.get(execution_id)
+            if identity is not None:
+                pid_str, start_key = identity
+                try:
+                    pid = int(pid_str)
+                except (TypeError, ValueError):
+                    pid = None
+                if pid is not None and pid > 0:
+                    status = process_identity_status(pid, start_key)
+                    if status in ("MATCH", "ALIVE_UNVERIFIED"):
+                        return ExecutionObservation(
+                            status="RUNNING",
+                            result_data={
+                                "reconciliation_state": status,
+                                "durable_identity_pid": pid,
+                            },
+                        )
+                    # MISMATCH: pid gone or reused by an unrelated process.
+                    # Fall through to the same terminal handling as "no
+                    # identity evidence at all".
             return self._lost_observation(execution_id)
         completed = run.pop("completed", None)
         if completed is not None:
