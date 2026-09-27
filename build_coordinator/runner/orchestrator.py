@@ -4126,10 +4126,23 @@ class BuildRunner:
         and comprehensive-review flags reset, while all finding entries,
         dispositions, reviewer history, and the prior epoch's stop evidence
         are retained for audit under `convergence.epoch_history`."""
-        waiting = task.waiting_input if isinstance(task.waiting_input, dict) else {}
-        evidence = waiting.get("failure_evidence") if isinstance(waiting.get("failure_evidence"), dict) else {}
-        relevant_shas = evidence.get("relevant_shas") if isinstance(evidence.get("relevant_shas"), dict) else {}
-        stop_sha = relevant_shas.get("reviewed_feature_sha") or relevant_shas.get("feature_sha")
+        registry = task.finding_registry if isinstance(task.finding_registry, dict) else {}
+        convergence = registry.get("convergence") if isinstance(registry.get("convergence"), dict) else {}
+        # The comprehensive review/stop's SHA is recorded once, when
+        # comprehensive_used is first set (see _reconcile_review_findings),
+        # and is never overwritten by a later re-block. The waiting_input
+        # failure_evidence, in contrast, is rewritten by every _block_task
+        # call -- including the re-block after an operator remediation was
+        # reviewed -- so it reflects the *new* review's SHA, not the SHA the
+        # original hard stop was evaluated against. Preferring the
+        # convergence-recorded SHA is what makes GH-101/GH-128 recoverable:
+        # otherwise stop_sha == current_sha and recovery always refuses.
+        stop_sha = convergence.get("comprehensive_reviewed_feature_sha")
+        if not stop_sha:
+            waiting = task.waiting_input if isinstance(task.waiting_input, dict) else {}
+            evidence = waiting.get("failure_evidence") if isinstance(waiting.get("failure_evidence"), dict) else {}
+            relevant_shas = evidence.get("relevant_shas") if isinstance(evidence.get("relevant_shas"), dict) else {}
+            stop_sha = relevant_shas.get("reviewed_feature_sha") or relevant_shas.get("feature_sha")
         if not stop_sha:
             return
 
@@ -5341,6 +5354,7 @@ class BuildRunner:
                 convergence["pending_comprehensive_review"] = False
                 convergence["comprehensive_used"] = True
                 convergence["comprehensive_execution_id"] = execution.execution_id
+                convergence["comprehensive_reviewed_feature_sha"] = execution.reviewed_feature_sha
                 registry["convergence"] = convergence
                 if task is not None:
                     task.finding_registry = registry
@@ -5368,6 +5382,7 @@ class BuildRunner:
             convergence["pending_comprehensive_review"] = False
             convergence["comprehensive_used"] = True
             convergence["comprehensive_execution_id"] = execution.execution_id
+            convergence["comprehensive_reviewed_feature_sha"] = execution.reviewed_feature_sha
             registry["convergence"] = convergence
         if task is not None:
             task.finding_registry = registry
