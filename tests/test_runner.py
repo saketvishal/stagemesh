@@ -412,6 +412,22 @@ class RecordingTaskSource:
         return True
 
 
+class CapacityWaitTaskSource(RecordingTaskSource):
+    def __init__(self):
+        super().__init__()
+        self.last_capacity_wait = None
+
+    def discover_tasks(self, session):
+        self.discoveries += 1
+        self.last_capacity_wait = {
+            "provider": "github",
+            "reason": "RATE_LIMITED",
+            "message": "GitHub task-source capacity unavailable",
+            "repo": "example/repo",
+        }
+        return []
+
+
 def _git(cwd: Path, *args: str) -> str:
     result = subprocess.run(
         ["git", *args],
@@ -989,6 +1005,29 @@ def test_live_builder_drains_after_task_becomes_deferred_without_outbound_done_s
         assert roles == ["BUILDER"]
 
 
+def test_runner_marks_capacity_full_when_task_source_reports_capacity_wait():
+    task_source = CapacityWaitTaskSource()
+    runner = BuildRunner(
+        SessionLocal,
+        _config(),
+        executors={},
+        git=FakeGit(),
+        task_source=task_source,
+    )
+
+    result = runner.run_once()
+
+    assert result.capacity_full is True
+    assert task_source.discoveries == 1
+    with SessionLocal() as session:
+        events = session.scalars(
+            select(BuildTaskEvent).where(BuildTaskEvent.event_type == "runner.task_source_capacity_wait")
+        ).all()
+    assert len(events) == 1
+    assert events[0].event_data["provider"] == "github"
+    assert events[0].event_data["reason"] == "RATE_LIMITED"
+
+
 def test_validation_runs_in_background_while_ready_tasks_dispatch():
     slow_validation = f"{sys.executable} -c \"import time; time.sleep(1)\""
     with SessionLocal() as session:
@@ -1206,8 +1245,6 @@ def test_validation_restarts_are_rerun_instead_of_trusted():
         assert session.get(BuildTask, "RUN-VALIDATION-RESTART").state == "VALIDATING"
 
 
-<<<<<<< HEAD
-=======
 def test_validation_executor_reconciles_completed_result_after_restart(tmp_path):
     result_path = tmp_path / "validation-result.json"
     shadow_workspace = tmp_path / "shadow-workspace"
@@ -1631,7 +1668,6 @@ def test_repeated_validation_recovery_preserves_history_without_claim_recovery_d
         assert task.state == "VALIDATING"
         assert claim.status == "ACTIVE"
         assert recovery_events == []
->>>>>>> refs/heads/main
 
 
 def test_validation_timeout_is_typed_with_start_end_and_exit_evidence():

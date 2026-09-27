@@ -213,6 +213,11 @@ class GitHubTaskSource(TaskSource):
         self._labels_ensured = False
         self._label_warning_emitted = False
         self._capacity_backoff_until = 0.0
+        self._last_capacity_wait: dict[str, Any] | None = None
+
+    @property
+    def last_capacity_wait(self) -> dict[str, Any] | None:
+        return dict(self._last_capacity_wait) if self._last_capacity_wait else None
 
     def ensure_labels(self, session) -> bool:
         """Ensure every stagemesh:* lifecycle label exists in the repository.
@@ -234,6 +239,7 @@ class GitHubTaskSource(TaskSource):
                 if label not in existing:
                     self._create_label(label)
             self._labels_ensured = True
+            self._label_warning_emitted = False
             return True
         except Exception as exc:
             err = str(exc)
@@ -363,10 +369,18 @@ class GitHubTaskSource(TaskSource):
 
     def discover_tasks(self, session) -> list[SyncResult]:
         """Fetch open issues from the repository and ingest into the durable queue."""
+        self._last_capacity_wait = None
         if not self.repo:
             return []
         self._load_capacity_backoff(session)
         if self._capacity_backoff_until > time.time():
+            self._last_capacity_wait = {
+                "provider": "github",
+                "reason": "RATE_LIMITED",
+                "message": f"GitHub task-source capacity is cooling down until {self._capacity_backoff_until:.0f}",
+                "repo": self.repo,
+                "backoff_until": self._capacity_backoff_until,
+            }
             return self._cached_discovery_results(
                 session,
                 f"GitHub task-source capacity is cooling down until {self._capacity_backoff_until:.0f}",
@@ -562,13 +576,14 @@ class GitHubTaskSource(TaskSource):
     def _record_source_capacity_wait(self, session, exc: TaskSourceCapacityError) -> None:
         wait = exc.retry_after_seconds if exc.retry_after_seconds is not None else 60
         self._capacity_backoff_until = max(self._capacity_backoff_until, time.time() + min(max(wait, 5), 900))
+        self._last_capacity_wait = {"repo": self.repo, **exc.as_dict(), "backoff_until": self._capacity_backoff_until}
         record_event(
             session,
             EventInput(
                 task_id=None,
                 event_type="task_source.capacity_wait",
                 actor="github-sync",
-                event_data={"repo": self.repo, **exc.as_dict(), "backoff_until": self._capacity_backoff_until},
+                event_data=self._last_capacity_wait,
             ),
         )
         session.flush()
@@ -1017,8 +1032,7 @@ class GitHubTaskSource(TaskSource):
                     },
                 ),
             )
-        if source_was_closed:
-            self._reconcile_reopened_task_from_open_issue(session, task, labels, url)
+        self._reconcile_reopened_task_from_open_issue(session, task, labels, url)
         if objective_id:
             task.objective_id = objective_id
             if task.reason_created == OBJECTIVE_ROOT_COMPAT_REASON:
