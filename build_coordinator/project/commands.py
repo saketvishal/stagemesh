@@ -62,6 +62,7 @@ from build_coordinator.project.state_migration import (
 )
 from build_coordinator.runner import BuildRunner
 from build_coordinator.runner.upstream import retry_pending_pushes
+from build_coordinator.runtime_provenance import collect_runtime_provenance
 from build_coordinator.service import ensure_state, list_available_tasks, set_mode
 
 _LIVE_EXECUTION = ("LAUNCHED", "RUNNING")
@@ -322,6 +323,7 @@ def project_status(session, project: ProjectDefinition) -> dict[str, Any]:
     return {
         "project_id": project.project_id,
         "state_dir": str(project.state_dir),
+        "runtime_provenance": _runtime_provenance(project),
         "concurrency": project.concurrency,
         "tasks_by_state": dict(sorted(by_state.items())),
         "blocked": _blocked_reasons(session),
@@ -361,6 +363,15 @@ def project_status(session, project: ProjectDefinition) -> dict[str, Any]:
             for e in executions
         ],
     }
+
+
+def _runtime_provenance(project: ProjectDefinition) -> dict[str, Any]:
+    from build_coordinator.config import get_settings
+
+    return collect_runtime_provenance(
+        project_root=project.root,
+        coordinator_database=get_settings().database_url,
+    ).as_dict()
 
 
 def _blocked_reasons(session) -> list[dict[str, Any]]:
@@ -584,6 +595,7 @@ def handle_continue(args: argparse.Namespace) -> None:
         ]
     payload = {
         "project": project.summary(),
+        "runtime_provenance": _runtime_provenance(project),
         "target_tasks": target_diagnostics,
         "backlog_sync": sync_payload,
         "task_source_adapters": adapter_payload,

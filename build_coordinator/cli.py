@@ -74,6 +74,7 @@ from build_coordinator.runner.models import RunnerConfig
 from build_coordinator.runner.routing import StageRequirement, route_worker
 from build_coordinator.runner.scheduling import active_worker_counts
 from build_coordinator.runner.worker_health import derive_worker_health
+from build_coordinator.runtime_provenance import collect_runtime_provenance
 from build_coordinator.types import ObjectiveSpec, PlannedChildTask, StructuredContractError, TaskSpec
 
 
@@ -626,6 +627,10 @@ def _status(args: argparse.Namespace, session) -> None:
                 ),
             },
             "controller_source": _controller_source(),
+            "runtime_provenance": collect_runtime_provenance(
+                project_root=settings.repo_root,
+                coordinator_database=settings.database_url,
+            ).as_dict(),
             "task_count": len(tasks),
             "tasks_by_state": by_state,
             "available_count": len(list_available_tasks(session)),
