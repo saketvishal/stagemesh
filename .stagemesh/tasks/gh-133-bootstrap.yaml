@@ -1,0 +1,44 @@
+# Bootstrap-only local task used to break a GitHub-source rate-limit deadlock.
+# This is StageMesh internal maintenance, not part of the new-user workflow.
+tasks:
+  - id: SM-133-RATE-LIMIT
+    title: Make GitHub task-source rate limits recoverable and non-blocking
+    priority: 0
+    risk: HIGH
+    review: INDEPENDENT
+    objective: >
+      Implement GH-133 so StageMesh does not depend exclusively on gh/GraphQL
+      availability to discover GitHub-backed work, and so rate limits are
+      handled as recoverable source capacity rather than as an empty queue.
+    requirements:
+      - Detect GitHub primary and secondary API rate-limit responses as a typed recoverable task-source capacity condition.
+      - Do not report an empty/fully-drained queue when GitHub discovery did not complete.
+      - Suppress repeated lifecycle-label provisioning warnings within the same run.
+      - Lifecycle-label provisioning must not be a prerequisite for reading or executing work.
+      - Automatically fall back from gh/GraphQL issue discovery to an equivalent REST path when possible.
+      - For public repositories, allow an unauthenticated REST fallback when authenticated discovery is rate-limited and public metadata is sufficient.
+      - Reuse durable/cached synchronized source state when live discovery is temporarily unavailable and it is safe to do so.
+      - Persist/reset or bounded-backoff information when available; do not spin tightly.
+      - Do not consume builder/reviewer retry budgets for task-source capacity failures.
+      - Preserve zero-config GitHub onboarding from GH-132 and all explicit task-source opt-outs/overrides.
+      - Authentication/permission failures remain distinct actionable diagnostics.
+    acceptance_criteria:
+      - A GitHub GraphQL rate limit no longer makes StageMesh appear to have no work.
+      - A rate-limited public GitHub repository can still discover eligible issues through automatic fallback when public REST access is available.
+      - Repeated label-provisioning attempts do not spam the same run.
+      - Cached eligible tasks remain executable when source refresh is temporarily unavailable and safety permits.
+      - After source capacity recovers, plain stagemesh continue resumes normal live discovery without DB repair.
+      - Existing explicit task-source configuration and deferred-label semantics remain unchanged.
+      - Deterministic tests cover discovery rate limit, label-provisioning rate limit, fallback, cached state, recovery, auth failure, and true zero-issue repositories.
+    scope:
+      allowed_paths:
+        - build_coordinator/task_source/
+        - build_coordinator/project/
+        - build_coordinator/github/
+        - tests/
+        - docs/
+    validation:
+      - python -m pytest tests/test_github_task_source_activation.py tests/test_github_label_provisioning.py tests/test_task_source.py -q
+    notes: >
+      Bootstrap implementation for GitHub issue GH-133. The Bhawna Skills
+      acceptance flow remains exactly: cd <repo>; stagemesh continue.
