@@ -23,9 +23,24 @@ from build_coordinator.models import BuildTask, BuildTaskEvent
 from build_coordinator.task_source.github import GitHubTaskSource
 
 
+class _HeaderedError(RuntimeError):
+    """A client-side error that (like a real HTTP client's exception) can
+    carry raw response headers, so a test can DEMONSTRATE a narrow-scope
+    capacity hit rather than relying on message wording alone -- see
+    GitHubTaskSource._is_primary_capacity_message /
+    _extract_capacity_headers."""
+
+    def __init__(self, message: str, *, headers: dict | None = None) -> None:
+        super().__init__(message)
+        self.headers = headers
+
+
 class RateLimitableClient:
     """Minimal GitHub client double whose calls can be individually forced
-    to raise a rate-limit or a non-rate-limit (auth) error on demand."""
+    to raise a rate-limit or a non-rate-limit (auth) error on demand, with
+    an actual call counter per method so tests can directly verify a real
+    request was (or was not) suppressed -- not just infer it from a
+    recorded event."""
 
     def __init__(self, issues):
         self.issues = list(issues)
@@ -33,10 +48,13 @@ class RateLimitableClient:
         self.closed: list[str] = []
         self.labels: list[dict] = []
         self.fail_calls: dict[str, str] = {}  # call name -> error message
+        self.fail_headers: dict[str, dict] = {}  # call name -> headers to attach to that failure
+        self.call_counts: dict[str, int] = {}
 
     def _maybe_fail(self, call: str) -> None:
+        self.call_counts[call] = self.call_counts.get(call, 0) + 1
         if call in self.fail_calls:
-            raise RuntimeError(self.fail_calls[call])
+            raise _HeaderedError(self.fail_calls[call], headers=self.fail_headers.get(call))
 
     def list_issues(self, repo, labels):
         self._maybe_fail("list_issues")
@@ -151,11 +169,19 @@ def test_outbound_rate_limit_suppresses_repeated_client_calls_until_cooldown_cle
     assert len(client.comments) == 0
 
 
-def test_label_provisioning_rate_limit_does_not_block_discovery_or_outbound():
-    """A rate limit hit while provisioning lifecycle labels must not gate a
-    different surface: discovery must still attempt a live fetch, and
-    outbound sync's own cooldown gate must remain unaffected, even while
-    label provisioning is independently cooling down on its own surface."""
+def test_undemonstrated_label_provisioning_rate_limit_is_treated_as_shared():
+    """A rate limit hit while provisioning lifecycle labels, with NO header
+    evidence pinning its scope, must be treated as an unknown-scope
+    restriction -- and an unknown-scope restriction defaults to shared, not
+    narrow (see GitHubTaskSource._is_primary_capacity_message). Message
+    wording alone ("secondary rate limit exceeded...") is never sufficient
+    to prove narrow scope: it describes what the server called the
+    restriction, not which surfaces it actually affects. So discovery must
+    genuinely be deferred by the same cooldown -- not "attempt a live
+    fetch regardless" (the previous, wording-trusting assumption this test
+    used to encode). See test_demonstrated_narrow_label_limit_does_not_gate_
+    other_surfaces below for the header-DEMONSTRATED case, where narrow
+    scope is legitimately honored."""
     client = RateLimitableClient([_issue(202)])
     client.fail_calls["list_labels"] = "secondary rate limit exceeded while listing labels"
     source = GitHubTaskSource(repo="example/repo", client=client)
@@ -163,11 +189,57 @@ def test_label_provisioning_rate_limit_does_not_block_discovery_or_outbound():
     with SessionLocal() as session:
         results = source.discover_tasks(session)
         session.commit()
-        # Discovery itself still ran (labels failing doesn't block reading work).
+        # Discovery itself still ran this first time (labels failing
+        # doesn't block reading work) -- the *shared* cooldown is only
+        # recorded as a side effect of the labels failure, not yet
+        # consulted by discovery's own upcoming attempt.
         assert len(results) == 1
         assert len(_capacity_wait_events(session, surface="labels")) == 1
-        assert len(_capacity_wait_events(session, surface="discovery")) == 0
-        assert len(_capacity_wait_events(session, surface="outbound")) == 0
+        assert source._capacity_cooldown_active(session, surface="labels") is True
+        # No header evidence was provided -- unknown scope -- so the shared
+        # cross-surface gate is genuinely active too.
+        assert source._capacity_cooldown_active(session, surface="discovery") is True
+        assert source._capacity_cooldown_active(session, surface="outbound") is True
+
+    task_id = results[0].task_id
+    with SessionLocal() as session:
+        task = session.get(BuildTask, task_id)
+        task.state = "DONE"
+        session.commit()
+
+    # A second discover_tasks() call must not make a real list_issues call
+    # at all while the shared cooldown from the unverified "secondary"
+    # message is active.
+    calls_before = client.call_counts.get("list_issues", 0)
+    client.fail_calls.pop("list_labels", None)
+    with SessionLocal() as session:
+        results2 = source.discover_tasks(session)
+        session.commit()
+    assert client.call_counts.get("list_issues", 0) == calls_before
+    assert len(results2) == 1
+    assert results2[0].action == "SOURCE_CAPACITY_WAIT"
+
+
+def test_demonstrated_narrow_label_limit_does_not_gate_other_surfaces():
+    """The DEMONSTRATED counterpart to the test above: when the label
+    -provisioning failure carries real header evidence that the shared
+    primary quota is NOT exhausted (X-RateLimit-Remaining present and
+    non-zero), the restriction is narrow/independent by proof, not by
+    trusting its wording -- and only then must discovery and outbound sync
+    keep running unaffected, exactly as "preserve legitimately independent
+    fallback behavior" requires."""
+    client = RateLimitableClient([_issue(2020)])
+    client.fail_calls["list_labels"] = "secondary rate limit exceeded while listing labels"
+    client.fail_headers["list_labels"] = {"X-RateLimit-Remaining": "4999"}
+    source = GitHubTaskSource(repo="example/repo", client=client)
+
+    with SessionLocal() as session:
+        results = source.discover_tasks(session)
+        session.commit()
+        assert len(results) == 1
+        assert len(_capacity_wait_events(session, surface="labels")) == 1
+        assert source._capacity_cooldown_active(session, surface="labels") is True
+        # Demonstrated narrow: the shared surfaces are NOT gated.
         assert source._capacity_cooldown_active(session, surface="discovery") is False
         assert source._capacity_cooldown_active(session, surface="outbound") is False
 
@@ -176,6 +248,13 @@ def test_label_provisioning_rate_limit_does_not_block_discovery_or_outbound():
         task = session.get(BuildTask, task_id)
         task.state = "DONE"
         session.commit()
+
+    # Discovery genuinely still attempts a real list_issues call.
+    calls_before = client.call_counts.get("list_issues", 0)
+    with SessionLocal() as session:
+        source.discover_tasks(session)
+        session.commit()
+    assert client.call_counts.get("list_issues", 0) == calls_before + 1
 
     # Labels are still cooling down on their own surface, so outbound sync's
     # pre-existing label-provisioning gate still applies -- but that must be
@@ -263,11 +342,14 @@ def test_primary_capacity_message_gates_other_rest_surfaces_via_shared_backoff()
     client.fail_calls.update(calls_before)
 
 
-def test_secondary_capacity_message_does_not_gate_shared_rest_surfaces():
-    """The inverse of the shared-primary case: a message explicitly
-    identified as a secondary/abuse-detection limit must never propagate to
-    the shared surface, so independent, genuinely permitted work (discovery,
-    outbound sync) keeps running while only the tripped surface cools down."""
+def test_unverified_secondary_wording_alone_is_not_treated_as_narrow():
+    """Direct regression for the corrected classifier: message wording
+    ("secondary rate limit", "abuse detection") must never, by itself,
+    demonstrate narrow scope. With no header evidence at all, this is
+    identical in effect to a primary hit -- the shared surface is gated
+    too. (Contrast test_demonstrated_narrow_label_limit_does_not_gate_
+    other_surfaces, which supplies real header evidence and correctly
+    stays narrow.)"""
     client = RateLimitableClient([_issue(211)])
     client.fail_calls["list_labels"] = "secondary rate limit exceeded while listing labels"
     source = GitHubTaskSource(repo="example/repo", client=client)
@@ -277,8 +359,8 @@ def test_secondary_capacity_message_does_not_gate_shared_rest_surfaces():
         session.commit()
         assert len(_capacity_wait_events(session, surface="labels")) == 1
         assert source._capacity_cooldown_active(session, surface="labels") is True
-        assert source._capacity_cooldown_active(session, surface="discovery") is False
-        assert source._capacity_cooldown_active(session, surface="outbound") is False
+        assert source._capacity_cooldown_active(session, surface="discovery") is True
+        assert source._capacity_cooldown_active(session, surface="outbound") is True
 
 
 def test_actual_client_request_count_is_suppressed_during_cooldown():
@@ -342,3 +424,55 @@ def test_actual_client_request_count_is_suppressed_during_cooldown():
         assert source.sync_outbound(session, task_id, "DONE") is True
         session.commit()
     assert call_count["add_comment"] == 2
+
+
+def test_undemonstrated_shared_cooldown_survives_source_restart_and_recovers():
+    """The shared-scope default from an unverified 'secondary' message must
+    itself be durable across a source-instance restart (a fresh
+    GitHubTaskSource with an empty in-memory backoff dict, matching what a
+    real executor/process restart looks like) -- not just an in-memory
+    flag -- and must genuinely recover (stop suppressing) once the
+    persisted backoff has actually elapsed, on every surface it gated."""
+    client = RateLimitableClient([_issue(212)])
+    client.fail_calls["list_labels"] = "secondary rate limit exceeded while listing labels"
+    source = GitHubTaskSource(repo="example/repo", client=client)
+
+    with SessionLocal() as session:
+        source.discover_tasks(session)
+        session.commit()
+        assert source._capacity_cooldown_active(session, surface="discovery") is True
+
+    # Simulate a restart: a brand-new source instance, empty in-memory
+    # dict, same repo/client.
+    restarted = GitHubTaskSource(repo="example/repo", client=client)
+    client.fail_calls.pop("list_labels", None)  # would succeed for real now
+    calls_before = client.call_counts.get("list_issues", 0)
+    with SessionLocal() as session:
+        results = restarted.discover_tasks(session)
+        session.commit()
+    # The restarted instance still honors the persisted shared cooldown: no
+    # real list_issues call, deferred result.
+    assert client.call_counts.get("list_issues", 0) == calls_before
+    assert len(results) == 1
+    assert results[0].action == "SOURCE_CAPACITY_WAIT"
+
+    # Force genuine elapse (both the "labels" and shared entries) and
+    # confirm recovery on the restarted instance.
+    with SessionLocal() as session:
+        events = session.scalars(
+            select(BuildTaskEvent).where(BuildTaskEvent.event_type == "task_source.capacity_wait")
+        ).all()
+        for event in events:
+            data = dict(event.event_data or {})
+            data["backoff_until"] = 0.0
+            event.event_data = data
+            session.add(event)
+        session.commit()
+    restarted._capacity_backoff_until_by_surface.clear()
+
+    with SessionLocal() as session:
+        results3 = restarted.discover_tasks(session)
+        session.commit()
+    assert client.call_counts.get("list_issues", 0) == calls_before + 1
+    assert len(results3) == 1
+    assert results3[0].action != "SOURCE_CAPACITY_WAIT"

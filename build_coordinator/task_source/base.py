@@ -56,12 +56,20 @@ class TaskSourceCapacityError(RuntimeError):
         reason: str = "RATE_LIMITED",
         retry_after_seconds: int | None = None,
         reset_at: str | None = None,
+        headers: Any = None,
     ) -> None:
         super().__init__(message)
         self.provider = provider
         self.reason = reason
         self.retry_after_seconds = retry_after_seconds
         self.reset_at = reset_at
+        # Raw HTTP response headers, when the raising call site actually had
+        # them (e.g. a direct REST HTTPError) -- carried through so a
+        # provider's later primary-vs-narrow capacity classification can be
+        # grounded in real evidence rather than message-text guessing. Never
+        # persisted verbatim into durable event data; consumed in-process
+        # only, at classification time.
+        self.headers = headers
 
     def as_dict(self) -> dict[str, Any]:
         return {
