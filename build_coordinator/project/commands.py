@@ -22,6 +22,7 @@ from build_coordinator.coordinator_lock import (
     release_coordinator_lock,
 )
 from build_coordinator.claims import task_source_eligibility, task_source_is_closed
+from build_coordinator.task_source.base import TaskSourceCapacityError
 from build_coordinator.db import (
     DatabaseSchemaError,
     SessionLocal,
@@ -437,12 +438,22 @@ def handle_continue(args: argparse.Namespace) -> None:
                 try:
                     discovered = [r.as_dict() for r in task_source.discover_tasks(session)]
                     local_adapter_payload.extend(discovered)
-                    if not discovered and not definitions:
+                    source_capacity_wait = any(
+                        str(item.get("action") or "").upper() == "SOURCE_CAPACITY_WAIT"
+                        for item in discovered
+                    )
+                    if not discovered and not definitions and not source_capacity_wait:
                         local_adapter_payload.append({
                             "source": "github",
                             "action": "NO_ELIGIBLE_OPEN_ISSUES",
                             "details": f"No eligible open GitHub issues found in {getattr(task_source, 'repo', 'the configured repository')}",
                         })
+                except TaskSourceCapacityError as exc:
+                    local_adapter_payload.append({
+                        "source": "github",
+                        "action": "SOURCE_CAPACITY_WAIT",
+                        "details": str(exc),
+                    })
                 except Exception as exc:  # optional adapter: never blocks local execution
                     local_adapter_payload.append({
                         "source": "github",
@@ -903,6 +914,10 @@ def _summarize_run(detail: dict[str, Any]) -> dict[str, Any]:
 
 
 def _detect_repo_from_git(root: Path) -> str | None:
+    def repo_from_url(url: str) -> str | None:
+        m = re.search(r"github\.com[:/]([^/]+/[^/.]+?)(?:\.git)?$", url)
+        return m.group(1) if m else None
+
     try:
         proc = subprocess.run(
             ["git", "config", "--get", "remote.origin.url"],
@@ -912,12 +927,20 @@ def _detect_repo_from_git(root: Path) -> str | None:
             check=False,
         )
         if proc.returncode == 0 and proc.stdout.strip():
-            url = proc.stdout.strip()
-            m = re.search(r"github\.com[:/]([^/]+/[^/.]+?)(?:\.git)?$", url)
-            if m:
-                return m.group(1)
+            detected = repo_from_url(proc.stdout.strip())
+            if detected:
+                return detected
     except Exception:
         pass
+    config_path = root / ".git" / "config"
+    if config_path.exists():
+        try:
+            text = config_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return None
+        match = re.search(r"^\s*url\s*=\s*(\S+)\s*$", text, flags=re.MULTILINE)
+        if match:
+            return repo_from_url(match.group(1))
     return None
 
 
