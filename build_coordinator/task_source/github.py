@@ -503,6 +503,8 @@ class GitHubTaskSource(TaskSource):
             return self._client.list_issues_rest(repo=self.repo, labels=self.labels, authenticated=True)
         except Exception as rest_exc:
             if self._is_rate_limit_message(str(rest_exc)):
+                if hasattr(self._client, "list_public_issues_rest"):
+                    return self._fetch_client_public_issues_rest(rest_exc)
                 raise self._capacity_error_from_message(str(rest_exc)) from rest_exc
             raise self._capacity_error_from_message(str(original_exc)) from rest_exc
 
