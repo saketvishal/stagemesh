@@ -7,7 +7,7 @@ import re
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from build_coordinator.db import commit_or_busy
+from build_coordinator.db import commit_or_busy, with_sqlite_retry
 from build_coordinator.github.client import GitHubClient
 from build_coordinator.github.sanitizer import AUTHORIZED_OWNERS
 from build_coordinator.models import (
@@ -76,15 +76,18 @@ def publish_open_gates(
         client.add_issue_comment(repo, issue_number, comment_body)
         client.set_issue_status_label(repo, issue_number, "HUMAN_GATE")
 
-        session.add(
-            BuildObjectiveEvent(
-                objective_id=objective_id,
-                event_type="github.gate_published",
-                actor=gate.gate_id,
-                event_data={"gate_id": gate.gate_id, "gate_type": gate.gate_type},
+        def _record_gate_published() -> None:
+            session.add(
+                BuildObjectiveEvent(
+                    objective_id=objective_id,
+                    event_type="github.gate_published",
+                    actor=gate.gate_id,
+                    event_data={"gate_id": gate.gate_id, "gate_type": gate.gate_type},
+                )
             )
-        )
-        commit_or_busy(session)
+            commit_or_busy(session)
+
+        with_sqlite_retry(_record_gate_published)
         published.append(gate)
 
     return published
@@ -117,13 +120,18 @@ def poll_and_ingest_gate_approvals(
         gate_id = match.group(1).strip()
         if gate_id in gates:
             gate = gates[gate_id]
-            resolved_gate = resolve_gate(
-                session,
-                gate_id,
-                resolved_by=f"gh:{comment.author}",
-                resolution_note=f"Approved via GitHub comment #{comment.id}",
-            )
-            commit_or_busy(session)
+
+            def _resolve_and_commit() -> BuildObjectiveGate:
+                rg = resolve_gate(
+                    session,
+                    gate_id,
+                    resolved_by=f"gh:{comment.author}",
+                    resolution_note=f"Approved via GitHub comment #{comment.id}",
+                )
+                commit_or_busy(session)
+                return rg
+
+            resolved_gate = with_sqlite_retry(_resolve_and_commit)
 
             # Confirm on GitHub and restore active status label
             client.add_issue_comment(
