@@ -322,6 +322,29 @@ def with_sqlite_retry(
     raise AssertionError("unreachable")  # pragma: no cover
 
 
+def commit_or_busy(session: Session) -> None:
+    """Commit `session`, converting SQLite writer-lock contention into a
+    typed `DatabaseBusyError` instead of letting a raw `OperationalError`
+    escape to the caller.
+
+    This intentionally does not retry the commit itself: once `commit()`
+    fails, SQLAlchemy has already rolled the transaction back and expired
+    the session's pending object state, so silently calling `commit()`
+    again would just commit an empty transaction and look like success
+    while dropping the write. The project's SQLite connections already
+    apply a bounded `busy_timeout` PRAGMA, which is where the actual
+    bounded wait for transient contention happens before this ever raises;
+    this only decides what a caller sees once that wait is exhausted.
+    """
+    try:
+        session.commit()
+    except OperationalError as exc:
+        session.rollback()
+        if not _is_transient_sqlite_lock_error(exc):
+            raise
+        raise DatabaseBusyError(f"SQLite write contention on commit: {exc}") from exc
+
+
 _process_database: DatabaseLifecycle | None = None
 
 

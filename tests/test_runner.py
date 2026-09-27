@@ -234,6 +234,48 @@ def test_post_launch_sqlite_retry_exhaustion_is_typed_without_duplicate_launch(m
     assert len(executor.launches) == 1
 
 
+def test_post_launch_final_commit_lock_is_typed_not_raw(monkeypatch):
+    class RunningExecutor:
+        adapter_name = "running-test"
+
+        def __init__(self) -> None:
+            self.launches = []
+
+        def launch(self, launch):
+            self.launches.append(launch)
+            return ExecutionHandle(execution_id=launch.execution_id, process_id="1234", result_path=launch.result_path)
+
+        def poll(self, execution_id: str) -> ExecutionObservation:
+            return ExecutionObservation(status="RUNNING")
+
+        def terminate(self, execution_id: str) -> ExecutionObservation:
+            return ExecutionObservation(status="TERMINATED")
+
+    with SessionLocal() as session:
+        upsert_task(session, _task("GH-101-FINAL"))
+        session.commit()
+
+    from sqlalchemy.orm import Session as SASession
+
+    original_commit = SASession.commit
+    calls = {"n": 0}
+
+    def flaky_commit(self, *args, **kwargs):
+        calls["n"] += 1
+        # Let the pre-launch row insert and the persist-launch commit
+        # through; fail only the final post-launch commit for this cycle.
+        if calls["n"] == 3:
+            raise OperationalError("COMMIT", None, Exception("database is locked"))
+        return original_commit(self, *args, **kwargs)
+
+    monkeypatch.setattr(SASession, "commit", flaky_commit)
+
+    executor = RunningExecutor()
+    with pytest.raises(DatabaseBusyError, match="STAGEMESH_SQLITE_BUSY"):
+        _runner(executors={"builder-a": executor}).run_once()
+    assert len(executor.launches) == 1
+
+
 def _config(*, auto_push=False, remediation_cycles=2):
     return RunnerConfig(
         workers=(

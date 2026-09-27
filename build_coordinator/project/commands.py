@@ -19,7 +19,12 @@ from build_coordinator.coordinator_lock import (
     heartbeat_coordinator_lock,
     release_coordinator_lock,
 )
-from build_coordinator.db import DatabaseSchemaError, SessionLocal, configure_process_database
+from build_coordinator.db import (
+    DatabaseSchemaError,
+    SessionLocal,
+    commit_or_busy,
+    configure_process_database,
+)
 from build_coordinator.models import BuildRunnerExecution, BuildTask, BuildTaskEvent, new_uuid
 from build_coordinator.project.backlog import (
     TaskDefinition,
@@ -199,7 +204,7 @@ def handle_project(args: argparse.Namespace) -> None:
             outcomes = retry_pending_pushes(
                 session, repo_root=project.root, remote=project.upstream_remote, main_ref=project.main_ref, actor="human:retry-push"
             )
-            session.commit()
+            commit_or_busy(session)
         _print({"retried": outcomes})
         return
     if command == "migrate-state":
@@ -214,7 +219,7 @@ def handle_project(args: argparse.Namespace) -> None:
     with lifecycle.session() as session:
         if command == "sync":
             report = sync_backlog(session, project, load_backlog(project), dry_run=args.dry_run)
-            session.commit()
+            commit_or_busy(session)
             _print(report.as_dict())
         elif command == "status":
             _print(project_status(session, project))
@@ -371,7 +376,7 @@ def handle_continue(args: argparse.Namespace) -> None:
                 session.rollback()
                 raise ProjectError(str(exc)) from exc
             lock_acquired = True
-            session.commit()
+            commit_or_busy(session)
         if not args.no_sync:
             report = sync_backlog(session, project, definitions, dry_run=args.dry_run)
             sync_payload = report.as_dict()
@@ -393,7 +398,7 @@ def handle_continue(args: argparse.Namespace) -> None:
             )
             session.rollback()
             return
-        session.commit()
+        commit_or_busy(session)
 
     runner = BuildRunner(SessionLocal, config, task_source=task_source, target_task_ids=target_task_ids)
     started = time.monotonic()
@@ -411,7 +416,7 @@ def handle_continue(args: argparse.Namespace) -> None:
                     drained_from = state.mode
                     if drained_from == "RUNNING":
                         set_mode(session, "DRAINING")
-                    session.commit()
+                    commit_or_busy(session)
                 print(f"[{project.project_id}] time budget reached: finishing in-flight work, starting nothing new", file=sys.stderr, flush=True)
             if project.push_upstream and (number == 1 or number % 10 == 0):
                 with lifecycle.session() as session:
@@ -421,7 +426,7 @@ def handle_continue(args: argparse.Namespace) -> None:
                         remote=project.upstream_remote,
                         main_ref=project.main_ref,
                     )
-                    session.commit()
+                    commit_or_busy(session)
             result = runner.run_once()
             with lifecycle.session() as session:
                 live = session.scalars(
@@ -434,7 +439,7 @@ def handle_continue(args: argparse.Namespace) -> None:
                     for execution_id in result.launched
                 ]
                 heartbeat_coordinator_lock(session, instance_id=instance_id)
-                session.commit()
+                commit_or_busy(session)
             for row in launched:
                 print(f"[{project.project_id}] {row.get('role', '?').lower()} {row.get('task_id')} on {row.get('worker_id')}", file=sys.stderr, flush=True)
             for item in result.escalations:
@@ -465,12 +470,12 @@ def handle_continue(args: argparse.Namespace) -> None:
         if drained_from == "RUNNING":
             with lifecycle.session() as session:
                 set_mode(session, "RUNNING")
-                session.commit()
+                commit_or_busy(session)
     finally:
         if lock_acquired:
             with lifecycle.session() as session:
                 release_coordinator_lock(session, instance_id=instance_id)
-                session.commit()
+                commit_or_busy(session)
 
     with lifecycle.session() as session:
         final = project_status(session, project)
