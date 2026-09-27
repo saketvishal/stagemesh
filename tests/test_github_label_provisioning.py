@@ -52,6 +52,8 @@ class LabelAwareMockClient:
     def list_labels(self, repo: str):
         if self.fail_on == "list_labels":
             raise RuntimeError("permission denied: cannot list labels")
+        if self.fail_on == "rate_limit_labels":
+            raise RuntimeError("secondary rate limit exceeded while listing labels")
         return sorted(self.known_labels)
 
     def create_label(self, repo: str, name: str):
@@ -168,6 +170,78 @@ def test_provisioning_failure_recorded_durably_and_does_not_raise():
         assert "permission denied" in events[0].event_data.get("error", "")
 
 
+def test_rate_limited_label_provisioning_warning_is_suppressed_within_run(caplog):
+    """Repeated rate-limited label checks record evidence but log one warning per adapter run."""
+    client = LabelAwareMockClient(issues=[], existing_labels=[], fail_on="rate_limit_labels")
+    source = GitHubTaskSource(repo="example/repo", client=client)
+
+    with caplog.at_level("WARNING", logger="build_coordinator.task_source.github"):
+        with SessionLocal() as session:
+            source.discover_tasks(session)
+            source.discover_tasks(session)
+            source.discover_tasks(session)
+            session.commit()
+
+    warnings = [
+        record
+        for record in caplog.records
+        if "Failed to provision GitHub lifecycle labels" in record.getMessage()
+    ]
+    assert len(warnings) == 1
+
+    with SessionLocal() as session:
+        events = session.scalars(
+            select(BuildTaskEvent).where(
+                BuildTaskEvent.event_type == "task_source.label_provisioning_failed",
+            )
+        ).all()
+        assert len(events) == 3
+    assert events[0].event_data["capacity"]["reason"] == "RATE_LIMITED"
+
+
+def test_label_provisioning_warning_resets_between_runner_cycles(caplog):
+    """A long-lived runner keeps surfacing persistent label-provisioning failures."""
+    client = LabelAwareMockClient(issues=[], existing_labels=[], fail_on="rate_limit_labels")
+    source = GitHubTaskSource(repo="example/repo", client=client)
+    runner = BuildRunner(SessionLocal, RunnerConfig.default(), task_source=source)
+
+    with caplog.at_level("WARNING", logger="build_coordinator.task_source.github"):
+        runner.run_once()
+        runner.run_once()
+
+    warnings = [
+        record
+        for record in caplog.records
+        if "Failed to provision GitHub lifecycle labels" in record.getMessage()
+    ]
+    assert len(warnings) == 2
+
+
+def test_label_provisioning_warning_resets_after_success(caplog):
+    """A long-lived adapter logs a later provisioning failure after recovery."""
+    client = LabelAwareMockClient(issues=[], existing_labels=[], fail_on="rate_limit_labels")
+    source = GitHubTaskSource(repo="example/repo", client=client)
+
+    with caplog.at_level("WARNING", logger="build_coordinator.task_source.github"):
+        with SessionLocal() as session:
+            source.discover_tasks(session)
+            client.fail_on = None
+            source.discover_tasks(session)
+            source._labels_ensured = False
+            client.fail_on = "list_labels"
+            source.discover_tasks(session)
+            session.commit()
+
+    warnings = [
+        record
+        for record in caplog.records
+        if "Failed to provision GitHub lifecycle labels" in record.getMessage()
+    ]
+    assert len(warnings) == 2
+    assert "rate limit" in warnings[0].getMessage().lower()
+    assert "permission denied" in warnings[1].getMessage().lower()
+
+
 def test_provisioning_retries_on_next_cycle_after_failure():
     """Failed provisioning is retried on a later sync, not abandoned forever."""
     client = LabelAwareMockClient(issues=[], existing_labels=[], fail_on="list_labels")
@@ -185,11 +259,11 @@ def test_provisioning_retries_on_next_cycle_after_failure():
     assert client.created_labels == EXPECTED_LIFECYCLE_LABELS
 
 
-def test_done_sync_not_permanently_stuck_when_label_initially_absent():
-    """5. Regression: DONE task, stagemesh:done absent -> provisioned, applied, issue closed.
+def test_open_issue_reopens_done_task_when_label_initially_absent():
+    """5. Regression: open source issue reopens local DONE work before outbound sync.
 
     No manual intervention required: the same runner cycle that discovers the
-    issue also provisions the missing label before applying it during
+    open issue also provisions lifecycle labels before applying READY during
     outbound sync.
     """
     client = LabelAwareMockClient(
@@ -216,14 +290,14 @@ def test_done_sync_not_permanently_stuck_when_label_initially_absent():
     runner = BuildRunner(SessionLocal, config, task_source=source)
     cycle = runner.run_once()
 
-    assert "stagemesh:done" in client.created_labels
+    assert "stagemesh:ready" in client.created_labels
     assert "GH-200" in cycle.outbound_synced
-    assert client.labels and client.labels[0]["label"] == "stagemesh:done"
-    assert client.closed == ["200"]
+    assert client.labels and client.labels[0]["label"] == "stagemesh:ready"
+    assert client.closed == []
 
     with SessionLocal() as session:
         task = session.get(BuildTask, "GH-200")
-        assert task.state == "DONE"
+        assert task.state == "READY"
 
 
 def test_done_sync_provisions_label_without_fresh_discovery_pass():
@@ -378,6 +452,14 @@ def test_reopened_issue_runner_cycle_replaces_stale_done_label_with_ready():
                 description="Closed before regression evidence arrived.",
                 acceptance_criteria=["Done"],
                 state="DONE",
+                definition_metadata={
+                    "source_type": "github",
+                    "source_owner": "example/repo",
+                    "source_ref": "205",
+                    "source_url": "https://github.com/example/repo/issues/205",
+                    "source_state": "CLOSED",
+                    "source_issue_number": 205,
+                },
             )
         )
         record_event(

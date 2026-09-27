@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+import subprocess
+import urllib.error
+from email.message import Message
+
 import pytest
 from pathlib import Path
+from types import SimpleNamespace
 from sqlalchemy import select
 
 from build_coordinator.claims import task_is_claimable
@@ -50,6 +55,46 @@ class FakeGitHubClient:
         self.closed.append(number)
 
 
+class RateLimitedThenRestClient(FakeGitHubClient):
+    def __init__(self, issues: list[dict]):
+        super().__init__(issues)
+        self.graphql_calls = 0
+        self.rest_calls = 0
+
+    def list_issues(self, repo: str, labels: tuple[str, ...]):
+        self.graphql_calls += 1
+        raise RuntimeError("GraphQL API rate limit exceeded")
+
+    def list_issues_rest(self, repo: str, labels: tuple[str, ...], authenticated: bool = True):
+        self.rest_calls += 1
+        return self.issues
+
+
+class RateLimitedThenPublicRestClient(FakeGitHubClient):
+    def __init__(self, issues: list[dict]):
+        super().__init__(issues)
+        self.graphql_calls = 0
+        self.auth_rest_calls = 0
+        self.public_rest_calls = 0
+
+    def list_issues(self, repo: str, labels: tuple[str, ...]):
+        self.graphql_calls += 1
+        raise RuntimeError("GraphQL API rate limit exceeded")
+
+    def list_issues_rest(self, repo: str, labels: tuple[str, ...], authenticated: bool = True):
+        self.auth_rest_calls += 1
+        raise RuntimeError("REST API rate limit exceeded; retry-after: 45")
+
+    def list_public_issues_rest(self, repo: str, labels: tuple[str, ...]):
+        self.public_rest_calls += 1
+        return self.issues
+
+
+class AlwaysRateLimitedClient(FakeGitHubClient):
+    def list_issues(self, repo: str, labels: tuple[str, ...]):
+        raise RuntimeError("secondary rate limit exceeded; retry-after: 120")
+
+
 @pytest.fixture(autouse=True)
 def clean_db():
     Base.metadata.drop_all(bind=engine)
@@ -70,7 +115,7 @@ def test_github_task_source_syncs_standard_task():
                     "- Add unit test\n\n"
                     "Blocked by: GH-100"
                 ),
-                "labels": [{"name": "review:independent"}, {"name": "risk:high"}],
+                "labels": [{"name": "review:independent-worker"}, {"name": "risk:high"}],
                 "url": "https://github.com/example/repo/issues/101",
             }
         ]
@@ -96,6 +141,284 @@ def test_github_task_source_syncs_standard_task():
         assert task.definition_metadata["source_owner"] == "example/repo"
         assert task.definition_metadata["source_ref"] == "101"
         assert task.definition_metadata["source_issue_number"] == 101
+
+
+def test_github_rate_limited_graphql_falls_back_to_rest_discovery():
+    issue = {
+        "number": 131,
+        "title": "Fallback issue",
+        "body": "Use REST when GraphQL capacity is unavailable.",
+        "labels": [],
+        "url": "https://github.com/example/repo/issues/131",
+    }
+    client = RateLimitedThenRestClient([issue])
+    source = GitHubTaskSource(repo="example/repo", client=client)
+
+    with SessionLocal() as session:
+        results = source.discover_tasks(session)
+        session.commit()
+
+    assert client.graphql_calls == 1
+    assert client.rest_calls == 1
+    assert [r.task_id for r in results] == ["GH-131"]
+    assert results[0].action == "CREATED"
+
+
+def test_authenticated_rest_rate_limit_falls_back_to_public_rest_discovery():
+    issue = {
+        "number": 135,
+        "title": "Public fallback after authenticated REST limit",
+        "body": "Use public metadata when authenticated GitHub paths are cooling down.",
+        "labels": [],
+        "url": "https://github.com/example/repo/issues/135",
+    }
+    client = RateLimitedThenPublicRestClient([issue])
+    source = GitHubTaskSource(repo="example/repo", client=client)
+
+    with SessionLocal() as session:
+        results = source.discover_tasks(session)
+        session.commit()
+
+    assert client.graphql_calls == 1
+    assert client.auth_rest_calls == 1
+    assert client.public_rest_calls == 1
+    assert [r.task_id for r in results] == ["GH-135"]
+    assert results[0].action == "CREATED"
+
+
+def test_rate_limited_gh_uses_unauthenticated_public_rest_fallback(monkeypatch):
+    source = GitHubTaskSource(repo="example/repo")
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:3] == ["gh", "label", "list"]:
+            return SimpleNamespace(stdout="[]", stderr="", returncode=0)
+        if cmd[:3] == ["gh", "label", "create"]:
+            return SimpleNamespace(stdout="", stderr="", returncode=0)
+        raise subprocess.CalledProcessError(
+            1,
+            cmd,
+            output="",
+            stderr="GraphQL API rate limit exceeded",
+        )
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return (
+                b'[{"number":133,"title":"Public fallback","body":"REST works",'
+                b'"labels":[],"html_url":"https://github.com/example/repo/issues/133","state":"open"}]'
+            )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr("urllib.request.urlopen", lambda req, timeout=15: FakeResponse())
+
+    with SessionLocal() as session:
+        results = source.discover_tasks(session)
+        session.commit()
+
+    assert [r.task_id for r in results] == ["GH-133"]
+    assert results[0].action == "CREATED"
+
+
+def test_github_rate_limit_reuses_cached_open_source_state():
+    cached = {
+        "number": 132,
+        "title": "Cached issue",
+        "body": "Already synchronized before rate limiting.",
+        "labels": [],
+        "url": "https://github.com/example/repo/issues/132",
+    }
+    with SessionLocal() as session:
+        GitHubTaskSource(repo="example/repo", client=FakeGitHubClient([cached])).discover_tasks(session)
+        session.commit()
+
+    source = GitHubTaskSource(repo="example/repo", client=AlwaysRateLimitedClient([]))
+    with SessionLocal() as session:
+        results = source.discover_tasks(session)
+        session.commit()
+
+    assert results
+    assert results[0].task_id == "GH-132"
+    assert results[0].action == "SOURCE_CAPACITY_WAIT"
+
+    with SessionLocal() as session:
+        task = session.get(BuildTask, "GH-132")
+        assert task is not None
+        assert task.state == "READY"
+        events = session.scalars(
+            select(BuildTaskEvent).where(BuildTaskEvent.event_type == "task_source.capacity_wait")
+        ).all()
+        assert len(events) == 1
+        assert events[0].event_data["reason"] == "RATE_LIMITED"
+
+
+def test_github_rate_limit_without_cache_reports_capacity_not_empty_queue():
+    source = GitHubTaskSource(repo="example/repo", client=AlwaysRateLimitedClient([]))
+    with SessionLocal() as session:
+        results = source.discover_tasks(session)
+        session.commit()
+
+    assert len(results) == 1
+    assert results[0].action == "SOURCE_CAPACITY_WAIT"
+    assert results[0].task_id == ""
+
+
+def test_github_rate_limit_backoff_skips_repeated_live_discovery():
+    class CountingRateLimitedClient(FakeGitHubClient):
+        def __init__(self):
+            super().__init__([])
+            self.calls = 0
+
+        def list_issues(self, repo: str, labels: tuple[str, ...]):
+            self.calls += 1
+            raise RuntimeError("secondary rate limit exceeded; retry-after: 120")
+
+    client = CountingRateLimitedClient()
+    source = GitHubTaskSource(repo="example/repo", client=client)
+
+    with SessionLocal() as session:
+        first = source.discover_tasks(session)
+        second = source.discover_tasks(session)
+        session.commit()
+
+    assert client.calls == 1
+    assert first[0].action == "SOURCE_CAPACITY_WAIT"
+    assert second[0].action == "SOURCE_CAPACITY_WAIT"
+
+
+def test_github_rate_limit_backoff_is_loaded_from_durable_state():
+    cached = {
+        "number": 239,
+        "title": "Do not refetch during persisted capacity wait",
+        "body": "A prior run already learned the source is cooling down.",
+        "labels": [],
+        "url": "https://github.com/example/repo/issues/239",
+    }
+    with SessionLocal() as session:
+        GitHubTaskSource(repo="example/repo", client=FakeGitHubClient([cached])).discover_tasks(session)
+        session.commit()
+
+    with SessionLocal() as session:
+        GitHubTaskSource(repo="example/repo", client=AlwaysRateLimitedClient([])).discover_tasks(session)
+        session.commit()
+
+    class ExplodingClient(FakeGitHubClient):
+        def list_issues(self, repo: str, labels: tuple[str, ...]):
+            raise AssertionError("live GitHub discovery should respect persisted backoff")
+
+    fresh_source = GitHubTaskSource(repo="example/repo", client=ExplodingClient([]))
+    with SessionLocal() as session:
+        results = fresh_source.discover_tasks(session)
+        session.commit()
+
+    assert [r.task_id for r in results] == ["GH-239"]
+    assert results[0].action == "SOURCE_CAPACITY_WAIT"
+
+
+def test_client_rest_rate_limit_after_graphql_reuses_cached_state():
+    cached = {
+        "number": 134,
+        "title": "Cached through REST capacity",
+        "body": "Keep runnable while all live GitHub discovery paths are limited.",
+        "labels": [],
+        "url": "https://github.com/example/repo/issues/134",
+    }
+    with SessionLocal() as session:
+        GitHubTaskSource(repo="example/repo", client=FakeGitHubClient([cached])).discover_tasks(session)
+        session.commit()
+
+    class RestAlsoRateLimitedClient(FakeGitHubClient):
+        def list_issues(self, repo: str, labels: tuple[str, ...]):
+            raise RuntimeError("GraphQL API rate limit exceeded")
+
+        def list_issues_rest(self, repo: str, labels: tuple[str, ...], authenticated: bool = True):
+            raise RuntimeError("REST API rate limit exceeded; retry-after: 45")
+
+    source = GitHubTaskSource(repo="example/repo", client=RestAlsoRateLimitedClient([]))
+    with SessionLocal() as session:
+        results = source.discover_tasks(session)
+        session.commit()
+
+    assert [r.task_id for r in results] == ["GH-134"]
+    assert results[0].action == "SOURCE_CAPACITY_WAIT"
+
+    with SessionLocal() as session:
+        event = session.scalars(
+            select(BuildTaskEvent).where(BuildTaskEvent.event_type == "task_source.capacity_wait")
+        ).one()
+        assert event.event_data["retry_after_seconds"] == 45
+
+
+def test_public_rest_rate_limit_detected_from_headers_without_magic_body(monkeypatch):
+    source = GitHubTaskSource(repo="example/repo")
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:3] == ["gh", "label", "list"]:
+            return SimpleNamespace(stdout="[]", stderr="", returncode=0)
+        if cmd[:3] == ["gh", "label", "create"]:
+            return SimpleNamespace(stdout="", stderr="", returncode=0)
+        raise subprocess.CalledProcessError(
+            1,
+            cmd,
+            output="",
+            stderr="GraphQL API rate limit exceeded",
+        )
+
+    headers = Message()
+    headers["X-RateLimit-Remaining"] = "0"
+    headers["X-RateLimit-Reset"] = "1800000000"
+    headers["Retry-After"] = "30"
+
+    def fake_urlopen(req, timeout=15):
+        raise urllib.error.HTTPError(
+            req.full_url,
+            403,
+            "Forbidden",
+            headers,
+            fp=SimpleNamespace(read=lambda: b'{"message":"Forbidden"}'),
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    with SessionLocal() as session:
+        results = source.discover_tasks(session)
+        session.commit()
+
+    assert len(results) == 1
+    assert results[0].action == "SOURCE_CAPACITY_WAIT"
+
+    with SessionLocal() as session:
+        event = session.scalars(
+            select(BuildTaskEvent).where(BuildTaskEvent.event_type == "task_source.capacity_wait")
+        ).one()
+        assert event.event_data["retry_after_seconds"] == 30
+        assert event.event_data["reset_at"] == "1800000000"
+
+
+def test_true_zero_issue_repository_still_reports_empty_discovery():
+    source = GitHubTaskSource(repo="example/repo", client=FakeGitHubClient([]))
+    with SessionLocal() as session:
+        results = source.discover_tasks(session)
+        session.commit()
+
+    assert results == []
+
+
+def test_github_auth_failure_remains_actionable_not_capacity():
+    class AuthFailureClient(FakeGitHubClient):
+        def list_issues(self, repo: str, labels: tuple[str, ...]):
+            raise RuntimeError("authentication unavailable for GitHub repository example/repo")
+
+    source = GitHubTaskSource(repo="example/repo", client=AuthFailureClient([]))
+    with SessionLocal() as session:
+        with pytest.raises(RuntimeError, match="authentication unavailable"):
+            source.discover_tasks(session)
 
 
 def test_github_deferred_label_syncs_visible_but_non_claimable():
@@ -347,7 +670,7 @@ def test_github_source_identity_does_not_import_policy_authority():
     with SessionLocal() as session:
         task = session.get(BuildTask, "GH-102")
         assert task is not None
-        assert task.review_policy == "SELF"
+        assert task.review_policy == "INDEPENDENT_WORKER"
         assert task.definition_metadata["source_type"] == "github"
         assert task.definition_metadata["source_ref"] == "102"
         for forbidden in ("routing_policy", "protected_paths", "permissions", "validation"):
@@ -567,7 +890,7 @@ def test_github_objective_reimport_reconciles_legacy_root_and_creates_planner():
         assert "Architecture and validation program" in planner.description
 
 
-def test_github_objective_resync_refreshes_planner_task_description():
+def test_github_objective_resync_preserves_existing_planner_task_description():
     client = FakeGitHubClient(
         [
             {
@@ -582,6 +905,12 @@ def test_github_objective_resync_refreshes_planner_task_description():
     source = GitHubTaskSource(repo="example/repo", client=client)
     with SessionLocal() as session:
         source.discover_tasks(session)
+        session.commit()
+
+    with SessionLocal() as session:
+        planner = session.get(BuildTask, planner_task_id("GH-111"))
+        assert planner is not None
+        planner.description = "Operator-adjusted planner instructions."
         session.commit()
 
     client.issues = [
@@ -600,9 +929,11 @@ def test_github_objective_resync_refreshes_planner_task_description():
     with SessionLocal() as session:
         planner = session.get(BuildTask, planner_task_id("GH-111"))
         assert planner is not None
-        assert "Updated objective" in planner.description
-        assert "updated rollout plan" in planner.description
-        assert "original plan" not in planner.description
+        assert planner.description == "Operator-adjusted planner instructions."
+        obj = session.get(BuildObjective, "GH-111")
+        assert obj is not None
+        assert "Updated objective" in obj.goal
+        assert "updated rollout plan" in obj.goal
 
 
 def test_github_objective_source_closure_suppresses_planner_without_completing_objective():

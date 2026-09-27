@@ -11,6 +11,10 @@ import logging
 import os
 import re
 import subprocess
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from typing import Any
 
 from sqlalchemy import select
@@ -31,6 +35,7 @@ from build_coordinator.task_source.base import (
     SOURCE_ELIGIBLE,
     SyncResult,
     TaskSource,
+    TaskSourceCapacityError,
     source_identity_metadata,
 )
 from build_coordinator.types import EventInput, OBJECTIVE_ROOT_COMPAT_REASON, ObjectiveSpec, TaskSpec
@@ -206,6 +211,16 @@ class GitHubTaskSource(TaskSource):
         self.eligibility_exclude_labels = configured_excludes or ("stagemesh:deferred",)
         self._outbound_events: list[dict[str, Any]] = []
         self._labels_ensured = False
+        self._label_warning_emitted = False
+        self._capacity_backoff_until = 0.0
+        self._last_capacity_wait: dict[str, Any] | None = None
+
+    def begin_sync_cycle(self) -> None:
+        self._label_warning_emitted = False
+
+    @property
+    def last_capacity_wait(self) -> dict[str, Any] | None:
+        return dict(self._last_capacity_wait) if self._last_capacity_wait else None
 
     def ensure_labels(self, session) -> bool:
         """Ensure every stagemesh:* lifecycle label exists in the repository.
@@ -227,17 +242,26 @@ class GitHubTaskSource(TaskSource):
                 if label not in existing:
                     self._create_label(label)
             self._labels_ensured = True
+            self._label_warning_emitted = False
             return True
         except Exception as exc:
             err = str(exc)
-            logger.warning("Failed to provision GitHub lifecycle labels for %s: %s", self.repo, err)
+            if not self._label_warning_emitted:
+                logger.warning("Failed to provision GitHub lifecycle labels for %s: %s", self.repo, err)
+                self._label_warning_emitted = True
             record_event(
                 session,
                 EventInput(
                     task_id=None,
                     event_type="task_source.label_provisioning_failed",
                     actor="github-sync",
-                    event_data={"error": err, "repo": self.repo},
+                    event_data={
+                        "error": err,
+                        "repo": self.repo,
+                        "capacity": self._capacity_error_from_message(err).as_dict()
+                        if self._is_rate_limit_message(err)
+                        else None,
+                    },
                 ),
             )
             session.flush()
@@ -348,10 +372,28 @@ class GitHubTaskSource(TaskSource):
 
     def discover_tasks(self, session) -> list[SyncResult]:
         """Fetch open issues from the repository and ingest into the durable queue."""
+        self._last_capacity_wait = None
         if not self.repo:
             return []
+        self._load_capacity_backoff(session)
+        if self._capacity_backoff_until > time.time():
+            self._last_capacity_wait = {
+                "provider": "github",
+                "reason": "RATE_LIMITED",
+                "message": f"GitHub task-source capacity is cooling down until {self._capacity_backoff_until:.0f}",
+                "repo": self.repo,
+                "backoff_until": self._capacity_backoff_until,
+            }
+            return self._cached_discovery_results(
+                session,
+                f"GitHub task-source capacity is cooling down until {self._capacity_backoff_until:.0f}",
+            )
         self.ensure_labels(session)
-        issues = self._fetch_issues()
+        try:
+            issues = self._fetch_issues()
+        except TaskSourceCapacityError as exc:
+            self._record_source_capacity_wait(session, exc)
+            return self._cached_discovery_results(session, str(exc))
         results: list[SyncResult] = []
         open_issue_numbers: set[int] = set()
         for issue in issues:
@@ -367,7 +409,16 @@ class GitHubTaskSource(TaskSource):
 
     def _fetch_issues(self) -> list[dict[str, Any]]:
         if self._client is not None:
-            return self._client.list_issues(repo=self.repo, labels=self.labels)
+            try:
+                return self._client.list_issues(repo=self.repo, labels=self.labels)
+            except Exception as exc:
+                if not self._is_rate_limit_message(str(exc)):
+                    raise
+                if hasattr(self._client, "list_issues_rest"):
+                    return self._fetch_client_issues_rest(exc)
+                if hasattr(self._client, "list_public_issues_rest"):
+                    return self._fetch_client_public_issues_rest(exc)
+                raise self._capacity_error_from_message(str(exc)) from exc
         cmd = [
             "gh",
             "issue",
@@ -388,14 +439,211 @@ class GitHubTaskSource(TaskSource):
             res = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", check=True)
             return json.loads(res.stdout)
         except FileNotFoundError:
-            raise RuntimeError("GitHub CLI ('gh') is not installed or not found on PATH")
+            return self._fetch_issues_public_rest()
         except subprocess.CalledProcessError as exc:
             err = (exc.stderr or exc.stdout or str(exc)).strip()
             if "not logged in" in err.lower() or "authentication" in err.lower() or "auth login" in err.lower():
-                raise RuntimeError(f"authentication unavailable for GitHub repository {self.repo}: {err}")
+                try:
+                    return self._fetch_issues_public_rest()
+                except RuntimeError:
+                    raise RuntimeError(f"authentication unavailable for GitHub repository {self.repo}: {err}") from exc
+            if self._is_rate_limit_message(err):
+                try:
+                    return self._fetch_issues_public_rest()
+                except TaskSourceCapacityError as rest_exc:
+                    raise rest_exc from exc
+                except RuntimeError:
+                    raise self._capacity_error_from_message(err) from exc
             raise RuntimeError(f"failed to fetch GitHub issues from {self.repo}: {err}")
         except Exception as exc:
+            if self._is_rate_limit_message(str(exc)):
+                raise self._capacity_error_from_message(str(exc)) from exc
             raise RuntimeError(f"failed to fetch GitHub issues from {self.repo}: {exc}")
+
+    def _fetch_issues_public_rest(self) -> list[dict[str, Any]]:
+        owner_repo = str(self.repo or "")
+        if "/" not in owner_repo:
+            raise RuntimeError(f"cannot use public GitHub REST fallback without owner/repo identity: {owner_repo}")
+        params: dict[str, str] = {"state": "open", "per_page": "100"}
+        if self.labels:
+            params["labels"] = ",".join(self.labels)
+        url = f"https://api.github.com/repos/{owner_repo}/issues?{urllib.parse.urlencode(params)}"
+        req = urllib.request.Request(
+            url,
+            headers={
+                "Accept": "application/vnd.github+json",
+                "User-Agent": "stagemesh-task-source",
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            retry_after = self._parse_retry_after(exc.headers.get("Retry-After"))
+            reset_at = exc.headers.get("X-RateLimit-Reset")
+            message = body or str(exc)
+            if self._is_rate_limited_http_response(exc.code, exc.headers, message):
+                raise TaskSourceCapacityError(
+                    f"GitHub REST rate limited for {self.repo}: {message}",
+                    provider="github",
+                    reason="RATE_LIMITED",
+                    retry_after_seconds=retry_after,
+                    reset_at=reset_at,
+                ) from exc
+            raise RuntimeError(f"GitHub public REST fallback failed for {self.repo}: HTTP {exc.code}: {message}") from exc
+        except Exception as exc:
+            if isinstance(exc, TaskSourceCapacityError):
+                raise
+            raise RuntimeError(f"GitHub public REST fallback failed for {self.repo}: {exc}") from exc
+
+        if not isinstance(payload, list):
+            raise RuntimeError(f"GitHub public REST fallback returned unexpected payload for {self.repo}")
+        issues: list[dict[str, Any]] = []
+        for item in payload:
+            if not isinstance(item, dict) or "pull_request" in item:
+                continue
+            issues.append(
+                {
+                    "number": item.get("number"),
+                    "title": item.get("title") or "",
+                    "body": item.get("body") or "",
+                    "labels": item.get("labels") or [],
+                    "url": item.get("html_url") or f"https://github.com/{self.repo}/issues/{item.get('number')}",
+                    "state": str(item.get("state") or "open").upper(),
+                }
+            )
+        return issues
+
+    def _fetch_client_issues_rest(self, original_exc: Exception) -> list[dict[str, Any]]:
+        try:
+            return self._client.list_issues_rest(repo=self.repo, labels=self.labels, authenticated=True)
+        except Exception as rest_exc:
+            if self._is_rate_limit_message(str(rest_exc)):
+                if hasattr(self._client, "list_public_issues_rest"):
+                    return self._fetch_client_public_issues_rest(rest_exc)
+                raise self._capacity_error_from_message(str(rest_exc)) from rest_exc
+            raise self._capacity_error_from_message(str(original_exc)) from rest_exc
+
+    def _fetch_client_public_issues_rest(self, original_exc: Exception) -> list[dict[str, Any]]:
+        try:
+            return self._client.list_public_issues_rest(repo=self.repo, labels=self.labels)
+        except Exception as rest_exc:
+            if self._is_rate_limit_message(str(rest_exc)):
+                raise self._capacity_error_from_message(str(rest_exc)) from rest_exc
+            raise self._capacity_error_from_message(str(original_exc)) from rest_exc
+
+    @staticmethod
+    def _parse_retry_after(value: str | None) -> int | None:
+        if not value:
+            return None
+        try:
+            return max(0, int(value))
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _is_rate_limit_message(message: str) -> bool:
+        lowered = message.lower()
+        return (
+            "rate limit" in lowered
+            or "secondary rate" in lowered
+            or "abuse detection" in lowered
+            or "api rate limit exceeded" in lowered
+            or "too many requests" in lowered
+        )
+
+    @staticmethod
+    def _is_rate_limited_http_response(code: int, headers: Any, message: str) -> bool:
+        if code == 429:
+            return True
+        if code != 403:
+            return False
+        remaining = None
+        if headers is not None:
+            remaining = headers.get("X-RateLimit-Remaining")
+        return remaining == "0" or GitHubTaskSource._is_rate_limit_message(message)
+
+    def _capacity_error_from_message(self, message: str) -> TaskSourceCapacityError:
+        retry_after = None
+        match = re.search(r"retry-?after[:= ]+(\d+)", message, flags=re.IGNORECASE)
+        if match:
+            retry_after = int(match.group(1))
+        return TaskSourceCapacityError(
+            f"GitHub task-source capacity unavailable for {self.repo}: {message}",
+            provider="github",
+            reason="RATE_LIMITED",
+            retry_after_seconds=retry_after,
+        )
+
+    def _record_source_capacity_wait(self, session, exc: TaskSourceCapacityError) -> None:
+        wait = exc.retry_after_seconds if exc.retry_after_seconds is not None else 60
+        self._capacity_backoff_until = max(self._capacity_backoff_until, time.time() + min(max(wait, 5), 900))
+        self._last_capacity_wait = {"repo": self.repo, **exc.as_dict(), "backoff_until": self._capacity_backoff_until}
+        record_event(
+            session,
+            EventInput(
+                task_id=None,
+                event_type="task_source.capacity_wait",
+                actor="github-sync",
+                event_data=self._last_capacity_wait,
+            ),
+        )
+        session.flush()
+
+    def _load_capacity_backoff(self, session) -> None:
+        if self._capacity_backoff_until > time.time():
+            return
+        events = session.scalars(
+            select(BuildTaskEvent)
+            .where(BuildTaskEvent.event_type == "task_source.capacity_wait")
+            .where(BuildTaskEvent.task_id.is_(None))
+            .order_by(BuildTaskEvent.created_at.desc())
+            .limit(20)
+        )
+        for event in events:
+            data = event.event_data or {}
+            if data.get("repo") != self.repo or data.get("provider") != "github":
+                continue
+            try:
+                backoff_until = float(data.get("backoff_until") or 0)
+            except (TypeError, ValueError):
+                backoff_until = 0.0
+            if backoff_until > time.time():
+                self._capacity_backoff_until = backoff_until
+            return
+
+    def _cached_discovery_results(self, session, detail: str) -> list[SyncResult]:
+        tasks = session.scalars(select(BuildTask)).all()
+        results: list[SyncResult] = []
+        for task in tasks:
+            metadata = dict(task.definition_metadata or {})
+            if (
+                metadata.get("source_type") == "github"
+                and metadata.get("source_owner") == self.repo
+                and str(metadata.get("source_state") or "OPEN").upper() == "OPEN"
+                and task_source_is_executable(task)
+            ):
+                results.append(
+                    SyncResult(
+                        task_id=task.task_id,
+                        title=task.title,
+                        action="SOURCE_CAPACITY_WAIT",
+                        source_ref=str(metadata.get("source_ref") or ""),
+                        details=f"Live GitHub discovery unavailable; reusing cached source state: {detail}",
+                    )
+                )
+        if results:
+            return results
+        return [
+            SyncResult(
+                task_id="",
+                title=f"GitHub task source {self.repo}",
+                action="SOURCE_CAPACITY_WAIT",
+                source_ref=str(self.repo or ""),
+                details=detail,
+            )
+        ]
 
     def _fetch_issue_by_number(self, issue_number: int) -> dict[str, Any] | None:
         if self._client is not None:
@@ -584,7 +832,7 @@ class GitHubTaskSource(TaskSource):
         source_url: str,
         source_state: str,
         previous_state: str,
-        eligibility: str = SOURCE_ELIGIBLE,
+        eligibility: str | None = None,
         eligibility_reason: str | None = None,
     ) -> None:
         planner = get_planner_task(session, objective.objective_id)
@@ -637,6 +885,7 @@ class GitHubTaskSource(TaskSource):
             was_current = self._objective_sync_is_current(session, task_id, title, body, ac, deps)
             existed = session.get(BuildObjective, task_id) is not None
             previous_eligibility = self._objective_source_eligibility(session, task_id)
+            previous_source_state = self._latest_objective_source_state(session, task_id)
             objective = self._sync_objective(
                 session,
                 task_id,
@@ -651,7 +900,9 @@ class GitHubTaskSource(TaskSource):
             )
             if not direct_execution:
                 current_eligibility = self._objective_source_eligibility(session, task_id)
-                if existed and previous_eligibility != current_eligibility:
+                if previous_source_state == "CLOSED":
+                    action = "SOURCE_OPEN"
+                elif existed and previous_eligibility != current_eligibility:
                     action = "SOURCE_ELIGIBILITY_CHANGED"
                 else:
                     action = "SKIPPED" if was_current else ("UPDATED" if existed else "CREATED")
@@ -709,7 +960,7 @@ class GitHubTaskSource(TaskSource):
         deps: list[str],
         labels: list[str],
         url: str,
-        eligibility: str = SOURCE_ELIGIBLE,
+        eligibility: str | None = None,
         eligibility_reason: str | None = None,
         objective_id: str | None = None,
     ) -> SyncResult:
@@ -820,6 +1071,7 @@ class GitHubTaskSource(TaskSource):
     ) -> None:
         if task.state != "DONE":
             return
+        label_set = {label.strip().lower() for label in labels}
         from_state = task.state
         task.state = "READY"
         task.current_claim_id = None
@@ -837,7 +1089,7 @@ class GitHubTaskSource(TaskSource):
                 event_data={
                     "source": url,
                     "reason": "GitHub issue is open again; reopening StageMesh task for dispatch",
-                    "had_stale_done_label": "stagemesh:done" in {label.strip().lower() for label in labels},
+                    "had_stale_done_label": "stagemesh:done" in label_set,
                 },
             ),
         )
@@ -955,7 +1207,7 @@ class GitHubTaskSource(TaskSource):
         deps: list[str],
         url: str,
         *,
-        eligibility: str = SOURCE_ELIGIBLE,
+        eligibility: str | None = None,
         eligibility_reason: str | None = None,
         reconcile_historical_root: bool = True,
     ) -> BuildObjective:

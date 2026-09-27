@@ -426,6 +426,22 @@ class RecordingTaskSource:
         return True
 
 
+class CapacityWaitTaskSource(RecordingTaskSource):
+    def __init__(self):
+        super().__init__()
+        self.last_capacity_wait = None
+
+    def discover_tasks(self, session):
+        self.discoveries += 1
+        self.last_capacity_wait = {
+            "provider": "github",
+            "reason": "RATE_LIMITED",
+            "message": "GitHub task-source capacity unavailable",
+            "repo": "example/repo",
+        }
+        return []
+
+
 def _git(cwd: Path, *args: str) -> str:
     result = subprocess.run(
         ["git", *args],
@@ -1001,6 +1017,29 @@ def test_live_builder_drains_after_task_becomes_deferred_without_outbound_done_s
             )
         ]
         assert roles == ["BUILDER"]
+
+
+def test_runner_marks_capacity_full_when_task_source_reports_capacity_wait():
+    task_source = CapacityWaitTaskSource()
+    runner = BuildRunner(
+        SessionLocal,
+        _config(),
+        executors={},
+        git=FakeGit(),
+        task_source=task_source,
+    )
+
+    result = runner.run_once()
+
+    assert result.capacity_full is True
+    assert task_source.discoveries == 1
+    with SessionLocal() as session:
+        events = session.scalars(
+            select(BuildTaskEvent).where(BuildTaskEvent.event_type == "runner.task_source_capacity_wait")
+        ).all()
+    assert len(events) == 1
+    assert events[0].event_data["provider"] == "github"
+    assert events[0].event_data["reason"] == "RATE_LIMITED"
 
 
 def test_validation_runs_in_background_while_ready_tasks_dispatch():
