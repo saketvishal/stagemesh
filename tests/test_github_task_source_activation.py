@@ -514,7 +514,7 @@ def test_direct_execution_opt_in_revives_historical_objective_root_task():
         assert task_is_claimable(session, task, utcnow()) is True
 
 
-def test_gh_71_objective_waits_for_gh_75_authoritative_completion_after_reimport():
+def test_gh_71_objective_waits_when_open_gh_75_reopens_after_reimport():
     issues = [
         {
             "number": 75,
@@ -556,4 +556,6 @@ def test_gh_71_objective_waits_for_gh_75_authoritative_completion_after_reimport
 
     with SessionLocal() as session:
         assert session.get(BuildObjective, "GH-71").dependencies == ["GH-75"]
-        assert task_is_claimable(session, session.get(BuildTask, planner_task_id("GH-71")), utcnow()) is True
+        gh75 = session.get(BuildTask, "GH-75")
+        assert gh75.state == "READY"
+        assert task_is_claimable(session, session.get(BuildTask, planner_task_id("GH-71")), utcnow()) is False

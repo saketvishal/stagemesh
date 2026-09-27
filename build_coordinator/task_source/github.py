@@ -28,7 +28,7 @@ from build_coordinator.models import (
     BuildTaskEvent,
     TASK_STATES,
 )
-from build_coordinator.objectives import _ensure_planner_task, _planner_task_description, create_objective, get_planner_task
+from build_coordinator.objectives import _ensure_planner_task, create_objective, get_planner_task
 from build_coordinator.service import upsert_task, utcnow
 from build_coordinator.task_source.base import (
     SOURCE_DEFERRED,
@@ -214,6 +214,9 @@ class GitHubTaskSource(TaskSource):
         self._label_warning_emitted = False
         self._capacity_backoff_until = 0.0
         self._last_capacity_wait: dict[str, Any] | None = None
+
+    def begin_sync_cycle(self) -> None:
+        self._label_warning_emitted = False
 
     @property
     def last_capacity_wait(self) -> dict[str, Any] | None:
@@ -1032,8 +1035,7 @@ class GitHubTaskSource(TaskSource):
                     },
                 ),
             )
-        if source_was_closed:
-            self._reconcile_reopened_task_from_open_issue(session, task, labels, url)
+        self._reconcile_reopened_task_from_open_issue(session, task, labels, url)
         if objective_id:
             task.objective_id = objective_id
             if task.reason_created == OBJECTIVE_ROOT_COMPAT_REASON:
@@ -1069,6 +1071,7 @@ class GitHubTaskSource(TaskSource):
     ) -> None:
         if task.state != "DONE":
             return
+        label_set = {label.strip().lower() for label in labels}
         from_state = task.state
         task.state = "READY"
         task.current_claim_id = None
@@ -1086,7 +1089,7 @@ class GitHubTaskSource(TaskSource):
                 event_data={
                     "source": url,
                     "reason": "GitHub issue is open again; reopening StageMesh task for dispatch",
-                    "had_stale_done_label": "stagemesh:done" in {label.strip().lower() for label in labels},
+                    "had_stale_done_label": "stagemesh:done" in label_set,
                 },
             ),
         )

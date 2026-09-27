@@ -288,6 +288,9 @@ class BuildRunner:
         result = RunnerCycleResult(mode=state.mode)
         if self._task_source is not None and state.mode != "PAUSED":
             try:
+                begin_sync_cycle = getattr(self._task_source, "begin_sync_cycle", None)
+                if callable(begin_sync_cycle):
+                    begin_sync_cycle()
                 self._task_source.discover_tasks(session)
                 source_capacity_wait = getattr(self._task_source, "last_capacity_wait", None)
                 if source_capacity_wait:
