@@ -900,6 +900,8 @@ def recover_lost_execution_claims(
     recovered: list[BuildTask] = []
     now = utcnow()
     for execution in terminal:
+        if execution.adapter == "validation":
+            continue
         claim = session.get(BuildTaskClaim, execution.claim_id)
         if claim is None or claim.status != "ACTIVE":
             continue

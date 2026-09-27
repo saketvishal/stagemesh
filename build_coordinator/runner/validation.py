@@ -13,6 +13,7 @@ import json
 import shlex
 import shutil
 import subprocess
+import sys
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -130,43 +131,88 @@ class ValidationExecutor:
     def __init__(self, *, timeout_seconds: float = 900) -> None:
         self._timeout_seconds = timeout_seconds
         self._runs: dict[str, dict[str, Any]] = {}
+        self._result_paths: dict[str, str] = {}
+
+    def remember_result_path(self, execution_id: str, result_path: str | None) -> None:
+        if result_path:
+            self._result_paths[execution_id] = result_path
 
     def launch(self, launch: ExecutionLaunch) -> ExecutionHandle:
         execution_id = launch.execution_id or str(uuid4())
+        if launch.result_path:
+            self.remember_result_path(execution_id, launch.result_path)
         commands = list(launch.metadata.get("commands") or [])
         if not commands:
-            self._runs[execution_id] = {"completed": ExecutionObservation(status="SUCCEEDED", result_data={"passed": True, "results": []})}
+            result_data = {"passed": True, "results": []}
+            self._write_result_file(execution_id, "SUCCEEDED", result_data)
+            self._runs[execution_id] = {"completed": ExecutionObservation(status="SUCCEEDED", result_data=result_data)}
             return ExecutionHandle(execution_id=execution_id)
-        self._runs[execution_id] = {
-            "commands": commands,
-            "cwd": launch.worktree_path,
-            "env": dict(launch.extra_env or {}),
-            "environment_fingerprint": validation_environment_fingerprint(launch.extra_env),
-            "index": 0,
-            "results": [],
-            "process": None,
-            "started": None,
-            "started_at": None,
-        }
-        self._start_next(execution_id)
+        result_path = self._result_paths.get(execution_id)
+        if result_path:
+            spec_path = Path(result_path).with_suffix(Path(result_path).suffix + ".validation-spec.json")
+            spec_path.parent.mkdir(parents=True, exist_ok=True)
+            spec_path.write_text(
+                json.dumps(
+                    {
+                        "execution_id": execution_id,
+                        "task_id": launch.task_id,
+                        "role": launch.role,
+                        "commands": commands,
+                        "cwd": launch.worktree_path,
+                        "timeout_seconds": self._timeout_seconds,
+                        "env": dict(launch.extra_env or {}),
+                    },
+                    sort_keys=True,
+                ),
+                encoding="utf-8",
+            )
+            env = {**os.environ, **dict(launch.extra_env or {})}
+            env["STAGEMESH_VALIDATION_SPEC_PATH"] = str(spec_path)
+            env["STAGEMESH_VALIDATION_RESULT_PATH"] = result_path
+            controller_root = str(Path(__file__).resolve().parents[2])
+            existing_pythonpath = env.get("PYTHONPATH")
+            env["PYTHONPATH"] = (
+                controller_root
+                if not existing_pythonpath
+                else os.pathsep.join([controller_root, existing_pythonpath])
+            )
+            process = subprocess.Popen(
+                [sys.executable, str(Path(__file__).resolve())],
+                cwd=launch.worktree_path or None,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL,
+                env=env,
+                **_popen_kwargs(),
+            )
+            self._runs[execution_id] = {"process": process}
+        else:
+            self._runs[execution_id] = {
+                "commands": commands,
+                "cwd": launch.worktree_path,
+                "env": dict(launch.extra_env or {}),
+                "environment_fingerprint": validation_environment_fingerprint(launch.extra_env),
+                "index": 0,
+                "results": [],
+                "process": None,
+                "started": None,
+                "started_at": None,
+            }
+            self._start_next(execution_id)
         process = self._runs[execution_id].get("process")
         return ExecutionHandle(
             execution_id=execution_id,
             process_id=str(process.pid) if process is not None else None,
+            result_path=result_path,
         )
 
     def poll(self, execution_id: str) -> ExecutionObservation:
         run = self._runs.get(execution_id)
         if run is None:
-            return ExecutionObservation(
-                status="LOST",
-                result_data={
-                    "reconciliation_state": "LOST",
-                    "validation_lost": True,
-                    "validation_terminal_type": "LOST",
-                    "ended_at": _utc_now_iso(),
-                },
-            )
+            reconciled = self._observation_from_result_file(execution_id)
+            if reconciled is not None:
+                return reconciled
+            return self._lost_observation(execution_id)
         completed = run.pop("completed", None)
         if completed is not None:
             self._runs.pop(execution_id, None)
@@ -191,6 +237,12 @@ class ValidationExecutor:
         exit_code = process.poll()
         if exit_code is None:
             return ExecutionObservation(status="RUNNING")
+        if "commands" not in run:
+            self._runs.pop(execution_id, None)
+            reconciled = self._observation_from_result_file(execution_id, exit_code=int(exit_code))
+            if reconciled is not None:
+                return reconciled
+            return self._lost_observation(execution_id, exit_code=int(exit_code))
         stdout, stderr = process.communicate()
         return self._finish_command(execution_id, int(exit_code), (stdout or "") + (stderr or ""), started)
 
@@ -205,6 +257,66 @@ class ValidationExecutor:
         return ExecutionObservation(
             status="TERMINATED",
             result_data={"validation_terminal_type": "CANCELLED", "ended_at": _utc_now_iso()},
+        )
+
+    def _write_result_file(self, execution_id: str, status: str, result_data: dict[str, Any]) -> None:
+        result_path = self._result_paths.get(execution_id)
+        if not result_path:
+            return
+        payload = {"status": status, **result_data}
+        path = Path(result_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+
+    def _observation_from_result_file(
+        self,
+        execution_id: str,
+        *,
+        exit_code: int | None = None,
+    ) -> ExecutionObservation | None:
+        result_path = self._result_paths.get(execution_id)
+        if not result_path:
+            return None
+        path = Path(result_path)
+        if not path.is_file():
+            return None
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            return ExecutionObservation(
+                status="FAILED",
+                exit_code=exit_code,
+                result_data={
+                    "passed": False,
+                    "results": [],
+                    "validation_terminal_type": "INVALID_RESULT",
+                    "error": str(exc),
+                    "ended_at": _utc_now_iso(),
+                },
+                result_path=result_path,
+            )
+        status = str(payload.pop("status", "SUCCEEDED" if exit_code in (None, 0) else "FAILED")).upper()
+        if status not in {"SUCCEEDED", "FAILED", "TERMINATED", "LOST"}:
+            status = "FAILED"
+            payload = {
+                **payload,
+                "passed": False,
+                "validation_terminal_type": "INVALID_RESULT_STATUS",
+                "error": "invalid validation result status",
+            }
+        return ExecutionObservation(status=status, exit_code=exit_code, result_data=payload, result_path=result_path)
+
+    def _lost_observation(self, execution_id: str, *, exit_code: int | None = None) -> ExecutionObservation:
+        return ExecutionObservation(
+            status="LOST",
+            exit_code=exit_code,
+            result_data={
+                "reconciliation_state": "LOST",
+                "validation_lost": True,
+                "validation_terminal_type": "LOST",
+                "ended_at": _utc_now_iso(),
+            },
+            result_path=self._result_paths.get(execution_id),
         )
 
     def _start_next(self, execution_id: str) -> None:
@@ -222,6 +334,7 @@ class ValidationExecutor:
                     "environment_fingerprint": run.get("environment_fingerprint"),
                 },
             )
+            self._write_result_file(execution_id, "SUCCEEDED", run["completed"].result_data)
             return
         command = commands[index]
         started = time.monotonic()
@@ -264,6 +377,7 @@ class ValidationExecutor:
                     "ended_at": _utc_now_iso(),
                 },
             )
+            self._write_result_file(execution_id, "FAILED", run["completed"].result_data)
 
     def _finish_command(
         self,
@@ -293,7 +407,7 @@ class ValidationExecutor:
         run["started_at"] = None
         if exit_code != 0:
             self._runs.pop(execution_id, None)
-            return ExecutionObservation(
+            observation = ExecutionObservation(
                 status="FAILED",
                 exit_code=exit_code,
                 result_data={
@@ -303,6 +417,8 @@ class ValidationExecutor:
                     "ended_at": _utc_now_iso(),
                 },
             )
+            self._write_result_file(execution_id, "FAILED", observation.result_data)
+            return observation
         run["index"] = int(run["index"]) + 1
         self._start_next(execution_id)
         completed = run.pop("completed", None)
@@ -310,3 +426,57 @@ class ValidationExecutor:
             self._runs.pop(execution_id, None)
             return completed
         return ExecutionObservation(status="RUNNING")
+
+
+def _popen_kwargs() -> dict[str, Any]:
+    if os.name != "nt":
+        return {}
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    return {"startupinfo": startupinfo}
+
+
+def _run_worker_from_env() -> int:
+    spec_path = os.environ.get("STAGEMESH_VALIDATION_SPEC_PATH")
+    result_path = os.environ.get("STAGEMESH_VALIDATION_RESULT_PATH")
+    if not spec_path or not result_path:
+        return 2
+    try:
+        spec = json.loads(Path(spec_path).read_text(encoding="utf-8"))
+        commands = [str(command) for command in spec.get("commands") or []]
+        cwd = str(spec.get("cwd") or os.getcwd())
+        timeout_seconds = float(spec.get("timeout_seconds") or 900)
+        env = {str(key): str(value) for key, value in dict(spec.get("env") or {}).items()}
+        outcome = run_validation(commands, cwd, timeout_seconds=timeout_seconds, env=env)
+        terminal = "PASSED" if outcome.passed else next(
+            (
+                str(item.get("failure_type") or "EXIT_CODE")
+                for item in outcome.results
+                if int(item.get("exit_code") or 0) != 0
+            ),
+            "EXIT_CODE",
+        )
+        payload = {
+            "status": "SUCCEEDED" if outcome.passed else "FAILED",
+            "passed": outcome.passed,
+            "results": outcome.results,
+            "validation_terminal_type": terminal,
+            "ended_at": _utc_now_iso(),
+            "environment_fingerprint": validation_environment_fingerprint(env),
+        }
+    except Exception as exc:  # pragma: no cover - last-ditch durable diagnostics
+        payload = {
+            "status": "FAILED",
+            "passed": False,
+            "results": [],
+            "validation_terminal_type": "VALIDATION_WORKER_ERROR",
+            "error": str(exc),
+            "ended_at": _utc_now_iso(),
+        }
+    Path(result_path).parent.mkdir(parents=True, exist_ok=True)
+    Path(result_path).write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+    return 0 if payload.get("status") == "SUCCEEDED" else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(_run_worker_from_env())
