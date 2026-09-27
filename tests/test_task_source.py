@@ -95,7 +95,7 @@ def test_github_task_source_syncs_standard_task():
                     "- Add unit test\n\n"
                     "Blocked by: GH-100"
                 ),
-                "labels": [{"name": "review:independent"}, {"name": "risk:high"}],
+                "labels": [{"name": "review:independent-worker"}, {"name": "risk:high"}],
                 "url": "https://github.com/example/repo/issues/101",
             }
         ]
@@ -224,6 +224,29 @@ def test_github_rate_limit_without_cache_reports_capacity_not_empty_queue():
     assert len(results) == 1
     assert results[0].action == "SOURCE_CAPACITY_WAIT"
     assert results[0].task_id == ""
+
+
+def test_github_rate_limit_backoff_skips_repeated_live_discovery():
+    class CountingRateLimitedClient(FakeGitHubClient):
+        def __init__(self):
+            super().__init__([])
+            self.calls = 0
+
+        def list_issues(self, repo: str, labels: tuple[str, ...]):
+            self.calls += 1
+            raise RuntimeError("secondary rate limit exceeded; retry-after: 120")
+
+    client = CountingRateLimitedClient()
+    source = GitHubTaskSource(repo="example/repo", client=client)
+
+    with SessionLocal() as session:
+        first = source.discover_tasks(session)
+        second = source.discover_tasks(session)
+        session.commit()
+
+    assert client.calls == 1
+    assert first[0].action == "SOURCE_CAPACITY_WAIT"
+    assert second[0].action == "SOURCE_CAPACITY_WAIT"
 
 
 def test_client_rest_rate_limit_after_graphql_reuses_cached_state():

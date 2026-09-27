@@ -365,6 +365,11 @@ class GitHubTaskSource(TaskSource):
         """Fetch open issues from the repository and ingest into the durable queue."""
         if not self.repo:
             return []
+        if self._capacity_backoff_until > time.time():
+            return self._cached_discovery_results(
+                session,
+                f"GitHub task-source capacity is cooling down until {self._capacity_backoff_until:.0f}",
+            )
         self.ensure_labels(session)
         try:
             issues = self._fetch_issues()
@@ -986,8 +991,7 @@ class GitHubTaskSource(TaskSource):
                     },
                 ),
             )
-        has_stale_done_label = "stagemesh:done" in {label.strip().lower() for label in labels}
-        if source_was_closed or has_stale_done_label:
+        if source_was_closed:
             self._reconcile_reopened_task_from_open_issue(session, task, labels, url)
         if objective_id:
             task.objective_id = objective_id
@@ -1052,7 +1056,6 @@ class GitHubTaskSource(TaskSource):
         mapping = (
             ("review:none", "NONE"),
             ("review:self", "SELF"),
-            ("review:independent", "INDEPENDENT_WORKER"),
             ("review:independent-worker", "INDEPENDENT_WORKER"),
             ("review:independent_provider", "INDEPENDENT_PROVIDER"),
             ("review:independent-provider", "INDEPENDENT_PROVIDER"),
@@ -1062,7 +1065,7 @@ class GitHubTaskSource(TaskSource):
         for label, policy in mapping:
             if label in normalized:
                 return policy
-        return "SELF"
+        return "INDEPENDENT_WORKER"
 
     def _record_sync_event(
         self,
@@ -1182,8 +1185,6 @@ class GitHubTaskSource(TaskSource):
             if planner is None and existing.state == "PLANNING":
                 planner = _ensure_planner_task(session, existing)
             if planner is not None:
-                planner.title = f"Plan objective {objective_id}"
-                planner.description = _planner_task_description(existing)
                 planner.dependencies = authoritative_deps
                 self._apply_planner_source_metadata(
                     planner,
