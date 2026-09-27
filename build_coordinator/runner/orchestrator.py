@@ -1229,7 +1229,7 @@ class BuildRunner:
                 },
             ),
         )
-        if execution.claim_id:
+        if execution.claim_id and merged.get("validation_terminal_type") != "STALE_VALIDATION_CONTEXT":
             claim = session.get(BuildTaskClaim, execution.claim_id)
             checkpoint(
                 session,
