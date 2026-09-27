@@ -64,7 +64,9 @@ from build_coordinator.service import (
     ClaimRequest,
     TaskSpec,
     claim_task,
+    reconcile_stale_executions,
     recover_expired,
+    request_task_input,
     upsert_task,
     utcnow,
 )
@@ -302,3 +304,82 @@ def test_confirmed_dead_process_still_recovers_normally_and_allows_redispatch():
             select(BuildRunnerExecution).where(BuildRunnerExecution.task_id == "CEP-3")
         ).all()
         assert len(all_builder_rows) == 2  # original (terminated) + replacement
+
+def test_reconcile_stale_executions_preserves_confirmed_alive_claimless_row():
+    """Independent-review-flagged gap: `reconcile_stale_executions`'s
+    no-claim branch (a row whose claim_id was cleared entirely, e.g. a
+    fully-deleted claim rather than merely an expired one) terminated
+    unconditionally with no process-identity check at all -- unlike the
+    claim-present branch a few lines below it, which this fix already
+    protects. A claimless row is stronger ownership evidence than a merely
+    -stale claim, but it is still not process evidence: the same
+    confirmed-alive process must not be killed just because its claim_id
+    is gone."""
+    proc = subprocess.Popen(_sleep_command(5))
+    try:
+        assert _wait_alive(proc.pid, True)
+        with SessionLocal() as session:
+            upsert_task(session, _task("CEP-4"))
+            session.add(
+                BuildRunnerExecution(
+                    execution_id="CEP-4-claimless-live",
+                    task_id="CEP-4",
+                    role="BUILDER",
+                    worker_id="builder-a",
+                    provider="local",
+                    adapter="fake",
+                    claim_id=None,
+                    status="RUNNING",
+                    worktree_path=str(Path.cwd()),
+                    process_id=str(proc.pid),
+                    process_start_key=None,
+                )
+            )
+            session.commit()
+
+        with SessionLocal() as session:
+            terminated = reconcile_stale_executions(session)
+            execution = session.get(BuildRunnerExecution, "CEP-4-claimless-live")
+
+            assert "CEP-4-claimless-live" not in {row.execution_id for row in terminated}
+            assert execution.status == "RUNNING"
+
+        assert _wait_alive(proc.pid, True)  # not killed by reconciliation
+    finally:
+        subprocess.run(["kill", "-9", str(proc.pid)])
+
+
+def test_request_task_input_preserves_confirmed_alive_execution_under_same_claim():
+    """Independent-review-flagged gap: `request_task_input` releases the
+    implementation claim/lease when a task moves to WAITING_FOR_INPUT, and
+    called `terminate_executions_for_claim` with no `exclude_execution_ids`
+    -- so any other LAUNCHED/RUNNING row sharing that claim_id (validation
+    shares the BUILDER/REMEDIATION claim_id; there is no dedicated
+    VALIDATION claim_type) would be killed with no process-identity check,
+    purely because of this state transition, even if it was confirmed or
+    ambiguously still alive."""
+    proc = subprocess.Popen(_sleep_command(5))
+    try:
+        assert _wait_alive(proc.pid, True)
+        claim_id, execution_id = _seed_claimed_builder_with_real_process(
+            "CEP-5", proc, process_start_key=None
+        )
+
+        with SessionLocal() as session:
+            task = request_task_input(session, "CEP-5", "need a decision", claim_id=claim_id)
+            execution = session.get(BuildRunnerExecution, execution_id)
+            lease = session.scalar(
+                select(BuildWorkerLease).where(BuildWorkerLease.execution_id == execution_id)
+            )
+
+            assert task.state == "WAITING_FOR_INPUT"
+            # Not terminated and not released: the confirmed/ambiguously
+            # alive execution and its worker lease are left exactly as
+            # they were, even though claim/lease ownership itself moved on.
+            assert execution.status == "RUNNING"
+            assert lease.status == "ACTIVE"
+
+        assert _wait_alive(proc.pid, True)  # not killed by the transition
+    finally:
+        subprocess.run(["kill", "-9", str(proc.pid)])
+
