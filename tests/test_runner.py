@@ -86,6 +86,20 @@ def _task(task_id: str, *, review_policy="INDEPENDENT", migration_allowed=False)
     )
 
 
+def _validated_execution(task_id: str, sha: str) -> BuildRunnerExecution:
+    return BuildRunnerExecution(
+        execution_id=f"validation-{task_id}",
+        task_id=task_id,
+        role="BUILDER",
+        worker_id="runner-validation",
+        provider="runner",
+        adapter="validation",
+        status="SUCCEEDED",
+        reviewed_feature_sha=sha,
+        result_data={"passed": True, "validated_sha": sha},
+    )
+
+
 def test_claim_task_uses_task_owned_canonical_branch_over_worker_override():
     with SessionLocal() as session:
         upsert_task(session, _task("GH-60"))
@@ -1846,13 +1860,14 @@ def test_review_ready_dispatches_independent_reviewer_not_builder():
 
 
 def test_green_review_dispatches_integration_and_push_policy_blocks_resumably():
+    feature_sha = "feature-sha"
     executors = {
         "reviewer-1": FakeExecutor(
             [
                 ExecutionObservation(
                     "SUCCEEDED",
                     result_data={
-                        "feature_sha": "abc123",
+                        "feature_sha": feature_sha,
                         "review": {"verdict": "GREEN", "ready_for_integration": True},
                     },
                 )
@@ -1866,6 +1881,7 @@ def test_green_review_dispatches_integration_and_push_policy_blocks_resumably():
         transition_task(session, "RUN-GREEN", "IN_PROGRESS")
         transition_task(session, "RUN-GREEN", "VALIDATING")
         transition_task(session, "RUN-GREEN", "REVIEW_READY")
+        session.add(_validated_execution("RUN-GREEN", feature_sha))
         session.commit()
 
     _runner(executors=executors).run_once()
@@ -1878,12 +1894,14 @@ def test_green_review_dispatches_integration_and_push_policy_blocks_resumably():
 
 
 def test_green_with_notes_without_remediation_is_integration_eligible():
+    feature_sha = "feature-sha"
     executors = {
         "reviewer-1": FakeExecutor(
             [
                 ExecutionObservation(
                     "SUCCEEDED",
                     result_data={
+                        "feature_sha": feature_sha,
                         "review": {
                             "verdict": "GREEN_WITH_NOTES",
                             "findings": ["minor note"],
@@ -1901,6 +1919,7 @@ def test_green_with_notes_without_remediation_is_integration_eligible():
         transition_task(session, "RUN-NOTES", "IN_PROGRESS")
         transition_task(session, "RUN-NOTES", "VALIDATING")
         transition_task(session, "RUN-NOTES", "REVIEW_READY")
+        session.add(_validated_execution("RUN-NOTES", feature_sha))
         session.commit()
 
     _runner(executors=executors).run_once()
@@ -1912,6 +1931,60 @@ def test_green_with_notes_without_remediation_is_integration_eligible():
         )
         assert execution is not None
         assert execution.result_data is not None
+
+
+def test_green_review_without_matching_validation_launches_validation_not_integration():
+    head_sha = subprocess.run(
+        ["git", "-c", "safe.directory=C:/stagemesh", "rev-parse", "HEAD"],
+        cwd=str(Path.cwd()),
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    executors = {
+        "reviewer-1": FakeExecutor(
+            [
+                ExecutionObservation(
+                    "SUCCEEDED",
+                    result_data={
+                        "feature_sha": head_sha,
+                        "review": {"verdict": "GREEN", "ready_for_integration": True},
+                    },
+                )
+            ]
+        ),
+        "integration-1": FakeExecutor([ExecutionObservation("SUCCEEDED")]),
+    }
+    with SessionLocal() as session:
+        task = upsert_task(session, _task("RUN-GREEN-NEEDS-VALIDATION"))
+        task.worktree_path = str(Path.cwd())
+        claim_task(session, ClaimRequest(task.task_id, worker_id="builder-a"))
+        transition_task(session, task.task_id, "IN_PROGRESS")
+        transition_task(session, task.task_id, "VALIDATING")
+        transition_task(session, task.task_id, "REVIEW_READY")
+        session.commit()
+
+    runner = _runner(executors=executors)
+    runner.run_once()
+    result = runner.run_once()
+
+    assert result.launched
+    with SessionLocal() as session:
+        task = session.get(BuildTask, "RUN-GREEN-NEEDS-VALIDATION")
+        assert task.state == "VALIDATING"
+        validation = session.scalar(
+            select(BuildRunnerExecution)
+            .where(BuildRunnerExecution.task_id == task.task_id)
+            .where(BuildRunnerExecution.adapter == "validation")
+        )
+        integration = session.scalar(
+            select(BuildRunnerExecution)
+            .where(BuildRunnerExecution.task_id == task.task_id)
+            .where(BuildRunnerExecution.role == "INTEGRATION")
+        )
+        assert validation is not None
+        assert validation.reviewed_feature_sha == "feature-sha"
+        assert integration is None
 
 
 def test_integration_resume_context_failure_preserves_policy_error(monkeypatch):
