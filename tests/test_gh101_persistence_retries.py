@@ -5,6 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+from sqlalchemy.exc import OperationalError
+
 from build_coordinator.db import DatabaseBusyError
 
 
@@ -128,6 +130,61 @@ def test_watcher_lock_acquisition_retries_from_fresh_session_after_typed_busy_co
     assert acquisitions[0] in lifecycle.sessions
     assert acquisitions[1] in lifecycle.sessions
     assert acquisitions[0] is not acquisitions[1]
+
+
+def test_runner_command_lock_acquisition_retries_on_transient_sqlite_busy(monkeypatch):
+    """GH-101: `stagemesh run`'s coordinator lock acquisition (cli._runner)
+    must be retried under `with_sqlite_retry`, mirroring `stagemesh continue`,
+    instead of surfacing a raw OperationalError from a short-lived writer
+    lock during startup."""
+    from build_coordinator import cli
+
+    attempts = {"acquire": 0, "commit": 0}
+
+    def flaky_acquire_coordinator_lock(_session, *, instance_id):
+        attempts["acquire"] += 1
+        if attempts["acquire"] == 1:
+            raise OperationalError("INSERT", {}, Exception("database is locked"))
+        return SimpleNamespace(recovered_stale=False, record=SimpleNamespace())
+
+    def counting_commit_or_busy(_session):
+        attempts["commit"] += 1
+
+    run_once_calls = {"count": 0}
+
+    class _Runner:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def run_once(self):
+            run_once_calls["count"] += 1
+            return SimpleNamespace(
+                mode="RUNNING",
+                recovered=[],
+                launched=[],
+                observed=[],
+                escalations=[],
+                capacity_full=False,
+                objectives_reconciled=0,
+                objective_follow_ups_created=0,
+                objective_unrelated_tasks_created=0,
+                objective_gates_raised=0,
+                objectives_completed=0,
+            )
+
+    monkeypatch.setattr(cli, "acquire_coordinator_lock", flaky_acquire_coordinator_lock)
+    monkeypatch.setattr(cli, "heartbeat_coordinator_lock", lambda *_a, **_k: None)
+    monkeypatch.setattr(cli, "release_coordinator_lock", lambda *_a, **_k: None)
+    monkeypatch.setattr(cli, "commit_or_busy", counting_commit_or_busy)
+    monkeypatch.setattr(cli, "BuildRunner", _Runner)
+    printed: list[dict] = []
+    monkeypatch.setattr(cli, "_print", printed.append)
+
+    cli._runner(SimpleNamespace(once=True, dry_run=False), session=SimpleNamespace())
+
+    assert attempts["acquire"] == 2
+    assert run_once_calls["count"] == 1
+    assert printed and printed[0]["mode"] == "RUNNING"
 
 
 def test_github_persistence_modules_do_not_commit_raw_sessions():
