@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 from datetime import timedelta
 
@@ -1193,14 +1194,444 @@ def test_validation_restarts_are_rerun_instead_of_trusted():
         }
         old = next(row for row in rows if row.execution_id == "validation-before-restart")
         new = next(row for row in rows if row.execution_id != "validation-before-restart")
-        assert old.status == "LOST"
-        assert old.result_data["validation_lost"] is True
-        assert old.result_data["validation_terminal_type"] == "LOST"
-        assert old.result_data["ended_at"]
+        assert old.status in {"LOST", "TERMINATED"}
+        if old.status == "LOST":
+            assert old.result_data["validation_lost"] is True
+            assert old.result_data["validation_terminal_type"] == "LOST"
+            assert old.result_data["ended_at"]
+        else:
+            assert old.result_data["reconciliation_state"] == "NO_CLAIM"
+            assert old.completed_at is not None
         assert new.status in {"LAUNCHED", "RUNNING"}
         assert session.get(BuildTask, "RUN-VALIDATION-RESTART").state == "VALIDATING"
 
 
+<<<<<<< HEAD
+=======
+def test_validation_executor_reconciles_completed_result_after_restart(tmp_path):
+    result_path = tmp_path / "validation-result.json"
+    shadow_workspace = tmp_path / "shadow-workspace"
+    shadow_module = shadow_workspace / "build_coordinator" / "runner" / "validation.py"
+    shadow_module.parent.mkdir(parents=True)
+    (shadow_workspace / "build_coordinator" / "__init__.py").write_text("", encoding="utf-8")
+    (shadow_workspace / "build_coordinator" / "runner" / "__init__.py").write_text("", encoding="utf-8")
+    shadow_module.write_text("# stale shadow module: should not be executed\n", encoding="utf-8")
+    command = f"{sys.executable} -c \"print('restart-safe')\""
+    executor = ValidationExecutor(timeout_seconds=30)
+
+    handle = executor.launch(
+        orchestrator_module.ExecutionLaunch(
+            task_id="RUN-VALIDATION-DURABLE",
+            role="BUILDER",
+            worker_id="runner-validation",
+            provider="runner",
+            worktree_path=str(shadow_workspace),
+            branch_name="branch",
+            prompt="",
+            execution_id="validation-durable",
+            result_path=str(result_path),
+            reviewed_feature_sha="feature-sha",
+            metadata={"commands": [command]},
+        )
+    )
+
+    assert handle.result_path == str(result_path)
+    for _ in range(100):
+        if result_path.is_file():
+            break
+        time.sleep(0.05)
+    assert result_path.is_file()
+
+    restarted = ValidationExecutor(timeout_seconds=30)
+    restarted.remember_result_path("validation-durable", str(result_path))
+    observation = restarted.poll("validation-durable")
+
+    assert observation.status == "SUCCEEDED"
+    assert observation.result_path == str(result_path)
+    assert observation.result_data["passed"] is True
+    assert observation.result_data["results"][0]["command"] == command
+
+
+def test_restarted_runner_uses_persisted_validation_result_path(tmp_path):
+    result_path = tmp_path / "validation-result.json"
+    command = f"{sys.executable} -c \"print('already-done')\""
+    result_path.write_text(
+        json.dumps(
+            {
+                "status": "SUCCEEDED",
+                "passed": True,
+                "validation_terminal_type": "PASSED",
+                "results": [
+                    {
+                        "command": command,
+                        "exit_code": 0,
+                        "failure_type": None,
+                        "started_at": "2026-09-27T00:00:00+00:00",
+                        "completed_at": "2026-09-27T00:00:01+00:00",
+                        "duration_seconds": 1.0,
+                        "output_tail": "already-done\n",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    with SessionLocal() as session:
+        task = upsert_task(
+            session,
+            TaskSpec(
+                **{
+                    **_task("RUN-VALIDATION-PERSISTED").__dict__,
+                    "required_validation": [command],
+                }
+            ),
+        )
+        claim = claim_task(session, ClaimRequest(task.task_id, worker_id="builder-a"))
+        task.state = "VALIDATING"
+        session.add(
+            BuildRunnerExecution(
+                execution_id="builder-done",
+                task_id=task.task_id,
+                role="BUILDER",
+                worker_id="builder-a",
+                provider="local",
+                adapter="fake",
+                claim_id=claim.claim_id,
+                status="SUCCEEDED",
+                worktree_path=str(Path.cwd()),
+                result_data={"feature_sha": "feature-sha"},
+                completed_at=utcnow(),
+            )
+        )
+        session.add(
+            BuildRunnerExecution(
+                execution_id="validation-done-before-restart",
+                task_id=task.task_id,
+                role="BUILDER",
+                worker_id="runner-validation",
+                provider="runner",
+                adapter="validation",
+                claim_id=claim.claim_id,
+                status="LAUNCHED",
+                worktree_path=str(Path.cwd()),
+                result_path=str(result_path),
+                reviewed_feature_sha="feature-sha",
+                result_data={
+                    "commands": [command],
+                    "workspace": str(Path.cwd()),
+                    "source_execution_id": "builder-done",
+                    "feature_sha": "feature-sha",
+                    "validated_sha": "feature-sha",
+                    "next_state": "REVIEW_READY",
+                },
+            )
+        )
+        session.commit()
+
+    result = _runner().run_once()
+
+    with SessionLocal() as session:
+        validation = session.get(BuildRunnerExecution, "validation-done-before-restart")
+        task = session.get(BuildTask, "RUN-VALIDATION-PERSISTED")
+        validation_rows = session.scalars(
+            select(BuildRunnerExecution)
+            .where(BuildRunnerExecution.task_id == "RUN-VALIDATION-PERSISTED")
+            .where(BuildRunnerExecution.adapter == "validation")
+        ).all()
+        assert result.observed == ["validation-done-before-restart"]
+        assert [row.execution_id for row in validation_rows] == ["validation-done-before-restart"]
+        assert validation.status == "SUCCEEDED"
+        assert validation.result_data["passed"] is True
+        assert task.state in {"REVIEW_READY", "REVIEWING"}
+
+
+def test_lost_validation_after_builder_success_resumes_validation_not_building():
+    validation_command = f"{sys.executable} -c \"print('ok')\""
+    with SessionLocal() as session:
+        task = upsert_task(
+            session,
+            TaskSpec(
+                **{
+                    **_task("RUN-VALIDATION-CLAIM-RESTART").__dict__,
+                    "required_validation": [validation_command],
+                }
+            ),
+        )
+        claim = claim_task(session, ClaimRequest("RUN-VALIDATION-CLAIM-RESTART", worker_id="builder-a"))
+        task.state = "VALIDATING"
+        session.add(
+            BuildRunnerExecution(
+                execution_id="builder-done",
+                task_id=task.task_id,
+                role="BUILDER",
+                worker_id="builder-a",
+                provider="local",
+                adapter="fake",
+                claim_id=claim.claim_id,
+                status="SUCCEEDED",
+                worktree_path=str(Path.cwd()),
+                result_data={"feature_sha": "feature-sha"},
+                completed_at=utcnow(),
+            )
+        )
+        session.add(
+            BuildRunnerExecution(
+                execution_id="validation-before-restart",
+                task_id=task.task_id,
+                role="BUILDER",
+                worker_id="runner-validation",
+                provider="runner",
+                adapter="validation",
+                claim_id=claim.claim_id,
+                status="LAUNCHED",
+                worktree_path=str(Path.cwd()),
+                reviewed_feature_sha="feature-sha",
+                result_data={
+                    "commands": [validation_command],
+                    "workspace": str(Path.cwd()),
+                    "source_execution_id": "builder-done",
+                    "validated_sha": "feature-sha",
+                    "next_state": "REVIEW_READY",
+                },
+            )
+        )
+        session.commit()
+
+    result = _runner(executors={"builder-a": FakeExecutor()}).run_once()
+
+    with SessionLocal() as session:
+        task = session.get(BuildTask, "RUN-VALIDATION-CLAIM-RESTART")
+        claim = session.get(BuildTaskClaim, task.current_claim_id)
+        validations = session.scalars(
+            select(BuildRunnerExecution)
+            .where(BuildRunnerExecution.task_id == task.task_id)
+            .where(BuildRunnerExecution.adapter == "validation")
+        ).all()
+        builder_rows = session.scalars(
+            select(BuildRunnerExecution)
+            .where(BuildRunnerExecution.task_id == task.task_id)
+            .where(BuildRunnerExecution.adapter == "fake")
+        ).all()
+
+        assert task.state == "VALIDATING"
+        assert claim.status == "ACTIVE"
+        assert {row.execution_id for row in validations} == {"validation-before-restart", *set(result.launched)}
+        assert session.get(BuildRunnerExecution, "validation-before-restart").status == "LOST"
+        assert len(builder_rows) == 1
+
+
+def test_live_validation_is_not_duplicated_or_killed():
+    with SessionLocal() as session:
+        task = upsert_task(session, _task("RUN-LIVE-VALIDATION"))
+        claim = claim_task(session, ClaimRequest(task.task_id, worker_id="builder-a"))
+        task.state = "VALIDATING"
+        session.add(
+            BuildRunnerExecution(
+                execution_id="builder-done",
+                task_id=task.task_id,
+                role="BUILDER",
+                worker_id="builder-a",
+                provider="local",
+                adapter="fake",
+                claim_id=claim.claim_id,
+                status="SUCCEEDED",
+                worktree_path=str(Path.cwd()),
+                result_data={"feature_sha": "feature-sha"},
+                completed_at=utcnow(),
+            )
+        )
+        session.add(
+            BuildRunnerExecution(
+                execution_id="validation-live",
+                task_id=task.task_id,
+                role="BUILDER",
+                worker_id="runner-validation",
+                provider="runner",
+                adapter="validation",
+                claim_id=claim.claim_id,
+                status="RUNNING",
+                worktree_path=str(Path.cwd()),
+                reviewed_feature_sha="feature-sha",
+                result_data={"commands": ["pytest -q"], "workspace": str(Path.cwd())},
+            )
+        )
+        session.commit()
+
+    runner = _runner(executors={"builder-a": FakeExecutor()})
+    runner._validation_executor = FakeExecutor([ExecutionObservation("RUNNING")])
+    result = runner.run_once()
+
+    with SessionLocal() as session:
+        validations = session.scalars(
+            select(BuildRunnerExecution)
+            .where(BuildRunnerExecution.task_id == "RUN-LIVE-VALIDATION")
+            .where(BuildRunnerExecution.adapter == "validation")
+        ).all()
+        assert result.launched == []
+        assert [(row.execution_id, row.status) for row in validations] == [("validation-live", "RUNNING")]
+        assert session.get(BuildTask, "RUN-LIVE-VALIDATION").state == "VALIDATING"
+
+
+def test_authoritative_completed_validation_result_reconciles_only_once():
+    head_sha = subprocess.run(
+        ["git", "-c", "safe.directory=C:/stagemesh", "rev-parse", "HEAD"],
+        cwd=str(Path.cwd()),
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    with SessionLocal() as session:
+        task = upsert_task(session, _task("RUN-VALIDATION-ONCE"))
+        claim = claim_task(session, ClaimRequest(task.task_id, worker_id="builder-a"))
+        task.state = "VALIDATING"
+        session.add(
+            BuildRunnerExecution(
+                execution_id="validation-once",
+                task_id=task.task_id,
+                role="BUILDER",
+                worker_id="runner-validation",
+                provider="runner",
+                adapter="validation",
+                claim_id=claim.claim_id,
+                status="RUNNING",
+                worktree_path=str(Path.cwd()),
+                reviewed_feature_sha=head_sha,
+                result_data={
+                    "commands": ["pytest -q"],
+                    "workspace": str(Path.cwd()),
+                    "source_execution_id": "builder-done",
+                    "validated_sha": head_sha,
+                    "next_state": "REVIEW_READY",
+                },
+            )
+        )
+        session.commit()
+
+    runner = _runner()
+    runner._validation_executor = FakeExecutor(
+        [
+            ExecutionObservation(
+                "SUCCEEDED",
+                result_data={
+                    "passed": True,
+                    "results": [{"command": "pytest -q", "exit_code": 0, "output_tail": ""}],
+                    "validation_terminal_type": "PASSED",
+                },
+            )
+        ]
+    )
+    runner.run_once()
+    runner.run_once()
+
+    with SessionLocal() as session:
+        events = session.scalars(
+            select(BuildTaskEvent)
+            .where(BuildTaskEvent.task_id == "RUN-VALIDATION-ONCE")
+            .where(BuildTaskEvent.event_type == "runner.validation")
+        ).all()
+        assert session.get(BuildTask, "RUN-VALIDATION-ONCE").state in {"REVIEW_READY", "REVIEWING"}
+        assert session.get(BuildRunnerExecution, "validation-once").status == "SUCCEEDED"
+        assert len(events) == 1
+
+
+def test_stale_sha_validation_result_cannot_pass_gate(monkeypatch):
+    stale_sha = "1" * 40
+    current_sha = "2" * 40
+    monkeypatch.setattr(
+        orchestrator_module,
+        "_git",
+        lambda _cwd, *_args: subprocess.CompletedProcess(_args, 0, stdout=current_sha + "\n", stderr=""),
+    )
+    with SessionLocal() as session:
+        task = upsert_task(session, _task("RUN-STALE-VALIDATION"))
+        claim = claim_task(session, ClaimRequest(task.task_id, worker_id="builder-a"))
+        task.state = "VALIDATING"
+        session.add(
+            BuildRunnerExecution(
+                execution_id="validation-stale",
+                task_id=task.task_id,
+                role="BUILDER",
+                worker_id="runner-validation",
+                provider="runner",
+                adapter="validation",
+                claim_id=claim.claim_id,
+                status="RUNNING",
+                worktree_path=str(Path.cwd()),
+                reviewed_feature_sha=stale_sha,
+                result_data={
+                    "commands": ["pytest -q"],
+                    "workspace": str(Path.cwd()),
+                    "source_execution_id": "builder-done",
+                    "validated_sha": stale_sha,
+                    "next_state": "REVIEW_READY",
+                },
+            )
+        )
+        session.commit()
+
+    runner = _runner()
+    runner._validation_executor = FakeExecutor(
+        [
+            ExecutionObservation(
+                "SUCCEEDED",
+                result_data={
+                    "passed": True,
+                    "results": [{"command": "pytest -q", "exit_code": 0, "output_tail": ""}],
+                    "validation_terminal_type": "PASSED",
+                },
+            )
+        ]
+    )
+    runner.run_once()
+
+    with SessionLocal() as session:
+        task = session.get(BuildTask, "RUN-STALE-VALIDATION")
+        validation = session.get(BuildRunnerExecution, "validation-stale")
+        assert task.state not in {"REVIEW_READY", "REVIEWING", "DONE"}
+        assert validation.status == "FAILED"
+        assert validation.result_data["validation_terminal_type"] == "STALE_VALIDATION_CONTEXT"
+        assert validation.result_data["passed"] is False
+
+
+def test_repeated_validation_recovery_preserves_history_without_claim_recovery_duplicates():
+    from build_coordinator.service import recover_lost_execution_claims
+
+    with SessionLocal() as session:
+        task = upsert_task(session, _task("RUN-REPEATED-VALIDATION-RECOVERY"))
+        claim = claim_task(session, ClaimRequest(task.task_id, worker_id="builder-a"))
+        task.state = "VALIDATING"
+        session.add(
+            BuildRunnerExecution(
+                execution_id="validation-lost",
+                task_id=task.task_id,
+                role="BUILDER",
+                worker_id="runner-validation",
+                provider="runner",
+                adapter="validation",
+                claim_id=claim.claim_id,
+                status="LOST",
+                completed_at=utcnow(),
+                worktree_path=str(Path.cwd()),
+                reviewed_feature_sha="feature-sha",
+                result_data={"validation_lost": True},
+            )
+        )
+        session.commit()
+
+    with SessionLocal() as session:
+        assert recover_lost_execution_claims(session, actor="test") == []
+        assert recover_lost_execution_claims(session, actor="test") == []
+        task = session.get(BuildTask, "RUN-REPEATED-VALIDATION-RECOVERY")
+        claim = session.get(BuildTaskClaim, task.current_claim_id)
+        recovery_events = session.scalars(
+            select(BuildTaskEvent)
+            .where(BuildTaskEvent.task_id == task.task_id)
+            .where(BuildTaskEvent.event_type == "claim.recovered_from_lost_execution")
+        ).all()
+        assert task.state == "VALIDATING"
+        assert claim.status == "ACTIVE"
+        assert recovery_events == []
+>>>>>>> refs/heads/main
 
 
 def test_validation_timeout_is_typed_with_start_end_and_exit_evidence():

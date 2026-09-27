@@ -1005,6 +1005,7 @@ class BuildRunner:
         if self._active_validation(session, source_execution.task_id) is not None:
             return
         execution_id = new_uuid()
+        result_path = str(self._result_dir() / f"{execution_id}.json")
         feature_sha = (source_execution.result_data or {}).get("feature_sha") or source_execution.reviewed_feature_sha
         validated_sha = feature_sha or self._current_head_sha(cwd)
         env_fingerprint = validation_environment_fingerprint()
@@ -1029,6 +1030,7 @@ class BuildRunner:
                 branch_name=source_execution.branch_name,
                 prompt="",
                 execution_id=execution_id,
+                result_path=result_path,
                 reviewed_feature_sha=validated_sha,
                 metadata={"commands": commands},
             )
@@ -1044,6 +1046,7 @@ class BuildRunner:
             worktree_path=cwd,
             branch_name=source_execution.branch_name,
             process_id=handle.process_id,
+            result_path=handle.result_path or result_path,
             reviewed_feature_sha=validated_sha,
             prompt_hash=validation_context_hash,
             status="LAUNCHED",
@@ -3425,6 +3428,9 @@ class BuildRunner:
 
     def _executor_for_execution(self, execution: BuildRunnerExecution) -> WorkerExecutor:
         if execution.adapter == "validation":
+            remember = getattr(self._validation_executor, "remember_result_path", None)
+            if remember is not None:
+                remember(execution.execution_id, execution.result_path)
             return self._validation_executor
         executor = self._executors.get(execution.worker_id)
         if executor is not None:
@@ -4262,6 +4268,43 @@ class BuildRunner:
                 return stop_sha
         return None
 
+    def _reconstruct_validation_limit_stop_sha(
+        self,
+        session: Session,
+        task: BuildTask,
+    ) -> str | None:
+        """Recover the SHA that validation actually failed when the
+        remediation-limit blocker predates durable SHA evidence in
+        waiting_input. This is still ancestry-checked by the caller before
+        any recovery is allowed."""
+        events = session.scalars(
+            select(BuildTaskEvent)
+            .where(BuildTaskEvent.task_id == task.task_id)
+            .where(BuildTaskEvent.event_type == "runner.validation")
+            .order_by(BuildTaskEvent.created_at.desc())
+        ).all()
+        for event in events:
+            data = event.event_data if isinstance(event.event_data, dict) else {}
+            if data.get("passed") is True:
+                continue
+            stop_sha = data.get("validated_sha") or data.get("feature_sha")
+            if stop_sha:
+                return str(stop_sha)
+
+        executions = session.scalars(
+            select(BuildRunnerExecution)
+            .where(BuildRunnerExecution.task_id == task.task_id)
+            .where(BuildRunnerExecution.adapter == "validation")
+            .where(BuildRunnerExecution.status == "FAILED")
+            .order_by(BuildRunnerExecution.completed_at.desc(), BuildRunnerExecution.launched_at.desc())
+        ).all()
+        for execution in executions:
+            data = execution.result_data if isinstance(execution.result_data, dict) else {}
+            stop_sha = data.get("validated_sha") or data.get("feature_sha") or execution.reviewed_feature_sha
+            if stop_sha:
+                return str(stop_sha)
+        return None
+
     def _recover_remediation_limit_reached(
         self,
         session: Session,
@@ -4298,6 +4341,8 @@ class BuildRunner:
             evidence = waiting.get("failure_evidence") if isinstance(waiting.get("failure_evidence"), dict) else {}
             relevant_shas = evidence.get("relevant_shas") if isinstance(evidence.get("relevant_shas"), dict) else {}
             stop_sha = relevant_shas.get("reviewed_feature_sha") or relevant_shas.get("feature_sha")
+        if not stop_sha:
+            stop_sha = self._reconstruct_validation_limit_stop_sha(session, task)
         if not stop_sha:
             return
 
