@@ -29,6 +29,7 @@ from build_coordinator.coordinator_lock import (
     acquire_coordinator_lock,
     release_coordinator_lock,
 )
+from build_coordinator.db import DatabaseBusyError, commit_or_busy
 from build_coordinator.github.controller import GitHubAutonomousController
 from build_coordinator.runner.models import RunnerConfig
 from build_coordinator.watcher import lock as watcher_lock
@@ -189,7 +190,21 @@ def run_foreground_cycle(
                 repository_slug=repo.slug,
                 instance_id=instance_id,
             )
-            session.commit()
+            commit_or_busy(session)
+        except DatabaseBusyError as exc:
+            logger.log(
+                "watcher.cycle_failed",
+                repository_slug=repo.slug,
+                cycle_id=cycle_id,
+                error_type="TRANSIENT_DATABASE_FAILURE",
+                message=str(exc),
+            )
+            return CycleOutcome(
+                task_name=task_name,
+                cycle_id=cycle_id,
+                ok=False,
+                failure_class="TRANSIENT_DATABASE_FAILURE",
+            )
         except watcher_lock.WatcherLockHeld as exc:
             logger.log(
                 "watcher.lock_held",
@@ -228,7 +243,7 @@ def run_foreground_cycle(
             except Exception as exc:
                 failure_class = classify_failure(exc)
                 _record_failure(session, task_name, failure_class, str(exc), backoff_policy, logger, repo.slug, cycle_id)
-                session.commit()
+                commit_or_busy(session)
                 return CycleOutcome(
                     task_name=task_name,
                     cycle_id=cycle_id,
@@ -246,7 +261,7 @@ def run_foreground_cycle(
     with session_factory() as session:
         try:
             acquire_coordinator_lock(session, instance_id=coordinator_instance_id)
-            session.commit()
+            commit_or_busy(session)
         except CoordinatorLockHeld as exc:
             session.rollback()
             logger.log(
@@ -257,6 +272,20 @@ def run_foreground_cycle(
                 extra=exc.owner,
             )
             return CycleOutcome(task_name=task_name, cycle_id=cycle_id, ok=False, failure_class="POLICY_FAILURE")
+        except DatabaseBusyError as exc:
+            logger.log(
+                "watcher.cycle_failed",
+                repository_slug=repo.slug,
+                cycle_id=cycle_id,
+                error_type="TRANSIENT_DATABASE_FAILURE",
+                message=str(exc),
+            )
+            return CycleOutcome(
+                task_name=task_name,
+                cycle_id=cycle_id,
+                ok=False,
+                failure_class="TRANSIENT_DATABASE_FAILURE",
+            )
 
     try:
         controller = GitHubAutonomousController(
@@ -272,12 +301,12 @@ def run_foreground_cycle(
         failure_class = classify_failure(exc)
         with session_factory() as session:
             _record_failure(session, task_name, failure_class, str(exc), backoff_policy, logger, repo.slug, cycle_id)
-            session.commit()
+            commit_or_busy(session)
         return CycleOutcome(task_name=task_name, cycle_id=cycle_id, ok=False, failure_class=failure_class)
     finally:
         with session_factory() as session:
             release_coordinator_lock(session, instance_id=coordinator_instance_id)
-            session.commit()
+            commit_or_busy(session)
 
     with session_factory() as session:
         runner_result = result.runner_result
@@ -298,7 +327,7 @@ def run_foreground_cycle(
                 "github_statuses_synced": len(result.statuses_synced),
             },
         )
-        session.commit()
+        commit_or_busy(session)
     logger.log(
         "watcher.cycle_succeeded",
         repository_slug=repo.slug,
@@ -422,7 +451,7 @@ def run_foreground(
                     summary = dict(record.last_cycle_summary or {})
                     summary["config_reload"] = reload_state.status
                     record.last_cycle_summary = summary
-                    session.commit()
+                    commit_or_busy(session)
         if once:
             return
         with session_factory() as session:
@@ -431,7 +460,7 @@ def run_foreground(
             record = session.get(BuildWatcherRecord, outcome.task_name) if outcome.task_name else None
             if record is not None and record.stop_requested:
                 watcher_lock.release_lock(session, outcome.task_name)
-                session.commit()
+                commit_or_busy(session)
                 return
             delay = (
                 next_sleep_seconds(session, outcome.task_name, default_poll_seconds=config.poll_seconds)
