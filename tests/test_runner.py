@@ -1987,6 +1987,63 @@ def test_green_review_without_matching_validation_launches_validation_not_integr
         assert integration is None
 
 
+def test_validation_redispatch_prefers_unvalidated_green_review_sha():
+    reviewed_sha = "2" * 40
+    stale_builder_sha = "1" * 40
+    with SessionLocal() as session:
+        task = upsert_task(session, _task("RUN-VALIDATE-REVIEW-SHA"))
+        task.state = "VALIDATING"
+        task.worktree_path = str(Path.cwd())
+        session.add(
+            BuildRunnerExecution(
+                execution_id="old-remediation",
+                task_id=task.task_id,
+                role="REMEDIATION",
+                worker_id="builder-a",
+                provider="local",
+                adapter="fake",
+                status="SUCCEEDED",
+                worktree_path=str(Path.cwd()),
+                reviewed_feature_sha=None,
+                result_data={"feature_sha": stale_builder_sha},
+            )
+        )
+        session.add(
+            BuildRunnerExecution(
+                execution_id="green-review",
+                task_id=task.task_id,
+                role="REVIEWER",
+                worker_id="reviewer-1",
+                provider="local",
+                adapter="fake",
+                status="SUCCEEDED",
+                worktree_path=str(Path.cwd()),
+                reviewed_feature_sha=reviewed_sha,
+                result_data={
+                    "reviewed_feature_sha": reviewed_sha,
+                    "review": {"verdict": "GREEN", "ready_for_integration": True},
+                },
+            )
+        )
+        session.commit()
+
+    runner = _runner()
+    runner._validation_executor = FakeExecutor([ExecutionObservation("SUCCEEDED", result_data={"passed": True})])
+    result = runner.run_once()
+
+    assert result.launched
+    with SessionLocal() as session:
+        validation = session.scalar(
+            select(BuildRunnerExecution)
+            .where(BuildRunnerExecution.task_id == "RUN-VALIDATE-REVIEW-SHA")
+            .where(BuildRunnerExecution.adapter == "validation")
+        )
+        assert validation is not None
+        assert validation.reviewed_feature_sha == reviewed_sha
+        assert validation.result_data["source_execution_id"] == "green-review"
+        assert validation.result_data["next_state"] == "REVIEWING"
+
+
 def test_integration_resume_context_failure_preserves_policy_error(monkeypatch):
     executors = {
         "reviewer-1": FakeExecutor(
