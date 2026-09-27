@@ -30,6 +30,7 @@ from build_coordinator.db import (
     SessionLocal,
     commit_or_busy,
     configure_process_database,
+    with_sqlite_retry,
 )
 from build_coordinator.events import stream_events
 from build_coordinator.service import (
@@ -812,12 +813,16 @@ def _recover_execution_retry(args: argparse.Namespace, session) -> None:
 def _runner(args: argparse.Namespace, session) -> None:
     commit_or_busy(session)
     instance_id = new_uuid()
-    try:
+
+    def acquire_lock_once() -> None:
         acquire_coordinator_lock(session, instance_id=instance_id)
+        commit_or_busy(session)
+
+    try:
+        with_sqlite_retry(acquire_lock_once)
     except CoordinatorLockHeld as exc:
         session.rollback()
         raise SystemExit(str(exc)) from exc
-    commit_or_busy(session)
     runner = BuildRunner(SessionLocal, RunnerConfig.default(dry_run=args.dry_run))
     try:
         if args.once:
