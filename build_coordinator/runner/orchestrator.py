@@ -1357,6 +1357,36 @@ class BuildRunner:
             )
             return
         if eligible:
+            task = session.get(BuildTask, execution.task_id)
+            if (
+                task is not None
+                and task.required_validation
+                and not self._has_successful_validation_for_sha(
+                    session, execution.task_id, execution.reviewed_feature_sha
+                )
+            ):
+                release_active_claims(session, execution.task_id, completed=True)
+                task.current_claim_id = None
+                task.lease_expires_at = None
+                task.last_heartbeat_at = None
+                transition_task(
+                    session,
+                    execution.task_id,
+                    "VALIDATING",
+                    actor="runner",
+                    reason="green review requires authoritative validation for reviewed SHA",
+                )
+                self._launch_validation(
+                    session,
+                    result,
+                    task=task,
+                    source_execution=execution,
+                    commands=list(task.required_validation or []),
+                    cwd=task.worktree_path or execution.worktree_path or self._git_cwd_for_execution(execution),
+                    next_state="REVIEWING",
+                    success_reason="reviewed SHA validated after recovery",
+                )
+                return
             release_active_claims(session, execution.task_id, completed=True)
             task = session.get(BuildTask, execution.task_id)
             if task is not None:
@@ -2694,6 +2724,31 @@ class BuildRunner:
                 routing_decision=decision,
             )
 
+    def _has_successful_validation_for_sha(
+        self,
+        session: Session,
+        task_id: str,
+        reviewed_sha: str | None,
+    ) -> bool:
+        if not reviewed_sha:
+            return False
+        rows = session.scalars(
+            select(BuildRunnerExecution)
+            .where(BuildRunnerExecution.task_id == task_id)
+            .where(BuildRunnerExecution.adapter == "validation")
+            .where(BuildRunnerExecution.status == "SUCCEEDED")
+            .where(BuildRunnerExecution.reviewed_feature_sha == reviewed_sha)
+            .order_by(BuildRunnerExecution.completed_at.desc(), BuildRunnerExecution.launched_at.desc())
+        ).all()
+        for row in rows:
+            data = row.result_data if isinstance(row.result_data, dict) else {}
+            if data.get("passed") is False:
+                continue
+            validated_sha = data.get("validated_sha") or data.get("feature_sha") or row.reviewed_feature_sha
+            if validated_sha == reviewed_sha:
+                return True
+        return False
+
     def _dispatch_integration(self, session: Session, result: RunnerCycleResult) -> None:
         rows = session.scalars(
             select(BuildRunnerExecution)
@@ -2783,6 +2838,9 @@ class BuildRunner:
                     error="integration requires a reviewed feature SHA",
                     recovery_classification="RECOVERABLE_GIT_STATE",
                 )
+                continue
+            if task.required_validation and not self._has_successful_validation_for_sha(session, row.task_id, reviewed_sha):
+                result.scheduling_reasons[row.task_id] = "awaiting_validated_reviewed_sha"
                 continue
             assessment = None
             try:
