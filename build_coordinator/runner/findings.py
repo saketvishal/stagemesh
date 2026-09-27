@@ -432,6 +432,52 @@ def record_convergence_generation(
     return updated
 
 
+def start_new_convergence_epoch(
+    registry: dict[str, Any] | None,
+    *,
+    resumed_feature_sha: str | None,
+    stop_feature_sha: str | None,
+    reason: str,
+    execution_id: str | None = None,
+) -> dict[str, Any]:
+    """Open a new bounded convergence epoch after authoritative evidence
+    (an advanced task branch feature SHA) shows an operator/external
+    remediation followed a prior hard convergence stop.
+
+    Only the *current* epoch's counters (generations, comprehensive-review
+    state) are reset -- finding entries, dispositions, and reviewer history
+    are left untouched, so the next reviewer must explicitly resolve or
+    restate prior open findings against the new SHA rather than inheriting a
+    silently-cleared slate. The prior epoch's convergence history and stop
+    reason are retained under `convergence.epoch_history` for audit.
+    """
+    updated = dict(registry or {})
+    prior_convergence = dict(updated.get("convergence") or {})
+    epoch_history = list(prior_convergence.get("epoch_history") or [])[-(_CONVERGENCE_HISTORY_LIMIT - 1) :]
+    epoch_history.append(
+        {
+            "generations": prior_convergence.get("generations"),
+            "comprehensive_used": prior_convergence.get("comprehensive_used"),
+            "comprehensive_execution_id": prior_convergence.get("comprehensive_execution_id"),
+            "stop_reason": prior_convergence.get("stop_reason"),
+            "history": prior_convergence.get("history"),
+            "stop_feature_sha": stop_feature_sha,
+            "resumed_feature_sha": resumed_feature_sha,
+            "resume_reason": reason,
+            "resume_execution_id": execution_id,
+        }
+    )
+    updated["convergence"] = {
+        "generations": 0,
+        "pending_comprehensive_review": False,
+        "comprehensive_used": False,
+        "processed_execution_ids": [],
+        "epoch_history": epoch_history,
+        "epoch_started_feature_sha": resumed_feature_sha,
+    }
+    return updated
+
+
 def comprehensive_reconciliation_missing_ids(
     prior_registry: dict[str, Any] | None,
     findings: list[Any] | None,
