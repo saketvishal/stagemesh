@@ -45,6 +45,7 @@ from build_coordinator.project.state_migration import (
 )
 import build_coordinator.project.state_migration as state_migration
 from build_coordinator.runner.models import RunnerConfig, WorkerConfig
+import build_coordinator.runner.orchestrator as orchestrator_module
 from build_coordinator.runner.orchestrator import BuildRunner
 from build_coordinator.service import transition_task, upsert_task
 
@@ -599,6 +600,60 @@ def test_governed_integration_records_evidence_then_fresh_sync_launches_zero_exe
             assert fresh.scalars(select(BuildRunnerExecution)).all() == []
     finally:
         fresh_lifecycle.dispose()
+
+
+def test_project_delivery_evidence_uses_configured_remote_and_main_ref(tmp_path, monkeypatch):
+    lifecycle = DatabaseLifecycle(f"sqlite:///{(tmp_path / 'runtime.sqlite3').as_posix()}", data_dir=tmp_path / "runtime")
+    lifecycle.initialize_schema()
+    calls: dict[str, object] = {}
+
+    def fake_expected_remote_url(repo_root, *, remote):
+        calls["expected_remote"] = (Path(repo_root), remote)
+        return "https://example.invalid/repo.git"
+
+    def fake_persist(repo_root, definitions, task_id, *, sha, push_remote, push_branch_name, expected_remote_url):
+        calls["persist"] = {
+            "repo_root": Path(repo_root),
+            "definitions": definitions,
+            "task_id": task_id,
+            "sha": sha,
+            "push_remote": push_remote,
+            "push_branch_name": push_branch_name,
+            "expected_remote_url": expected_remote_url,
+        }
+        return {"status": "COMMITTED", "changed": True, "sha": sha}
+
+    monkeypatch.setattr(orchestrator_module, "find_project_root", lambda root: tmp_path / "repo")
+    monkeypatch.setattr(orchestrator_module, "load_project", lambda root: SimpleNamespace(root=root))
+    monkeypatch.setattr(orchestrator_module, "load_backlog", lambda project: ["definition"])
+    monkeypatch.setattr(orchestrator_module, "expected_remote_url", fake_expected_remote_url)
+    monkeypatch.setattr(orchestrator_module, "persist_delivery_evidence_in_history", fake_persist)
+
+    try:
+        with lifecycle.session() as runtime:
+            runner = BuildRunner(
+                lambda: runtime,
+                RunnerConfig(remote_name="upstream", main_ref="trunk", allowed_workspace_roots=[str(tmp_path)]),
+            )
+            runner._settings = dataclasses.replace(runner._settings, repo_root=tmp_path / "repo", data_dir=tmp_path)
+
+            result = runner._persist_project_delivery_evidence(runtime, "A-1", "abc123", push_required=True)
+
+            assert result == {"status": "COMMITTED", "changed": True, "sha": "abc123"}
+            assert calls["expected_remote"] == (tmp_path / "repo", "upstream")
+            assert calls["persist"] == {
+                "repo_root": tmp_path / "repo",
+                "definitions": ["definition"],
+                "task_id": "A-1",
+                "sha": "abc123",
+                "push_remote": "upstream",
+                "push_branch_name": "trunk",
+                "expected_remote_url": "https://example.invalid/repo.git",
+            }
+            events = runtime.scalars(select(BuildTaskEvent)).all()
+            assert [event.event_type for event in events] == ["project.delivery_evidence_persisted"]
+    finally:
+        lifecycle.dispose()
 
 
 def test_persist_delivery_evidence_committed_to_head_returns_safe_unchanged(tmp_path):

@@ -1805,7 +1805,7 @@ class BuildRunner:
             expected_url = None
             if push_required:
                 try:
-                    expected_url = expected_remote_url(repo_root, remote=self._config.git_remote)
+                    expected_url = expected_remote_url(repo_root, remote=self._config.remote_name)
                 except Exception:
                     expected_url = None
             result = persist_delivery_evidence_in_history(
@@ -1813,8 +1813,8 @@ class BuildRunner:
                 load_backlog(project),
                 task_id,
                 sha=sha,
-                push_remote=self._config.git_remote if push_required else None,
-                push_branch_name=self._config.git_main_branch,
+                push_remote=self._config.remote_name if push_required else None,
+                push_branch_name=self._config.main_ref,
                 expected_remote_url=expected_url,
             )
         except Exception as exc:
