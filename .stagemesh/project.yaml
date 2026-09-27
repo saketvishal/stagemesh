@@ -22,7 +22,7 @@ upstream:
 
 task_sources:
   github:
-    enabled: true
+    enabled: false
     repo: saketvishal/stagemesh
     exclude_labels:
       - stagemesh:deferred
