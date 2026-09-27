@@ -1481,3 +1481,184 @@ def test_scenario_12_unknown_human_change_protected(tmp_path: Path):
     # Verify stash contains the secret note
     stash_list = _git(repo, "stash", "list").stdout
     assert stash_msg in stash_list
+
+
+# ---------------------------------------------------------------------------
+# GH-128: Resume a new bounded convergence epoch after operator remediation
+# ---------------------------------------------------------------------------
+def _blocked_remediation_limit_task(
+    session_factory,
+    repo: Path,
+    tmp_path: Path,
+    branch: str,
+    stop_sha: str,
+) -> None:
+    with session_factory() as session:
+        ensure_state(session)
+        registry = {
+            "entries": {
+                "f1": {
+                    "id": "f1",
+                    "description": "F1",
+                    "status": "STILL_OPEN",
+                    "attempts": 4,
+                    "first_seen_cycle": "review-cycle:exec-1",
+                    "history": [{"execution_id": "exec-1", "status": "STILL_OPEN"}],
+                }
+            },
+            "convergence": {
+                "generations": 3,
+                "comprehensive_used": True,
+                "pending_comprehensive_review": False,
+                "stop_reason": "serial_new_finding_convergence_threshold_reached",
+                "history": [{"generation": 1}, {"generation": 2}, {"generation": 3}],
+            },
+        }
+        task = BuildTask(
+            task_id="GH-128-T",
+            title="Remediation limit task",
+            description="d",
+            state="BLOCKED",
+            branch_name=branch,
+            finding_registry=registry,
+            waiting_input={
+                "failure_evidence": {
+                    "relevant_shas": {"reviewed_feature_sha": stop_sha},
+                }
+            },
+        )
+        session.add(task)
+        record_event(
+            session,
+            EventInput(
+                task_id="GH-128-T",
+                event_type="task.transitioned",
+                actor="runner",
+                to_state="BLOCKED",
+                event_data={"reason": "REMEDIATION_LIMIT_REACHED"},
+            ),
+        )
+        session.commit()
+
+
+def test_remediation_limit_reached_resumes_new_epoch_when_feature_sha_advances(tmp_path: Path):
+    """An operator/external commit that advances the task branch past the
+    SHA the comprehensive review/stop evaluated must open a new bounded
+    convergence epoch, while preserving prior findings/history (GH-128)."""
+    repo, _ = _setup_test_repo(tmp_path)
+    branch = "stagemesh/GH-128-T"
+    wt = tmp_path / "worktrees" / "gh-128"
+    ensure_worktree(
+        wt,
+        repo_root=repo,
+        branch_name=branch,
+        base_sha=_git(repo, "rev-parse", "HEAD").stdout.strip(),
+        allowed_roots=[str(tmp_path)],
+    )
+    (wt / "feature.txt").write_text("initial fix attempt\n", encoding="utf-8")
+    _git(wt, "add", "feature.txt")
+    _git(wt, "commit", "-m", "feature work reviewed at stop")
+    stop_sha = _git(wt, "rev-parse", "HEAD").stdout.strip()
+
+    session_factory, runner = _setup_runner(tmp_path, repo)
+    _blocked_remediation_limit_task(session_factory, repo, tmp_path, branch, stop_sha)
+
+    # Operator/external remediation commit lands on the task branch after the stop.
+    (wt / "feature.txt").write_text("operator remediation applied\n", encoding="utf-8")
+    _git(wt, "add", "feature.txt")
+    _git(wt, "commit", "-m", "operator remediation")
+    new_sha = _git(wt, "rev-parse", "HEAD").stdout.strip()
+
+    result = RunnerCycleResult()
+    with session_factory() as session:
+        runner._recover_diagnosed_blockers(session, result)
+        session.commit()
+
+    assert "GH-128-T" in result.recovered
+    with session_factory() as session:
+        task = session.get(BuildTask, "GH-128-T")
+        assert task.state == "REVIEW_READY"
+        registry = task.finding_registry
+        assert registry["entries"]["f1"]["status"] == "STILL_OPEN"
+        assert registry["entries"]["f1"]["attempts"] == 4
+        convergence = registry["convergence"]
+        assert convergence["generations"] == 0
+        assert convergence["comprehensive_used"] is False
+        assert convergence["pending_comprehensive_review"] is False
+        epoch_history = convergence["epoch_history"]
+        assert epoch_history[-1]["stop_feature_sha"] == stop_sha
+        assert epoch_history[-1]["resumed_feature_sha"] == new_sha
+        assert epoch_history[-1]["generations"] == 3
+        assert epoch_history[-1]["comprehensive_used"] is True
+
+        event = session.scalar(
+            select(BuildTaskEvent)
+            .where(BuildTaskEvent.task_id == "GH-128-T")
+            .where(BuildTaskEvent.event_type == "runner.convergence_epoch_resumed")
+        )
+        assert event is not None
+        assert event.event_data["stop_feature_sha"] == stop_sha
+        assert event.event_data["resumed_feature_sha"] == new_sha
+
+
+def test_remediation_limit_reached_fails_closed_when_feature_sha_unchanged(tmp_path: Path):
+    """Without authoritative evidence that the feature SHA advanced past the
+    stop, the task must remain BLOCKED (fail closed) rather than resuming
+    (GH-128)."""
+    repo, _ = _setup_test_repo(tmp_path)
+    branch = "stagemesh/GH-128-U"
+    wt = tmp_path / "worktrees" / "gh-128-unchanged"
+    ensure_worktree(
+        wt,
+        repo_root=repo,
+        branch_name=branch,
+        base_sha=_git(repo, "rev-parse", "HEAD").stdout.strip(),
+        allowed_roots=[str(tmp_path)],
+    )
+    (wt / "feature.txt").write_text("initial fix attempt\n", encoding="utf-8")
+    _git(wt, "add", "feature.txt")
+    _git(wt, "commit", "-m", "feature work reviewed at stop")
+    stop_sha = _git(wt, "rev-parse", "HEAD").stdout.strip()
+
+    session_factory, runner = _setup_runner(tmp_path, repo)
+    with session_factory() as session:
+        ensure_state(session)
+        task = BuildTask(
+            task_id="GH-128-U",
+            title="Remediation limit task",
+            description="d",
+            state="BLOCKED",
+            branch_name=branch,
+            finding_registry={
+                "entries": {},
+                "convergence": {"generations": 3, "comprehensive_used": True},
+            },
+            waiting_input={
+                "failure_evidence": {
+                    "relevant_shas": {"reviewed_feature_sha": stop_sha},
+                }
+            },
+        )
+        session.add(task)
+        record_event(
+            session,
+            EventInput(
+                task_id="GH-128-U",
+                event_type="task.transitioned",
+                actor="runner",
+                to_state="BLOCKED",
+                event_data={"reason": "REMEDIATION_LIMIT_REACHED"},
+            ),
+        )
+        session.commit()
+
+    # No new commit lands on the branch -- feature SHA has not advanced.
+    result = RunnerCycleResult()
+    with session_factory() as session:
+        runner._recover_diagnosed_blockers(session, result)
+        session.commit()
+
+    assert "GH-128-U" not in result.recovered
+    with session_factory() as session:
+        task = session.get(BuildTask, "GH-128-U")
+        assert task.state == "BLOCKED"
