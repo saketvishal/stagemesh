@@ -23,8 +23,10 @@ from build_coordinator.execution.base import (
 from build_coordinator.execution.process_tree import (
     ProcessTree,
     attach_started_process,
+    capture_process_identity,
     kill_process_tree,
     popen_kwargs,
+    process_identity_status,
 )
 from build_coordinator.execution.results import (
     ExecutorResultError,
@@ -54,6 +56,7 @@ class SubprocessExecutor:
         log_dir: str | Path | None = None,
         result_paths: dict[str, str] | None = None,
         temp_dir: str | Path | None = None,
+        process_identities: dict[str, tuple[str, str | None]] | None = None,
     ) -> None:
         if not command:
             raise ValueError("subprocess executor command must be non-empty")
@@ -61,6 +64,13 @@ class SubprocessExecutor:
         self._processes: dict[str, subprocess.Popen[str]] = {}
         self._trees: dict[str, ProcessTree] = {}
         self._result_paths: dict[str, str] = dict(result_paths or {})
+        # execution_id -> (process_id, durable start-identity token). Seeded
+        # from durable storage (BuildRunnerExecution.process_id /
+        # .process_start_key) whenever this executor instance did not
+        # itself launch the process -- i.e. after a coordinator/executor
+        # restart -- so poll() can tell a genuinely live original process
+        # apart from a stale row. See `remember_process_identity`.
+        self._process_identities: dict[str, tuple[str, str | None]] = dict(process_identities or {})
         self._log_handles: dict[str, tuple] = {}
         self._pending_observations: dict[str, ExecutionObservation] = {}
         self._log_dir = Path(log_dir) if log_dir else None
@@ -89,6 +99,19 @@ class SubprocessExecutor:
     def remember_result_path(self, execution_id: str, result_path: str | None) -> None:
         if result_path:
             self._result_paths[execution_id] = result_path
+
+    def remember_process_identity(
+        self, execution_id: str, process_id: str | None, process_start_key: str | None
+    ) -> None:
+        """Seed durable process identity for an execution this instance did not launch.
+
+        Called during restart/reconstruction reattachment so poll() can
+        verify the original process is still alive instead of assuming it
+        is LOST merely because the in-memory Popen handle does not exist in
+        *this* executor instance.
+        """
+        if process_id:
+            self._process_identities[execution_id] = (str(process_id), process_start_key)
 
     def launch(self, launch: ExecutionLaunch) -> ExecutionHandle:
         execution_id = launch.execution_id or str(uuid4())
@@ -164,10 +187,13 @@ class SubprocessExecutor:
             process.stdin.write(launch.prompt)
             process.stdin.close()
         self._processes[execution_id] = process
+        start_key = capture_process_identity(process.pid)
+        self._process_identities[execution_id] = (str(process.pid), start_key)
         return ExecutionHandle(
             execution_id=execution_id,
             process_id=str(process.pid),
             result_path=result_path,
+            process_start_key=start_key,
         )
 
     def poll(self, execution_id: str) -> ExecutionObservation:
@@ -220,6 +246,34 @@ class SubprocessExecutor:
         result_path = self._result_paths.get(execution_id)
         if result_path and Path(result_path).is_file():
             return self._observation_from_result_file(execution_id)
+        identity = self._process_identities.get(execution_id)
+        if identity is not None:
+            pid_str, start_key = identity
+            try:
+                pid = int(pid_str)
+            except (TypeError, ValueError):
+                pid = None
+            if pid is not None and pid > 0:
+                status = process_identity_status(pid, start_key)
+                if status in ("MATCH", "ALIVE_UNVERIFIED"):
+                    # The original OS process is confirmed alive (MATCH) or
+                    # observably alive with no evidence to the contrary
+                    # (ALIVE_UNVERIFIED, e.g. identity capture failed on
+                    # this poll but liveness itself did not). Either way:
+                    # do not report LOST, do not let the caller release
+                    # ownership or launch a duplicate worker.
+                    return ExecutionObservation(
+                        status="RUNNING",
+                        result_data={
+                            "reconciliation_state": status,
+                            "durable_identity_pid": pid,
+                        },
+                        result_path=result_path,
+                    )
+                # MISMATCH: the pid either no longer exists, or now belongs
+                # to an unrelated process (pid reuse) -- either way the
+                # original process is gone. Fall through to the same
+                # terminal handling as "no identity evidence at all".
         return ExecutionObservation(
             status="LOST",
             result_data={"reconciliation_state": "LOST"},

@@ -285,6 +285,13 @@ class BuildRunnerExecution(Base):
     worktree_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     branch_name: Mapped[str | None] = mapped_column(String(240), nullable=True)
     process_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    # Durable start-identity token captured alongside process_id (see
+    # execution.process_tree.capture_process_identity). Lets a later poll
+    # -- possibly after the coordinator/executor lost its in-memory Popen
+    # handle across a restart -- confirm the original process is still
+    # running instead of assuming LOST, without trusting process_id alone
+    # (pids get reused).
+    process_start_key: Mapped[str | None] = mapped_column(String(160), nullable=True)
     result_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     reviewed_feature_sha: Mapped[str | None] = mapped_column(String(64), nullable=True)
     prompt_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
