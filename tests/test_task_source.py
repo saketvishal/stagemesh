@@ -249,6 +249,35 @@ def test_github_rate_limit_backoff_skips_repeated_live_discovery():
     assert second[0].action == "SOURCE_CAPACITY_WAIT"
 
 
+def test_github_rate_limit_backoff_is_loaded_from_durable_state():
+    cached = {
+        "number": 239,
+        "title": "Do not refetch during persisted capacity wait",
+        "body": "A prior run already learned the source is cooling down.",
+        "labels": [],
+        "url": "https://github.com/example/repo/issues/239",
+    }
+    with SessionLocal() as session:
+        GitHubTaskSource(repo="example/repo", client=FakeGitHubClient([cached])).discover_tasks(session)
+        session.commit()
+
+    with SessionLocal() as session:
+        GitHubTaskSource(repo="example/repo", client=AlwaysRateLimitedClient([])).discover_tasks(session)
+        session.commit()
+
+    class ExplodingClient(FakeGitHubClient):
+        def list_issues(self, repo: str, labels: tuple[str, ...]):
+            raise AssertionError("live GitHub discovery should respect persisted backoff")
+
+    fresh_source = GitHubTaskSource(repo="example/repo", client=ExplodingClient([]))
+    with SessionLocal() as session:
+        results = fresh_source.discover_tasks(session)
+        session.commit()
+
+    assert [r.task_id for r in results] == ["GH-239"]
+    assert results[0].action == "SOURCE_CAPACITY_WAIT"
+
+
 def test_client_rest_rate_limit_after_graphql_reuses_cached_state():
     cached = {
         "number": 134,
@@ -819,7 +848,7 @@ def test_github_objective_reimport_reconciles_legacy_root_and_creates_planner():
         assert "Architecture and validation program" in planner.description
 
 
-def test_github_objective_resync_refreshes_planner_task_description():
+def test_github_objective_resync_preserves_existing_planner_task_description():
     client = FakeGitHubClient(
         [
             {
@@ -834,6 +863,12 @@ def test_github_objective_resync_refreshes_planner_task_description():
     source = GitHubTaskSource(repo="example/repo", client=client)
     with SessionLocal() as session:
         source.discover_tasks(session)
+        session.commit()
+
+    with SessionLocal() as session:
+        planner = session.get(BuildTask, planner_task_id("GH-111"))
+        assert planner is not None
+        planner.description = "Operator-adjusted planner instructions."
         session.commit()
 
     client.issues = [
@@ -852,9 +887,11 @@ def test_github_objective_resync_refreshes_planner_task_description():
     with SessionLocal() as session:
         planner = session.get(BuildTask, planner_task_id("GH-111"))
         assert planner is not None
-        assert "Updated objective" in planner.description
-        assert "updated rollout plan" in planner.description
-        assert "original plan" not in planner.description
+        assert planner.description == "Operator-adjusted planner instructions."
+        obj = session.get(BuildObjective, "GH-111")
+        assert obj is not None
+        assert "Updated objective" in obj.goal
+        assert "updated rollout plan" in obj.goal
 
 
 def test_github_objective_source_closure_suppresses_planner_without_completing_objective():
