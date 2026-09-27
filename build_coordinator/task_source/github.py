@@ -266,7 +266,9 @@ class GitHubTaskSource(TaskSource):
             return True
         except Exception as exc:
             err = str(exc)
-            is_capacity = self._maybe_record_capacity_wait_from_error(session, err, surface="labels")
+            is_capacity = self._maybe_record_capacity_wait_from_error(
+                session, err, surface="labels", headers=self._extract_capacity_headers(exc)
+            )
             if not self._label_warning_emitted:
                 logger.warning("Failed to provision GitHub lifecycle labels for %s: %s", self.repo, err)
                 self._label_warning_emitted = True
@@ -411,7 +413,9 @@ class GitHubTaskSource(TaskSource):
         try:
             issues = self._fetch_issues()
         except TaskSourceCapacityError as exc:
-            primary = self._is_primary_capacity_message(str(exc))
+            primary = self._is_primary_capacity_message(
+                str(exc), headers=self._extract_capacity_headers(exc)
+            )
             self._record_source_capacity_wait(session, exc, surface="discovery", primary=primary)
             return self._cached_discovery_results(session, str(exc))
         results: list[SyncResult] = []
@@ -510,6 +514,7 @@ class GitHubTaskSource(TaskSource):
                     reason="RATE_LIMITED",
                     retry_after_seconds=retry_after,
                     reset_at=reset_at,
+                    headers=exc.headers,
                 ) from exc
             raise RuntimeError(f"GitHub public REST fallback failed for {self.repo}: HTTP {exc.code}: {message}") from exc
         except Exception as exc:
@@ -589,21 +594,52 @@ class GitHubTaskSource(TaskSource):
 
     @staticmethod
     def _is_primary_capacity_message(message: str, headers: Any = None) -> bool:
-        """True when the evidence indicates the shared, account-wide
-        primary REST quota is exhausted (as opposed to GitHub's narrower,
-        per-endpoint secondary/abuse-detection throttle). A confirmed
-        `X-RateLimit-Remaining: 0` header is the strongest signal; absent
-        headers (e.g. `gh` CLI stderr text), default to primary unless the
-        message explicitly names the secondary/abuse-detection limiter,
-        since an unqualified "rate limit"/"too many requests" report is,
-        in GitHub's own terminology, ordinarily the primary limit.
+        """True unless HEADER evidence demonstrates this hit is a narrower,
+        non-shared restriction rather than the shared, account-wide primary
+        REST quota.
+
+        This deliberately does not infer narrow scope from message wording
+        alone ("secondary rate limit", "abuse detection", ...): that phrase
+        describes how the server labeled the restriction, not which
+        surfaces it actually affects, and nothing here can verify it from
+        text. Treating an *unverified* "secondary" message as narrow is the
+        dangerous mistake -- it would let other surfaces keep hammering a
+        quota that may in fact still be shared-exhausted -- so an
+        unknown-scope restriction defaults to the safe classification:
+        primary/shared. Only real header evidence can move this to narrow:
+
+          - `X-RateLimit-Remaining == "0"` -> demonstrably primary/shared.
+          - `X-RateLimit-Remaining` present and not "0" -> the shared quota
+            is demonstrably *not* exhausted, so whatever tripped this call
+            must be a narrower restriction (secondary/abuse-detection),
+            genuinely independent of the shared quota -> not shared.
+
+        With no headers at all -- the common case for the `gh` CLI
+        subprocess path and simple mock/third-party clients, none of which
+        expose raw HTTP response headers -- scope is unknown, and this
+        returns True (shared) by design.
         """
-        if headers is not None and headers.get("X-RateLimit-Remaining") == "0":
-            return True
-        lowered = message.lower()
-        if "secondary rate" in lowered or "abuse detection" in lowered:
-            return False
-        return GitHubTaskSource._is_rate_limit_message(message)
+        if headers is not None:
+            remaining = headers.get("X-RateLimit-Remaining")
+            if remaining is not None:
+                return remaining == "0"
+        return True
+
+    @staticmethod
+    def _extract_capacity_headers(exc: BaseException) -> Any:
+        """Best-effort extraction of raw HTTP response headers from an
+        arbitrary client exception, so `_is_primary_capacity_message` can
+        be given real evidence when it exists (a `TaskSourceCapacityError`
+        raised with `headers=...`, an `HTTPError`-like `.headers`, or a
+        `requests`-style `.response.headers`) instead of falling back to
+        its conservative "unknown scope" default. Returns None -- and
+        therefore that conservative default -- when no such evidence is
+        available."""
+        headers = getattr(exc, "headers", None)
+        if headers is not None:
+            return headers
+        response = getattr(exc, "response", None)
+        return getattr(response, "headers", None)
 
     @staticmethod
     def _is_rate_limited_http_response(code: int, headers: Any, message: str) -> bool:
@@ -671,13 +707,20 @@ class GitHubTaskSource(TaskSource):
         typed source-capacity wait scoped to `surface` and return True.
         Non-rate-limit failures (auth, permissions, network, not-found, ...)
         are left untouched so they remain distinct, actionable diagnostics
-        rather than being folded into capacity handling. A *secondary*
-        (abuse-detection) limit stays scoped to `surface` alone -- it must
-        never gate issue discovery or task execution merely because label
-        provisioning or outbound sync tripped it. A *primary*, account-wide
-        REST quota exhaustion is genuinely shared, so it additionally gates
-        every other REST-backed surface until the same cooldown clears
-        (see `_is_primary_capacity_message` / `_SHARED_PRIMARY_SURFACE`)."""
+        rather than being folded into capacity handling. A *demonstrated*
+        narrow (secondary/abuse-detection) limit -- backed by real header
+        evidence, never by message wording alone -- stays scoped to
+        `surface` alone, so it never gates issue discovery or task
+        execution merely because label provisioning or outbound sync
+        tripped it. A primary, account-wide REST quota exhaustion -- or any
+        capacity hit whose scope is not demonstrated by header evidence --
+        is treated as genuinely shared, so it additionally gates every
+        other REST-backed surface until the same cooldown clears (see
+        `_is_primary_capacity_message` / `_extract_capacity_headers` /
+        `_SHARED_PRIMARY_SURFACE`). Pass `headers` from the actual raised
+        exception (`_extract_capacity_headers(exc)`) whenever it's in
+        scope at the call site, rather than leaving it as the default
+        `None`, so a real narrow-scope hit can still be demonstrated."""
         if not self._is_rate_limit_message(err):
             return False
         primary = self._is_primary_capacity_message(err, headers)
@@ -1776,7 +1819,9 @@ class GitHubTaskSource(TaskSource):
                 return True
             except Exception as exc:
                 err = str(exc)
-                self._maybe_record_capacity_wait_from_error(session, err, surface="outbound")
+                self._maybe_record_capacity_wait_from_error(
+                session, err, surface="outbound", headers=self._extract_capacity_headers(exc)
+            )
                 logger.warning("Failed to sync outbound to GitHub via client for #%s: %s", issue_number, err)
                 self._record_outbound_failed(
                     session,
@@ -1800,6 +1845,9 @@ class GitHubTaskSource(TaskSource):
             )
             if proc_comment.returncode != 0:
                 err = (proc_comment.stderr or proc_comment.stdout or "gh issue comment failed").strip()
+                # No exception object here (subprocess.run(check=False) never
+                # raises) -- no header evidence is available, so this is the
+                # "unknown scope" case (see _is_primary_capacity_message).
                 self._maybe_record_capacity_wait_from_error(session, err, surface="outbound")
                 logger.warning("Failed to comment on GitHub issue #%s: %s", issue_number, err)
                 self._record_outbound_failed(
@@ -1817,7 +1865,9 @@ class GitHubTaskSource(TaskSource):
                 self._remove_stale_lifecycle_labels(issue_number, label)
             except Exception as exc:
                 err = str(exc)
-                self._maybe_record_capacity_wait_from_error(session, err, surface="outbound")
+                self._maybe_record_capacity_wait_from_error(
+                session, err, surface="outbound", headers=self._extract_capacity_headers(exc)
+            )
                 logger.warning("Failed to remove stale lifecycle labels from GitHub issue #%s: %s", issue_number, err)
                 self._record_outbound_failed(
                     session,
@@ -1839,6 +1889,7 @@ class GitHubTaskSource(TaskSource):
             )
             if proc_label.returncode != 0:
                 err = (proc_label.stderr or proc_label.stdout or "gh issue edit --add-label failed").strip()
+                # No exception object here either -- same "unknown scope" case.
                 self._maybe_record_capacity_wait_from_error(session, err, surface="outbound")
                 logger.warning("Failed to add label to GitHub issue #%s: %s", issue_number, err)
                 self._record_outbound_failed(
@@ -1863,6 +1914,7 @@ class GitHubTaskSource(TaskSource):
                 )
                 if proc_close.returncode != 0:
                     err = (proc_close.stderr or proc_close.stdout or "gh issue close failed").strip()
+                    # No exception object here either -- same "unknown scope" case.
                     self._maybe_record_capacity_wait_from_error(session, err, surface="outbound")
                     logger.warning("Failed to close GitHub issue #%s: %s", issue_number, err)
                     self._record_outbound_failed(
@@ -1885,7 +1937,9 @@ class GitHubTaskSource(TaskSource):
             return True
         except Exception as exc:
             err = str(exc)
-            self._maybe_record_capacity_wait_from_error(session, err, surface="outbound")
+            self._maybe_record_capacity_wait_from_error(
+                session, err, surface="outbound", headers=self._extract_capacity_headers(exc)
+            )
             logger.warning("Subprocess exception syncing outbound to GitHub issue #%s: %s", issue_number, err)
             self._record_outbound_failed(
                 session,

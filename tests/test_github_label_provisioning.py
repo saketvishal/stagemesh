@@ -108,8 +108,19 @@ def _force_capacity_cooldown_expired(source: GitHubTaskSource, session, *, surfa
     process instance honors a cooldown recorded before a restart). To make
     a test's next call see a genuinely-cleared cooldown, both must be
     rolled back into the past.
+
+    Also clears the shared `__rest_primary__` pseudo-surface: since
+    GitHubTaskSource._is_primary_capacity_message() now defaults an
+    unverified/unknown-scope capacity message to *shared* (see that
+    method's docstring -- message wording like "secondary rate limit"
+    alone is never sufficient to prove narrow scope), a plain rate-limit
+    failure recorded by these fixtures also sets the shared backoff, and
+    that must be rolled back too or a later "intended success" call would
+    still be suppressed by the shared gate even after "labels"'s own entry
+    is cleared.
     """
     source._capacity_backoff_until_by_surface[surface] = 0.0
+    source._capacity_backoff_until_by_surface[source._SHARED_PRIMARY_SURFACE] = 0.0
     events = session.scalars(
         select(BuildTaskEvent)
         .where(BuildTaskEvent.event_type == "task_source.capacity_wait")
@@ -117,7 +128,9 @@ def _force_capacity_cooldown_expired(source: GitHubTaskSource, session, *, surfa
     ).all()
     for event in events:
         data = dict(event.event_data or {})
-        if data.get("repo") != source.repo or data.get("surface") != surface:
+        if data.get("repo") != source.repo:
+            continue
+        if data.get("surface") != surface and not data.get("primary"):
             continue
         data["backoff_until"] = time.time() - 1
         event.event_data = data
