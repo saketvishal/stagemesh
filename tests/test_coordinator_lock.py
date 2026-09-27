@@ -7,11 +7,16 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import delete
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
+from sqlalchemy.orm import Session
 
 from build_coordinator import coordinator_lock
-from build_coordinator.db import Base, SessionLocal, engine, initialize_schema
+from build_coordinator.db import Base, DatabaseBusyError, SessionLocal, engine, initialize_schema, with_sqlite_retry
 from build_coordinator.models import BuildCoordinatorLock
+
+
+def _locked_error() -> OperationalError:
+    return OperationalError("INSERT INTO build_coordinator_locks ...", {}, Exception("database is locked"))
 
 
 @pytest.fixture(autouse=True)
@@ -183,3 +188,50 @@ def test_first_acquisition_race_reports_typed_lock_held(monkeypatch):
     with pytest.raises(coordinator_lock.CoordinatorLockHeld, match="already running"):
         coordinator_lock.acquire_coordinator_lock(session, pid=os.getpid() + 1, instance_id="loser")
     assert session.rolled_back
+
+
+def test_initial_insert_transient_lock_retries_and_succeeds(monkeypatch):
+    real_flush = Session.flush
+    attempts_made = {"count": 0}
+
+    def flaky_flush(self, *args, **kwargs):
+        # Only the explicit flush inside `acquire_coordinator_lock`'s insert
+        # path should observe the injected transient lock -- the later
+        # `session.commit()` flush must be allowed through once it clears.
+        if getattr(self, "_gh101_test_inject_lock", False):
+            self._gh101_test_inject_lock = False
+            raise _locked_error()
+        return real_flush(self, *args, **kwargs)
+
+    monkeypatch.setattr(Session, "flush", flaky_flush)
+
+    def attempt():
+        attempts_made["count"] += 1
+        with SessionLocal() as session:
+            if attempts_made["count"] < 3:
+                session._gh101_test_inject_lock = True
+            acquisition = coordinator_lock.acquire_coordinator_lock(
+                session, pid=os.getpid(), instance_id="owner-1"
+            )
+            session.commit()
+            return acquisition.recovered_stale, acquisition.record.process_id
+
+    recovered_stale, process_id = with_sqlite_retry(attempt, attempts=5, base_delay=0.0)
+    assert not recovered_stale
+    assert process_id == os.getpid()
+    assert attempts_made["count"] == 3
+
+
+def test_initial_insert_transient_lock_exceeds_budget_raises_busy(monkeypatch):
+    def always_locked(self, *args, **kwargs):
+        raise _locked_error()
+
+    monkeypatch.setattr(Session, "flush", always_locked)
+
+    def attempt():
+        with SessionLocal() as session:
+            coordinator_lock.acquire_coordinator_lock(session, pid=os.getpid(), instance_id="owner-1")
+            session.commit()
+
+    with pytest.raises(DatabaseBusyError):
+        with_sqlite_retry(attempt, attempts=3, base_delay=0.0)

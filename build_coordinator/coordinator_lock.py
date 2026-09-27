@@ -22,6 +22,7 @@ from datetime import UTC, datetime
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
+from build_coordinator.db import _is_transient_sqlite_lock_error
 from build_coordinator.models import BuildCoordinatorLock, new_uuid
 from build_coordinator.watcher.lock import _host_name, is_pid_alive
 
@@ -93,7 +94,25 @@ def acquire_coordinator_lock(
         session.add(record)
         try:
             session.flush()
-        except (IntegrityError, OperationalError) as exc:
+        except OperationalError as exc:
+            session.rollback()
+            if _is_transient_sqlite_lock_error(exc):
+                # A short-lived SQLite writer lock, not a real ownership
+                # conflict -- propagate so `with_sqlite_retry` can retry the
+                # whole acquisition rather than misclassifying it as a held
+                # coordinator lock.
+                raise
+            try:
+                winner = session.get(BuildCoordinatorLock, 1)
+            except OperationalError:
+                winner = None
+            if winner is not None:
+                _raise_lock_held(winner, now=_now(), stale_after_seconds=stale_after_seconds)
+            raise CoordinatorLockHeld(
+                "another coordinator acquired this project while this process was starting; "
+                "refusing to start a second coordinator against the same database"
+            ) from exc
+        except IntegrityError as exc:
             session.rollback()
             try:
                 winner = session.get(BuildCoordinatorLock, 1)
