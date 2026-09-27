@@ -365,6 +365,7 @@ class GitHubTaskSource(TaskSource):
         """Fetch open issues from the repository and ingest into the durable queue."""
         if not self.repo:
             return []
+        self._load_capacity_backoff(session)
         if self._capacity_backoff_until > time.time():
             return self._cached_discovery_results(
                 session,
@@ -570,6 +571,28 @@ class GitHubTaskSource(TaskSource):
         )
         session.flush()
 
+    def _load_capacity_backoff(self, session) -> None:
+        if self._capacity_backoff_until > time.time():
+            return
+        events = session.scalars(
+            select(BuildTaskEvent)
+            .where(BuildTaskEvent.event_type == "task_source.capacity_wait")
+            .where(BuildTaskEvent.task_id.is_(None))
+            .order_by(BuildTaskEvent.created_at.desc())
+            .limit(20)
+        )
+        for event in events:
+            data = event.event_data or {}
+            if data.get("repo") != self.repo or data.get("provider") != "github":
+                continue
+            try:
+                backoff_until = float(data.get("backoff_until") or 0)
+            except (TypeError, ValueError):
+                backoff_until = 0.0
+            if backoff_until > time.time():
+                self._capacity_backoff_until = backoff_until
+            return
+
     def _cached_discovery_results(self, session, detail: str) -> list[SyncResult]:
         tasks = session.scalars(select(BuildTask)).all()
         results: list[SyncResult] = []
@@ -579,6 +602,7 @@ class GitHubTaskSource(TaskSource):
                 metadata.get("source_type") == "github"
                 and metadata.get("source_owner") == self.repo
                 and str(metadata.get("source_state") or "OPEN").upper() == "OPEN"
+                and task_source_is_executable(task)
             ):
                 results.append(
                     SyncResult(
