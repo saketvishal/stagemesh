@@ -458,6 +458,7 @@ def start_new_convergence_epoch(
         {
             "generations": prior_convergence.get("generations"),
             "comprehensive_used": prior_convergence.get("comprehensive_used"),
+            "comprehensive_execution_id": prior_convergence.get("comprehensive_execution_id"),
             "stop_reason": prior_convergence.get("stop_reason"),
             "history": prior_convergence.get("history"),
             "stop_feature_sha": stop_feature_sha,
