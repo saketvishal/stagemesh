@@ -902,6 +902,10 @@ def _summarize_run(detail: dict[str, Any]) -> dict[str, Any]:
 
 
 def _detect_repo_from_git(root: Path) -> str | None:
+    def repo_from_url(url: str) -> str | None:
+        m = re.search(r"github\.com[:/]([^/]+/[^/.]+?)(?:\.git)?$", url)
+        return m.group(1) if m else None
+
     try:
         proc = subprocess.run(
             ["git", "config", "--get", "remote.origin.url"],
@@ -911,12 +915,20 @@ def _detect_repo_from_git(root: Path) -> str | None:
             check=False,
         )
         if proc.returncode == 0 and proc.stdout.strip():
-            url = proc.stdout.strip()
-            m = re.search(r"github\.com[:/]([^/]+/[^/.]+?)(?:\.git)?$", url)
-            if m:
-                return m.group(1)
+            detected = repo_from_url(proc.stdout.strip())
+            if detected:
+                return detected
     except Exception:
         pass
+    config_path = root / ".git" / "config"
+    if config_path.exists():
+        try:
+            text = config_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return None
+        match = re.search(r"^\s*url\s*=\s*(\S+)\s*$", text, flags=re.MULTILINE)
+        if match:
+            return repo_from_url(match.group(1))
     return None
 
 
@@ -975,6 +987,16 @@ def _optional_task_source(
     options.update({key: value for key, value in cfg.items() if key not in {"enabled", "repo", "labels", "options", "_inferred"}})
 
     if normalized_source_type == "github" and not cfg.get("repo") and not os.getenv("BUILD_COORDINATOR_GITHUB_REPO"):
+        explicit_config = not cfg.get("_inferred") and any(
+            configured_name == "github" for configured_name, _ in project.task_sources.items()
+        )
+        if explicit_config and not force:
+            diagnostics.append({
+                "source": "github",
+                "action": "ERROR",
+                "details": "missing repo identity: 'repo' must be specified in task_sources.github or detectable from git remote",
+            })
+            return None, diagnostics
         detected_repo = _detect_repo_from_git(project.root)
         if detected_repo:
             cfg["repo"] = detected_repo

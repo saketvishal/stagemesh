@@ -1201,6 +1201,89 @@ def test_validation_restarts_are_rerun_instead_of_trusted():
         assert session.get(BuildTask, "RUN-VALIDATION-RESTART").state == "VALIDATING"
 
 
+def test_validation_recovery_after_expired_builder_claim_does_not_redispatch_builder():
+    validation_command = f"{sys.executable} -c \"print('ok')\""
+    with SessionLocal() as session:
+        task = upsert_task(
+            session,
+            TaskSpec(
+                **{
+                    **_task("RUN-VALIDATION-EXPIRED-CLAIM").__dict__,
+                    "required_validation": [validation_command],
+                }
+            ),
+        )
+        claim = claim_task(session, ClaimRequest("RUN-VALIDATION-EXPIRED-CLAIM", worker_id="builder-a"))
+        task.state = "VALIDATING"
+        task.current_claim_id = claim.claim_id
+        claim.lease_expires_at = utcnow() - timedelta(seconds=1)
+        claim.status = "EXPIRED"
+        session.add(
+            BuildRunnerExecution(
+                execution_id="builder-succeeded-expired-claim",
+                task_id="RUN-VALIDATION-EXPIRED-CLAIM",
+                role="BUILDER",
+                worker_id="builder-a",
+                provider="local",
+                adapter="fake",
+                claim_id=claim.claim_id,
+                status="SUCCEEDED",
+                result_data={"feature_sha": "feature-sha-expired-claim"},
+            )
+        )
+        session.add(
+            BuildRunnerExecution(
+                execution_id="validation-lost-expired-claim",
+                task_id="RUN-VALIDATION-EXPIRED-CLAIM",
+                role="BUILDER",
+                worker_id="runner-validation",
+                provider="runner",
+                adapter="validation",
+                claim_id=claim.claim_id,
+                status="LAUNCHED",
+                reviewed_feature_sha="feature-sha-expired-claim",
+                result_data={
+                    "commands": [validation_command],
+                    "workspace": str(Path.cwd()),
+                    "source_execution_id": "builder-succeeded-expired-claim",
+                    "validated_sha": "feature-sha-expired-claim",
+                    "next_state": "REVIEW_READY",
+                },
+            )
+        )
+        session.commit()
+
+    builder_executor = FakeExecutor()
+    runner = _runner(executors={"builder-a": builder_executor})
+    result = runner.run_once()
+
+    with SessionLocal() as session:
+        task = session.get(BuildTask, "RUN-VALIDATION-EXPIRED-CLAIM")
+        builder_rows = session.scalars(
+            select(BuildRunnerExecution)
+            .where(BuildRunnerExecution.task_id == "RUN-VALIDATION-EXPIRED-CLAIM")
+            .where(BuildRunnerExecution.adapter == "fake")
+        ).all()
+        validation_rows = session.scalars(
+            select(BuildRunnerExecution)
+            .where(BuildRunnerExecution.task_id == "RUN-VALIDATION-EXPIRED-CLAIM")
+            .where(BuildRunnerExecution.adapter == "validation")
+            .order_by(BuildRunnerExecution.execution_id)
+        ).all()
+
+        assert builder_executor.launches == []
+        assert len(builder_rows) == 1
+        assert len(validation_rows) == 2
+        old = next(row for row in validation_rows if row.execution_id == "validation-lost-expired-claim")
+        new = next(row for row in validation_rows if row.execution_id != "validation-lost-expired-claim")
+        assert old.status in {"LOST", "TERMINATED"}
+        assert new.execution_id in result.launched
+        assert new.status in {"LAUNCHED", "RUNNING"}
+        assert new.result_data["source_execution_id"] == "builder-succeeded-expired-claim"
+        assert new.result_data["validated_sha"] == "feature-sha-expired-claim"
+        assert task.state == "VALIDATING"
+
+
 def test_validation_timeout_is_typed_with_start_end_and_exit_evidence():
     executor = ValidationExecutor(timeout_seconds=0.01)
     command = f"{sys.executable} -c \"import time; time.sleep(1)\""

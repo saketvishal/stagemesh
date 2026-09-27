@@ -28,7 +28,7 @@ from build_coordinator.models import (
     BuildTaskEvent,
     TASK_STATES,
 )
-from build_coordinator.objectives import _ensure_planner_task, create_objective, get_planner_task
+from build_coordinator.objectives import _ensure_planner_task, _planner_task_description, create_objective, get_planner_task
 from build_coordinator.service import upsert_task, utcnow
 from build_coordinator.task_source.base import (
     SOURCE_DEFERRED,
@@ -754,7 +754,7 @@ class GitHubTaskSource(TaskSource):
         source_url: str,
         source_state: str,
         previous_state: str,
-        eligibility: str = SOURCE_ELIGIBLE,
+        eligibility: str | None = None,
         eligibility_reason: str | None = None,
     ) -> None:
         planner = get_planner_task(session, objective.objective_id)
@@ -807,6 +807,7 @@ class GitHubTaskSource(TaskSource):
             was_current = self._objective_sync_is_current(session, task_id, title, body, ac, deps)
             existed = session.get(BuildObjective, task_id) is not None
             previous_eligibility = self._objective_source_eligibility(session, task_id)
+            previous_source_state = self._latest_objective_source_state(session, task_id)
             objective = self._sync_objective(
                 session,
                 task_id,
@@ -821,7 +822,9 @@ class GitHubTaskSource(TaskSource):
             )
             if not direct_execution:
                 current_eligibility = self._objective_source_eligibility(session, task_id)
-                if existed and previous_eligibility != current_eligibility:
+                if previous_source_state == "CLOSED":
+                    action = "SOURCE_OPEN"
+                elif existed and previous_eligibility != current_eligibility:
                     action = "SOURCE_ELIGIBILITY_CHANGED"
                 else:
                     action = "SKIPPED" if was_current else ("UPDATED" if existed else "CREATED")
@@ -879,7 +882,7 @@ class GitHubTaskSource(TaskSource):
         deps: list[str],
         labels: list[str],
         url: str,
-        eligibility: str = SOURCE_ELIGIBLE,
+        eligibility: str | None = None,
         eligibility_reason: str | None = None,
         objective_id: str | None = None,
     ) -> SyncResult:
@@ -954,7 +957,9 @@ class GitHubTaskSource(TaskSource):
                     },
                 ),
             )
-        self._reconcile_reopened_task_from_open_issue(session, task, labels, url)
+        has_stale_done_label = "stagemesh:done" in {label.strip().lower() for label in labels}
+        if source_was_closed or has_stale_done_label:
+            self._reconcile_reopened_task_from_open_issue(session, task, labels, url)
         if objective_id:
             task.objective_id = objective_id
             if task.reason_created == OBJECTIVE_ROOT_COMPAT_REASON:
@@ -1018,6 +1023,7 @@ class GitHubTaskSource(TaskSource):
         mapping = (
             ("review:none", "NONE"),
             ("review:self", "SELF"),
+            ("review:independent", "INDEPENDENT_WORKER"),
             ("review:independent-worker", "INDEPENDENT_WORKER"),
             ("review:independent_provider", "INDEPENDENT_PROVIDER"),
             ("review:independent-provider", "INDEPENDENT_PROVIDER"),
@@ -1027,7 +1033,7 @@ class GitHubTaskSource(TaskSource):
         for label, policy in mapping:
             if label in normalized:
                 return policy
-        return "INDEPENDENT_WORKER"
+        return "SELF"
 
     def _record_sync_event(
         self,
@@ -1125,7 +1131,7 @@ class GitHubTaskSource(TaskSource):
         deps: list[str],
         url: str,
         *,
-        eligibility: str = SOURCE_ELIGIBLE,
+        eligibility: str | None = None,
         eligibility_reason: str | None = None,
         reconcile_historical_root: bool = True,
     ) -> BuildObjective:
@@ -1147,6 +1153,8 @@ class GitHubTaskSource(TaskSource):
             if planner is None and existing.state == "PLANNING":
                 planner = _ensure_planner_task(session, existing)
             if planner is not None:
+                planner.title = f"Plan objective {objective_id}"
+                planner.description = _planner_task_description(existing)
                 planner.dependencies = authoritative_deps
                 self._apply_planner_source_metadata(
                     planner,
