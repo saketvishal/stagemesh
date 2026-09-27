@@ -310,6 +310,21 @@ def with_sqlite_retry(
         try:
             return fn()
         except DatabaseBusyError as exc:
+            # A DatabaseBusyError wrapping an OperationalError cause means a
+            # *nested* with_sqlite_retry call already exhausted its own
+            # attempts and deliberately re-typed the error so this outer
+            # call wouldn't blindly retry `fn` -- most importantly, so a
+            # caller like BuildRunner.run_once() (which sets is_retryable to
+            # reject retries once an external worker launch has started)
+            # doesn't re-invoke `fn` from scratch and risk a duplicate
+            # launch. Route that case through the same is_retryable gate as
+            # a plain OperationalError. A bare DatabaseBusyError with no
+            # such cause is a caller's own typed, already-bounded signal
+            # (e.g. commit_or_busy) that this attempt should simply be
+            # retried like any other transient failure.
+            cause = exc.__cause__
+            if isinstance(cause, OperationalError) and not is_retryable(cause):
+                raise
             if attempt == attempts:
                 raise
             delay = min(max_delay, base_delay * (2 ** (attempt - 1)))
