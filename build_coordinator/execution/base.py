@@ -32,6 +32,13 @@ class ExecutionHandle:
     execution_id: str
     process_id: str | None = None
     result_path: str | None = None
+    # Durable start-identity token captured at launch time (see
+    # execution.process_tree.capture_process_identity). Combined with
+    # process_id, this lets a later poll -- possibly after the coordinator
+    # or executor was reconstructed and lost its in-memory handle --
+    # distinguish "the original process is still running" from "a
+    # different process now happens to have this pid".
+    process_start_key: str | None = None
 
 
 @dataclass(frozen=True)

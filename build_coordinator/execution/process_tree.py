@@ -317,6 +317,196 @@ def _windows_descendants(root_pid: int) -> list[int]:
     return found
 
 
+def capture_process_identity(pid: int) -> str | None:
+    """Best-effort durable start-identity token for `pid`.
+
+    Combined with the pid itself, this lets a later reconciliation confirm
+    "the process I launched is still running" rather than "some process with
+    this pid exists" -- pids get reused, a bare pid does not. Returns None
+    when no platform-specific identity evidence could be captured; callers
+    must treat that as "unknown", never as "same" or "different".
+    """
+    if pid <= 0:
+        return None
+    if sys.platform == "win32":
+        return _windows_process_start_key(pid)
+    return _posix_process_start_key(pid)
+
+
+def process_identity_status(pid: int, remembered_start_key: str | None) -> str:
+    """Classify a remembered (pid, start_key) pair against current OS state.
+
+    Returns one of:
+      "MATCH"      -- pid is alive and its current start identity matches
+                       remembered_start_key. Safe to treat as the original
+                       process, still running.
+      "MISMATCH"   -- pid exists but its start identity differs (the pid was
+                       reused by a different process) or pid no longer
+                       exists at all. The original process is gone.
+      "ALIVE_UNVERIFIED" -- pid is alive but current identity could not be
+                       captured for comparison (platform probe failed), and
+                       there is no positive evidence the original process is
+                       gone. Treated as still running, not redispatched, but
+                       distinguishable in evidence from a confirmed MATCH.
+      "UNKNOWN"    -- remembered_start_key is None (identity was never
+                       captured for this execution, e.g. a row that predates
+                       durable identity tracking). No liveness claim can be
+                       made from identity alone.
+    """
+    if remembered_start_key is None:
+        return "UNKNOWN"
+    current_key = capture_process_identity(pid)
+    if current_key is not None:
+        return "MATCH" if current_key == remembered_start_key else "MISMATCH"
+    if _process_exists(pid):
+        return "ALIVE_UNVERIFIED"
+    return "MISMATCH"
+
+
+def _process_exists(pid: int) -> bool:
+    """True iff `pid` refers to a process that is genuinely still running.
+
+    A zombie (a child that has exited but not yet been reaped by its
+    parent) is NOT considered to exist here: `kill(pid, 0)` alone still
+    succeeds for a zombie, because the kernel keeps its pid slot allocated
+    until reaped, but the worker it represents has already exited -- an
+    executor that treated that as "still running" would strand a task
+    waiting on a process that will never produce anything more.
+    """
+    if pid <= 0:
+        return False
+    if sys.platform == "win32":
+        return _windows_process_exists(pid)
+    stat = _read_posix_stat_fields(pid)
+    if stat is not None:
+        state, _starttime = stat
+        return state != "Z"
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # Exists and is not ours to introspect via /proc; best effort.
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _read_posix_stat_fields(pid: int) -> tuple[str, str] | None:
+    """Return (state, starttime) from /proc/<pid>/stat, or None if unreadable."""
+    try:
+        with open(f"/proc/{pid}/stat", "r", encoding="utf-8") as fh:
+            content = fh.read()
+    except OSError:
+        return None
+    try:
+        # comm (field 2) is parenthesized and may itself contain ')' and
+        # spaces, so split on the LAST ')' before reading the remaining
+        # space-delimited fields: index0=state(field3), ...,
+        # starttime is field22 overall -> index19 after the split.
+        after_comm = content.rsplit(")", 1)[1].split()
+        state = after_comm[0]
+        starttime = after_comm[19]
+        if not starttime.isdigit():
+            return None
+    except (IndexError, ValueError):
+        return None
+    return state, starttime
+
+
+def _posix_process_start_key(pid: int) -> str | None:
+    stat = _read_posix_stat_fields(pid)
+    if stat is None:
+        return _posix_ps_start_key(pid)
+    state, starttime = stat
+    if state == "Z":
+        # A zombie has exited; it has no meaningful "still running" identity.
+        return None
+    return f"proc:{starttime}"
+
+
+def _posix_ps_start_key(pid: int) -> str | None:
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "lstart="],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except (OSError, ValueError):
+        return None
+    if result.returncode != 0:
+        return None
+    value = result.stdout.strip()
+    return f"ps:{value}" if value else None
+
+
+def _windows_process_exists(pid: int) -> bool:
+    import ctypes
+    from ctypes import wintypes
+
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    STILL_ACTIVE = 259
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        # ERROR_ACCESS_DENIED (5): the process exists but is not queryable.
+        return ctypes.get_last_error() == 5
+    try:
+        exit_code = wintypes.DWORD()
+        kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+            return ctypes.get_last_error() == 5
+        return exit_code.value == STILL_ACTIVE
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def _windows_process_start_key(pid: int) -> str | None:
+    import ctypes
+    from ctypes import wintypes
+
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        return None
+    try:
+        creation = wintypes.FILETIME()
+        exit_time = wintypes.FILETIME()
+        kernel_time = wintypes.FILETIME()
+        user_time = wintypes.FILETIME()
+        kernel32.GetProcessTimes.argtypes = [
+            wintypes.HANDLE,
+            ctypes.POINTER(wintypes.FILETIME),
+            ctypes.POINTER(wintypes.FILETIME),
+            ctypes.POINTER(wintypes.FILETIME),
+            ctypes.POINTER(wintypes.FILETIME),
+        ]
+        ok = kernel32.GetProcessTimes(
+            handle,
+            ctypes.byref(creation),
+            ctypes.byref(exit_time),
+            ctypes.byref(kernel_time),
+            ctypes.byref(user_time),
+        )
+        if not ok:
+            return None
+        value = (creation.dwHighDateTime << 32) | creation.dwLowDateTime
+        if value == 0:
+            return None
+        return f"win:{value}"
+    finally:
+        kernel32.CloseHandle(handle)
+
+
 def _close_handle(handle) -> None:
     import ctypes
 

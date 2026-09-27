@@ -1061,6 +1061,7 @@ class BuildRunner:
             worktree_path=cwd,
             branch_name=source_execution.branch_name,
             process_id=handle.process_id,
+            process_start_key=handle.process_start_key,
             result_path=handle.result_path or result_path,
             reviewed_feature_sha=validated_sha,
             prompt_hash=validation_context_hash,
@@ -3141,6 +3142,7 @@ class BuildRunner:
 
         def _persist_launch() -> None:
             row.process_id = handle.process_id
+            row.process_start_key = handle.process_start_key
             row.result_path = handle.result_path or result_path
             record_event(
                 session,
@@ -3543,11 +3545,17 @@ class BuildRunner:
             remember = getattr(self._validation_executor, "remember_result_path", None)
             if remember is not None:
                 remember(execution.execution_id, execution.result_path)
+            remember_identity = getattr(self._validation_executor, "remember_process_identity", None)
+            if remember_identity is not None:
+                remember_identity(execution.execution_id, execution.process_id, execution.process_start_key)
             return self._validation_executor
         executor = self._executors.get(execution.worker_id)
         if executor is not None:
             if isinstance(executor, SubprocessExecutor):
                 executor.remember_result_path(execution.execution_id, execution.result_path)
+                executor.remember_process_identity(
+                    execution.execution_id, execution.process_id, execution.process_start_key
+                )
             return executor
         if execution.adapter == "fake":
             executor = FakeExecutor()
@@ -3570,6 +3578,11 @@ class BuildRunner:
                 temp_dir=self._temp_dir(),
                 result_paths={execution.execution_id: execution.result_path}
                 if execution.result_path
+                else {},
+                process_identities={
+                    execution.execution_id: (execution.process_id, execution.process_start_key)
+                }
+                if execution.process_id
                 else {},
             )
             self._executors[execution.worker_id] = executor
