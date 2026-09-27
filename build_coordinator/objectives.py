@@ -33,6 +33,7 @@ from build_coordinator.models import (
     BuildTask,
     BuildTaskEvent,
 )
+from build_coordinator.claims import objective_dependency_is_satisfied, task_source_is_executable
 from build_coordinator.policy import CoordinatorPolicyError
 from build_coordinator.service import upsert_task, utcnow
 from build_coordinator.planner import planner_task_id
@@ -150,11 +151,11 @@ def objective_dependencies_satisfied(session: Session, objective: BuildObjective
     for dep_id in objective.dependencies or []:
         dep_objective = session.get(BuildObjective, dep_id)
         if dep_objective is not None:
-            if dep_objective.state != "COMPLETED":
+            if not objective_dependency_is_satisfied(session, dep_objective):
                 return False
             continue
         dep_task = session.get(BuildTask, dep_id)
-        if dep_task is None or dep_task.state != "DONE":
+        if dep_task is None or not task_source_is_executable(dep_task) or dep_task.state != "DONE":
             return False
     return True
 
@@ -188,6 +189,30 @@ def objective_work_tasks(session: Session, objective_id: str) -> list[BuildTask]
 
 def get_planner_task(session: Session, objective_id: str) -> BuildTask | None:
     return session.get(BuildTask, planner_task_id(objective_id))
+
+
+def objective_source_is_closed(session: Session, objective: BuildObjective) -> bool:
+    planner = get_planner_task(session, objective.objective_id)
+    if planner is not None:
+        metadata = planner.definition_metadata or {}
+        if metadata.get("source_type") == "github" and metadata.get("source_state") is not None:
+            return str(metadata.get("source_state") or "").upper() == "CLOSED"
+    latest = session.scalar(
+        select(BuildObjectiveEvent)
+        .where(BuildObjectiveEvent.objective_id == objective.objective_id)
+        .where(BuildObjectiveEvent.event_type == "objective.source_state_changed")
+        .order_by(BuildObjectiveEvent.created_at.desc())
+    )
+    if latest is None:
+        return False
+    return str((latest.event_data or {}).get("to_state") or "").upper() == "CLOSED"
+
+
+def objective_source_is_executable(session: Session, objective: BuildObjective) -> bool:
+    planner = get_planner_task(session, objective.objective_id)
+    if planner is not None:
+        return task_source_is_executable(planner)
+    return not objective_source_is_closed(session, objective)
 
 
 def open_gates(session: Session, objective_id: str) -> list[BuildObjectiveGate]:
@@ -659,6 +684,8 @@ def run_objective_cycle(session: Session) -> list[ObjectiveReconcileSummary]:
     restart) converges rather than duplicating work."""
     summaries: list[ObjectiveReconcileSummary] = []
     for objective in list_objectives(session):
+        if not objective_source_is_executable(session, objective):
+            continue
         # HUMAN_GATE still reconciles: later blocked-task reasons (especially
         # REMOTE_PUSH_APPROVAL_REQUIRED) must surface as additional typed
         # gates. Open gates keep the objective stopped via _reassess_completion.

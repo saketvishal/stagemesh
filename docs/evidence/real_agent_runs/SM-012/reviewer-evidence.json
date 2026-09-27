@@ -1,0 +1,31 @@
+{
+  "command": [
+    "C:\\Program Files\\Python313\\python.exe",
+    "-m",
+    "build_coordinator.agents.wrapper",
+    "--runtime",
+    "claude"
+  ],
+  "exit_code": 0,
+  "provider": "anthropic",
+  "result_data": {
+    "architecture_notes": [],
+    "execution_id": "exec-reviewer-SM-012-REAL",
+    "finding_dispositions": [],
+    "findings": [],
+    "ready_for_integration": true,
+    "required_remediation": [],
+    "reviewed_feature_sha": "fe62bc9772b5b35a41ff9852adb473a9b99f1e8d",
+    "role": "REVIEWER",
+    "schema_version": 1,
+    "status": "SUCCEEDED",
+    "task_id": "SM-012-REAL",
+    "verdict": "GREEN"
+  },
+  "result_file_present": true,
+  "result_path": "C:\\Users\\saket\\AppData\\Local\\Temp\\sm012_pytest\\pytest-of-saket\\pytest-3\\test_real_agent_builder_review0\\reviewer-result.json",
+  "role": "REVIEWER",
+  "runtime": "claude",
+  "status": "SUCCEEDED",
+  "worker_id": "reviewer-1"
+}

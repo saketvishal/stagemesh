@@ -1,0 +1,33 @@
+schema_version: 1
+demo_id: staged-independent-review
+description: Public-safe builder and reviewer separation demo.
+project:
+  id: demo-staged
+  repo: /path/to/disposable-demo-repo
+task:
+  id: DEMO-002
+  title: Add input validation
+  description: Reject empty names in the sample command handler.
+  acceptance_criteria:
+    - Empty names are rejected.
+    - Non-empty names still succeed.
+    - Tests cover both paths.
+  review_policy: INDEPENDENT
+workers:
+  - id: builder-a
+    provider: provider-a
+    stages: [BUILD, REMEDIATION]
+    command: [python, examples/stdin_print_cli_wrapper.py]
+  - id: reviewer-a
+    provider: provider-b
+    stages: [REVIEW]
+    command: [python, examples/stdin_print_cli_wrapper.py]
+  - id: integrator-a
+    provider: provider-a
+    stages: [INTEGRATE]
+    command: [python, examples/stdin_print_cli_wrapper.py]
+evidence:
+  - reviewer worker differs from builder worker
+  - reviewed SHA equals feature SHA at integration
+  - GitHub outbound dry-run payload contains only placeholder names
+

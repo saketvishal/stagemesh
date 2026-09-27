@@ -52,6 +52,7 @@ EXECUTION_STATUSES = (
     "TERMINATED",
     "LOST",
 )
+WORKER_LEASE_STATUSES = ("ACTIVE", "RELEASED", "EXPIRED")
 
 
 def new_uuid() -> str:
@@ -294,6 +295,38 @@ class BuildRunnerExecution(Base):
     launched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     last_observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class BuildWorkerLease(Base):
+    """SQL-backed worker slot lease for multi-machine runner coordination."""
+
+    __tablename__ = "build_worker_leases"
+    __table_args__ = (
+        CheckConstraint("status IN ('ACTIVE','RELEASED','EXPIRED')", name="chk_build_worker_leases_status"),
+        Index("idx_build_worker_leases_worker", "worker_id"),
+        Index("idx_build_worker_leases_status_expiry", "status", "lease_expires_at"),
+        Index(
+            "uq_build_worker_leases_active_slot",
+            "worker_id",
+            "slot_index",
+            unique=True,
+            sqlite_where=text("status = 'ACTIVE' AND slot_index IS NOT NULL"),
+            postgresql_where=text("status = 'ACTIVE' AND slot_index IS NOT NULL"),
+        ),
+    )
+
+    lease_id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    worker_id: Mapped[str] = mapped_column(String(160), nullable=False)
+    provider: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    slot_index: Mapped[int | None] = mapped_column(nullable=True)
+    machine_id: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    process_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    task_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    execution_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    acquired_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    heartbeat_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    lease_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default="ACTIVE")
 
 
 OBJECTIVE_STATES = (

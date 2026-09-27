@@ -618,9 +618,8 @@ def test_provider_failures_remain_provider_failure(failure_code):
         assert runner._review_environment_attempts(session, task_id) == 0
 
 
-def test_reviewer_rate_limit_exhaustion_stays_typed_as_provider_failure():
-    """Repeated reviewer RATE_LIMITED failures escalate with provider evidence,
-    not as remediation or review-environment exhaustion."""
+def test_reviewer_rate_limit_is_capacity_wait_not_task_block():
+    """RATE_LIMITED is provider capacity, so it must not consume review budget or block the task."""
     task_id = f"T-RATE-{uuid4().hex[:6]}"
     with SessionLocal() as session:
         upsert_task(session, _task(task_id))
@@ -638,22 +637,33 @@ def test_reviewer_rate_limit_exhaustion_stays_typed_as_provider_failure():
 
     runner = _runner(config=_config(max_review_environment_attempts=1), executors=executors)
     runner.run_once()  # launch first reviewer
-    runner.run_once()  # observe RATE_LIMITED failure -> typed provider block
+    result = runner.run_once()  # observe RATE_LIMITED -> keep task waiting at review stage
 
+    assert result.escalations == []
+    assert result.scheduling_reasons[task_id] == "provider_capacity_wait"
     with SessionLocal() as session:
         task = session.get(BuildTask, task_id)
-        assert task.state == "BLOCKED"
-        transition = session.scalar(
+        assert task.state == "REVIEW_READY"
+        blocked = session.scalars(
             select(BuildTaskEvent)
             .where(BuildTaskEvent.task_id == task_id)
-            .where(BuildTaskEvent.event_type == "task.transitioned")
             .where(BuildTaskEvent.to_state == "BLOCKED")
-            .order_by(BuildTaskEvent.created_at.desc())
+        ).all()
+        assert blocked == []
+        provider_failure = session.scalar(
+            select(BuildTaskEvent)
+            .where(BuildTaskEvent.task_id == task_id)
+            .where(BuildTaskEvent.event_type == "runner.provider_failure")
         )
-        assert transition.event_data["reason"] == "PROVIDER_FAILURE:RATE_LIMITED"
-        evidence = task.waiting_input["failure_evidence"]
-        assert evidence["underlying_invariant"] == "REVIEWER_PROVIDER_FAILURE"
-        assert evidence["provider_failure"] == "RATE_LIMITED"
+        assert provider_failure is not None
+        assert provider_failure.event_data["failure"] == "RATE_LIMITED"
+        execution = session.scalar(
+            select(BuildRunnerExecution)
+            .where(BuildRunnerExecution.task_id == task_id)
+            .where(BuildRunnerExecution.role == "REVIEWER")
+        )
+        assert execution.result_data["provider_capacity_failure"] is True
+        assert execution.result_data["reviewer_attempt"] == 0
         assert runner._remediation_cycles(session, task_id) == 0
         assert runner._review_environment_attempts(session, task_id) == 0
 

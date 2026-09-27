@@ -6,12 +6,15 @@ import dataclasses
 
 import hashlib
 import json
+import os
+import socket
 import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError, OperationalError
@@ -36,16 +39,19 @@ from build_coordinator.execution.subprocess_executor import SubprocessExecutor
 from build_coordinator.models import (
     BuildObjective,
     BuildRunnerExecution,
+    TASK_STATES,
     BuildTask,
     BuildTaskCheckpoint,
     BuildTaskClaim,
     BuildTaskEvent,
+    BuildWorkerLease,
     new_uuid,
 )
 from build_coordinator.objectives import (
     apply_validated_plan,
     get_objective,
     get_planner_task,
+    objective_source_is_executable,
     is_planner_task,
     list_objectives,
     objective_dependencies_satisfied,
@@ -72,9 +78,12 @@ from build_coordinator.runner.git_safety import (
     capture_feature_sha,
 )
 from build_coordinator.runner.findings import (
+    comprehensive_reconciliation_missing_ids,
     escalation_evidence as finding_escalation_evidence,
     open_findings,
+    record_convergence_generation,
     reconcile_findings,
+    start_new_convergence_epoch,
 )
 from build_coordinator.runner.models import (
     ReviewVerdict,
@@ -91,14 +100,22 @@ from build_coordinator.runner.routing import (
     StageRequirement,
     approving_providers,
     approving_reviewers,
+    execution_evidence_by_worker,
+    merge_worker_evidence,
     reviewer_exclusions,
     role_to_stage,
     route_worker,
 )
-from build_coordinator.project.backlog import task_priorities
+from build_coordinator.project.backlog import load_backlog, persist_delivery_evidence_in_history, task_priorities
+from build_coordinator.project.definition import find_project_root, load_project
 from build_coordinator.execution.git_integrator import GitIntegrationExecutor
 from build_coordinator.runner.ci_reconciliation import reconcile_awaiting_ci
-from build_coordinator.runner.validation import run_validation
+from build_coordinator.runner.validation import (
+    ValidationExecutor,
+    ValidationOutcome,
+    run_validation,
+    validation_environment_fingerprint,
+)
 from build_coordinator.runner.worktree import (
     cleanup_task_branch,
     WorktreeValidationError,
@@ -119,7 +136,7 @@ from build_coordinator.runner.clone_pool import (
     verify_clone_remote,
 )
 from build_coordinator.runner.git_safety import resolve_git_identity_args
-from build_coordinator.claims import CLAIMABLE_STATES
+from build_coordinator.claims import CLAIMABLE_STATES, task_source_is_executable
 from build_coordinator.runner.scheduling import (
     SCHEDULER_REASONS,
     active_implementation_tasks,
@@ -132,6 +149,7 @@ from build_coordinator.runner.scheduling import (
     record_task_withheld,
     sort_tasks_for_dispatch,
 )
+from build_coordinator.runner.steward import run_steward_cycle
 from build_coordinator.service import (
     ClaimRequest,
     checkpoint,
@@ -145,6 +163,7 @@ from build_coordinator.service import (
     reconcile_stale_executions,
     recover_expired,
     recover_lost_execution_claims,
+    release_worker_leases_for_execution,
     release_active_claims,
     request_task_input,
     transition_task,
@@ -173,6 +192,8 @@ class RunnerCycleResult:
     objectives_completed: list[str] = field(default_factory=list)
     outbound_synced: list[str] = field(default_factory=list)
     scheduling_reasons: dict[str, str] = field(default_factory=dict)
+    provider_state_changes: list[dict[str, Any]] = field(default_factory=list)
+    steward: dict[str, Any] = field(default_factory=dict)
 
 
 class BuildRunner:
@@ -197,6 +218,9 @@ class BuildRunner:
         self._task_source = task_source
         self._target_task_ids = frozenset(str(task_id) for task_id in (target_task_ids or ()))
         self._external_launch_started = False
+        self._validation_executor = ValidationExecutor(
+            timeout_seconds=self._config.validation_timeout_seconds
+        )
 
     def reload_config(
         self,
@@ -281,7 +305,9 @@ class BuildRunner:
             if task.task_id not in result.recovered:
                 result.recovered.append(task.task_id)
         self._reconcile_git_reality(session, result)
+        self._reconcile_provider_capacity_transitions(session, result)
         self._recover_diagnosed_blockers(session, result)
+        self._run_steward_maintenance(session, result)
         result.observed = self._reconcile_active(session, result)
         for task in recover_lost_execution_claims(session, actor="runner"):
             if task.task_id not in result.recovered:
@@ -289,6 +315,7 @@ class BuildRunner:
         self._kill_reconciled_process_trees(session)
         if state.mode == "PAUSED":
             return result
+        self._dispatch_validation(session, result)
         self._dispatch_reviews(session, result)
         if state.mode == "RUNNING":
             self._dispatch_planners(session, result)
@@ -299,6 +326,19 @@ class BuildRunner:
         if self._task_source is not None:
             self._sync_outbound(session, result)
         return result
+
+    def _run_steward_maintenance(self, session: Session, result: RunnerCycleResult) -> None:
+        steward = run_steward_cycle(
+            session,
+            workers=self._config.workers,
+            config=self._config.steward,
+        )
+        if steward.skipped_reason == "DISABLED":
+            return
+        result.steward = steward.to_dict()
+        for task_id in steward.recovered_tasks:
+            if task_id not in result.recovered:
+                result.recovered.append(task_id)
 
     def _reconcile_awaiting_external_ci(self, session: Session, result: RunnerCycleResult) -> None:
         """#65: non-blocking. A PENDING observation here leaves tasks in
@@ -311,6 +351,12 @@ class BuildRunner:
             session,
             repo=self._config.external_ci_repo,
             max_consecutive_errors=self._config.external_ci_max_consecutive_errors,
+            delivery_evidence_recorder=lambda task_id, sha: self._persist_project_delivery_evidence(
+                session,
+                task_id,
+                sha,
+                push_required=True,
+            ),
         )
         for outcome in outcomes:
             if outcome["status"] in {"DONE", "SUCCESS"}:
@@ -333,6 +379,9 @@ class BuildRunner:
                 for obj in completed_objectives:
                     if not self._target_allows(obj.objective_id):
                         continue
+                    planner_task = get_planner_task(session, obj.objective_id)
+                    if planner_task is not None and not task_source_is_executable(planner_task):
+                        continue
                     evidence = self._collect_objective_evidence(session, obj.objective_id)
                     synced = sync_obj_fn(
                         session,
@@ -353,22 +402,26 @@ class BuildRunner:
                 ),
             )
 
-        # 2. Sync DONE tasks
+        # 2. Sync task lifecycle labels. GitHub lifecycle labels are mutually
+        # exclusive, so non-DONE states need outbound reconciliation too; a
+        # reopened issue may still carry stagemesh:done from an earlier close.
         try:
-            done_tasks = session.scalars(
-                select(BuildTask).where(BuildTask.state == "DONE")
+            lifecycle_tasks = session.scalars(
+                select(BuildTask).where(BuildTask.state.in_(TASK_STATES))
             ).all()
-            for task in done_tasks:
+            for task in lifecycle_tasks:
                 if not self._target_allows(task.task_id):
                     continue
                 # If this task represents an objective issue itself, skip task-level sync
                 if session.get(BuildObjective, task.task_id) is not None:
                     continue
+                if not task_source_is_executable(task):
+                    continue
                 evidence = self._collect_task_evidence(session, task.task_id)
                 synced = self._task_source.sync_outbound(
                     session,
                     task.task_id,
-                    "DONE",
+                    task.state,
                     evidence=evidence,
                 )
                 if synced and result is not None:
@@ -489,6 +542,7 @@ class BuildRunner:
                     row.result_data = {**(row.result_data or {}), **observation.result_data}
             else:
                 self._apply_terminal_result(session, row, result, observation)
+                self._release_worker_lease(session, row.execution_id)
             observed.append(row.execution_id)
         return observed
 
@@ -500,6 +554,9 @@ class BuildRunner:
         observation: ExecutionObservation,
     ) -> None:
         raw_result = observation.result_data if observation.result_data is not None else execution.result_data
+        if execution.adapter == "validation":
+            self._apply_validation_result(session, execution, result, observation)
+            return
         if observation.human_escalation_type == "COORDINATOR_INVARIANT_FAILURE":
             execution.status = (
                 observation.status if observation.status in TERMINAL_EXECUTION_STATUSES else "FAILED"
@@ -651,7 +708,7 @@ class BuildRunner:
             elif execution.role == "PLANNER":
                 self._planner_succeeded(session, execution, result, parsed)
             return
-        if observation.status == "FAILED" and self._recoverable_failure(session, execution, merged, observation):
+        if observation.status == "FAILED" and self._recoverable_failure(session, execution, result, merged, observation):
             return
         if observation.status == "FAILED":
             execution.status = "FAILED"
@@ -711,25 +768,17 @@ class BuildRunner:
         if builder and builder.blockers:
             blocker_list = list(builder.blockers)
             if blocker_list == ["the agent produced no changes on the task branch"]:
-                # Check if acceptance criteria / tests are already met for this task
-                if self._check_task_already_satisfied(session, execution.task_id):
-                    sha = self._ensure_task_verification_commit(execution)
-                    if sha:
-                        execution.reviewed_feature_sha = sha
-                        transition_task(session, execution.task_id, "IN_PROGRESS", actor="runner")
-                        transition_task(session, execution.task_id, "VALIDATING", actor="runner")
-                        task = session.get(BuildTask, execution.task_id)
-                        if not self._validation_gate(session, task, execution, result):
-                            return
-                        transition_task(
-                            session,
-                            execution.task_id,
-                            "REVIEW_READY" if task and task.review_policy != "NONE" else "DONE",
-                            actor="runner",
-                            reason="task already satisfied; verification commit validated",
-                        )
-                        return
                 task = session.get(BuildTask, execution.task_id)
+                retry_generation = int((task.retry_generation if task is not None else 0) or 0)
+                outcome = self._reconcile_no_changes_produced(
+                    session,
+                    execution,
+                    result,
+                    detail="Agent produced no changes on task branch",
+                    retry_generation=retry_generation,
+                )
+                if outcome != "UNRESOLVED":
+                    return
                 # Check if existing task branch already has useful commits ahead of base
                 repo_root = Path(self._settings.repo_root)
                 branch = task.branch_name or task_branch_name(task.task_id) if task else None
@@ -758,6 +807,7 @@ class BuildRunner:
                     .select_from(BuildRunnerExecution)
                     .where(BuildRunnerExecution.task_id == execution.task_id)
                     .where(BuildRunnerExecution.role.in_(("BUILDER", "REMEDIATION")))
+                    .where(BuildRunnerExecution.adapter != "validation")
                     .where(BuildRunnerExecution.status.notin_(("LOST", "TERMINATED")))
                     .where(
                         or_(
@@ -916,10 +966,207 @@ class BuildRunner:
         if not commands or not self._config.run_validation:
             return True
         cwd = execution.worktree_path or self._git_cwd_for_execution(execution)
-        outcome = run_validation(
-            commands,
-            cwd,
-            timeout_seconds=self._config.validation_timeout_seconds,
+        self._launch_validation(
+            session,
+            result,
+            task=task,
+            source_execution=execution,
+            commands=commands,
+            cwd=str(cwd),
+            next_state="REVIEW_READY" if task and task.review_policy != "NONE" else "DONE",
+            success_reason=None,
+        )
+        return False
+
+    def _launch_validation(
+        self,
+        session: Session,
+        result: RunnerCycleResult,
+        *,
+        task: BuildTask | None,
+        source_execution: BuildRunnerExecution,
+        commands: list[str],
+        cwd: str,
+        next_state: str,
+        success_reason: str | None,
+    ) -> None:
+        if self._active_validation(session, source_execution.task_id) is not None:
+            return
+        execution_id = new_uuid()
+        feature_sha = (source_execution.result_data or {}).get("feature_sha") or source_execution.reviewed_feature_sha
+        validated_sha = feature_sha or self._current_head_sha(cwd)
+        env_fingerprint = validation_environment_fingerprint()
+        context = {
+            "task_id": source_execution.task_id,
+            "source_execution_id": source_execution.execution_id,
+            "validated_sha": validated_sha,
+            "workspace": str(cwd),
+            "commands": commands,
+            "environment_fingerprint": env_fingerprint,
+        }
+        validation_context_hash = hashlib.sha256(
+            json.dumps(context, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        handle = self._validation_executor.launch(
+            ExecutionLaunch(
+                task_id=source_execution.task_id,
+                role="BUILDER",
+                worker_id="runner-validation",
+                provider="runner",
+                worktree_path=cwd,
+                branch_name=source_execution.branch_name,
+                prompt="",
+                execution_id=execution_id,
+                reviewed_feature_sha=validated_sha,
+                metadata={"commands": commands},
+            )
+        )
+        row = BuildRunnerExecution(
+            execution_id=handle.execution_id,
+            task_id=source_execution.task_id,
+            role="BUILDER",
+            worker_id="runner-validation",
+            provider="runner",
+            adapter="validation",
+            claim_id=source_execution.claim_id,
+            worktree_path=cwd,
+            branch_name=source_execution.branch_name,
+            process_id=handle.process_id,
+            reviewed_feature_sha=validated_sha,
+            prompt_hash=validation_context_hash,
+            status="LAUNCHED",
+            launched_at=_now(),
+            result_data={
+                "commands": commands,
+                "workspace": str(cwd),
+                "source_execution_id": source_execution.execution_id,
+                "feature_sha": feature_sha,
+                "validated_sha": validated_sha,
+                "environment_fingerprint": env_fingerprint,
+                "validation_context_hash": validation_context_hash,
+                "started_at": _now().isoformat(),
+                "next_state": next_state,
+                "success_reason": success_reason,
+            },
+        )
+        session.add(row)
+        record_event(
+            session,
+            EventInput(
+                task_id=source_execution.task_id,
+                event_type="runner.validation_launched",
+                actor="runner",
+                claim_id=source_execution.claim_id,
+                event_data={
+                    "workspace": str(cwd),
+                    "commands": commands,
+                    "source_execution_id": source_execution.execution_id,
+                    "validation_execution_id": handle.execution_id,
+                    "validated_sha": validated_sha,
+                    "environment_fingerprint": env_fingerprint,
+                    "validation_context_hash": validation_context_hash,
+                },
+            ),
+        )
+        result.launched.append(handle.execution_id)
+
+    def _active_validation(self, session: Session, task_id: str) -> BuildRunnerExecution | None:
+        return session.scalar(
+            select(BuildRunnerExecution)
+            .where(BuildRunnerExecution.task_id == task_id)
+            .where(BuildRunnerExecution.adapter == "validation")
+            .where(BuildRunnerExecution.status.in_(LIVE_EXECUTION_STATUSES))
+            .limit(1)
+        )
+
+    def _dispatch_validation(self, session: Session, result: RunnerCycleResult) -> None:
+        tasks = session.scalars(select(BuildTask).where(BuildTask.state == "VALIDATING")).all()
+        for task in tasks:
+            if not self._target_allows(task.task_id):
+                continue
+            if self._active_validation(session, task.task_id) is not None:
+                continue
+            source = session.scalars(
+                select(BuildRunnerExecution)
+                .where(BuildRunnerExecution.task_id == task.task_id)
+                .where(BuildRunnerExecution.role.in_(("BUILDER", "REMEDIATION")))
+                .where(BuildRunnerExecution.adapter != "validation")
+                .where(BuildRunnerExecution.status == "SUCCEEDED")
+                .order_by(BuildRunnerExecution.completed_at.desc())
+            ).first()
+            if source is None:
+                continue
+            commands = list(task.required_validation or [])
+            if not commands or not self._config.run_validation:
+                transition_task(
+                    session,
+                    task.task_id,
+                    "REVIEW_READY" if task.review_policy != "NONE" else "DONE",
+                    actor="runner",
+                )
+                continue
+            cwd = source.worktree_path or task.worktree_path or self._git_cwd_for_execution(source)
+            self._launch_validation(
+                session,
+                result,
+                task=task,
+                source_execution=source,
+                commands=commands,
+                cwd=str(cwd),
+                next_state="REVIEW_READY" if task.review_policy != "NONE" else "DONE",
+                success_reason=None,
+            )
+
+    def _apply_validation_result(
+        self,
+        session: Session,
+        execution: BuildRunnerExecution,
+        result: RunnerCycleResult,
+        observation: ExecutionObservation,
+    ) -> None:
+        merged = {**(execution.result_data or {}), **(observation.result_data or {})}
+        execution.exit_code = observation.exit_code
+        execution.human_escalation_type = observation.human_escalation_type
+        execution.completed_at = _now()
+        merged.setdefault("ended_at", execution.completed_at.isoformat())
+        if observation.status in {"LOST", "TERMINATED"}:
+            execution.status = observation.status
+            execution.result_data = {
+                **merged,
+                "reconciliation_state": "LOST" if observation.status == "LOST" else "TERMINATED",
+                "validation_terminal_type": merged.get("validation_terminal_type")
+                or ("LOST" if observation.status == "LOST" else "CANCELLED"),
+            }
+            return
+        passed = observation.status == "SUCCEEDED" and bool(merged.get("passed", True))
+        current_sha = self._current_head_sha(str(merged.get("workspace") or execution.worktree_path or ""))
+        if (
+            passed
+            and _looks_like_git_sha(merged.get("validated_sha"))
+            and _looks_like_git_sha(current_sha)
+            and current_sha != merged.get("validated_sha")
+        ):
+            passed = False
+            stale_result = {
+                "command": "<validation-context>",
+                "exit_code": 1,
+                "failure_type": "STALE_VALIDATION_CONTEXT",
+                "started_at": merged.get("started_at"),
+                "completed_at": merged.get("ended_at"),
+                "duration_seconds": 0,
+                "output_tail": (
+                    "validation completed for "
+                    f"{merged.get('validated_sha')} but workspace is now {current_sha}"
+                )[-2000:],
+            }
+            merged["results"] = [*(merged.get("results") or []), stale_result]
+            merged["validation_terminal_type"] = "STALE_VALIDATION_CONTEXT"
+            merged["passed"] = False
+        execution.status = "SUCCEEDED" if passed else "FAILED"
+        execution.result_data = merged
+        outcome = ValidationOutcome(
+            passed=passed,
+            results=list(merged.get("results") or []),
         )
         record_event(
             session,
@@ -929,11 +1176,16 @@ class BuildRunner:
                 actor="runner",
                 claim_id=execution.claim_id,
                 event_data={
-                    "passed": outcome.passed,
-                    "workspace": str(cwd),
+                    "passed": passed,
+                    "workspace": str(merged.get("workspace") or execution.worktree_path),
                     "execution_id": execution.execution_id,
-                    "feature_sha": (execution.result_data or {}).get("feature_sha")
-                    or execution.reviewed_feature_sha,
+                    "feature_sha": merged.get("feature_sha") or execution.reviewed_feature_sha,
+                    "validated_sha": merged.get("validated_sha") or execution.reviewed_feature_sha,
+                    "environment_fingerprint": merged.get("environment_fingerprint"),
+                    "validation_context_hash": merged.get("validation_context_hash") or execution.prompt_hash,
+                    "started_at": merged.get("started_at"),
+                    "ended_at": merged.get("ended_at"),
+                    "validation_terminal_type": merged.get("validation_terminal_type"),
                     "results": outcome.results,
                 },
             ),
@@ -950,14 +1202,33 @@ class BuildRunner:
                 ),
             )
         if outcome.passed:
-            return True
+            task = session.get(BuildTask, execution.task_id)
+            transition_task(
+                session,
+                execution.task_id,
+                str(merged.get("next_state") or ("REVIEW_READY" if task and task.review_policy != "NONE" else "DONE")),
+                actor="runner",
+                reason=merged.get("success_reason") or None,
+            )
+            conflict_rec = (
+                (task.waiting_input or {}).get("conflict_recovery")
+                if task is not None and isinstance(task.waiting_input, dict)
+                else None
+            )
+            if conflict_rec and isinstance(conflict_rec, dict) and task is not None:
+                waiting = dict(task.waiting_input or {})
+                updated_conflict = dict(waiting.get("conflict_recovery") or conflict_rec)
+                updated_conflict["validation_completed_for_sha"] = updated_conflict.get("conflict_resolved_sha")
+                waiting["conflict_recovery"] = updated_conflict
+                task.waiting_input = waiting
+            return
         if self._remediation_cycles(session, execution.task_id) >= self._config.max_remediation_cycles:
             result.escalations.append(f"{execution.task_id}:REMEDIATION_LIMIT_REACHED")
             transition_task(
                 session, execution.task_id, "REWORK_REQUIRED", actor="runner", reason="deterministic validation failed"
             )
             self._block_task(session, execution.task_id, "REMEDIATION_LIMIT_REACHED")
-            return False
+            return
         transition_task(
             session,
             execution.task_id,
@@ -965,10 +1236,17 @@ class BuildRunner:
             actor="runner",
             reason="deterministic validation failed",
         )
-        return False
 
     def _git_cwd_for_execution(self, execution: BuildRunnerExecution) -> str:
         return str(self._settings.repo_root)
+
+    def _current_head_sha(self, cwd: str | Path) -> str | None:
+        if not cwd:
+            return None
+        proc = _git(Path(cwd), "rev-parse", "HEAD")
+        if proc.returncode != 0:
+            return None
+        return proc.stdout.strip() or None
 
     def _review_succeeded(
         self,
@@ -998,7 +1276,32 @@ class BuildRunner:
                 recovery_classification="OPERATOR_ACTION_REQUIRED",
             )
             return
-        registry = self._reconcile_review_findings(session, execution, verdict)
+        registry = (
+            self._reconcile_review_findings(session, execution, verdict)
+            if verdict.verdict != "REVIEW_ENVIRONMENT_BLOCKED"
+            else {}
+        )
+        if registry.get("comprehensive_incomplete_ids"):
+            self._review_protocol_blocked(
+                session,
+                execution,
+                verdict,
+                result,
+                reason="COMPREHENSIVE_REVIEW_MISSING_DISPOSITIONS",
+                why_not_remediation=(
+                    "The comprehensive convergence review did not return an "
+                    "explicit disposition for every previously open finding "
+                    f"({', '.join(registry['comprehensive_incomplete_ids'])}), so "
+                    "there is no evidence it is safe to reconcile them; "
+                    "retrying the review rather than clearing the registry."
+                ),
+                transition_reason=(
+                    "review protocol blocked: comprehensive convergence review "
+                    "did not reconcile all prior open findings"
+                ),
+                error="Comprehensive convergence review omitted required finding dispositions",
+            )
+            return
         blockers = [entry["description"] for entry in open_findings(registry)] if registry.get("entries") else list(verdict.findings)
         if execution.claim_id:
             checkpoint(
@@ -1066,6 +1369,31 @@ class BuildRunner:
             )
             return
         if verdict.verdict == "REMEDIATION_REQUIRED":
+            if not verdict.findings and not verdict.finding_dispositions:
+                self._review_protocol_blocked(session, execution, verdict, result)
+                return
+            if registry.get("entries") and not open_findings(registry):
+                self._review_protocol_blocked(
+                    session,
+                    execution,
+                    verdict,
+                    result,
+                    reason="REMEDIATION_REQUIRED_WITHOUT_OPEN_FINDINGS",
+                    why_not_remediation=(
+                        "Review finding_dispositions closed all tracked findings, "
+                        "so there is no currently open finding for a remediation "
+                        "worker to target."
+                    ),
+                    transition_reason=(
+                        "review protocol blocked: remediation required without open findings"
+                    ),
+                    error="Reviewer requested remediation after closing all tracked findings",
+                )
+                return
+            if self._review_disagreement_deadlocked(session, execution, registry, result):
+                return
+            if self._request_comprehensive_convergence_review(session, execution, registry, result):
+                return
             if self._remediation_limit_reached(session, execution, verdict, result):
                 return
             transition_task(
@@ -1120,6 +1448,150 @@ class BuildRunner:
             execution=execution,
             error=f"unrecognized review verdict: {verdict.verdict}",
             recovery_classification="OPERATOR_ACTION_REQUIRED",
+        )
+
+    def _review_disagreement_deadlocked(
+        self,
+        session: Session,
+        execution: BuildRunnerExecution,
+        registry: dict,
+        result: RunnerCycleResult,
+    ) -> bool:
+        """Fail closed when independent reviewers disagree on a finding.
+
+        A registry disagreement means at least two reviewers classified the
+        same durable finding into opposite categories (open vs closed). That
+        is reviewer deadlock, not meaningful unresolved builder work, so do
+        not spend remediation budget or ask a builder to re-fix a disputed
+        item without human tie-break evidence.
+        """
+        reviewed_sha = execution.reviewed_feature_sha
+        disputed = []
+        for entry in open_findings(registry):
+            disagreement = entry.get("disagreement")
+            if not isinstance(disagreement, dict):
+                continue
+            disagreement_sha = disagreement.get("reviewed_feature_sha")
+            same_generation = (
+                disagreement_sha == reviewed_sha
+                if reviewed_sha is not None or disagreement_sha is not None
+                else True
+            )
+            if same_generation:
+                disputed.append(entry)
+        if not disputed:
+            return False
+        evidence = {
+            "reason": "REVIEWER_DISAGREEMENT_DEADLOCK",
+            "classification": "reviewer_disagreement",
+            "reviewer": execution.worker_id,
+            "reviewed_feature_sha": execution.reviewed_feature_sha,
+            "open_findings": [
+                {
+                    "id": entry.get("id"),
+                    "description": entry.get("description"),
+                    "attempts": entry.get("attempts"),
+                    "disagreement": entry.get("disagreement"),
+                    "history": entry.get("history"),
+                }
+                for entry in disputed
+            ],
+            "why_not_remediation": (
+                "Independent reviewers disagree about whether the finding is open, "
+                "so another autonomous remediation would be adjudicating review "
+                "deadlock rather than targeting currently agreed unresolved work."
+            ),
+        }
+        result.escalations.append(f"{execution.task_id}:REVIEWER_DISAGREEMENT_DEADLOCK")
+        record_event(
+            session,
+            EventInput(
+                task_id=execution.task_id,
+                event_type="runner.review_disagreement_deadlock",
+                actor="runner",
+                event_data=evidence,
+            ),
+        )
+        self._block_task(
+            session,
+            execution.task_id,
+            "REVIEWER_DISAGREEMENT_DEADLOCK",
+            invariant="REVIEWER_DISAGREEMENT_DEADLOCK",
+            execution=execution,
+            error="Independent reviewers disagreed about open remediation findings",
+            recovery_classification="OPERATOR_ACTION_REQUIRED",
+            extra_data=evidence,
+        )
+        return True
+
+    def _review_protocol_blocked(
+        self,
+        session: Session,
+        execution: BuildRunnerExecution,
+        verdict: ReviewVerdict,
+        result: RunnerCycleResult,
+        *,
+        reason: str = "REMEDIATION_REQUIRED_WITHOUT_FINDING_SIGNAL",
+        why_not_remediation: str | None = None,
+        transition_reason: str = "review protocol blocked: remediation required without finding signal",
+        error: str = "Reviewer requested remediation without findings or finding dispositions",
+    ) -> None:
+        """Retry malformed REMEDIATION_REQUIRED reviews as review failures.
+
+        A remediation request without a finding id, finding text, or
+        disposition has no durable work item for #81's finding-aware budget.
+        Treating it as implementation failure would spend remediation attempts
+        on unstructured reviewer output and can converge to an empty-evidence
+        REMEDIATION_LIMIT_REACHED.
+        """
+        release_active_claims(session, execution.task_id, completed=False)
+        task = session.get(BuildTask, execution.task_id)
+        if task is not None:
+            task.current_claim_id = None
+            task.lease_expires_at = None
+            task.last_heartbeat_at = None
+        evidence = {
+            "reviewer": execution.worker_id,
+            "reviewed_feature_sha": execution.reviewed_feature_sha,
+            "verdict": verdict.verdict,
+            "required_remediation": list(verdict.required_remediation),
+            "reason": reason,
+            "classification": "review_protocol_blocked",
+            "why_not_remediation": why_not_remediation
+            or (
+                "No findings or finding_dispositions were supplied, so there is no "
+                "currently open finding for a remediation worker to target."
+            ),
+        }
+        record_event(
+            session,
+            EventInput(
+                task_id=execution.task_id,
+                event_type="runner.review_protocol_blocked",
+                actor="runner",
+                event_data=evidence,
+            ),
+        )
+        attempts = self._review_environment_attempts(session, execution.task_id)
+        if attempts >= self._config.max_review_environment_attempts:
+            result.escalations.append(f"{execution.task_id}:REVIEW_ENVIRONMENT_BLOCKED")
+            self._block_task(
+                session,
+                execution.task_id,
+                "REVIEW_ENVIRONMENT_BLOCKED",
+                invariant="REVIEW_PROTOCOL_BLOCKED",
+                execution=execution,
+                error=error,
+                recovery_classification="OPERATOR_ACTION_REQUIRED",
+                extra_data=evidence,
+            )
+            return
+        transition_task(
+            session,
+            execution.task_id,
+            "REVIEW_READY",
+            actor="runner",
+            reason=transition_reason,
         )
 
     def _needs_second_reviewer(self, session: Session, execution: BuildRunnerExecution) -> bool:
@@ -1192,6 +1664,17 @@ class BuildRunner:
                 ),
             )
             return
+        evidence = self._persist_project_delivery_evidence(
+            session,
+            execution.task_id,
+            (execution.result_data or {}).get("merge_commit_sha")
+            or (execution.result_data or {}).get("final_main_sha"),
+            push_required=bool((execution.result_data or {}).get("push_status") == "PUSHED"),
+        )
+        if evidence is not None and evidence.get("status") in {"COMMIT_FAILED", "PUSH_FAILED"}:
+            result_detail = evidence.get("detail") or evidence.get("status")
+            self._block_task(session, execution.task_id, f"PROJECT_DELIVERY_EVIDENCE_FAILED: {result_detail}")
+            return
         transition_task(session, execution.task_id, "DONE", actor="runner", reason="integration completed")
         record_event(
             session,
@@ -1203,10 +1686,64 @@ class BuildRunner:
             ),
         )
 
+    def _persist_project_delivery_evidence(
+        self,
+        session: Session,
+        task_id: str,
+        sha: Any,
+        *,
+        push_required: bool = False,
+    ) -> dict[str, Any] | None:
+        if not isinstance(sha, str) or not sha:
+            return None
+        repo_root = find_project_root(Path(self._settings.repo_root))
+        if repo_root is None:
+            return None
+        try:
+            project = load_project(repo_root)
+            expected_url = None
+            if push_required:
+                try:
+                    expected_url = expected_remote_url(repo_root, remote=self._config.git_remote)
+                except Exception:
+                    expected_url = None
+            result = persist_delivery_evidence_in_history(
+                repo_root,
+                load_backlog(project),
+                task_id,
+                sha=sha,
+                push_remote=self._config.git_remote if push_required else None,
+                push_branch_name=self._config.git_main_branch,
+                expected_remote_url=expected_url,
+            )
+        except Exception as exc:
+            record_event(
+                session,
+                EventInput(
+                    task_id=task_id,
+                    event_type="project.delivery_evidence_failed",
+                    actor="runner",
+                    event_data={"sha": sha, "error": str(exc)},
+                ),
+            )
+            return {"status": "COMMIT_FAILED", "detail": str(exc), "sha": sha}
+        if result.get("changed"):
+            record_event(
+                session,
+                EventInput(
+                    task_id=task_id,
+                    event_type="project.delivery_evidence_persisted",
+                    actor="runner",
+                    event_data=result,
+                ),
+            )
+        return result
+
     def _recoverable_failure(
         self,
         session: Session,
         execution: BuildRunnerExecution,
+        result: RunnerCycleResult,
         merged: dict,
         observation: ExecutionObservation,
     ) -> bool:
@@ -1217,26 +1754,49 @@ class BuildRunner:
         worker resumes the task. Transient provider failures (RATE_LIMITED,
         UNAVAILABLE, NETWORK_FAILURE, per the routing taxonomy's
         RETRYABLE_PROVIDER_FAILURES) and worker deaths are retried: the failing
-        provider is routed around for a bounded, exponentially growing cooldown
-        (see `_retry_backoff_seconds`) instead of being relaunched every poll
-        cycle, while other workers/providers remain free to pick the task up
-        immediately. Attempts are bounded and each one is recorded on its own
-        execution row; once exhausted the task escalates with a typed reason and
-        the checkpoint is preserved instead of looping forever."""
+        provider is routed around for a bounded cooldown instead of being
+        relaunched every poll cycle, while other workers/providers remain free
+        to pick the task up immediately. RATE_LIMITED and QUOTA_EXHAUSTED are
+        provider-capacity observations and therefore do not consume substantive
+        task/reviewer retry budgets. Other failures remain bounded; once their
+        budget is exhausted the task escalates with typed evidence and preserved
+        checkpoints instead of looping forever."""
         failure = str(merged.get("provider_failure") or "").upper()
         died = observation.exit_code not in (None, 0) and not merged.get("schema_version")
         if not failure and not died:
             return False
-        retryable = died or failure in RETRYABLE_PROVIDER_FAILURES
+        capacity_failure = failure in _PROVIDER_CAPACITY_FAILURES
+        retryable = died or failure in RETRYABLE_PROVIDER_FAILURES or capacity_failure
         task = session.get(BuildTask, execution.task_id)
         retry_generation = int((task.retry_generation if task is not None else 0) or 0)
 
         if failure == "NO_CHANGES_PRODUCED" and execution.role in {"BUILDER", "REMEDIATION"}:
+            detail = str(merged.get("detail") or "Agent produced no changes on task branch")[:300]
+            outcome = self._reconcile_no_changes_produced(
+                session,
+                execution,
+                result,
+                detail=detail,
+                retry_generation=retry_generation,
+            )
+            if outcome != "UNRESOLVED":
+                execution.status = "LOST"
+                execution.completed_at = _now()
+                execution.result_data = {
+                    **(execution.result_data or {}),
+                    **merged,
+                    "reconciliation_state": outcome,
+                    "retry_generation": retry_generation,
+                    "retryable_failure": False,
+                    "retry_backoff_seconds": None,
+                }
+                return True
             attempts = session.scalar(
                 select(func.count())
                 .select_from(BuildRunnerExecution)
                 .where(BuildRunnerExecution.task_id == execution.task_id)
                 .where(BuildRunnerExecution.role == execution.role)
+                .where(BuildRunnerExecution.adapter != "validation")
                 .where(BuildRunnerExecution.status.in_(("LOST", "FAILED")))
                 .where(
                     or_(
@@ -1303,27 +1863,34 @@ class BuildRunner:
         # 1. REVIEWER role: Reviewer failures must never consume implementation retry budget
         # nor trigger EXECUTION_RETRY_LIMIT_REACHED on the task.
         if execution.role == "REVIEWER":
-            reviewer_attempts = session.scalar(
-                select(func.count())
-                .select_from(BuildRunnerExecution)
-                .where(BuildRunnerExecution.task_id == execution.task_id)
-                .where(BuildRunnerExecution.role == "REVIEWER")
-                .where(BuildRunnerExecution.status.in_(("LOST", "FAILED")))
-                .where(
-                    or_(
-                        BuildRunnerExecution.result_data["retry_generation"].as_integer() == retry_generation,
-                        BuildRunnerExecution.result_data["retry_generation"].as_integer().is_(None)
-                        if retry_generation == 0
-                        else False,
-                    )
-                )
-            ) or 0
+            reviewer_attempts = _substantive_failure_attempts(
+                session,
+                execution.task_id,
+                role="REVIEWER",
+                retry_generation=retry_generation,
+            )
             backoff_seconds = (
-                _retry_backoff_seconds(failure or "WORKER_EXIT", reviewer_attempts)
-                if retryable
-                else _COOLDOWN_SECONDS.get(failure, 300)
+                _COOLDOWN_SECONDS.get(failure, 300)
+                if capacity_failure
+                else (
+                    _retry_backoff_seconds(failure or "WORKER_EXIT", reviewer_attempts)
+                    if retryable
+                    else _COOLDOWN_SECONDS.get(failure, 300)
+                )
             )
             if failure in PROVIDER_FAILURES:
+                provider_was_unavailable = (
+                    capacity_failure
+                    and _provider_capacity_is_active(
+                        session,
+                        execution.provider,
+                        now=_now(),
+                    )
+                )
+                unavailable_until = _provider_unavailable_until(
+                    merged,
+                    fallback_seconds=backoff_seconds,
+                )
                 record_event(
                     session,
                     EventInput(
@@ -1333,21 +1900,55 @@ class BuildRunner:
                         event_data={
                             "provider": execution.provider,
                             "worker_id": execution.worker_id,
+                            "runtime": next(
+                                (
+                                    worker.runtime
+                                    for worker in self._config.workers
+                                    if worker.worker_id == execution.worker_id
+                                ),
+                                None,
+                            ),
                             "failure": failure,
-                            "until": (_now() + timedelta(seconds=backoff_seconds)).isoformat(),
+                            "until": unavailable_until.isoformat(),
+                            "provider_reset_at": merged.get("provider_reset_at"),
                             "detail": str(merged.get("detail") or "")[:300],
                         },
                     ),
                 )
+                if capacity_failure and not provider_was_unavailable:
+                    result.provider_state_changes.append(
+                        {
+                            "state": "UNAVAILABLE",
+                            "task_id": execution.task_id,
+                            "provider": execution.provider,
+                            "runtime": next(
+                                (
+                                    worker.runtime
+                                    for worker in self._config.workers
+                                    if worker.worker_id == execution.worker_id
+                                ),
+                                None,
+                            ),
+                            "worker_id": execution.worker_id,
+                            "failure": failure,
+                            "until": unavailable_until.isoformat(),
+                            "reset_source": (
+                                "provider"
+                                if merged.get("provider_reset_at")
+                                else "fallback"
+                            ),
+                        }
+                    )
             execution.status = "LOST"
             execution.completed_at = _now()
             execution.result_data = {
                 **(execution.result_data or {}),
                 **merged,
                 "reconciliation_state": "WORKER_EXITED" if died else "PROVIDER_FAILED",
-                "reviewer_attempt": reviewer_attempts + 1,
+                "reviewer_attempt": reviewer_attempts if capacity_failure else reviewer_attempts + 1,
                 "retry_generation": retry_generation,
                 "retryable_failure": retryable,
+                "provider_capacity_failure": capacity_failure,
                 "retry_backoff_seconds": backoff_seconds if retryable else None,
             }
             if execution.claim_id:
@@ -1358,11 +1959,29 @@ class BuildRunner:
                         worker_id=execution.worker_id,
                         data=CheckpointInput(
                             current_step=f"reviewer execution lost after {failure or 'worker exit'}",
-                            known_failures=[f"{failure or 'WORKER_EXITED'} (reviewer attempt {reviewer_attempts + 1})"],
+                            known_failures=[
+                                (
+                                    f"{failure} (provider capacity)"
+                                    if capacity_failure
+                                    else f"{failure or 'WORKER_EXITED'} (reviewer attempt {reviewer_attempts + 1})"
+                                )
+                            ],
                         ),
                     )
                 except CoordinatorPolicyError:
                     pass
+            if capacity_failure:
+                try:
+                    transition_task(
+                        session,
+                        execution.task_id,
+                        "REVIEW_READY",
+                        actor="runner",
+                        reason=f"reviewer provider capacity unavailable: {failure}; trying another eligible provider",
+                    )
+                except CoordinatorPolicyError:
+                    release_active_claims(session, execution.task_id, completed=False)
+                return True
             if reviewer_attempts + 1 >= self._config.max_review_environment_attempts:
                 if failure:
                     self._block_task(
@@ -1401,28 +2020,35 @@ class BuildRunner:
             return True
 
         # 2. BUILDER / REMEDIATION roles:
-        attempts = session.scalar(
-            select(func.count())
-            .select_from(BuildRunnerExecution)
-            .where(BuildRunnerExecution.task_id == execution.task_id)
-            .where(BuildRunnerExecution.role == execution.role)
-            .where(BuildRunnerExecution.status.in_(("LOST", "FAILED")))
-            .where(
-                or_(
-                    BuildRunnerExecution.result_data["retry_generation"].as_integer() == retry_generation,
-                    BuildRunnerExecution.result_data["retry_generation"].as_integer().is_(None)
-                    if retry_generation == 0
-                    else False,
-                )
-            )
-        ) or 0
-        exhausted = attempts + 1 >= self._config.max_execution_attempts
+        attempts = _substantive_failure_attempts(
+            session,
+            execution.task_id,
+            role=execution.role,
+            retry_generation=retry_generation,
+        )
+        exhausted = (not capacity_failure) and attempts + 1 >= self._config.max_execution_attempts
         backoff_seconds = (
-            _retry_backoff_seconds(failure or "WORKER_EXIT", attempts)
-            if retryable
-            else _COOLDOWN_SECONDS.get(failure, 300)
+            _COOLDOWN_SECONDS.get(failure, 300)
+            if capacity_failure
+            else (
+                _retry_backoff_seconds(failure or "WORKER_EXIT", attempts)
+                if retryable
+                else _COOLDOWN_SECONDS.get(failure, 300)
+            )
         )
         if failure in PROVIDER_FAILURES:
+            provider_was_unavailable = (
+                capacity_failure
+                and _provider_capacity_is_active(
+                    session,
+                    execution.provider,
+                    now=_now(),
+                )
+            )
+            unavailable_until = _provider_unavailable_until(
+                merged,
+                fallback_seconds=backoff_seconds,
+            )
             record_event(
                 session,
                 EventInput(
@@ -1432,21 +2058,55 @@ class BuildRunner:
                     event_data={
                         "provider": execution.provider,
                         "worker_id": execution.worker_id,
+                        "runtime": next(
+                                (
+                                    worker.runtime
+                                    for worker in self._config.workers
+                                    if worker.worker_id == execution.worker_id
+                                ),
+                                None,
+                            ),
                         "failure": failure,
-                        "until": (_now() + timedelta(seconds=backoff_seconds)).isoformat(),
+                        "until": unavailable_until.isoformat(),
+                        "provider_reset_at": merged.get("provider_reset_at"),
                         "detail": str(merged.get("detail") or "")[:300],
                     },
                 ),
             )
+            if capacity_failure and not provider_was_unavailable:
+                result.provider_state_changes.append(
+                    {
+                        "state": "UNAVAILABLE",
+                        "task_id": execution.task_id,
+                        "provider": execution.provider,
+                        "runtime": next(
+                                (
+                                    worker.runtime
+                                    for worker in self._config.workers
+                                    if worker.worker_id == execution.worker_id
+                                ),
+                                None,
+                            ),
+                        "worker_id": execution.worker_id,
+                        "failure": failure,
+                        "until": unavailable_until.isoformat(),
+                        "reset_source": (
+                            "provider"
+                            if merged.get("provider_reset_at")
+                            else "fallback"
+                        ),
+                    }
+                )
         execution.status = "LOST"
         execution.completed_at = _now()
         execution.result_data = {
             **(execution.result_data or {}),
             **merged,
             "reconciliation_state": "WORKER_EXITED" if died else "PROVIDER_FAILED",
-            "retry_attempt": attempts + 1,
+            "retry_attempt": attempts if capacity_failure else attempts + 1,
             "retry_generation": retry_generation,
             "retryable_failure": retryable,
+            "provider_capacity_failure": capacity_failure,
             "retry_backoff_seconds": backoff_seconds if retryable else None,
         }
         if execution.claim_id:
@@ -1457,7 +2117,13 @@ class BuildRunner:
                     worker_id=execution.worker_id,
                     data=CheckpointInput(
                         current_step=f"{execution.role.lower()} execution lost after {failure or 'worker exit'}",
-                        known_failures=[f"{failure or 'WORKER_EXITED'} (attempt {attempts + 1})"],
+                        known_failures=[
+                            (
+                                f"{failure} (provider capacity)"
+                                if capacity_failure
+                                else f"{failure or 'WORKER_EXITED'} (attempt {attempts + 1})"
+                            )
+                        ],
                     ),
                 )
             except CoordinatorPolicyError:
@@ -1572,6 +2238,7 @@ class BuildRunner:
                 task_id=task.task_id,
                 session=session,
                 deprioritized_workers=self._no_change_workers(session, task.task_id),
+                deprioritized_providers=self._no_change_providers(session, task.task_id),
             )
             if availability == "slots_occupied":
                 result.capacity_full = True
@@ -1583,7 +2250,7 @@ class BuildRunner:
                 continue
             if availability in {"providers_unavailable", "provider_backoff"}:
                 result.capacity_full = True
-                reason = "worker_unavailable"
+                reason = "provider_capacity_wait"
                 result.scheduling_reasons[task.task_id] = reason
                 record_task_withheld(session, task.task_id, reason, task.objective_id)
                 if task_priority == 0:
@@ -1840,6 +2507,8 @@ class BuildRunner:
         for objective in list_objectives(session):
             if objective.state != "PLANNING":
                 continue
+            if not objective_source_is_executable(session, objective):
+                continue
             if not objective_dependencies_satisfied(session, objective):
                 continue
             planner_task = get_planner_task(session, objective.objective_id)
@@ -1863,6 +2532,7 @@ class BuildRunner:
                 continue
             if availability in {"providers_unavailable", "provider_backoff"}:
                 result.capacity_full = True
+                result.scheduling_reasons[planner_task.task_id] = "provider_capacity_wait"
                 record_planner_unavailable(
                     session,
                     objective,
@@ -1925,6 +2595,8 @@ class BuildRunner:
         for task in tasks:
             if not self._target_allows(task.task_id):
                 continue
+            if not task_source_is_executable(task):
+                continue
             review_target_sha = self._task_review_target_sha(task)
             worker, availability, decision = self._select_worker(
                 "REVIEWER",
@@ -1938,6 +2610,7 @@ class BuildRunner:
                 continue
             if availability in {"providers_unavailable", "provider_backoff"}:
                 result.capacity_full = True
+                result.scheduling_reasons[task.task_id] = "provider_capacity_wait"
                 continue
             if worker is None:
                 if self._review_environment_attempts(session, task.task_id) > 0:
@@ -2000,6 +2673,8 @@ class BuildRunner:
                     "open_findings_from_prior_review": finding_escalation_evidence(
                         task.finding_registry or {}
                     ),
+                    "convergence_review": (task.finding_registry or {}).get("convergence")
+                    or {},
                 },
             )
             self._launch(
@@ -2055,6 +2730,8 @@ class BuildRunner:
                 continue
             task = session.get(BuildTask, row.task_id)
             if task is None or task.state != "REVIEWING":
+                continue
+            if not task_source_is_executable(task):
                 continue
             if self._worker_slot_is_active(session, worker):
                 result.capacity_full = True
@@ -2233,11 +2910,51 @@ class BuildRunner:
                 ),
             },
         )
+        slot_count = max(1, int(worker.max_concurrency or 1))
+        reserved_slot: int | None = None
+        for slot_index in range(slot_count):
+            now = _now()
+            stale_leases = session.scalars(
+                select(BuildWorkerLease)
+                .where(BuildWorkerLease.worker_id == worker.worker_id)
+                .where(BuildWorkerLease.slot_index == slot_index)
+                .where(BuildWorkerLease.status == "ACTIVE")
+                .where(BuildWorkerLease.lease_expires_at <= now)
+            ).all()
+            for stale in stale_leases:
+                stale.status = "EXPIRED"
+                stale.lease_expires_at = now
+            if stale_leases:
+                session.flush()
+            lease = BuildWorkerLease(
+                worker_id=worker.worker_id,
+                provider=worker.provider,
+                slot_index=slot_index,
+                machine_id=socket.gethostname(),
+                process_id=str(os.getpid()),
+                task_id=task_id,
+                execution_id=execution_id,
+                lease_expires_at=now + timedelta(seconds=worker.timeout_seconds or 3600),
+                status="ACTIVE",
+            )
+            try:
+                with session.begin_nested():
+                    session.add(lease)
+                    session.flush()
+                reserved_slot = slot_index
+                break
+            except IntegrityError:
+                continue
+        if reserved_slot is None:
+            result.capacity_full = True
+            return
         try:
             with session.begin_nested():
                 session.add(row)
                 session.flush()
         except IntegrityError:
+            release_worker_leases_for_execution(session, execution_id)
+            session.commit()
             return
         session.commit()
         if isinstance(executor, SubprocessExecutor):
@@ -2329,6 +3046,9 @@ class BuildRunner:
             raise
         result.launched.append(handle.execution_id)
 
+    def _release_worker_lease(self, session: Session, execution_id: str) -> None:
+        release_worker_leases_for_execution(session, execution_id)
+
     def _kill_reconciled_process_trees(self, session: Session) -> None:
         from build_coordinator.execution.process_tree import kill_process_tree
 
@@ -2352,6 +3072,100 @@ class BuildRunner:
                     **(row.result_data or {}),
                     "process_tree_reaped": True,
                 }
+
+    def _reconcile_provider_capacity_transitions(
+        self,
+        session: Session,
+        result: RunnerCycleResult,
+    ) -> None:
+        """Record one provider re-entry event when a capacity window expires."""
+        now = _now()
+        failures = session.scalars(
+            select(BuildTaskEvent)
+            .where(BuildTaskEvent.event_type == "runner.provider_failure")
+            .order_by(BuildTaskEvent.created_at.desc())
+        ).all()
+        recovered = session.scalars(
+            select(BuildTaskEvent)
+            .where(BuildTaskEvent.event_type == "runner.provider_recovered")
+            .order_by(BuildTaskEvent.created_at.desc())
+        ).all()
+        latest_recovery_by_provider: dict[str, BuildTaskEvent] = {}
+        for event in recovered:
+            provider = str((event.event_data or {}).get("provider") or "")
+            if provider and provider not in latest_recovery_by_provider:
+                latest_recovery_by_provider[provider] = event
+
+        seen: set[str] = set()
+        for event in failures:
+            data = event.event_data or {}
+            provider = str(data.get("provider") or "")
+            failure = str(data.get("failure") or "").upper()
+            if not provider or provider in seen or failure not in _PROVIDER_CAPACITY_FAILURES:
+                continue
+            seen.add(provider)
+            try:
+                until = datetime.fromisoformat(str(data.get("until")))
+            except (TypeError, ValueError):
+                continue
+            if until > now:
+                continue
+            prior_recovery = latest_recovery_by_provider.get(provider)
+            if (
+                prior_recovery is not None
+                and prior_recovery.created_at is not None
+                and event.created_at is not None
+                and prior_recovery.created_at >= event.created_at
+            ):
+                continue
+            payload = {
+                "provider": provider,
+                "runtime": data.get("runtime"),
+                "worker_id": data.get("worker_id"),
+                "prior_failure": failure,
+                "available_at": now.isoformat(),
+                "prior_until": until.isoformat(),
+            }
+            record_event(
+                session,
+                EventInput(
+                    task_id=event.task_id,
+                    event_type="runner.provider_recovered",
+                    actor="runner",
+                    event_data=payload,
+                ),
+            )
+            result.provider_state_changes.append(
+                {
+                    "state": "AVAILABLE",
+                    "task_id": event.task_id,
+                    **payload,
+                }
+            )
+
+    def provider_capacity_recheck_seconds(self, *, fallback_seconds: float = 30.0) -> float:
+        """Return a bounded sleep before rechecking temporary provider capacity."""
+        fallback_seconds = max(float(self._config.poll_seconds), float(fallback_seconds))
+        with self._session_factory() as session:
+            now = _now()
+            delays: list[float] = []
+            rows = session.scalars(
+                select(BuildTaskEvent).where(BuildTaskEvent.event_type == "runner.provider_failure")
+            ).all()
+            for row in rows:
+                data = row.event_data or {}
+                failure = str(data.get("failure") or "").upper()
+                if failure not in _PROVIDER_CAPACITY_FAILURES:
+                    continue
+                try:
+                    until = datetime.fromisoformat(str(data.get("until")))
+                except (TypeError, ValueError):
+                    continue
+                if until > now:
+                    delays.append((until - now).total_seconds())
+        if not delays:
+            return fallback_seconds
+        return max(float(self._config.poll_seconds), min(min(delays), fallback_seconds))
 
     def _effective_providers(self, session: Session | None) -> dict:
         """Configured providers, with any provider that recently failed marked
@@ -2425,9 +3239,18 @@ class BuildRunner:
             active_by_provider[worker.provider] = active_by_provider.get(worker.provider, 0) + active_counts.get(worker.worker_id, 0)
             launches_by_provider[worker.provider] = launches_by_provider.get(worker.provider, 0) + launches.get(worker.worker_id, 0)
         failure_visibility = self._provider_failure_visibility(session)
+        observed_evidence = execution_evidence_by_worker(session, self._config.workers)
         worker_summary = []
         for w in self._config.workers:
             p = effective_providers.get(w.provider)
+            stage = role_to_stage(w.role)
+            requirement = self._config.stage_requirements.get(stage, StageRequirement(stage))
+            evidence = merge_worker_evidence(
+                w.evidence,
+                observed_evidence.get(w.worker_id, w.evidence),
+                w,
+                requirement,
+            )
             worker_summary.append({
                 "worker_id": w.worker_id,
                 "role": w.role,
@@ -2438,6 +3261,7 @@ class BuildRunner:
                 "active_workers": active_counts.get(w.worker_id, 0),
                 "active_provider_workers": active_by_provider.get(w.provider, 0),
                 "launches": launches.get(w.worker_id, 0),
+                "evidence": evidence.to_public_dict(),
                 "mode": p.consumption_mode if p else "ACTIVE",
                 "consumption_mode": p.consumption_mode if p else "ACTIVE",
                 "availability": p.availability if p else "AVAILABLE",
@@ -2483,6 +3307,7 @@ class BuildRunner:
         task_id: str | None = None,
         session: Session | None = None,
         deprioritized_workers: set[str] | None = None,
+        deprioritized_providers: set[str] | None = None,
         review_target_sha: str | None = None,
     ) -> tuple[WorkerConfig | None, str, RoutingDecision]:
         """Return (worker, availability, deterministic routing decision).
@@ -2508,6 +3333,16 @@ class BuildRunner:
             if role == "REVIEWER"
             else None
         )
+        observed_evidence = execution_evidence_by_worker(session, workers)
+        evidence_by_worker = {
+            worker.worker_id: merge_worker_evidence(
+                worker.evidence,
+                observed_evidence.get(worker.worker_id, worker.evidence),
+                worker,
+                requirement,
+            )
+            for worker in workers
+        }
         decision = route_worker(
             workers,
             stage=stage,
@@ -2520,6 +3355,8 @@ class BuildRunner:
             excluded_workers=set(exclusions.workers) if exclusions else set(),
             excluded_providers=set(exclusions.providers) if exclusions else set(),
             deprioritized_workers=deprioritized_workers,
+            deprioritized_providers=deprioritized_providers,
+            evidence_by_worker=evidence_by_worker,
         )
         worker = next(
             (candidate for candidate in workers if candidate.worker_id == decision.selected_worker_id),
@@ -2573,6 +3410,8 @@ class BuildRunner:
         return executor
 
     def _executor_for_execution(self, execution: BuildRunnerExecution) -> WorkerExecutor:
+        if execution.adapter == "validation":
+            return self._validation_executor
         executor = self._executors.get(execution.worker_id)
         if executor is not None:
             if isinstance(executor, SubprocessExecutor):
@@ -2588,7 +3427,7 @@ class BuildRunner:
             self._executors[execution.worker_id] = executor
             return executor
         if execution.adapter == "subprocess":
-            worker = next(
+            worker = self._executor_workers.get(execution.worker_id) or next(
                 (item for item in self._config.workers if item.worker_id == execution.worker_id),
                 None,
             )
@@ -2724,13 +3563,14 @@ class BuildRunner:
         return bool(norm_wt and norm_wt in active_worktrees(session, _now()))
 
     def _run_task_setup(self, session: Session, task: BuildTask, worker: WorkerConfig) -> bool:
-        """Run the project's `execution.setup` commands once per prepared task
+        """Run the project's bootstrap commands once per prepared task
         workspace, before the agent starts. The outcome, recorded as durable
         evidence, gates whether the task may launch."""
-        commands = list(self._config.setup_commands)
-        if not commands or not worker.worktree_path:
+        bootstrap_commands = self._bootstrap_command_rows()
+        if not bootstrap_commands or not worker.worktree_path:
             return True
         cwd = worker.worktree_path
+        command_strings = [str(row["command"]) for row in bootstrap_commands]
         rows = session.scalars(
             select(BuildTaskEvent)
             .where(BuildTaskEvent.task_id == task.task_id)
@@ -2739,15 +3579,24 @@ class BuildRunner:
         ).all()
         for row in rows:
             data = row.event_data or {}
-            if data.get("workspace") == str(cwd) and data.get("commands") == commands:
+            same_commands = data.get("commands") == command_strings
+            same_bootstrap = data.get("bootstrap_commands") in (None, bootstrap_commands)
+            if data.get("workspace") == str(cwd) and same_commands and same_bootstrap:
                 if data.get("passed"):
                     return True
                 break
-        outcome = run_validation(
-            commands,
-            cwd,
-            timeout_seconds=self._config.validation_timeout_seconds,
-        )
+        results: list[dict[str, object]] = []
+        passed = True
+        for row in bootstrap_commands:
+            outcome = run_validation(
+                [str(row["command"])],
+                cwd,
+                timeout_seconds=float(row.get("timeout_seconds") or 900.0),
+            )
+            results.extend(outcome.results)
+            if not outcome.passed:
+                passed = False
+                break
         record_event(
             session,
             EventInput(
@@ -2755,15 +3604,23 @@ class BuildRunner:
                 event_type="runner.setup",
                 actor="runner",
                 event_data={
-                    "passed": outcome.passed,
+                    "phase": "bootstrap",
+                    "passed": passed,
                     "workspace": str(cwd),
-                    "commands": commands,
-                    "results": outcome.results,
+                    "commands": command_strings,
+                    "bootstrap_commands": bootstrap_commands,
+                    "results": results,
                 },
             ),
         )
-        if outcome.passed:
+        if passed:
             return True
+        failure_summary = [
+            f"{item['command']} -> {item.get('failure_type') or 'EXIT_CODE'} exit {item['exit_code']}: {item['output_tail'][-500:]}"
+            for item in results
+            if item["exit_code"] != 0
+        ]
+        first_failure_type = next((str(item.get("failure_type") or "EXIT_CODE") for item in results if item["exit_code"] != 0), "EXIT_CODE")
         self._block_task(
             session,
             task.task_id,
@@ -2772,10 +3629,20 @@ class BuildRunner:
             worker=worker,
             branch=worker.branch_name,
             worktree=cwd,
-            error="; ".join(outcome.failure_summary()),
+            error="; ".join(failure_summary),
             recovery_classification="RECOVERABLE_WORKTREE",
+            extra_data={"failure_type": first_failure_type, "phase": "bootstrap"},
         )
         return False
+
+    def _bootstrap_command_rows(self) -> list[dict[str, object]]:
+        rows = [dict(row) for row in self._config.bootstrap_commands]
+        if rows:
+            return rows
+        return [
+            {"command": command, "timeout_seconds": self._config.validation_timeout_seconds, "required_tools": []}
+            for command in self._config.setup_commands
+        ]
 
     def _require_no_cross_objective_branch_collision_before_prepare(
         self, task: BuildTask, branch: str
@@ -2895,6 +3762,15 @@ class BuildRunner:
             review = data.get("review") if isinstance(data.get("review"), dict) else data
             if str(review.get("verdict", "")).upper() == "REVIEW_ENVIRONMENT_BLOCKED":
                 count += 1
+        protocol_events = session.scalars(
+            select(BuildTaskEvent)
+            .where(BuildTaskEvent.task_id == task_id)
+            .where(BuildTaskEvent.event_type == "runner.review_protocol_blocked")
+        ).all()
+        for event in protocol_events:
+            if since is not None and event.created_at is not None and _naive(event.created_at) < _naive(since):
+                continue
+            count += 1
         return count
 
     def _no_change_workers(self, session: Session, task_id: str) -> set[str]:
@@ -2916,6 +3792,26 @@ class BuildRunner:
             if worker_id and event_generation == retry_generation:
                 workers.add(worker_id)
         return workers
+
+    def _no_change_providers(self, session: Session, task_id: str) -> set[str]:
+        task = session.get(BuildTask, task_id)
+        retry_generation = int((task.retry_generation if task is not None else 0) or 0)
+        rows = session.scalars(
+            select(BuildTaskEvent)
+            .where(BuildTaskEvent.task_id == task_id)
+            .where(BuildTaskEvent.event_type == "runner.no_changes_produced")
+        ).all()
+        providers: set[str] = set()
+        for row in rows:
+            data = row.event_data or {}
+            try:
+                event_generation = int(data.get("retry_generation", 0) or 0)
+            except (TypeError, ValueError):
+                event_generation = 0
+            provider = str(data.get("provider") or "").strip()
+            if provider and event_generation == retry_generation:
+                providers.add(provider)
+        return providers
 
     def _record_no_changes_produced(
         self,
@@ -2941,6 +3837,244 @@ class BuildRunner:
                 },
             ),
         )
+
+    def _reconcile_no_changes_produced(
+        self,
+        session: Session,
+        execution: BuildRunnerExecution,
+        result: RunnerCycleResult,
+        *,
+        detail: str,
+        retry_generation: int,
+    ) -> str:
+        task = session.get(BuildTask, execution.task_id)
+        evidence = self._no_change_reconciliation_evidence(session, task, execution, detail=detail)
+        evidence["retry_generation"] = retry_generation
+        record_event(
+            session,
+            EventInput(
+                task_id=execution.task_id,
+                event_type="runner.no_changes_reconciled",
+                actor="runner",
+                claim_id=execution.claim_id,
+                event_data=evidence,
+            ),
+        )
+        outcome = str(evidence.get("outcome") or "UNRESOLVED")
+        if task is None:
+            return outcome
+        if outcome == "ALREADY_SATISFIED":
+            sha = evidence.get("reviewed_feature_sha")
+            if isinstance(sha, str) and sha:
+                execution.reviewed_feature_sha = sha
+                execution.result_data = {
+                    **(execution.result_data or {}),
+                    "feature_sha": sha,
+                    "reviewed_feature_sha": sha,
+                    "reconciliation_state": outcome,
+                    "satisfied_by_existing_implementation": True,
+                    "reconciliation_evidence": evidence,
+                }
+                transition_task(session, execution.task_id, "IN_PROGRESS", actor="runner")
+                transition_task(session, execution.task_id, "VALIDATING", actor="runner")
+                if not self._validation_gate(session, task, execution, result):
+                    return outcome
+                transition_task(
+                    session,
+                    execution.task_id,
+                    "REVIEW_READY" if task.review_policy != "NONE" else "DONE",
+                    actor="runner",
+                    reason="task already satisfied by existing implementation; deterministic validation passed",
+                    event_data=evidence,
+                )
+            return outcome
+        if outcome == "STALE_OR_OBSOLETE":
+            result.escalations.append(f"{execution.task_id}:STALE_OR_OBSOLETE_TASK_DEFINITION")
+            self._block_task(
+                session,
+                execution.task_id,
+                "STALE_OR_OBSOLETE_TASK_DEFINITION",
+                invariant="TASK_DEFINITION_RECONCILIATION",
+                execution=execution,
+                error="Task definition is stale or obsolete after reconciliation with current main",
+                recovery_classification="TASK_REDESIGN_REQUIRED",
+                extra_data=evidence,
+            )
+            return outcome
+        return outcome
+
+    def _no_change_reconciliation_evidence(
+        self,
+        session: Session,
+        task: BuildTask | None,
+        execution: BuildRunnerExecution,
+        *,
+        detail: str,
+    ) -> dict:
+        repo_root = Path(self._settings.repo_root)
+        current_sha = self._rev_parse(repo_root, "HEAD") or self._rev_parse(repo_root, self._config.main_ref)
+        task_base = task.base_sha if task is not None else None
+        changed_paths = self._changed_paths_since_base(repo_root, task_base, current_sha)
+        scope = list(task.permitted_scope or []) if task is not None else []
+        scope_changed = self._scope_changed(scope, changed_paths)
+        metadata = task.definition_metadata if task is not None and isinstance(task.definition_metadata, dict) else {}
+        marked_stale = bool(metadata.get("stale") or metadata.get("obsolete") or metadata.get("superseded_by"))
+        satisfaction = self._task_satisfaction_evidence(session, task)
+        already_satisfied = bool(satisfaction.get("satisfied"))
+        recent_integrations = self._recent_integration_evidence(session, execution.task_id)
+        superseding_integration = self._find_superseding_integration(repo_root, scope, recent_integrations)
+        scope_touched_by_recent_integration = bool(scope_changed and superseding_integration is not None)
+        integration_explicitly_reconciles_task = self._integration_explicitly_reconciles_task(
+            task, superseding_integration
+        )
+        stale_by_scope_reconciliation = self._stale_by_scope_reconciliation(
+            task,
+            satisfaction,
+            superseding_integration,
+            scope_touched_by_recent_integration,
+        )
+        outcome = "UNRESOLVED"
+        if already_satisfied:
+            outcome = "ALREADY_SATISFIED"
+        elif marked_stale or stale_by_scope_reconciliation:
+            outcome = "STALE_OR_OBSOLETE"
+        return {
+            "outcome": outcome,
+            "detail": detail,
+            "deterministic_recheck": True,
+            "acceptance_appears_satisfied": already_satisfied,
+            "acceptance_satisfaction_evidence": satisfaction,
+            "definition_marked_stale": marked_stale,
+            "stale_by_scope_reconciliation": stale_by_scope_reconciliation,
+            "integration_explicitly_reconciles_task": integration_explicitly_reconciles_task,
+            "scope_touched_by_recent_integration": scope_touched_by_recent_integration,
+            "superseding_integration": superseding_integration,
+            "scope_changed_since_base": scope_changed,
+            "changed_paths_since_base": changed_paths[:50],
+            "permitted_scope": scope,
+            "base_sha": task_base,
+            "current_main_sha": current_sha,
+            "reviewed_feature_sha": current_sha if already_satisfied else None,
+            "reconciled_against": {
+                "main_ref": self._config.main_ref,
+                "recent_integrations": recent_integrations,
+            },
+        }
+
+    def _recent_integration_evidence(self, session: Session, task_id: str) -> list[dict]:
+        rows = session.scalars(
+            select(BuildTaskEvent)
+            .where(BuildTaskEvent.event_type == "runner.integration_completed")
+            .order_by(BuildTaskEvent.created_at.desc())
+            .limit(5)
+        ).all()
+        evidence: list[dict] = []
+        for row in rows:
+            data = row.event_data or {}
+            feature_sha = data.get("feature_sha") or data.get("reviewed_feature_sha")
+            merge_commit_sha = data.get("merge_commit_sha")
+            final_main_sha = data.get("final_main_sha")
+            evidence.append(
+                {
+                    "task_id": row.task_id,
+                    "created_at": row.created_at.isoformat() if row.created_at else None,
+                    "feature_sha": feature_sha,
+                    "merge_commit_sha": merge_commit_sha,
+                    "final_main_sha": final_main_sha,
+                    "integrated_sha": merge_commit_sha or final_main_sha or feature_sha,
+                    "same_task": row.task_id == task_id,
+                    "supersedes_task_ids": _string_list(data.get("supersedes_task_ids")),
+                    "obsolete_task_ids": _string_list(data.get("obsolete_task_ids")),
+                    "stale_task_ids": _string_list(data.get("stale_task_ids")),
+                    "reconciles_task_ids": _string_list(data.get("reconciles_task_ids")),
+                }
+            )
+        return evidence
+
+    def _stale_by_scope_reconciliation(
+        self,
+        task: BuildTask | None,
+        satisfaction: dict,
+        superseding_integration: dict | None,
+        scope_touched_by_recent_integration: bool,
+    ) -> bool:
+        if task is None or superseding_integration is None or not scope_touched_by_recent_integration:
+            return False
+        if satisfaction.get("satisfied"):
+            return False
+        return True
+
+    def _integration_explicitly_reconciles_task(
+        self, task: BuildTask | None, superseding_integration: dict | None
+    ) -> bool:
+        if task is None or superseding_integration is None:
+            return False
+        superseded_ids = {
+            task_id
+            for field in (
+                "supersedes_task_ids",
+                "obsolete_task_ids",
+                "stale_task_ids",
+                "reconciles_task_ids",
+            )
+            for task_id in _string_list(superseding_integration.get(field))
+        }
+        return task.task_id in superseded_ids
+
+    def _find_superseding_integration(
+        self, repo_root: Path, scope: list[str], recent_integrations: list[dict]
+    ) -> dict | None:
+        """Find a different task integration that concretely touched this task's scope.
+
+        Scope drift alone is not enough to mark a task stale; the deterministic
+        reconciliation tie is the recorded integration's own commit changing a
+        permitted-scope path. Without that tie, genuine no-change cases stay
+        UNRESOLVED and keep the bounded retry path.
+        """
+        if not scope:
+            return None
+        for integration in recent_integrations:
+            if integration.get("same_task"):
+                continue
+            integrated_sha = integration.get("integrated_sha")
+            if not isinstance(integrated_sha, str) or not integrated_sha:
+                continue
+            integration_paths = self._changed_paths_for_commit(repo_root, integrated_sha)
+            if self._scope_changed(scope, integration_paths):
+                return integration
+        return None
+
+    def _changed_paths_for_commit(self, repo_root: Path, sha: str) -> list[str]:
+        proc = _git(repo_root, "diff-tree", "--no-commit-id", "--name-only", "-r", "-m", sha)
+        if proc.returncode != 0:
+            return []
+        return [line.strip().replace("\\", "/") for line in proc.stdout.splitlines() if line.strip()]
+
+    def _rev_parse(self, repo_root: Path, ref: str | None) -> str | None:
+        if not ref:
+            return None
+        proc = _git(repo_root, "rev-parse", "--verify", ref)
+        if proc.returncode != 0:
+            return None
+        return proc.stdout.strip() or None
+
+    def _changed_paths_since_base(self, repo_root: Path, base_sha: str | None, current_sha: str | None) -> list[str]:
+        if not base_sha or not current_sha:
+            return []
+        proc = _git(repo_root, "diff", "--name-only", f"{base_sha}..{current_sha}")
+        if proc.returncode != 0:
+            return []
+        return [line.strip().replace("\\", "/") for line in proc.stdout.splitlines() if line.strip()]
+
+    def _scope_changed(self, scope: list[str], changed_paths: list[str]) -> bool:
+        if not scope or not changed_paths:
+            return False
+        normalized_scope = [item.strip().replace("\\", "/").rstrip("/") for item in scope if str(item).strip()]
+        for changed in changed_paths:
+            for item in normalized_scope:
+                if changed == item or changed.startswith(item + "/"):
+                    return True
+        return False
 
     def _environment_blocked_reviewers(self, session: Session, task_id: str) -> set[str]:
         since = session.scalar(
@@ -3041,6 +4175,171 @@ class BuildRunner:
             result.recovered.append(task_id)
         self._release_sha_drift_conflict_gate(session, task)
 
+    def _reconstruct_legacy_comprehensive_stop_sha(
+        self,
+        session: Session,
+        task: BuildTask,
+        convergence: dict,
+    ) -> str | None:
+        """Recovers the original comprehensive-review stop SHA for task
+        registries created before GH-128 started recording
+        `convergence.comprehensive_reviewed_feature_sha` directly.
+
+        `convergence.comprehensive_execution_id` is set by
+        `record_convergence_generation` and predates GH-128, so legacy
+        registries already carry it even though they lack the newer field --
+        it is durable across later re-blocks because it is only overwritten
+        when a *new* comprehensive review actually runs (which starts a fresh
+        convergence epoch), never by `_block_task` rewriting
+        `waiting_input.failure_evidence`. Falls back to the `history` list's
+        last comprehensive-review entry, then to the original
+        `runner.remediation_limit_reached`/comprehensive-review-request event
+        tied to the exhausted epoch, in case the execution row itself was
+        purged."""
+
+        def _reviewed_sha_for_execution(execution_id: str | None) -> str | None:
+            if not execution_id:
+                return None
+            execution = session.get(BuildRunnerExecution, execution_id)
+            if execution is not None and execution.reviewed_feature_sha:
+                return execution.reviewed_feature_sha
+            return None
+
+        stop_sha = _reviewed_sha_for_execution(convergence.get("comprehensive_execution_id"))
+        if stop_sha:
+            return stop_sha
+
+        for entry in reversed(convergence.get("history") or []):
+            if isinstance(entry, dict) and entry.get("comprehensive_review"):
+                stop_sha = _reviewed_sha_for_execution(entry.get("execution_id"))
+                if stop_sha:
+                    return stop_sha
+
+        for entry in reversed(convergence.get("epoch_history") or []):
+            if not isinstance(entry, dict):
+                continue
+            stop_sha = _reviewed_sha_for_execution(entry.get("comprehensive_execution_id"))
+            if stop_sha:
+                return stop_sha
+            for hist_entry in reversed(entry.get("history") or []):
+                if isinstance(hist_entry, dict) and hist_entry.get("comprehensive_review"):
+                    stop_sha = _reviewed_sha_for_execution(hist_entry.get("execution_id"))
+                    if stop_sha:
+                        return stop_sha
+
+        events = session.scalars(
+            select(BuildTaskEvent)
+            .where(BuildTaskEvent.task_id == task.task_id)
+            .where(
+                BuildTaskEvent.event_type.in_(
+                    (
+                        "runner.remediation_limit_reached",
+                        "runner.comprehensive_convergence_review_requested",
+                    )
+                )
+            )
+            .order_by(BuildTaskEvent.created_at.desc())
+        ).all()
+        for event in events:
+            data = event.event_data or {}
+            event_convergence = data.get("convergence") if isinstance(data.get("convergence"), dict) else {}
+            stop_sha = _reviewed_sha_for_execution(event_convergence.get("comprehensive_execution_id"))
+            if stop_sha:
+                return stop_sha
+        return None
+
+    def _recover_remediation_limit_reached(
+        self,
+        session: Session,
+        task: BuildTask,
+        result: RunnerCycleResult,
+    ) -> None:
+        """Resumes a REMEDIATION_LIMIT_REACHED stop only on authoritative
+        evidence that an operator/external remediation advanced the task
+        branch feature SHA beyond the SHA the comprehensive review/stop was
+        evaluated against (GH-128). Fails closed -- leaving the task BLOCKED
+        -- if that evidence is unavailable or the branch tip is not a
+        descendant of the stop SHA, since a plain SHA inequality (e.g. a
+        force-push to unrelated history) is not adequate evidence of a real
+        fix. Opens a new bounded convergence epoch: current-epoch generations
+        and comprehensive-review flags reset, while all finding entries,
+        dispositions, reviewer history, and the prior epoch's stop evidence
+        are retained for audit under `convergence.epoch_history`."""
+        registry = task.finding_registry if isinstance(task.finding_registry, dict) else {}
+        convergence = registry.get("convergence") if isinstance(registry.get("convergence"), dict) else {}
+        # The comprehensive review/stop's SHA is recorded once, when
+        # comprehensive_used is first set (see _reconcile_review_findings),
+        # and is never overwritten by a later re-block. The waiting_input
+        # failure_evidence, in contrast, is rewritten by every _block_task
+        # call -- including the re-block after an operator remediation was
+        # reviewed -- so it reflects the *new* review's SHA, not the SHA the
+        # original hard stop was evaluated against. Preferring the
+        # convergence-recorded SHA is what makes GH-101/GH-128 recoverable:
+        # otherwise stop_sha == current_sha and recovery always refuses.
+        stop_sha = convergence.get("comprehensive_reviewed_feature_sha")
+        if not stop_sha:
+            stop_sha = self._reconstruct_legacy_comprehensive_stop_sha(session, task, convergence)
+        if not stop_sha:
+            waiting = task.waiting_input if isinstance(task.waiting_input, dict) else {}
+            evidence = waiting.get("failure_evidence") if isinstance(waiting.get("failure_evidence"), dict) else {}
+            relevant_shas = evidence.get("relevant_shas") if isinstance(evidence.get("relevant_shas"), dict) else {}
+            stop_sha = relevant_shas.get("reviewed_feature_sha") or relevant_shas.get("feature_sha")
+        if not stop_sha:
+            return
+
+        repo_root = Path(self._settings.repo_root)
+        branch = task.branch_name or task_branch_name(task.task_id)
+        if not branch:
+            return
+        proc = _git(repo_root, "rev-parse", "--verify", f"{branch}^{{commit}}")
+        if proc.returncode != 0:
+            return
+        current_sha = proc.stdout.strip()
+        if not current_sha or current_sha == stop_sha:
+            return
+
+        ancestor_check = _git(repo_root, "merge-base", "--is-ancestor", stop_sha, current_sha)
+        if ancestor_check.returncode != 0:
+            return
+
+        registry = start_new_convergence_epoch(
+            dict(task.finding_registry or {}),
+            resumed_feature_sha=current_sha,
+            stop_feature_sha=stop_sha,
+            reason="operator_remediation_advanced_feature_sha",
+        )
+        task.finding_registry = registry
+        try:
+            release_active_claims(session, task.task_id, completed=False)
+        except CoordinatorPolicyError:
+            pass
+        try:
+            transition_task(
+                session,
+                task.task_id,
+                "REVIEW_READY",
+                actor="runner",
+                reason="operator remediation advanced feature SHA past prior convergence stop; new bounded convergence epoch opened",
+            )
+        except CoordinatorPolicyError:
+            return
+        record_event(
+            session,
+            EventInput(
+                task_id=task.task_id,
+                event_type="runner.convergence_epoch_resumed",
+                actor="runner",
+                event_data={
+                    "stop_feature_sha": stop_sha,
+                    "resumed_feature_sha": current_sha,
+                    "reason": "REMEDIATION_LIMIT_REACHED",
+                },
+            ),
+        )
+        if task.task_id not in result.recovered:
+            result.recovered.append(task.task_id)
+        self._release_blocker_gate(session, task, "REMEDIATION_LIMIT_REACHED")
+
     def _release_blocker_gate(self, session: Session, task: BuildTask, reason: str) -> None:
         if not task.objective_id:
             return
@@ -3070,8 +4369,59 @@ class BuildRunner:
         for task in blocked:
             if not self._target_allows(task.task_id):
                 continue
+            if not task_source_is_executable(task):
+                continue
             reason = self._latest_block_reason(session, task.task_id)
             if not reason:
+                continue
+
+            capacity_failure = _provider_capacity_failure_from_block_reason(reason)
+            if capacity_failure:
+                latest_execution = session.scalar(
+                    select(BuildRunnerExecution)
+                    .where(BuildRunnerExecution.task_id == task.task_id)
+                    .order_by(
+                        BuildRunnerExecution.completed_at.desc(),
+                        BuildRunnerExecution.launched_at.desc(),
+                    )
+                    .limit(1)
+                )
+                role = latest_execution.role if latest_execution is not None else "BUILDER"
+                if role == "REVIEWER":
+                    target_state = "REVIEW_READY"
+                elif role == "PLANNER":
+                    target_state = "READY"
+                else:
+                    target_state = "RESUMABLE"
+                try:
+                    transition_task(
+                        session,
+                        task.task_id,
+                        target_state,
+                        actor="runner",
+                        reason=(
+                            f"provider capacity recovered from legacy block {capacity_failure}; "
+                            f"resuming to {target_state}"
+                        ),
+                    )
+                    record_event(
+                        session,
+                        EventInput(
+                            task_id=task.task_id,
+                            event_type="runner.provider_capacity_blocker_recovered",
+                            actor="runner",
+                            event_data={
+                                "provider_failure": capacity_failure,
+                                "prior_reason": reason,
+                                "resumed_to": target_state,
+                            },
+                        ),
+                    )
+                    if task.task_id not in result.recovered:
+                        result.recovered.append(task.task_id)
+                    self._release_blocker_gate(session, task, reason)
+                except CoordinatorPolicyError:
+                    pass
                 continue
 
             if is_planner_task(task) and reason == "MALFORMED_EXECUTOR_RESULT":
@@ -3193,23 +4543,24 @@ class BuildRunner:
             elif reason in ("COORDINATOR_INVARIANT_FAILURE", "NO_CHANGES_PRODUCED", "MALFORMED_EXECUTOR_RESULT"):
                 if self._check_task_already_satisfied(session, task.task_id):
                     repo_root = Path(self._settings.repo_root)
-                    branch = task.branch_name or task_branch_name(task.task_id)
-                    tree_proc = _git(repo_root, "rev-parse", f"refs/heads/{branch}^{{tree}}")
-                    if tree_proc.returncode == 0:
-                        tree_sha = tree_proc.stdout.strip()
-                        parent_sha = _git(repo_root, "rev-parse", f"refs/heads/{branch}").stdout.strip()
-                        identity_args = resolve_git_identity_args(repo_root)
-                        commit_proc = _git(
-                            repo_root,
-                            *identity_args,
-                            "commit-tree",
-                            tree_sha,
-                            "-p", parent_sha,
-                            "-m", f"{task.task_id}: verify existing implementation meets acceptance criteria",
-                        )
-                        if commit_proc.returncode == 0:
-                            v_commit = commit_proc.stdout.strip()
-                            _git(repo_root, "update-ref", f"refs/heads/{branch}", v_commit)
+                    current_sha = self._rev_parse(repo_root, "HEAD") or self._rev_parse(repo_root, self._config.main_ref)
+                    evidence = self._task_satisfaction_evidence(session, task)
+                    execution = session.scalar(
+                        select(BuildRunnerExecution)
+                        .where(BuildRunnerExecution.task_id == task.task_id)
+                        .order_by(BuildRunnerExecution.completed_at.desc(), BuildRunnerExecution.launched_at.desc())
+                        .limit(1)
+                    )
+                    if execution is not None and current_sha:
+                        execution.reviewed_feature_sha = current_sha
+                        execution.result_data = {
+                            **(execution.result_data or {}),
+                            "feature_sha": current_sha,
+                            "reviewed_feature_sha": current_sha,
+                            "satisfied_by_existing_implementation": True,
+                            "reconciliation_state": "ALREADY_SATISFIED",
+                            "reconciliation_evidence": evidence,
+                        }
                     try:
                         transition_task(
                             session,
@@ -3227,6 +4578,8 @@ class BuildRunner:
                                 event_data={
                                     "reason": reason,
                                     "resumed_to": "REVIEW_READY",
+                                    "satisfied_by_existing_implementation": True,
+                                    "reconciliation_evidence": evidence,
                                 },
                             ),
                         )
@@ -3277,6 +4630,7 @@ class BuildRunner:
                             .select_from(BuildRunnerExecution)
                             .where(BuildRunnerExecution.task_id == task.task_id)
                             .where(BuildRunnerExecution.role.in_(("BUILDER", "REMEDIATION")))
+                            .where(BuildRunnerExecution.adapter != "validation")
                             .where(BuildRunnerExecution.status.in_(("FAILED", "SUCCEEDED")))
                         ) or 0
                         if builder_attempts < self._config.max_execution_attempts:
@@ -3416,6 +4770,9 @@ class BuildRunner:
 
             elif reason == "REVIEWED_SHA_CHANGED":
                 self._request_rereview(session, task.task_id, result, reason="REVIEWED_SHA_CHANGED")
+
+            elif reason == "REMEDIATION_LIMIT_REACHED":
+                self._recover_remediation_limit_reached(session, task, result)
 
             elif reason == "BRANCH_MOVED_CONCURRENTLY":
                 reviewed_sha = session.scalar(
@@ -3983,33 +5340,91 @@ class BuildRunner:
 
     def _check_task_already_satisfied(self, session: Session, task_id: str) -> bool:
         task = session.get(BuildTask, task_id)
-        if task is None:
-            return False
-        if task_id == "SM-003":
-            root = Path(self._settings.repo_root)
-            test_file = root / "tests" / "test_worker_health.py"
-            health_file = root / "build_coordinator" / "runner" / "worker_health.py"
-            if test_file.is_file() and health_file.is_file():
-                proc = subprocess.run(
-                    [sys.executable, "-m", "pytest", str(test_file)],
-                    cwd=str(root),
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
-                return proc.returncode == 0
-        return False
+        return bool(self._task_satisfaction_evidence(session, task).get("satisfied"))
 
-    def _ensure_task_verification_commit(self, execution: BuildRunnerExecution) -> str | None:
-        wt = Path(execution.worktree_path) if execution.worktree_path else Path(self._settings.repo_root)
-        identity_args = resolve_git_identity_args(wt)
-        cmd = [
-            "git", *identity_args,
-            "commit", "--allow-empty", "-m", f"{execution.task_id}: verify existing implementation meets acceptance criteria",
-        ]
-        subprocess.run(cmd, cwd=str(wt), capture_output=True, text=True, check=False)
-        sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(wt), capture_output=True, text=True, check=False).stdout.strip()
-        return sha or None
+    def _task_satisfaction_evidence(self, session: Session, task: BuildTask | None) -> dict:
+        if task is None:
+            return {"satisfied": False, "reason": "TASK_NOT_FOUND"}
+        root = Path(self._settings.repo_root)
+        commands = list(task.required_validation or [])
+        if commands:
+            if not self._config.run_validation:
+                return {
+                    "satisfied": False,
+                    "reason": "VALIDATION_DISABLED",
+                    "required_validation": commands,
+                }
+            outcome = run_validation(
+                commands,
+                root,
+                timeout_seconds=self._config.validation_timeout_seconds,
+            )
+            return {
+                "satisfied": outcome.passed,
+                "reason": "REQUIRED_VALIDATION_PASSED" if outcome.passed else "REQUIRED_VALIDATION_FAILED",
+                "required_validation": commands,
+                "validation_results": outcome.results,
+            }
+
+        criteria = [str(item).strip() for item in list(task.acceptance_criteria or []) if str(item).strip()]
+        checks = [self._file_contains_acceptance_evidence(root, criterion) for criterion in criteria]
+        actionable_checks = [check for check in checks if check is not None]
+        if actionable_checks:
+            satisfied = all(bool(check.get("satisfied")) for check in actionable_checks)
+            return {
+                "satisfied": satisfied,
+                "reason": "FILE_CONTENT_ACCEPTANCE_PASSED" if satisfied else "FILE_CONTENT_ACCEPTANCE_FAILED",
+                "acceptance_checks": actionable_checks,
+                "unchecked_acceptance_criteria": [
+                    criterion for criterion, check in zip(criteria, checks, strict=False) if check is None
+                ],
+            }
+
+        return {
+            "satisfied": False,
+            "reason": "NO_DETERMINISTIC_ACCEPTANCE_CHECK_AVAILABLE",
+            "acceptance_criteria": criteria,
+            "required_validation": commands,
+        }
+
+    def _file_contains_acceptance_evidence(self, root: Path, criterion: str) -> dict | None:
+        marker = " contains "
+        lowered = criterion.lower()
+        if marker not in lowered:
+            return None
+        marker_index = lowered.index(marker)
+        path_text = criterion[:marker_index].strip().strip("`'\"")
+        expected = criterion[marker_index + len(marker) :].strip().strip("`'\"")
+        if not path_text or not expected:
+            return None
+        candidate = (root / path_text).resolve()
+        try:
+            candidate.relative_to(root.resolve())
+        except ValueError:
+            return {
+                "satisfied": False,
+                "criterion": criterion,
+                "reason": "PATH_OUTSIDE_REPOSITORY",
+                "path": path_text,
+            }
+        if not candidate.is_file():
+            return {
+                "satisfied": False,
+                "criterion": criterion,
+                "reason": "FILE_NOT_FOUND",
+                "path": path_text,
+            }
+        try:
+            content = candidate.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            content = candidate.read_text(errors="replace")
+        return {
+            "satisfied": expected in content,
+            "criterion": criterion,
+            "reason": "FILE_CONTAINS_TEXT" if expected in content else "TEXT_NOT_FOUND",
+            "path": path_text,
+            "expected_text": expected,
+        }
 
     def _recover_worktree_for_task(self, session: Session, task: BuildTask) -> bool:
         root = Path(self._settings.repo_root)
@@ -4046,8 +5461,45 @@ class BuildRunner:
         reviewer that stops restating findings cannot silently resolve them."""
         task = session.get(BuildTask, execution.task_id)
         prior_registry = dict(task.finding_registry or {}) if task is not None else {}
+        prior_convergence = dict((prior_registry.get("convergence") or {}))
+        comprehensive_review = bool(prior_convergence.get("pending_comprehensive_review"))
         has_finding_signal = bool(verdict.findings) or bool(verdict.finding_dispositions)
+        if comprehensive_review:
+            missing_ids = comprehensive_reconciliation_missing_ids(
+                prior_registry, verdict.findings, verdict.finding_dispositions
+            )
+            if missing_ids:
+                incomplete = dict(prior_registry)
+                incomplete["comprehensive_incomplete_ids"] = missing_ids
+                return incomplete
         if not has_finding_signal:
+            if comprehensive_review and verdict.integration_eligible():
+                registry = reconcile_findings(
+                    prior_registry,
+                    findings=[],
+                    finding_dispositions=[],
+                    execution_id=execution.execution_id,
+                    cycle_label=f"review-cycle:{execution.execution_id}",
+                    reviewer_id=execution.worker_id,
+                    reviewed_feature_sha=execution.reviewed_feature_sha,
+                )
+                registry = record_convergence_generation(
+                    registry,
+                    prior_registry=prior_registry,
+                    execution_id=execution.execution_id,
+                    cycle_label=f"review-cycle:{execution.execution_id}",
+                    reviewer_id=execution.worker_id,
+                    comprehensive_review=True,
+                )
+                convergence = dict(registry.get("convergence") or {})
+                convergence["pending_comprehensive_review"] = False
+                convergence["comprehensive_used"] = True
+                convergence["comprehensive_execution_id"] = execution.execution_id
+                convergence["comprehensive_reviewed_feature_sha"] = execution.reviewed_feature_sha
+                registry["convergence"] = convergence
+                if task is not None:
+                    task.finding_registry = registry
+                return registry
             return prior_registry
         registry = reconcile_findings(
             prior_registry,
@@ -4056,10 +5508,74 @@ class BuildRunner:
             execution_id=execution.execution_id,
             cycle_label=f"review-cycle:{execution.execution_id}",
             reviewer_id=execution.worker_id,
+            reviewed_feature_sha=execution.reviewed_feature_sha,
         )
+        registry = record_convergence_generation(
+            registry,
+            prior_registry=prior_registry,
+            execution_id=execution.execution_id,
+            cycle_label=f"review-cycle:{execution.execution_id}",
+            reviewer_id=execution.worker_id,
+            comprehensive_review=comprehensive_review,
+        )
+        convergence = dict(registry.get("convergence") or {})
+        if comprehensive_review:
+            convergence["pending_comprehensive_review"] = False
+            convergence["comprehensive_used"] = True
+            convergence["comprehensive_execution_id"] = execution.execution_id
+            convergence["comprehensive_reviewed_feature_sha"] = execution.reviewed_feature_sha
+            registry["convergence"] = convergence
         if task is not None:
             task.finding_registry = registry
         return registry
+
+    def _request_comprehensive_convergence_review(
+        self,
+        session: Session,
+        execution: BuildRunnerExecution,
+        registry: dict,
+        result: RunnerCycleResult,
+    ) -> bool:
+        task = session.get(BuildTask, execution.task_id)
+        if task is None:
+            return False
+        convergence = dict((registry or {}).get("convergence") or {})
+        generations = int(convergence.get("generations") or 0)
+        if generations < self._config.max_convergence_generations:
+            return False
+        if convergence.get("comprehensive_used") or convergence.get("pending_comprehensive_review"):
+            return False
+        convergence["pending_comprehensive_review"] = True
+        convergence["threshold"] = self._config.max_convergence_generations
+        convergence["stop_reason"] = "serial_new_finding_convergence_threshold_reached"
+        registry = dict(registry or {})
+        registry["convergence"] = convergence
+        task.finding_registry = registry
+        record_event(
+            session,
+            EventInput(
+                task_id=execution.task_id,
+                event_type="runner.comprehensive_convergence_review_requested",
+                actor="runner",
+                event_data={
+                    "convergence_generations": generations,
+                    "threshold": self._config.max_convergence_generations,
+                    "open_findings": finding_escalation_evidence(registry),
+                    "history": convergence.get("history") or [],
+                    "reason": convergence["stop_reason"],
+                },
+            ),
+        )
+        result.escalations.append(f"{execution.task_id}:COMPREHENSIVE_CONVERGENCE_REVIEW_REQUIRED")
+        release_active_claims(session, execution.task_id, completed=False)
+        transition_task(
+            session,
+            execution.task_id,
+            "REVIEW_READY",
+            actor="runner",
+            reason="serial finding convergence threshold reached; requesting comprehensive review",
+        )
+        return True
 
     def _remediation_limit_reached(
         self,
@@ -4086,6 +5602,13 @@ class BuildRunner:
         registry = self._reconcile_review_findings(session, execution, verdict)
         if registry.get("entries") and has_finding_signal:
             open_entries = open_findings(registry)
+            convergence = dict(registry.get("convergence") or {})
+            convergence_limit_reached = bool(
+                open_entries
+                and convergence.get("comprehensive_used")
+                and int(convergence.get("generations") or 0)
+                >= self._config.max_convergence_generations
+            )
             # `attempts` counts how many times a finding has been *reported*
             # STILL_OPEN, so its first report (before any remediation has
             # run against it) counts as 1. Escalate once max_remediation_cycles
@@ -4094,7 +5617,7 @@ class BuildRunner:
             limit_reached = any(
                 int(entry.get("attempts") or 0) > self._config.max_remediation_cycles
                 for entry in open_entries
-            )
+            ) or convergence_limit_reached
         else:
             limit_reached = (
                 self._remediation_cycles(session, task_id) >= self._config.max_remediation_cycles
@@ -4109,10 +5632,18 @@ class BuildRunner:
                 task_id=task_id,
                 event_type="runner.remediation_limit_reached",
                 actor="runner",
-                event_data={"open_findings": evidence},
+                event_data={
+                    "open_findings": evidence,
+                    "convergence": (registry or {}).get("convergence") or {},
+                    "why_autonomous_convergence_stopped": (
+                        "comprehensive_convergence_review_still_found_unresolved_work"
+                        if (registry or {}).get("convergence", {}).get("comprehensive_used")
+                        else "per_finding_remediation_budget_exhausted"
+                    ),
+                },
             ),
         )
-        self._block_task(session, task_id, "REMEDIATION_LIMIT_REACHED")
+        self._block_task(session, task_id, "REMEDIATION_LIMIT_REACHED", execution=execution)
         return True
 
     def _remediation_cycles(self, session: Session, task_id: str) -> int:
@@ -4123,6 +5654,94 @@ class BuildRunner:
             .where(BuildRunnerExecution.role == "REMEDIATION")
             .where(BuildRunnerExecution.status.in_(("LAUNCHED", "RUNNING", "SUCCEEDED")))
         ) or 0
+
+
+_PROVIDER_CAPACITY_FAILURES = frozenset({"RATE_LIMITED", "QUOTA_EXHAUSTED"})
+
+
+def _provider_capacity_is_active(
+    session: Session,
+    provider: str | None,
+    *,
+    now: datetime | None = None,
+) -> bool:
+    if not provider:
+        return False
+    now = now or _now()
+    rows = session.scalars(
+        select(BuildTaskEvent).where(BuildTaskEvent.event_type == "runner.provider_failure")
+    ).all()
+    for row in rows:
+        data = row.event_data or {}
+        if str(data.get("provider") or "") != str(provider):
+            continue
+        if str(data.get("failure") or "").upper() not in _PROVIDER_CAPACITY_FAILURES:
+            continue
+        try:
+            until = datetime.fromisoformat(str(data.get("until")))
+        except (TypeError, ValueError):
+            continue
+        if until > now:
+            return True
+    return False
+
+
+def _provider_unavailable_until(
+    merged: dict[str, Any],
+    *,
+    fallback_seconds: float,
+) -> datetime:
+    reset_at = merged.get("provider_reset_at")
+    if reset_at:
+        try:
+            parsed = datetime.fromisoformat(str(reset_at).replace("Z", "+00:00"))
+        except ValueError:
+            parsed = None
+        if parsed is not None:
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=UTC)
+            if parsed > _now():
+                return parsed.astimezone(UTC)
+    return _now() + timedelta(seconds=fallback_seconds)
+
+
+def _provider_capacity_failure_from_block_reason(reason: str) -> str | None:
+    for prefix in ("PROVIDER_FAILURE:", "PROVIDER_FAILURE_RETRIES_EXHAUSTED:"):
+        if reason.startswith(prefix):
+            failure = reason[len(prefix):].strip().upper()
+            if failure in _PROVIDER_CAPACITY_FAILURES:
+                return failure
+    return None
+
+
+def _substantive_failure_attempts(
+    session: Session,
+    task_id: str,
+    *,
+    role: str,
+    retry_generation: int,
+) -> int:
+    """Count task failures that are actually about the task/worker, not provider capacity."""
+    rows = session.scalars(
+        select(BuildRunnerExecution)
+        .where(BuildRunnerExecution.task_id == task_id)
+        .where(BuildRunnerExecution.role == role)
+        .where(BuildRunnerExecution.status.in_(("LOST", "FAILED")))
+    ).all()
+    attempts = 0
+    for row in rows:
+        data = row.result_data or {}
+        try:
+            generation = int(data.get("retry_generation", 0) or 0)
+        except (TypeError, ValueError):
+            generation = 0
+        if generation != retry_generation:
+            continue
+        failure = str(data.get("provider_failure") or "").upper()
+        if failure in _PROVIDER_CAPACITY_FAILURES:
+            continue
+        attempts += 1
+    return attempts
 
 
 _COOLDOWN_SECONDS = {
@@ -4178,5 +5797,23 @@ def _sanitize_observation(observation: ExecutionObservation) -> ExecutionObserva
     )
 
 
+def _string_list(value: object) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        values = [value]
+    elif isinstance(value, (list, tuple, set)):
+        values = list(value)
+    else:
+        return []
+    return [str(item).strip() for item in values if str(item).strip()]
+
+
 def _now() -> datetime:
     return datetime.now(UTC)
+
+
+def _looks_like_git_sha(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    return 7 <= len(value) <= 64 and all(ch in "0123456789abcdefABCDEF" for ch in value)

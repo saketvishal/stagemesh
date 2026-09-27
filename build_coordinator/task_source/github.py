@@ -15,6 +15,7 @@ from typing import Any
 
 from sqlalchemy import select
 
+from build_coordinator.claims import task_source_is_executable
 from build_coordinator.events import record_event
 from build_coordinator.models import (
     BuildObjective,
@@ -24,20 +25,46 @@ from build_coordinator.models import (
     TASK_STATES,
 )
 from build_coordinator.objectives import _ensure_planner_task, create_objective, get_planner_task
-from build_coordinator.service import upsert_task
-from build_coordinator.task_source.base import SyncResult, TaskSource
+from build_coordinator.service import upsert_task, utcnow
+from build_coordinator.task_source.base import (
+    SOURCE_DEFERRED,
+    SOURCE_ELIGIBLE,
+    SyncResult,
+    TaskSource,
+    source_identity_metadata,
+)
 from build_coordinator.types import EventInput, OBJECTIVE_ROOT_COMPAT_REASON, ObjectiveSpec, TaskSpec
 
 logger = logging.getLogger(__name__)
 
 
-def _resolve_issue_number_static(session, entity_id: str, is_objective: bool = False) -> int | None:
-    """Instance-independent counterpart of `GitHubTaskSource._resolve_issue_number`."""
-    m = re.match(r"^GH-(\d+)$", entity_id)
-    if m:
-        return int(m.group(1))
+def _normalize_label(label: Any) -> str:
+    return str(label or "").strip().lower()
 
+
+def _resolve_issue_number_static(
+    session,
+    entity_id: str,
+    is_objective: bool = False,
+    repo: str | None = None,
+) -> int | None:
+    """Instance-independent counterpart of `GitHubTaskSource._resolve_issue_number`."""
     if not is_objective:
+        task = session.get(BuildTask, entity_id)
+        metadata = dict(task.definition_metadata or {}) if task is not None else {}
+        has_source_identity = metadata.get("source_type") is not None or metadata.get("source_owner") is not None
+        if has_source_identity:
+            if metadata.get("source_type") != "github":
+                return None
+            if repo is not None and metadata.get("source_owner") != repo:
+                return None
+            source_ref = metadata.get("source_ref")
+            if source_ref is not None and re.fullmatch(r"\d+", str(source_ref)):
+                return int(source_ref)
+            issue_number = metadata.get("source_issue_number")
+            if issue_number is not None and re.fullmatch(r"\d+", str(issue_number)):
+                return int(issue_number)
+
         events = session.scalars(
             select(BuildTaskEvent)
             .where(
@@ -48,7 +75,12 @@ def _resolve_issue_number_static(session, entity_id: str, is_objective: bool = F
         ).all()
         for ev in events:
             src = (ev.event_data or {}).get("source", "")
-            sm = re.search(r"/issues/(\d+)$", src)
+            pattern = (
+                rf"^https://github\.com/{re.escape(repo)}/issues/(\d+)$"
+                if repo is not None
+                else r"/issues/(\d+)$"
+            )
+            sm = re.search(pattern, src)
             if sm:
                 return int(sm.group(1))
     else:
@@ -62,7 +94,12 @@ def _resolve_issue_number_static(session, entity_id: str, is_objective: bool = F
         ).all()
         for ev in obj_events:
             src = (ev.event_data or {}).get("source", "")
-            sm = re.search(r"/issues/(\d+)$", src)
+            pattern = (
+                rf"^https://github\.com/{re.escape(repo)}/issues/(\d+)$"
+                if repo is not None
+                else r"/issues/(\d+)$"
+            )
+            sm = re.search(pattern, src)
             if sm:
                 return int(sm.group(1))
         events = session.scalars(
@@ -75,7 +112,12 @@ def _resolve_issue_number_static(session, entity_id: str, is_objective: bool = F
         ).all()
         for ev in events:
             src = (ev.event_data or {}).get("source", "")
-            sm = re.search(r"/issues/(\d+)$", src)
+            pattern = (
+                rf"^https://github\.com/{re.escape(repo)}/issues/(\d+)$"
+                if repo is not None
+                else r"/issues/(\d+)$"
+            )
+            sm = re.search(pattern, src)
             if sm:
                 return int(sm.group(1))
 
@@ -118,7 +160,7 @@ def check_objective_fully_delivered(
         return False
     if not repo or dry_run:
         return True
-    issue_number = _resolve_issue_number_static(session, objective_id, is_objective=True)
+    issue_number = _resolve_issue_number_static(session, objective_id, is_objective=True, repo=repo)
     if issue_number is None:
         return True
     return _is_outbound_synced_static(session, objective_id, "COMPLETED", is_objective=True)
@@ -133,7 +175,7 @@ def check_task_fully_delivered(
         return False
     if not repo or dry_run:
         return True
-    issue_number = _resolve_issue_number_static(session, task_id, is_objective=False)
+    issue_number = _resolve_issue_number_static(session, task_id, is_objective=False, repo=repo)
     if issue_number is None:
         return True
     return _is_outbound_synced_static(session, task_id, "DONE", is_objective=False)
@@ -152,11 +194,16 @@ class GitHubTaskSource(TaskSource):
         labels: tuple[str, ...] = (),
         dry_run: bool = False,
         client: Any = None,
+        eligibility_include_labels: tuple[str, ...] = (),
+        eligibility_exclude_labels: tuple[str, ...] = (),
     ) -> None:
         self.repo = repo or os.getenv("BUILD_COORDINATOR_GITHUB_REPO")
         self.labels = labels
         self.dry_run = dry_run
         self._client = client  # For mocking/testing
+        self.eligibility_include_labels = tuple(_normalize_label(l) for l in eligibility_include_labels if str(l).strip())
+        configured_excludes = tuple(_normalize_label(l) for l in eligibility_exclude_labels if str(l).strip())
+        self.eligibility_exclude_labels = configured_excludes or ("stagemesh:deferred",)
         self._outbound_events: list[dict[str, Any]] = []
         self._labels_ensured = False
 
@@ -219,6 +266,86 @@ class GitHubTaskSource(TaskSource):
             check=True,
         )
 
+    def _remove_stale_lifecycle_labels(self, issue_number: int, current_label: str) -> bool:
+        stale_labels = tuple(label for label in self.LIFECYCLE_LABELS if label != current_label)
+        if not stale_labels:
+            return True
+
+        if self._client is not None:
+            if not hasattr(self._client, "remove_label"):
+                return True
+            present_labels = self._client_issue_label_names(issue_number)
+            for label in stale_labels:
+                if present_labels is not None and label not in present_labels:
+                    continue
+                try:
+                    self._client.remove_label(repo=self.repo, number=str(issue_number), label=label)
+                except Exception as exc:
+                    if self._is_absent_label_error(exc):
+                        continue
+                    raise
+            return True
+
+        present_labels = self._issue_label_names(issue_number)
+        for label in stale_labels:
+            if label not in present_labels:
+                continue
+            proc_remove = subprocess.run(
+                ["gh", "issue", "edit", str(issue_number), "--repo", self.repo, "--remove-label", label],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+            )
+            if proc_remove.returncode != 0:
+                err = (proc_remove.stderr or proc_remove.stdout or "gh issue edit --remove-label failed").strip()
+                raise RuntimeError(err)
+        return True
+
+    def _issue_label_names(self, issue_number: int) -> set[str]:
+        proc = subprocess.run(
+            ["gh", "issue", "view", str(issue_number), "--repo", self.repo, "--json", "labels"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+        if proc.returncode != 0:
+            err = (proc.stderr or proc.stdout or "gh issue view failed").strip()
+            raise RuntimeError(err)
+        data = json.loads(proc.stdout or "{}")
+        return {label.get("name", "") for label in data.get("labels", []) if isinstance(label, dict)}
+
+    def _client_issue_label_names(self, issue_number: int) -> set[str] | None:
+        if self._client is None:
+            return None
+        if hasattr(self._client, "get_issue"):
+            issue = self._client.get_issue(repo=self.repo, issue_number=issue_number)
+            labels = getattr(issue, "labels", None)
+            if labels is not None:
+                return {label.get("name", "") if isinstance(label, dict) else str(label) for label in labels}
+        if hasattr(self._client, "issues"):
+            for issue in getattr(self._client, "issues"):
+                if str(issue.get("number")) == str(issue_number):
+                    return {
+                        label.get("name", "") if isinstance(label, dict) else str(label)
+                        for label in issue.get("labels", [])
+                    }
+            return None
+        return None
+
+    @staticmethod
+    def _is_absent_label_error(exc: Exception) -> bool:
+        message = str(exc).lower()
+        return (
+            "not found" in message
+            or "does not exist" in message
+            or "missing" in message
+            or "not applied" in message
+        )
+
     def discover_tasks(self, session) -> list[SyncResult]:
         """Fetch open issues from the repository and ingest into the durable queue."""
         if not self.repo:
@@ -226,10 +353,16 @@ class GitHubTaskSource(TaskSource):
         self.ensure_labels(session)
         issues = self._fetch_issues()
         results: list[SyncResult] = []
+        open_issue_numbers: set[int] = set()
         for issue in issues:
+            try:
+                open_issue_numbers.add(int(issue["number"]))
+            except (KeyError, TypeError, ValueError):
+                pass
             res = self._sync_issue(session, issue)
             if res is not None:
                 results.append(res)
+        results.extend(self._reconcile_source_states(session, open_issue_numbers))
         return results
 
     def _fetch_issues(self) -> list[dict[str, Any]]:
@@ -264,12 +397,229 @@ class GitHubTaskSource(TaskSource):
         except Exception as exc:
             raise RuntimeError(f"failed to fetch GitHub issues from {self.repo}: {exc}")
 
+    def _fetch_issue_by_number(self, issue_number: int) -> dict[str, Any] | None:
+        if self._client is not None:
+            if not hasattr(self._client, "get_issue"):
+                return None
+            issue = self._client.get_issue(repo=self.repo, issue_number=issue_number)
+            if isinstance(issue, dict):
+                return issue
+            return {
+                "number": getattr(issue, "number", issue_number),
+                "state": getattr(issue, "state", ""),
+                "url": getattr(issue, "html_url", ""),
+            }
+        cmd = [
+            "gh",
+            "issue",
+            "view",
+            str(issue_number),
+            "--repo",
+            self.repo,
+            "--json",
+            "number,state,url",
+        ]
+        try:
+            res = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=True,
+            )
+            data = json.loads(res.stdout)
+            return data if isinstance(data, dict) else None
+        except Exception:
+            return None
+
+    def _reconcile_source_states(
+        self,
+        session,
+        open_issue_numbers: set[int],
+    ) -> list[SyncResult]:
+        task_ids = session.scalars(
+            select(BuildTaskEvent.task_id)
+            .where(BuildTaskEvent.actor == "github-sync")
+            .where(BuildTaskEvent.task_id.isnot(None))
+            .distinct()
+        ).all()
+        results: list[SyncResult] = []
+        for task_id in task_ids:
+            if not task_id:
+                continue
+            task = session.get(BuildTask, task_id)
+            if task is None:
+                continue
+            issue_number = self._resolve_issue_number(session, task_id, is_objective=False)
+            if issue_number is None:
+                continue
+            metadata = dict(task.definition_metadata or {})
+            previous_state = str(metadata.get("source_state") or "").upper()
+
+            if issue_number in open_issue_numbers:
+                source_state = "OPEN"
+                source_url = metadata.get("source_url") or f"https://github.com/{self.repo}/issues/{issue_number}"
+            else:
+                source = self._fetch_issue_by_number(issue_number)
+                if source is None:
+                    continue
+                source_state = str(source.get("state") or "").upper()
+                source_url = source.get("url") or metadata.get("source_url") or f"https://github.com/{self.repo}/issues/{issue_number}"
+
+            if source_state not in {"OPEN", "CLOSED"}:
+                continue
+
+            metadata.update(
+                source_identity_metadata(
+                    source_type="github",
+                    source_owner=self.repo,
+                    source_ref=str(issue_number),
+                    source_url=source_url,
+                    source_state=source_state,
+                    legacy={"source_issue_number": issue_number},
+                )
+            )
+            task.definition_metadata = metadata
+
+            if source_state != previous_state:
+                record_event(
+                    session,
+                    EventInput(
+                        task_id=task.task_id,
+                        event_type="task_source.source_state_changed",
+                        actor="github-sync",
+                        event_data={
+                            "source": source_url,
+                            "issue_number": issue_number,
+                            "from_state": previous_state or None,
+                            "to_state": source_state,
+                        },
+                    ),
+                )
+                results.append(
+                    SyncResult(
+                        task_id=task.task_id,
+                        title=task.title,
+                        action=f"SOURCE_{source_state}",
+                        source_ref=str(source_url),
+                        details=(
+                            "GitHub source issue closed; local task preserved but suppressed"
+                            if source_state == "CLOSED"
+                            else "GitHub source issue reopened; source suppression cleared"
+                        ),
+                    )
+                )
+        objective_ids = session.scalars(
+            select(BuildObjectiveEvent.objective_id)
+            .where(BuildObjectiveEvent.actor == "github-sync")
+            .where(BuildObjectiveEvent.objective_id.isnot(None))
+            .distinct()
+        ).all()
+        for objective_id in objective_ids:
+            if not objective_id:
+                continue
+            objective = session.get(BuildObjective, objective_id)
+            if objective is None:
+                continue
+            issue_number = self._resolve_issue_number(session, objective_id, is_objective=True)
+            if issue_number is None:
+                continue
+            if issue_number in open_issue_numbers:
+                source_state = "OPEN"
+                source_url = f"https://github.com/{self.repo}/issues/{issue_number}"
+            else:
+                source = self._fetch_issue_by_number(issue_number)
+                if source is None:
+                    continue
+                source_state = str(source.get("state") or "").upper()
+                source_url = source.get("url") or f"https://github.com/{self.repo}/issues/{issue_number}"
+            if source_state not in {"OPEN", "CLOSED"}:
+                continue
+            previous_state = self._latest_objective_source_state(session, objective.objective_id)
+            self._apply_objective_source_state(
+                session,
+                objective,
+                issue_number=issue_number,
+                source_url=source_url,
+                source_state=source_state,
+                previous_state=previous_state,
+            )
+            if source_state != previous_state:
+                results.append(
+                    SyncResult(
+                        task_id=objective.objective_id,
+                        title=objective.goal[:240],
+                        action=f"SOURCE_{source_state}",
+                        source_ref=str(source_url),
+                        details=(
+                            "GitHub objective issue closed; planner and objective-generated work suppressed"
+                            if source_state == "CLOSED"
+                            else "GitHub objective issue reopened; objective source suppression cleared"
+                        ),
+                    )
+                )
+        return results
+
+    def _latest_objective_source_state(self, session, objective_id: str) -> str:
+        planner = get_planner_task(session, objective_id)
+        if planner is not None:
+            metadata = planner.definition_metadata or {}
+            if metadata.get("source_type") == "github" and metadata.get("source_state") is not None:
+                return str(metadata.get("source_state") or "").upper()
+        event = session.scalar(
+            select(BuildObjectiveEvent)
+            .where(BuildObjectiveEvent.objective_id == objective_id)
+            .where(BuildObjectiveEvent.event_type == "objective.source_state_changed")
+            .order_by(BuildObjectiveEvent.created_at.desc())
+        )
+        return str(((event.event_data if event is not None else {}) or {}).get("to_state") or "").upper()
+
+    def _apply_objective_source_state(
+        self,
+        session,
+        objective: BuildObjective,
+        *,
+        issue_number: int,
+        source_url: str,
+        source_state: str,
+        previous_state: str,
+        eligibility: str = SOURCE_ELIGIBLE,
+        eligibility_reason: str | None = None,
+    ) -> None:
+        planner = get_planner_task(session, objective.objective_id)
+        if planner is not None:
+            self._apply_planner_source_metadata(
+                planner,
+                issue_number=issue_number,
+                source_url=source_url,
+                source_state=source_state,
+                eligibility=eligibility,
+                eligibility_reason=eligibility_reason,
+            )
+        if source_state == previous_state:
+            return
+        session.add(
+            BuildObjectiveEvent(
+                objective_id=objective.objective_id,
+                event_type="objective.source_state_changed",
+                actor="github-sync",
+                event_data={
+                    "source": source_url,
+                    "issue_number": issue_number,
+                    "from_state": previous_state or None,
+                    "to_state": source_state,
+                },
+            )
+        )
+
     def _sync_issue(self, session, issue: dict[str, Any]) -> SyncResult | None:
         number = issue["number"]
         title = issue.get("title", f"Issue #{number}")
         body = issue.get("body", "")
         labels = [l.get("name", "") if isinstance(l, dict) else str(l) for l in issue.get("labels", [])]
         url = issue.get("url", f"https://github.com/{self.repo}/issues/{number}")
+        eligibility, eligibility_reason = self._source_eligibility_from_labels(labels)
 
         # Check for explicit task_id in body e.g. <!-- task_id: ... -->
         task_id_match = re.search(r"<!--\s*task_id:\s*([A-Za-z0-9_-]+)\s*-->", body)
@@ -286,6 +636,7 @@ class GitHubTaskSource(TaskSource):
             direct_execution = self._objective_direct_execution_enabled(labels, body)
             was_current = self._objective_sync_is_current(session, task_id, title, body, ac, deps)
             existed = session.get(BuildObjective, task_id) is not None
+            previous_eligibility = self._objective_source_eligibility(session, task_id)
             objective = self._sync_objective(
                 session,
                 task_id,
@@ -294,16 +645,25 @@ class GitHubTaskSource(TaskSource):
                 ac,
                 deps,
                 url,
+                eligibility=eligibility,
+                eligibility_reason=eligibility_reason,
                 reconcile_historical_root=not direct_execution,
             )
             if not direct_execution:
-                action = "SKIPPED" if was_current else ("UPDATED" if existed else "CREATED")
+                current_eligibility = self._objective_source_eligibility(session, task_id)
+                if existed and previous_eligibility != current_eligibility:
+                    action = "SOURCE_ELIGIBILITY_CHANGED"
+                else:
+                    action = "SKIPPED" if was_current else ("UPDATED" if existed else "CREATED")
                 return SyncResult(
                     task_id=task_id,
                     title=title,
                     action=action,
                     source_ref=url,
-                    details="Synced from GitHub issue as authoritative objective; no root implementation task created",
+                    details=(
+                        "Synced from GitHub issue as authoritative objective; "
+                        f"eligibility: {current_eligibility or eligibility}; no root implementation task created"
+                    ),
                 )
             deps = list(objective.dependencies)
 
@@ -316,8 +676,21 @@ class GitHubTaskSource(TaskSource):
             deps,
             labels,
             url,
+            eligibility=eligibility,
+            eligibility_reason=eligibility_reason,
             objective_id=task_id if is_objective else None,
         )
+
+    def _source_eligibility_from_labels(self, labels: list[str]) -> tuple[str, str | None]:
+        normalized = {_normalize_label(label) for label in labels}
+        excludes = set(self.eligibility_exclude_labels)
+        matched_excludes = sorted(normalized & excludes)
+        if matched_excludes:
+            return SOURCE_DEFERRED, f"matched exclude label(s): {', '.join(matched_excludes)}"
+        includes = set(self.eligibility_include_labels)
+        if includes and not (normalized & includes):
+            return SOURCE_DEFERRED, f"missing include label(s): {', '.join(sorted(includes))}"
+        return SOURCE_ELIGIBLE, "eligible by source label policy"
 
     @staticmethod
     def _objective_direct_execution_enabled(labels: list[str], body: str) -> bool:
@@ -336,9 +709,15 @@ class GitHubTaskSource(TaskSource):
         deps: list[str],
         labels: list[str],
         url: str,
+        eligibility: str = SOURCE_ELIGIBLE,
+        eligibility_reason: str | None = None,
         objective_id: str | None = None,
     ) -> SyncResult:
         existing = session.get(BuildTask, task_id)
+        source_was_closed = bool(
+            existing is not None
+            and str((existing.definition_metadata or {}).get("source_state") or "").upper() == "CLOSED"
+        )
         review_policy = self._review_policy_from_labels(labels)
         risk_level = "HIGH" if any("risk:high" in l.lower() for l in labels) else "MEDIUM"
         priority = self._parse_priority(labels, body)
@@ -356,7 +735,13 @@ class GitHubTaskSource(TaskSource):
             action = "SKIPPED" if unchanged else "UPDATED"
         else:
             action = "CREATED"
+        previous_eligibility = str(
+            ((existing.definition_metadata or {}) if existing is not None else {}).get("source_eligibility")
+            or "ELIGIBLE"
+        ).upper()
 
+        issue_match = re.search(r"/issues/(\d+)$", url)
+        issue_number = int(issue_match.group(1)) if issue_match else None
         spec = TaskSpec(
             task_id=task_id,
             title=title,
@@ -365,8 +750,41 @@ class GitHubTaskSource(TaskSource):
             dependencies=deps,
             risk_level=risk_level,
             review_policy=review_policy,
+            definition_metadata={
+                **(existing.definition_metadata if existing is not None else {}),
+                **source_identity_metadata(
+                    source_type="github",
+                    source_owner=self.repo,
+                    source_ref=str(issue_number if issue_number is not None else task_id),
+                    source_url=url,
+                    source_state="OPEN",
+                    source_eligibility=eligibility,
+                    source_eligibility_reason=eligibility_reason,
+                    legacy={"source_issue_number": issue_number},
+                ),
+            },
         )
         task = upsert_task(session, spec)
+        current_eligibility = str((task.definition_metadata or {}).get("source_eligibility") or "ELIGIBLE").upper()
+        if existing is not None and action == "SKIPPED" and previous_eligibility != current_eligibility:
+            action = "SOURCE_ELIGIBILITY_CHANGED"
+        if source_was_closed:
+            action = "SOURCE_OPEN"
+            record_event(
+                session,
+                EventInput(
+                    task_id=task.task_id,
+                    event_type="task_source.source_state_changed",
+                    actor="github-sync",
+                    event_data={
+                        "source": url,
+                        "issue_number": (task.definition_metadata or {}).get("source_issue_number"),
+                        "from_state": "CLOSED",
+                        "to_state": "OPEN",
+                    },
+                ),
+            )
+        self._reconcile_reopened_task_from_open_issue(session, task, labels, url)
         if objective_id:
             task.objective_id = objective_id
             if task.reason_created == OBJECTIVE_ROOT_COMPAT_REASON:
@@ -379,7 +797,11 @@ class GitHubTaskSource(TaskSource):
         details = (
             f"in sync ({task.state})"
             if action == "SKIPPED"
-            else f"Synced from GitHub issue as {task.state} (priority: {priority})"
+            else (
+                "GitHub source issue reopened; source suppression cleared"
+                if action == "SOURCE_OPEN"
+                else f"Synced from GitHub issue as {task.state} (priority: {priority}; eligibility: {eligibility})"
+            )
         )
         return SyncResult(
             task_id=task.task_id,
@@ -387,6 +809,37 @@ class GitHubTaskSource(TaskSource):
             action=action,
             source_ref=url,
             details=details,
+        )
+
+    def _reconcile_reopened_task_from_open_issue(
+        self,
+        session,
+        task: BuildTask,
+        labels: list[str],
+        url: str,
+    ) -> None:
+        if task.state != "DONE":
+            return
+        from_state = task.state
+        task.state = "READY"
+        task.current_claim_id = None
+        task.lease_expires_at = None
+        task.last_heartbeat_at = None
+        task.updated_at = utcnow()
+        record_event(
+            session,
+            EventInput(
+                task_id=task.task_id,
+                event_type="task.reopened_from_source",
+                actor="github-sync",
+                from_state=from_state,
+                to_state="READY",
+                event_data={
+                    "source": url,
+                    "reason": "GitHub issue is open again; reopening StageMesh task for dispatch",
+                    "had_stale_done_label": "stagemesh:done" in {label.strip().lower() for label in labels},
+                },
+            ),
         )
 
     @staticmethod
@@ -502,6 +955,8 @@ class GitHubTaskSource(TaskSource):
         deps: list[str],
         url: str,
         *,
+        eligibility: str = SOURCE_ELIGIBLE,
+        eligibility_reason: str | None = None,
         reconcile_historical_root: bool = True,
     ) -> BuildObjective:
         existing = session.get(BuildObjective, objective_id)
@@ -523,6 +978,14 @@ class GitHubTaskSource(TaskSource):
                 planner = _ensure_planner_task(session, existing)
             if planner is not None:
                 planner.dependencies = authoritative_deps
+                self._apply_planner_source_metadata(
+                    planner,
+                    issue_number=self._issue_number_from_url(url),
+                    source_url=url,
+                    source_state="OPEN",
+                    eligibility=eligibility,
+                    eligibility_reason=eligibility_reason,
+                )
             return existing
         obj = create_objective(
             session,
@@ -548,11 +1011,60 @@ class GitHubTaskSource(TaskSource):
                 },
             )
         )
+        issue_match = re.search(r"/issues/(\d+)$", url)
+        issue_number = int(issue_match.group(1)) if issue_match else None
+        if issue_number is not None:
+            self._apply_objective_source_state(
+                session,
+                obj,
+                issue_number=issue_number,
+                source_url=url,
+                source_state="OPEN",
+                previous_state="",
+                eligibility=eligibility,
+                eligibility_reason=eligibility_reason,
+            )
         planner = get_planner_task(session, objective_id)
         if planner is not None:
             planner.dependencies = list(deps)
         session.flush()
         return obj
+
+    @staticmethod
+    def _issue_number_from_url(url: str) -> int | None:
+        issue_match = re.search(r"/issues/(\d+)$", url)
+        return int(issue_match.group(1)) if issue_match else None
+
+    def _apply_planner_source_metadata(
+        self,
+        planner: BuildTask,
+        *,
+        issue_number: int | None,
+        source_url: str,
+        source_state: str,
+        eligibility: str = SOURCE_ELIGIBLE,
+        eligibility_reason: str | None = None,
+    ) -> None:
+        metadata = dict(planner.definition_metadata or {})
+        metadata.update(
+            source_identity_metadata(
+                source_type="github",
+                source_owner=self.repo,
+                source_ref=str(issue_number if issue_number is not None else planner.task_id),
+                source_url=source_url,
+                source_state=source_state,
+                source_eligibility=eligibility,
+                source_eligibility_reason=eligibility_reason,
+                legacy={"source_issue_number": issue_number},
+            )
+        )
+        planner.definition_metadata = metadata
+
+    def _objective_source_eligibility(self, session, objective_id: str) -> str | None:
+        planner = get_planner_task(session, objective_id)
+        if planner is None:
+            return None
+        return str((planner.definition_metadata or {}).get("source_eligibility") or "ELIGIBLE").upper()
 
     def _objective_sync_is_current(
         self,
@@ -660,13 +1172,23 @@ class GitHubTaskSource(TaskSource):
         return deps
 
     def _resolve_issue_number(self, session, entity_id: str, is_objective: bool = False) -> int | None:
-        # 1. Exact GH-<digits> pattern
-        m = re.match(r"^GH-(\d+)$", entity_id)
-        if m:
-            return int(m.group(1))
-
-        # 2. Check sync events in database
         if not is_objective:
+            task = session.get(BuildTask, entity_id)
+            metadata = dict(task.definition_metadata or {}) if task is not None else {}
+            has_source_identity = metadata.get("source_type") is not None or metadata.get("source_owner") is not None
+            if has_source_identity:
+                if (
+                    metadata.get("source_type") != "github"
+                    or metadata.get("source_owner") != self.repo
+                ):
+                    return None
+                source_ref = metadata.get("source_ref")
+                if source_ref is not None and re.fullmatch(r"\d+", str(source_ref)):
+                    return int(source_ref)
+                issue_number = metadata.get("source_issue_number")
+                if issue_number is not None and re.fullmatch(r"\d+", str(issue_number)):
+                    return int(issue_number)
+
             events = session.scalars(
                 select(BuildTaskEvent)
                 .where(
@@ -677,7 +1199,7 @@ class GitHubTaskSource(TaskSource):
             ).all()
             for ev in events:
                 src = (ev.event_data or {}).get("source", "")
-                sm = re.search(r"/issues/(\d+)$", src)
+                sm = re.search(rf"^https://github\.com/{re.escape(str(self.repo or ''))}/issues/(\d+)$", src)
                 if sm:
                     return int(sm.group(1))
         else:
@@ -691,7 +1213,7 @@ class GitHubTaskSource(TaskSource):
             ).all()
             for ev in obj_events:
                 src = (ev.event_data or {}).get("source", "")
-                sm = re.search(r"/issues/(\d+)$", src)
+                sm = re.search(rf"^https://github\.com/{re.escape(str(self.repo or ''))}/issues/(\d+)$", src)
                 if sm:
                     return int(sm.group(1))
             events = session.scalars(
@@ -704,7 +1226,7 @@ class GitHubTaskSource(TaskSource):
             ).all()
             for ev in events:
                 src = (ev.event_data or {}).get("source", "")
-                sm = re.search(r"/issues/(\d+)$", src)
+                sm = re.search(rf"^https://github\.com/{re.escape(str(self.repo or ''))}/issues/(\d+)$", src)
                 if sm:
                     return int(sm.group(1))
 
@@ -847,6 +1369,7 @@ class GitHubTaskSource(TaskSource):
                 if not already_commented:
                     self._client.add_comment(repo=self.repo, number=str(issue_number), body=comment_body)
 
+                self._remove_stale_lifecycle_labels(issue_number, label)
                 if hasattr(self._client, "add_label"):
                     self._client.add_label(repo=self.repo, number=str(issue_number), label=label)
 
@@ -898,6 +1421,21 @@ class GitHubTaskSource(TaskSource):
                 return False
 
             # 2. gh issue edit --add-label
+            try:
+                self._remove_stale_lifecycle_labels(issue_number, label)
+            except Exception as exc:
+                err = str(exc)
+                logger.warning("Failed to remove stale lifecycle labels from GitHub issue #%s: %s", issue_number, err)
+                self._record_outbound_failed(
+                    session,
+                    entity_id,
+                    issue_number,
+                    error=err,
+                    action="gh_remove_stale_labels",
+                    is_objective=is_objective,
+                )
+                return False
+
             proc_label = subprocess.run(
                 ["gh", "issue", "edit", str(issue_number), "--repo", self.repo, "--add-label", label],
                 capture_output=True,
@@ -946,7 +1484,7 @@ class GitHubTaskSource(TaskSource):
                 session,
                 entity_id,
                 issue_number,
-                state="DONE" if should_close else label,
+                state=synced_state,
                 is_objective=is_objective,
             )
             return True
@@ -984,6 +1522,10 @@ class GitHubTaskSource(TaskSource):
         # If task_id corresponds to a BuildObjective, do NOT close or label stagemesh:done
         # at the task level! The objective issue is only closed when BuildObjective reaches COMPLETED.
         if session.get(BuildObjective, task_id) is not None:
+            return True
+
+        task = session.get(BuildTask, task_id)
+        if task is not None and not task_source_is_executable(task):
             return True
 
         # Check source identity: Only GitHub-originating tasks can update GitHub!
@@ -1041,6 +1583,9 @@ class GitHubTaskSource(TaskSource):
         # Only sync when objective is actually COMPLETED
         obj = session.get(BuildObjective, objective_id)
         if obj is None or obj.state != "COMPLETED":
+            return True
+        objective_eligibility = self._objective_source_eligibility(session, objective_id)
+        if objective_eligibility is not None and objective_eligibility != SOURCE_ELIGIBLE:
             return True
 
         # Resolve issue number
