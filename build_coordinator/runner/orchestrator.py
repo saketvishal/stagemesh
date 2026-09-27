@@ -1089,14 +1089,18 @@ class BuildRunner:
                 continue
             if self._active_validation(session, task.task_id) is not None:
                 continue
-            source = session.scalars(
+            source = self._latest_green_review_requiring_validation(session, task)
+            next_state = "REVIEWING" if source is not None else ("REVIEW_READY" if task.review_policy != "NONE" else "DONE")
+            success_reason = "reviewed SHA validated after recovery" if source is not None else None
+            if source is None:
+                source = session.scalars(
                 select(BuildRunnerExecution)
                 .where(BuildRunnerExecution.task_id == task.task_id)
                 .where(BuildRunnerExecution.role.in_(("BUILDER", "REMEDIATION")))
                 .where(BuildRunnerExecution.adapter != "validation")
                 .where(BuildRunnerExecution.status == "SUCCEEDED")
                 .order_by(BuildRunnerExecution.completed_at.desc())
-            ).first()
+                ).first()
             if source is None:
                 continue
             commands = list(task.required_validation or [])
@@ -1116,9 +1120,40 @@ class BuildRunner:
                 source_execution=source,
                 commands=commands,
                 cwd=str(cwd),
-                next_state="REVIEW_READY" if task.review_policy != "NONE" else "DONE",
-                success_reason=None,
+                next_state=next_state,
+                success_reason=success_reason,
             )
+
+    def _latest_green_review_requiring_validation(
+        self,
+        session: Session,
+        task: BuildTask,
+    ) -> BuildRunnerExecution | None:
+        rows = session.scalars(
+            select(BuildRunnerExecution)
+            .where(BuildRunnerExecution.task_id == task.task_id)
+            .where(BuildRunnerExecution.role == "REVIEWER")
+            .where(BuildRunnerExecution.status == "SUCCEEDED")
+            .where(BuildRunnerExecution.reviewed_feature_sha.is_not(None))
+            .order_by(BuildRunnerExecution.completed_at.desc(), BuildRunnerExecution.launched_at.desc())
+        ).all()
+        for row in rows:
+            try:
+                parsed = parse_executor_result(
+                    row.result_data or {},
+                    execution_id=row.execution_id,
+                    task_id=row.task_id,
+                    role="REVIEWER",
+                    reviewed_feature_sha=row.reviewed_feature_sha,
+                    require_identity=row.adapter != "fake",
+                )
+            except (ExecutorResultError, ReviewVerdictContradiction):
+                continue
+            if parsed.reviewer is None or not parsed.reviewer.verdict.integration_eligible():
+                continue
+            if not self._has_successful_validation_for_sha(session, task.task_id, row.reviewed_feature_sha):
+                return row
+        return None
 
     def _apply_validation_result(
         self,
@@ -1226,6 +1261,9 @@ class BuildRunner:
                 updated_conflict["validation_completed_for_sha"] = updated_conflict.get("conflict_resolved_sha")
                 waiting["conflict_recovery"] = updated_conflict
                 task.waiting_input = waiting
+            return
+        if merged.get("validation_terminal_type") == "STALE_VALIDATION_CONTEXT":
+            result.scheduling_reasons[execution.task_id] = "stale_validation_context"
             return
         if self._remediation_cycles(session, execution.task_id) >= self._config.max_remediation_cycles:
             result.escalations.append(f"{execution.task_id}:REMEDIATION_LIMIT_REACHED")
