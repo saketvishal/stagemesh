@@ -70,6 +70,26 @@ class RateLimitedThenRestClient(FakeGitHubClient):
         return self.issues
 
 
+class RateLimitedThenPublicRestClient(FakeGitHubClient):
+    def __init__(self, issues: list[dict]):
+        super().__init__(issues)
+        self.graphql_calls = 0
+        self.auth_rest_calls = 0
+        self.public_rest_calls = 0
+
+    def list_issues(self, repo: str, labels: tuple[str, ...]):
+        self.graphql_calls += 1
+        raise RuntimeError("GraphQL API rate limit exceeded")
+
+    def list_issues_rest(self, repo: str, labels: tuple[str, ...], authenticated: bool = True):
+        self.auth_rest_calls += 1
+        raise RuntimeError("REST API rate limit exceeded; retry-after: 45")
+
+    def list_public_issues_rest(self, repo: str, labels: tuple[str, ...]):
+        self.public_rest_calls += 1
+        return self.issues
+
+
 class AlwaysRateLimitedClient(FakeGitHubClient):
     def list_issues(self, repo: str, labels: tuple[str, ...]):
         raise RuntimeError("secondary rate limit exceeded; retry-after: 120")
@@ -141,6 +161,28 @@ def test_github_rate_limited_graphql_falls_back_to_rest_discovery():
     assert client.graphql_calls == 1
     assert client.rest_calls == 1
     assert [r.task_id for r in results] == ["GH-131"]
+    assert results[0].action == "CREATED"
+
+
+def test_authenticated_rest_rate_limit_falls_back_to_public_rest_discovery():
+    issue = {
+        "number": 135,
+        "title": "Public fallback after authenticated REST limit",
+        "body": "Use public metadata when authenticated GitHub paths are cooling down.",
+        "labels": [],
+        "url": "https://github.com/example/repo/issues/135",
+    }
+    client = RateLimitedThenPublicRestClient([issue])
+    source = GitHubTaskSource(repo="example/repo", client=client)
+
+    with SessionLocal() as session:
+        results = source.discover_tasks(session)
+        session.commit()
+
+    assert client.graphql_calls == 1
+    assert client.auth_rest_calls == 1
+    assert client.public_rest_calls == 1
+    assert [r.task_id for r in results] == ["GH-135"]
     assert results[0].action == "CREATED"
 
 
