@@ -6,6 +6,7 @@ import logging
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from build_coordinator.db import commit_or_busy
 from build_coordinator.github.client import GitHubClient
 from build_coordinator.models import (
     BuildObjective,
@@ -113,5 +114,5 @@ def sync_objective_status_to_github(
             event_data={"status": status, "issue_number": issue_number, "repo": repo},
         )
     )
-    session.commit()
+    commit_or_busy(session)
     return status

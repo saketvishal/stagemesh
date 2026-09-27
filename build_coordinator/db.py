@@ -310,6 +310,11 @@ def with_sqlite_retry(
     for attempt in range(1, attempts + 1):
         try:
             return fn()
+        except DatabaseBusyError as exc:
+            if attempt == attempts:
+                raise
+            delay = min(max_delay, base_delay * (2 ** (attempt - 1)))
+            time.sleep(delay + random.uniform(0, base_delay))
         except OperationalError as exc:
             if not is_retryable(exc):
                 raise

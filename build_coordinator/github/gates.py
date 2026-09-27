@@ -7,6 +7,7 @@ import re
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from build_coordinator.db import commit_or_busy
 from build_coordinator.github.client import GitHubClient
 from build_coordinator.github.sanitizer import AUTHORIZED_OWNERS
 from build_coordinator.models import (
@@ -83,7 +84,7 @@ def publish_open_gates(
                 event_data={"gate_id": gate.gate_id, "gate_type": gate.gate_type},
             )
         )
-        session.commit()
+        commit_or_busy(session)
         published.append(gate)
 
     return published
@@ -122,7 +123,7 @@ def poll_and_ingest_gate_approvals(
                 resolved_by=f"gh:{comment.author}",
                 resolution_note=f"Approved via GitHub comment #{comment.id}",
             )
-            session.commit()
+            commit_or_busy(session)
 
             # Confirm on GitHub and restore active status label
             client.add_issue_comment(

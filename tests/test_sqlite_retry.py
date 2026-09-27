@@ -42,6 +42,20 @@ def test_retries_transient_lock_error_then_succeeds():
     assert attempts["count"] == 3
 
 
+def test_retries_typed_database_busy_error_then_succeeds():
+    attempts = {"count": 0}
+
+    def fn():
+        attempts["count"] += 1
+        if attempts["count"] < 3:
+            raise DatabaseBusyError("SQLite write contention on commit")
+        return "recovered"
+
+    result = with_sqlite_retry(fn, attempts=5, base_delay=0.0)
+    assert result == "recovered"
+    assert attempts["count"] == 3
+
+
 def test_raises_database_busy_error_after_exhausting_attempts():
     def fn():
         raise _operational_error("database is locked")
