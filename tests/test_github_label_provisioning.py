@@ -199,6 +199,24 @@ def test_rate_limited_label_provisioning_warning_is_suppressed_within_run(caplog
     assert events[0].event_data["capacity"]["reason"] == "RATE_LIMITED"
 
 
+def test_label_provisioning_warning_resets_between_runner_cycles(caplog):
+    """A long-lived runner keeps surfacing persistent label-provisioning failures."""
+    client = LabelAwareMockClient(issues=[], existing_labels=[], fail_on="rate_limit_labels")
+    source = GitHubTaskSource(repo="example/repo", client=client)
+    runner = BuildRunner(SessionLocal, RunnerConfig.default(), task_source=source)
+
+    with caplog.at_level("WARNING", logger="build_coordinator.task_source.github"):
+        runner.run_once()
+        runner.run_once()
+
+    warnings = [
+        record
+        for record in caplog.records
+        if "Failed to provision GitHub lifecycle labels" in record.getMessage()
+    ]
+    assert len(warnings) == 2
+
+
 def test_label_provisioning_warning_resets_after_success(caplog):
     """A long-lived adapter logs a later provisioning failure after recovery."""
     client = LabelAwareMockClient(issues=[], existing_labels=[], fail_on="rate_limit_labels")
@@ -241,11 +259,11 @@ def test_provisioning_retries_on_next_cycle_after_failure():
     assert client.created_labels == EXPECTED_LIFECYCLE_LABELS
 
 
-def test_done_sync_not_permanently_stuck_when_label_initially_absent():
-    """5. Regression: DONE task, stagemesh:done absent -> provisioned, applied, issue closed.
+def test_open_issue_reopens_done_task_when_label_initially_absent():
+    """5. Regression: open source issue reopens local DONE work before outbound sync.
 
     No manual intervention required: the same runner cycle that discovers the
-    issue also provisions the missing label before applying it during
+    open issue also provisions lifecycle labels before applying READY during
     outbound sync.
     """
     client = LabelAwareMockClient(
@@ -272,14 +290,14 @@ def test_done_sync_not_permanently_stuck_when_label_initially_absent():
     runner = BuildRunner(SessionLocal, config, task_source=source)
     cycle = runner.run_once()
 
-    assert "stagemesh:done" in client.created_labels
+    assert "stagemesh:ready" in client.created_labels
     assert "GH-200" in cycle.outbound_synced
-    assert client.labels and client.labels[0]["label"] == "stagemesh:done"
-    assert client.closed == ["200"]
+    assert client.labels and client.labels[0]["label"] == "stagemesh:ready"
+    assert client.closed == []
 
     with SessionLocal() as session:
         task = session.get(BuildTask, "GH-200")
-        assert task.state == "DONE"
+        assert task.state == "READY"
 
 
 def test_done_sync_provisions_label_without_fresh_discovery_pass():
