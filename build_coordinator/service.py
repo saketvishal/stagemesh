@@ -880,7 +880,17 @@ def recover_expired(session: Session, *, actor: str = "cli") -> list[BuildTask]:
         else:
             task.state = "STALE"
         task.updated_at = now
-        terminated = terminate_executions_for_claim(session, claim.claim_id, reason="STALE_CLAIM")
+        # Only VALIDATING preserves a live validation execution across the
+        # claim's lease expiry (see terminate_executions_for_claim
+        # docstring): for every other from_state, a LAUNCHED/RUNNING
+        # validation-adapter row under this claim would be an orphaned
+        # anomaly (the state machine does not leave validation running
+        # once the task has left VALIDATING), so the prior unconditional
+        # termination behavior is preserved there.
+        exclude_adapters = frozenset({"validation"}) if from_state == "VALIDATING" else frozenset()
+        terminated = terminate_executions_for_claim(
+            session, claim.claim_id, reason="STALE_CLAIM", exclude_adapters=exclude_adapters
+        )
         for execution in terminated:
             release_worker_leases_for_execution(session, execution.execution_id, status="EXPIRED")
         recovered.append(task)
@@ -975,14 +985,35 @@ def terminate_executions_for_claim(
     claim_id: str | None,
     *,
     reason: str,
+    exclude_adapters: frozenset[str] = frozenset(),
 ) -> list[BuildRunnerExecution]:
+    """Terminate LAUNCHED/RUNNING executions under `claim_id`.
+
+    `exclude_adapters` lets a caller release claim/lease ownership (the
+    authoritative-ownership bookkeeping) without destructively killing a
+    live execution row it has no direct evidence is actually dead. This
+    matters for validation: validation executions share the BUILDER/
+    REMEDIATION claim (there is no dedicated VALIDATION claim_type), so a
+    claim-lease expiry is *only* evidence that the coordinator/worker
+    lease bookkeeping lapsed -- it is not evidence that the underlying OS
+    process running validation has exited. A verified-live validator must
+    not be killed and relaunched solely because its inherited
+    implementation lease expired; the orchestrator's own liveness-aware
+    poll (durable process identity, not PID alone) is what actually
+    determines whether the excluded row is still running, and reconciles
+    it to a terminal state on this same runner cycle if -- and only if --
+    the process is confirmed gone or its identity no longer matches.
+    """
     if not claim_id:
         return []
-    rows = session.scalars(
+    query = (
         select(BuildRunnerExecution)
         .where(BuildRunnerExecution.claim_id == str(claim_id))
         .where(BuildRunnerExecution.status.in_(("LAUNCHED", "RUNNING")))
-    ).all()
+    )
+    if exclude_adapters:
+        query = query.where(BuildRunnerExecution.adapter.not_in(exclude_adapters))
+    rows = session.scalars(query).all()
     now = utcnow()
     for row in rows:
         row.status = "TERMINATED"
@@ -1017,7 +1048,24 @@ def release_worker_leases_for_execution(
 
 
 def reconcile_stale_executions(session: Session) -> list[BuildRunnerExecution]:
-    """Terminate live execution rows whose coordinator claim is no longer authoritative."""
+    """Terminate live execution rows whose coordinator claim is no longer authoritative.
+
+    Validation-adapter rows are always excluded here, unconditionally --
+    not just when a result file has already landed. Validation shares the
+    BUILDER/REMEDIATION claim (there is no dedicated VALIDATION claim
+    type), so a claim going stale is evidence only that the *lease
+    bookkeeping* lapsed, never evidence that the underlying OS process is
+    actually gone. Killing a validation row here on claim-staleness alone
+    would terminate and force a relaunch of a genuinely still-running,
+    verified-live validator solely because its inherited implementation
+    lease expired. The runner's own liveness-aware poll
+    (`Runner._reconcile_active`, which uses durable process identity, not
+    PID alone) always runs later in the same cycle as every caller of this
+    function (`_run_once` and the steward maintenance it invokes) and is
+    the sole authority that reconciles a validation row to a terminal
+    state -- and only does so once the process is confirmed gone or its
+    identity no longer matches.
+    """
     now = utcnow()
     live = session.scalars(
         select(BuildRunnerExecution).where(
@@ -1026,7 +1074,7 @@ def reconcile_stale_executions(session: Session) -> list[BuildRunnerExecution]:
     ).all()
     terminated: list[BuildRunnerExecution] = []
     for row in live:
-        if row.adapter == "validation" and row.result_path and Path(row.result_path).is_file():
+        if row.adapter == "validation":
             continue
         if not row.claim_id:
             row.status = "TERMINATED"
