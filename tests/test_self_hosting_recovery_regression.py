@@ -335,6 +335,62 @@ def test_restart_does_not_duplicate_workers_or_discard_changes(tmp_path: Path):
         assert reconciled[0].result_data["reconciliation_state"] == "STALE_CLAIM"
 
 
+def test_stale_validation_with_result_file_remains_observable(tmp_path: Path):
+    from datetime import timedelta
+
+    repo, _ = _setup_test_repo(tmp_path)
+    session_factory, _runner = _setup_runner(tmp_path, repo)
+    result_path = tmp_path / "results" / "validation-done.json"
+    result_path.parent.mkdir(parents=True, exist_ok=True)
+    result_path.write_text(
+        '{"status":"SUCCEEDED","passed":true,"validated_sha":"abc"}',
+        encoding="utf-8",
+    )
+
+    with session_factory() as session:
+        ensure_state(session)
+        task = BuildTask(task_id="GH-80", title="Validation Test", description="desc", state="VALIDATING")
+        session.add(task)
+        session.commit()
+
+        claim = BuildTaskClaim(
+            claim_id="claim-validation-80",
+            task_id="GH-80",
+            claim_type="IMPLEMENTATION",
+            worker_id="builder-worker-1",
+            provider="test",
+            lease_expires_at=datetime.now(UTC) + timedelta(seconds=10),
+            last_heartbeat_at=datetime.now(UTC),
+            branch_name="stagemesh/GH-80",
+            worktree_path=str(tmp_path / "worktrees" / "b1"),
+        )
+        session.add(claim)
+        session.add(
+            BuildRunnerExecution(
+                execution_id="validation-80",
+                task_id="GH-80",
+                claim_id=claim.claim_id,
+                role="BUILDER",
+                worker_id="runner-validation",
+                provider="runner",
+                adapter="validation",
+                status="LAUNCHED",
+                result_path=str(result_path),
+            )
+        )
+        session.commit()
+
+        claim_ref = session.get(BuildTaskClaim, claim.claim_id)
+        claim_ref.lease_expires_at = datetime.now(UTC) - timedelta(seconds=10)
+        session.commit()
+
+        reconciled = reconcile_stale_executions(session)
+        preserved = session.get(BuildRunnerExecution, "validation-80")
+        assert reconciled == []
+        assert preserved.status == "LAUNCHED"
+        assert preserved.result_data == {}
+
+
 # 11. Multi-project / worktree isolation remains intact
 def test_multi_project_worktree_isolation(tmp_path: Path):
     repo1, _ = _setup_test_repo(tmp_path / "proj1")

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from uuid import UUID
 
 from sqlalchemy import select, update
@@ -1009,6 +1010,8 @@ def reconcile_stale_executions(session: Session) -> list[BuildRunnerExecution]:
     ).all()
     terminated: list[BuildRunnerExecution] = []
     for row in live:
+        if row.adapter == "validation" and row.result_path and Path(row.result_path).is_file():
+            continue
         if not row.claim_id:
             row.status = "TERMINATED"
             row.completed_at = now
