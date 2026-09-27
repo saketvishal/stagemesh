@@ -1662,3 +1662,103 @@ def test_remediation_limit_reached_fails_closed_when_feature_sha_unchanged(tmp_p
     with session_factory() as session:
         task = session.get(BuildTask, "GH-128-U")
         assert task.state == "BLOCKED"
+
+
+def test_remediation_limit_reached_resumes_after_reblock_on_post_remediation_review(tmp_path: Path):
+    """Reproduces the exact GH-101/GH-128 sequence: a prior hard stop at SHA
+    A, an operator advance to SHA B, the task moved back to REVIEW_READY, and
+    a reviewer reporting REMEDIATION_REQUIRED/open findings against SHA B --
+    which re-blocks the task and rewrites waiting_input's failure_evidence to
+    point at SHA B, not A. Recovery must still compare against the original
+    stop SHA A (recorded once in convergence.comprehensive_reviewed_feature_sha
+    and never overwritten by the re-block) and open a new epoch, rather than
+    seeing stop_sha == current_sha and refusing to resume."""
+    repo, _ = _setup_test_repo(tmp_path)
+    branch = "stagemesh/GH-128-V"
+    wt = tmp_path / "worktrees" / "gh-128-reblock"
+    ensure_worktree(
+        wt,
+        repo_root=repo,
+        branch_name=branch,
+        base_sha=_git(repo, "rev-parse", "HEAD").stdout.strip(),
+        allowed_roots=[str(tmp_path)],
+    )
+    (wt / "feature.txt").write_text("initial fix attempt\n", encoding="utf-8")
+    _git(wt, "add", "feature.txt")
+    _git(wt, "commit", "-m", "feature work reviewed at prior hard stop")
+    stop_sha_a = _git(wt, "rev-parse", "HEAD").stdout.strip()
+
+    # Operator/external remediation advances the branch to SHA B.
+    (wt / "feature.txt").write_text("operator remediation applied\n", encoding="utf-8")
+    _git(wt, "add", "feature.txt")
+    _git(wt, "commit", "-m", "operator remediation")
+    sha_b = _git(wt, "rev-parse", "HEAD").stdout.strip()
+
+    session_factory, runner = _setup_runner(tmp_path, repo)
+    with session_factory() as session:
+        ensure_state(session)
+        registry = {
+            "entries": {
+                "f1": {
+                    "id": "f1",
+                    "description": "F1",
+                    "status": "STILL_OPEN",
+                    "attempts": 4,
+                    "first_seen_cycle": "review-cycle:exec-1",
+                    "history": [{"execution_id": "exec-1", "status": "STILL_OPEN"}],
+                }
+            },
+            "convergence": {
+                "generations": 3,
+                "comprehensive_used": True,
+                "pending_comprehensive_review": False,
+                "comprehensive_reviewed_feature_sha": stop_sha_a,
+                "stop_reason": "serial_new_finding_convergence_threshold_reached",
+                "history": [{"generation": 1}, {"generation": 2}, {"generation": 3}],
+            },
+        }
+        task = BuildTask(
+            task_id="GH-128-V",
+            title="Remediation limit task re-blocked after operator remediation",
+            description="d",
+            state="BLOCKED",
+            branch_name=branch,
+            finding_registry=registry,
+            # Simulates _block_task's re-block on the reviewer's evaluation of
+            # SHA B: failure_evidence now points at B, not the original stop A.
+            waiting_input={
+                "failure_evidence": {
+                    "relevant_shas": {"reviewed_feature_sha": sha_b},
+                }
+            },
+        )
+        session.add(task)
+        record_event(
+            session,
+            EventInput(
+                task_id="GH-128-V",
+                event_type="task.transitioned",
+                actor="runner",
+                to_state="BLOCKED",
+                event_data={"reason": "REMEDIATION_LIMIT_REACHED"},
+            ),
+        )
+        session.commit()
+
+    result = RunnerCycleResult()
+    with session_factory() as session:
+        runner._recover_diagnosed_blockers(session, result)
+        session.commit()
+
+    assert "GH-128-V" in result.recovered
+    with session_factory() as session:
+        task = session.get(BuildTask, "GH-128-V")
+        assert task.state == "REVIEW_READY"
+        registry = task.finding_registry
+        assert registry["entries"]["f1"]["status"] == "STILL_OPEN"
+        convergence = registry["convergence"]
+        assert convergence["generations"] == 0
+        assert convergence["comprehensive_used"] is False
+        epoch_history = convergence["epoch_history"]
+        assert epoch_history[-1]["stop_feature_sha"] == stop_sha_a
+        assert epoch_history[-1]["resumed_feature_sha"] == sha_b
