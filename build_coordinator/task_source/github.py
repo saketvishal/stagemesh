@@ -1032,7 +1032,8 @@ class GitHubTaskSource(TaskSource):
                     },
                 ),
             )
-        self._reconcile_reopened_task_from_open_issue(session, task, labels, url)
+        if source_was_closed:
+            self._reconcile_reopened_task_from_open_issue(session, task, labels, url)
         if objective_id:
             task.objective_id = objective_id
             if task.reason_created == OBJECTIVE_ROOT_COMPAT_REASON:
