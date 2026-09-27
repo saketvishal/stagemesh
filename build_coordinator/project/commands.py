@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -399,7 +401,12 @@ def handle_continue(args: argparse.Namespace) -> None:
         return
 
     sync_payload: dict[str, Any] | None = None
-    task_source, initial_diagnostics = _optional_task_source(project, force=args.github, dry_run=args.dry_run)
+    task_source, initial_diagnostics = _optional_task_source(
+        project,
+        force=args.github,
+        dry_run=args.dry_run,
+        local_backlog_empty=not definitions,
+    )
     adapter_payload: list[dict[str, Any]] = list(initial_diagnostics)
     def initial_reconcile_once():
         nonlocal sync_payload, adapter_payload, lock_acquired
@@ -417,9 +424,20 @@ def handle_continue(args: argparse.Namespace) -> None:
                 sync_payload = report.as_dict()
             if task_source is not None:
                 try:
-                    local_adapter_payload.extend([r.as_dict() for r in task_source.discover_tasks(session)])
+                    discovered = [r.as_dict() for r in task_source.discover_tasks(session)]
+                    local_adapter_payload.extend(discovered)
+                    if not discovered and not definitions:
+                        local_adapter_payload.append({
+                            "source": "github",
+                            "action": "NO_ELIGIBLE_OPEN_ISSUES",
+                            "details": f"No eligible open GitHub issues found in {getattr(task_source, 'repo', 'the configured repository')}",
+                        })
                 except Exception as exc:  # optional adapter: never blocks local execution
-                    local_adapter_payload.append({"source": "github", "action": "ERROR", "details": str(exc)})
+                    local_adapter_payload.append({
+                        "source": "github",
+                        "action": "ERROR",
+                        "details": _github_adapter_error(str(exc)),
+                    })
             adapter_payload = local_adapter_payload
             if args.dry_run:
                 _print(
@@ -584,6 +602,7 @@ def handle_continue(args: argparse.Namespace) -> None:
                 final,
                 last_escalations,
                 target_task_ids=target_task_ids,
+                adapter_payload=adapter_payload,
             ),
             flush=True,
         )
@@ -647,6 +666,7 @@ def _continue_human_summary(
     outstanding_escalations: dict[str, str] | None = None,
     *,
     target_task_ids: frozenset[str] | set[str] | tuple[str, ...] = frozenset(),
+    adapter_payload: list[dict[str, Any]] | None = None,
 ) -> str:
     """A bounded, operator-facing summary: current state and what needs attention,
     never a dump of historical execution/routing evidence (that's `--json`)."""
@@ -701,7 +721,33 @@ def _continue_human_summary(
         lines += ["", "ATTENTION"]
         for task_id, reason in sorted(attention.items()):
             lines.append(f"  {task_id}  {_escalation_label(reason)}")
+    notices = _adapter_human_notices(adapter_payload or [])
+    if notices:
+        lines += ["", "TASK SOURCES"]
+        lines.extend(f"  {notice}" for notice in notices)
     return "\n".join(lines)
+
+
+def _adapter_human_notices(adapter_payload: list[dict[str, Any]]) -> list[str]:
+    notices: list[str] = []
+    for item in adapter_payload:
+        source = str(item.get("source") or "task source")
+        action = str(item.get("action") or "").upper()
+        details = str(item.get("details") or "").strip()
+        if action == "ERROR":
+            notices.append(f"{source}: {details or 'adapter error'}")
+        elif action == "NO_ELIGIBLE_OPEN_ISSUES":
+            notices.append(details or f"{source}: no eligible open issues found")
+    return notices
+
+
+def _github_adapter_error(message: str) -> str:
+    lowered = message.lower()
+    if "gh" in lowered and ("not installed" in lowered or "not found" in lowered):
+        return "GitHub issue discovery needs the GitHub CLI: install `gh` and run `gh auth login`, then retry `stagemesh continue`."
+    if "authentication" in lowered or "not logged in" in lowered or "auth login" in lowered:
+        return "GitHub issue discovery needs authentication: run `gh auth login`, then retry `stagemesh continue`."
+    return message
 
 
 def _is_global_mode(args: argparse.Namespace) -> bool:
@@ -864,7 +910,7 @@ def _detect_repo_from_git(root: Path) -> str | None:
 
 
 def _optional_task_source(
-    project: ProjectDefinition, *, force: bool, dry_run: bool
+    project: ProjectDefinition, *, force: bool, dry_run: bool, local_backlog_empty: bool = False
 ) -> tuple[Any | None, list[dict[str, Any]]]:
     from build_coordinator.task_source import get_task_source
 
@@ -886,16 +932,21 @@ def _optional_task_source(
     if force and not any(src_name == "github" for src_name, _ in source_configs):
         source_configs.append(("github", {}))
 
+    if not force and not source_configs and local_backlog_empty:
+        detected_repo = _detect_repo_from_git(project.root)
+        if detected_repo:
+            source_configs.append(("github", {"repo": detected_repo, "_inferred": True}))
+
     if not source_configs:
         return None, diagnostics
 
     enabled_sources = [
         (src_name, cfg)
         for src_name, cfg in source_configs
-        if cfg.get("enabled", False) or (force and src_name == "github")
+        if cfg.get("enabled", False) or (force and src_name == "github") or (cfg.get("_inferred") and src_name == "github")
     ]
     for src_name, cfg in source_configs:
-        if cfg.get("enabled", False) or (force and src_name == "github"):
+        if cfg.get("enabled", False) or (force and src_name == "github") or (cfg.get("_inferred") and src_name == "github"):
             continue
         diagnostics.append({
             "source": src_name,
@@ -910,7 +961,7 @@ def _optional_task_source(
     source_type = cfg.pop("type", src_name)
     normalized_source_type = source_type.lower()
     options = dict(cfg.get("options") or {})
-    options.update({key: value for key, value in cfg.items() if key not in {"enabled", "repo", "labels", "options"}})
+    options.update({key: value for key, value in cfg.items() if key not in {"enabled", "repo", "labels", "options", "_inferred"}})
 
     if normalized_source_type == "github" and not cfg.get("repo") and not os.getenv("BUILD_COORDINATOR_GITHUB_REPO"):
         detected_repo = _detect_repo_from_git(project.root)
@@ -925,7 +976,8 @@ def _optional_task_source(
             return None, diagnostics
 
     try:
-        source = get_task_source({"type": source_type, **cfg, "options": options, "dry_run": dry_run})
+        source_cfg = {key: value for key, value in cfg.items() if key != "_inferred"}
+        source = get_task_source({"type": source_type, **source_cfg, "options": options, "dry_run": dry_run})
         return source, diagnostics
     except Exception as exc:
         diagnostics.append({
