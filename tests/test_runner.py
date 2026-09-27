@@ -280,6 +280,79 @@ def test_post_launch_final_commit_lock_is_typed_not_raw(monkeypatch):
     assert len(executor.launches) == 1
 
 
+def test_with_sqlite_retry_does_not_retry_databasebusyerror_when_is_retryable_says_no():
+    """with_sqlite_retry's DatabaseBusyError branch must honor the caller's
+    is_retryable predicate exactly like its OperationalError branch does.
+
+    This reproduces the exact double-launch mechanism from orchestrator.py:
+    a DatabaseBusyError raised with `is_retryable=False` (e.g. because an
+    external launch has already started) must propagate on the very first
+    attempt instead of being retried, since a retry there would call `fn`
+    again from scratch and could relaunch an external worker.
+    """
+    from build_coordinator.db import with_sqlite_retry
+
+    calls = {"n": 0}
+
+    def fn():
+        calls["n"] += 1
+        try:
+            raise OperationalError("UPDATE t", None, Exception("database is locked"))
+        except OperationalError as exc:
+            raise DatabaseBusyError("already launched, do not retry") from exc
+
+    with pytest.raises(DatabaseBusyError, match="already launched"):
+        with_sqlite_retry(fn, attempts=5, is_retryable=lambda exc: False)
+
+    assert calls["n"] == 1
+
+
+def test_with_sqlite_retry_retries_databasebusyerror_when_is_retryable_says_yes():
+    """A DatabaseBusyError whose underlying cause is still considered
+    retryable by the caller's predicate should be retried like a plain
+    transient OperationalError, up to `attempts`."""
+    from build_coordinator.db import with_sqlite_retry
+
+    calls = {"n": 0}
+
+    def fn():
+        calls["n"] += 1
+        if calls["n"] < 3:
+            try:
+                raise OperationalError("UPDATE t", None, Exception("database is locked"))
+            except OperationalError as exc:
+                raise DatabaseBusyError("transient, retry me") from exc
+        return "ok"
+
+    result = with_sqlite_retry(fn, attempts=5, base_delay=0.0, is_retryable=lambda exc: True)
+
+    assert result == "ok"
+    assert calls["n"] == 3
+
+
+def test_with_sqlite_retry_retries_bare_databasebusyerror_with_no_cause():
+    """A DatabaseBusyError raised directly by application code (e.g.
+    commit_or_busy), with no OperationalError __cause__, is a typed,
+    already-bounded transient signal and must still be retried like before
+    -- only a DatabaseBusyError wrapping an OperationalError cause (i.e.
+    produced by a nested with_sqlite_retry call) is subject to the
+    is_retryable gate."""
+    from build_coordinator.db import with_sqlite_retry
+
+    calls = {"n": 0}
+
+    def fn():
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise DatabaseBusyError("SQLite write contention on commit")
+        return "recovered"
+
+    result = with_sqlite_retry(fn, attempts=5, base_delay=0.0)
+
+    assert result == "recovered"
+    assert calls["n"] == 3
+
+
 def _config(
     *,
     auto_push=False,
