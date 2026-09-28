@@ -80,7 +80,7 @@ def render_final_report(root: Path, store: Store | None = None) -> str:
         "- local backlog, configured JSON task-source adapters, and GitHub task-source contracts with deferred, stale, unknown, auth, and rate-limit states",
         "- provider SDK, capacity-aware routing, failover, structured capacity visibility, configurable stage routing, single-agent mode, and staged execution mode",
         "- validated objective planning, dependency-aware scheduling, review findings, remediation attempts, and retry/backoff",
-        "- worker registry, lease-renewable distributed work packets, CI-wait capacity release, global project registry, structured status/operator reports, dashboard tables, audit export, release artifact, acceptance matrix, completion audit, and release-readiness reports",
+        "- worker registry, lease-renewable distributed work packets, CI-wait capacity release, ambiguity-checked global project registry, structured status/operator reports, dashboard tables, audit export, release artifact, acceptance matrix, completion audit, and release-readiness reports",
         "- workspace boundaries cover generated outputs, configured sources, demo scaffolds, objective inputs, and release packaging while excluding runtime state and symlink escapes",
         "",
         "## Acceptance Evidence",

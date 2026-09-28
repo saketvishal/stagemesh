@@ -396,6 +396,32 @@ def main() -> int:
             "registry error:",
             env,
         )
+        broken_registry.write_text(
+            json.dumps(
+                {
+                    "projects": [
+                        {"name": "dup", "path": str(project), "db_path": str(project / ".stagemesh" / "one.sqlite3")},
+                        {"name": "dup", "path": str(project / "other"), "db_path": str(project / ".stagemesh" / "two.sqlite3")},
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        run_failure(
+            [
+                sys.executable,
+                "-m",
+                "stagemesh.cli",
+                "--project",
+                str(project),
+                "registry",
+                "--registry",
+                str(broken_registry),
+            ],
+            ROOT,
+            "registry error:",
+            env,
+        )
         backend_output = run([sys.executable, "-m", "stagemesh.cli", "--project", str(project), "backend"], ROOT, env)
         if (
             "name: sqlite" not in backend_output

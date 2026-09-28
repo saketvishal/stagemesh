@@ -45,20 +45,27 @@ class GlobalRegistry:
         if not isinstance(projects, list):
             raise RegistryValidationError("registry projects must be a list")
         loaded: list[ProjectRegistration] = []
+        names: set[str] = set()
+        paths: set[Path] = set()
         for item in projects:
             if not isinstance(item, dict):
                 raise RegistryValidationError("registry project entries must be objects")
             if not all(isinstance(item.get(key), str) and item.get(key) for key in ("name", "path", "db_path")):
                 raise RegistryValidationError("registry project entries require name, path, and db_path")
-            loaded.append(
-                self._normalize(
-                    ProjectRegistration(
-                        name=str(item["name"]),
-                        path=Path(item["path"]),
-                        db_path=Path(item["db_path"]),
-                    )
+            project = self._normalize(
+                ProjectRegistration(
+                    name=str(item["name"]),
+                    path=Path(item["path"]),
+                    db_path=Path(item["db_path"]),
                 )
             )
+            if project.name in names:
+                raise RegistryValidationError(f"duplicate registry project name: {project.name}")
+            if project.path in paths:
+                raise RegistryValidationError(f"duplicate registry project path: {project.path}")
+            names.add(project.name)
+            paths.add(project.path)
+            loaded.append(project)
         return loaded
 
     def save(self, projects: list[ProjectRegistration]) -> None:

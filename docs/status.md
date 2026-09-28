@@ -19,7 +19,7 @@
 - CLI for init, doctor, planning, continue, plain/JSON status, health, capacity, and CI gates.
 - Security boundary helper for workspace path checks, generated outputs, configured sources, demos, and objective input files.
 - Worker registry and heartbeat records for durable worker visibility.
-- Global multi-project registry file.
+- Global multi-project registry file with ambiguity and duplicate-state validation.
 - Outbound source synchronization event log that never becomes lifecycle truth.
 - Structured operator report command for dashboard/status integration.
 - Dependency-aware scheduling for planned tasks.
