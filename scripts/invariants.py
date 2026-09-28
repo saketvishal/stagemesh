@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import zipfile
@@ -49,6 +50,7 @@ from stagemesh.release_readiness import release_readiness
 from stagemesh.external_evidence import record_external_evidence, external_evidence_records
 from stagemesh.acceptance_matrix import acceptance_matrix
 from stagemesh.routing import Provider, Router, RoutingMode
+from stagemesh.github import parse_github_remote
 
 
 def assert_raises(exc_type, fn, *args, **kwargs) -> None:
@@ -276,6 +278,25 @@ def main() -> int:
         assert config.single_agent_provider == "codex"
         assert config.stage_routes["REVIEW"] == "claude"
 
+    def github_remote_detection_supports_zero_config(store: Store, project: Path) -> None:
+        assert parse_github_remote("https://github.com/openai/stagemesh.git").owner == "openai"
+        assert parse_github_remote("git@github.com:openai/stagemesh.git").repo == "stagemesh"
+        assert parse_github_remote("ssh://git@github.com/openai/stagemesh.git").repo == "stagemesh"
+        assert parse_github_remote("https://example.invalid/openai/stagemesh.git") is None
+        project.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["git", "init"], cwd=project, text=True, capture_output=True, check=True)
+        subprocess.run(
+            ["git", "remote", "add", "origin", "git@github.com:stage/mesh.git"],
+            cwd=project,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        config = load_config(project)
+        assert config.github.owner == "stage"
+        assert config.github.repo == "mesh"
+        assert config.github.configured is False
+
     def routing_modes_select_expected_provider(store: Store, project: Path) -> None:
         providers = [
             Provider("codex", frozenset({"code", "review"}), True, priority=2),
@@ -458,6 +479,7 @@ def main() -> int:
         git_attribution_is_worker_owned,
         secrets_are_redacted,
         config_loads_from_project_file,
+        github_remote_detection_supports_zero_config,
         routing_modes_select_expected_provider,
         release_output_stays_inside_workspace,
         release_artifact_contains_tracked_source_manifest,

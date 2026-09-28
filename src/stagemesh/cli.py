@@ -314,6 +314,7 @@ def command_github_acceptance(args: argparse.Namespace) -> int:
     print(f"deferred_skipped: {result.deferred_skipped}")
     print(f"outbound_status: {result.outbound_status}")
     print(f"rate_limit_status: {result.rate_limit_status}")
+    print(f"detected_repo: {result.detected_owner}/{result.detected_repo}")
     store.close()
     return 0 if result.status == "PASS" else 1
 

@@ -72,7 +72,7 @@ def render_final_report(root: Path, store: Store | None = None) -> str:
         "- Windows acceptance: `python scripts/acceptance.py`",
         "- Linux acceptance: configured in `.github/workflows/ci.yml`; hosted result required for final external proof",
         "- provider acceptance: deterministic provider dry-run proves capacity failover; live providers require credentials/tools",
-        "- GitHub/task-source acceptance: deterministic dry-run proves discovery, deferred labels, outbound sync, and rate-limit classification; live GitHub requires credentials/network",
+        "- GitHub/task-source acceptance: deterministic dry-run proves zero-config remote detection, discovery, deferred labels, outbound sync, and rate-limit classification; live GitHub requires credentials/network",
         "- restart/recovery acceptance: covered by invariant suite",
         "- exact-SHA validation/review acceptance: covered by invariant suite and review model",
         "- durable Git handoff acceptance: covered by invariant suite",
