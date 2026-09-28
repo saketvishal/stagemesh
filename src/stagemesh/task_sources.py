@@ -117,3 +117,13 @@ def sync_source(store: Store, tasks: list[DiscoveredTask]) -> list[str]:
         if task.eligible and task.state == "OPEN":
             ids.append(store.upsert_task(task.title, task.source, task.source_id))
     return ids
+
+
+class OutboundSync:
+    """Records outbound lifecycle synchronization without trusting it as lifecycle truth."""
+
+    def __init__(self, store: Store):
+        self.store = store
+
+    def publish(self, source: str, source_id: str, status: str, payload: dict[str, object] | None = None) -> str:
+        return self.store.add_source_event(source, source_id, "outbound", status, payload or {})

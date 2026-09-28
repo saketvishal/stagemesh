@@ -16,6 +16,10 @@
 - Recovery behavior that preserves uncertain process identity and does not treat PID alone as proof of liveness or death.
 - CLI for init, doctor, planning, continue, status, health, capacity, and CI gates.
 - Security boundary helper for workspace path checks.
+- Worker registry and heartbeat records for durable worker visibility.
+- Global multi-project registry file.
+- Outbound source synchronization event log that never becomes lifecycle truth.
+- Operator report command for dashboard/status integration.
 - GitHub Actions CI for Windows and Linux.
 - Stdlib invariant and acceptance runners for dependency-free verification.
 

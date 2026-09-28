@@ -10,9 +10,13 @@ from .capacity import CapacityKind, CapacityRegistry
 from .ci import broken_future_feature_gate, default_gates
 from .coordinator import Coordinator
 from .observability import health
+from .operator import operator_report
 from .objectives import ObjectivePlanner
 from .persistence import Store
+from .process_identity import current_process_identity
+from .registry import GlobalRegistry, ProjectRegistration
 from .task_sources import LocalBacklogSource, sync_source
+from .workers import heartbeat_worker, register_worker
 
 
 def runtime_dir(project: Path) -> Path:
@@ -31,6 +35,9 @@ def command_init(args: argparse.Namespace) -> int:
     if args.task:
         store.upsert_task(args.task)
     store.close()
+    if args.register:
+        registry = GlobalRegistry(Path(args.registry).resolve())
+        registry.register(ProjectRegistration(project.name, project, db_path(project)))
     print(f"initialized StageMesh at {runtime_dir(project)}")
     return 0
 
@@ -113,6 +120,37 @@ def command_health(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_worker(args: argparse.Namespace) -> int:
+    project = Path(args.project).resolve()
+    store = Store(db_path(project))
+    store.migrate()
+    capabilities = set(args.capability or ["code"])
+    register_worker(store, args.worker_id, args.provider, capabilities, current_process_identity(), args.lease_seconds)
+    heartbeat_worker(store, args.worker_id, args.lease_seconds)
+    store.close()
+    print(f"worker: {args.worker_id}")
+    return 0
+
+
+def command_operator(args: argparse.Namespace) -> int:
+    project = Path(args.project).resolve()
+    store = Store(db_path(project))
+    store.migrate()
+    report = operator_report(store)
+    print(f"summary: {report.summary}")
+    for line in report.lines:
+        print(line)
+    store.close()
+    return 0
+
+
+def command_registry(args: argparse.Namespace) -> int:
+    registry = GlobalRegistry(Path(args.registry).resolve())
+    for project in registry.load():
+        print(f"{project.name} {project.path} {project.db_path}")
+    return 0
+
+
 def command_capacity(args: argparse.Namespace) -> int:
     registry = CapacityRegistry()
     registry.record(args.primary, CapacityKind.AVAILABLE if not args.primary_down else CapacityKind.CAPACITY)
@@ -138,6 +176,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
     init = sub.add_parser("init")
     init.add_argument("--task")
+    init.add_argument("--register", action="store_true")
+    init.add_argument("--registry", default=str(Path.home() / ".stagemesh" / "registry.json"))
     init.set_defaults(func=command_init)
     doctor = sub.add_parser("doctor")
     doctor.set_defaults(func=command_doctor)
@@ -157,6 +197,17 @@ def build_parser() -> argparse.ArgumentParser:
     capacity.add_argument("--primary-down", action="store_true")
     capacity.add_argument("--secondary-down", action="store_true")
     capacity.set_defaults(func=command_capacity)
+    worker = sub.add_parser("worker")
+    worker.add_argument("worker_id")
+    worker.add_argument("--provider", default="local")
+    worker.add_argument("--capability", action="append")
+    worker.add_argument("--lease-seconds", type=float, default=300)
+    worker.set_defaults(func=command_worker)
+    operator = sub.add_parser("operator")
+    operator.set_defaults(func=command_operator)
+    registry = sub.add_parser("registry")
+    registry.add_argument("--registry", default=str(Path.home() / ".stagemesh" / "registry.json"))
+    registry.set_defaults(func=command_registry)
     ci = sub.add_parser("ci")
     ci.add_argument("--future-feature-gate", action="store_true")
     ci.add_argument("--skip-acceptance", action="store_true")

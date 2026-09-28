@@ -102,6 +102,27 @@ class Store:
                 created_at REAL NOT NULL,
                 updated_at REAL NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS workers (
+                id TEXT PRIMARY KEY,
+                provider TEXT NOT NULL,
+                capabilities TEXT NOT NULL,
+                pid INTEGER,
+                process_create_time REAL,
+                boot_id TEXT,
+                executable TEXT,
+                heartbeat_at REAL NOT NULL,
+                lease_expires_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS source_events (
+                id TEXT PRIMARY KEY,
+                source TEXT NOT NULL,
+                source_id TEXT NOT NULL,
+                direction TEXT NOT NULL,
+                status TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                created_at REAL NOT NULL
+            );
             """
         )
         self.conn.execute(
@@ -278,3 +299,87 @@ class Store:
             (objective_id, title, json.dumps(payload, sort_keys=True), now, now),
         )
         self.conn.commit()
+
+    def upsert_worker(
+        self,
+        *,
+        worker_id: str,
+        provider: str,
+        capabilities: list[str],
+        pid: int | None,
+        process_create_time: float | None,
+        boot_id: str | None,
+        executable: str | None,
+        heartbeat_at: float,
+        lease_expires_at: float,
+    ) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO workers VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                provider=excluded.provider,
+                capabilities=excluded.capabilities,
+                pid=excluded.pid,
+                process_create_time=excluded.process_create_time,
+                boot_id=excluded.boot_id,
+                executable=excluded.executable,
+                heartbeat_at=excluded.heartbeat_at,
+                lease_expires_at=excluded.lease_expires_at,
+                updated_at=excluded.updated_at
+            """,
+            (
+                worker_id,
+                provider,
+                json.dumps(capabilities),
+                pid,
+                process_create_time,
+                boot_id,
+                executable,
+                heartbeat_at,
+                lease_expires_at,
+                time.time(),
+            ),
+        )
+        self.conn.commit()
+
+    def heartbeat_worker(self, worker_id: str, heartbeat_at: float, lease_expires_at: float) -> None:
+        self.conn.execute(
+            "UPDATE workers SET heartbeat_at=?, lease_expires_at=?, updated_at=? WHERE id=?",
+            (heartbeat_at, lease_expires_at, time.time(), worker_id),
+        )
+        self.conn.commit()
+
+    def workers(self) -> list[sqlite3.Row]:
+        return list(self.conn.execute("SELECT * FROM workers ORDER BY id"))
+
+    def add_source_event(
+        self,
+        source: str,
+        source_id: str,
+        direction: str,
+        status: str,
+        payload: dict[str, Any] | None = None,
+    ) -> str:
+        event_id = str(uuid.uuid4())
+        self.conn.execute(
+            "INSERT INTO source_events VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                event_id,
+                source,
+                source_id,
+                direction,
+                status,
+                json.dumps(payload or {}, sort_keys=True),
+                time.time(),
+            ),
+        )
+        self.conn.commit()
+        return event_id
+
+    def source_events(self, limit: int = 50) -> list[sqlite3.Row]:
+        return list(
+            self.conn.execute(
+                "SELECT * FROM source_events ORDER BY created_at DESC LIMIT ?",
+                (limit,),
+            )
+        )

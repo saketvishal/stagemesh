@@ -27,6 +27,29 @@ def main() -> int:
         project.mkdir()
         env = {"PYTHONPATH": str(ROOT / "src")}
         run([sys.executable, "-m", "stagemesh.cli", "--project", str(project), "init"], ROOT, env)
+        registry = project / "registry.json"
+        run(
+            [
+                sys.executable,
+                "-m",
+                "stagemesh.cli",
+                "--project",
+                str(project),
+                "init",
+                "--register",
+                "--registry",
+                str(registry),
+            ],
+            ROOT,
+            env,
+        )
+        registry_output = run(
+            [sys.executable, "-m", "stagemesh.cli", "--project", str(project), "registry", "--registry", str(registry)],
+            ROOT,
+            env,
+        )
+        if "project" not in registry_output:
+            raise AssertionError(registry_output)
         objective = project / "objective.json"
         objective.write_text(
             json.dumps(
@@ -59,6 +82,26 @@ def main() -> int:
         health = run([sys.executable, "-m", "stagemesh.cli", "--project", str(project), "health"], ROOT, env)
         if "ok: True" not in health or "done: 2" not in health:
             raise AssertionError(health)
+        run(
+            [
+                sys.executable,
+                "-m",
+                "stagemesh.cli",
+                "--project",
+                str(project),
+                "worker",
+                "worker-1",
+                "--provider",
+                "codex",
+                "--capability",
+                "code",
+            ],
+            ROOT,
+            env,
+        )
+        operator = run([sys.executable, "-m", "stagemesh.cli", "--project", str(project), "operator"], ROOT, env)
+        if "workers=1" not in operator or "worker worker-1 provider=codex" not in operator:
+            raise AssertionError(operator)
         capacity = run(
             [
                 sys.executable,
