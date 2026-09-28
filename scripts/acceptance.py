@@ -790,7 +790,12 @@ def main() -> int:
             ROOT,
             env,
         )
-        if "future-feature: PASS" not in ci:
+        if (
+            "provider_acceptance: PASS" not in ci
+            or "github_acceptance: PASS" not in ci
+            or "live_acceptance: PASS" not in ci
+            or "future-feature: PASS" not in ci
+        ):
             raise AssertionError(ci)
         ci_wait = run(
             [

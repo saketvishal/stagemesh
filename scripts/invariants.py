@@ -56,7 +56,7 @@ from stagemesh.github import parse_github_remote
 from stagemesh.operator import operator_report
 from stagemesh.dashboard import render_dashboard
 from stagemesh.acceptance import AcceptanceCheck, AcceptanceValidationError, local_acceptance_report, proof_gaps, run_check, write_acceptance_report
-from stagemesh.ci import CIValidationError, broken_future_feature_gate, default_gates, run_gate
+from stagemesh.ci import CIValidationError, broken_future_feature_gate, default_gate_commands, default_gates, run_gate
 from stagemesh.ci_wait import decide_ci_wait
 from stagemesh.objectives import ObjectivePlanner, ObjectiveValidationError
 from stagemesh.registry import GlobalRegistry, ProjectRegistration, RegistryConflictError, RegistryValidationError
@@ -621,6 +621,11 @@ def main() -> int:
         assert_raises(CIValidationError, run_gate, "python", [sys.executable], project / "missing")
         assert_raises(CIValidationError, default_gates, project / "missing", False)
         assert_raises(CIValidationError, broken_future_feature_gate, project / "missing")
+        gate_names = [name for name, _ in default_gate_commands(include_acceptance=False)]
+        assert "provider_acceptance" in gate_names
+        assert "github_acceptance" in gate_names
+        assert "live_acceptance" in gate_names
+        assert "acceptance" not in gate_names
 
     def capacity_registry_rejects_invalid_provider_state(store: Store, project: Path) -> None:
         registry = CapacityRegistry()
@@ -911,8 +916,10 @@ def main() -> int:
         output = project / "audit.jsonl"
         export_audit_jsonl(store, output)
         text = output.read_text(encoding="utf-8")
-        assert "***REDACTED***" in text
-        assert "abc" not in text
+        exported = [json.loads(line) for line in text.strip().splitlines()]
+        secret = [event for event in exported if event["event_type"] == "secret.test"][0]
+        assert secret["payload"]["token"] == "***REDACTED***"
+        assert secret["payload"]["safe"] == "ok"
         limited = project / "audit-limited.jsonl"
         export_audit_jsonl(store, limited, limit=1)
         text = limited.read_text(encoding="utf-8")
