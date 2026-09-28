@@ -28,7 +28,7 @@ from .persistence_backends import probe_backend
 from .postgres_store import PostgresStore, postgres_schema_contract
 from .provider_acceptance import run_provider_acceptance
 from .process_identity import current_process_identity
-from .registry import GlobalRegistry, ProjectRegistration
+from .registry import GlobalRegistry, ProjectRegistration, RegistryConflictError
 from .release import build_release_artifact
 from .release_readiness import write_release_readiness
 from .retry import RetryRegistry
@@ -55,7 +55,11 @@ def command_init(args: argparse.Namespace) -> int:
     store.close()
     if args.register:
         registry = GlobalRegistry(Path(args.registry).resolve())
-        registry.register(ProjectRegistration(project.name, project, db_path(project)))
+        try:
+            registry.register(ProjectRegistration(project.name, project, db_path(project)))
+        except RegistryConflictError as exc:
+            print(f"registry conflict: {exc}", file=sys.stderr)
+            return 2
     print(f"initialized StageMesh at {runtime_dir(project)}")
     return 0
 

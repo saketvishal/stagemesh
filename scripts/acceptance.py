@@ -44,6 +44,21 @@ def main() -> int:
             ROOT,
             env,
         )
+        run(
+            [
+                sys.executable,
+                "-m",
+                "stagemesh.cli",
+                "--project",
+                str(project),
+                "init",
+                "--register",
+                "--registry",
+                str(registry),
+            ],
+            ROOT,
+            env,
+        )
         registry_output = run(
             [sys.executable, "-m", "stagemesh.cli", "--project", str(project), "registry", "--registry", str(registry)],
             ROOT,
@@ -51,6 +66,9 @@ def main() -> int:
         )
         if "project" not in registry_output:
             raise AssertionError(registry_output)
+        registry_data = json.loads(registry.read_text(encoding="utf-8"))
+        if len(registry_data["projects"]) != 1 or Path(registry_data["projects"][0]["path"]) != project.resolve():
+            raise AssertionError(registry_data)
         objective = project / "objective.json"
         objective.write_text(
             json.dumps(
