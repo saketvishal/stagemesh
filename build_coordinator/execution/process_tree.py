@@ -373,15 +373,38 @@ def process_identity_status(pid: int, remembered_start_key: str | None) -> str:
     pid with no identity to compare is exactly the ambiguous case this
     function exists to fail closed on, so it is always checked for current
     liveness before falling back to a terminal classification.
+
+    Liveness (`_process_exists`) is always checked before trusting an
+    identity-token comparison, including when a remembered identity IS
+    present: on Windows, a process's start-identity metadata (creation
+    time) can remain queryable, and unchanged, even after the process has
+    exited -- as long as some handle (e.g. the launching process's own
+    still-open `subprocess.Popen` handle) keeps the kernel process object
+    alive past exit. Comparing identity tokens first would then report a
+    confirmed-dead pid as MATCH. `_process_exists` checks the actual exit
+    code (Windows `GetExitCodeProcess`, POSIX `/proc` state / zombie
+    check), so it is the authoritative liveness signal: a pid that is not
+    currently alive is always MISMATCH, never MATCH or ALIVE_UNVERIFIED.
     """
     if remembered_start_key is None:
         return "ALIVE_UNVERIFIED" if _process_exists(pid) else "UNKNOWN"
+    if not _process_exists(pid):
+        # Liveness is checked first and is authoritative. On Windows, a
+        # process's start-identity metadata (creation time, read via
+        # GetProcessTimes) can still be queryable here -- and unchanged --
+        # even after the process has exited, as long as some handle (e.g.
+        # the launching process's own still-open subprocess.Popen handle)
+        # keeps the underlying kernel process object alive past exit. If
+        # identity comparison ran first, that would produce a false MATCH
+        # for a pid that is not actually running any more. A confirmed-dead
+        # pid (via `_process_exists`, which checks the real exit code, not
+        # just object/handle existence) is never MATCH or ALIVE_UNVERIFIED,
+        # regardless of what identity capture reports.
+        return "MISMATCH"
     current_key = capture_process_identity(pid)
     if current_key is not None:
         return "MATCH" if current_key == remembered_start_key else "MISMATCH"
-    if _process_exists(pid):
-        return "ALIVE_UNVERIFIED"
-    return "MISMATCH"
+    return "ALIVE_UNVERIFIED"
 
 
 def _process_exists(pid: int) -> bool:
