@@ -234,6 +234,9 @@ def main() -> int:
         )
         if not dashboard.exists() or "dashboard:" not in dashboard_output:
             raise AssertionError(dashboard_output)
+        dashboard_text = dashboard.read_text(encoding="utf-8")
+        if "<h2>Tasks</h2>" not in dashboard_text or "<h2>Workers</h2>" not in dashboard_text or "worker-1" not in dashboard_text:
+            raise AssertionError(dashboard_text)
         release_dir = ROOT / ".stagemesh" / "acceptance-release"
         release_output = run(
             [
