@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .persistence import Store
+from .github import GitHubClient
 
 
 @dataclass(frozen=True)
@@ -131,3 +132,22 @@ class OutboundSync:
 
     def publish(self, source: str, source_id: str, status: str, payload: dict[str, object] | None = None) -> str:
         return self.store.add_source_event(source, source_id, "outbound", status, payload or {})
+
+
+class GitHubOutboundSync(OutboundSync):
+    def __init__(self, store: Store, client: GitHubClient):
+        super().__init__(store)
+        self.client = client
+
+    def publish_done(self, issue_number: str, candidate_sha: str) -> str:
+        comment = self.client.comment_issue(
+            issue_number, f"StageMesh integrated candidate `{candidate_sha}`."
+        )
+        close = self.client.close_issue(issue_number) if comment.status == "OK" else comment
+        status = "OK" if comment.status == "OK" and close.status == "OK" else close.status
+        return self.publish(
+            "github",
+            issue_number,
+            status,
+            {"candidate_sha": candidate_sha, "comment": comment.status, "close": close.status},
+        )
