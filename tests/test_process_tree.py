@@ -178,3 +178,39 @@ def test_restart_reaps_owned_tree_from_durable_pid(tmp_path: Path):
         time.sleep(0.1)
     for name, pid in pids.items():
         assert not _alive(pid), f"{name} pid {pid} still alive after restart reap"
+
+
+def test_dead_pid_with_stale_matching_identity_is_never_reported_alive(monkeypatch):
+    """Regression for a Windows-specific false-positive discovered on
+    native Windows CI: `test_restart_with_dead_worker_and_no_result_is_lost`
+    reported the reconciled execution as RUNNING instead of LOST for a
+    process that had genuinely exited.
+
+    Root cause: on Windows, a process's start-identity metadata (creation
+    time, read via GetProcessTimes) can remain queryable -- and unchanged
+    -- even after the process has exited, as long as some handle (e.g. the
+    launching process's own still-open `subprocess.Popen` handle) keeps the
+    underlying kernel process object alive past exit. `process_identity_status`
+    used to compare identity tokens before checking current liveness, so a
+    confirmed-dead pid whose stale identity still matched the remembered one
+    was reported MATCH -- and a caller (`SubprocessExecutor.poll`) then
+    treated a genuinely-gone worker as still running, exactly the
+    "duplicate worker dispatched against a still-claimed task" failure mode
+    this whole identity-reconciliation mechanism exists to prevent.
+
+    `_process_exists` (the real exit-code/zombie check, not just
+    object/handle existence) must be checked first and is authoritative:
+    a pid that is not currently alive is always MISMATCH, never MATCH or
+    ALIVE_UNVERIFIED, regardless of what identity capture reports.
+    """
+    import build_coordinator.execution.process_tree as process_tree
+
+    monkeypatch.setattr(process_tree, "_process_exists", lambda pid: False)
+    monkeypatch.setattr(
+        process_tree, "capture_process_identity", lambda pid: "stale-but-matching-key"
+    )
+
+    assert (
+        process_tree.process_identity_status(12345, "stale-but-matching-key")
+        == "MISMATCH"
+    )
