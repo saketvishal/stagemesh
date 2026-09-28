@@ -56,6 +56,7 @@ from stagemesh.routing import Provider, Router, RoutingMode, RoutingValidationEr
 from stagemesh.github import parse_github_remote
 from stagemesh.operator import operator_report
 from stagemesh.dashboard import render_dashboard
+from stagemesh.observability import health
 from stagemesh.demo import DemoValidationError, create_demo_project
 from stagemesh.acceptance import AcceptanceCheck, AcceptanceValidationError, local_acceptance_report, proof_gaps, run_check, write_acceptance_report
 from stagemesh.ci import CIValidationError, broken_future_feature_gate, default_gate_commands, default_gates, run_gate
@@ -419,6 +420,17 @@ def main() -> int:
         assert "<h2>Retries</h2>" in dashboard
         assert "worker-observe" in dashboard
         assert "https://example.invalid/ci" in dashboard
+
+    def health_degrades_on_failed_or_unknown_executions(store: Store, project: Path) -> None:
+        task_id = store.upsert_task("observe failure", source="local", source_id="failure")
+        failed_id = store.start_execution(task_id=task_id, claim_id=None, kind=ExecutionKind.VALIDATION)
+        unknown_id = store.start_execution(task_id=task_id, claim_id=None, kind=ExecutionKind.REVIEW)
+        store.finish_execution(failed_id, ExecutionStatus.FAILED)
+        store.finish_execution(unknown_id, ExecutionStatus.UNKNOWN)
+        report = health(store)
+        assert report.ok is False
+        assert report.failed_execution_count == 1
+        assert report.unknown_execution_count == 1
 
     def dependency_scheduling(store: Store, project: Path) -> None:
         first = store.upsert_task("first", source="local", source_id="first")
@@ -1220,6 +1232,7 @@ def main() -> int:
         worker_heartbeat_and_outbound_sync,
         worker_registration_rejects_invalid_identity,
         operator_dashboard_exposes_structured_state,
+        health_degrades_on_failed_or_unknown_executions,
         dependency_scheduling,
         objective_planner_rejects_invalid_dependencies,
         global_registry_rejects_ambiguous_projects,
