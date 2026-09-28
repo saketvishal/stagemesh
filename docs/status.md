@@ -9,6 +9,7 @@
 - Durable candidate and exact-SHA evidence model.
 - Fake and subprocess executors.
 - Provider adapter SDK surface for Codex, Claude, Grok, and additional runtime commands.
+- Configured provider commands are converted into runtime adapters for live acceptance.
 - Capacity registry with primary/secondary failover classification.
 - Configurable provider routing with SINGLE_AGENT and STAGED modes plus per-stage provider routes.
 - Local backlog source and GitHub issue-source models, including zero-config remote detection, deferred, unknown, stale, auth, and rate-limit semantics.
@@ -35,7 +36,8 @@
 - Config loader for project files and environment overrides.
 - Secret redaction helpers for logs/reports.
 - Live acceptance harness that exercises configured GitHub/providers or reports not configured.
-- Machine-readable local acceptance report generator.
+- Live acceptance reports unproven sync/execution gates explicitly instead of treating command availability as execution proof.
+- Machine-readable local acceptance report generator with structured proof gaps and proof status.
 - Release packaging is constrained to the project workspace boundary.
 - Idempotent migration runner with schema version reporting and migration audit table.
 - SQLite durability settings enable WAL and busy timeout.
@@ -50,11 +52,14 @@
 - Deterministic GitHub dry-run acceptance proves discovery, deferred labels, outbound sync, and rate-limit classification without external credentials.
 - Release-readiness report aggregates local gates and explicitly reports external evidence gaps.
 - External evidence registry records hosted CI, live provider, live GitHub, and database acceptance links against candidate SHAs.
+- Passing external evidence must name a candidate SHA and only counts for the matching candidate.
 - Acceptance matrix artifact maps each major requirement to proven local evidence or an explicit external gap.
 - Completion audit and acceptance matrix consume durable external evidence records when available.
+- Final report summarizes local checks, candidate-scoped evidence, structured proof gaps, completion audit, and acceptance matrix state.
 - GitHub Actions CI for Windows and Linux.
 - Stdlib invariant and acceptance runners for dependency-free verification.
 - Clean-tree acceptance copies only tracked files, installs StageMesh into an isolated target, and runs CLI smoke checks from the installed package.
+- Local `stagemesh ci` covers compile, invariants, provider acceptance, GitHub acceptance, live acceptance, clean acceptance, and optional full acceptance.
 
 ## Verified Locally
 
@@ -64,6 +69,12 @@
 - `python scripts/clean_acceptance.py`
 - `python -m stagemesh.cli --project . ci --future-feature-gate`
 - `python -m pip install . --target .tmp-install --no-cache-dir --upgrade`
+
+Current generated reports show local checks passing while proof remains blocked on external evidence:
+
+- acceptance report: `PASS proof=BLOCKED_ON_EXTERNAL_EVIDENCE`
+- completion audit: `complete=False`
+- acceptance matrix: `INCOMPLETE`
 
 ## Still Required For Full Product Acceptance
 
