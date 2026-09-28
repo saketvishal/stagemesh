@@ -81,6 +81,8 @@ def _validate_stage(stage: str) -> str:
 
 
 def _validate_limit(limit: int) -> int:
+    if not isinstance(limit, int):
+        raise WorkQueueError("work packet poll limit must be an integer")
     if limit < 1:
         raise WorkQueueError("work packet poll limit must be at least 1")
     if limit > 100:
@@ -89,6 +91,8 @@ def _validate_limit(limit: int) -> int:
 
 
 def _validate_lease_seconds(lease_seconds: float) -> float:
+    if not isinstance(lease_seconds, (int, float)):
+        raise WorkQueueError("work packet lease seconds must be numeric")
     if lease_seconds <= 0:
         raise WorkQueueError("work packet lease seconds must be positive")
     return lease_seconds
