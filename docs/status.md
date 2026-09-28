@@ -12,7 +12,7 @@
 - Capacity registry with primary/secondary failover classification.
 - Configurable provider routing with SINGLE_AGENT and STAGED modes plus per-stage provider routes.
 - Local backlog source and GitHub issue-source models, including zero-config remote detection, deferred, unknown, stale, auth, and rate-limit semantics.
-- Structured objective planner validation.
+- Structured objective planner validation, including duplicate task and unknown dependency rejection.
 - Built-in validation, independent review, and integration evidence.
 - Recovery behavior that preserves uncertain process identity and does not treat PID alone as proof of liveness or death.
 - CLI for init, doctor, planning, continue, status, health, capacity, and CI gates.

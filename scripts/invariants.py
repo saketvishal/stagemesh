@@ -54,6 +54,7 @@ from stagemesh.github import parse_github_remote
 from stagemesh.operator import operator_report
 from stagemesh.dashboard import render_dashboard
 from stagemesh.ci_wait import decide_ci_wait
+from stagemesh.objectives import ObjectivePlanner, ObjectiveValidationError
 
 
 def assert_raises(exc_type, fn, *args, **kwargs) -> None:
@@ -244,6 +245,40 @@ def main() -> int:
         assert scheduler.decision(second).eligible is False
         store.advance_task(first, Stage.DONE)
         assert scheduler.decision(second).eligible is True
+
+    def objective_planner_rejects_invalid_dependencies(store: Store, project: Path) -> None:
+        planner = ObjectivePlanner()
+        valid = planner.parse(
+            {
+                "id": "obj",
+                "title": "valid",
+                "tasks": [
+                    {"id": "a", "title": "a"},
+                    {"id": "b", "title": "b", "dependencies": ["a"]},
+                ],
+            }
+        )
+        assert valid.tasks == ("a", "b")
+        assert_raises(
+            ObjectiveValidationError,
+            planner.parse,
+            {"id": "dup", "title": "dup", "tasks": [{"id": "a", "title": "a"}, {"id": "a", "title": "again"}]},
+        )
+        assert_raises(
+            ObjectiveValidationError,
+            planner.parse,
+            {"id": "missing", "title": "missing", "tasks": [{"id": "a", "title": "a", "dependencies": ["nope"]}]},
+        )
+        assert_raises(
+            ObjectiveValidationError,
+            planner.parse,
+            {"id": "baddeps", "title": "baddeps", "tasks": [{"id": "a", "title": "a", "dependencies": "nope"}]},
+        )
+        assert_raises(
+            ObjectiveValidationError,
+            planner.parse,
+            {"id": "baddep", "title": "baddep", "tasks": [{"id": "a", "title": "a", "dependencies": [1]}]},
+        )
 
     def finding_convergence_is_bounded(store: Store, project: Path) -> None:
         task_id = store.upsert_task("review task")
@@ -550,6 +585,7 @@ def main() -> int:
         worker_heartbeat_and_outbound_sync,
         operator_dashboard_exposes_structured_state,
         dependency_scheduling,
+        objective_planner_rejects_invalid_dependencies,
         finding_convergence_is_bounded,
         distributed_work_packets_are_claimed_once,
         distributed_work_packets_have_renewable_leases,
