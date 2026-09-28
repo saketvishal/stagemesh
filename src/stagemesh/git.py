@@ -12,17 +12,42 @@ class GitError(RuntimeError):
     pass
 
 
+class GitValidationError(ValueError):
+    pass
+
+
+def _validate_non_empty_string(value: str, field: str, max_length: int = 200) -> str:
+    if not isinstance(value, str):
+        raise GitValidationError(f"{field} must be a string")
+    normalized = value.strip()
+    if not normalized:
+        raise GitValidationError(f"{field} must be a non-empty string")
+    if len(normalized) > max_length:
+        raise GitValidationError(f"{field} must be {max_length} characters or fewer")
+    return normalized
+
+
 class GitWorkspace:
     def __init__(self, path: Path):
-        self.path = Path(path)
+        self.path = Path(path).resolve()
 
     def run(
         self, *args: str, check: bool = True, env: dict[str, str] | None = None
     ) -> subprocess.CompletedProcess[str]:
+        if not args:
+            raise GitValidationError("git command must include at least one argument")
+        validated_args = tuple(
+            _validate_non_empty_string(arg, "git command argument", 1000)
+            for arg in args
+        )
+        if env:
+            for key, value in env.items():
+                _validate_non_empty_string(key, "git environment key", 200)
+                _validate_non_empty_string(value, f"git environment value for {key}", 1000)
         merged_env = os.environ.copy()
         merged_env.update(env or {})
         result = subprocess.run(
-            ["git", *args],
+            ["git", *validated_args],
             cwd=self.path,
             text=True,
             capture_output=True,
@@ -41,6 +66,7 @@ class GitWorkspace:
             self.run("config", "user.name", "StageMesh")
 
     def commit_all(self, message: str, attribution: GitAttribution | None = None) -> str:
+        message = _validate_non_empty_string(message, "commit message", 200)
         self.run("add", "-A")
         diff = self.run("diff", "--cached", "--quiet", check=False)
         if diff.returncode == 0:
@@ -57,7 +83,10 @@ class GitWorkspace:
         return self.head()
 
     def head(self) -> str:
-        return self.run("rev-parse", "HEAD").stdout.strip()
+        sha = self.run("rev-parse", "HEAD").stdout.strip()
+        if not sha:
+            raise GitError("git returned an empty HEAD")
+        return sha
 
     def head_or_synthetic(self) -> str:
         result = self.run("rev-parse", "HEAD", check=False)
@@ -67,5 +96,13 @@ class GitWorkspace:
         return f"synthetic-{digest}"
 
     def create_worktree(self, target: Path, ref: str = "HEAD") -> None:
+        ref = _validate_non_empty_string(ref, "worktree ref", 200)
+        target = Path(target).resolve()
+        if target == self.path:
+            raise GitValidationError("worktree target must differ from workspace path")
+        if target in self.path.parents:
+            raise GitValidationError("worktree target must not contain workspace path")
+        if self.path in target.parents:
+            raise GitValidationError("worktree target must not be inside workspace path")
         target.parent.mkdir(parents=True, exist_ok=True)
         self.run("worktree", "add", str(target), ref)
