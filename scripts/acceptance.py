@@ -131,6 +131,24 @@ def main() -> int:
             raise AssertionError(status)
         if "future work" in status:
             raise AssertionError("deferred task was dispatched")
+        adapter_tasks = project / "adapter-tasks.json"
+        adapter_tasks.write_text(
+            '{"tasks":[{"id":"adapter-1","title":"configured adapter task"}]}',
+            encoding="utf-8",
+        )
+        config_file = project / ".stagemesh" / "config.json"
+        config_file.write_text(
+            '{"task_sources":[{"name":"linear","type":"json","path":"adapter-tasks.json"}]}',
+            encoding="utf-8",
+        )
+        config_with_source = run([sys.executable, "-m", "stagemesh.cli", "--project", str(project), "config"], ROOT, env)
+        if "task_source.linear: json" not in config_with_source:
+            raise AssertionError(config_with_source)
+        for _ in range(8):
+            run([sys.executable, "-m", "stagemesh.cli", "--project", str(project), "continue", "--once"], ROOT, env)
+        status = run([sys.executable, "-m", "stagemesh.cli", "--project", str(project), "status"], ROOT, env)
+        if "DONE DONE configured adapter task" not in status:
+            raise AssertionError(status)
         original_backlog = backlog.read_text(encoding="utf-8")
         backlog.write_text('{"tasks":[{"id":"bad","title":"bad","dependencies":["missing"]}]}', encoding="utf-8")
         invalid_backlog = subprocess.run(
@@ -403,7 +421,7 @@ def main() -> int:
         ):
             raise AssertionError(github_acceptance)
         health = run([sys.executable, "-m", "stagemesh.cli", "--project", str(project), "health"], ROOT, env)
-        if "ok: True" not in health or "done: 2" not in health:
+        if "ok: True" not in health or "done: 3" not in health:
             raise AssertionError(health)
         run(
             [

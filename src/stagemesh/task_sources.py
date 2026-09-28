@@ -7,6 +7,7 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
+from .config import StageMeshConfig
 from .domain import TaskStatus
 from .persistence import Store
 from .github import GitHubClient, parse_retry_after
@@ -31,8 +32,10 @@ class DiscoveredTask:
 class LocalBacklogSource:
     name = "local-backlog"
 
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, name: str | None = None):
         self.path = Path(path)
+        if name is not None:
+            self.name = _validate_source_name(name)
 
     def discover(self) -> list[DiscoveredTask]:
         if not self.path.exists():
@@ -90,6 +93,19 @@ class LocalBacklogSource:
                 )
             )
         return discovered
+
+
+class JsonFileTaskSource(LocalBacklogSource):
+    """Configurable JSON source using the local backlog task schema."""
+
+
+def task_sources_from_config(config: StageMeshConfig) -> list[JsonFileTaskSource]:
+    sources: list[JsonFileTaskSource] = []
+    for source in config.task_sources:
+        if source.kind != "json" or source.path is None:
+            raise TaskSourceValidationError(f"unsupported configured task source: {source.name}")
+        sources.append(JsonFileTaskSource(source.path, source.name))
+    return sources
 
 
 class GitHubIssueSource:
@@ -172,7 +188,16 @@ def _github_issue_to_task(issue: dict[str, object]) -> DiscoveredTask:
         title=title,
         eligible="stagemesh:deferred" not in label_names and state.lower() == "open",
         state="OPEN" if state.lower() == "open" else state.upper(),
-    )
+        )
+
+
+def _validate_source_name(value: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise TaskSourceValidationError("task source name must be a non-empty string")
+    normalized = value.strip()
+    if any(char.isspace() for char in normalized):
+        raise TaskSourceValidationError("task source name must not contain whitespace")
+    return normalized
 
 
 def sync_source(store: Store, tasks: list[DiscoveredTask]) -> list[str]:

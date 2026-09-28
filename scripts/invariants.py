@@ -20,7 +20,7 @@ from stagemesh.lifecycle import LifecycleError, evidence_allows_advance
 from stagemesh.persistence import Store, StoreValidationError
 from stagemesh.process_identity import classify_process
 from stagemesh.review import Reviewer
-from stagemesh.task_sources import DiscoveredTask, GitHubApiIssueSource, GitHubIssueSource, LocalBacklogSource, OutboundSync, TaskSourceValidationError, sync_source
+from stagemesh.task_sources import DiscoveredTask, GitHubApiIssueSource, GitHubIssueSource, LocalBacklogSource, OutboundSync, TaskSourceValidationError, sync_source, task_sources_from_config
 from stagemesh.workers import WorkerValidationError, heartbeat_worker, register_worker
 from stagemesh.scheduling import Scheduler
 from stagemesh.remediation import RemediationPolicy, RemediationValidationError, finding_identity
@@ -346,6 +346,28 @@ def main() -> int:
         assert_raises(TaskSourceValidationError, LocalBacklogSource(backlog).discover)
         backlog.write_text('{"tasks":[{"id":"one","title":"one","state":"MAYBE"}]}', encoding="utf-8")
         assert_raises(TaskSourceValidationError, LocalBacklogSource(backlog).discover)
+
+    def configured_json_task_source_syncs_with_distinct_source(store: Store, project: Path) -> None:
+        project.mkdir(parents=True)
+        config_dir = project / ".stagemesh"
+        config_dir.mkdir()
+        source_file = project / "linear.json"
+        source_file.write_text(
+            '{"tasks":[{"id":"L-1","title":"adapter task"},{"id":"L-2","title":"blocked adapter task","dependencies":["L-1"]}]}',
+            encoding="utf-8",
+        )
+        (config_dir / "config.json").write_text(
+            '{"task_sources":[{"name":"linear","type":"json","path":"linear.json"}]}',
+            encoding="utf-8",
+        )
+        config = load_config(project)
+        sources = task_sources_from_config(config)
+        assert [source.name for source in sources] == ["linear"]
+        ids = sync_source(store, sources[0].discover())
+        assert len(ids) == 2
+        rows = store.tasks()
+        assert {row["source"] for row in rows} == {"linear"}
+        assert {row["source_id"] for row in rows} == {"L-1", "L-2"}
 
     def worker_heartbeat_and_outbound_sync(store: Store, project: Path) -> None:
         register_worker(
@@ -739,6 +761,7 @@ def main() -> int:
         config = load_config(project)
         assert config.github.configured is True
         assert config.provider_commands["codex"] == "codex --test"
+        assert config.task_sources == ()
         assert config.routing_mode == "SINGLE_AGENT"
         assert config.single_agent_provider == "codex"
         assert config.stage_routes["REVIEW"] == "claude"
@@ -756,6 +779,17 @@ def main() -> int:
         config_file.write_text('{"providers":{"codex":""}}', encoding="utf-8")
         assert_raises(ConfigValidationError, load_config, project)
         config_file.write_text('{"providers":[]}', encoding="utf-8")
+        assert_raises(ConfigValidationError, load_config, project)
+        config_file.write_text('{"task_sources":{}}', encoding="utf-8")
+        assert_raises(ConfigValidationError, load_config, project)
+        config_file.write_text('{"task_sources":[{"name":"linear","type":"api","path":"tasks.json"}]}', encoding="utf-8")
+        assert_raises(ConfigValidationError, load_config, project)
+        config_file.write_text('{"task_sources":[{"name":"linear","type":"json","path":""}]}', encoding="utf-8")
+        assert_raises(ConfigValidationError, load_config, project)
+        config_file.write_text(
+            json.dumps({"task_sources": [{"name": "linear", "type": "json", "path": str(project.parent / "outside.json")}]}),
+            encoding="utf-8",
+        )
         assert_raises(ConfigValidationError, load_config, project)
 
     def github_remote_detection_supports_zero_config(store: Store, project: Path) -> None:
@@ -1134,6 +1168,7 @@ def main() -> int:
         targeted_ops,
         source_semantics,
         local_backlog_source_rejects_malformed_tasks,
+        configured_json_task_source_syncs_with_distinct_source,
         worker_heartbeat_and_outbound_sync,
         worker_registration_rejects_invalid_identity,
         operator_dashboard_exposes_structured_state,
