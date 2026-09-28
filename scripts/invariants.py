@@ -47,7 +47,7 @@ from stagemesh.postgres_store import (
 from stagemesh.final_report import render_final_report
 from stagemesh.provider_acceptance import run_provider_acceptance
 from stagemesh.github_acceptance import run_github_acceptance
-from stagemesh.release_readiness import release_readiness
+from stagemesh.release_readiness import ReleaseReadinessValidationError, release_readiness, run_command_check, write_release_readiness
 from stagemesh.external_evidence import ExternalEvidenceValidationError, record_external_evidence, external_evidence_records
 from stagemesh.acceptance_matrix import acceptance_matrix
 from stagemesh.routing import Provider, Router, RoutingMode, RoutingValidationError
@@ -770,6 +770,14 @@ def main() -> int:
         data = release_readiness(ROOT, include_acceptance=False, run_checks=False, store=store)
         assert data["overall_status"] in {"BLOCKED_ON_EXTERNAL_EVIDENCE", "FAIL"}
         assert "external_gaps" in data
+        assert_raises(ReleaseReadinessValidationError, run_command_check, "", [sys.executable, "--version"], ROOT)
+        assert_raises(ReleaseReadinessValidationError, run_command_check, "python", [], ROOT)
+        assert_raises(ReleaseReadinessValidationError, run_command_check, "python", [sys.executable, ""], ROOT)
+        assert_raises(ReleaseReadinessValidationError, run_command_check, "python", [sys.executable], ROOT / "missing")
+        assert_raises(ReleaseReadinessValidationError, release_readiness, ROOT / "missing", False, False, store)
+        project.mkdir(parents=True)
+        outside = project.parent / "outside" / "readiness.json"
+        assert_raises(SecurityBoundaryError, write_release_readiness, project, outside, False, False, store)
 
     def external_evidence_is_durable(store: Store, project: Path) -> None:
         evidence_id = record_external_evidence(
