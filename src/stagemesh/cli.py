@@ -27,6 +27,7 @@ from .provider_acceptance import run_provider_acceptance
 from .process_identity import current_process_identity
 from .registry import GlobalRegistry, ProjectRegistration
 from .release import build_release_artifact
+from .release_readiness import write_release_readiness
 from .retry import RetryRegistry
 from .security import WorkspaceBoundary
 from .task_sources import LocalBacklogSource, sync_source
@@ -296,6 +297,19 @@ def command_github_acceptance(args: argparse.Namespace) -> int:
     return 0 if result.status == "PASS" else 1
 
 
+def command_release_readiness(args: argparse.Namespace) -> int:
+    project = Path(args.project).resolve()
+    output = WorkspaceBoundary(project).require_inside(Path(args.output).resolve())
+    write_release_readiness(
+        project,
+        output,
+        include_acceptance=not args.skip_acceptance,
+        run_checks=not args.skip_checks,
+    )
+    print(f"release-readiness: {output}")
+    return 0
+
+
 def command_completion_audit(args: argparse.Namespace) -> int:
     project = Path(args.project).resolve()
     output = WorkspaceBoundary(project).require_inside(Path(args.output).resolve())
@@ -388,6 +402,11 @@ def build_parser() -> argparse.ArgumentParser:
     provider_acceptance.set_defaults(func=command_provider_acceptance)
     github_acceptance = sub.add_parser("github-acceptance")
     github_acceptance.set_defaults(func=command_github_acceptance)
+    readiness = sub.add_parser("release-readiness")
+    readiness.add_argument("--output", default=".stagemesh/release-readiness.json")
+    readiness.add_argument("--skip-acceptance", action="store_true")
+    readiness.add_argument("--skip-checks", action="store_true")
+    readiness.set_defaults(func=command_release_readiness)
     worker = sub.add_parser("worker")
     worker.add_argument("worker_id")
     worker.add_argument("--provider", default="local")

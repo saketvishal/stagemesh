@@ -36,6 +36,7 @@ from stagemesh.postgres_store import PostgresStore, PostgresUnavailable, postgre
 from stagemesh.final_report import render_final_report
 from stagemesh.provider_acceptance import run_provider_acceptance
 from stagemesh.github_acceptance import run_github_acceptance
+from stagemesh.release_readiness import release_readiness
 
 
 def assert_raises(exc_type, fn, *args, **kwargs) -> None:
@@ -299,6 +300,11 @@ def main() -> int:
         assert result.deferred_skipped is True
         assert result.rate_limit_status == "UNKNOWN"
 
+    def release_readiness_reports_external_gaps(store: Store, project: Path) -> None:
+        data = release_readiness(ROOT, include_acceptance=False, run_checks=False)
+        assert data["overall_status"] in {"BLOCKED_ON_EXTERNAL_EVIDENCE", "FAIL"}
+        assert "external_gaps" in data
+
     cases = [
         live_worker_restart,
         dead_worker_recovers,
@@ -328,6 +334,7 @@ def main() -> int:
         final_report_mentions_missing_evidence,
         provider_acceptance_isolates_capacity_failure,
         github_acceptance_models_sync_contract,
+        release_readiness_reports_external_gaps,
     ]
     for case in cases:
         with_store(case)
