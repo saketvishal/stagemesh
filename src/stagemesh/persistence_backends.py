@@ -34,3 +34,22 @@ class PostgresBackend:
         raise NotImplementedError(
             "PostgreSQL support is interface-ready but requires a psycopg-backed Store implementation"
         )
+
+
+@dataclass(frozen=True)
+class BackendProbe:
+    name: str
+    available: bool
+    reason: str
+
+
+def probe_backend(url: str | None, sqlite_path: Path | None = None) -> BackendProbe:
+    if not url or url.startswith("sqlite://") or sqlite_path is not None:
+        return BackendProbe("sqlite", True, "sqlite default available")
+    if url.startswith("postgres://") or url.startswith("postgresql://"):
+        try:
+            __import__("psycopg")
+        except ImportError:
+            return BackendProbe("postgres", False, "psycopg is not installed")
+        return BackendProbe("postgres", True, "psycopg is installed")
+    return BackendProbe("unknown", False, f"unsupported backend URL: {url}")

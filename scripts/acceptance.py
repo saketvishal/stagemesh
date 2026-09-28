@@ -75,12 +75,20 @@ def main() -> int:
         if "future work" in status:
             raise AssertionError("deferred task was dispatched")
         doctor = run([sys.executable, "-m", "stagemesh.cli", "--project", str(project), "doctor"], ROOT, env)
-        required = ["version:", "executable path:", "python interpreter:", "imported package path:", "db:", "schema version: 2"]
+        required = [
+            "version:",
+            "executable path:",
+            "python interpreter:",
+            "imported package path:",
+            "db:",
+            "schema version: 2",
+            "backend: sqlite",
+        ]
         missing = [item for item in required if item not in doctor]
         if missing:
             raise AssertionError(f"doctor missing {missing}")
         config_output = run([sys.executable, "-m", "stagemesh.cli", "--project", str(project), "config"], ROOT, env)
-        if "github.configured: False" not in config_output:
+        if "github.configured: False" not in config_output or "database_url: sqlite://default" not in config_output:
             raise AssertionError(config_output)
         health = run([sys.executable, "-m", "stagemesh.cli", "--project", str(project), "health"], ROOT, env)
         if "ok: True" not in health or "done: 2" not in health:
@@ -205,6 +213,23 @@ def main() -> int:
         )
         if not acceptance_report.exists() or "acceptance-report:" not in report_output:
             raise AssertionError(report_output)
+        completion_audit = project / ".stagemesh" / "completion-audit.json"
+        audit_output = run(
+            [
+                sys.executable,
+                "-m",
+                "stagemesh.cli",
+                "--project",
+                str(project),
+                "completion-audit",
+                "--output",
+                str(completion_audit),
+            ],
+            ROOT,
+            env,
+        )
+        if not completion_audit.exists() or "completion-audit:" not in audit_output:
+            raise AssertionError(audit_output)
         capacity = run(
             [
                 sys.executable,

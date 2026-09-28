@@ -37,6 +37,8 @@
 - Release packaging is constrained to the project workspace boundary.
 - Idempotent migration runner with schema version reporting and migration audit table.
 - SQLite durability settings enable WAL and busy timeout.
+- Backend probe for sqlite/postgres configuration with explicit PostgreSQL dependency reporting.
+- Machine-readable completion audit that refuses to mark external/credentialed requirements complete without evidence.
 - GitHub Actions CI for Windows and Linux.
 - Stdlib invariant and acceptance runners for dependency-free verification.
 

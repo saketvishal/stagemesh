@@ -28,6 +28,8 @@ from stagemesh.redaction import redact_mapping, redact_text
 from stagemesh.config import load_config
 from stagemesh.release import build_release_artifact
 from stagemesh.security import SecurityBoundaryError
+from stagemesh.persistence_backends import probe_backend
+from stagemesh.completion_audit import completion_audit
 
 
 def assert_raises(exc_type, fn, *args, **kwargs) -> None:
@@ -236,6 +238,18 @@ def main() -> int:
         second = store.schema_version()
         assert first == second == 2
 
+    def backend_probe_reports_postgres_dependency(store: Store, project: Path) -> None:
+        probe = probe_backend("postgresql://example/db")
+        assert probe.name == "postgres"
+        assert probe.available in {True, False}
+        assert probe.reason
+
+    def completion_audit_is_not_falsely_complete(store: Store, project: Path) -> None:
+        audit = completion_audit()
+        assert audit["complete"] is False
+        statuses = {item["status"] for item in audit["items"]}
+        assert "REQUIRES_CREDENTIALS" in statuses or "MISSING_EXTERNAL_EVIDENCE" in statuses
+
     cases = [
         live_worker_restart,
         dead_worker_recovers,
@@ -257,6 +271,8 @@ def main() -> int:
         config_loads_from_project_file,
         release_output_stays_inside_workspace,
         migrations_are_idempotent,
+        backend_probe_reports_postgres_dependency,
+        completion_audit_is_not_falsely_complete,
     ]
     for case in cases:
         with_store(case)
