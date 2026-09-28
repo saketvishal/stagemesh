@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Protocol
 
 from .capacity import CapacityKind, CapacityRegistry
+from .config import StageMeshConfig
 from .domain import ExecutionStatus
 from .execution import ExecutionResult
 from .persistence import Store
@@ -56,15 +57,27 @@ class RuntimeCommandAdapter:
 
 
 def approved_default_adapters() -> list[RuntimeCommandAdapter]:
-    adapters: list[RuntimeCommandAdapter] = []
+    commands: dict[str, str] = {}
     for name, env_name, fallback in [
         ("codex", "STAGEMESH_CODEX_CMD", "codex"),
         ("claude", "STAGEMESH_CLAUDE_CMD", "claude"),
         ("grok", "STAGEMESH_GROK_CMD", "grok"),
     ]:
-        command = tuple(shlex.split(os.environ.get(env_name) or fallback))
-        adapters.append(RuntimeCommandAdapter(name=name, command=command))
-    return adapters
+        commands[name] = os.environ.get(env_name) or fallback
+    return adapters_from_commands(commands)
+
+
+def adapters_from_config(config: StageMeshConfig) -> list[RuntimeCommandAdapter]:
+    commands = {adapter.name: shlex.join(adapter.command) for adapter in approved_default_adapters()}
+    commands.update(config.provider_commands)
+    return adapters_from_commands(commands)
+
+
+def adapters_from_commands(commands: dict[str, str]) -> list[RuntimeCommandAdapter]:
+    return [
+        RuntimeCommandAdapter(name=name, command=tuple(shlex.split(command)))
+        for name, command in sorted(commands.items())
+    ]
 
 
 def record_provider_capacity(registry: CapacityRegistry, adapters: list[ProviderAdapter]) -> None:

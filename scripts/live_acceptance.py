@@ -9,7 +9,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from stagemesh.config import load_config
 from stagemesh.github import GitHubClient, UrlLibGitHubTransport
-from stagemesh.providers import approved_default_adapters
+from stagemesh.providers import adapters_from_config
 
 
 def main() -> int:
@@ -29,7 +29,7 @@ def main() -> int:
     else:
         checks.append("github: NOT_CONFIGURED")
         checks.append("github:sync: NOT_CONFIGURED")
-    for adapter in approved_default_adapters():
+    for adapter in adapters_from_config(config):
         checks.append(f"provider:{adapter.name}: {adapter.check_capacity()}")
         checks.append(f"provider:{adapter.name}:execution: NOT_PROVEN")
     print("\n".join(checks))
