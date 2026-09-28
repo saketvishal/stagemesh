@@ -44,7 +44,7 @@ from stagemesh.postgres_store import (
     postgres_schema_contract,
     postgres_schema_statements,
 )
-from stagemesh.final_report import render_final_report
+from stagemesh.final_report import FinalReportValidationError, render_final_report
 from stagemesh.provider_acceptance import run_provider_acceptance
 from stagemesh.github_acceptance import run_github_acceptance
 from stagemesh.release_readiness import ReleaseReadinessValidationError, release_readiness, run_command_check, write_release_readiness
@@ -732,6 +732,16 @@ def main() -> int:
         assert "## Roadmap Preservation" in report
         assert "acceptance report status: not generated" in report
         assert "completion audit status: not generated" in report
+        assert_raises(FinalReportValidationError, render_final_report, project / "missing", store)
+        report_dir = project / ".stagemesh"
+        report_dir.mkdir()
+        (report_dir / "acceptance-report.json").write_text("{not-json", encoding="utf-8")
+        (report_dir / "completion-audit.json").write_text('{"items": ["bad"]}', encoding="utf-8")
+        (report_dir / "acceptance-matrix.json").write_text("[]", encoding="utf-8")
+        invalid_report = render_final_report(project, store)
+        assert "acceptance report status: invalid report" in invalid_report
+        assert "completion audit status: invalid report" in invalid_report
+        assert "acceptance matrix status: invalid report" in invalid_report
 
     def provider_acceptance_isolates_capacity_failure(store: Store, project: Path) -> None:
         result = run_provider_acceptance(store, project)

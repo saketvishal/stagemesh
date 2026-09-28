@@ -1,14 +1,20 @@
 from __future__ import annotations
 
-import subprocess
 import json
+import subprocess
 from pathlib import Path
 
 from . import __version__
 from .persistence import Store
+from .release import validate_candidate_sha, ReleaseValidationError
+
+
+class FinalReportValidationError(ValueError):
+    pass
 
 
 def candidate_sha(root: Path) -> str:
+    root = _validate_root(root)
     result = subprocess.run(
         ["git", "-c", f"safe.directory={root.as_posix()}", "rev-parse", "HEAD"],
         cwd=root,
@@ -16,10 +22,17 @@ def candidate_sha(root: Path) -> str:
         capture_output=True,
         check=False,
     )
-    return result.stdout.strip() if result.returncode == 0 else "UNKNOWN"
+    if result.returncode != 0:
+        return "UNKNOWN"
+    sha = result.stdout.strip()
+    try:
+        return validate_candidate_sha(sha)
+    except ReleaseValidationError:
+        return "UNKNOWN"
 
 
 def render_final_report(root: Path, store: Store | None = None) -> str:
+    root = _validate_root(root)
     sha = candidate_sha(root)
     task_count = len(store.tasks()) if store else 0
     worker_count = len(store.workers()) if store else 0
@@ -103,27 +116,57 @@ def render_final_report(root: Path, store: Store | None = None) -> str:
 
 def _acceptance_summary(root: Path) -> str:
     path = root / ".stagemesh" / "acceptance-report.json"
-    if not path.exists():
+    data = _read_report_json(path)
+    if data is None:
         return "not generated"
-    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        return "invalid report"
     checks = data.get("checks", [])
+    if not isinstance(checks, list):
+        return "invalid report"
+    if not all(isinstance(check, dict) for check in checks):
+        return "invalid report"
     passed = sum(1 for check in checks if check.get("status") == "PASS")
     return f"{data.get('status', 'UNKNOWN')} ({passed}/{len(checks)} checks passing)"
 
 
 def _completion_summary(root: Path) -> str:
     path = root / ".stagemesh" / "completion-audit.json"
-    if not path.exists():
+    data = _read_report_json(path)
+    if data is None:
         return "not generated"
-    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        return "invalid report"
     items = data.get("items", [])
+    if not isinstance(items, list):
+        return "invalid report"
+    if not all(isinstance(item, dict) for item in items):
+        return "invalid report"
     proven = sum(1 for item in items if item.get("status") == "PROVEN")
     return f"complete={data.get('complete', False)} ({proven}/{len(items)} requirements proven)"
 
 
 def _matrix_summary(root: Path) -> str:
     path = root / ".stagemesh" / "acceptance-matrix.json"
-    if not path.exists():
+    data = _read_report_json(path)
+    if data is None:
         return "not generated"
-    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        return "invalid report"
     return f"{data.get('status', 'UNKNOWN')} ({data.get('proven', 0)}/{data.get('total', 0)} rows proven)"
+
+
+def _read_report_json(path: Path) -> object | None:
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return "invalid"
+
+
+def _validate_root(root: Path) -> Path:
+    resolved = Path(root).resolve()
+    if not resolved.exists() or not resolved.is_dir():
+        raise FinalReportValidationError("final report root must be an existing directory")
+    return resolved
