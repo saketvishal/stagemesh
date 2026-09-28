@@ -2168,3 +2168,127 @@ def test_needs_attention_is_deduplicated_across_cycles_but_reprinted_on_change(t
         "[fixture] needs attention: GH-1:EXTERNAL_EXECUTOR_CONFIGURATION_REQUIRED",
         "[fixture] needs attention: GH-1:OTHER_REASON_CHANGED",
     ]
+
+
+# ------------------------------------------------------ delivered_by hygiene
+
+
+def test_gh_133_bootstrap_definition_carries_delivery_evidence():
+    """Regression for an incident where `stagemesh continue` immediately
+    claimed and re-executed SM-133-RATE-LIMIT on a brand-new coordinator
+    database (a fresh clone/candidate checkout with no prior task history),
+    even though that task's work had already shipped across many commits
+    ending at 09a4fff (see build_coordinator/task_source/github.py and
+    tests/test_github_rate_limit_capacity_surfaces.py).
+
+    Root cause: `.stagemesh/tasks/gh-133-bootstrap.yaml` never recorded
+    `delivered_by` evidence for SM-133-RATE-LIMIT. `sync_backlog` only
+    reconciles a definition straight to DONE (`RECONCILED`) when its
+    `delivered_by` evidence is present and verified against committed git
+    history (see `verify_delivery_evidence`/`_reconcile_delivered` in
+    build_coordinator/project/backlog.py); without it, a database with no
+    record of the task treats the definition as brand new and seeds it
+    READY, and a priority-0 HIGH-risk task like this one is claimed
+    immediately on the next `stagemesh continue`.
+
+    This test checks the definition's *content*, not the live sync
+    behavior against real git ancestry (which would be sensitive to the
+    checkout's clone depth in CI) -- the generic delivered_by/RECONCILED
+    sync path already has full coverage above using throwaway fixture
+    repos. What was actually missing, and what caused the incident, was
+    this specific bootstrap file never being updated once its work landed.
+    """
+    source = REPO_ROOT / ".stagemesh" / "tasks" / "gh-133-bootstrap.yaml"
+    data = yaml.safe_load(source.read_text(encoding="utf-8"))
+    task = next(entry for entry in data["tasks"] if entry.get("id") == "SM-133-RATE-LIMIT")
+    delivered_by = task.get("delivered_by")
+    assert isinstance(delivered_by, dict), (
+        "SM-133-RATE-LIMIT is already implemented and merged (see "
+        "build_coordinator/task_source/github.py); its bootstrap definition "
+        "must carry structured delivered_by evidence so a fresh coordinator "
+        "database reconciles it to DONE instead of relaunching it as a new "
+        "READY task on the next `stagemesh continue`"
+    )
+    sha = delivered_by.get("sha") or delivered_by.get("integrated_sha")
+    assert sha and len(sha) == 40 and all(c in "0123456789abcdef" for c in sha), (
+        f"delivered_by.sha must be a full 40-character git commit sha, got {sha!r}"
+    )
+
+
+def test_fresh_database_reconciles_delivered_bootstrap_task_instead_of_relaunching(tmp_path):
+    """End-to-end regression: syncing the real project's real backlog
+    (including the real gh-133-bootstrap.yaml) into a brand-new, empty
+    coordinator database -- exactly the situation on a fresh clone/candidate
+    checkout -- must reconcile SM-133-RATE-LIMIT straight to DONE via its
+    delivered_by evidence, never leave it READY/claimable.
+    """
+    project = load_project(REPO_ROOT)
+    definitions = load_backlog(project)
+    gh133 = next(d for d in definitions if d.task_id == "SM-133-RATE-LIMIT")
+    assert gh133.delivered_by, "fixture drifted: expected delivered_by on the real bootstrap task"
+
+    lifecycle = DatabaseLifecycle(f"sqlite:///{(tmp_path / 'fresh.sqlite3').as_posix()}", data_dir=tmp_path)
+    lifecycle.initialize_schema()
+    try:
+        with lifecycle.session() as db:
+            evidence = verify_delivery_evidence(REPO_ROOT, gh133)
+            if evidence["status"] != "VERIFIED":
+                pytest.skip(
+                    f"delivery sha not reachable in this checkout's history ({evidence}); "
+                    "covered independently by test_gh_133_bootstrap_definition_carries_delivery_evidence"
+                )
+            report = sync_backlog(db, project, definitions)
+            result = next(r for r in report.results if r.task_id == "SM-133-RATE-LIMIT")
+            assert result.action == "RECONCILED", (
+                f"expected SM-133-RATE-LIMIT to reconcile straight to DONE on a fresh "
+                f"database, got {result.action!r} ({result.detail}) -- this is exactly the "
+                f"defect that let `stagemesh continue` relaunch already-shipped work"
+            )
+            task = db.get(BuildTask, "SM-133-RATE-LIMIT")
+            assert task is not None and task.state == "DONE"
+    finally:
+        lifecycle.dispose()
+
+
+def test_delivered_by_reconciles_a_stale_claimable_task_not_only_ready(tmp_path, session):
+    """Regression for the exact incident this mirrors: a task that was
+    already claimed and then abandoned (its execution died, so the claim
+    was recovered to STALE -- still claimable, per `CLAIMABLE_STATES` in
+    build_coordinator/policy.py) must ALSO be reconciled to DONE once its
+    definition gains verified `delivered_by` evidence, not just a task that
+    happens to still be READY or brand new.
+
+    Before this fix, `sync_backlog` only reconciled `delivered_by` for
+    `task is None or task.state == "READY"`. A task stuck in any other
+    CLAIMABLE_STATES member (STALE, RESUMABLE, REWORK_REQUIRED) fell
+    through to the DEFERRED branch instead, so it stayed claimable forever
+    -- the scheduler would keep reclaiming and re-executing already-shipped
+    work every cycle, exactly what happened when `stagemesh continue`
+    repeatedly relaunched SM-133-RATE-LIMIT after its live execution died.
+    """
+    root = write_project(tmp_path / "repo", tasks={"A-1": {}})
+    git(root, "init", "-b", "main")
+    git(root, "add", ".")
+    git(root, "commit", "-m", "init")
+
+    project = load_project(root)
+    sync_backlog(session, project, load_backlog(project))
+    transition_task(session, "A-1", "CLAIMED", actor="worker")
+    transition_task(session, "A-1", "STALE", actor="runner")
+    assert session.get(BuildTask, "A-1").state == "STALE"
+
+    sha = git(root, "rev-parse", "HEAD")
+    assert persist_delivery_evidence_in_history(root, load_backlog(project), "A-1", sha=sha)["status"] == "COMMITTED"
+
+    report = sync_backlog(session, project, load_backlog(project))
+    result = next(r for r in report.results if r.task_id == "A-1")
+    assert result.action == "RECONCILED", (
+        f"a STALE (still-claimable) task with verified delivered_by evidence must be "
+        f"swept to DONE, not left claimable; got {result.action!r} ({result.details})"
+    )
+    assert session.get(BuildTask, "A-1").state == "DONE"
+
+    # And it must stay DONE on the next sync too -- no flapping back to claimable.
+    again = sync_backlog(session, project, load_backlog(project))
+    assert next(r for r in again.results if r.task_id == "A-1").action == "SKIPPED"
+    assert session.get(BuildTask, "A-1").state == "DONE"

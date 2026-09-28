@@ -42,3 +42,20 @@ tasks:
     notes: >
       Bootstrap implementation for GitHub issue GH-133. The Bhawna Skills
       acceptance flow remains exactly: cd <repo>; stagemesh continue.
+    # GH-133 landed across many commits ending at 09a4fff (header-evidenced
+    # capacity classification, persisted label-provisioning cooldown, and
+    # shared primary-quota gating) -- see build_coordinator/task_source/github.py
+    # and tests/test_github_rate_limit_capacity_surfaces.py. This bootstrap
+    # task was delivered outside the normal StageMesh claim/build/review
+    # lifecycle (it drove its own implementation via ad hoc dogfooding
+    # commits), so nothing ever recorded that completion here. Without this
+    # delivered_by marker, every fresh coordinator database -- including a
+    # brand-new clone or candidate checkout with no prior task history --
+    # sees an "undelivered" READY definition and `stagemesh continue`
+    # immediately claims and re-executes already-shipped work. See
+    # `verify_delivery_evidence` / `persist_delivery_evidence` in
+    # build_coordinator/project/backlog.py for how this is meant to be kept
+    # current: run that step again if SM-133-RATE-LIMIT scope is ever
+    # revised and re-delivered.
+    delivered_by:
+      sha: 09a4fff341830de23aa9630a1b4c7d272ec0de9a

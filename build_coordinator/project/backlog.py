@@ -33,7 +33,7 @@ from build_coordinator.project.definition import (
     ProjectError,
     read_yaml,
 )
-from build_coordinator.policy import normalize_review_policy
+from build_coordinator.policy import CLAIMABLE_STATES, normalize_review_policy
 from build_coordinator.runner.git_safety import resolve_git_identity_args
 from build_coordinator.service import transition_task, upsert_task
 from build_coordinator.task_source.base import SyncResult, source_identity_metadata
@@ -511,7 +511,7 @@ def sync_backlog(
                 )
             )
             continue
-        if definition.delivered_by and (task is None or task.state == "READY"):
+        if definition.delivered_by and (task is None or task.state in CLAIMABLE_STATES):
             if not dry_run:
                 if task is None:
                     upsert_task(session, definition.to_spec())
