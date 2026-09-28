@@ -76,6 +76,8 @@ def _validate_capabilities(capabilities: set[str]) -> set[str]:
 
 
 def _validate_lease_seconds(lease_seconds: float) -> float:
+    if not isinstance(lease_seconds, (int, float)):
+        raise WorkerValidationError("worker lease seconds must be numeric")
     if lease_seconds <= 0:
         raise WorkerValidationError("worker lease seconds must be positive")
     return lease_seconds

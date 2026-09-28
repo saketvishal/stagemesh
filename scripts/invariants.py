@@ -365,8 +365,10 @@ def main() -> int:
         assert_raises(WorkerValidationError, register_worker, store, "worker", "", {"code"}, identity)
         assert_raises(WorkerValidationError, register_worker, store, "worker", "codex", set(), identity)
         assert_raises(WorkerValidationError, register_worker, store, "worker", "codex", {"code", " code "}, identity)
+        assert_raises(WorkerValidationError, register_worker, store, "worker", "codex", {"code"}, identity, "soon")
         assert_raises(WorkerValidationError, register_worker, store, "worker", "codex", {"code"}, identity, 0)
         assert_raises(WorkerValidationError, heartbeat_worker, store, "", 10)
+        assert_raises(WorkerValidationError, heartbeat_worker, store, "worker", "soon")
         assert_raises(WorkerValidationError, heartbeat_worker, store, "worker", 0)
 
     def operator_dashboard_exposes_structured_state(store: Store, project: Path) -> None:
@@ -938,7 +940,9 @@ def main() -> int:
         assert_raises(RetryValidationError, retries.record_failure, "", "rate-limit")
         assert_raises(RetryValidationError, retries.record_failure, "github:2", "")
         assert_raises(RetryValidationError, retries.record_success, "")
+        assert_raises(RetryValidationError, backoff_seconds, "one")
         assert_raises(RetryValidationError, backoff_seconds, 0)
+        assert_raises(RetryValidationError, backoff_seconds, 1, "fast")
         assert_raises(RetryValidationError, backoff_seconds, 1, 0)
 
     def workspace_boundary_rejects_outside_outputs(store: Store, project: Path) -> None:
