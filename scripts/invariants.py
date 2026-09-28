@@ -20,6 +20,7 @@ from stagemesh.task_sources import DiscoveredTask, GitHubIssueSource, OutboundSy
 from stagemesh.workers import heartbeat_worker, register_worker
 from stagemesh.scheduling import Scheduler
 from stagemesh.remediation import RemediationPolicy, finding_identity
+from stagemesh.distributed import WorkQueue
 
 
 def assert_raises(exc_type, fn, *args, **kwargs) -> None:
@@ -168,6 +169,16 @@ def main() -> int:
         store.close_finding(finding_id)
         assert policy.should_remediate(store, finding_id) is False
 
+    def distributed_work_packets_are_claimed_once(store: Store, project: Path) -> None:
+        task_id = store.upsert_task("distributed")
+        queue = WorkQueue(store)
+        packet_id = queue.enqueue(task_id, "IMPLEMENT")
+        first = queue.poll("worker-a")
+        second = queue.poll("worker-b")
+        assert [packet.id for packet in first] == [packet_id]
+        assert second == []
+        queue.ack(packet_id, "SUCCEEDED", {"candidate_sha": "abc"})
+
     cases = [
         live_worker_restart,
         dead_worker_recovers,
@@ -182,6 +193,7 @@ def main() -> int:
         worker_heartbeat_and_outbound_sync,
         dependency_scheduling,
         finding_convergence_is_bounded,
+        distributed_work_packets_are_claimed_once,
     ]
     for case in cases:
         with_store(case)

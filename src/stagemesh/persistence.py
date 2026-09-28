@@ -145,6 +145,17 @@ class Store:
                 payload TEXT NOT NULL,
                 created_at REAL NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS work_packets (
+                id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL REFERENCES tasks(id),
+                stage TEXT NOT NULL,
+                worker_id TEXT,
+                candidate_sha TEXT,
+                status TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            );
             """
         )
         self.conn.execute(
@@ -487,3 +498,62 @@ class Store:
             (finding_id,),
         ).fetchone()
         return int(row["count"])
+
+    def enqueue_work(
+        self,
+        task_id: str,
+        stage: str,
+        worker_id: str | None,
+        candidate_sha: str | None,
+        payload: dict[str, Any] | None = None,
+    ) -> str:
+        packet_id = str(uuid.uuid4())
+        now = time.time()
+        self.conn.execute(
+            "INSERT INTO work_packets VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                packet_id,
+                task_id,
+                stage,
+                worker_id,
+                candidate_sha,
+                "QUEUED",
+                json.dumps(payload or {}, sort_keys=True),
+                now,
+                now,
+            ),
+        )
+        self.conn.commit()
+        return packet_id
+
+    def claim_work_packets(self, worker_id: str, limit: int = 1) -> list[sqlite3.Row]:
+        with self.conn:
+            rows = list(
+                self.conn.execute(
+                    """
+                    SELECT * FROM work_packets
+                    WHERE status='QUEUED' AND (worker_id IS NULL OR worker_id=?)
+                    ORDER BY created_at
+                    LIMIT ?
+                    """,
+                    (worker_id, limit),
+                )
+            )
+            now = time.time()
+            claimed: list[sqlite3.Row] = []
+            for row in rows:
+                self.conn.execute(
+                    "UPDATE work_packets SET status='CLAIMED', worker_id=?, updated_at=? WHERE id=? AND status='QUEUED'",
+                    (worker_id, now, row["id"]),
+                )
+                claimed_row = self.conn.execute("SELECT * FROM work_packets WHERE id=?", (row["id"],)).fetchone()
+                if claimed_row is not None:
+                    claimed.append(claimed_row)
+            return claimed
+
+    def ack_work_packet(self, packet_id: str, status: str, payload: dict[str, Any] | None = None) -> None:
+        self.conn.execute(
+            "UPDATE work_packets SET status=?, payload=?, updated_at=? WHERE id=?",
+            (status, json.dumps(payload or {}, sort_keys=True), time.time(), packet_id),
+        )
+        self.conn.commit()

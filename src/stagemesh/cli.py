@@ -10,6 +10,8 @@ from .capacity import CapacityKind, CapacityRegistry
 from .ci import broken_future_feature_gate, default_gates
 from .dashboard import render_dashboard
 from .coordinator import Coordinator
+from .distributed import WorkQueue
+from .final_report import render_final_report
 from .observability import health
 from .operator import operator_report
 from .objectives import ObjectivePlanner
@@ -166,6 +168,40 @@ def command_release(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_work(args: argparse.Namespace) -> int:
+    project = Path(args.project).resolve()
+    store = Store(db_path(project))
+    store.migrate()
+    queue = WorkQueue(store)
+    if args.work_command == "enqueue":
+        packet_id = queue.enqueue(args.task_id, args.stage, args.worker_id, args.candidate_sha)
+        print(f"packet: {packet_id}")
+    elif args.work_command == "poll":
+        for packet in queue.poll(args.worker_id, args.limit):
+            print(f"{packet.id} {packet.task_id} {packet.stage} {packet.candidate_sha or ''}")
+    elif args.work_command == "ack":
+        queue.ack(args.packet_id, args.status)
+        print(f"ack: {args.packet_id}")
+    store.close()
+    return 0
+
+
+def command_report(args: argparse.Namespace) -> int:
+    project = Path(args.project).resolve()
+    store = Store(db_path(project))
+    store.migrate()
+    report = render_final_report(project, store)
+    if args.output:
+        output = Path(args.output).resolve()
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(report, encoding="utf-8")
+        print(f"report: {output}")
+    else:
+        print(report)
+    store.close()
+    return 0
+
+
 def command_registry(args: argparse.Namespace) -> int:
     registry = GlobalRegistry(Path(args.registry).resolve())
     for project in registry.load():
@@ -234,9 +270,28 @@ def build_parser() -> argparse.ArgumentParser:
     release.add_argument("--candidate-sha", required=True)
     release.add_argument("--output", default="dist")
     release.set_defaults(func=command_release)
+    work = sub.add_parser("work")
+    work_sub = work.add_subparsers(dest="work_command", required=True)
+    enqueue = work_sub.add_parser("enqueue")
+    enqueue.add_argument("task_id")
+    enqueue.add_argument("--stage", default="IMPLEMENT")
+    enqueue.add_argument("--worker-id")
+    enqueue.add_argument("--candidate-sha")
+    enqueue.set_defaults(func=command_work)
+    poll = work_sub.add_parser("poll")
+    poll.add_argument("worker_id")
+    poll.add_argument("--limit", type=int, default=1)
+    poll.set_defaults(func=command_work)
+    ack = work_sub.add_parser("ack")
+    ack.add_argument("packet_id")
+    ack.add_argument("--status", default="SUCCEEDED")
+    ack.set_defaults(func=command_work)
     registry = sub.add_parser("registry")
     registry.add_argument("--registry", default=str(Path.home() / ".stagemesh" / "registry.json"))
     registry.set_defaults(func=command_registry)
+    report = sub.add_parser("report")
+    report.add_argument("--output")
+    report.set_defaults(func=command_report)
     ci = sub.add_parser("ci")
     ci.add_argument("--future-feature-gate", action="store_true")
     ci.add_argument("--skip-acceptance", action="store_true")
