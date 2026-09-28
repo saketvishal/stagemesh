@@ -34,7 +34,7 @@ from stagemesh.security import SecurityBoundaryError
 from stagemesh.persistence_backends import probe_backend
 from stagemesh.completion_audit import completion_audit
 from stagemesh.audit import record_audit, export_audit_jsonl
-from stagemesh.retry import RetryRegistry
+from stagemesh.retry import RetryRegistry, RetryValidationError, backoff_seconds
 from stagemesh.postgres_store import (
     POSTGRES_SCHEMA_TABLES,
     PostgresStore,
@@ -615,6 +615,11 @@ def main() -> int:
         assert retries.decision("github:1", now=101).allowed is False
         retries.record_success("github:1")
         assert retries.decision("github:1", now=101).allowed is True
+        assert_raises(RetryValidationError, retries.record_failure, "", "rate-limit")
+        assert_raises(RetryValidationError, retries.record_failure, "github:2", "")
+        assert_raises(RetryValidationError, retries.record_success, "")
+        assert_raises(RetryValidationError, backoff_seconds, 0)
+        assert_raises(RetryValidationError, backoff_seconds, 1, 0)
 
     def workspace_boundary_rejects_outside_outputs(store: Store, project: Path) -> None:
         project.mkdir(parents=True, exist_ok=True)

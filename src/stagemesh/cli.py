@@ -31,7 +31,7 @@ from .process_identity import current_process_identity
 from .registry import GlobalRegistry, ProjectRegistration, RegistryConflictError
 from .release import ReleaseValidationError, build_release_artifact
 from .release_readiness import write_release_readiness
-from .retry import RetryRegistry
+from .retry import RetryRegistry, RetryValidationError
 from .security import WorkspaceBoundary
 from .task_sources import LocalBacklogSource, TaskSourceValidationError, sync_source
 from .workers import heartbeat_worker, register_worker
@@ -588,6 +588,9 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     except ExternalEvidenceValidationError as exc:
         print(f"external evidence error: {exc}", file=sys.stderr)
+        return 2
+    except RetryValidationError as exc:
+        print(f"retry error: {exc}", file=sys.stderr)
         return 2
 
 
