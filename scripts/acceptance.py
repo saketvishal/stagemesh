@@ -980,6 +980,27 @@ def main() -> int:
             or "future-feature: PASS" not in ci
         ):
             raise AssertionError(ci)
+        ci_json = run(
+            [
+                sys.executable,
+                "-m",
+                "stagemesh.cli",
+                "--project",
+                str(ROOT),
+                "ci",
+                "--future-feature-gate",
+                "--skip-acceptance",
+                "--json",
+            ],
+            ROOT,
+            env,
+        )
+        ci_data = json.loads(ci_json)
+        if ci_data["status"] != "PASS":
+            raise AssertionError(ci_json)
+        gate_statuses = {gate["name"]: gate["passed"] for gate in ci_data["gates"]}
+        if gate_statuses.get("future-feature") is not True or gate_statuses.get("live_acceptance") is not True:
+            raise AssertionError(ci_json)
         ci_wait = run(
             [
                 sys.executable,
@@ -1029,6 +1050,7 @@ def main() -> int:
                     "ci",
                     "--future-feature-gate",
                     "--skip-acceptance",
+                    "--json",
                 ],
                 cwd=ROOT,
                 text=True,
@@ -1036,7 +1058,9 @@ def main() -> int:
                 env={**os.environ.copy(), **env},
                 check=False,
             )
-            if failed.returncode == 0 or "future-feature: FAIL" not in failed.stdout:
+            failed_ci = json.loads(failed.stdout)
+            failed_gates = {gate["name"]: gate["passed"] for gate in failed_ci["gates"]}
+            if failed.returncode == 0 or failed_ci["status"] != "FAIL" or failed_gates.get("future-feature") is not False:
                 raise AssertionError(failed.stdout + failed.stderr)
         finally:
             marker.unlink(missing_ok=True)
