@@ -115,6 +115,34 @@ def command_status(args: argparse.Namespace) -> int:
     store = Store(db_path(project))
     store.migrate()
     rows = store.tasks()
+    if args.json:
+        report = health(store)
+        print(
+            json.dumps(
+                {
+                    "ok": report.ok,
+                    "task_count": report.task_count,
+                    "running_count": report.running_count,
+                    "done_count": report.done_count,
+                    "backlog_state": report.backlog_state,
+                    "tasks": [
+                        {
+                            "id": row["id"],
+                            "stage": row["stage"],
+                            "status": row["status"],
+                            "title": row["title"],
+                            "source": row["source"],
+                            "source_id": row["source_id"],
+                        }
+                        for row in rows
+                    ],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        store.close()
+        return 0
     if not rows:
         print("backlog: EMPTY")
     for row in rows:
@@ -468,6 +496,7 @@ def build_parser() -> argparse.ArgumentParser:
     cont.add_argument("--once", action="store_true")
     cont.set_defaults(func=command_continue)
     status = sub.add_parser("status")
+    status.add_argument("--json", action="store_true")
     status.set_defaults(func=command_status)
     plan = sub.add_parser("plan")
     plan.add_argument("file")
