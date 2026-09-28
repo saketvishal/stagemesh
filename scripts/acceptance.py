@@ -144,6 +144,27 @@ def main() -> int:
         )
         if not audit_log.exists() or "audit:" not in audit_output:
             raise AssertionError(audit_output)
+        invalid_audit = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "stagemesh.cli",
+                "--project",
+                str(project),
+                "audit",
+                "--output",
+                str(audit_log),
+                "--limit",
+                "0",
+            ],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            env={**os.environ.copy(), **env},
+            check=False,
+        )
+        if invalid_audit.returncode != 2 or "audit error:" not in (invalid_audit.stdout + invalid_audit.stderr):
+            raise AssertionError(invalid_audit.stdout + invalid_audit.stderr)
         retry_output = run(
             [
                 sys.executable,

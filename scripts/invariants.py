@@ -33,7 +33,7 @@ from stagemesh.release import ReleaseValidationError, build_release_artifact, re
 from stagemesh.security import SecurityBoundaryError
 from stagemesh.persistence_backends import probe_backend
 from stagemesh.completion_audit import completion_audit
-from stagemesh.audit import record_audit, export_audit_jsonl
+from stagemesh.audit import AuditValidationError, record_audit, export_audit_jsonl
 from stagemesh.retry import RetryRegistry, RetryValidationError, backoff_seconds
 from stagemesh.postgres_store import (
     POSTGRES_SCHEMA_TABLES,
@@ -636,11 +636,21 @@ def main() -> int:
 
     def audit_events_are_redacted_and_exportable(store: Store, project: Path) -> None:
         record_audit(store, "secret.test", {"token": "abc", "safe": "ok"})
+        record_audit(store, "secret.second", {"safe": "later"})
         output = project / "audit.jsonl"
         export_audit_jsonl(store, output)
         text = output.read_text(encoding="utf-8")
         assert "***REDACTED***" in text
         assert "abc" not in text
+        limited = project / "audit-limited.jsonl"
+        export_audit_jsonl(store, limited, limit=1)
+        text = limited.read_text(encoding="utf-8")
+        lines = text.strip().splitlines()
+        assert len(lines) == 1
+        assert "secret.second" in lines[0]
+        assert_raises(AuditValidationError, record_audit, store, "", {"safe": "ok"})
+        assert_raises(AuditValidationError, export_audit_jsonl, store, output, 0)
+        assert_raises(AuditValidationError, export_audit_jsonl, store, output, 10001)
 
     def retry_backoff_is_durable_and_clearable(store: Store, project: Path) -> None:
         retries = RetryRegistry(store)
