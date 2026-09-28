@@ -29,7 +29,7 @@ from .postgres_store import PostgresStore, postgres_schema_contract
 from .provider_acceptance import run_provider_acceptance
 from .process_identity import current_process_identity
 from .registry import GlobalRegistry, ProjectRegistration, RegistryConflictError
-from .release import build_release_artifact
+from .release import ReleaseValidationError, build_release_artifact
 from .release_readiness import write_release_readiness
 from .retry import RetryRegistry
 from .security import WorkspaceBoundary
@@ -579,6 +579,9 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     except TaskSourceValidationError as exc:
         print(f"task source error: {exc}", file=sys.stderr)
+        return 2
+    except ReleaseValidationError as exc:
+        print(f"release error: {exc}", file=sys.stderr)
         return 2
 
 
