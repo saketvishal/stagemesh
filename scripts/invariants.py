@@ -230,6 +230,12 @@ def main() -> int:
             "abc",
         )
 
+    def migrations_are_idempotent(store: Store, project: Path) -> None:
+        first = store.schema_version()
+        store.migrate()
+        second = store.schema_version()
+        assert first == second == 2
+
     cases = [
         live_worker_restart,
         dead_worker_recovers,
@@ -250,6 +256,7 @@ def main() -> int:
         secrets_are_redacted,
         config_loads_from_project_file,
         release_output_stays_inside_workspace,
+        migrations_are_idempotent,
     ]
     for case in cases:
         with_store(case)

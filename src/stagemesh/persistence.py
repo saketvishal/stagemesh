@@ -8,8 +8,9 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .domain import EvidenceKind, EvidenceStatus, ExecutionKind, ExecutionStatus, Stage, TaskStatus
+from .migrations import apply_migrations, current_schema_version
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 class Store:
@@ -19,6 +20,8 @@ class Store:
         self.conn = sqlite3.connect(self.db_path)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys = ON")
+        self.conn.execute("PRAGMA journal_mode = WAL")
+        self.conn.execute("PRAGMA busy_timeout = 5000")
 
     def close(self) -> None:
         self.conn.close()
@@ -160,9 +163,13 @@ class Store:
         )
         self.conn.execute(
             "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)",
-            (SCHEMA_VERSION, time.time()),
+            (1, time.time()),
         )
+        apply_migrations(self.conn)
         self.conn.commit()
+
+    def schema_version(self) -> int:
+        return current_schema_version(self.conn)
 
     def upsert_task(self, title: str, source: str = "local", source_id: str | None = None, project: str | None = None) -> str:
         task_id = source_id or str(uuid.uuid4())
