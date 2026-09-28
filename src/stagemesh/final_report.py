@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+import json
 from pathlib import Path
 
 from . import __version__
@@ -22,6 +23,8 @@ def render_final_report(root: Path, store: Store | None = None) -> str:
     sha = candidate_sha(root)
     task_count = len(store.tasks()) if store else 0
     worker_count = len(store.workers()) if store else 0
+    acceptance = _acceptance_summary(root)
+    audit = _completion_summary(root)
     return "\n".join(
         [
             "# StageMesh vNext Final Report",
@@ -41,6 +44,8 @@ def render_final_report(root: Path, store: Store | None = None) -> str:
             "- durable Git handoff acceptance: covered by invariant suite",
             "- clean-install acceptance: `python -m pip install . --target .tmp-install --no-cache-dir --upgrade`",
             "- CI result: local `stagemesh ci --future-feature-gate` passes; hosted CI result pending external runner",
+            f"- acceptance report status: {acceptance}",
+            f"- completion audit status: {audit}",
             "- independent review result: exact-SHA review evidence and findings are modeled; live independent provider review pending provider credentials",
             f"- runtime task count: {task_count}",
             f"- registered worker count: {worker_count}",
@@ -49,3 +54,23 @@ def render_final_report(root: Path, store: Store | None = None) -> str:
             "",
         ]
     )
+
+
+def _acceptance_summary(root: Path) -> str:
+    path = root / ".stagemesh" / "acceptance-report.json"
+    if not path.exists():
+        return "not generated"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    checks = data.get("checks", [])
+    passed = sum(1 for check in checks if check.get("status") == "PASS")
+    return f"{data.get('status', 'UNKNOWN')} ({passed}/{len(checks)} checks passing)"
+
+
+def _completion_summary(root: Path) -> str:
+    path = root / ".stagemesh" / "completion-audit.json"
+    if not path.exists():
+        return "not generated"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    items = data.get("items", [])
+    proven = sum(1 for item in items if item.get("status") == "PROVEN")
+    return f"complete={data.get('complete', False)} ({proven}/{len(items)} requirements proven)"

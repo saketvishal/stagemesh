@@ -33,6 +33,7 @@ from stagemesh.completion_audit import completion_audit
 from stagemesh.audit import record_audit, export_audit_jsonl
 from stagemesh.retry import RetryRegistry
 from stagemesh.postgres_store import PostgresStore, PostgresUnavailable, postgres_available
+from stagemesh.final_report import render_final_report
 
 
 def assert_raises(exc_type, fn, *args, **kwargs) -> None:
@@ -278,6 +279,12 @@ def main() -> int:
         boundary = __import__("stagemesh.security", fromlist=["WorkspaceBoundary"]).WorkspaceBoundary(project)
         assert_raises(SecurityBoundaryError, boundary.require_inside, project.parent / "outside.txt")
 
+    def final_report_mentions_missing_evidence(store: Store, project: Path) -> None:
+        project.mkdir(parents=True, exist_ok=True)
+        report = render_final_report(project, store)
+        assert "acceptance report status: not generated" in report
+        assert "completion audit status: not generated" in report
+
     cases = [
         live_worker_restart,
         dead_worker_recovers,
@@ -304,6 +311,7 @@ def main() -> int:
         audit_events_are_redacted_and_exportable,
         retry_backoff_is_durable_and_clearable,
         workspace_boundary_rejects_outside_outputs,
+        final_report_mentions_missing_evidence,
     ]
     for case in cases:
         with_store(case)

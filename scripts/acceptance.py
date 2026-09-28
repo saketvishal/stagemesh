@@ -275,6 +275,14 @@ def main() -> int:
         )
         if not completion_audit.exists() or "completion-audit:" not in audit_output:
             raise AssertionError(audit_output)
+        repo_report = ROOT / ".stagemesh" / "final-report.md"
+        repo_report_output = run(
+            [sys.executable, "-m", "stagemesh.cli", "--project", str(ROOT), "report", "--output", str(repo_report)],
+            ROOT,
+            env,
+        )
+        if not repo_report.exists() or "acceptance report status: PASS" not in repo_report.read_text(encoding="utf-8"):
+            raise AssertionError(repo_report_output)
         capacity = run(
             [
                 sys.executable,
