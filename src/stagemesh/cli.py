@@ -16,6 +16,7 @@ from .dashboard import render_dashboard
 from .coordinator import Coordinator
 from .distributed import WorkQueue
 from .final_report import render_final_report
+from .github_acceptance import run_github_acceptance
 from .observability import health
 from .operator import operator_report
 from .objectives import ObjectivePlanner
@@ -281,6 +282,20 @@ def command_provider_acceptance(args: argparse.Namespace) -> int:
     return 0 if result.status == "PASS" else 1
 
 
+def command_github_acceptance(args: argparse.Namespace) -> int:
+    project = Path(args.project).resolve()
+    store = Store(db_path(project))
+    store.migrate()
+    result = run_github_acceptance(store)
+    print(f"status: {result.status}")
+    print(f"discovered: {result.discovered}")
+    print(f"deferred_skipped: {result.deferred_skipped}")
+    print(f"outbound_status: {result.outbound_status}")
+    print(f"rate_limit_status: {result.rate_limit_status}")
+    store.close()
+    return 0 if result.status == "PASS" else 1
+
+
 def command_completion_audit(args: argparse.Namespace) -> int:
     project = Path(args.project).resolve()
     output = WorkspaceBoundary(project).require_inside(Path(args.output).resolve())
@@ -371,6 +386,8 @@ def build_parser() -> argparse.ArgumentParser:
     backend.set_defaults(func=command_backend)
     provider_acceptance = sub.add_parser("provider-acceptance")
     provider_acceptance.set_defaults(func=command_provider_acceptance)
+    github_acceptance = sub.add_parser("github-acceptance")
+    github_acceptance.set_defaults(func=command_github_acceptance)
     worker = sub.add_parser("worker")
     worker.add_argument("worker_id")
     worker.add_argument("--provider", default="local")

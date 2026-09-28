@@ -142,6 +142,13 @@ def main() -> int:
         )
         if "status: PASS" not in provider_acceptance or "chosen_provider: secondary" not in provider_acceptance:
             raise AssertionError(provider_acceptance)
+        github_acceptance = run(
+            [sys.executable, "-m", "stagemesh.cli", "--project", str(project), "github-acceptance"],
+            ROOT,
+            env,
+        )
+        if "status: PASS" not in github_acceptance or "rate_limit_status: UNKNOWN" not in github_acceptance:
+            raise AssertionError(github_acceptance)
         health = run([sys.executable, "-m", "stagemesh.cli", "--project", str(project), "health"], ROOT, env)
         if "ok: True" not in health or "done: 2" not in health:
             raise AssertionError(health)
