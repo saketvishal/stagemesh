@@ -395,6 +395,19 @@ def main() -> int:
         assert row["status"] == "FAILED"
         assert_raises(WorkQueueError, queue.ack, unclaimed, "SUCCEEDED")
 
+    def distributed_work_rejects_invalid_queue_inputs(store: Store, project: Path) -> None:
+        task_id = store.upsert_task("distributed validation")
+        queue = WorkQueue(store)
+        assert_raises(WorkQueueError, queue.enqueue, "", "VALIDATE")
+        assert_raises(WorkQueueError, queue.enqueue, task_id, "BOGUS")
+        assert_raises(WorkQueueError, queue.enqueue, task_id, "VALIDATE", "")
+        assert_raises(WorkQueueError, queue.poll, "")
+        assert_raises(WorkQueueError, queue.poll, "worker", 0)
+        assert_raises(WorkQueueError, queue.poll, "worker", 101)
+        assert_raises(WorkQueueError, queue.poll, "worker", 1, 0)
+        assert_raises(WorkQueueError, queue.renew, "", "worker")
+        assert_raises(WorkQueueError, queue.renew, "packet", "")
+
     def distributed_work_packets_have_renewable_leases(store: Store, project: Path) -> None:
         task_id = store.upsert_task("leased distributed")
         queue = WorkQueue(store)
@@ -798,6 +811,7 @@ def main() -> int:
         finding_convergence_is_bounded,
         distributed_work_packets_are_claimed_once,
         distributed_work_ack_requires_claimed_terminal_status,
+        distributed_work_rejects_invalid_queue_inputs,
         distributed_work_packets_have_renewable_leases,
         ci_wait_releases_worker_capacity_while_pending,
         capacity_registry_rejects_invalid_provider_state,

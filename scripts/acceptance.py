@@ -485,6 +485,27 @@ def main() -> int:
         )
         if packet_id not in poll_output:
             raise AssertionError(poll_output)
+        invalid_poll = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "stagemesh.cli",
+                "--project",
+                str(project),
+                "work",
+                "poll",
+                "worker-2",
+                "--limit",
+                "0",
+            ],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            env={**os.environ.copy(), **env},
+            check=False,
+        )
+        if invalid_poll.returncode != 2 or "work queue error:" not in (invalid_poll.stdout + invalid_poll.stderr):
+            raise AssertionError(invalid_poll.stdout + invalid_poll.stderr)
         renew_output = run(
             [sys.executable, "-m", "stagemesh.cli", "--project", str(project), "work", "renew", packet_id, "worker-2"],
             ROOT,
