@@ -48,6 +48,7 @@ from sqlalchemy import delete, select
 
 from build_coordinator.db import Base, SessionLocal, engine, initialize_schema
 from build_coordinator.execution import FakeExecutor
+from build_coordinator.execution.process_tree import _process_exists, kill_process_tree
 from build_coordinator.models import (
     BuildCoordinatorState,
     BuildRunnerExecution,
@@ -118,13 +119,18 @@ def _sleep_command(seconds: float) -> list[str]:
 
 
 def _wait_alive(pid: int, expected: bool, timeout: float = 2.0) -> bool:
+    # Portable liveness check: reuses the project's own durable
+    # process-existence probe (process_tree._process_exists), which is
+    # correct on both POSIX and Windows and already distinguishes a
+    # genuinely-exited process from a reused pid slot -- `kill -0` is a
+    # POSIX-only shell command and does not exist on Windows.
     deadline = time.time() + timeout
     while time.time() < deadline:
-        alive = subprocess.run(["kill", "-0", str(pid)]).returncode == 0
+        alive = _process_exists(pid)
         if alive == expected:
             return alive
         time.sleep(0.02)
-    return subprocess.run(["kill", "-0", str(pid)]).returncode == 0
+    return _process_exists(pid)
 
 
 def _seed_claimed_builder_with_real_process(
@@ -209,7 +215,7 @@ def test_expired_claim_with_confirmed_alive_process_preserves_row_and_task_state
 
         assert _wait_alive(proc.pid, True)  # not killed by recovery itself
     finally:
-        subprocess.run(["kill", "-9", str(proc.pid)])
+        kill_process_tree(proc.pid)
 
 
 def test_missing_identity_capture_at_launch_still_preserves_live_worker_through_lease_recovery():
@@ -265,7 +271,7 @@ def test_missing_identity_capture_at_launch_still_preserves_live_worker_through_
         # release, no state change to claimable, no replacement dispatch.
         assert "CEP-2" in result.recovered
     finally:
-        subprocess.run(["kill", "-9", str(proc.pid)])
+        kill_process_tree(proc.pid)
 
 
 def test_confirmed_dead_process_still_recovers_normally_and_allows_redispatch():
@@ -346,7 +352,7 @@ def test_reconcile_stale_executions_preserves_confirmed_alive_claimless_row():
 
         assert _wait_alive(proc.pid, True)  # not killed by reconciliation
     finally:
-        subprocess.run(["kill", "-9", str(proc.pid)])
+        kill_process_tree(proc.pid)
 
 
 def test_request_task_input_preserves_confirmed_alive_execution_under_same_claim():
@@ -381,5 +387,5 @@ def test_request_task_input_preserves_confirmed_alive_execution_under_same_claim
 
         assert _wait_alive(proc.pid, True)  # not killed by the transition
     finally:
-        subprocess.run(["kill", "-9", str(proc.pid)])
+        kill_process_tree(proc.pid)
 

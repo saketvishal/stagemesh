@@ -27,7 +27,9 @@ import pytest
 from build_coordinator.execution.base import ExecutionLaunch
 from build_coordinator.execution.subprocess_executor import SubprocessExecutor
 from build_coordinator.execution.process_tree import (
+    _process_exists,
     capture_process_identity,
+    kill_process_tree,
     process_identity_status,
 )
 
@@ -51,13 +53,18 @@ def _sleep_command(seconds: float) -> list[str]:
 
 
 def _wait_alive(pid: int, expected: bool, timeout: float = 2.0) -> bool:
+    # Portable liveness check: reuses the project's own durable
+    # process-existence probe (process_tree._process_exists), which is
+    # correct on both POSIX and Windows and already distinguishes a
+    # genuinely-exited process from a reused pid slot -- `kill -0` is a
+    # POSIX-only shell command and does not exist on Windows.
     deadline = time.time() + timeout
     while time.time() < deadline:
-        alive = subprocess.run(["kill", "-0", str(pid)]).returncode == 0
+        alive = _process_exists(pid)
         if alive == expected:
             return alive
         time.sleep(0.02)
-    return subprocess.run(["kill", "-0", str(pid)]).returncode == 0
+    return _process_exists(pid)
 
 
 def _spawn_and_wait_dead() -> int:
@@ -87,7 +94,7 @@ def test_restart_while_worker_alive_reports_running_not_lost(tmp_path: Path):
     assert observation.result_data["reconciliation_state"] in ("MATCH", "ALIVE_UNVERIFIED")
     assert _wait_alive(int(handle.process_id), True)  # not killed by the reconciliation itself
 
-    subprocess.run(["kill", "-9", handle.process_id])
+    kill_process_tree(int(handle.process_id))
 
 
 def test_restart_with_valid_result_already_written_is_consumed_normally(tmp_path: Path):
@@ -116,7 +123,14 @@ def test_restart_with_dead_worker_and_no_result_is_lost(tmp_path: Path):
     """The original terminal/lost handling is unchanged for a genuinely dead worker."""
     original = SubprocessExecutor([sys.executable, "-c", "pass"], log_dir=tmp_path / "logs")
     handle = original.launch(_launch(tmp_path, execution_id="exec-3"))
-    assert _wait_alive(int(handle.process_id), False)
+    # Regression note: with the portable liveness probe, a just-exited
+    # child is correctly reported dead (a zombie is not "alive") as soon as
+    # it exits, unlike the old `kill -0` check which reported zombies as
+    # alive until reaped. `_wait_alive` returns the *observed* liveness, so
+    # confirming death must check for `is False`, matching the established
+    # pattern used elsewhere in this suite (see test_claim_expiry_preserves_live_worker.py
+    # and test_validation_claim_recovery.py).
+    assert _wait_alive(int(handle.process_id), False) is False
 
     reattached = SubprocessExecutor([sys.executable], log_dir=tmp_path / "logs")
     reattached.remember_result_path("exec-3", str(tmp_path / "exec-3.json"))
@@ -144,7 +158,7 @@ def test_pid_reuse_is_not_mistaken_for_the_original_process(tmp_path: Path):
     observation = reattached.poll("exec-4")
     assert observation.status == "LOST"
 
-    subprocess.run(["kill", "-9", str(real_pid)])
+    kill_process_tree(real_pid)
 
 
 def test_no_durable_identity_falls_back_to_legacy_behavior(tmp_path: Path):

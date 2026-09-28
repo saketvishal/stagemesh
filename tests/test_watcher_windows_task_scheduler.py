@@ -26,6 +26,27 @@ def test_stable_task_name_never_embeds_secrets_or_branch_names():
     assert "token" not in name.lower()
 
 
+def test_stable_task_name_normalizes_trailing_slash_and_backslash_and_case():
+    # Regression for the f-string-with-backslash syntax error: normalization
+    # must still strip trailing '/' and '\\' and lowercase both inputs so
+    # equivalent paths on POSIX and Windows-style separators hash the same.
+    canonical = stable_task_name("C:/stagemesh-orchestrator", "saketvishal/stagemesh-orchestrator")
+
+    trailing_forward_slash = stable_task_name("C:/stagemesh-orchestrator/", "saketvishal/stagemesh-orchestrator")
+    trailing_backslash = stable_task_name("C:/stagemesh-orchestrator\\", "saketvishal/stagemesh-orchestrator")
+    mixed_case = stable_task_name("C:/STAGEMESH-ORCHESTRATOR", "SAKETVISHAL/Stagemesh-Orchestrator")
+    padded_whitespace = stable_task_name("  C:/stagemesh-orchestrator  ", "  saketvishal/stagemesh-orchestrator  ")
+
+    assert trailing_forward_slash == canonical
+    assert trailing_backslash == canonical
+    assert mixed_case == canonical
+    assert padded_whitespace == canonical
+
+    # A genuinely different root must still hash differently.
+    different = stable_task_name("C:/stagemesh-orchestrator-other", "saketvishal/stagemesh-orchestrator")
+    assert different != canonical
+
+
 def test_task_definition_command_has_no_secrets_in_arguments():
     definition = TaskDefinition(
         task_name="BuildCoordinator-abc123",
