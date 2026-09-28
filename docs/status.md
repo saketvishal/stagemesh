@@ -16,7 +16,7 @@
 - Structured objective planner validation, including duplicate task and unknown dependency rejection.
 - Built-in validation, independent review, and integration evidence.
 - Recovery behavior that preserves uncertain process identity and does not treat PID alone as proof of liveness or death.
-- CLI for init, doctor, planning, continue, status, health, capacity, and CI gates.
+- CLI for init, doctor, planning, continue, plain/JSON status, health, capacity, and CI gates.
 - Security boundary helper for workspace path checks.
 - Worker registry and heartbeat records for durable worker visibility.
 - Global multi-project registry file.

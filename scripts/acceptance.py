@@ -131,6 +131,16 @@ def main() -> int:
             raise AssertionError(status)
         if "future work" in status:
             raise AssertionError("deferred task was dispatched")
+        status_json = run(
+            [sys.executable, "-m", "stagemesh.cli", "--project", str(project), "status", "--json"],
+            ROOT,
+            env,
+        )
+        status_data = json.loads(status_json)
+        if status_data["done_count"] != 2 or status_data["backlog_state"] != "ACTIVE":
+            raise AssertionError(status_json)
+        if {task["title"] for task in status_data["tasks"]} != {"first task", "dependent task"}:
+            raise AssertionError(status_json)
         adapter_tasks = project / "adapter-tasks.json"
         adapter_tasks.write_text(
             '{"tasks":[{"id":"adapter-1","title":"configured adapter task"}]}',
