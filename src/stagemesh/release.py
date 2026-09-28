@@ -59,7 +59,7 @@ def release_files(root: Path) -> list[Path]:
     return sorted(
         path
         for path in root.rglob("*")
-        if path.is_file() and release_path_allowed(path.relative_to(root))
+        if release_file_allowed(root, path)
     )
 
 
@@ -77,14 +77,31 @@ def git_tracked_files(root: Path) -> list[Path]:
         if not raw:
             continue
         relative = Path(raw.decode("utf-8"))
-        if release_path_allowed(relative):
-            files.append(root / relative)
+        candidate = root / relative
+        if release_file_allowed(root, candidate):
+            files.append(candidate)
     return files
 
 
 def release_path_allowed(relative: Path) -> bool:
     blocked = {".git", ".stagemesh", ".tmp-install", "__pycache__", "dist", "build"}
     return not any(part in blocked or part.endswith(".egg-info") for part in relative.parts)
+
+
+def release_file_allowed(root: Path, path: Path) -> bool:
+    try:
+        relative = path.relative_to(root)
+    except ValueError:
+        return False
+    if not release_path_allowed(relative):
+        return False
+    if path.is_symlink() or not path.is_file():
+        return False
+    try:
+        path.resolve().relative_to(root)
+    except ValueError:
+        return False
+    return True
 
 
 def sha256_file(path: Path) -> str:
