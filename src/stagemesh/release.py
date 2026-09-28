@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import subprocess
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,15 +22,14 @@ def build_release_artifact(root: Path, output_dir: Path, version: str, candidate
     output_dir.mkdir(parents=True, exist_ok=True)
     manifest = output_dir / "stagemesh-release-manifest.json"
     archive = output_dir / f"stagemesh-{version}-{candidate_sha[:8]}.zip"
-    files = [
-        path
-        for path in root.rglob("*")
-        if path.is_file()
-        and ".git" not in path.parts
-        and ".stagemesh" not in path.parts
-        and ".tmp-install" not in path.parts
-        and "__pycache__" not in path.parts
-        and "dist" not in path.parts
+    files = release_files(root)
+    file_entries = [
+        {
+            "path": path.relative_to(root).as_posix(),
+            "sha256": sha256_file(path),
+            "size": path.stat().st_size,
+        }
+        for path in files
     ]
     manifest.write_text(
         json.dumps(
@@ -37,6 +38,7 @@ def build_release_artifact(root: Path, output_dir: Path, version: str, candidate
                 "version": version,
                 "candidate_sha": candidate_sha,
                 "file_count": len(files),
+                "files": file_entries,
             },
             indent=2,
             sort_keys=True,
@@ -46,5 +48,48 @@ def build_release_artifact(root: Path, output_dir: Path, version: str, candidate
     with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zf:
         for path in files:
             zf.write(path, path.relative_to(root).as_posix())
-        zf.write(manifest, manifest.relative_to(root).as_posix() if manifest.is_relative_to(root) else manifest.name)
+        zf.write(manifest, manifest.name)
     return ReleaseArtifact(archive=archive, manifest=manifest)
+
+
+def release_files(root: Path) -> list[Path]:
+    tracked = git_tracked_files(root)
+    if tracked:
+        return sorted(tracked)
+    return sorted(
+        path
+        for path in root.rglob("*")
+        if path.is_file() and release_path_allowed(path.relative_to(root))
+    )
+
+
+def git_tracked_files(root: Path) -> list[Path]:
+    result = subprocess.run(
+        ["git", "-c", f"safe.directory={root.as_posix()}", "ls-files", "-z"],
+        cwd=root,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return []
+    files: list[Path] = []
+    for raw in result.stdout.split(b"\0"):
+        if not raw:
+            continue
+        relative = Path(raw.decode("utf-8"))
+        if release_path_allowed(relative):
+            files.append(root / relative)
+    return files
+
+
+def release_path_allowed(relative: Path) -> bool:
+    blocked = {".git", ".stagemesh", ".tmp-install", "__pycache__", "dist", "build"}
+    return not any(part in blocked or part.endswith(".egg-info") for part in relative.parts)
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()

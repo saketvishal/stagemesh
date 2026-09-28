@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import zipfile
 from pathlib import Path
 
 
@@ -239,6 +240,19 @@ def main() -> int:
         )
         if "archive:" not in release_output or not (release_dir / "stagemesh-release-manifest.json").exists():
             raise AssertionError(release_output)
+        release_manifest = json.loads((release_dir / "stagemesh-release-manifest.json").read_text(encoding="utf-8"))
+        release_paths = {entry["path"] for entry in release_manifest["files"]}
+        if "pyproject.toml" not in release_paths or "scripts/clean_acceptance.py" not in release_paths:
+            raise AssertionError(release_manifest)
+        if any(".stagemesh" in Path(path).parts or ".tmp-install" in Path(path).parts for path in release_paths):
+            raise AssertionError(release_manifest)
+        archives = sorted(release_dir.glob("stagemesh-*.zip"))
+        if not archives:
+            raise AssertionError(release_output)
+        with zipfile.ZipFile(archives[-1]) as archive:
+            archive_names = set(archive.namelist())
+        if "stagemesh-release-manifest.json" not in archive_names or "pyproject.toml" not in archive_names:
+            raise AssertionError(archive_names)
         packet_output = run(
             [
                 sys.executable,
