@@ -25,6 +25,7 @@ from .process_identity import current_process_identity
 from .registry import GlobalRegistry, ProjectRegistration
 from .release import build_release_artifact
 from .retry import RetryRegistry
+from .security import WorkspaceBoundary
 from .task_sources import LocalBacklogSource, sync_source
 from .workers import heartbeat_worker, register_worker
 
@@ -164,7 +165,7 @@ def command_dashboard(args: argparse.Namespace) -> int:
     project = Path(args.project).resolve()
     store = Store(db_path(project))
     store.migrate()
-    output = Path(args.output).resolve()
+    output = WorkspaceBoundary(project).require_inside(Path(args.output).resolve())
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(render_dashboard(store), encoding="utf-8")
     store.close()
@@ -204,7 +205,7 @@ def command_report(args: argparse.Namespace) -> int:
     store.migrate()
     report = render_final_report(project, store)
     if args.output:
-        output = Path(args.output).resolve()
+        output = WorkspaceBoundary(project).require_inside(Path(args.output).resolve())
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(report, encoding="utf-8")
         print(f"report: {output}")
@@ -216,7 +217,7 @@ def command_report(args: argparse.Namespace) -> int:
 
 def command_acceptance_report(args: argparse.Namespace) -> int:
     project = Path(args.project).resolve()
-    output = Path(args.output).resolve()
+    output = WorkspaceBoundary(project).require_inside(Path(args.output).resolve())
     write_acceptance_report(project, output, include_acceptance=not args.skip_acceptance)
     print(f"acceptance-report: {output}")
     return 0
@@ -251,7 +252,8 @@ def command_config(args: argparse.Namespace) -> int:
 
 
 def command_completion_audit(args: argparse.Namespace) -> int:
-    output = Path(args.output).resolve()
+    project = Path(args.project).resolve()
+    output = WorkspaceBoundary(project).require_inside(Path(args.output).resolve())
     write_completion_audit(output)
     print(f"completion-audit: {output}")
     return 0
@@ -262,7 +264,7 @@ def command_audit(args: argparse.Namespace) -> int:
     store = Store(db_path(project))
     store.migrate()
     if args.output:
-        output = Path(args.output).resolve()
+        output = WorkspaceBoundary(project).require_inside(Path(args.output).resolve())
         export_audit_jsonl(store, output, args.limit)
         print(f"audit: {output}")
     else:
