@@ -16,7 +16,8 @@ from stagemesh.lifecycle import LifecycleError, evidence_allows_advance
 from stagemesh.persistence import Store
 from stagemesh.process_identity import classify_process
 from stagemesh.review import Reviewer
-from stagemesh.task_sources import DiscoveredTask, GitHubIssueSource, sync_source
+from stagemesh.task_sources import DiscoveredTask, GitHubIssueSource, OutboundSync, sync_source
+from stagemesh.workers import heartbeat_worker, register_worker
 
 
 def assert_raises(exc_type, fn, *args, **kwargs) -> None:
@@ -128,6 +129,20 @@ def main() -> int:
         assert tasks == []
         assert status == "UNKNOWN"
 
+    def worker_heartbeat_and_outbound_sync(store: Store, project: Path) -> None:
+        register_worker(
+            store,
+            "worker-1",
+            "codex",
+            {"code"},
+            ProcessIdentity(pid=1, create_time=2.0, boot_id="boot", executable="codex"),
+            lease_seconds=1,
+        )
+        heartbeat_worker(store, "worker-1", lease_seconds=10)
+        assert store.workers()[0]["provider"] == "codex"
+        OutboundSync(store).publish("github", "1", "DONE", {"sha": "abc"})
+        assert store.source_events()[0]["direction"] == "outbound"
+
     cases = [
         live_worker_restart,
         dead_worker_recovers,
@@ -139,6 +154,7 @@ def main() -> int:
         durable_handoff,
         targeted_ops,
         source_semantics,
+        worker_heartbeat_and_outbound_sync,
     ]
     for case in cases:
         with_store(case)
