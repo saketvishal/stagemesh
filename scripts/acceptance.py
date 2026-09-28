@@ -169,6 +169,27 @@ def main() -> int:
         )
         if "github:acceptance" not in retry_list:
             raise AssertionError(retry_list)
+        invalid_retry = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "stagemesh.cli",
+                "--project",
+                str(project),
+                "retries",
+                "fail",
+                "github:invalid",
+                "--reason",
+                "",
+            ],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            env={**os.environ.copy(), **env},
+            check=False,
+        )
+        if invalid_retry.returncode != 2 or "retry error:" not in (invalid_retry.stdout + invalid_retry.stderr):
+            raise AssertionError(invalid_retry.stdout + invalid_retry.stderr)
         evidence_add = run(
             [
                 sys.executable,
