@@ -45,6 +45,7 @@
 - Optional psycopg-backed PostgreSQL store facade with explicit backend probe and ping command.
 - Final report now summarizes machine-readable acceptance and completion-audit artifacts when present.
 - Deterministic provider dry-run acceptance proves capacity-aware failover and failure isolation without external credentials.
+- Deterministic GitHub dry-run acceptance proves discovery, deferred labels, outbound sync, and rate-limit classification without external credentials.
 - GitHub Actions CI for Windows and Linux.
 - Stdlib invariant and acceptance runners for dependency-free verification.
 

@@ -16,6 +16,7 @@ jobs:
       - run: python -m compileall -q src scripts build_backend.py
       - run: python scripts/invariants.py
       - run: python scripts/provider_acceptance.py
+      - run: python scripts/github_acceptance.py
       - run: python scripts/acceptance.py
       - run: python scripts/live_acceptance.py
 
@@ -30,5 +31,6 @@ jobs:
       - run: python -m compileall -q src scripts build_backend.py
       - run: python scripts/invariants.py
       - run: python scripts/provider_acceptance.py
+      - run: python scripts/github_acceptance.py
       - run: python scripts/acceptance.py
       - run: python scripts/live_acceptance.py
