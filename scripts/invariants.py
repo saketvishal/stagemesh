@@ -47,7 +47,7 @@ from stagemesh.final_report import render_final_report
 from stagemesh.provider_acceptance import run_provider_acceptance
 from stagemesh.github_acceptance import run_github_acceptance
 from stagemesh.release_readiness import release_readiness
-from stagemesh.external_evidence import record_external_evidence, external_evidence_records
+from stagemesh.external_evidence import ExternalEvidenceValidationError, record_external_evidence, external_evidence_records
 from stagemesh.acceptance_matrix import acceptance_matrix
 from stagemesh.routing import Provider, Router, RoutingMode
 from stagemesh.github import parse_github_remote
@@ -268,7 +268,7 @@ def main() -> int:
         )
         OutboundSync(store).publish("github", "42", "UNKNOWN", {"task_id": task_id})
         RetryRegistry(store).record_failure("github:42", "rate-limit", now=100)
-        record_external_evidence(store, "hosted-ci", "PASS", "https://example.invalid/ci", "abc")
+        record_external_evidence(store, "hosted-ci", "PASS", "https://example.invalid/ci", "abc1234")
         report = operator_report(store)
         assert "retry_states=1" in report.lines
         assert "external_evidence=1" in report.lines
@@ -653,15 +653,28 @@ def main() -> int:
         evidence_id = record_external_evidence(
             store,
             "hosted-ci",
-            "PASS",
+            "pass",
             "https://example.invalid/run/1",
-            candidate_sha="abc",
+            candidate_sha="ABC1234",
             notes="synthetic",
         )
         records = external_evidence_records(store)
         assert records[0].id == evidence_id
         assert records[0].kind == "hosted-ci"
-        assert records[0].candidate_sha == "abc"
+        assert records[0].status == "PASS"
+        assert records[0].candidate_sha == "abc1234"
+        assert_raises(ExternalEvidenceValidationError, record_external_evidence, store, "unknown", "PASS", "https://example.invalid")
+        assert_raises(ExternalEvidenceValidationError, record_external_evidence, store, "hosted-ci", "MAYBE", "https://example.invalid")
+        assert_raises(ExternalEvidenceValidationError, record_external_evidence, store, "hosted-ci", "PASS", "file:///tmp/proof")
+        assert_raises(
+            ExternalEvidenceValidationError,
+            record_external_evidence,
+            store,
+            "hosted-ci",
+            "PASS",
+            "https://example.invalid",
+            "not-a-sha",
+        )
 
     def acceptance_matrix_has_external_gaps(store: Store, project: Path) -> None:
         matrix = acceptance_matrix()
@@ -671,7 +684,7 @@ def main() -> int:
         assert any(row["status"] != "PROVEN" for row in rows)
 
     def external_evidence_updates_audit_rows(store: Store, project: Path) -> None:
-        record_external_evidence(store, "hosted-ci", "PASS", "https://example.invalid/linux", "abc")
+        record_external_evidence(store, "hosted-ci", "PASS", "https://example.invalid/linux", "abc1234")
         audit = completion_audit(store)
         linux = [item for item in audit["items"] if item["requirement"] == "Linux acceptance"][0]
         assert linux["status"] == "PROVEN"

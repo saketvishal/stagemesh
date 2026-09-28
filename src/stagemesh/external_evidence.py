@@ -1,8 +1,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from urllib.parse import urlparse
 
 from .persistence import Store
+from .release import ReleaseValidationError, validate_candidate_sha
+
+
+class ExternalEvidenceValidationError(ValueError):
+    pass
+
+
+EXTERNAL_EVIDENCE_KINDS = {"hosted-ci", "live-github", "live-provider", "postgres"}
+EXTERNAL_EVIDENCE_STATUSES = {"PASS", "FAIL"}
 
 
 @dataclass(frozen=True)
@@ -23,7 +33,14 @@ def record_external_evidence(
     candidate_sha: str | None = None,
     notes: str = "",
 ) -> str:
-    return store.add_external_evidence(kind, status, url, candidate_sha, notes)
+    normalized_kind = _validate_kind(kind)
+    normalized_status = _validate_status(status)
+    normalized_url = _validate_url(url)
+    try:
+        normalized_sha = validate_candidate_sha(candidate_sha) if candidate_sha else None
+    except ReleaseValidationError as exc:
+        raise ExternalEvidenceValidationError(str(exc)) from exc
+    return store.add_external_evidence(normalized_kind, normalized_status, normalized_url, normalized_sha, notes)
 
 
 def external_evidence_records(store: Store) -> list[ExternalEvidenceRecord]:
@@ -38,3 +55,23 @@ def external_evidence_records(store: Store) -> list[ExternalEvidenceRecord]:
         )
         for row in store.external_evidence()
     ]
+
+
+def _validate_kind(kind: str) -> str:
+    if kind not in EXTERNAL_EVIDENCE_KINDS:
+        raise ExternalEvidenceValidationError(f"external evidence kind must be one of: {', '.join(sorted(EXTERNAL_EVIDENCE_KINDS))}")
+    return kind
+
+
+def _validate_status(status: str) -> str:
+    normalized = status.upper() if isinstance(status, str) else ""
+    if normalized not in EXTERNAL_EVIDENCE_STATUSES:
+        raise ExternalEvidenceValidationError(f"external evidence status must be one of: {', '.join(sorted(EXTERNAL_EVIDENCE_STATUSES))}")
+    return normalized
+
+
+def _validate_url(url: str) -> str:
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ExternalEvidenceValidationError("external evidence url must be an absolute http(s) URL")
+    return url
