@@ -539,6 +539,30 @@ def main() -> int:
         assert_raises(RegistryValidationError, GlobalRegistry(malformed).load)
         malformed.write_text('{"projects":[{"name":"","path":"x","db_path":"db"}]}', encoding="utf-8")
         assert_raises(RegistryValidationError, GlobalRegistry(malformed).load)
+        malformed.write_text(
+            json.dumps(
+                {
+                    "projects": [
+                        {"name": "dup", "path": str(first), "db_path": str(first / ".stagemesh" / "db.sqlite3")},
+                        {"name": "dup", "path": str(second), "db_path": str(second / ".stagemesh" / "db.sqlite3")},
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        assert_raises(RegistryValidationError, GlobalRegistry(malformed).load)
+        malformed.write_text(
+            json.dumps(
+                {
+                    "projects": [
+                        {"name": "first", "path": str(first), "db_path": str(first / ".stagemesh" / "db.sqlite3")},
+                        {"name": "second", "path": str(first), "db_path": str(first / ".stagemesh" / "other.sqlite3")},
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        assert_raises(RegistryValidationError, GlobalRegistry(malformed).load)
         assert_raises(RegistryValidationError, registry.register, ProjectRegistration("", first, first / ".stagemesh" / "db.sqlite3"))
 
     def finding_convergence_is_bounded(store: Store, project: Path) -> None:
