@@ -303,7 +303,7 @@ def main() -> int:
         assert result.rate_limit_status == "UNKNOWN"
 
     def release_readiness_reports_external_gaps(store: Store, project: Path) -> None:
-        data = release_readiness(ROOT, include_acceptance=False, run_checks=False)
+        data = release_readiness(ROOT, include_acceptance=False, run_checks=False, store=store)
         assert data["overall_status"] in {"BLOCKED_ON_EXTERNAL_EVIDENCE", "FAIL"}
         assert "external_gaps" in data
 
@@ -336,6 +336,9 @@ def main() -> int:
         matrix = acceptance_matrix(store)
         linux_row = [row for row in matrix["rows"] if row["area"] == "Linux acceptance"][0]
         assert linux_row["status"] == "PROVEN"
+        readiness = release_readiness(ROOT, include_acceptance=False, run_checks=False, store=store)
+        gaps = {item["requirement"] for item in readiness["external_gaps"]}
+        assert "Linux acceptance" not in gaps
 
     cases = [
         live_worker_restart,

@@ -313,12 +313,18 @@ def command_github_acceptance(args: argparse.Namespace) -> int:
 def command_release_readiness(args: argparse.Namespace) -> int:
     project = Path(args.project).resolve()
     output = WorkspaceBoundary(project).require_inside(Path(args.output).resolve())
-    write_release_readiness(
-        project,
-        output,
-        include_acceptance=not args.skip_acceptance,
-        run_checks=not args.skip_checks,
-    )
+    store = Store(db_path(project))
+    store.migrate()
+    try:
+        write_release_readiness(
+            project,
+            output,
+            include_acceptance=not args.skip_acceptance,
+            run_checks=not args.skip_checks,
+            store=store,
+        )
+    finally:
+        store.close()
     print(f"release-readiness: {output}")
     return 0
 

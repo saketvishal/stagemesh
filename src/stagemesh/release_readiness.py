@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .completion_audit import completion_audit
+from .persistence import Store
 
 
 @dataclass(frozen=True)
@@ -25,7 +26,7 @@ def run_command_check(name: str, command: list[str], root: Path) -> ReadinessChe
 
 
 def release_readiness(
-    root: Path, include_acceptance: bool = True, run_checks: bool = True
+    root: Path, include_acceptance: bool = True, run_checks: bool = True, store: Store | None = None
 ) -> dict[str, object]:
     checks: list[ReadinessCheck] = []
     if run_checks:
@@ -43,7 +44,7 @@ def release_readiness(
         ]
         if include_acceptance:
             checks.insert(4, run_command_check("acceptance", [sys.executable, "scripts/acceptance.py"], root))
-    audit = completion_audit()
+    audit = completion_audit(store)
     external_gaps = [
         item for item in audit["items"]
         if item["status"] in {"REQUIRES_CREDENTIALS", "MISSING_EXTERNAL_EVIDENCE", "INTERFACE_READY"}
@@ -59,10 +60,14 @@ def release_readiness(
 
 
 def write_release_readiness(
-    root: Path, output: Path, include_acceptance: bool = True, run_checks: bool = True
+    root: Path,
+    output: Path,
+    include_acceptance: bool = True,
+    run_checks: bool = True,
+    store: Store | None = None,
 ) -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(
-        json.dumps(release_readiness(root, include_acceptance, run_checks), indent=2, sort_keys=True),
+        json.dumps(release_readiness(root, include_acceptance, run_checks, store), indent=2, sort_keys=True),
         encoding="utf-8",
     )
