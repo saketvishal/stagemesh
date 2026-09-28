@@ -20,8 +20,8 @@ class MatrixRow:
     evidence: str
 
 
-def acceptance_matrix(store: Store | None = None) -> dict[str, object]:
-    audit = completion_audit(store)
+def acceptance_matrix(store: Store | None = None, candidate_sha: str | None = None) -> dict[str, object]:
+    audit = completion_audit(store, candidate_sha)
     rows = [
         MatrixRow(str(item["requirement"]), str(item["status"]), str(item["evidence"]))
         for item in audit["items"]
@@ -35,10 +35,12 @@ def acceptance_matrix(store: Store | None = None) -> dict[str, object]:
     }
 
 
-def write_acceptance_matrix(path: Path, store: Store | None = None, root: Path | None = None) -> None:
+def write_acceptance_matrix(
+    path: Path, store: Store | None = None, root: Path | None = None, candidate_sha: str | None = None
+) -> None:
     path = _validate_output(path, root)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(acceptance_matrix(store), indent=2, sort_keys=True), encoding="utf-8")
+    path.write_text(json.dumps(acceptance_matrix(store, candidate_sha), indent=2, sort_keys=True), encoding="utf-8")
 
 
 def _validate_output(path: Path, root: Path | None) -> Path:

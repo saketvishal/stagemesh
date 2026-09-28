@@ -34,7 +34,11 @@ def run_command_check(name: str, command: list[str], root: Path) -> ReadinessChe
 
 
 def release_readiness(
-    root: Path, include_acceptance: bool = True, run_checks: bool = True, store: Store | None = None
+    root: Path,
+    include_acceptance: bool = True,
+    run_checks: bool = True,
+    store: Store | None = None,
+    candidate_sha: str | None = None,
 ) -> dict[str, object]:
     root = _validate_root(root)
     checks: list[ReadinessCheck] = []
@@ -53,7 +57,7 @@ def release_readiness(
         ]
         if include_acceptance:
             checks.insert(4, run_command_check("acceptance", [sys.executable, "scripts/acceptance.py"], root))
-    audit = completion_audit(store)
+    audit = completion_audit(store, candidate_sha)
     external_gaps = [
         item for item in audit["items"]
         if item["status"] in {"REQUIRES_CREDENTIALS", "MISSING_EXTERNAL_EVIDENCE", "INTERFACE_READY"}
@@ -74,12 +78,13 @@ def write_release_readiness(
     include_acceptance: bool = True,
     run_checks: bool = True,
     store: Store | None = None,
+    candidate_sha: str | None = None,
 ) -> None:
     root = _validate_root(root)
     output = WorkspaceBoundary(root).require_inside(output)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(
-        json.dumps(release_readiness(root, include_acceptance, run_checks, store), indent=2, sort_keys=True),
+        json.dumps(release_readiness(root, include_acceptance, run_checks, store, candidate_sha), indent=2, sort_keys=True),
         encoding="utf-8",
     )
 

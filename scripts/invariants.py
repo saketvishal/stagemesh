@@ -959,14 +959,15 @@ def main() -> int:
         assert "## Remaining Human-Only Actions" in report
         assert "## Roadmap Preservation" in report
         assert "acceptance report status: not generated" in report
-        assert "completion audit status: not generated" in report
+        assert "completion audit status: complete=False" in report
+        assert "acceptance matrix status: INCOMPLETE" in report
         assert_raises(FinalReportValidationError, render_final_report, project / "missing", store)
         report_dir = project / ".stagemesh"
         report_dir.mkdir()
         (report_dir / "acceptance-report.json").write_text("{not-json", encoding="utf-8")
         (report_dir / "completion-audit.json").write_text('{"items": ["bad"]}', encoding="utf-8")
         (report_dir / "acceptance-matrix.json").write_text("[]", encoding="utf-8")
-        invalid_report = render_final_report(project, store)
+        invalid_report = render_final_report(project)
         assert "acceptance report status: invalid report" in invalid_report
         assert "completion audit status: invalid report" in invalid_report
         assert "acceptance matrix status: invalid report" in invalid_report
@@ -1060,13 +1061,16 @@ def main() -> int:
 
     def external_evidence_updates_audit_rows(store: Store, project: Path) -> None:
         record_external_evidence(store, "hosted-ci", "PASS", "https://example.invalid/linux", "abc1234")
-        audit = completion_audit(store)
+        stale_audit = completion_audit(store, candidate_sha="def5678")
+        stale_linux = [item for item in stale_audit["items"] if item["requirement"] == "Linux acceptance"][0]
+        assert stale_linux["status"] == "MISSING_EXTERNAL_EVIDENCE"
+        audit = completion_audit(store, candidate_sha="abc1234")
         linux = [item for item in audit["items"] if item["requirement"] == "Linux acceptance"][0]
         assert linux["status"] == "PROVEN"
-        matrix = acceptance_matrix(store)
+        matrix = acceptance_matrix(store, candidate_sha="abc1234")
         linux_row = [row for row in matrix["rows"] if row["area"] == "Linux acceptance"][0]
         assert linux_row["status"] == "PROVEN"
-        readiness = release_readiness(ROOT, include_acceptance=False, run_checks=False, store=store)
+        readiness = release_readiness(ROOT, include_acceptance=False, run_checks=False, store=store, candidate_sha="abc1234")
         gaps = {item["requirement"] for item in readiness["external_gaps"]}
         assert "Linux acceptance" not in gaps
 

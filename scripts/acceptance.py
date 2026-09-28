@@ -678,7 +678,11 @@ def main() -> int:
         matrix_text = acceptance_matrix.read_text(encoding="utf-8") if acceptance_matrix.exists() else ""
         if "acceptance-matrix:" not in matrix_output or '"status": "INCOMPLETE"' not in matrix_text:
             raise AssertionError(matrix_output + matrix_text)
-        if "Linux acceptance" not in matrix_text or "https://example.invalid/run/acceptance" not in matrix_text:
+        if (
+            "Linux acceptance" not in matrix_text
+            or "MISSING_EXTERNAL_EVIDENCE" not in matrix_text
+            or "https://example.invalid/run/acceptance" in matrix_text
+        ):
             raise AssertionError(matrix_text)
         completion_audit = ROOT / ".stagemesh" / "completion-audit.json"
         audit_output = run(
