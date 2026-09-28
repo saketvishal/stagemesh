@@ -56,6 +56,7 @@ from stagemesh.routing import Provider, Router, RoutingMode, RoutingValidationEr
 from stagemesh.github import parse_github_remote
 from stagemesh.operator import operator_report
 from stagemesh.dashboard import render_dashboard
+from stagemesh.demo import DemoValidationError, create_demo_project
 from stagemesh.acceptance import AcceptanceCheck, AcceptanceValidationError, local_acceptance_report, proof_gaps, run_check, write_acceptance_report
 from stagemesh.ci import CIValidationError, broken_future_feature_gate, default_gate_commands, default_gates, run_gate
 from stagemesh.ci_wait import decide_ci_wait
@@ -849,6 +850,17 @@ def main() -> int:
             "abc1234",
         )
 
+    def demo_project_is_workspace_bound_and_runnable_shape(store: Store, project: Path) -> None:
+        project.mkdir(parents=True, exist_ok=True)
+        demo = create_demo_project(project, project / ".stagemesh" / "demo")
+        assert demo.objective.exists()
+        payload = json.loads(demo.objective.read_text(encoding="utf-8"))
+        assert [task["id"] for task in payload["tasks"]] == ["demo-plan", "demo-validate"]
+        assert payload["tasks"][1]["dependencies"] == ["demo-plan"]
+        assert "status --json" in demo.readme.read_text(encoding="utf-8")
+        assert_raises(SecurityBoundaryError, create_demo_project, project, project.parent / "demo")
+        assert_raises(DemoValidationError, create_demo_project, project, demo.root)
+
     def release_artifact_rejects_unsafe_metadata(store: Store, project: Path) -> None:
         project.mkdir(parents=True, exist_ok=True)
         assert_raises(
@@ -1198,6 +1210,7 @@ def main() -> int:
         github_remote_detection_supports_zero_config,
         routing_modes_select_expected_provider,
         release_output_stays_inside_workspace,
+        demo_project_is_workspace_bound_and_runnable_shape,
         release_artifact_rejects_unsafe_metadata,
         release_artifact_contains_tracked_source_manifest,
         release_files_reject_symlink_escape,

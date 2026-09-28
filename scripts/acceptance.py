@@ -493,6 +493,55 @@ def main() -> int:
         dashboard_text = dashboard.read_text(encoding="utf-8")
         if "<h2>Tasks</h2>" not in dashboard_text or "<h2>Workers</h2>" not in dashboard_text or "worker-1" not in dashboard_text:
             raise AssertionError(dashboard_text)
+        demo_project = project / ".stagemesh" / "demo-project"
+        demo_output = run(
+            [
+                sys.executable,
+                "-m",
+                "stagemesh.cli",
+                "--project",
+                str(project),
+                "demo",
+                "--output",
+                str(demo_project),
+            ],
+            ROOT,
+            env,
+        )
+        demo_objective = demo_project / "objective.json"
+        if "demo:" not in demo_output or not demo_objective.exists():
+            raise AssertionError(demo_output)
+        run([sys.executable, "-m", "stagemesh.cli", "--project", str(demo_project), "init"], ROOT, env)
+        run([sys.executable, "-m", "stagemesh.cli", "--project", str(demo_project), "plan", str(demo_objective)], ROOT, env)
+        for _ in range(10):
+            run([sys.executable, "-m", "stagemesh.cli", "--project", str(demo_project), "continue", "--once"], ROOT, env)
+        demo_status = run(
+            [sys.executable, "-m", "stagemesh.cli", "--project", str(demo_project), "status", "--json"],
+            ROOT,
+            env,
+        )
+        demo_status_data = json.loads(demo_status)
+        if demo_status_data["done_count"] != 2:
+            raise AssertionError(demo_status)
+        duplicate_demo = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "stagemesh.cli",
+                "--project",
+                str(project),
+                "demo",
+                "--output",
+                str(demo_project),
+            ],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            env={**os.environ.copy(), **env},
+            check=False,
+        )
+        if duplicate_demo.returncode != 2 or "demo error:" not in (duplicate_demo.stdout + duplicate_demo.stderr):
+            raise AssertionError(duplicate_demo.stdout + duplicate_demo.stderr)
         release_dir = ROOT / ".stagemesh" / "acceptance-release"
         release_output = run(
             [
