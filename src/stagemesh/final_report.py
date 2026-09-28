@@ -129,7 +129,11 @@ def _acceptance_summary(root: Path) -> str:
     if not all(isinstance(check, dict) for check in checks):
         return "invalid report"
     passed = sum(1 for check in checks if check.get("status") == "PASS")
-    return f"{data.get('status', 'UNKNOWN')} ({passed}/{len(checks)} checks passing)"
+    gaps = data.get("proof_gaps", [])
+    if not isinstance(gaps, list):
+        return "invalid report"
+    proof_status = data.get("proof_status", "UNKNOWN")
+    return f"{data.get('status', 'UNKNOWN')} proof={proof_status} ({passed}/{len(checks)} checks passing, {len(gaps)} proof gaps)"
 
 
 def _external_evidence_count(store: Store | None, candidate: str) -> int:

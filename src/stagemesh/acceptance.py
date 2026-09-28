@@ -43,10 +43,12 @@ def local_acceptance_report(root: Path, include_acceptance: bool = True) -> dict
     ]
     if include_acceptance:
         checks.insert(2, run_check("acceptance", [sys.executable, "scripts/acceptance.py"], root))
+    gaps = proof_gaps(checks)
     return {
         "generated_at": time.time(),
         "status": "PASS" if all(check.status == "PASS" for check in checks) else "FAIL",
-        "proof_gaps": proof_gaps(checks),
+        "proof_status": "BLOCKED_ON_EXTERNAL_EVIDENCE" if gaps else "PROVEN",
+        "proof_gaps": gaps,
         "checks": [
             {"name": check.name, "status": check.status, "output": check.output[-4000:]}
             for check in checks
