@@ -475,6 +475,26 @@ def command_retries(args: argparse.Namespace) -> int:
         print(f"{args.key} cleared")
     else:
         rows = store.retry_states()
+        if args.json:
+            print(
+                json.dumps(
+                    {
+                        "retries": [
+                            {
+                                "key": row["key"],
+                                "attempts": row["attempts"],
+                                "next_attempt_at": row["next_attempt_at"],
+                                "reason": row["reason"],
+                            }
+                            for row in rows
+                        ],
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+            store.close()
+            return 0
         if not rows:
             print("retries: EMPTY")
         for row in rows:
@@ -681,6 +701,7 @@ def build_parser() -> argparse.ArgumentParser:
     retries = sub.add_parser("retries")
     retry_sub = retries.add_subparsers(dest="retry_command")
     retry_list = retry_sub.add_parser("list")
+    retry_list.add_argument("--json", action="store_true")
     retry_list.set_defaults(func=command_retries)
     retry_fail = retry_sub.add_parser("fail")
     retry_fail.add_argument("key")
