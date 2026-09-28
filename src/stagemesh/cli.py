@@ -263,6 +263,10 @@ def command_config(args: argparse.Namespace) -> int:
     print(f"github.repo: {config.github.repo or ''}")
     print(f"github.configured: {config.github.configured}")
     print(f"database_url: {config.database_url or 'sqlite://default'}")
+    print(f"routing.mode: {config.routing_mode}")
+    print(f"routing.single_agent_provider: {config.single_agent_provider or ''}")
+    for stage, provider in sorted(config.stage_routes.items()):
+        print(f"routing.stage.{stage}: {provider}")
     for name, command in sorted(config.provider_commands.items()):
         print(f"provider.{name}: {command}")
     return 0
@@ -294,6 +298,8 @@ def command_provider_acceptance(args: argparse.Namespace) -> int:
     print(f"chosen_provider: {result.chosen_provider}")
     print(f"execution_status: {result.execution_status}")
     print(f"capacity_failure_isolated: {result.capacity_failure_isolated}")
+    print(f"single_agent_provider: {result.single_agent_provider}")
+    print(f"review_provider: {result.review_provider}")
     store.close()
     return 0 if result.status == "PASS" else 1
 

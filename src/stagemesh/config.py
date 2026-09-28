@@ -22,6 +22,9 @@ class StageMeshConfig:
     project: Path
     github: GitHubConfig
     provider_commands: dict[str, str]
+    routing_mode: str
+    stage_routes: dict[str, str]
+    single_agent_provider: str | None
     database_url: str | None
     source: str
 
@@ -36,6 +39,8 @@ def load_config(project: Path, config_path: Path | None = None) -> StageMeshConf
         source = str(path)
     github_data = data.get("github", {}) if isinstance(data.get("github", {}), dict) else {}
     providers = data.get("providers", {}) if isinstance(data.get("providers", {}), dict) else {}
+    routing_data = data.get("routing", {}) if isinstance(data.get("routing", {}), dict) else {}
+    stage_routes_data = routing_data.get("stage_routes", {}) if isinstance(routing_data.get("stage_routes", {}), dict) else {}
     github = GitHubConfig(
         owner=os.environ.get("STAGEMESH_GITHUB_OWNER") or _string(github_data.get("owner")),
         repo=os.environ.get("STAGEMESH_GITHUB_REPO") or _string(github_data.get("repo")),
@@ -51,6 +56,10 @@ def load_config(project: Path, config_path: Path | None = None) -> StageMeshConf
         project=project,
         github=github,
         provider_commands=provider_commands,
+        routing_mode=os.environ.get("STAGEMESH_ROUTING_MODE") or _string(routing_data.get("mode")) or "STAGED",
+        stage_routes={str(key): str(value) for key, value in stage_routes_data.items()},
+        single_agent_provider=os.environ.get("STAGEMESH_SINGLE_AGENT_PROVIDER")
+        or _string(routing_data.get("single_agent_provider")),
         database_url=database_url,
         source=source,
     )
