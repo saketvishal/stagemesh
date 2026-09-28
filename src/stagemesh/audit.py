@@ -5,6 +5,7 @@ from pathlib import Path
 
 from .redaction import redact_mapping
 from .persistence import Store
+from .security import WorkspaceBoundary
 
 
 class AuditValidationError(ValueError):
@@ -17,8 +18,9 @@ def record_audit(store: Store, event_type: str, payload: dict[str, object]) -> s
     return store.add_audit_event(event_type, redact_mapping(payload))
 
 
-def export_audit_jsonl(store: Store, output: Path, limit: int = 500) -> None:
+def export_audit_jsonl(store: Store, output: Path, limit: int = 500, root: Path | None = None) -> None:
     limit = _validate_limit(limit)
+    output = _validate_output(output, root)
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("w", encoding="utf-8") as handle:
         for event in reversed(store.audit_events(limit)):
@@ -58,3 +60,12 @@ def _validate_payload(payload: dict[str, object]) -> dict[str, object]:
     if not isinstance(payload, dict):
         raise AuditValidationError("audit payload must be an object")
     return payload
+
+
+def _validate_output(output: Path, root: Path | None) -> Path:
+    resolved = Path(output).resolve()
+    if root is not None:
+        return WorkspaceBoundary(Path(root).resolve()).require_inside(resolved)
+    if not resolved.name or resolved.is_dir():
+        raise AuditValidationError("audit export output must name a file")
+    return resolved
