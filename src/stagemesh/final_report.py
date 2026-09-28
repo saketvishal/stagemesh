@@ -5,6 +5,8 @@ import subprocess
 from pathlib import Path
 
 from . import __version__
+from .acceptance_matrix import acceptance_matrix
+from .completion_audit import completion_audit
 from .persistence import Store
 from .release import validate_candidate_sha, ReleaseValidationError
 
@@ -38,8 +40,8 @@ def render_final_report(root: Path, store: Store | None = None) -> str:
     worker_count = len(store.workers()) if store else 0
     external_count = len(store.external_evidence()) if store else 0
     acceptance = _acceptance_summary(root)
-    audit = _completion_summary(root)
-    matrix = _matrix_summary(root)
+    audit = _completion_summary(root, sha, store)
+    matrix = _matrix_summary(root, sha, store)
     sections = [
         "# StageMesh vNext Final Report",
         "",
@@ -130,7 +132,13 @@ def _acceptance_summary(root: Path) -> str:
     return f"{data.get('status', 'UNKNOWN')} ({passed}/{len(checks)} checks passing)"
 
 
-def _completion_summary(root: Path) -> str:
+def _completion_summary(root: Path, candidate: str, store: Store | None) -> str:
+    if store is not None:
+        data = completion_audit(store, candidate)
+        items = data["items"]
+        if isinstance(items, list):
+            proven = sum(1 for item in items if isinstance(item, dict) and item.get("status") == "PROVEN")
+            return f"complete={data.get('complete', False)} candidate={candidate} ({proven}/{len(items)} requirements proven)"
     path = root / ".stagemesh" / "completion-audit.json"
     data = _read_report_json(path)
     if data is None:
@@ -143,17 +151,20 @@ def _completion_summary(root: Path) -> str:
     if not all(isinstance(item, dict) for item in items):
         return "invalid report"
     proven = sum(1 for item in items if item.get("status") == "PROVEN")
-    return f"complete={data.get('complete', False)} ({proven}/{len(items)} requirements proven)"
+    return f"complete={data.get('complete', False)} candidate={candidate} ({proven}/{len(items)} requirements proven)"
 
 
-def _matrix_summary(root: Path) -> str:
+def _matrix_summary(root: Path, candidate: str, store: Store | None) -> str:
+    if store is not None:
+        data = acceptance_matrix(store, candidate)
+        return f"{data.get('status', 'UNKNOWN')} candidate={candidate} ({data.get('proven', 0)}/{data.get('total', 0)} rows proven)"
     path = root / ".stagemesh" / "acceptance-matrix.json"
     data = _read_report_json(path)
     if data is None:
         return "not generated"
     if not isinstance(data, dict):
         return "invalid report"
-    return f"{data.get('status', 'UNKNOWN')} ({data.get('proven', 0)}/{data.get('total', 0)} rows proven)"
+    return f"{data.get('status', 'UNKNOWN')} candidate={candidate} ({data.get('proven', 0)}/{data.get('total', 0)} rows proven)"
 
 
 def _read_report_json(path: Path) -> object | None:

@@ -18,7 +18,7 @@ from .config import ConfigValidationError, load_config
 from .dashboard import render_dashboard
 from .coordinator import Coordinator
 from .distributed import WorkQueue, WorkQueueError
-from .final_report import FinalReportValidationError, render_final_report
+from .final_report import FinalReportValidationError, candidate_sha, render_final_report
 from .external_evidence import ExternalEvidenceValidationError, external_evidence_records, record_external_evidence
 from .github_acceptance import run_github_acceptance
 from .observability import health
@@ -244,7 +244,7 @@ def command_acceptance_matrix(args: argparse.Namespace) -> int:
     output = WorkspaceBoundary(project).require_inside(Path(args.output).resolve())
     store = Store(db_path(project))
     store.migrate()
-    write_acceptance_matrix(output, store, root=project)
+    write_acceptance_matrix(output, store, root=project, candidate_sha=candidate_sha(project))
     store.close()
     print(f"acceptance-matrix: {output}")
     return 0
@@ -341,6 +341,7 @@ def command_release_readiness(args: argparse.Namespace) -> int:
             include_acceptance=not args.skip_acceptance,
             run_checks=not args.skip_checks,
             store=store,
+            candidate_sha=candidate_sha(project),
         )
     finally:
         store.close()
@@ -353,7 +354,7 @@ def command_completion_audit(args: argparse.Namespace) -> int:
     output = WorkspaceBoundary(project).require_inside(Path(args.output).resolve())
     store = Store(db_path(project))
     store.migrate()
-    write_completion_audit(output, store, root=project)
+    write_completion_audit(output, store, root=project, candidate_sha=candidate_sha(project))
     store.close()
     print(f"completion-audit: {output}")
     return 0

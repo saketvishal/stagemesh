@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .persistence import Store
+from .release import ReleaseValidationError, validate_candidate_sha
 from .security import WorkspaceBoundary
 
 
@@ -48,8 +49,8 @@ EVIDENCE_REQUIREMENTS = {
 }
 
 
-def completion_audit(store: Store | None = None) -> dict[str, object]:
-    evidence_by_requirement = _external_evidence_by_requirement(store)
+def completion_audit(store: Store | None = None, candidate_sha: str | None = None) -> dict[str, object]:
+    evidence_by_requirement = _external_evidence_by_requirement(store, candidate_sha)
     items = []
     for item in CORE_AUDIT_ITEMS:
         if item.requirement in evidence_by_requirement:
@@ -65,23 +66,37 @@ def completion_audit(store: Store | None = None) -> dict[str, object]:
     return {"complete": all(item["status"] == "PROVEN" for item in items), "items": items}
 
 
-def write_completion_audit(path: Path, store: Store | None = None, root: Path | None = None) -> None:
+def write_completion_audit(
+    path: Path, store: Store | None = None, root: Path | None = None, candidate_sha: str | None = None
+) -> None:
     path = _validate_output(path, root)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(completion_audit(store), indent=2, sort_keys=True), encoding="utf-8")
+    path.write_text(json.dumps(completion_audit(store, candidate_sha), indent=2, sort_keys=True), encoding="utf-8")
 
 
-def _external_evidence_by_requirement(store: Store | None) -> dict[str, str]:
+def _external_evidence_by_requirement(store: Store | None, candidate_sha: str | None) -> dict[str, str]:
     if store is None:
         return {}
+    expected_sha = _validate_optional_sha(candidate_sha)
     evidence: dict[str, str] = {}
     for row in store.external_evidence():
         if row["status"] != "PASS":
+            continue
+        if expected_sha is not None and row["candidate_sha"] != expected_sha:
             continue
         requirement = EVIDENCE_REQUIREMENTS.get(row["kind"])
         if requirement:
             evidence[requirement] = f"external evidence {row['id']}: {row['url']}"
     return evidence
+
+
+def _validate_optional_sha(candidate_sha: str | None) -> str | None:
+    if candidate_sha is None or candidate_sha == "UNKNOWN":
+        return None
+    try:
+        return validate_candidate_sha(candidate_sha)
+    except ReleaseValidationError as exc:
+        raise CompletionAuditValidationError(str(exc)) from exc
 
 
 def _validate_output(path: Path, root: Path | None) -> Path:
