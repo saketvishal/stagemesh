@@ -158,7 +158,11 @@ def main() -> int:
         if missing:
             raise AssertionError(f"doctor missing {missing}")
         config_output = run([sys.executable, "-m", "stagemesh.cli", "--project", str(project), "config"], ROOT, env)
-        if "github.configured: False" not in config_output or "database_url: sqlite://default" not in config_output:
+        if (
+            "github.configured: False" not in config_output
+            or "database_url: sqlite://default" not in config_output
+            or "routing.mode: STAGED" not in config_output
+        ):
             raise AssertionError(config_output)
         backend_output = run([sys.executable, "-m", "stagemesh.cli", "--project", str(project), "backend"], ROOT, env)
         if (
@@ -172,7 +176,12 @@ def main() -> int:
             ROOT,
             env,
         )
-        if "status: PASS" not in provider_acceptance or "chosen_provider: secondary" not in provider_acceptance:
+        if (
+            "status: PASS" not in provider_acceptance
+            or "chosen_provider: secondary" not in provider_acceptance
+            or "single_agent_provider: solo" not in provider_acceptance
+            or "review_provider: reviewer" not in provider_acceptance
+        ):
             raise AssertionError(provider_acceptance)
         github_acceptance = run(
             [sys.executable, "-m", "stagemesh.cli", "--project", str(project), "github-acceptance"],

@@ -48,6 +48,7 @@ from stagemesh.github_acceptance import run_github_acceptance
 from stagemesh.release_readiness import release_readiness
 from stagemesh.external_evidence import record_external_evidence, external_evidence_records
 from stagemesh.acceptance_matrix import acceptance_matrix
+from stagemesh.routing import Provider, Router, RoutingMode
 
 
 def assert_raises(exc_type, fn, *args, **kwargs) -> None:
@@ -265,12 +266,27 @@ def main() -> int:
         config_dir = project / ".stagemesh"
         config_dir.mkdir(parents=True)
         (config_dir / "config.json").write_text(
-            '{"github":{"owner":"o","repo":"r","token":"t"},"providers":{"codex":"codex --test"}}',
+            '{"github":{"owner":"o","repo":"r","token":"t"},"providers":{"codex":"codex --test"},"routing":{"mode":"SINGLE_AGENT","single_agent_provider":"codex","stage_routes":{"REVIEW":"claude"}}}',
             encoding="utf-8",
         )
         config = load_config(project)
         assert config.github.configured is True
         assert config.provider_commands["codex"] == "codex --test"
+        assert config.routing_mode == "SINGLE_AGENT"
+        assert config.single_agent_provider == "codex"
+        assert config.stage_routes["REVIEW"] == "claude"
+
+    def routing_modes_select_expected_provider(store: Store, project: Path) -> None:
+        providers = [
+            Provider("codex", frozenset({"code", "review"}), True, priority=2),
+            Provider("claude", frozenset({"review"}), True, priority=1),
+        ]
+        staged = Router(providers, mode=RoutingMode.STAGED, stage_routes={"REVIEW": "claude"})
+        assert staged.choose_for_stage(Stage.REVIEW, "review").name == "claude"
+        single = Router(providers, mode=RoutingMode.SINGLE_AGENT, single_agent_provider="codex")
+        assert single.choose_for_stage(Stage.REVIEW, "review").name == "codex"
+        down = Router(providers, mode=RoutingMode.SINGLE_AGENT, single_agent_provider="missing")
+        assert down.choose_for_stage(Stage.REVIEW, "review") is None
 
     def release_output_stays_inside_workspace(store: Store, project: Path) -> None:
         project.mkdir(parents=True, exist_ok=True)
@@ -442,6 +458,7 @@ def main() -> int:
         git_attribution_is_worker_owned,
         secrets_are_redacted,
         config_loads_from_project_file,
+        routing_modes_select_expected_provider,
         release_output_stays_inside_workspace,
         release_artifact_contains_tracked_source_manifest,
         migrations_are_idempotent,

@@ -23,6 +23,8 @@ def main() -> int:
         print(f"provider_acceptance: {result.status}")
         print(f"chosen_provider: {result.chosen_provider}")
         print(f"capacity_failure_isolated: {result.capacity_failure_isolated}")
+        print(f"single_agent_provider: {result.single_agent_provider}")
+        print(f"review_provider: {result.review_provider}")
         return 0 if result.status == "PASS" else 1
 
 

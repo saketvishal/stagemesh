@@ -61,7 +61,7 @@ def render_final_report(root: Path, store: Store | None = None) -> str:
         "- deterministic `PLAN -> IMPLEMENT -> VALIDATE -> REVIEW -> INTEGRATE -> DONE` lifecycle",
         "- claims, leases, durable executions, process identity, recovery, exact-SHA evidence, and durable handoff",
         "- local backlog and GitHub task-source contracts with deferred, stale, unknown, auth, and rate-limit states",
-        "- provider SDK, capacity-aware routing, failover, stage routing, single-agent and staged execution modes",
+        "- provider SDK, capacity-aware routing, failover, configurable stage routing, single-agent mode, and staged execution mode",
         "- objective planning, dependency-aware scheduling, review findings, remediation attempts, and retry/backoff",
         "- worker registry, distributed work packets, global project registry, operator report, dashboard, audit export, release artifact, acceptance matrix, completion audit, and release-readiness reports",
         "- release packaging uses tracked source files plus a hashed manifest and excludes runtime state",
