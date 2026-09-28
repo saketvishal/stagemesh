@@ -716,10 +716,13 @@ def main() -> int:
         repo_report_text = repo_report.read_text(encoding="utf-8") if repo_report.exists() else ""
         if (
             not repo_report.exists()
-            or "acceptance report status: PASS" not in repo_report_text
+            or "acceptance report status: PASS proof=BLOCKED_ON_EXTERNAL_EVIDENCE" not in repo_report_text
             or "acceptance matrix status: INCOMPLETE" not in repo_report_text
         ):
             raise AssertionError(repo_report_output)
+        status_doc = (ROOT / "docs" / "status.md").read_text(encoding="utf-8")
+        if "acceptance report: `PASS proof=BLOCKED_ON_EXTERNAL_EVIDENCE`" not in status_doc:
+            raise AssertionError(status_doc)
         readiness = ROOT / ".stagemesh" / "release-readiness.json"
         readiness_output = run(
             [
