@@ -91,6 +91,7 @@ class Store:
                 source_id TEXT NOT NULL,
                 state TEXT NOT NULL,
                 status TEXT NOT NULL,
+                retry_after REAL,
                 updated_at REAL NOT NULL,
                 PRIMARY KEY(source, source_id)
             );
@@ -250,13 +251,20 @@ class Store:
     def running_executions(self) -> Iterable[sqlite3.Row]:
         return self.conn.execute("SELECT * FROM executions WHERE status=?", (ExecutionStatus.RUNNING,))
 
-    def cache_source(self, source: str, source_id: str, state: dict[str, Any], status: str) -> None:
+    def cache_source(
+        self,
+        source: str,
+        source_id: str,
+        state: dict[str, Any],
+        status: str,
+        retry_after: float | None = None,
+    ) -> None:
         self.conn.execute(
             """
-            INSERT INTO source_cache VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(source, source_id) DO UPDATE SET state=excluded.state, status=excluded.status, updated_at=excluded.updated_at
+            INSERT INTO source_cache VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(source, source_id) DO UPDATE SET state=excluded.state, status=excluded.status, retry_after=excluded.retry_after, updated_at=excluded.updated_at
             """,
-            (source, source_id, json.dumps(state, sort_keys=True), status, time.time()),
+            (source, source_id, json.dumps(state, sort_keys=True), status, retry_after, time.time()),
         )
         self.conn.commit()
 

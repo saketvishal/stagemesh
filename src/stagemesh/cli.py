@@ -7,6 +7,7 @@ from pathlib import Path
 
 from . import __version__
 from .capacity import CapacityKind, CapacityRegistry
+from .ci import broken_future_feature_gate, default_gates
 from .coordinator import Coordinator
 from .observability import health
 from .objectives import ObjectivePlanner
@@ -121,6 +122,16 @@ def command_capacity(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_ci(args: argparse.Namespace) -> int:
+    root = Path(args.project).resolve()
+    results = default_gates(root, include_acceptance=not args.skip_acceptance)
+    if args.future_feature_gate:
+        results.append(broken_future_feature_gate(root))
+    for result in results:
+        print(f"{result.name}: {'PASS' if result.passed else 'FAIL'}")
+    return 0 if all(result.passed for result in results) else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="stagemesh")
     parser.add_argument("--project", default=".")
@@ -146,6 +157,10 @@ def build_parser() -> argparse.ArgumentParser:
     capacity.add_argument("--primary-down", action="store_true")
     capacity.add_argument("--secondary-down", action="store_true")
     capacity.set_defaults(func=command_capacity)
+    ci = sub.add_parser("ci")
+    ci.add_argument("--future-feature-gate", action="store_true")
+    ci.add_argument("--skip-acceptance", action="store_true")
+    ci.set_defaults(func=command_ci)
     return parser
 
 

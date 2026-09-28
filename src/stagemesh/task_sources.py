@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import time
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -60,6 +63,50 @@ class GitHubIssueSource:
                 for issue in self.cached_issues
             ],
             "OK",
+        )
+
+
+class GitHubApiIssueSource:
+    name = "github"
+
+    def __init__(self, owner: str, repo: str, token: str | None = None, now: float | None = None):
+        self.owner = owner
+        self.repo = repo
+        self.token = token
+        self.now = time.time() if now is None else now
+
+    def discover(self) -> tuple[list[DiscoveredTask], str, float | None]:
+        request = urllib.request.Request(
+            f"https://api.github.com/repos/{self.owner}/{self.repo}/issues?state=open",
+            headers={
+                "Accept": "application/vnd.github+json",
+                **({"Authorization": f"Bearer {self.token}"} if self.token else {}),
+            },
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=20) as response:
+                issues = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            if exc.code in {403, 429}:
+                retry_after = exc.headers.get("Retry-After")
+                return [], "UNKNOWN", self.now + float(retry_after or 60)
+            if exc.code in {401, 404}:
+                return [], "STALE", None
+            raise
+        return (
+            [
+                DiscoveredTask(
+                    source=self.name,
+                    source_id=str(issue["number"]),
+                    title=str(issue["title"]),
+                    eligible="stagemesh:deferred" not in [label.get("name") for label in issue.get("labels", [])],
+                    state="OPEN",
+                )
+                for issue in issues
+                if "pull_request" not in issue
+            ],
+            "OK",
+            None,
         )
 
 

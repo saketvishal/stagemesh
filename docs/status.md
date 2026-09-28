@@ -1,0 +1,39 @@
+# StageMesh vNext Status
+
+## Implemented
+
+- Installable Python package with local no-network build backend.
+- SQLite persistence with migrations and durable records for tasks, claims, executions, candidates, evidence, source cache, and objectives.
+- Deterministic lifecycle state machine for `PLAN -> IMPLEMENT -> VALIDATE -> REVIEW -> INTEGRATE -> DONE`.
+- One-active-claim enforcement per task.
+- Durable candidate and exact-SHA evidence model.
+- Fake and subprocess executors.
+- Provider adapter SDK surface for Codex, Claude, Grok, and additional runtime commands.
+- Capacity registry with primary/secondary failover classification.
+- Local backlog source and GitHub issue-source models, including deferred, unknown, stale, auth, and rate-limit semantics.
+- Structured objective planner validation.
+- Built-in validation, independent review, and integration evidence.
+- Recovery behavior that preserves uncertain process identity and does not treat PID alone as proof of liveness or death.
+- CLI for init, doctor, planning, continue, status, health, capacity, and CI gates.
+- Security boundary helper for workspace path checks.
+- GitHub Actions CI for Windows and Linux.
+- Stdlib invariant and acceptance runners for dependency-free verification.
+
+## Verified Locally
+
+- `python -m compileall -q src scripts build_backend.py`
+- `python scripts/invariants.py`
+- `python scripts/acceptance.py`
+- `python -m stagemesh.cli --project . ci --future-feature-gate`
+- `python -m pip install . --target .tmp-install --no-cache-dir --upgrade`
+
+## Still Required For Full Product Acceptance
+
+- Live GitHub API acceptance with credentials, outbound issue synchronization, and permission/auth matrix.
+- Full production provider adapters for Codex, Claude, Grok, and other approved workers.
+- Distributed worker transport and remote lease renewal.
+- Operator dashboard and richer status UI.
+- PostgreSQL implementation behind the persistence interface.
+- Real CI execution results from GitHub-hosted Windows and Linux runners.
+- Public release artifacts and contributor demo packaging.
+- Deeper security hardening for sandbox, secrets, git attribution, and multi-project registry operation.
