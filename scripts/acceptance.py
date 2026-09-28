@@ -493,6 +493,17 @@ def main() -> int:
         operator = run([sys.executable, "-m", "stagemesh.cli", "--project", str(project), "operator"], ROOT, env)
         if "workers=1" not in operator or "worker worker-1 provider=codex" not in operator:
             raise AssertionError(operator)
+        operator_json = run(
+            [sys.executable, "-m", "stagemesh.cli", "--project", str(project), "operator", "--json"],
+            ROOT,
+            env,
+        )
+        operator_data = json.loads(operator_json)
+        if operator_data["summary"] != "ok":
+            raise AssertionError(operator_json)
+        section_rows = {section["name"]: section["rows"] for section in operator_data["sections"]}
+        if "Workers" not in section_rows or section_rows["Workers"][0]["provider"] != "codex":
+            raise AssertionError(operator_json)
         invalid_worker = subprocess.run(
             [
                 sys.executable,
