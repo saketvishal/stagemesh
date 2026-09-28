@@ -902,11 +902,16 @@ def main() -> int:
         lines = text.strip().splitlines()
         assert len(lines) == 1
         assert "secret.second" in lines[0]
+        rooted = project / ".stagemesh" / "audit-rooted.jsonl"
+        export_audit_jsonl(store, rooted, root=project)
+        assert rooted.exists()
         assert_raises(AuditValidationError, record_audit, store, "", {"safe": "ok"})
         assert_raises(AuditValidationError, record_audit, store, "bad.payload", [])
         assert_raises(AuditValidationError, export_audit_jsonl, store, output, 0)
         assert_raises(AuditValidationError, export_audit_jsonl, store, output, "10")
         assert_raises(AuditValidationError, export_audit_jsonl, store, output, 10001)
+        assert_raises(AuditValidationError, export_audit_jsonl, store, Path(""))
+        assert_raises(SecurityBoundaryError, export_audit_jsonl, store, project.parent / "audit.jsonl", 500, project)
 
     def retry_backoff_is_durable_and_clearable(store: Store, project: Path) -> None:
         retries = RetryRegistry(store)

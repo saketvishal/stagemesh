@@ -365,7 +365,7 @@ def command_audit(args: argparse.Namespace) -> int:
     store.migrate()
     if args.output:
         output = WorkspaceBoundary(project).require_inside(Path(args.output).resolve())
-        export_audit_jsonl(store, output, args.limit)
+        export_audit_jsonl(store, output, args.limit, root=project)
         print(f"audit: {output}")
     else:
         for event in store.audit_events(args.limit):
