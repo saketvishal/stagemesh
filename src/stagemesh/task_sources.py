@@ -37,7 +37,10 @@ class LocalBacklogSource:
     def discover(self) -> list[DiscoveredTask]:
         if not self.path.exists():
             return []
-        data = json.loads(self.path.read_text(encoding="utf-8"))
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise TaskSourceValidationError("local backlog must be valid JSON") from exc
         if not isinstance(data, dict):
             raise TaskSourceValidationError("local backlog root must be an object")
         tasks = data.get("tasks", [])
@@ -130,6 +133,8 @@ class GitHubApiIssueSource:
             if exc.code in {401, 404}:
                 return [], "STALE", None
             raise
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return [], "UNKNOWN", None
         if not isinstance(issues, list):
             raise TaskSourceValidationError("github issues response must be a list")
         discovered = []
