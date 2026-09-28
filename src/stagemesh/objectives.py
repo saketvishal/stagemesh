@@ -36,12 +36,25 @@ class ObjectivePlanner:
         if not isinstance(tasks, list) or not tasks:
             raise ObjectiveValidationError("objective tasks must be a non-empty list")
         task_ids: list[str] = []
+        seen_task_ids: set[str] = set()
         for item in tasks:
             if not isinstance(item, dict) or not self.REQUIRED_TASK_FIELDS <= set(item):
                 raise ObjectiveValidationError("each task requires id and title")
             if not isinstance(item["id"], str) or not isinstance(item["title"], str):
                 raise ObjectiveValidationError("task id and title must be strings")
+            if item["id"] in seen_task_ids:
+                raise ObjectiveValidationError(f"duplicate task id: {item['id']}")
+            seen_task_ids.add(item["id"])
             task_ids.append(item["id"])
+        for item in tasks:
+            dependencies = item.get("dependencies", [])
+            if not isinstance(dependencies, list):
+                raise ObjectiveValidationError("task dependencies must be a list")
+            for dependency in dependencies:
+                if not isinstance(dependency, str):
+                    raise ObjectiveValidationError("task dependency ids must be strings")
+                if dependency not in seen_task_ids:
+                    raise ObjectiveValidationError(f"unknown dependency: {dependency}")
         return Objective(objective_id, title, tuple(task_ids))
 
     def write_backlog(self, objective: Objective, source_payload: dict[str, Any], path: Path) -> None:

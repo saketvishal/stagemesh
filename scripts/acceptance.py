@@ -67,6 +67,27 @@ def main() -> int:
             encoding="utf-8",
         )
         run([sys.executable, "-m", "stagemesh.cli", "--project", str(project), "plan", str(objective)], ROOT, env)
+        invalid_objective = project / "invalid-objective.json"
+        invalid_objective.write_text(
+            json.dumps(
+                {
+                    "id": "obj-invalid",
+                    "title": "invalid objective",
+                    "tasks": [{"id": "bad", "title": "bad task", "dependencies": ["missing"]}],
+                }
+            ),
+            encoding="utf-8",
+        )
+        invalid_plan = subprocess.run(
+            [sys.executable, "-m", "stagemesh.cli", "--project", str(project), "plan", str(invalid_objective)],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            env={**os.environ.copy(), **env},
+            check=False,
+        )
+        if invalid_plan.returncode == 0 or "unknown dependency" not in (invalid_plan.stdout + invalid_plan.stderr):
+            raise AssertionError(invalid_plan.stdout + invalid_plan.stderr)
         backlog = project / ".stagemesh" / "backlog.json"
         for _ in range(16):
             run([sys.executable, "-m", "stagemesh.cli", "--project", str(project), "continue", "--once"], ROOT, env)
