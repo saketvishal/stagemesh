@@ -55,6 +55,7 @@ from stagemesh.operator import operator_report
 from stagemesh.dashboard import render_dashboard
 from stagemesh.ci_wait import decide_ci_wait
 from stagemesh.objectives import ObjectivePlanner, ObjectiveValidationError
+from stagemesh.registry import GlobalRegistry, ProjectRegistration, RegistryConflictError
 
 
 def assert_raises(exc_type, fn, *args, **kwargs) -> None:
@@ -278,6 +279,29 @@ def main() -> int:
             ObjectiveValidationError,
             planner.parse,
             {"id": "baddep", "title": "baddep", "tasks": [{"id": "a", "title": "a", "dependencies": [1]}]},
+        )
+
+    def global_registry_rejects_ambiguous_projects(store: Store, project: Path) -> None:
+        registry = GlobalRegistry(project.parent / "registry.json")
+        first = project / "first"
+        second = project / "second"
+        first.mkdir(parents=True)
+        second.mkdir(parents=True)
+        registry.register(ProjectRegistration("first", first, first / ".stagemesh" / "stagemesh.sqlite3"))
+        registry.register(ProjectRegistration("first", first, first / ".stagemesh" / "stagemesh.sqlite3"))
+        projects = registry.load()
+        assert len(projects) == 1
+        assert projects[0].path == first.resolve()
+        assert projects[0].db_path == (first / ".stagemesh" / "stagemesh.sqlite3").resolve()
+        assert_raises(
+            RegistryConflictError,
+            registry.register,
+            ProjectRegistration("first", second, second / ".stagemesh" / "stagemesh.sqlite3"),
+        )
+        assert_raises(
+            RegistryConflictError,
+            registry.register,
+            ProjectRegistration("second", first, first / ".stagemesh" / "stagemesh.sqlite3"),
         )
 
     def finding_convergence_is_bounded(store: Store, project: Path) -> None:
@@ -586,6 +610,7 @@ def main() -> int:
         operator_dashboard_exposes_structured_state,
         dependency_scheduling,
         objective_planner_rejects_invalid_dependencies,
+        global_registry_rejects_ambiguous_projects,
         finding_convergence_is_bounded,
         distributed_work_packets_are_claimed_once,
         distributed_work_packets_have_renewable_leases,
