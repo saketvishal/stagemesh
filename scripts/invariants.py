@@ -51,6 +51,8 @@ from stagemesh.external_evidence import record_external_evidence, external_evide
 from stagemesh.acceptance_matrix import acceptance_matrix
 from stagemesh.routing import Provider, Router, RoutingMode
 from stagemesh.github import parse_github_remote
+from stagemesh.operator import operator_report
+from stagemesh.dashboard import render_dashboard
 
 
 def assert_raises(exc_type, fn, *args, **kwargs) -> None:
@@ -208,6 +210,30 @@ def main() -> int:
         assert store.workers()[0]["provider"] == "codex"
         OutboundSync(store).publish("github", "1", "DONE", {"sha": "abc"})
         assert store.source_events()[0]["direction"] == "outbound"
+
+    def operator_dashboard_exposes_structured_state(store: Store, project: Path) -> None:
+        task_id = store.upsert_task("observe me", source="local", source_id="observe")
+        register_worker(
+            store,
+            "worker-observe",
+            "codex",
+            {"code"},
+            ProcessIdentity(pid=1, create_time=1.0, boot_id="boot", executable="codex"),
+            lease_seconds=10,
+        )
+        OutboundSync(store).publish("github", "42", "UNKNOWN", {"task_id": task_id})
+        RetryRegistry(store).record_failure("github:42", "rate-limit", now=100)
+        record_external_evidence(store, "hosted-ci", "PASS", "https://example.invalid/ci", "abc")
+        report = operator_report(store)
+        assert "retry_states=1" in report.lines
+        assert "external_evidence=1" in report.lines
+        section_names = {section.name for section in report.sections}
+        assert {"Tasks", "Workers", "Source Events", "Retries", "External Evidence"}.issubset(section_names)
+        dashboard = render_dashboard(store)
+        assert "<h2>Tasks</h2>" in dashboard
+        assert "<h2>Retries</h2>" in dashboard
+        assert "worker-observe" in dashboard
+        assert "https://example.invalid/ci" in dashboard
 
     def dependency_scheduling(store: Store, project: Path) -> None:
         first = store.upsert_task("first", source="local", source_id="first")
@@ -472,6 +498,7 @@ def main() -> int:
         targeted_ops,
         source_semantics,
         worker_heartbeat_and_outbound_sync,
+        operator_dashboard_exposes_structured_state,
         dependency_scheduling,
         finding_convergence_is_bounded,
         distributed_work_packets_are_claimed_once,
