@@ -20,6 +20,10 @@ class RetryDecision:
 
 
 def backoff_seconds(attempts: int, base: float = 5, cap: float = 300) -> float:
+    if not isinstance(attempts, int):
+        raise RetryValidationError("retry attempts must be an integer")
+    if not isinstance(base, (int, float)) or not isinstance(cap, (int, float)):
+        raise RetryValidationError("retry backoff base and cap must be numeric")
     if attempts < 1:
         raise RetryValidationError("retry attempts must be at least 1")
     if base <= 0 or cap <= 0:
