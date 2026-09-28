@@ -28,6 +28,8 @@
 - Release archive and manifest generation for public/demo packaging.
 - Durable distributed work packets with poll and acknowledgement commands.
 - Final report generation command with candidate, acceptance, and remaining-action inventory.
+- Transport-injected GitHub client for live inbound/outbound sync acceptance.
+- Git attribution helper for worker-owned authorship and StageMesh-owned commits.
 - GitHub Actions CI for Windows and Linux.
 - Stdlib invariant and acceptance runners for dependency-free verification.
 

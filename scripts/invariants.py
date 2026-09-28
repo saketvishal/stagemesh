@@ -21,6 +21,9 @@ from stagemesh.workers import heartbeat_worker, register_worker
 from stagemesh.scheduling import Scheduler
 from stagemesh.remediation import RemediationPolicy, finding_identity
 from stagemesh.distributed import WorkQueue
+from stagemesh.github import GitHubClient
+from stagemesh.task_sources import GitHubOutboundSync
+from stagemesh.attribution import attribution_for_worker
 
 
 def assert_raises(exc_type, fn, *args, **kwargs) -> None:
@@ -179,6 +182,22 @@ def main() -> int:
         assert second == []
         queue.ack(packet_id, "SUCCEEDED", {"candidate_sha": "abc"})
 
+    def github_outbound_sync_records_capacity_separately(store: Store, project: Path) -> None:
+        class RateLimitedTransport:
+            def request(self, method, path, body=None):
+                return 403, {"Retry-After": "120"}, {"message": "rate limit"}
+
+        client = GitHubClient("owner", "repo", RateLimitedTransport())
+        event_id = GitHubOutboundSync(store, client).publish_done("1", "abc")
+        event = store.source_events()[0]
+        assert event["id"] == event_id
+        assert event["status"] == "UNKNOWN"
+
+    def git_attribution_is_worker_owned(store: Store, project: Path) -> None:
+        attribution = attribution_for_worker("worker 1", "codex")
+        assert attribution.author_email == "codex+worker-1@stagemesh.invalid"
+        assert attribution.committer_email == "stagemesh@stagemesh.invalid"
+
     cases = [
         live_worker_restart,
         dead_worker_recovers,
@@ -194,6 +213,8 @@ def main() -> int:
         dependency_scheduling,
         finding_convergence_is_bounded,
         distributed_work_packets_are_claimed_once,
+        github_outbound_sync_records_capacity_separately,
+        git_attribution_is_worker_owned,
     ]
     for case in cases:
         with_store(case)

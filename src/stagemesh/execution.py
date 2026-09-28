@@ -8,6 +8,7 @@ from .domain import ExecutionKind, ExecutionStatus
 from .git import GitWorkspace
 from .persistence import Store
 from .process_identity import popen_identity
+from .attribution import attribution_for_worker
 
 
 @dataclass(frozen=True)
@@ -34,7 +35,10 @@ class FakeExecutor(Executor):
         workspace.init_if_needed()
         task_file = project / f"stagemesh-task-{task_id}.txt"
         task_file.write_text(f"implemented {task_id}\n", encoding="utf-8")
-        sha = workspace.commit_all(f"StageMesh implementation for {task_id}")
+        sha = workspace.commit_all(
+            f"StageMesh implementation for {task_id}",
+            attribution=attribution_for_worker("local-worker", self.name),
+        )
         store.add_candidate(task_id, sha, self.name, durable_handoff=True)
         store.finish_execution(execution_id, ExecutionStatus.SUCCEEDED, sha)
         return ExecutionResult(ExecutionStatus.SUCCEEDED, sha, durable_handoff=True)
