@@ -37,6 +37,7 @@ from stagemesh.final_report import render_final_report
 from stagemesh.provider_acceptance import run_provider_acceptance
 from stagemesh.github_acceptance import run_github_acceptance
 from stagemesh.release_readiness import release_readiness
+from stagemesh.external_evidence import record_external_evidence, external_evidence_records
 
 
 def assert_raises(exc_type, fn, *args, **kwargs) -> None:
@@ -305,6 +306,20 @@ def main() -> int:
         assert data["overall_status"] in {"BLOCKED_ON_EXTERNAL_EVIDENCE", "FAIL"}
         assert "external_gaps" in data
 
+    def external_evidence_is_durable(store: Store, project: Path) -> None:
+        evidence_id = record_external_evidence(
+            store,
+            "hosted-ci",
+            "PASS",
+            "https://example.invalid/run/1",
+            candidate_sha="abc",
+            notes="synthetic",
+        )
+        records = external_evidence_records(store)
+        assert records[0].id == evidence_id
+        assert records[0].kind == "hosted-ci"
+        assert records[0].candidate_sha == "abc"
+
     cases = [
         live_worker_restart,
         dead_worker_recovers,
@@ -335,6 +350,7 @@ def main() -> int:
         provider_acceptance_isolates_capacity_failure,
         github_acceptance_models_sync_contract,
         release_readiness_reports_external_gaps,
+        external_evidence_is_durable,
     ]
     for case in cases:
         with_store(case)
