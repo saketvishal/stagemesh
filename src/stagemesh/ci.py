@@ -27,13 +27,20 @@ def run_gate(name: str, command: list[str], cwd: Path) -> GateResult:
 
 def default_gates(root: Path, include_acceptance: bool = True) -> list[GateResult]:
     root = _validate_root(root)
+    return [run_gate(name, command, root) for name, command in default_gate_commands(include_acceptance)]
+
+
+def default_gate_commands(include_acceptance: bool = True) -> list[tuple[str, list[str]]]:
     gates = [
-        run_gate("compile", [sys.executable, "-m", "compileall", "-q", "src", "scripts", "build_backend.py"], root),
-        run_gate("invariants", [sys.executable, "scripts/invariants.py"], root),
-        run_gate("clean_acceptance", [sys.executable, "scripts/clean_acceptance.py"], root),
+        ("compile", [sys.executable, "-m", "compileall", "-q", "src", "scripts", "build_backend.py"]),
+        ("invariants", [sys.executable, "scripts/invariants.py"]),
+        ("provider_acceptance", [sys.executable, "scripts/provider_acceptance.py"]),
+        ("github_acceptance", [sys.executable, "scripts/github_acceptance.py"]),
+        ("live_acceptance", [sys.executable, "scripts/live_acceptance.py"]),
+        ("clean_acceptance", [sys.executable, "scripts/clean_acceptance.py"]),
     ]
     if include_acceptance:
-        gates.append(run_gate("acceptance", [sys.executable, "scripts/acceptance.py"], root))
+        gates.append(("acceptance", [sys.executable, "scripts/acceptance.py"]))
     return gates
 
 
