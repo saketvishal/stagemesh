@@ -615,6 +615,25 @@ def main() -> int:
         )
         if "chosen: claude" not in capacity:
             raise AssertionError(capacity)
+        invalid_capacity = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "stagemesh.cli",
+                "--project",
+                str(project),
+                "capacity",
+                "--primary",
+                "",
+            ],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            env={**os.environ.copy(), **env},
+            check=False,
+        )
+        if invalid_capacity.returncode != 2 or "capacity error:" not in (invalid_capacity.stdout + invalid_capacity.stderr):
+            raise AssertionError(invalid_capacity.stdout + invalid_capacity.stderr)
         marker = ROOT / ".stagemesh-broken-feature"
         marker.unlink(missing_ok=True)
         ci = run(
