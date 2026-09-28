@@ -38,6 +38,7 @@ from stagemesh.provider_acceptance import run_provider_acceptance
 from stagemesh.github_acceptance import run_github_acceptance
 from stagemesh.release_readiness import release_readiness
 from stagemesh.external_evidence import record_external_evidence, external_evidence_records
+from stagemesh.acceptance_matrix import acceptance_matrix
 
 
 def assert_raises(exc_type, fn, *args, **kwargs) -> None:
@@ -320,6 +321,13 @@ def main() -> int:
         assert records[0].kind == "hosted-ci"
         assert records[0].candidate_sha == "abc"
 
+    def acceptance_matrix_has_external_gaps(store: Store, project: Path) -> None:
+        matrix = acceptance_matrix()
+        assert matrix["status"] == "INCOMPLETE"
+        rows = matrix["rows"]
+        assert any(row["status"] == "PROVEN" for row in rows)
+        assert any(row["status"] != "PROVEN" for row in rows)
+
     cases = [
         live_worker_restart,
         dead_worker_recovers,
@@ -351,6 +359,7 @@ def main() -> int:
         github_acceptance_models_sync_contract,
         release_readiness_reports_external_gaps,
         external_evidence_is_durable,
+        acceptance_matrix_has_external_gaps,
     ]
     for case in cases:
         with_store(case)

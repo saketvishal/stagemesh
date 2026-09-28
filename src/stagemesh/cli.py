@@ -7,6 +7,7 @@ from pathlib import Path
 
 from . import __version__
 from .acceptance import write_acceptance_report
+from .acceptance_matrix import write_acceptance_matrix
 from .audit import export_audit_jsonl
 from .capacity import CapacityKind, CapacityRegistry
 from .ci import broken_future_feature_gate, default_gates
@@ -225,6 +226,14 @@ def command_acceptance_report(args: argparse.Namespace) -> int:
     output = WorkspaceBoundary(project).require_inside(Path(args.output).resolve())
     write_acceptance_report(project, output, include_acceptance=not args.skip_acceptance)
     print(f"acceptance-report: {output}")
+    return 0
+
+
+def command_acceptance_matrix(args: argparse.Namespace) -> int:
+    project = Path(args.project).resolve()
+    output = WorkspaceBoundary(project).require_inside(Path(args.output).resolve())
+    write_acceptance_matrix(output)
+    print(f"acceptance-matrix: {output}")
     return 0
 
 
@@ -473,6 +482,9 @@ def build_parser() -> argparse.ArgumentParser:
     acceptance_report.add_argument("--output", default=".stagemesh/acceptance-report.json")
     acceptance_report.add_argument("--skip-acceptance", action="store_true")
     acceptance_report.set_defaults(func=command_acceptance_report)
+    acceptance_matrix = sub.add_parser("acceptance-matrix")
+    acceptance_matrix.add_argument("--output", default=".stagemesh/acceptance-matrix.json")
+    acceptance_matrix.set_defaults(func=command_acceptance_matrix)
     audit = sub.add_parser("completion-audit")
     audit.add_argument("--output", default=".stagemesh/completion-audit.json")
     audit.set_defaults(func=command_completion_audit)
