@@ -42,6 +42,7 @@ from stagemesh.postgres_store import (
     PostgresStore,
     PostgresUnavailable,
     postgres_available,
+    postgres_declared_tables,
     postgres_schema_contract,
     postgres_schema_statements,
 )
@@ -883,11 +884,15 @@ def main() -> int:
         contract = postgres_schema_contract()
         assert contract["dialect"] == "postgresql"
         assert tuple(contract["tables"]) == POSTGRES_SCHEMA_TABLES
+        assert tuple(contract["declared_tables"]) == POSTGRES_SCHEMA_TABLES
+        assert tuple(postgres_declared_tables()) == POSTGRES_SCHEMA_TABLES
         schema_sql = str(contract["schema_sql"])
         for table in POSTGRES_SCHEMA_TABLES:
             assert f"CREATE TABLE IF NOT EXISTS {table}" in schema_sql
         statements = postgres_schema_statements()
         assert len(statements) >= len(POSTGRES_SCHEMA_TABLES)
+        assert all(statement for statement in statements)
+        assert all(not statement.endswith(";") for statement in statements)
         fake_conn = FakePostgresConnection()
         pg_store = object.__new__(PostgresStore)
         pg_store.conn = fake_conn

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -264,9 +265,15 @@ def postgres_schema_contract() -> dict[str, object]:
     return {
         "dialect": "postgresql",
         "tables": list(POSTGRES_SCHEMA_TABLES),
+        "declared_tables": postgres_declared_tables(),
         "schema_sql": POSTGRES_SCHEMA_SQL.strip(),
     }
 
 
 def postgres_schema_statements() -> list[str]:
     return [statement.strip() for statement in POSTGRES_SCHEMA_SQL.split(";") if statement.strip()]
+
+
+def postgres_declared_tables() -> list[str]:
+    pattern = re.compile(r"CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\s+([a-z_][a-z0-9_]*)", re.IGNORECASE)
+    return pattern.findall(POSTGRES_SCHEMA_SQL)
