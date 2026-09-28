@@ -212,6 +212,82 @@ def main() -> int:
         assert_raises(StoreValidationError, store.add_evidence, task_id, "abc123", EvidenceKind.VALIDATION, "BAD")
         assert_raises(StoreValidationError, store.add_evidence, task_id, "abc123", EvidenceKind.VALIDATION, EvidenceStatus.PASSED, [])
         assert_raises(StoreValidationError, store.advance_task, task_id, "BAD")
+        assert_raises(StoreValidationError, store.cache_source, "", "1", {}, "OK")
+        assert_raises(StoreValidationError, store.cache_source, "source", "", {}, "OK")
+        assert_raises(StoreValidationError, store.cache_source, "source", "1", [], "OK")
+        assert_raises(StoreValidationError, store.cache_source, "source", "1", {}, "")
+        assert_raises(StoreValidationError, store.save_objective, "", "objective", {})
+        assert_raises(StoreValidationError, store.save_objective, "objective", "", {})
+        assert_raises(StoreValidationError, store.save_objective, "objective", "objective", [])
+        assert_raises(
+            StoreValidationError,
+            store.upsert_worker,
+            worker_id="",
+            provider="codex",
+            capabilities=["code"],
+            pid=None,
+            process_create_time=None,
+            boot_id=None,
+            executable=None,
+            heartbeat_at=1,
+            lease_expires_at=2,
+        )
+        assert_raises(
+            StoreValidationError,
+            store.upsert_worker,
+            worker_id="worker",
+            provider="codex",
+            capabilities=["code", "code"],
+            pid=None,
+            process_create_time=None,
+            boot_id=None,
+            executable=None,
+            heartbeat_at=1,
+            lease_expires_at=2,
+        )
+        assert_raises(StoreValidationError, store.heartbeat_worker, "", 1, 2)
+        assert_raises(StoreValidationError, store.add_source_event, "", "1", "outbound", "OK")
+        assert_raises(StoreValidationError, store.add_source_event, "source", "", "outbound", "OK")
+        assert_raises(StoreValidationError, store.add_source_event, "source", "1", "", "OK")
+        assert_raises(StoreValidationError, store.add_source_event, "source", "1", "outbound", "")
+        assert_raises(StoreValidationError, store.add_source_event, "source", "1", "outbound", "OK", [])
+        assert_raises(StoreValidationError, store.source_events, 0)
+        assert_raises(StoreValidationError, store.upsert_finding, "", task_id, "abc123", "HIGH", "message")
+        assert_raises(StoreValidationError, store.upsert_finding, "finding", "", "abc123", "HIGH", "message")
+        assert_raises(StoreValidationError, store.upsert_finding, "finding", task_id, "", "HIGH", "message")
+        assert_raises(StoreValidationError, store.upsert_finding, "finding", task_id, "abc123", "", "message")
+        assert_raises(StoreValidationError, store.upsert_finding, "finding", task_id, "abc123", "HIGH", "")
+        assert_raises(StoreValidationError, store.get_finding, "")
+        assert_raises(StoreValidationError, store.close_finding, "")
+        assert_raises(StoreValidationError, store.open_findings_for_candidate, "", "abc123")
+        assert_raises(StoreValidationError, store.add_remediation_attempt, "", "attempted")
+        assert_raises(StoreValidationError, store.add_remediation_attempt, "finding", "")
+        assert_raises(StoreValidationError, store.add_remediation_attempt, "finding", "attempted", [])
+        assert_raises(StoreValidationError, store.remediation_attempt_count, "")
+        assert_raises(StoreValidationError, store.enqueue_work, "", Stage.PLAN, None, None)
+        assert_raises(StoreValidationError, store.enqueue_work, task_id, "BAD", None, None)
+        assert_raises(StoreValidationError, store.enqueue_work, task_id, Stage.PLAN, "", None)
+        assert_raises(StoreValidationError, store.enqueue_work, task_id, Stage.PLAN, None, "", [])
+        assert_raises(StoreValidationError, store.claim_work_packets, "", 1, 1)
+        assert_raises(StoreValidationError, store.claim_work_packets, "worker", 0, 1)
+        assert_raises(StoreValidationError, store.claim_work_packets, "worker", 1, 0)
+        assert_raises(StoreValidationError, store.renew_work_packet, "", "worker")
+        assert_raises(StoreValidationError, store.renew_work_packet, "packet", "")
+        assert_raises(StoreValidationError, store.ack_work_packet, "", "SUCCEEDED")
+        assert_raises(StoreValidationError, store.ack_work_packet, "packet", "")
+        assert_raises(StoreValidationError, store.ack_work_packet, "packet", "SUCCEEDED", [])
+        assert_raises(StoreValidationError, store.add_audit_event, "", {})
+        assert_raises(StoreValidationError, store.add_audit_event, "audit", [])
+        assert_raises(StoreValidationError, store.audit_events, 0)
+        assert_raises(StoreValidationError, store.get_retry_state, "")
+        assert_raises(StoreValidationError, store.upsert_retry_state, "", 1, 10, "reason")
+        assert_raises(StoreValidationError, store.upsert_retry_state, "retry", -1, 10, "reason")
+        assert_raises(StoreValidationError, store.upsert_retry_state, "retry", 1, 10, "")
+        assert_raises(StoreValidationError, store.clear_retry_state, "")
+        assert_raises(StoreValidationError, store.add_external_evidence, "", "PASS", "https://example.invalid")
+        assert_raises(StoreValidationError, store.add_external_evidence, "hosted-ci", "", "https://example.invalid")
+        assert_raises(StoreValidationError, store.add_external_evidence, "hosted-ci", "PASS", "")
+        assert_raises(StoreValidationError, store.add_external_evidence, "hosted-ci", "PASS", "https://example.invalid", "")
 
     def targeted_ops(store: Store, project: Path) -> None:
         first = store.upsert_task("first")
