@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from stagemesh.coordinator import Coordinator
-from stagemesh.domain import EvidenceKind, EvidenceStatus, ExecutionKind, ExecutionStatus, ProcessIdentity, Stage
+from stagemesh.domain import EvidenceKind, EvidenceStatus, ExecutionKind, ExecutionStatus, ProcessIdentity, Stage, TaskStatus
 from stagemesh.execution import ExecutionResult, FakeExecutor
 from stagemesh.lifecycle import LifecycleError, evidence_allows_advance
 from stagemesh.persistence import Store, StoreValidationError
@@ -421,14 +421,17 @@ def main() -> int:
         assert "worker-observe" in dashboard
         assert "https://example.invalid/ci" in dashboard
 
-    def health_degrades_on_failed_or_unknown_executions(store: Store, project: Path) -> None:
+    def health_degrades_on_blocked_tasks_or_failed_executions(store: Store, project: Path) -> None:
         task_id = store.upsert_task("observe failure", source="local", source_id="failure")
+        store.conn.execute("UPDATE tasks SET status=? WHERE id=?", (TaskStatus.BLOCKED, task_id))
+        store.conn.commit()
         failed_id = store.start_execution(task_id=task_id, claim_id=None, kind=ExecutionKind.VALIDATION)
         unknown_id = store.start_execution(task_id=task_id, claim_id=None, kind=ExecutionKind.REVIEW)
         store.finish_execution(failed_id, ExecutionStatus.FAILED)
         store.finish_execution(unknown_id, ExecutionStatus.UNKNOWN)
         report = health(store)
         assert report.ok is False
+        assert report.blocked_task_count == 1
         assert report.failed_execution_count == 1
         assert report.unknown_execution_count == 1
 
@@ -1232,7 +1235,7 @@ def main() -> int:
         worker_heartbeat_and_outbound_sync,
         worker_registration_rejects_invalid_identity,
         operator_dashboard_exposes_structured_state,
-        health_degrades_on_failed_or_unknown_executions,
+        health_degrades_on_blocked_tasks_or_failed_executions,
         dependency_scheduling,
         objective_planner_rejects_invalid_dependencies,
         global_registry_rejects_ambiguous_projects,
