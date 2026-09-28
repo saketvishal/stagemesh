@@ -346,6 +346,11 @@ def main() -> int:
     def final_report_mentions_missing_evidence(store: Store, project: Path) -> None:
         project.mkdir(parents=True, exist_ok=True)
         report = render_final_report(project, store)
+        assert "## Final Architecture" in report
+        assert "## Complete Feature Inventory" in report
+        assert "## Acceptance Evidence" in report
+        assert "## Remaining Human-Only Actions" in report
+        assert "## Roadmap Preservation" in report
         assert "acceptance report status: not generated" in report
         assert "completion audit status: not generated" in report
 
