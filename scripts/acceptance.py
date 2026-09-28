@@ -297,6 +297,26 @@ def main() -> int:
         )
         if "evidence:" not in evidence_add:
             raise AssertionError(evidence_add)
+        duplicate_evidence_add = run(
+            [
+                sys.executable,
+                "-m",
+                "stagemesh.cli",
+                "--project",
+                str(project),
+                "evidence",
+                "add",
+                "hosted-ci",
+                "PASS",
+                "https://example.invalid/run/acceptance",
+                "--candidate-sha",
+                project_candidate,
+            ],
+            ROOT,
+            env,
+        )
+        if duplicate_evidence_add != evidence_add:
+            raise AssertionError(duplicate_evidence_add)
         mismatch_evidence = run(
             [
                 sys.executable,
@@ -334,6 +354,8 @@ def main() -> int:
             raise AssertionError(evidence_json)
         evidence_matches = {record["kind"]: record["candidate_match"] for record in evidence_data["records"]}
         if evidence_matches != {"hosted-ci": True, "live-provider": False}:
+            raise AssertionError(evidence_json)
+        if len(evidence_data["records"]) != 2:
             raise AssertionError(evidence_json)
         invalid_evidence = subprocess.run(
             [

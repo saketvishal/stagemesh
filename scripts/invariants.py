@@ -1155,7 +1155,17 @@ def main() -> int:
             candidate_sha="ABC1234",
             notes="synthetic",
         )
+        duplicate_id = record_external_evidence(
+            store,
+            "hosted-ci",
+            "PASS",
+            "https://example.invalid/run/1",
+            candidate_sha="abc1234",
+            notes="synthetic",
+        )
         records = external_evidence_records(store)
+        assert duplicate_id == evidence_id
+        assert len(records) == 1
         assert records[0].id == evidence_id
         assert records[0].kind == "hosted-ci"
         assert records[0].status == "PASS"
