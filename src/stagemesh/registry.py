@@ -9,6 +9,10 @@ class RegistryConflictError(ValueError):
     pass
 
 
+class RegistryValidationError(ValueError):
+    pass
+
+
 @dataclass(frozen=True)
 class ProjectRegistration:
     name: str
@@ -21,22 +25,31 @@ class GlobalRegistry:
         self.path = Path(path).resolve()
 
     def _normalize(self, project: ProjectRegistration) -> ProjectRegistration:
+        if not isinstance(project, ProjectRegistration):
+            raise RegistryValidationError("registry project must be a ProjectRegistration")
         name = project.name.strip()
         if not name:
-            raise ValueError("project name is required")
+            raise RegistryValidationError("project name is required")
         return ProjectRegistration(name=name, path=project.path.resolve(), db_path=project.db_path.resolve())
 
     def load(self) -> list[ProjectRegistration]:
         if not self.path.exists():
             return []
-        data = json.loads(self.path.read_text(encoding="utf-8"))
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise RegistryValidationError("registry file must be valid JSON") from exc
+        if not isinstance(data, dict):
+            raise RegistryValidationError("registry root must be an object")
         projects = data.get("projects", [])
         if not isinstance(projects, list):
-            raise ValueError("registry projects must be a list")
+            raise RegistryValidationError("registry projects must be a list")
         loaded: list[ProjectRegistration] = []
         for item in projects:
             if not isinstance(item, dict):
-                raise ValueError("registry project entries must be objects")
+                raise RegistryValidationError("registry project entries must be objects")
+            if not all(isinstance(item.get(key), str) and item.get(key) for key in ("name", "path", "db_path")):
+                raise RegistryValidationError("registry project entries require name, path, and db_path")
             loaded.append(
                 self._normalize(
                     ProjectRegistration(

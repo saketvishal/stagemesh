@@ -43,7 +43,10 @@ def load_config(project: Path, config_path: Path | None = None) -> StageMeshConf
     data: dict[str, object] = {}
     source = "defaults"
     if path.exists():
-        loaded = json.loads(path.read_text(encoding="utf-8"))
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise ConfigValidationError("config file must be valid JSON") from exc
         if not isinstance(loaded, dict):
             raise ConfigValidationError("config root must be an object")
         data = loaded

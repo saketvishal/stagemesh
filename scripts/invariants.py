@@ -59,7 +59,7 @@ from stagemesh.acceptance import AcceptanceValidationError, local_acceptance_rep
 from stagemesh.ci import CIValidationError, broken_future_feature_gate, default_gates, run_gate
 from stagemesh.ci_wait import decide_ci_wait
 from stagemesh.objectives import ObjectivePlanner, ObjectiveValidationError
-from stagemesh.registry import GlobalRegistry, ProjectRegistration, RegistryConflictError
+from stagemesh.registry import GlobalRegistry, ProjectRegistration, RegistryConflictError, RegistryValidationError
 from stagemesh.capacity import CapacityKind, CapacityRegistry, CapacityValidationError
 from stagemesh.providers import ProviderValidationError, RuntimeCommandAdapter, approved_default_adapters
 
@@ -501,6 +501,18 @@ def main() -> int:
             registry.register,
             ProjectRegistration("second", first, first / ".stagemesh" / "stagemesh.sqlite3"),
         )
+        malformed = project.parent / "malformed-registry.json"
+        malformed.write_text("{not-json", encoding="utf-8")
+        assert_raises(RegistryValidationError, GlobalRegistry(malformed).load)
+        malformed.write_text("[]", encoding="utf-8")
+        assert_raises(RegistryValidationError, GlobalRegistry(malformed).load)
+        malformed.write_text('{"projects":{}}', encoding="utf-8")
+        assert_raises(RegistryValidationError, GlobalRegistry(malformed).load)
+        malformed.write_text('{"projects":[[]]}', encoding="utf-8")
+        assert_raises(RegistryValidationError, GlobalRegistry(malformed).load)
+        malformed.write_text('{"projects":[{"name":"","path":"x","db_path":"db"}]}', encoding="utf-8")
+        assert_raises(RegistryValidationError, GlobalRegistry(malformed).load)
+        assert_raises(RegistryValidationError, registry.register, ProjectRegistration("", first, first / ".stagemesh" / "db.sqlite3"))
 
     def finding_convergence_is_bounded(store: Store, project: Path) -> None:
         task_id = store.upsert_task("review task")
@@ -711,6 +723,8 @@ def main() -> int:
         config_dir = project / ".stagemesh"
         config_dir.mkdir(parents=True)
         config_file = config_dir / "config.json"
+        config_file.write_text("{not-json", encoding="utf-8")
+        assert_raises(ConfigValidationError, load_config, project)
         config_file.write_text('{"routing":{"mode":"ROUND_ROBIN"}}', encoding="utf-8")
         assert_raises(ConfigValidationError, load_config, project)
         config_file.write_text('{"routing":{"stage_routes":{"BOGUS":"codex"}}}', encoding="utf-8")
