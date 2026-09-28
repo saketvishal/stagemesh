@@ -200,6 +200,23 @@ def command_operator(args: argparse.Namespace) -> int:
     store = Store(db_path(project))
     store.migrate()
     report = operator_report(store)
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "summary": report.summary,
+                    "lines": list(report.lines),
+                    "sections": [
+                        {"name": section.name, "rows": [dict(row) for row in section.rows]}
+                        for section in report.sections
+                    ],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        store.close()
+        return 0
     print(f"summary: {report.summary}")
     for line in report.lines:
         print(line)
@@ -555,6 +572,7 @@ def build_parser() -> argparse.ArgumentParser:
     worker.add_argument("--lease-seconds", type=float, default=300)
     worker.set_defaults(func=command_worker)
     operator = sub.add_parser("operator")
+    operator.add_argument("--json", action="store_true")
     operator.set_defaults(func=command_operator)
     dashboard = sub.add_parser("dashboard")
     dashboard.add_argument("--output", default="stagemesh-dashboard.html")

@@ -21,7 +21,7 @@
 - Worker registry and heartbeat records for durable worker visibility.
 - Global multi-project registry file with ambiguity and duplicate-state validation.
 - Outbound source synchronization event log that never becomes lifecycle truth.
-- Structured operator report command for dashboard/status integration.
+- Structured plain/JSON operator report command for dashboard/status integration.
 - Dependency-aware scheduling for planned tasks.
 - PostgreSQL-ready persistence backend interface.
 - CI wait decision helper and CLI command that release worker capacity while checks are pending.
