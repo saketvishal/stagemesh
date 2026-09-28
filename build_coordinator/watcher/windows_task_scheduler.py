@@ -22,7 +22,9 @@ def stable_task_name(control_repo_root: str, repository_slug: str) -> str:
     """Deterministic Task Scheduler task name scoped to the authorized
     repository. Derived from a hash of the normalized control repo root and
     GitHub slug so the name never embeds a token, branch name, or secret."""
-    normalized = f"{control_repo_root.strip().rstrip('/\\').lower()}|{repository_slug.strip().lower()}"
+    normalized_root = control_repo_root.strip().rstrip("/\\").lower()
+    normalized_slug = repository_slug.strip().lower()
+    normalized = f"{normalized_root}|{normalized_slug}"
     digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
     return f"BuildCoordinator-{digest}"
 

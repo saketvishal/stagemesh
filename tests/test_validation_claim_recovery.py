@@ -61,6 +61,7 @@ from sqlalchemy import select
 from build_coordinator.db import Base, SessionLocal, engine, initialize_schema
 from build_coordinator.execution import FakeExecutor
 from build_coordinator.execution.base import ExecutionLaunch
+from build_coordinator.execution.process_tree import _process_exists, kill_process_tree
 from build_coordinator.models import (
     BuildCoordinatorState,
     BuildRunnerExecution,
@@ -147,13 +148,18 @@ def _quick_exit_command() -> list[str]:
 
 
 def _wait_alive(pid: int, expected: bool, timeout: float = 3.0) -> bool:
+    # Portable liveness check: reuses the project's own durable
+    # process-existence probe (process_tree._process_exists), which is
+    # correct on both POSIX and Windows and already distinguishes a
+    # genuinely-exited process from a reused pid slot -- `kill -0` is a
+    # POSIX-only shell command and does not exist on Windows.
     deadline = time.time() + timeout
     while time.time() < deadline:
-        alive = subprocess.run(["kill", "-0", str(pid)]).returncode == 0
+        alive = _process_exists(pid)
         if alive == expected:
             return alive
         time.sleep(0.02)
-    return subprocess.run(["kill", "-0", str(pid)]).returncode == 0
+    return _process_exists(pid)
 
 
 def _result_path(execution_id: str) -> str:
@@ -277,7 +283,7 @@ def test_expired_claim_preserves_live_validator_row_not_terminated():
             assert validation_row.status == "LAUNCHED"
         assert _wait_alive(pid, True)  # not killed by the reconciliation itself
     finally:
-        subprocess.run(["kill", "-9", str(pid)])
+        kill_process_tree(pid)
 
 
 def test_runner_cycle_healthy_live_validator_survives_full_cycle_with_zero_duplicates():
@@ -330,7 +336,7 @@ def test_runner_cycle_healthy_live_validator_survives_full_cycle_with_zero_dupli
         # Zero unintended terminations: the real OS process must still be alive.
         assert _wait_alive(pid, True)
     finally:
-        subprocess.run(["kill", "-9", str(pid)])
+        kill_process_tree(pid)
 
 
 # ---------------------------------------------------------------------------
@@ -352,7 +358,7 @@ def test_runner_cycle_confirmed_dead_validator_recovers_safely_without_overlap()
     # not a normal exit), so it never writes a result file. This is the
     # "confirmed interrupted" case, distinct from a validator that finished
     # quickly and left a valid result to be consumed normally.
-    subprocess.run(["kill", "-9", str(pid)])
+    kill_process_tree(pid)
     assert _wait_alive(pid, False, timeout=5.0) is False
     _expire_claim(claim_id)
 
@@ -440,7 +446,7 @@ def test_runner_cycle_ambiguous_identity_does_not_duplicate_dispatch(monkeypatch
 
         assert _wait_alive(pid, True)
     finally:
-        subprocess.run(["kill", "-9", str(pid)])
+        kill_process_tree(pid)
 
 
 # ---------------------------------------------------------------------------
