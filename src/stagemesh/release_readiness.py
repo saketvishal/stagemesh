@@ -9,6 +9,7 @@ from pathlib import Path
 
 from .completion_audit import completion_audit
 from .persistence import Store
+from .security import WorkspaceBoundary
 
 
 @dataclass(frozen=True)
@@ -18,7 +19,14 @@ class ReadinessCheck:
     detail: str
 
 
+class ReleaseReadinessValidationError(ValueError):
+    pass
+
+
 def run_command_check(name: str, command: list[str], root: Path) -> ReadinessCheck:
+    name = _validate_text(name, "readiness check name")
+    command = _validate_command(command)
+    root = _validate_root(root)
     result = subprocess.run(command, cwd=root, text=True, capture_output=True, check=False)
     status = "PASS" if result.returncode == 0 else "FAIL"
     detail = (result.stdout + result.stderr).strip()[-2000:]
@@ -28,6 +36,7 @@ def run_command_check(name: str, command: list[str], root: Path) -> ReadinessChe
 def release_readiness(
     root: Path, include_acceptance: bool = True, run_checks: bool = True, store: Store | None = None
 ) -> dict[str, object]:
+    root = _validate_root(root)
     checks: list[ReadinessCheck] = []
     if run_checks:
         checks = [
@@ -66,8 +75,34 @@ def write_release_readiness(
     run_checks: bool = True,
     store: Store | None = None,
 ) -> None:
+    root = _validate_root(root)
+    output = WorkspaceBoundary(root).require_inside(output)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(
         json.dumps(release_readiness(root, include_acceptance, run_checks, store), indent=2, sort_keys=True),
         encoding="utf-8",
     )
+
+
+def _validate_text(value: str, field: str, max_length: int = 200) -> str:
+    if not isinstance(value, str):
+        raise ReleaseReadinessValidationError(f"{field} must be a string")
+    normalized = value.strip()
+    if not normalized:
+        raise ReleaseReadinessValidationError(f"{field} must be a non-empty string")
+    if len(normalized) > max_length:
+        raise ReleaseReadinessValidationError(f"{field} must be {max_length} characters or fewer")
+    return normalized
+
+
+def _validate_command(command: list[str]) -> list[str]:
+    if not isinstance(command, list) or not command:
+        raise ReleaseReadinessValidationError("readiness command must be a non-empty list")
+    return [_validate_text(arg, "readiness command argument", 1000) for arg in command]
+
+
+def _validate_root(root: Path) -> Path:
+    resolved = Path(root).resolve()
+    if not resolved.exists() or not resolved.is_dir():
+        raise ReleaseReadinessValidationError("readiness root must be an existing directory")
+    return resolved
