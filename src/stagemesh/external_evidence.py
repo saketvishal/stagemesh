@@ -36,6 +36,8 @@ def record_external_evidence(
     normalized_kind = _validate_kind(kind)
     normalized_status = _validate_status(status)
     normalized_url = _validate_url(url)
+    if normalized_status == "PASS" and not candidate_sha:
+        raise ExternalEvidenceValidationError("passing external evidence must include a candidate SHA")
     try:
         normalized_sha = validate_candidate_sha(candidate_sha) if candidate_sha else None
     except ReleaseValidationError as exc:
