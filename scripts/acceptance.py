@@ -357,6 +357,26 @@ def main() -> int:
         operator = run([sys.executable, "-m", "stagemesh.cli", "--project", str(project), "operator"], ROOT, env)
         if "workers=1" not in operator or "worker worker-1 provider=codex" not in operator:
             raise AssertionError(operator)
+        invalid_worker = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "stagemesh.cli",
+                "--project",
+                str(project),
+                "worker",
+                "worker-bad",
+                "--lease-seconds",
+                "0",
+            ],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            env={**os.environ.copy(), **env},
+            check=False,
+        )
+        if invalid_worker.returncode != 2 or "worker error:" not in (invalid_worker.stdout + invalid_worker.stderr):
+            raise AssertionError(invalid_worker.stdout + invalid_worker.stderr)
         dashboard = project / ".stagemesh" / "dashboard.html"
         dashboard_output = run(
             [

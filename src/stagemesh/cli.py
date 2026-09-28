@@ -34,7 +34,7 @@ from .release_readiness import write_release_readiness
 from .retry import RetryRegistry, RetryValidationError
 from .security import WorkspaceBoundary
 from .task_sources import LocalBacklogSource, TaskSourceValidationError, sync_source
-from .workers import heartbeat_worker, register_worker
+from .workers import WorkerValidationError, heartbeat_worker, register_worker
 
 
 def runtime_dir(project: Path) -> Path:
@@ -597,6 +597,9 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     except AuditValidationError as exc:
         print(f"audit error: {exc}", file=sys.stderr)
+        return 2
+    except WorkerValidationError as exc:
+        print(f"worker error: {exc}", file=sys.stderr)
         return 2
 
 

@@ -20,7 +20,7 @@ from stagemesh.persistence import Store
 from stagemesh.process_identity import classify_process
 from stagemesh.review import Reviewer
 from stagemesh.task_sources import DiscoveredTask, GitHubIssueSource, LocalBacklogSource, OutboundSync, TaskSourceValidationError, sync_source
-from stagemesh.workers import heartbeat_worker, register_worker
+from stagemesh.workers import WorkerValidationError, heartbeat_worker, register_worker
 from stagemesh.scheduling import Scheduler
 from stagemesh.remediation import RemediationPolicy, finding_identity
 from stagemesh.distributed import WorkQueue, WorkQueueError
@@ -257,6 +257,16 @@ def main() -> int:
         assert store.workers()[0]["provider"] == "codex"
         OutboundSync(store).publish("github", "1", "DONE", {"sha": "abc"})
         assert store.source_events()[0]["direction"] == "outbound"
+
+    def worker_registration_rejects_invalid_identity(store: Store, project: Path) -> None:
+        identity = ProcessIdentity(pid=1, create_time=2.0, boot_id="boot", executable="codex")
+        assert_raises(WorkerValidationError, register_worker, store, "", "codex", {"code"}, identity)
+        assert_raises(WorkerValidationError, register_worker, store, "worker", "", {"code"}, identity)
+        assert_raises(WorkerValidationError, register_worker, store, "worker", "codex", set(), identity)
+        assert_raises(WorkerValidationError, register_worker, store, "worker", "codex", {"code", " code "}, identity)
+        assert_raises(WorkerValidationError, register_worker, store, "worker", "codex", {"code"}, identity, 0)
+        assert_raises(WorkerValidationError, heartbeat_worker, store, "", 10)
+        assert_raises(WorkerValidationError, heartbeat_worker, store, "worker", 0)
 
     def operator_dashboard_exposes_structured_state(store: Store, project: Path) -> None:
         task_id = store.upsert_task("observe me", source="local", source_id="observe")
@@ -780,6 +790,7 @@ def main() -> int:
         source_semantics,
         local_backlog_source_rejects_malformed_tasks,
         worker_heartbeat_and_outbound_sync,
+        worker_registration_rejects_invalid_identity,
         operator_dashboard_exposes_structured_state,
         dependency_scheduling,
         objective_planner_rejects_invalid_dependencies,

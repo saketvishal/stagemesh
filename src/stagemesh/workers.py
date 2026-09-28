@@ -7,6 +7,10 @@ from .domain import ProcessIdentity
 from .persistence import Store
 
 
+class WorkerValidationError(ValueError):
+    pass
+
+
 @dataclass(frozen=True)
 class WorkerRecord:
     id: str
@@ -29,6 +33,10 @@ def register_worker(
     identity: ProcessIdentity,
     lease_seconds: float = 300,
 ) -> None:
+    worker_id = _validate_text(worker_id, "worker id")
+    provider = _validate_text(provider, "worker provider")
+    capabilities = _validate_capabilities(capabilities)
+    lease_seconds = _validate_lease_seconds(lease_seconds)
     now = time.time()
     store.upsert_worker(
         worker_id=worker_id,
@@ -44,5 +52,30 @@ def register_worker(
 
 
 def heartbeat_worker(store: Store, worker_id: str, lease_seconds: float = 300) -> None:
+    worker_id = _validate_text(worker_id, "worker id")
+    lease_seconds = _validate_lease_seconds(lease_seconds)
     now = time.time()
     store.heartbeat_worker(worker_id, now, now + lease_seconds)
+
+
+def _validate_text(value: str, field: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise WorkerValidationError(f"{field} must be a non-empty string")
+    if len(value) > 200:
+        raise WorkerValidationError(f"{field} must be 200 characters or fewer")
+    return value.strip()
+
+
+def _validate_capabilities(capabilities: set[str]) -> set[str]:
+    if not capabilities:
+        raise WorkerValidationError("worker capabilities must not be empty")
+    normalized = {_validate_text(capability, "worker capability") for capability in capabilities}
+    if len(normalized) != len(capabilities):
+        raise WorkerValidationError("worker capabilities must be unique after trimming")
+    return normalized
+
+
+def _validate_lease_seconds(lease_seconds: float) -> float:
+    if lease_seconds <= 0:
+        raise WorkerValidationError("worker lease seconds must be positive")
+    return lease_seconds
