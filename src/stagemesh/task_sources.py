@@ -9,7 +9,7 @@ from pathlib import Path
 
 from .domain import TaskStatus
 from .persistence import Store
-from .github import GitHubClient
+from .github import GitHubClient, parse_retry_after
 from .audit import record_audit
 from .retry import RetryRegistry
 
@@ -126,7 +126,7 @@ class GitHubApiIssueSource:
         except urllib.error.HTTPError as exc:
             if exc.code in {403, 429}:
                 retry_after = exc.headers.get("Retry-After")
-                return [], "UNKNOWN", self.now + float(retry_after or 60)
+                return [], "UNKNOWN", self.now + parse_retry_after(retry_after)
             if exc.code in {401, 404}:
                 return [], "STALE", None
             raise

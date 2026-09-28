@@ -24,7 +24,7 @@ from stagemesh.workers import heartbeat_worker, register_worker
 from stagemesh.scheduling import Scheduler
 from stagemesh.remediation import RemediationPolicy, finding_identity
 from stagemesh.distributed import WorkQueue, WorkQueueError
-from stagemesh.github import GitHubClient
+from stagemesh.github import GitHubClient, parse_retry_after
 from stagemesh.task_sources import GitHubOutboundSync
 from stagemesh.attribution import attribution_for_worker
 from stagemesh.redaction import redact_mapping, redact_text
@@ -438,6 +438,20 @@ def main() -> int:
         assert event["id"] == event_id
         assert event["status"] == "UNKNOWN"
 
+    def github_retry_after_parsing_is_defensive(store: Store, project: Path) -> None:
+        class InvalidRetryAfterTransport:
+            def request(self, method, path, body=None):
+                return 429, {"Retry-After": "not-a-number"}, {"message": "rate limit"}
+
+        assert parse_retry_after(None) == 60
+        assert parse_retry_after("") == 60
+        assert parse_retry_after("not-a-number") == 60
+        assert parse_retry_after("-1") == 60
+        assert parse_retry_after("15") == 15
+        result = GitHubClient("owner", "repo", InvalidRetryAfterTransport()).list_open_issues()
+        assert result.status == "UNKNOWN"
+        assert result.retry_after == 60
+
     def git_attribution_is_worker_owned(store: Store, project: Path) -> None:
         attribution = attribution_for_worker("worker 1", "codex")
         assert attribution.author_email == "codex+worker-1@stagemesh.invalid"
@@ -767,6 +781,7 @@ def main() -> int:
         ci_wait_releases_worker_capacity_while_pending,
         capacity_registry_rejects_invalid_provider_state,
         github_outbound_sync_records_capacity_separately,
+        github_retry_after_parsing_is_defensive,
         git_attribution_is_worker_owned,
         secrets_are_redacted,
         config_loads_from_project_file,
