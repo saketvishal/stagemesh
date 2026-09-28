@@ -32,6 +32,7 @@ from stagemesh.persistence_backends import probe_backend
 from stagemesh.completion_audit import completion_audit
 from stagemesh.audit import record_audit, export_audit_jsonl
 from stagemesh.retry import RetryRegistry
+from stagemesh.postgres_store import PostgresStore, PostgresUnavailable, postgres_available
 
 
 def assert_raises(exc_type, fn, *args, **kwargs) -> None:
@@ -245,6 +246,8 @@ def main() -> int:
         assert probe.name == "postgres"
         assert probe.available in {True, False}
         assert probe.reason
+        if not postgres_available():
+            assert_raises(PostgresUnavailable, PostgresStore, "postgresql://example/db")
 
     def completion_audit_is_not_falsely_complete(store: Store, project: Path) -> None:
         audit = completion_audit()

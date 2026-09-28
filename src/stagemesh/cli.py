@@ -21,6 +21,7 @@ from .operator import operator_report
 from .objectives import ObjectivePlanner
 from .persistence import Store
 from .persistence_backends import probe_backend
+from .postgres_store import PostgresStore
 from .process_identity import current_process_identity
 from .registry import GlobalRegistry, ProjectRegistration
 from .release import build_release_artifact
@@ -251,6 +252,21 @@ def command_config(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_backend(args: argparse.Namespace) -> int:
+    config = load_config(Path(args.project).resolve(), Path(args.config).resolve() if args.config else None)
+    probe = probe_backend(config.database_url, db_path(Path(args.project).resolve()))
+    print(f"name: {probe.name}")
+    print(f"available: {probe.available}")
+    print(f"reason: {probe.reason}")
+    if args.ping and config.database_url and probe.name == "postgres":
+        store = PostgresStore(config.database_url)
+        try:
+            print(f"ping: {store.ping()}")
+        finally:
+            store.close()
+    return 0
+
+
 def command_completion_audit(args: argparse.Namespace) -> int:
     project = Path(args.project).resolve()
     output = WorkspaceBoundary(project).require_inside(Path(args.output).resolve())
@@ -335,6 +351,10 @@ def build_parser() -> argparse.ArgumentParser:
     config = sub.add_parser("config")
     config.add_argument("--config")
     config.set_defaults(func=command_config)
+    backend = sub.add_parser("backend")
+    backend.add_argument("--config")
+    backend.add_argument("--ping", action="store_true")
+    backend.set_defaults(func=command_backend)
     worker = sub.add_parser("worker")
     worker.add_argument("worker_id")
     worker.add_argument("--provider", default="local")

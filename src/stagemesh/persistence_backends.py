@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Protocol
 
 from .persistence import Store
+from .postgres_store import PostgresStore
 
 
 class PersistenceBackend(Protocol):
@@ -30,10 +31,8 @@ class PostgresBackend:
     dsn: str
     name: str = "postgres"
 
-    def open(self) -> Store:
-        raise NotImplementedError(
-            "PostgreSQL support is interface-ready but requires a psycopg-backed Store implementation"
-        )
+    def open(self) -> PostgresStore:
+        return PostgresStore(self.dsn)
 
 
 @dataclass(frozen=True)
