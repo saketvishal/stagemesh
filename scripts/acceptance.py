@@ -809,11 +809,23 @@ def main() -> int:
         )
         if "should_wait: True" not in ci_wait or "release_worker: True" not in ci_wait:
             raise AssertionError(ci_wait)
-        live = run([sys.executable, "scripts/live_acceptance.py"], ROOT, env)
+        root_config = ROOT / ".stagemesh" / "config.json"
+        original_root_config = root_config.read_text(encoding="utf-8") if root_config.exists() else None
+        root_config.parent.mkdir(parents=True, exist_ok=True)
+        root_config.write_text('{"providers":{"custom":"python --version"}}', encoding="utf-8")
+        try:
+            live = run([sys.executable, "scripts/live_acceptance.py"], ROOT, env)
+        finally:
+            if original_root_config is None:
+                root_config.unlink(missing_ok=True)
+            else:
+                root_config.write_text(original_root_config, encoding="utf-8")
         if (
             "github:" not in live
             or "github:sync:" not in live
             or "provider:codex:" not in live
+            or "provider:custom: AVAILABLE" not in live
+            or "provider:custom:execution: NOT_PROVEN" not in live
             or "provider:codex:execution: NOT_PROVEN" not in live
         ):
             raise AssertionError(live)

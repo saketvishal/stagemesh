@@ -61,7 +61,7 @@ from stagemesh.ci_wait import decide_ci_wait
 from stagemesh.objectives import ObjectivePlanner, ObjectiveValidationError
 from stagemesh.registry import GlobalRegistry, ProjectRegistration, RegistryConflictError, RegistryValidationError
 from stagemesh.capacity import CapacityKind, CapacityRegistry, CapacityValidationError
-from stagemesh.providers import ProviderValidationError, RuntimeCommandAdapter, approved_default_adapters
+from stagemesh.providers import ProviderValidationError, RuntimeCommandAdapter, adapters_from_config, approved_default_adapters
 
 
 def assert_raises(exc_type, fn, *args, **kwargs) -> None:
@@ -1000,13 +1000,22 @@ def main() -> int:
         old = os.environ.get("STAGEMESH_CODEX_CMD")
         os.environ["STAGEMESH_CODEX_CMD"] = '"python" "-m" "stagemesh.cli"'
         try:
-            codex = approved_default_adapters()[0]
+            codex = [adapter for adapter in approved_default_adapters() if adapter.name == "codex"][0]
             assert codex.command == ("python", "-m", "stagemesh.cli")
         finally:
             if old is None:
                 os.environ.pop("STAGEMESH_CODEX_CMD", None)
             else:
                 os.environ["STAGEMESH_CODEX_CMD"] = old
+        config_dir = project / ".stagemesh"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "config.json").write_text(
+            '{"providers":{"custom":"python --version","codex":"python -m stagemesh.cli"}}',
+            encoding="utf-8",
+        )
+        adapters = {adapter.name: adapter.command for adapter in adapters_from_config(load_config(project))}
+        assert adapters["custom"] == ("python", "--version")
+        assert adapters["codex"] == ("python", "-m", "stagemesh.cli")
 
     def github_acceptance_models_sync_contract(store: Store, project: Path) -> None:
         result = run_github_acceptance(store)
