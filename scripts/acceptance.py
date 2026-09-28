@@ -642,6 +642,10 @@ def main() -> int:
         )
         if not acceptance_report.exists() or "acceptance-report:" not in report_output:
             raise AssertionError(report_output)
+        acceptance_report_data = json.loads(acceptance_report.read_text(encoding="utf-8"))
+        proof_gap_text = json.dumps(acceptance_report_data.get("proof_gaps", []))
+        if "provider:codex:execution: NOT_PROVEN" not in proof_gap_text or "github:sync:" not in proof_gap_text:
+            raise AssertionError(acceptance_report_data)
         run(
             [
                 sys.executable,

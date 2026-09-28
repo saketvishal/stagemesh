@@ -46,6 +46,7 @@ def local_acceptance_report(root: Path, include_acceptance: bool = True) -> dict
     return {
         "generated_at": time.time(),
         "status": "PASS" if all(check.status == "PASS" for check in checks) else "FAIL",
+        "proof_gaps": proof_gaps(checks),
         "checks": [
             {"name": check.name, "status": check.status, "output": check.output[-4000:]}
             for check in checks
@@ -61,6 +62,15 @@ def write_acceptance_report(root: Path, output: Path, include_acceptance: bool =
         json.dumps(local_acceptance_report(root, include_acceptance), indent=2, sort_keys=True),
         encoding="utf-8",
     )
+
+
+def proof_gaps(checks: list[AcceptanceCheck]) -> list[dict[str, str]]:
+    gaps: list[dict[str, str]] = []
+    for check in checks:
+        for line in check.output.splitlines():
+            if "NOT_CONFIGURED" in line or "NOT_PROVEN" in line:
+                gaps.append({"check": check.name, "evidence": line.strip()})
+    return gaps
 
 
 def _validate_text(value: str, field: str, max_length: int = 200) -> str:
