@@ -9,6 +9,7 @@ from pathlib import Path
 
 from .persistence import Store
 from .github import GitHubClient
+from .audit import record_audit
 
 
 @dataclass(frozen=True)
@@ -131,7 +132,13 @@ class OutboundSync:
         self.store = store
 
     def publish(self, source: str, source_id: str, status: str, payload: dict[str, object] | None = None) -> str:
-        return self.store.add_source_event(source, source_id, "outbound", status, payload or {})
+        event_id = self.store.add_source_event(source, source_id, "outbound", status, payload or {})
+        record_audit(
+            self.store,
+            "source.outbound",
+            {"source": source, "source_id": source_id, "status": status, **(payload or {})},
+        )
+        return event_id
 
 
 class GitHubOutboundSync(OutboundSync):

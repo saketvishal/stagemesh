@@ -74,6 +74,23 @@ def main() -> int:
             raise AssertionError(status)
         if "future work" in status:
             raise AssertionError("deferred task was dispatched")
+        audit_log = project / ".stagemesh" / "audit.jsonl"
+        audit_output = run(
+            [
+                sys.executable,
+                "-m",
+                "stagemesh.cli",
+                "--project",
+                str(project),
+                "audit",
+                "--output",
+                str(audit_log),
+            ],
+            ROOT,
+            env,
+        )
+        if not audit_log.exists() or "audit:" not in audit_output:
+            raise AssertionError(audit_output)
         doctor = run([sys.executable, "-m", "stagemesh.cli", "--project", str(project), "doctor"], ROOT, env)
         required = [
             "version:",

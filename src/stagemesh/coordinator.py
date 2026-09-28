@@ -9,6 +9,7 @@ from .lifecycle import evidence_allows_advance
 from .persistence import Store
 from .review import Reviewer
 from .scheduling import Scheduler
+from .audit import record_audit
 from .validation import Validator
 
 
@@ -52,6 +53,7 @@ class Coordinator:
         stage = Stage(task["stage"])
         if stage is Stage.PLAN:
             self.store.advance_task(task_id, Stage.IMPLEMENT)
+            record_audit(self.store, "task.advance", {"task_id": task_id, "stage": Stage.IMPLEMENT})
             return 1
         if stage is Stage.IMPLEMENT:
             claim_id = self.store.acquire_claim(task_id, "local-worker")
@@ -60,6 +62,11 @@ class Coordinator:
             result = self.executor.run(self.store, task_id, claim_id, self.project)
             if result.status is ExecutionStatus.SUCCEEDED and result.candidate_sha and result.durable_handoff:
                 self.store.advance_task(task_id, Stage.VALIDATE)
+                record_audit(
+                    self.store,
+                    "candidate.produced",
+                    {"task_id": task_id, "candidate_sha": result.candidate_sha, "executor": self.executor.name},
+                )
                 return 1
             return 0
         candidate = self.store.latest_candidate(task_id)
@@ -91,4 +98,9 @@ class Coordinator:
             status=EvidenceStatus.PASSED,
         )
         self.store.advance_task(task_id, decision.target)
+        record_audit(
+            self.store,
+            "task.advance",
+            {"task_id": task_id, "stage": decision.target, "candidate_sha": sha, "reason": decision.reason},
+        )
         return 1
