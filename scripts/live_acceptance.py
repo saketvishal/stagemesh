@@ -25,10 +25,13 @@ def main() -> int:
         checks.append(f"github: {result.status}")
         if result.status not in {"OK", "UNKNOWN", "STALE"}:
             raise AssertionError(result)
+        checks.append("github:sync: NOT_PROVEN")
     else:
         checks.append("github: NOT_CONFIGURED")
+        checks.append("github:sync: NOT_CONFIGURED")
     for adapter in approved_default_adapters():
         checks.append(f"provider:{adapter.name}: {adapter.check_capacity()}")
+        checks.append(f"provider:{adapter.name}:execution: NOT_PROVEN")
     print("\n".join(checks))
     return 0
 

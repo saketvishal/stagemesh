@@ -804,7 +804,12 @@ def main() -> int:
         if "should_wait: True" not in ci_wait or "release_worker: True" not in ci_wait:
             raise AssertionError(ci_wait)
         live = run([sys.executable, "scripts/live_acceptance.py"], ROOT, env)
-        if "github:" not in live or "provider:codex:" not in live:
+        if (
+            "github:" not in live
+            or "github:sync:" not in live
+            or "provider:codex:" not in live
+            or "provider:codex:execution: NOT_PROVEN" not in live
+        ):
             raise AssertionError(live)
         marker.write_text("broken\n", encoding="utf-8")
         try:
