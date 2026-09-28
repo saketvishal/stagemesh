@@ -506,6 +506,25 @@ def command_ci(args: argparse.Namespace) -> int:
     results = default_gates(root, include_acceptance=not args.skip_acceptance)
     if args.future_feature_gate:
         results.append(broken_future_feature_gate(root))
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "status": "PASS" if all(result.passed for result in results) else "FAIL",
+                    "gates": [
+                        {
+                            "name": result.name,
+                            "passed": result.passed,
+                            "output": result.output[-4000:],
+                        }
+                        for result in results
+                    ],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0 if all(result.passed for result in results) else 1
     for result in results:
         print(f"{result.name}: {'PASS' if result.passed else 'FAIL'}")
     return 0 if all(result.passed for result in results) else 1
@@ -653,6 +672,7 @@ def build_parser() -> argparse.ArgumentParser:
     ci = sub.add_parser("ci")
     ci.add_argument("--future-feature-gate", action="store_true")
     ci.add_argument("--skip-acceptance", action="store_true")
+    ci.add_argument("--json", action="store_true")
     ci.set_defaults(func=command_ci)
     ci_wait = sub.add_parser("ci-wait")
     ci_wait.add_argument("status")
