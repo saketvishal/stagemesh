@@ -255,6 +255,14 @@ def main() -> int:
         )
         if "github:acceptance" not in retry_list:
             raise AssertionError(retry_list)
+        retry_json = run(
+            [sys.executable, "-m", "stagemesh.cli", "--project", str(project), "retries", "list", "--json"],
+            ROOT,
+            env,
+        )
+        retry_data = json.loads(retry_json)
+        if retry_data["retries"][0]["key"] != "github:acceptance" or retry_data["retries"][0]["attempts"] != 1:
+            raise AssertionError(retry_json)
         invalid_retry = subprocess.run(
             [
                 sys.executable,
@@ -276,6 +284,27 @@ def main() -> int:
         )
         if invalid_retry.returncode != 2 or "retry error:" not in (invalid_retry.stdout + invalid_retry.stderr):
             raise AssertionError(invalid_retry.stdout + invalid_retry.stderr)
+        run(
+            [
+                sys.executable,
+                "-m",
+                "stagemesh.cli",
+                "--project",
+                str(project),
+                "retries",
+                "success",
+                "github:acceptance",
+            ],
+            ROOT,
+            env,
+        )
+        empty_retry_json = run(
+            [sys.executable, "-m", "stagemesh.cli", "--project", str(project), "retries", "list", "--json"],
+            ROOT,
+            env,
+        )
+        if json.loads(empty_retry_json)["retries"] != []:
+            raise AssertionError(empty_retry_json)
         project_candidate = run(["git", "rev-parse", "HEAD"], project).strip()
         evidence_add = run(
             [
