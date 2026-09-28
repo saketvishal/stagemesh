@@ -13,13 +13,7 @@ jobs:
         with:
           python-version: "3.11"
       - run: python -m pip install . --target .tmp-install --no-cache-dir
-      - run: python -m compileall -q src scripts build_backend.py
-      - run: python scripts/invariants.py
-      - run: python scripts/provider_acceptance.py
-      - run: python scripts/github_acceptance.py
-      - run: python scripts/clean_acceptance.py
-      - run: python scripts/acceptance.py
-      - run: python scripts/live_acceptance.py
+      - run: python -m stagemesh.cli --project . ci --future-feature-gate
 
   linux:
     runs-on: ubuntu-latest
@@ -29,10 +23,4 @@ jobs:
         with:
           python-version: "3.11"
       - run: python -m pip install . --target .tmp-install --no-cache-dir
-      - run: python -m compileall -q src scripts build_backend.py
-      - run: python scripts/invariants.py
-      - run: python scripts/provider_acceptance.py
-      - run: python scripts/github_acceptance.py
-      - run: python scripts/clean_acceptance.py
-      - run: python scripts/acceptance.py
-      - run: python scripts/live_acceptance.py
+      - run: python -m stagemesh.cli --project . ci --future-feature-gate
