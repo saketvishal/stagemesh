@@ -8,12 +8,12 @@ from pathlib import Path
 
 from . import __version__
 from .acceptance import AcceptanceValidationError, write_acceptance_report
-from .acceptance_matrix import write_acceptance_matrix
+from .acceptance_matrix import AcceptanceMatrixValidationError, write_acceptance_matrix
 from .audit import AuditValidationError, export_audit_jsonl
 from .capacity import CapacityKind, CapacityRegistry, CapacityValidationError
 from .ci import CIValidationError, broken_future_feature_gate, default_gates
 from .ci_wait import decide_ci_wait
-from .completion_audit import write_completion_audit
+from .completion_audit import CompletionAuditValidationError, write_completion_audit
 from .config import ConfigValidationError, load_config
 from .dashboard import render_dashboard
 from .coordinator import Coordinator
@@ -244,7 +244,7 @@ def command_acceptance_matrix(args: argparse.Namespace) -> int:
     output = WorkspaceBoundary(project).require_inside(Path(args.output).resolve())
     store = Store(db_path(project))
     store.migrate()
-    write_acceptance_matrix(output, store)
+    write_acceptance_matrix(output, store, root=project)
     store.close()
     print(f"acceptance-matrix: {output}")
     return 0
@@ -353,7 +353,7 @@ def command_completion_audit(args: argparse.Namespace) -> int:
     output = WorkspaceBoundary(project).require_inside(Path(args.output).resolve())
     store = Store(db_path(project))
     store.migrate()
-    write_completion_audit(output, store)
+    write_completion_audit(output, store, root=project)
     store.close()
     print(f"completion-audit: {output}")
     return 0
@@ -602,6 +602,12 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     except AcceptanceValidationError as exc:
         print(f"acceptance error: {exc}", file=sys.stderr)
+        return 2
+    except AcceptanceMatrixValidationError as exc:
+        print(f"acceptance matrix error: {exc}", file=sys.stderr)
+        return 2
+    except CompletionAuditValidationError as exc:
+        print(f"completion audit error: {exc}", file=sys.stderr)
         return 2
     except CIValidationError as exc:
         print(f"ci error: {exc}", file=sys.stderr)

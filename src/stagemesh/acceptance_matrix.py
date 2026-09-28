@@ -6,6 +6,11 @@ from pathlib import Path
 
 from .completion_audit import completion_audit
 from .persistence import Store
+from .security import WorkspaceBoundary
+
+
+class AcceptanceMatrixValidationError(ValueError):
+    pass
 
 
 @dataclass(frozen=True)
@@ -30,6 +35,16 @@ def acceptance_matrix(store: Store | None = None) -> dict[str, object]:
     }
 
 
-def write_acceptance_matrix(path: Path, store: Store | None = None) -> None:
+def write_acceptance_matrix(path: Path, store: Store | None = None, root: Path | None = None) -> None:
+    path = _validate_output(path, root)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(acceptance_matrix(store), indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _validate_output(path: Path, root: Path | None) -> Path:
+    output = Path(path).resolve()
+    if root is not None:
+        return WorkspaceBoundary(Path(root).resolve()).require_inside(output)
+    if not output.name or output.is_dir():
+        raise AcceptanceMatrixValidationError("acceptance matrix output must name a file")
+    return output
