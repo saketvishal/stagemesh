@@ -114,6 +114,19 @@ def main() -> int:
             raise AssertionError(status)
         if "future work" in status:
             raise AssertionError("deferred task was dispatched")
+        original_backlog = backlog.read_text(encoding="utf-8")
+        backlog.write_text('{"tasks":[{"id":"bad","title":"bad","dependencies":"one"}]}', encoding="utf-8")
+        invalid_backlog = subprocess.run(
+            [sys.executable, "-m", "stagemesh.cli", "--project", str(project), "continue", "--once"],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            env={**os.environ.copy(), **env},
+            check=False,
+        )
+        backlog.write_text(original_backlog, encoding="utf-8")
+        if invalid_backlog.returncode != 2 or "task source error:" not in (invalid_backlog.stdout + invalid_backlog.stderr):
+            raise AssertionError(invalid_backlog.stdout + invalid_backlog.stderr)
         audit_log = project / ".stagemesh" / "audit.jsonl"
         audit_output = run(
             [

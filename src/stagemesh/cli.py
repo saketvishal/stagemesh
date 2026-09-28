@@ -33,7 +33,7 @@ from .release import build_release_artifact
 from .release_readiness import write_release_readiness
 from .retry import RetryRegistry
 from .security import WorkspaceBoundary
-from .task_sources import LocalBacklogSource, sync_source
+from .task_sources import LocalBacklogSource, TaskSourceValidationError, sync_source
 from .workers import heartbeat_worker, register_worker
 
 
@@ -576,6 +576,9 @@ def main(argv: list[str] | None = None) -> int:
         return int(args.func(args))
     except ConfigValidationError as exc:
         print(f"config error: {exc}", file=sys.stderr)
+        return 2
+    except TaskSourceValidationError as exc:
+        print(f"task source error: {exc}", file=sys.stderr)
         return 2
 
 
