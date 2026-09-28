@@ -741,7 +741,9 @@ def main() -> int:
         assert len(lines) == 1
         assert "secret.second" in lines[0]
         assert_raises(AuditValidationError, record_audit, store, "", {"safe": "ok"})
+        assert_raises(AuditValidationError, record_audit, store, "bad.payload", [])
         assert_raises(AuditValidationError, export_audit_jsonl, store, output, 0)
+        assert_raises(AuditValidationError, export_audit_jsonl, store, output, "10")
         assert_raises(AuditValidationError, export_audit_jsonl, store, output, 10001)
 
     def retry_backoff_is_durable_and_clearable(store: Store, project: Path) -> None:
