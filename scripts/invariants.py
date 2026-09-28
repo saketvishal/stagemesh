@@ -57,6 +57,7 @@ from stagemesh.ci_wait import decide_ci_wait
 from stagemesh.objectives import ObjectivePlanner, ObjectiveValidationError
 from stagemesh.registry import GlobalRegistry, ProjectRegistration, RegistryConflictError
 from stagemesh.capacity import CapacityKind, CapacityRegistry, CapacityValidationError
+from stagemesh.providers import ProviderValidationError, RuntimeCommandAdapter, approved_default_adapters
 
 
 def assert_raises(exc_type, fn, *args, **kwargs) -> None:
@@ -664,6 +665,27 @@ def main() -> int:
         assert result.chosen_provider == "secondary"
         assert result.capacity_failure_isolated is True
 
+    def runtime_provider_adapter_validates_definition(store: Store, project: Path) -> None:
+        adapter = RuntimeCommandAdapter("codex", ("python", "--version"), frozenset({" code ", "review"}))
+        assert adapter.name == "codex"
+        assert adapter.command == ("python", "--version")
+        assert adapter.capabilities == frozenset({"code", "review"})
+        assert_raises(ProviderValidationError, RuntimeCommandAdapter, "", ("python",))
+        assert_raises(ProviderValidationError, RuntimeCommandAdapter, "codex", ())
+        assert_raises(ProviderValidationError, RuntimeCommandAdapter, "codex", ("python", ""), frozenset({"code"}))
+        assert_raises(ProviderValidationError, RuntimeCommandAdapter, "codex", ("python",), frozenset())
+        assert_raises(ProviderValidationError, RuntimeCommandAdapter, "codex", ("python",), frozenset({""}))
+        old = os.environ.get("STAGEMESH_CODEX_CMD")
+        os.environ["STAGEMESH_CODEX_CMD"] = '"python" "-m" "stagemesh.cli"'
+        try:
+            codex = approved_default_adapters()[0]
+            assert codex.command == ("python", "-m", "stagemesh.cli")
+        finally:
+            if old is None:
+                os.environ.pop("STAGEMESH_CODEX_CMD", None)
+            else:
+                os.environ["STAGEMESH_CODEX_CMD"] = old
+
     def github_acceptance_models_sync_contract(store: Store, project: Path) -> None:
         result = run_github_acceptance(store)
         assert result.status == "PASS"
@@ -764,6 +786,7 @@ def main() -> int:
         workspace_boundary_rejects_outside_outputs,
         final_report_mentions_missing_evidence,
         provider_acceptance_isolates_capacity_failure,
+        runtime_provider_adapter_validates_definition,
         github_acceptance_models_sync_contract,
         release_readiness_reports_external_gaps,
         external_evidence_is_durable,
