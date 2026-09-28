@@ -10,6 +10,7 @@ from pathlib import Path
 from .persistence import Store
 from .github import GitHubClient
 from .audit import record_audit
+from .retry import RetryRegistry
 
 
 @dataclass(frozen=True)
@@ -147,11 +148,25 @@ class GitHubOutboundSync(OutboundSync):
         self.client = client
 
     def publish_done(self, issue_number: str, candidate_sha: str) -> str:
+        retry = RetryRegistry(self.store)
+        key = f"github:{issue_number}:outbound"
+        decision = retry.decision(key)
+        if not decision.allowed:
+            return self.publish(
+                "github",
+                issue_number,
+                "BACKOFF",
+                {"candidate_sha": candidate_sha, "next_attempt_at": decision.next_attempt_at},
+            )
         comment = self.client.comment_issue(
             issue_number, f"StageMesh integrated candidate `{candidate_sha}`."
         )
         close = self.client.close_issue(issue_number) if comment.status == "OK" else comment
         status = "OK" if comment.status == "OK" and close.status == "OK" else close.status
+        if status == "OK":
+            retry.record_success(key)
+        else:
+            retry.record_failure(key, status)
         return self.publish(
             "github",
             issue_number,

@@ -91,6 +91,31 @@ def main() -> int:
         )
         if not audit_log.exists() or "audit:" not in audit_output:
             raise AssertionError(audit_output)
+        retry_output = run(
+            [
+                sys.executable,
+                "-m",
+                "stagemesh.cli",
+                "--project",
+                str(project),
+                "retries",
+                "fail",
+                "github:acceptance",
+                "--reason",
+                "rate-limit",
+            ],
+            ROOT,
+            env,
+        )
+        if "attempts=1" not in retry_output:
+            raise AssertionError(retry_output)
+        retry_list = run(
+            [sys.executable, "-m", "stagemesh.cli", "--project", str(project), "retries", "list"],
+            ROOT,
+            env,
+        )
+        if "github:acceptance" not in retry_list:
+            raise AssertionError(retry_list)
         doctor = run([sys.executable, "-m", "stagemesh.cli", "--project", str(project), "doctor"], ROOT, env)
         required = [
             "version:",

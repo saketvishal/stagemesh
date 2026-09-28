@@ -165,6 +165,13 @@ class Store:
                 payload TEXT NOT NULL,
                 created_at REAL NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS retry_state (
+                key TEXT PRIMARY KEY,
+                attempts INTEGER NOT NULL,
+                next_attempt_at REAL NOT NULL,
+                reason TEXT NOT NULL,
+                updated_at REAL NOT NULL
+            );
             """
         )
         self.conn.execute(
@@ -587,3 +594,27 @@ class Store:
                 (limit,),
             )
         )
+
+    def get_retry_state(self, key: str) -> sqlite3.Row | None:
+        return self.conn.execute("SELECT * FROM retry_state WHERE key=?", (key,)).fetchone()
+
+    def upsert_retry_state(self, key: str, attempts: int, next_attempt_at: float, reason: str) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO retry_state VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET
+                attempts=excluded.attempts,
+                next_attempt_at=excluded.next_attempt_at,
+                reason=excluded.reason,
+                updated_at=excluded.updated_at
+            """,
+            (key, attempts, next_attempt_at, reason, time.time()),
+        )
+        self.conn.commit()
+
+    def clear_retry_state(self, key: str) -> None:
+        self.conn.execute("DELETE FROM retry_state WHERE key=?", (key,))
+        self.conn.commit()
+
+    def retry_states(self) -> list[sqlite3.Row]:
+        return list(self.conn.execute("SELECT * FROM retry_state ORDER BY key"))

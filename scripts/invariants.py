@@ -31,6 +31,7 @@ from stagemesh.security import SecurityBoundaryError
 from stagemesh.persistence_backends import probe_backend
 from stagemesh.completion_audit import completion_audit
 from stagemesh.audit import record_audit, export_audit_jsonl
+from stagemesh.retry import RetryRegistry
 
 
 def assert_raises(exc_type, fn, *args, **kwargs) -> None:
@@ -259,6 +260,16 @@ def main() -> int:
         assert "***REDACTED***" in text
         assert "abc" not in text
 
+    def retry_backoff_is_durable_and_clearable(store: Store, project: Path) -> None:
+        retries = RetryRegistry(store)
+        first = retries.record_failure("github:1", "rate-limit", now=100)
+        second = retries.record_failure("github:1", "rate-limit", now=100)
+        assert first.attempts == 1
+        assert second.attempts == 2
+        assert retries.decision("github:1", now=101).allowed is False
+        retries.record_success("github:1")
+        assert retries.decision("github:1", now=101).allowed is True
+
     cases = [
         live_worker_restart,
         dead_worker_recovers,
@@ -283,6 +294,7 @@ def main() -> int:
         backend_probe_reports_postgres_dependency,
         completion_audit_is_not_falsely_complete,
         audit_events_are_redacted_and_exportable,
+        retry_backoff_is_durable_and_clearable,
     ]
     for case in cases:
         with_store(case)
