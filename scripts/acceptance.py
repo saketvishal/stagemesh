@@ -123,6 +123,20 @@ def main() -> int:
             "objective error:",
             env,
         )
+        outside_objective = project.parent / "outside-objective.json"
+        outside_objective.write_text('{"id":"outside","title":"outside","tasks":[]}', encoding="utf-8")
+        outside_plan = subprocess.run(
+            [sys.executable, "-m", "stagemesh.cli", "--project", str(project), "plan", str(outside_objective)],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            env={**os.environ.copy(), **env},
+            check=False,
+        )
+        if outside_plan.returncode != 2 or "security boundary error:" not in (
+            outside_plan.stdout + outside_plan.stderr
+        ):
+            raise AssertionError(outside_plan.stdout + outside_plan.stderr)
         backlog = project / ".stagemesh" / "backlog.json"
         for _ in range(16):
             run([sys.executable, "-m", "stagemesh.cli", "--project", str(project), "continue", "--once"], ROOT, env)

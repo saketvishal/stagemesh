@@ -154,7 +154,7 @@ def command_status(args: argparse.Namespace) -> int:
 
 def command_plan(args: argparse.Namespace) -> int:
     project = Path(args.project).resolve()
-    payload_path = Path(args.file).resolve()
+    payload_path = WorkspaceBoundary(project).require_inside(Path(args.file).resolve())
     raw_payload = payload_path.read_text(encoding="utf-8")
     planner = ObjectivePlanner()
     objective = planner.parse(raw_payload)

@@ -17,7 +17,7 @@
 - Built-in validation, independent review, and integration evidence.
 - Recovery behavior that preserves uncertain process identity and does not treat PID alone as proof of liveness or death.
 - CLI for init, doctor, planning, continue, plain/JSON status, health, capacity, and CI gates.
-- Security boundary helper for workspace path checks.
+- Security boundary helper for workspace path checks, generated outputs, configured sources, demos, and objective input files.
 - Worker registry and heartbeat records for durable worker visibility.
 - Global multi-project registry file.
 - Outbound source synchronization event log that never becomes lifecycle truth.
