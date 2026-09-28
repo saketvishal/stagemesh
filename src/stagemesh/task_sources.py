@@ -45,14 +45,20 @@ class LocalBacklogSource:
             raise TaskSourceValidationError("local backlog tasks must be a list")
         discovered: list[DiscoveredTask] = []
         seen: set[str] = set()
-        valid_states = {str(status) for status in TaskStatus}
+        task_ids: set[str] = set()
         for item in tasks:
             if not isinstance(item, dict):
                 raise TaskSourceValidationError("local backlog task entries must be objects")
             source_id = item.get("id")
-            title = item.get("title")
             if not isinstance(source_id, str) or not source_id:
                 raise TaskSourceValidationError("local backlog task id must be a non-empty string")
+            if source_id in task_ids:
+                raise TaskSourceValidationError(f"duplicate local backlog task id: {source_id}")
+            task_ids.add(source_id)
+        valid_states = {str(status) for status in TaskStatus}
+        for item in tasks:
+            source_id = item.get("id")
+            title = item.get("title")
             if source_id in seen:
                 raise TaskSourceValidationError(f"duplicate local backlog task id: {source_id}")
             if not isinstance(title, str) or not title:
@@ -66,6 +72,9 @@ class LocalBacklogSource:
             dependencies = item.get("dependencies", [])
             if not isinstance(dependencies, list) or not all(isinstance(dep, str) for dep in dependencies):
                 raise TaskSourceValidationError(f"local backlog task {source_id} dependencies must be a list of strings")
+            for dependency in dependencies:
+                if dependency not in task_ids:
+                    raise TaskSourceValidationError(f"local backlog task {source_id} has unknown dependency: {dependency}")
             seen.add(source_id)
             discovered.append(
                 DiscoveredTask(

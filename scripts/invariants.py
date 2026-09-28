@@ -235,6 +235,8 @@ def main() -> int:
         assert_raises(TaskSourceValidationError, LocalBacklogSource(backlog).discover)
         backlog.write_text('{"tasks":[{"id":"one","title":"one","dependencies":"two"}]}', encoding="utf-8")
         assert_raises(TaskSourceValidationError, LocalBacklogSource(backlog).discover)
+        backlog.write_text('{"tasks":[{"id":"one","title":"one","dependencies":["missing"]}]}', encoding="utf-8")
+        assert_raises(TaskSourceValidationError, LocalBacklogSource(backlog).discover)
         backlog.write_text('{"tasks":[{"id":"one","title":"one","eligible":"yes"}]}', encoding="utf-8")
         assert_raises(TaskSourceValidationError, LocalBacklogSource(backlog).discover)
         backlog.write_text('{"tasks":[{"id":"one","title":"one","state":"MAYBE"}]}', encoding="utf-8")
