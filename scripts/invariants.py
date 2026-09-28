@@ -29,7 +29,7 @@ from stagemesh.task_sources import GitHubOutboundSync
 from stagemesh.attribution import attribution_for_worker
 from stagemesh.redaction import redact_mapping, redact_text
 from stagemesh.config import load_config
-from stagemesh.release import build_release_artifact
+from stagemesh.release import build_release_artifact, release_files
 from stagemesh.security import SecurityBoundaryError
 from stagemesh.persistence_backends import probe_backend
 from stagemesh.completion_audit import completion_audit
@@ -363,6 +363,23 @@ def main() -> int:
         assert "stagemesh-release-manifest.json" in names
         assert not any(name.startswith(".stagemesh/") for name in names)
 
+    def release_files_reject_symlink_escape(store: Store, project: Path) -> None:
+        project.mkdir(parents=True, exist_ok=True)
+        outside = project.parent / "outside-secret.txt"
+        outside.write_text("secret", encoding="utf-8")
+        inside = project / "inside.txt"
+        inside.write_text("inside", encoding="utf-8")
+        link = project / "linked-secret.txt"
+        try:
+            link.symlink_to(outside)
+        except (OSError, NotImplementedError):
+            return
+        subprocess.run(["git", "init"], cwd=project, text=True, capture_output=True, check=True)
+        subprocess.run(["git", "add", "-A"], cwd=project, text=True, capture_output=True, check=True)
+        files = {path.name for path in release_files(project)}
+        assert "inside.txt" in files
+        assert "linked-secret.txt" not in files
+
     def migrations_are_idempotent(store: Store, project: Path) -> None:
         first = store.schema_version()
         store.migrate()
@@ -510,6 +527,7 @@ def main() -> int:
         routing_modes_select_expected_provider,
         release_output_stays_inside_workspace,
         release_artifact_contains_tracked_source_manifest,
+        release_files_reject_symlink_escape,
         migrations_are_idempotent,
         backend_probe_reports_postgres_dependency,
         postgres_schema_contract_covers_authoritative_tables,
