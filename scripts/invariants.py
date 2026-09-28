@@ -54,6 +54,8 @@ from stagemesh.routing import Provider, Router, RoutingMode, RoutingValidationEr
 from stagemesh.github import parse_github_remote
 from stagemesh.operator import operator_report
 from stagemesh.dashboard import render_dashboard
+from stagemesh.acceptance import AcceptanceValidationError, local_acceptance_report, run_check, write_acceptance_report
+from stagemesh.ci import CIValidationError, broken_future_feature_gate, default_gates, run_gate
 from stagemesh.ci_wait import decide_ci_wait
 from stagemesh.objectives import ObjectivePlanner, ObjectiveValidationError
 from stagemesh.registry import GlobalRegistry, ProjectRegistration, RegistryConflictError
@@ -440,6 +442,21 @@ def main() -> int:
         timed_out = decide_ci_wait("pending", elapsed_seconds=1800, max_seconds=1800)
         assert timed_out.should_wait is False
         assert timed_out.release_worker is True
+
+    def acceptance_and_ci_gates_validate_inputs(store: Store, project: Path) -> None:
+        project.mkdir(parents=True)
+        assert_raises(AcceptanceValidationError, run_check, "", [sys.executable, "--version"], project)
+        assert_raises(AcceptanceValidationError, run_check, "python", [], project)
+        assert_raises(AcceptanceValidationError, run_check, "python", [sys.executable, ""], project)
+        assert_raises(AcceptanceValidationError, run_check, "python", [sys.executable], project / "missing")
+        assert_raises(AcceptanceValidationError, local_acceptance_report, project / "missing", False)
+        assert_raises(SecurityBoundaryError, write_acceptance_report, project, project.parent / "acceptance.json", False)
+        assert_raises(CIValidationError, run_gate, "", [sys.executable, "--version"], project)
+        assert_raises(CIValidationError, run_gate, "python", [], project)
+        assert_raises(CIValidationError, run_gate, "python", [sys.executable, ""], project)
+        assert_raises(CIValidationError, run_gate, "python", [sys.executable], project / "missing")
+        assert_raises(CIValidationError, default_gates, project / "missing", False)
+        assert_raises(CIValidationError, broken_future_feature_gate, project / "missing")
 
     def capacity_registry_rejects_invalid_provider_state(store: Store, project: Path) -> None:
         registry = CapacityRegistry()
@@ -859,6 +876,7 @@ def main() -> int:
         distributed_work_rejects_invalid_queue_inputs,
         distributed_work_packets_have_renewable_leases,
         ci_wait_releases_worker_capacity_while_pending,
+        acceptance_and_ci_gates_validate_inputs,
         capacity_registry_rejects_invalid_provider_state,
         github_outbound_sync_records_capacity_separately,
         github_retry_after_parsing_is_defensive,
