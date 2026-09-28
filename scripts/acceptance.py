@@ -299,6 +299,24 @@ def main() -> int:
         )
         if not acceptance_report.exists() or "acceptance-report:" not in report_output:
             raise AssertionError(report_output)
+        acceptance_matrix = ROOT / ".stagemesh" / "acceptance-matrix.json"
+        matrix_output = run(
+            [
+                sys.executable,
+                "-m",
+                "stagemesh.cli",
+                "--project",
+                str(ROOT),
+                "acceptance-matrix",
+                "--output",
+                str(acceptance_matrix),
+            ],
+            ROOT,
+            env,
+        )
+        matrix_text = acceptance_matrix.read_text(encoding="utf-8") if acceptance_matrix.exists() else ""
+        if "acceptance-matrix:" not in matrix_output or '"status": "INCOMPLETE"' not in matrix_text:
+            raise AssertionError(matrix_output + matrix_text)
         completion_audit = ROOT / ".stagemesh" / "completion-audit.json"
         audit_output = run(
             [
@@ -322,7 +340,12 @@ def main() -> int:
             ROOT,
             env,
         )
-        if not repo_report.exists() or "acceptance report status: PASS" not in repo_report.read_text(encoding="utf-8"):
+        repo_report_text = repo_report.read_text(encoding="utf-8") if repo_report.exists() else ""
+        if (
+            not repo_report.exists()
+            or "acceptance report status: PASS" not in repo_report_text
+            or "acceptance matrix status: INCOMPLETE" not in repo_report_text
+        ):
             raise AssertionError(repo_report_output)
         readiness = ROOT / ".stagemesh" / "release-readiness.json"
         readiness_output = run(

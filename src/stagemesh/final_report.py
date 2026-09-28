@@ -26,6 +26,7 @@ def render_final_report(root: Path, store: Store | None = None) -> str:
     external_count = len(store.external_evidence()) if store else 0
     acceptance = _acceptance_summary(root)
     audit = _completion_summary(root)
+    matrix = _matrix_summary(root)
     return "\n".join(
         [
             "# StageMesh vNext Final Report",
@@ -47,6 +48,7 @@ def render_final_report(root: Path, store: Store | None = None) -> str:
             "- CI result: local `stagemesh ci --future-feature-gate` passes; hosted CI result pending external runner",
             f"- acceptance report status: {acceptance}",
             f"- completion audit status: {audit}",
+            f"- acceptance matrix status: {matrix}",
             "- independent review result: exact-SHA review evidence and findings are modeled; live independent provider review pending provider credentials",
             f"- runtime task count: {task_count}",
             f"- registered worker count: {worker_count}",
@@ -76,3 +78,11 @@ def _completion_summary(root: Path) -> str:
     items = data.get("items", [])
     proven = sum(1 for item in items if item.get("status") == "PROVEN")
     return f"complete={data.get('complete', False)} ({proven}/{len(items)} requirements proven)"
+
+
+def _matrix_summary(root: Path) -> str:
+    path = root / ".stagemesh" / "acceptance-matrix.json"
+    if not path.exists():
+        return "not generated"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    return f"{data.get('status', 'UNKNOWN')} ({data.get('proven', 0)}/{data.get('total', 0)} rows proven)"
