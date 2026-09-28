@@ -30,6 +30,9 @@
 - Final report generation command with candidate, acceptance, and remaining-action inventory.
 - Transport-injected GitHub client for live inbound/outbound sync acceptance.
 - Git attribution helper for worker-owned authorship and StageMesh-owned commits.
+- Config loader for project files and environment overrides.
+- Secret redaction helpers for logs/reports.
+- Live acceptance harness that exercises configured GitHub/providers or reports not configured.
 - GitHub Actions CI for Windows and Linux.
 - Stdlib invariant and acceptance runners for dependency-free verification.
 

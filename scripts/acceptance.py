@@ -79,6 +79,9 @@ def main() -> int:
         missing = [item for item in required if item not in doctor]
         if missing:
             raise AssertionError(f"doctor missing {missing}")
+        config_output = run([sys.executable, "-m", "stagemesh.cli", "--project", str(project), "config"], ROOT, env)
+        if "github.configured: False" not in config_output:
+            raise AssertionError(config_output)
         health = run([sys.executable, "-m", "stagemesh.cli", "--project", str(project), "health"], ROOT, env)
         if "ok: True" not in health or "done: 2" not in health:
             raise AssertionError(health)
@@ -217,6 +220,9 @@ def main() -> int:
         )
         if "future-feature: PASS" not in ci:
             raise AssertionError(ci)
+        live = run([sys.executable, "scripts/live_acceptance.py"], ROOT, env)
+        if "github:" not in live or "provider:codex:" not in live:
+            raise AssertionError(live)
         marker.write_text("broken\n", encoding="utf-8")
         try:
             failed = subprocess.run(
