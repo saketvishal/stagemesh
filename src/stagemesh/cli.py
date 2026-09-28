@@ -11,6 +11,7 @@ from .acceptance_matrix import write_acceptance_matrix
 from .audit import export_audit_jsonl
 from .capacity import CapacityKind, CapacityRegistry
 from .ci import broken_future_feature_gate, default_gates
+from .ci_wait import decide_ci_wait
 from .completion_audit import write_completion_audit
 from .config import load_config
 from .dashboard import render_dashboard
@@ -422,6 +423,15 @@ def command_ci(args: argparse.Namespace) -> int:
     return 0 if all(result.passed for result in results) else 1
 
 
+def command_ci_wait(args: argparse.Namespace) -> int:
+    decision = decide_ci_wait(args.status, args.elapsed_seconds, args.max_seconds)
+    print(f"should_wait: {decision.should_wait}")
+    print(f"release_worker: {decision.release_worker}")
+    print(f"poll_after_seconds: {decision.poll_after_seconds}")
+    print(f"reason: {decision.reason}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="stagemesh")
     parser.add_argument("--project", default=".")
@@ -547,6 +557,11 @@ def build_parser() -> argparse.ArgumentParser:
     ci.add_argument("--future-feature-gate", action="store_true")
     ci.add_argument("--skip-acceptance", action="store_true")
     ci.set_defaults(func=command_ci)
+    ci_wait = sub.add_parser("ci-wait")
+    ci_wait.add_argument("status")
+    ci_wait.add_argument("--elapsed-seconds", type=float, default=0)
+    ci_wait.add_argument("--max-seconds", type=float, default=1800)
+    ci_wait.set_defaults(func=command_ci_wait)
     return parser
 
 

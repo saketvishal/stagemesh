@@ -23,7 +23,7 @@
 - Structured operator report command for dashboard/status integration.
 - Dependency-aware scheduling for planned tasks.
 - PostgreSQL-ready persistence backend interface.
-- CI wait decision helper that releases worker capacity while checks are pending.
+- CI wait decision helper and CLI command that release worker capacity while checks are pending.
 - Static HTML dashboard rendering with task, worker, source-event, retry, and external-evidence tables.
 - Persistent review findings and bounded remediation attempts.
 - Release archive and manifest generation for public/demo packaging.
