@@ -18,6 +18,7 @@ from .config import ConfigValidationError, load_config
 from .dashboard import render_dashboard
 from .coordinator import Coordinator
 from .distributed import WorkQueue, WorkQueueError
+from .e2e_acceptance import EndToEndAcceptanceValidationError, write_end_to_end_acceptance
 from .final_report import FinalReportValidationError, candidate_sha, render_final_report
 from .external_evidence import ExternalEvidenceValidationError, external_evidence_records, record_external_evidence
 from .github_acceptance import run_github_acceptance
@@ -247,6 +248,14 @@ def command_acceptance_matrix(args: argparse.Namespace) -> int:
     write_acceptance_matrix(output, store, root=project, candidate_sha=candidate_sha(project))
     store.close()
     print(f"acceptance-matrix: {output}")
+    return 0
+
+
+def command_end_to_end_acceptance(args: argparse.Namespace) -> int:
+    project = Path(args.project).resolve()
+    output = WorkspaceBoundary(project).require_inside(Path(args.output).resolve())
+    write_end_to_end_acceptance(output, root=project)
+    print(f"end-to-end-acceptance: {output}")
     return 0
 
 
@@ -531,6 +540,9 @@ def build_parser() -> argparse.ArgumentParser:
     acceptance_matrix = sub.add_parser("acceptance-matrix")
     acceptance_matrix.add_argument("--output", default=".stagemesh/acceptance-matrix.json")
     acceptance_matrix.set_defaults(func=command_acceptance_matrix)
+    e2e = sub.add_parser("end-to-end-acceptance")
+    e2e.add_argument("--output", default=".stagemesh/end-to-end-acceptance.json")
+    e2e.set_defaults(func=command_end_to_end_acceptance)
     audit = sub.add_parser("completion-audit")
     audit.add_argument("--output", default=".stagemesh/completion-audit.json")
     audit.set_defaults(func=command_completion_audit)
@@ -606,6 +618,9 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     except AcceptanceMatrixValidationError as exc:
         print(f"acceptance matrix error: {exc}", file=sys.stderr)
+        return 2
+    except EndToEndAcceptanceValidationError as exc:
+        print(f"end-to-end acceptance error: {exc}", file=sys.stderr)
         return 2
     except CompletionAuditValidationError as exc:
         print(f"completion audit error: {exc}", file=sys.stderr)

@@ -690,6 +690,29 @@ def main() -> int:
             or "https://example.invalid/run/acceptance" in matrix_text
         ):
             raise AssertionError(matrix_text)
+        e2e_acceptance = ROOT / ".stagemesh" / "end-to-end-acceptance.json"
+        e2e_output = run(
+            [
+                sys.executable,
+                "-m",
+                "stagemesh.cli",
+                "--project",
+                str(ROOT),
+                "end-to-end-acceptance",
+                "--output",
+                str(e2e_acceptance),
+            ],
+            ROOT,
+            env,
+        )
+        e2e_text = e2e_acceptance.read_text(encoding="utf-8") if e2e_acceptance.exists() else ""
+        if (
+            "end-to-end-acceptance:" not in e2e_output
+            or '"status": "COMPLETE"' not in e2e_text
+            or '"total": 18' not in e2e_text
+            or "interrupt validation" not in e2e_text
+        ):
+            raise AssertionError(e2e_output + e2e_text)
         completion_audit = ROOT / ".stagemesh" / "completion-audit.json"
         audit_output = run(
             [
@@ -718,6 +741,7 @@ def main() -> int:
             not repo_report.exists()
             or "acceptance report status: PASS proof=BLOCKED_ON_EXTERNAL_EVIDENCE" not in repo_report_text
             or "acceptance matrix status: INCOMPLETE" not in repo_report_text
+            or "end-to-end acceptance status: COMPLETE (18/18 steps proven)" not in repo_report_text
         ):
             raise AssertionError(repo_report_output)
         status_doc = (ROOT / "docs" / "status.md").read_text(encoding="utf-8")
