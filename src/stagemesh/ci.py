@@ -22,6 +22,7 @@ def default_gates(root: Path, include_acceptance: bool = True) -> list[GateResul
     gates = [
         run_gate("compile", [sys.executable, "-m", "compileall", "-q", "src", "scripts", "build_backend.py"], root),
         run_gate("invariants", [sys.executable, "scripts/invariants.py"], root),
+        run_gate("clean_acceptance", [sys.executable, "scripts/clean_acceptance.py"], root),
     ]
     if include_acceptance:
         gates.append(run_gate("acceptance", [sys.executable, "scripts/acceptance.py"], root))

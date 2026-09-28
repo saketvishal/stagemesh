@@ -28,6 +28,7 @@ def local_acceptance_report(root: Path, include_acceptance: bool = True) -> dict
         run_check("provider_acceptance", [sys.executable, "scripts/provider_acceptance.py"], root),
         run_check("github_acceptance", [sys.executable, "scripts/github_acceptance.py"], root),
         run_check("live_acceptance", [sys.executable, "scripts/live_acceptance.py"], root),
+        run_check("clean_acceptance", [sys.executable, "scripts/clean_acceptance.py"], root),
         run_check("install", [sys.executable, "-m", "pip", "install", ".", "--target", ".tmp-install", "--no-cache-dir", "--upgrade"], root),
     ]
     if include_acceptance:

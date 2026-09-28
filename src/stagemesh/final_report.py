@@ -75,7 +75,7 @@ def render_final_report(root: Path, store: Store | None = None) -> str:
         "- restart/recovery acceptance: covered by invariant suite",
         "- exact-SHA validation/review acceptance: covered by invariant suite and review model",
         "- durable Git handoff acceptance: covered by invariant suite",
-        "- clean-install acceptance: `python -m pip install . --target .tmp-install --no-cache-dir --upgrade`",
+        "- clean-install acceptance: `python scripts/clean_acceptance.py` plus `python -m pip install . --target .tmp-install --no-cache-dir --upgrade`",
         "- CI result: local `stagemesh ci --future-feature-gate` passes; hosted CI result pending external runner",
         "- independent review result: exact-SHA review evidence and findings are modeled; live independent provider review pending provider credentials",
         "",

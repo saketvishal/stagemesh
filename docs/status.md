@@ -52,12 +52,14 @@
 - Completion audit and acceptance matrix consume durable external evidence records when available.
 - GitHub Actions CI for Windows and Linux.
 - Stdlib invariant and acceptance runners for dependency-free verification.
+- Clean-tree acceptance copies only tracked files, installs StageMesh into an isolated target, and runs CLI smoke checks from the installed package.
 
 ## Verified Locally
 
 - `python -m compileall -q src scripts build_backend.py`
 - `python scripts/invariants.py`
 - `python scripts/acceptance.py`
+- `python scripts/clean_acceptance.py`
 - `python -m stagemesh.cli --project . ci --future-feature-gate`
 - `python -m pip install . --target .tmp-install --no-cache-dir --upgrade`
 
