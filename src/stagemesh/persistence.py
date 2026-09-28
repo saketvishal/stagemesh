@@ -159,6 +159,12 @@ class Store:
                 created_at REAL NOT NULL,
                 updated_at REAL NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS audit_events (
+                id TEXT PRIMARY KEY,
+                event_type TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                created_at REAL NOT NULL
+            );
             """
         )
         self.conn.execute(
@@ -564,3 +570,20 @@ class Store:
             (status, json.dumps(payload or {}, sort_keys=True), time.time(), packet_id),
         )
         self.conn.commit()
+
+    def add_audit_event(self, event_type: str, payload: dict[str, Any] | None = None) -> str:
+        event_id = str(uuid.uuid4())
+        self.conn.execute(
+            "INSERT INTO audit_events VALUES (?, ?, ?, ?)",
+            (event_id, event_type, json.dumps(payload or {}, sort_keys=True), time.time()),
+        )
+        self.conn.commit()
+        return event_id
+
+    def audit_events(self, limit: int = 500) -> list[sqlite3.Row]:
+        return list(
+            self.conn.execute(
+                "SELECT * FROM audit_events ORDER BY created_at DESC LIMIT ?",
+                (limit,),
+            )
+        )

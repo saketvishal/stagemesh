@@ -30,6 +30,7 @@ from stagemesh.release import build_release_artifact
 from stagemesh.security import SecurityBoundaryError
 from stagemesh.persistence_backends import probe_backend
 from stagemesh.completion_audit import completion_audit
+from stagemesh.audit import record_audit, export_audit_jsonl
 
 
 def assert_raises(exc_type, fn, *args, **kwargs) -> None:
@@ -250,6 +251,14 @@ def main() -> int:
         statuses = {item["status"] for item in audit["items"]}
         assert "REQUIRES_CREDENTIALS" in statuses or "MISSING_EXTERNAL_EVIDENCE" in statuses
 
+    def audit_events_are_redacted_and_exportable(store: Store, project: Path) -> None:
+        record_audit(store, "secret.test", {"token": "abc", "safe": "ok"})
+        output = project / "audit.jsonl"
+        export_audit_jsonl(store, output)
+        text = output.read_text(encoding="utf-8")
+        assert "***REDACTED***" in text
+        assert "abc" not in text
+
     cases = [
         live_worker_restart,
         dead_worker_recovers,
@@ -273,6 +282,7 @@ def main() -> int:
         migrations_are_idempotent,
         backend_probe_reports_postgres_dependency,
         completion_audit_is_not_falsely_complete,
+        audit_events_are_redacted_and_exportable,
     ]
     for case in cases:
         with_store(case)

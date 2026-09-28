@@ -7,6 +7,7 @@ from pathlib import Path
 
 from . import __version__
 from .acceptance import write_acceptance_report
+from .audit import export_audit_jsonl
 from .capacity import CapacityKind, CapacityRegistry
 from .ci import broken_future_feature_gate, default_gates
 from .completion_audit import write_completion_audit
@@ -255,6 +256,21 @@ def command_completion_audit(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_audit(args: argparse.Namespace) -> int:
+    project = Path(args.project).resolve()
+    store = Store(db_path(project))
+    store.migrate()
+    if args.output:
+        output = Path(args.output).resolve()
+        export_audit_jsonl(store, output, args.limit)
+        print(f"audit: {output}")
+    else:
+        for event in store.audit_events(args.limit):
+            print(f"{event['id']} {event['event_type']} {event['created_at']}")
+    store.close()
+    return 0
+
+
 def command_ci(args: argparse.Namespace) -> int:
     root = Path(args.project).resolve()
     results = default_gates(root, include_acceptance=not args.skip_acceptance)
@@ -339,6 +355,10 @@ def build_parser() -> argparse.ArgumentParser:
     audit = sub.add_parser("completion-audit")
     audit.add_argument("--output", default=".stagemesh/completion-audit.json")
     audit.set_defaults(func=command_completion_audit)
+    audit_log = sub.add_parser("audit")
+    audit_log.add_argument("--output")
+    audit_log.add_argument("--limit", type=int, default=500)
+    audit_log.set_defaults(func=command_audit)
     ci = sub.add_parser("ci")
     ci.add_argument("--future-feature-gate", action="store_true")
     ci.add_argument("--skip-acceptance", action="store_true")
