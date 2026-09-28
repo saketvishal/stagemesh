@@ -637,6 +637,10 @@ def main() -> int:
             def request(self, method, path, body=None):
                 return 429, {"Retry-After": "not-a-number"}, {"message": "rate limit"}
 
+        class MalformedIssuesTransport:
+            def request(self, method, path, body=None):
+                return 200, {}, {"message": "not a list"}
+
         class InvalidJsonResponse:
             status = 200
             headers: dict[str, str] = {}
@@ -658,6 +662,8 @@ def main() -> int:
         result = GitHubClient("owner", "repo", InvalidRetryAfterTransport()).list_open_issues()
         assert result.status == "UNKNOWN"
         assert result.retry_after == 60
+        result = GitHubClient("owner", "repo", MalformedIssuesTransport()).list_open_issues()
+        assert result.status == "UNKNOWN"
         original_urlopen = urllib.request.urlopen
         urllib.request.urlopen = lambda request, timeout=20: InvalidJsonResponse()
         try:

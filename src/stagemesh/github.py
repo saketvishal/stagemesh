@@ -60,7 +60,10 @@ class GitHubClient:
         code, headers, payload = self.transport.request(
             "GET", f"/repos/{self.owner}/{self.repo}/issues?state=open"
         )
-        return self._result(code, headers, payload)
+        result = self._result(code, headers, payload)
+        if result.status == "OK" and not isinstance(result.payload, list):
+            return GitHubResult("UNKNOWN", result.payload)
+        return result
 
     def comment_issue(self, number: str, body: str) -> GitHubResult:
         code, headers, payload = self.transport.request(
