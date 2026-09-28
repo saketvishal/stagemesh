@@ -26,7 +26,7 @@ from stagemesh.remediation import RemediationPolicy, finding_identity
 from stagemesh.distributed import WorkQueue, WorkQueueError
 from stagemesh.github import GitHubClient, parse_retry_after
 from stagemesh.task_sources import GitHubOutboundSync
-from stagemesh.attribution import attribution_for_worker
+from stagemesh.attribution import AttributionValidationError, attribution_for_worker
 from stagemesh.redaction import redact_mapping, redact_text
 from stagemesh.config import ConfigValidationError, load_config
 from stagemesh.release import ReleaseValidationError, build_release_artifact, release_files
@@ -479,6 +479,13 @@ def main() -> int:
         attribution = attribution_for_worker("worker 1", "codex")
         assert attribution.author_email == "codex+worker-1@stagemesh.invalid"
         assert attribution.committer_email == "stagemesh@stagemesh.invalid"
+        spaced = attribution_for_worker(" worker\t1\n", " codex ")
+        assert spaced.author_name == "StageMesh codex worker worker 1"
+        assert spaced.author_email == "codex+worker-1@stagemesh.invalid"
+        assert_raises(AttributionValidationError, attribution_for_worker, "", "codex")
+        assert_raises(AttributionValidationError, attribution_for_worker, "worker", "")
+        assert_raises(AttributionValidationError, attribution_for_worker, "!!!", "codex")
+        assert_raises(AttributionValidationError, attribution_for_worker, "worker", "!")
 
     def secrets_are_redacted(store: Store, project: Path) -> None:
         redacted = redact_mapping({"github_token": "abc", "nested": {"password": "def"}, "safe": "ok"})
