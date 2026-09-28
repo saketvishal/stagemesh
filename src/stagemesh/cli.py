@@ -1,38 +1,39 @@
 from __future__ import annotations
 
 import argparse
+import json
 import platform
 import sys
 from pathlib import Path
 
 from . import __version__
-from .acceptance import write_acceptance_report
+from .acceptance import AcceptanceValidationError, write_acceptance_report
 from .acceptance_matrix import write_acceptance_matrix
 from .audit import AuditValidationError, export_audit_jsonl
 from .capacity import CapacityKind, CapacityRegistry, CapacityValidationError
-from .ci import broken_future_feature_gate, default_gates
+from .ci import CIValidationError, broken_future_feature_gate, default_gates
 from .ci_wait import decide_ci_wait
 from .completion_audit import write_completion_audit
 from .config import ConfigValidationError, load_config
 from .dashboard import render_dashboard
 from .coordinator import Coordinator
 from .distributed import WorkQueue, WorkQueueError
-from .final_report import render_final_report
+from .final_report import FinalReportValidationError, render_final_report
 from .external_evidence import ExternalEvidenceValidationError, external_evidence_records, record_external_evidence
 from .github_acceptance import run_github_acceptance
 from .observability import health
 from .operator import operator_report
-from .objectives import ObjectivePlanner
-from .persistence import Store
+from .objectives import ObjectivePlanner, ObjectiveValidationError
+from .persistence import Store, StoreValidationError
 from .persistence_backends import probe_backend
 from .postgres_store import PostgresStore, postgres_schema_contract
 from .provider_acceptance import run_provider_acceptance
 from .process_identity import current_process_identity
-from .registry import GlobalRegistry, ProjectRegistration, RegistryConflictError
+from .registry import GlobalRegistry, ProjectRegistration, RegistryConflictError, RegistryValidationError
 from .release import ReleaseValidationError, build_release_artifact
-from .release_readiness import write_release_readiness
+from .release_readiness import ReleaseReadinessValidationError, write_release_readiness
 from .retry import RetryRegistry, RetryValidationError
-from .security import WorkspaceBoundary
+from .security import SecurityBoundaryError, WorkspaceBoundary
 from .task_sources import LocalBacklogSource, TaskSourceValidationError, sync_source
 from .workers import WorkerValidationError, heartbeat_worker, register_worker
 
@@ -121,9 +122,10 @@ def command_status(args: argparse.Namespace) -> int:
 def command_plan(args: argparse.Namespace) -> int:
     project = Path(args.project).resolve()
     payload_path = Path(args.file).resolve()
-    payload = __import__("json").loads(payload_path.read_text(encoding="utf-8"))
+    raw_payload = payload_path.read_text(encoding="utf-8")
     planner = ObjectivePlanner()
-    objective = planner.parse(payload)
+    objective = planner.parse(raw_payload)
+    payload = json.loads(raw_payload)
     store = Store(db_path(project))
     store.migrate()
     store.save_objective(objective.id, objective.title, payload)
@@ -580,8 +582,32 @@ def main(argv: list[str] | None = None) -> int:
     except TaskSourceValidationError as exc:
         print(f"task source error: {exc}", file=sys.stderr)
         return 2
+    except ObjectiveValidationError as exc:
+        print(f"objective error: {exc}", file=sys.stderr)
+        return 2
+    except StoreValidationError as exc:
+        print(f"store error: {exc}", file=sys.stderr)
+        return 2
+    except RegistryValidationError as exc:
+        print(f"registry error: {exc}", file=sys.stderr)
+        return 2
+    except SecurityBoundaryError as exc:
+        print(f"security boundary error: {exc}", file=sys.stderr)
+        return 2
     except ReleaseValidationError as exc:
         print(f"release error: {exc}", file=sys.stderr)
+        return 2
+    except FinalReportValidationError as exc:
+        print(f"final report error: {exc}", file=sys.stderr)
+        return 2
+    except AcceptanceValidationError as exc:
+        print(f"acceptance error: {exc}", file=sys.stderr)
+        return 2
+    except CIValidationError as exc:
+        print(f"ci error: {exc}", file=sys.stderr)
+        return 2
+    except ReleaseReadinessValidationError as exc:
+        print(f"release readiness error: {exc}", file=sys.stderr)
         return 2
     except WorkQueueError as exc:
         print(f"work queue error: {exc}", file=sys.stderr)
