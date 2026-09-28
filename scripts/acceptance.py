@@ -22,6 +22,15 @@ def run(command: list[str], cwd: Path, env: dict[str, str] | None = None) -> str
     return result.stdout
 
 
+def run_failure(command: list[str], cwd: Path, expected: str, env: dict[str, str] | None = None) -> None:
+    merged = os.environ.copy()
+    merged.update(env or {})
+    result = subprocess.run(command, cwd=cwd, text=True, capture_output=True, env=merged, check=False)
+    output = result.stdout + result.stderr
+    if result.returncode != 2 or expected not in output:
+        raise AssertionError(output)
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory(prefix="stagemesh-acceptance-") as raw:
         project = Path(raw) / "project"
@@ -106,6 +115,14 @@ def main() -> int:
         )
         if invalid_plan.returncode == 0 or "unknown dependency" not in (invalid_plan.stdout + invalid_plan.stderr):
             raise AssertionError(invalid_plan.stdout + invalid_plan.stderr)
+        invalid_json_objective = project / "invalid-json-objective.json"
+        invalid_json_objective.write_text("{not-json", encoding="utf-8")
+        run_failure(
+            [sys.executable, "-m", "stagemesh.cli", "--project", str(project), "plan", str(invalid_json_objective)],
+            ROOT,
+            "objective error:",
+            env,
+        )
         backlog = project / ".stagemesh" / "backlog.json"
         for _ in range(16):
             run([sys.executable, "-m", "stagemesh.cli", "--project", str(project), "continue", "--once"], ROOT, env)
@@ -304,6 +321,39 @@ def main() -> int:
             invalid_config_result.stdout + invalid_config_result.stderr
         ):
             raise AssertionError(invalid_config_result.stdout + invalid_config_result.stderr)
+        invalid_config.write_text("{not-json", encoding="utf-8")
+        run_failure(
+            [
+                sys.executable,
+                "-m",
+                "stagemesh.cli",
+                "--project",
+                str(project),
+                "config",
+                "--config",
+                str(invalid_config),
+            ],
+            ROOT,
+            "config error:",
+            env,
+        )
+        broken_registry = project / "broken-registry.json"
+        broken_registry.write_text("{not-json", encoding="utf-8")
+        run_failure(
+            [
+                sys.executable,
+                "-m",
+                "stagemesh.cli",
+                "--project",
+                str(project),
+                "registry",
+                "--registry",
+                str(broken_registry),
+            ],
+            ROOT,
+            "registry error:",
+            env,
+        )
         backend_output = run([sys.executable, "-m", "stagemesh.cli", "--project", str(project), "backend"], ROOT, env)
         if (
             "name: sqlite" not in backend_output
