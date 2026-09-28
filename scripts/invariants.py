@@ -29,7 +29,7 @@ from stagemesh.task_sources import GitHubOutboundSync
 from stagemesh.attribution import attribution_for_worker
 from stagemesh.redaction import redact_mapping, redact_text
 from stagemesh.config import ConfigValidationError, load_config
-from stagemesh.release import build_release_artifact, release_files
+from stagemesh.release import ReleaseValidationError, build_release_artifact, release_files
 from stagemesh.security import SecurityBoundaryError
 from stagemesh.persistence_backends import probe_backend
 from stagemesh.completion_audit import completion_audit
@@ -490,7 +490,26 @@ def main() -> int:
             project,
             project.parent / "outside",
             "0.1.0",
-            "abc",
+            "abc1234",
+        )
+
+    def release_artifact_rejects_unsafe_metadata(store: Store, project: Path) -> None:
+        project.mkdir(parents=True, exist_ok=True)
+        assert_raises(
+            ReleaseValidationError,
+            build_release_artifact,
+            ROOT,
+            ROOT / ".stagemesh" / "bad-release",
+            "0.1.0",
+            "../escape",
+        )
+        assert_raises(
+            ReleaseValidationError,
+            build_release_artifact,
+            ROOT,
+            ROOT / ".stagemesh" / "bad-release",
+            "../version",
+            "abcdef1",
         )
 
     def release_artifact_contains_tracked_source_manifest(store: Store, project: Path) -> None:
@@ -679,6 +698,7 @@ def main() -> int:
         github_remote_detection_supports_zero_config,
         routing_modes_select_expected_provider,
         release_output_stays_inside_workspace,
+        release_artifact_rejects_unsafe_metadata,
         release_artifact_contains_tracked_source_manifest,
         release_files_reject_symlink_escape,
         migrations_are_idempotent,

@@ -182,7 +182,7 @@ def main() -> int:
                 "PASS",
                 "https://example.invalid/run/acceptance",
                 "--candidate-sha",
-                "acceptance-sha",
+                "abc1234",
             ],
             ROOT,
             env,
@@ -194,7 +194,7 @@ def main() -> int:
             ROOT,
             env,
         )
-        if "hosted-ci PASS acceptance-sha" not in evidence_list:
+        if "hosted-ci PASS abc1234" not in evidence_list:
             raise AssertionError(evidence_list)
         doctor = run([sys.executable, "-m", "stagemesh.cli", "--project", str(project), "doctor"], ROOT, env)
         required = [
@@ -322,7 +322,7 @@ def main() -> int:
                 str(ROOT),
                 "release",
                 "--candidate-sha",
-                "acceptance-sha",
+                "abc1234",
                 "--output",
                 str(release_dir),
             ],
@@ -331,6 +331,27 @@ def main() -> int:
         )
         if "archive:" not in release_output or not (release_dir / "stagemesh-release-manifest.json").exists():
             raise AssertionError(release_output)
+        invalid_release = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "stagemesh.cli",
+                "--project",
+                str(ROOT),
+                "release",
+                "--candidate-sha",
+                "../bad",
+                "--output",
+                str(release_dir),
+            ],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            env={**os.environ.copy(), **env},
+            check=False,
+        )
+        if invalid_release.returncode != 2 or "release error:" not in (invalid_release.stdout + invalid_release.stderr):
+            raise AssertionError(invalid_release.stdout + invalid_release.stderr)
         release_manifest = json.loads((release_dir / "stagemesh-release-manifest.json").read_text(encoding="utf-8"))
         release_paths = {entry["path"] for entry in release_manifest["files"]}
         if "pyproject.toml" not in release_paths or "scripts/clean_acceptance.py" not in release_paths:
@@ -439,7 +460,7 @@ def main() -> int:
                 "PASS",
                 "https://example.invalid/run/acceptance",
                 "--candidate-sha",
-                "acceptance-sha",
+                "abc1234",
             ],
             ROOT,
             env,

@@ -2,12 +2,17 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import subprocess
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
 from .security import WorkspaceBoundary
+
+
+class ReleaseValidationError(ValueError):
+    pass
 
 
 @dataclass(frozen=True)
@@ -18,6 +23,8 @@ class ReleaseArtifact:
 
 def build_release_artifact(root: Path, output_dir: Path, version: str, candidate_sha: str) -> ReleaseArtifact:
     root = root.resolve()
+    version = validate_release_token(version, "version")
+    candidate_sha = validate_candidate_sha(candidate_sha)
     output_dir = WorkspaceBoundary(root).require_inside(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     manifest = output_dir / "stagemesh-release-manifest.json"
@@ -50,6 +57,18 @@ def build_release_artifact(root: Path, output_dir: Path, version: str, candidate
             zf.write(path, path.relative_to(root).as_posix())
         zf.write(manifest, manifest.name)
     return ReleaseArtifact(archive=archive, manifest=manifest)
+
+
+def validate_candidate_sha(candidate_sha: str) -> str:
+    if not isinstance(candidate_sha, str) or not re.fullmatch(r"[0-9a-fA-F]{7,64}", candidate_sha):
+        raise ReleaseValidationError("candidate sha must be 7-64 hexadecimal characters")
+    return candidate_sha.lower()
+
+
+def validate_release_token(value: str, field: str) -> str:
+    if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", value):
+        raise ReleaseValidationError(f"{field} must be a safe release token")
+    return value
 
 
 def release_files(root: Path) -> list[Path]:
