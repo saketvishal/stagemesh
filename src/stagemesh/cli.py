@@ -302,6 +302,18 @@ def command_capacity(args: argparse.Namespace) -> int:
     registry.record(args.primary, CapacityKind.AVAILABLE if not args.primary_down else CapacityKind.CAPACITY)
     registry.record(args.secondary, CapacityKind.AVAILABLE if not args.secondary_down else CapacityKind.CAPACITY)
     chosen = registry.choose_primary_secondary(args.primary, args.secondary)
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "chosen": chosen,
+                    "providers": registry.snapshot((args.primary, args.secondary)),
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
     print(f"chosen: {chosen or 'NONE'}")
     return 0
 
@@ -508,6 +520,7 @@ def build_parser() -> argparse.ArgumentParser:
     capacity.add_argument("--secondary", default="claude")
     capacity.add_argument("--primary-down", action="store_true")
     capacity.add_argument("--secondary-down", action="store_true")
+    capacity.add_argument("--json", action="store_true")
     capacity.set_defaults(func=command_capacity)
     config = sub.add_parser("config")
     config.add_argument("--config")
