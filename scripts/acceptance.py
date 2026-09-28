@@ -154,6 +154,7 @@ def main() -> int:
         if (
             status_data["done_count"] != 2
             or status_data["backlog_state"] != "ACTIVE"
+            or status_data["blocked_task_count"] != 0
             or status_data["failed_execution_count"] != 0
             or status_data["unknown_execution_count"] != 0
         ):
@@ -479,6 +480,7 @@ def main() -> int:
         if (
             "ok: True" not in health
             or "done: 3" not in health
+            or "blocked_tasks: 0" not in health
             or "failed_executions: 0" not in health
             or "unknown_executions: 0" not in health
         ):

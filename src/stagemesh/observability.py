@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .domain import ExecutionStatus, Stage
+from .domain import ExecutionStatus, Stage, TaskStatus
 from .persistence import Store
 
 
@@ -10,6 +10,7 @@ from .persistence import Store
 class HealthReport:
     ok: bool
     task_count: int
+    blocked_task_count: int
     running_count: int
     done_count: int
     failed_execution_count: int
@@ -21,6 +22,7 @@ def health(store: Store) -> HealthReport:
     tasks = store.tasks()
     running = list(store.running_executions())
     done = [task for task in tasks if task["stage"] == Stage.DONE or task["status"] == "DONE"]
+    blocked = [task for task in tasks if task["status"] == TaskStatus.BLOCKED]
     failed_execution_count = int(
         store.conn.execute(
             "SELECT COUNT(*) FROM executions WHERE status=?",
@@ -35,8 +37,9 @@ def health(store: Store) -> HealthReport:
     )
     backlog_state = "EMPTY" if not tasks else "ACTIVE"
     return HealthReport(
-        ok=failed_execution_count == 0 and unknown_execution_count == 0,
+        ok=not blocked and failed_execution_count == 0 and unknown_execution_count == 0,
         task_count=len(tasks),
+        blocked_task_count=len(blocked),
         running_count=len(running),
         done_count=len(done),
         failed_execution_count=failed_execution_count,

@@ -123,6 +123,7 @@ def command_status(args: argparse.Namespace) -> int:
                 {
                     "ok": report.ok,
                     "task_count": report.task_count,
+                    "blocked_task_count": report.blocked_task_count,
                     "running_count": report.running_count,
                     "done_count": report.done_count,
                     "failed_execution_count": report.failed_execution_count,
@@ -178,6 +179,7 @@ def command_health(args: argparse.Namespace) -> int:
     report = health(store)
     print(f"ok: {report.ok}")
     print(f"tasks: {report.task_count}")
+    print(f"blocked_tasks: {report.blocked_task_count}")
     print(f"running: {report.running_count}")
     print(f"done: {report.done_count}")
     print(f"failed_executions: {report.failed_execution_count}")
