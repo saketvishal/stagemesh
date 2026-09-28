@@ -22,6 +22,7 @@ from .objectives import ObjectivePlanner
 from .persistence import Store
 from .persistence_backends import probe_backend
 from .postgres_store import PostgresStore
+from .provider_acceptance import run_provider_acceptance
 from .process_identity import current_process_identity
 from .registry import GlobalRegistry, ProjectRegistration
 from .release import build_release_artifact
@@ -267,6 +268,19 @@ def command_backend(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_provider_acceptance(args: argparse.Namespace) -> int:
+    project = Path(args.project).resolve()
+    store = Store(db_path(project))
+    store.migrate()
+    result = run_provider_acceptance(store, project)
+    print(f"status: {result.status}")
+    print(f"chosen_provider: {result.chosen_provider}")
+    print(f"execution_status: {result.execution_status}")
+    print(f"capacity_failure_isolated: {result.capacity_failure_isolated}")
+    store.close()
+    return 0 if result.status == "PASS" else 1
+
+
 def command_completion_audit(args: argparse.Namespace) -> int:
     project = Path(args.project).resolve()
     output = WorkspaceBoundary(project).require_inside(Path(args.output).resolve())
@@ -355,6 +369,8 @@ def build_parser() -> argparse.ArgumentParser:
     backend.add_argument("--config")
     backend.add_argument("--ping", action="store_true")
     backend.set_defaults(func=command_backend)
+    provider_acceptance = sub.add_parser("provider-acceptance")
+    provider_acceptance.set_defaults(func=command_provider_acceptance)
     worker = sub.add_parser("worker")
     worker.add_argument("worker_id")
     worker.add_argument("--provider", default="local")

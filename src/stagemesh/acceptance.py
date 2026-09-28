@@ -25,6 +25,7 @@ def local_acceptance_report(root: Path, include_acceptance: bool = True) -> dict
     checks = [
         run_check("compile", [sys.executable, "-m", "compileall", "-q", "src", "scripts", "build_backend.py"], root),
         run_check("invariants", [sys.executable, "scripts/invariants.py"], root),
+        run_check("provider_acceptance", [sys.executable, "scripts/provider_acceptance.py"], root),
         run_check("live_acceptance", [sys.executable, "scripts/live_acceptance.py"], root),
         run_check("install", [sys.executable, "-m", "pip", "install", ".", "--target", ".tmp-install", "--no-cache-dir", "--upgrade"], root),
     ]
