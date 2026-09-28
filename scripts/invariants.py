@@ -28,7 +28,7 @@ from stagemesh.github import GitHubClient
 from stagemesh.task_sources import GitHubOutboundSync
 from stagemesh.attribution import attribution_for_worker
 from stagemesh.redaction import redact_mapping, redact_text
-from stagemesh.config import load_config
+from stagemesh.config import ConfigValidationError, load_config
 from stagemesh.release import build_release_artifact, release_files
 from stagemesh.security import SecurityBoundaryError
 from stagemesh.persistence_backends import probe_backend
@@ -396,6 +396,19 @@ def main() -> int:
         assert config.single_agent_provider == "codex"
         assert config.stage_routes["REVIEW"] == "claude"
 
+    def config_rejects_invalid_routing_and_provider_shapes(store: Store, project: Path) -> None:
+        config_dir = project / ".stagemesh"
+        config_dir.mkdir(parents=True)
+        config_file = config_dir / "config.json"
+        config_file.write_text('{"routing":{"mode":"ROUND_ROBIN"}}', encoding="utf-8")
+        assert_raises(ConfigValidationError, load_config, project)
+        config_file.write_text('{"routing":{"stage_routes":{"BOGUS":"codex"}}}', encoding="utf-8")
+        assert_raises(ConfigValidationError, load_config, project)
+        config_file.write_text('{"providers":{"codex":""}}', encoding="utf-8")
+        assert_raises(ConfigValidationError, load_config, project)
+        config_file.write_text('{"providers":[]}', encoding="utf-8")
+        assert_raises(ConfigValidationError, load_config, project)
+
     def github_remote_detection_supports_zero_config(store: Store, project: Path) -> None:
         assert parse_github_remote("https://github.com/openai/stagemesh.git").owner == "openai"
         assert parse_github_remote("git@github.com:openai/stagemesh.git").repo == "stagemesh"
@@ -619,6 +632,7 @@ def main() -> int:
         git_attribution_is_worker_owned,
         secrets_are_redacted,
         config_loads_from_project_file,
+        config_rejects_invalid_routing_and_provider_shapes,
         github_remote_detection_supports_zero_config,
         routing_modes_select_expected_provider,
         release_output_stays_inside_workspace,

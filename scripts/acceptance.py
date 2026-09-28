@@ -203,6 +203,29 @@ def main() -> int:
             or "routing.mode: STAGED" not in config_output
         ):
             raise AssertionError(config_output)
+        invalid_config = project / "invalid-config.json"
+        invalid_config.write_text('{"routing":{"mode":"ROUND_ROBIN"}}', encoding="utf-8")
+        invalid_config_result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "stagemesh.cli",
+                "--project",
+                str(project),
+                "config",
+                "--config",
+                str(invalid_config),
+            ],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            env={**os.environ.copy(), **env},
+            check=False,
+        )
+        if invalid_config_result.returncode != 2 or "config error: unsupported routing mode" not in (
+            invalid_config_result.stdout + invalid_config_result.stderr
+        ):
+            raise AssertionError(invalid_config_result.stdout + invalid_config_result.stderr)
         backend_output = run([sys.executable, "-m", "stagemesh.cli", "--project", str(project), "backend"], ROOT, env)
         if (
             "name: sqlite" not in backend_output

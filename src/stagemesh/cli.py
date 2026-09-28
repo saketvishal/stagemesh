@@ -13,7 +13,7 @@ from .capacity import CapacityKind, CapacityRegistry
 from .ci import broken_future_feature_gate, default_gates
 from .ci_wait import decide_ci_wait
 from .completion_audit import write_completion_audit
-from .config import load_config
+from .config import ConfigValidationError, load_config
 from .dashboard import render_dashboard
 from .coordinator import Coordinator
 from .distributed import WorkQueue
@@ -572,7 +572,11 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    return int(args.func(args))
+    try:
+        return int(args.func(args))
+    except ConfigValidationError as exc:
+        print(f"config error: {exc}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":
