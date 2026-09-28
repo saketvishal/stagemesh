@@ -644,6 +644,8 @@ def main() -> int:
             raise AssertionError(report_output)
         acceptance_report_data = json.loads(acceptance_report.read_text(encoding="utf-8"))
         proof_gap_text = json.dumps(acceptance_report_data.get("proof_gaps", []))
+        if acceptance_report_data.get("proof_status") != "BLOCKED_ON_EXTERNAL_EVIDENCE":
+            raise AssertionError(acceptance_report_data)
         if "provider:codex:execution: NOT_PROVEN" not in proof_gap_text or "github:sync:" not in proof_gap_text:
             raise AssertionError(acceptance_report_data)
         run(

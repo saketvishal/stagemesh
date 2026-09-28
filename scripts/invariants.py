@@ -974,6 +974,12 @@ def main() -> int:
         assert "acceptance report status: invalid report" in invalid_report
         assert "completion audit status: invalid report" in invalid_report
         assert "acceptance matrix status: invalid report" in invalid_report
+        (report_dir / "acceptance-report.json").write_text(
+            '{"status":"PASS","proof_status":"BLOCKED_ON_EXTERNAL_EVIDENCE","proof_gaps":[{"check":"live","evidence":"provider:codex:execution: NOT_PROVEN"}],"checks":[{"name":"live","status":"PASS"}]}',
+            encoding="utf-8",
+        )
+        report_with_gaps = render_final_report(project)
+        assert "acceptance report status: PASS proof=BLOCKED_ON_EXTERNAL_EVIDENCE (1/1 checks passing, 1 proof gaps)" in report_with_gaps
 
     def provider_acceptance_isolates_capacity_failure(store: Store, project: Path) -> None:
         result = run_provider_acceptance(store, project)
