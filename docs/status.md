@@ -24,6 +24,8 @@
 - PostgreSQL-ready persistence backend interface.
 - CI wait decision helper that releases worker capacity while checks are pending.
 - Static HTML dashboard rendering from operator status.
+- Persistent review findings and bounded remediation attempts.
+- Release archive and manifest generation for public/demo packaging.
 - GitHub Actions CI for Windows and Linux.
 - Stdlib invariant and acceptance runners for dependency-free verification.
 

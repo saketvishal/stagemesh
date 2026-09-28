@@ -19,6 +19,7 @@ from stagemesh.review import Reviewer
 from stagemesh.task_sources import DiscoveredTask, GitHubIssueSource, OutboundSync, sync_source
 from stagemesh.workers import heartbeat_worker, register_worker
 from stagemesh.scheduling import Scheduler
+from stagemesh.remediation import RemediationPolicy, finding_identity
 
 
 def assert_raises(exc_type, fn, *args, **kwargs) -> None:
@@ -153,6 +154,20 @@ def main() -> int:
         store.advance_task(first, Stage.DONE)
         assert scheduler.decision(second).eligible is True
 
+    def finding_convergence_is_bounded(store: Store, project: Path) -> None:
+        task_id = store.upsert_task("review task")
+        sha = "review-sha"
+        finding_id = finding_identity(sha, "bug")
+        store.upsert_finding(finding_id, task_id, sha, "P1", "bug")
+        policy = RemediationPolicy(max_attempts=2)
+        assert policy.should_remediate(store, finding_id) is True
+        policy.record_attempt(store, finding_id, "FAILED")
+        assert policy.should_remediate(store, finding_id) is True
+        policy.record_attempt(store, finding_id, "FAILED")
+        assert policy.should_remediate(store, finding_id) is False
+        store.close_finding(finding_id)
+        assert policy.should_remediate(store, finding_id) is False
+
     cases = [
         live_worker_restart,
         dead_worker_recovers,
@@ -166,6 +181,7 @@ def main() -> int:
         source_semantics,
         worker_heartbeat_and_outbound_sync,
         dependency_scheduling,
+        finding_convergence_is_bounded,
     ]
     for case in cases:
         with_store(case)
