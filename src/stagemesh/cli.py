@@ -9,7 +9,7 @@ from . import __version__
 from .acceptance import write_acceptance_report
 from .acceptance_matrix import write_acceptance_matrix
 from .audit import export_audit_jsonl
-from .capacity import CapacityKind, CapacityRegistry
+from .capacity import CapacityKind, CapacityRegistry, CapacityValidationError
 from .ci import broken_future_feature_gate, default_gates
 from .ci_wait import decide_ci_wait
 from .completion_audit import write_completion_audit
@@ -591,6 +591,9 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     except RetryValidationError as exc:
         print(f"retry error: {exc}", file=sys.stderr)
+        return 2
+    except CapacityValidationError as exc:
+        print(f"capacity error: {exc}", file=sys.stderr)
         return 2
 
 

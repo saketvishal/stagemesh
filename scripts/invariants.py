@@ -56,6 +56,7 @@ from stagemesh.dashboard import render_dashboard
 from stagemesh.ci_wait import decide_ci_wait
 from stagemesh.objectives import ObjectivePlanner, ObjectiveValidationError
 from stagemesh.registry import GlobalRegistry, ProjectRegistration, RegistryConflictError
+from stagemesh.capacity import CapacityKind, CapacityRegistry, CapacityValidationError
 
 
 def assert_raises(exc_type, fn, *args, **kwargs) -> None:
@@ -415,6 +416,16 @@ def main() -> int:
         assert timed_out.should_wait is False
         assert timed_out.release_worker is True
 
+    def capacity_registry_rejects_invalid_provider_state(store: Store, project: Path) -> None:
+        registry = CapacityRegistry()
+        registry.record("primary", CapacityKind.CAPACITY, retry_after_seconds=30)
+        registry.record("secondary", CapacityKind.AVAILABLE)
+        assert registry.choose_primary_secondary("primary", "secondary") == "secondary"
+        assert registry.get("missing").kind == CapacityKind.UNKNOWN
+        assert_raises(CapacityValidationError, registry.record, "", CapacityKind.AVAILABLE)
+        assert_raises(CapacityValidationError, registry.record, "provider", "BOGUS")
+        assert_raises(CapacityValidationError, registry.record, "provider", CapacityKind.CAPACITY, -1)
+
     def github_outbound_sync_records_capacity_separately(store: Store, project: Path) -> None:
         class RateLimitedTransport:
             def request(self, method, path, body=None):
@@ -722,6 +733,7 @@ def main() -> int:
         distributed_work_ack_requires_claimed_terminal_status,
         distributed_work_packets_have_renewable_leases,
         ci_wait_releases_worker_capacity_while_pending,
+        capacity_registry_rejects_invalid_provider_state,
         github_outbound_sync_records_capacity_separately,
         git_attribution_is_worker_owned,
         secrets_are_redacted,
