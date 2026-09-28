@@ -1033,6 +1033,7 @@ def main() -> int:
         assert records[0].candidate_sha == "abc1234"
         assert_raises(ExternalEvidenceValidationError, record_external_evidence, store, "unknown", "PASS", "https://example.invalid")
         assert_raises(ExternalEvidenceValidationError, record_external_evidence, store, "hosted-ci", "MAYBE", "https://example.invalid")
+        assert_raises(ExternalEvidenceValidationError, record_external_evidence, store, "hosted-ci", "PASS", "https://example.invalid")
         assert_raises(ExternalEvidenceValidationError, record_external_evidence, store, "hosted-ci", "PASS", "file:///tmp/proof")
         assert_raises(
             ExternalEvidenceValidationError,
