@@ -22,6 +22,7 @@ class StageMeshConfig:
     project: Path
     github: GitHubConfig
     provider_commands: dict[str, str]
+    database_url: str | None
     source: str
 
 
@@ -45,7 +46,14 @@ def load_config(project: Path, config_path: Path | None = None) -> StageMeshConf
         env_value = os.environ.get(f"STAGEMESH_{name.upper()}_CMD")
         if env_value:
             provider_commands[name] = env_value
-    return StageMeshConfig(project=project, github=github, provider_commands=provider_commands, source=source)
+    database_url = os.environ.get("STAGEMESH_DATABASE_URL") or _string(data.get("database_url"))
+    return StageMeshConfig(
+        project=project,
+        github=github,
+        provider_commands=provider_commands,
+        database_url=database_url,
+        source=source,
+    )
 
 
 def _string(value: object) -> str | None:

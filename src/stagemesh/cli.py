@@ -9,6 +9,7 @@ from . import __version__
 from .acceptance import write_acceptance_report
 from .capacity import CapacityKind, CapacityRegistry
 from .ci import broken_future_feature_gate, default_gates
+from .completion_audit import write_completion_audit
 from .config import load_config
 from .dashboard import render_dashboard
 from .coordinator import Coordinator
@@ -18,6 +19,7 @@ from .observability import health
 from .operator import operator_report
 from .objectives import ObjectivePlanner
 from .persistence import Store
+from .persistence_backends import probe_backend
 from .process_identity import current_process_identity
 from .registry import GlobalRegistry, ProjectRegistration
 from .release import build_release_artifact
@@ -62,6 +64,9 @@ def command_doctor(args: argparse.Namespace) -> int:
     print(f"schema version: {store.schema_version()}")
     print(f"config source: {config.source}")
     print(f"github configured: {config.github.configured}")
+    backend = probe_backend(config.database_url, db_path(project))
+    print(f"backend: {backend.name}")
+    print(f"backend available: {backend.available}")
     print(f"editable/development status: {'development' if 'site-packages' not in __file__ else 'installed'}")
     print(f"platform: {platform.platform()}")
     store.close()
@@ -237,8 +242,16 @@ def command_config(args: argparse.Namespace) -> int:
     print(f"github.owner: {config.github.owner or ''}")
     print(f"github.repo: {config.github.repo or ''}")
     print(f"github.configured: {config.github.configured}")
+    print(f"database_url: {config.database_url or 'sqlite://default'}")
     for name, command in sorted(config.provider_commands.items()):
         print(f"provider.{name}: {command}")
+    return 0
+
+
+def command_completion_audit(args: argparse.Namespace) -> int:
+    output = Path(args.output).resolve()
+    write_completion_audit(output)
+    print(f"completion-audit: {output}")
     return 0
 
 
@@ -323,6 +336,9 @@ def build_parser() -> argparse.ArgumentParser:
     acceptance_report.add_argument("--output", default=".stagemesh/acceptance-report.json")
     acceptance_report.add_argument("--skip-acceptance", action="store_true")
     acceptance_report.set_defaults(func=command_acceptance_report)
+    audit = sub.add_parser("completion-audit")
+    audit.add_argument("--output", default=".stagemesh/completion-audit.json")
+    audit.set_defaults(func=command_completion_audit)
     ci = sub.add_parser("ci")
     ci.add_argument("--future-feature-gate", action="store_true")
     ci.add_argument("--skip-acceptance", action="store_true")
