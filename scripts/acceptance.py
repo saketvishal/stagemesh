@@ -361,6 +361,24 @@ def main() -> int:
             or "postgres schema contract: 18 tables" not in backend_output
         ):
             raise AssertionError(backend_output)
+        postgres_config = project / "postgres-config.json"
+        postgres_config.write_text('{"database_url":"postgresql://example/db"}', encoding="utf-8")
+        postgres_backend = run(
+            [
+                sys.executable,
+                "-m",
+                "stagemesh.cli",
+                "--project",
+                str(project),
+                "backend",
+                "--config",
+                str(postgres_config),
+            ],
+            ROOT,
+            env,
+        )
+        if "name: postgres" not in postgres_backend or "sqlite default available" in postgres_backend:
+            raise AssertionError(postgres_backend)
         provider_acceptance = run(
             [sys.executable, "-m", "stagemesh.cli", "--project", str(project), "provider-acceptance"],
             ROOT,

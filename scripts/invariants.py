@@ -846,10 +846,14 @@ def main() -> int:
         assert first == second == 2
 
     def backend_probe_reports_postgres_dependency(store: Store, project: Path) -> None:
-        probe = probe_backend("postgresql://example/db")
+        sqlite_probe = probe_backend(None, project / ".stagemesh" / "stagemesh.sqlite3")
+        assert sqlite_probe.name == "sqlite"
+        probe = probe_backend("postgresql://example/db", project / ".stagemesh" / "stagemesh.sqlite3")
         assert probe.name == "postgres"
         assert probe.available in {True, False}
         assert probe.reason
+        unknown = probe_backend("mysql://example/db", project / ".stagemesh" / "stagemesh.sqlite3")
+        assert unknown.name == "unknown"
         if not postgres_available():
             assert_raises(PostgresUnavailable, PostgresStore, "postgresql://example/db")
 

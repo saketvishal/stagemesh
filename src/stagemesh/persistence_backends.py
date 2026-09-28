@@ -43,8 +43,10 @@ class BackendProbe:
 
 
 def probe_backend(url: str | None, sqlite_path: Path | None = None) -> BackendProbe:
-    if not url or url.startswith("sqlite://") or sqlite_path is not None:
+    if not url:
         return BackendProbe("sqlite", True, "sqlite default available")
+    if url.startswith("sqlite://"):
+        return BackendProbe("sqlite", True, "sqlite configured")
     if url.startswith("postgres://") or url.startswith("postgresql://"):
         try:
             __import__("psycopg")
