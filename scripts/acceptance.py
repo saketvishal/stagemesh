@@ -472,6 +472,23 @@ def main() -> int:
         )
         if "future-feature: PASS" not in ci:
             raise AssertionError(ci)
+        ci_wait = run(
+            [
+                sys.executable,
+                "-m",
+                "stagemesh.cli",
+                "--project",
+                str(ROOT),
+                "ci-wait",
+                "pending",
+                "--elapsed-seconds",
+                "30",
+            ],
+            ROOT,
+            env,
+        )
+        if "should_wait: True" not in ci_wait or "release_worker: True" not in ci_wait:
+            raise AssertionError(ci_wait)
         live = run([sys.executable, "scripts/live_acceptance.py"], ROOT, env)
         if "github:" not in live or "provider:codex:" not in live:
             raise AssertionError(live)

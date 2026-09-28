@@ -53,6 +53,7 @@ from stagemesh.routing import Provider, Router, RoutingMode
 from stagemesh.github import parse_github_remote
 from stagemesh.operator import operator_report
 from stagemesh.dashboard import render_dashboard
+from stagemesh.ci_wait import decide_ci_wait
 
 
 def assert_raises(exc_type, fn, *args, **kwargs) -> None:
@@ -283,6 +284,22 @@ def main() -> int:
         store.conn.commit()
         reclaimed = queue.poll("worker-b", lease_seconds=1)
         assert [packet.id for packet in reclaimed] == [packet_id]
+
+    def ci_wait_releases_worker_capacity_while_pending(store: Store, project: Path) -> None:
+        pending = decide_ci_wait("pending", elapsed_seconds=30)
+        assert pending.should_wait is True
+        assert pending.release_worker is True
+        assert pending.poll_after_seconds >= 5
+        assert pending.reason == "ci pending"
+        passed = decide_ci_wait("success", elapsed_seconds=30)
+        assert passed.should_wait is False
+        assert passed.release_worker is False
+        failed = decide_ci_wait("failed", elapsed_seconds=30)
+        assert failed.should_wait is False
+        assert failed.release_worker is False
+        timed_out = decide_ci_wait("pending", elapsed_seconds=1800, max_seconds=1800)
+        assert timed_out.should_wait is False
+        assert timed_out.release_worker is True
 
     def github_outbound_sync_records_capacity_separately(store: Store, project: Path) -> None:
         class RateLimitedTransport:
@@ -536,6 +553,7 @@ def main() -> int:
         finding_convergence_is_bounded,
         distributed_work_packets_are_claimed_once,
         distributed_work_packets_have_renewable_leases,
+        ci_wait_releases_worker_capacity_while_pending,
         github_outbound_sync_records_capacity_separately,
         git_attribution_is_worker_owned,
         secrets_are_redacted,
