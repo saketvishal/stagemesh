@@ -8,6 +8,7 @@ from pathlib import Path
 from . import __version__
 from .capacity import CapacityKind, CapacityRegistry
 from .ci import broken_future_feature_gate, default_gates
+from .config import load_config
 from .dashboard import render_dashboard
 from .coordinator import Coordinator
 from .distributed import WorkQueue
@@ -48,6 +49,7 @@ def command_init(args: argparse.Namespace) -> int:
 
 def command_doctor(args: argparse.Namespace) -> int:
     project = Path(args.project).resolve()
+    config = load_config(project)
     store = Store(db_path(project))
     store.migrate()
     print(f"version: {__version__}")
@@ -56,7 +58,8 @@ def command_doctor(args: argparse.Namespace) -> int:
     print(f"imported package path: {Path(__file__).resolve().parent}")
     print(f"project: {project}")
     print(f"db: {db_path(project)}")
-    print(f"config source: defaults")
+    print(f"config source: {config.source}")
+    print(f"github configured: {config.github.configured}")
     print(f"editable/development status: {'development' if 'site-packages' not in __file__ else 'installed'}")
     print(f"platform: {platform.platform()}")
     store.close()
@@ -218,6 +221,17 @@ def command_capacity(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_config(args: argparse.Namespace) -> int:
+    config = load_config(Path(args.project).resolve(), Path(args.config).resolve() if args.config else None)
+    print(f"source: {config.source}")
+    print(f"github.owner: {config.github.owner or ''}")
+    print(f"github.repo: {config.github.repo or ''}")
+    print(f"github.configured: {config.github.configured}")
+    for name, command in sorted(config.provider_commands.items()):
+        print(f"provider.{name}: {command}")
+    return 0
+
+
 def command_ci(args: argparse.Namespace) -> int:
     root = Path(args.project).resolve()
     results = default_gates(root, include_acceptance=not args.skip_acceptance)
@@ -255,6 +269,9 @@ def build_parser() -> argparse.ArgumentParser:
     capacity.add_argument("--primary-down", action="store_true")
     capacity.add_argument("--secondary-down", action="store_true")
     capacity.set_defaults(func=command_capacity)
+    config = sub.add_parser("config")
+    config.add_argument("--config")
+    config.set_defaults(func=command_config)
     worker = sub.add_parser("worker")
     worker.add_argument("worker_id")
     worker.add_argument("--provider", default="local")

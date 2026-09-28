@@ -24,6 +24,8 @@ from stagemesh.distributed import WorkQueue
 from stagemesh.github import GitHubClient
 from stagemesh.task_sources import GitHubOutboundSync
 from stagemesh.attribution import attribution_for_worker
+from stagemesh.redaction import redact_mapping, redact_text
+from stagemesh.config import load_config
 
 
 def assert_raises(exc_type, fn, *args, **kwargs) -> None:
@@ -198,6 +200,23 @@ def main() -> int:
         assert attribution.author_email == "codex+worker-1@stagemesh.invalid"
         assert attribution.committer_email == "stagemesh@stagemesh.invalid"
 
+    def secrets_are_redacted(store: Store, project: Path) -> None:
+        redacted = redact_mapping({"github_token": "abc", "nested": {"password": "def"}, "safe": "ok"})
+        assert redacted["github_token"] == "***REDACTED***"
+        assert redacted["nested"] == {"password": "***REDACTED***"}
+        assert redact_text("token abc", ["abc"]) == "token ***REDACTED***"
+
+    def config_loads_from_project_file(store: Store, project: Path) -> None:
+        config_dir = project / ".stagemesh"
+        config_dir.mkdir(parents=True)
+        (config_dir / "config.json").write_text(
+            '{"github":{"owner":"o","repo":"r","token":"t"},"providers":{"codex":"codex --test"}}',
+            encoding="utf-8",
+        )
+        config = load_config(project)
+        assert config.github.configured is True
+        assert config.provider_commands["codex"] == "codex --test"
+
     cases = [
         live_worker_restart,
         dead_worker_recovers,
@@ -215,6 +234,8 @@ def main() -> int:
         distributed_work_packets_are_claimed_once,
         github_outbound_sync_records_capacity_separately,
         git_attribution_is_worker_owned,
+        secrets_are_redacted,
+        config_loads_from_project_file,
     ]
     for case in cases:
         with_store(case)
