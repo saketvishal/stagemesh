@@ -34,7 +34,7 @@ from stagemesh.config import ConfigValidationError, load_config
 from stagemesh.release import ReleaseValidationError, build_release_artifact, release_files
 from stagemesh.security import SecurityBoundaryError
 from stagemesh.persistence_backends import probe_backend
-from stagemesh.completion_audit import completion_audit
+from stagemesh.completion_audit import CompletionAuditValidationError, completion_audit, write_completion_audit
 from stagemesh.audit import AuditValidationError, record_audit, export_audit_jsonl
 from stagemesh.retry import RetryRegistry, RetryValidationError, backoff_seconds
 from stagemesh.postgres_store import (
@@ -50,7 +50,7 @@ from stagemesh.provider_acceptance import run_provider_acceptance
 from stagemesh.github_acceptance import run_github_acceptance
 from stagemesh.release_readiness import ReleaseReadinessValidationError, release_readiness, run_command_check, write_release_readiness
 from stagemesh.external_evidence import ExternalEvidenceValidationError, record_external_evidence, external_evidence_records
-from stagemesh.acceptance_matrix import acceptance_matrix
+from stagemesh.acceptance_matrix import AcceptanceMatrixValidationError, acceptance_matrix, write_acceptance_matrix
 from stagemesh.routing import Provider, Router, RoutingMode, RoutingValidationError
 from stagemesh.github import parse_github_remote
 from stagemesh.operator import operator_report
@@ -877,6 +877,12 @@ def main() -> int:
         assert audit["complete"] is False
         statuses = {item["status"] for item in audit["items"]}
         assert "REQUIRES_CREDENTIALS" in statuses or "MISSING_EXTERNAL_EVIDENCE" in statuses
+        project.mkdir(parents=True, exist_ok=True)
+        output = project / ".stagemesh" / "completion-audit.json"
+        write_completion_audit(output, store, root=project)
+        assert output.exists()
+        assert_raises(SecurityBoundaryError, write_completion_audit, project.parent / "completion-audit.json", store, project)
+        assert_raises(CompletionAuditValidationError, write_completion_audit, Path(""), store)
 
     def audit_events_are_redacted_and_exportable(store: Store, project: Path) -> None:
         record_audit(store, "secret.test", {"token": "abc", "safe": "ok"})
@@ -1018,6 +1024,12 @@ def main() -> int:
         rows = matrix["rows"]
         assert any(row["status"] == "PROVEN" for row in rows)
         assert any(row["status"] != "PROVEN" for row in rows)
+        project.mkdir(parents=True, exist_ok=True)
+        output = project / ".stagemesh" / "acceptance-matrix.json"
+        write_acceptance_matrix(output, store, root=project)
+        assert output.exists()
+        assert_raises(SecurityBoundaryError, write_acceptance_matrix, project.parent / "acceptance-matrix.json", store, project)
+        assert_raises(AcceptanceMatrixValidationError, write_acceptance_matrix, Path(""), store)
 
     def external_evidence_updates_audit_rows(store: Store, project: Path) -> None:
         record_external_evidence(store, "hosted-ci", "PASS", "https://example.invalid/linux", "abc1234")

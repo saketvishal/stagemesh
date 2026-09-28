@@ -5,6 +5,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .persistence import Store
+from .security import WorkspaceBoundary
+
+
+class CompletionAuditValidationError(ValueError):
+    pass
 
 
 @dataclass(frozen=True)
@@ -60,7 +65,8 @@ def completion_audit(store: Store | None = None) -> dict[str, object]:
     return {"complete": all(item["status"] == "PROVEN" for item in items), "items": items}
 
 
-def write_completion_audit(path: Path, store: Store | None = None) -> None:
+def write_completion_audit(path: Path, store: Store | None = None, root: Path | None = None) -> None:
+    path = _validate_output(path, root)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(completion_audit(store), indent=2, sort_keys=True), encoding="utf-8")
 
@@ -76,3 +82,12 @@ def _external_evidence_by_requirement(store: Store | None) -> dict[str, str]:
         if requirement:
             evidence[requirement] = f"external evidence {row['id']}: {row['url']}"
     return evidence
+
+
+def _validate_output(path: Path, root: Path | None) -> Path:
+    output = Path(path).resolve()
+    if root is not None:
+        return WorkspaceBoundary(Path(root).resolve()).require_inside(output)
+    if not output.name or output.is_dir():
+        raise CompletionAuditValidationError("completion audit output must name a file")
+    return output
