@@ -42,6 +42,7 @@
 - Persisted audit events with redacted JSONL export for shareable operational evidence.
 - Durable retry/backoff registry for source/provider failures with CLI inspection.
 - CLI-generated dashboard, reports, audits, and acceptance artifacts are constrained to the selected project boundary.
+- Optional psycopg-backed PostgreSQL store facade with explicit backend probe and ping command.
 - GitHub Actions CI for Windows and Linux.
 - Stdlib invariant and acceptance runners for dependency-free verification.
 
