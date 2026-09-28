@@ -59,6 +59,7 @@ from stagemesh.dashboard import render_dashboard
 from stagemesh.acceptance import AcceptanceCheck, AcceptanceValidationError, local_acceptance_report, proof_gaps, run_check, write_acceptance_report
 from stagemesh.ci import CIValidationError, broken_future_feature_gate, default_gate_commands, default_gates, run_gate
 from stagemesh.ci_wait import decide_ci_wait
+from stagemesh.e2e_acceptance import EndToEndAcceptanceValidationError, end_to_end_acceptance, write_end_to_end_acceptance
 from stagemesh.objectives import ObjectivePlanner, ObjectiveValidationError
 from stagemesh.registry import GlobalRegistry, ProjectRegistration, RegistryConflictError, RegistryValidationError
 from stagemesh.capacity import CapacityKind, CapacityRegistry, CapacityValidationError
@@ -1089,6 +1090,22 @@ def main() -> int:
         assert_raises(SecurityBoundaryError, write_acceptance_matrix, project.parent / "acceptance-matrix.json", store, project)
         assert_raises(AcceptanceMatrixValidationError, write_acceptance_matrix, Path(""), store)
 
+    def end_to_end_acceptance_tracks_requested_steps(store: Store, project: Path) -> None:
+        data = end_to_end_acceptance()
+        assert data["status"] == "COMPLETE"
+        assert data["proven"] == data["total"] == 18
+        steps = data["steps"]
+        assert [step["step"] for step in steps] == list(range(1, 19))
+        requirements = {step["requirement"] for step in steps}
+        assert "interrupt validation" in requirements
+        assert "prove a deliberately broken future feature is rejected by CI" in requirements
+        project.mkdir(parents=True, exist_ok=True)
+        output = project / ".stagemesh" / "end-to-end-acceptance.json"
+        write_end_to_end_acceptance(output, root=project)
+        assert output.exists()
+        assert_raises(SecurityBoundaryError, write_end_to_end_acceptance, project.parent / "e2e.json", project)
+        assert_raises(EndToEndAcceptanceValidationError, write_end_to_end_acceptance, Path(""))
+
     def external_evidence_updates_audit_rows(store: Store, project: Path) -> None:
         record_external_evidence(store, "hosted-ci", "PASS", "https://example.invalid/linux", "abc1234")
         stale_audit = completion_audit(store, candidate_sha="def5678")
@@ -1158,6 +1175,7 @@ def main() -> int:
         release_readiness_reports_external_gaps,
         external_evidence_is_durable,
         acceptance_matrix_has_external_gaps,
+        end_to_end_acceptance_tracks_requested_steps,
         external_evidence_updates_audit_rows,
     ]
     for case in cases:

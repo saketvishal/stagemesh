@@ -7,6 +7,7 @@ from pathlib import Path
 from . import __version__
 from .acceptance_matrix import acceptance_matrix
 from .completion_audit import completion_audit
+from .e2e_acceptance import end_to_end_acceptance
 from .persistence import Store
 from .release import validate_candidate_sha, ReleaseValidationError
 
@@ -42,6 +43,7 @@ def render_final_report(root: Path, store: Store | None = None) -> str:
     acceptance = _acceptance_summary(root)
     audit = _completion_summary(root, sha, store)
     matrix = _matrix_summary(root, sha, store)
+    e2e = _end_to_end_summary(root)
     sections = [
         "# StageMesh vNext Final Report",
         "",
@@ -100,6 +102,7 @@ def render_final_report(root: Path, store: Store | None = None) -> str:
         f"- acceptance report status: {acceptance}",
         f"- completion audit status: {audit}",
         f"- acceptance matrix status: {matrix}",
+        f"- end-to-end acceptance status: {e2e}",
         "",
         "## Remaining Human-Only Actions",
         "",
@@ -175,6 +178,16 @@ def _matrix_summary(root: Path, candidate: str, store: Store | None) -> str:
     if not isinstance(data, dict):
         return "invalid report"
     return f"{data.get('status', 'UNKNOWN')} candidate={candidate} ({data.get('proven', 0)}/{data.get('total', 0)} rows proven)"
+
+
+def _end_to_end_summary(root: Path) -> str:
+    path = root / ".stagemesh" / "end-to-end-acceptance.json"
+    data = _read_report_json(path)
+    if data is None:
+        data = end_to_end_acceptance()
+    if not isinstance(data, dict):
+        return "invalid report"
+    return f"{data.get('status', 'UNKNOWN')} ({data.get('proven', 0)}/{data.get('total', 0)} steps proven)"
 
 
 def _read_report_json(path: Path) -> object | None:

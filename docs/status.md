@@ -54,8 +54,9 @@
 - External evidence registry records hosted CI, live provider, live GitHub, and database acceptance links against candidate SHAs.
 - Passing external evidence must name a candidate SHA and only counts for the matching candidate.
 - Acceptance matrix artifact maps each major requirement to proven local evidence or an explicit external gap.
+- End-to-end acceptance artifact maps the requested 18 clean-environment acceptance steps to local proof evidence.
 - Completion audit and acceptance matrix consume durable external evidence records when available.
-- Final report summarizes local checks, candidate-scoped evidence, structured proof gaps, completion audit, and acceptance matrix state.
+- Final report summarizes local checks, candidate-scoped evidence, structured proof gaps, completion audit, acceptance matrix, and end-to-end acceptance state.
 - GitHub Actions CI for Windows and Linux.
 - Stdlib invariant and acceptance runners for dependency-free verification.
 - Clean-tree acceptance copies only tracked files, installs StageMesh into an isolated target, and runs CLI smoke checks from the installed package.
@@ -75,6 +76,7 @@ Current generated reports show local checks passing while proof remains blocked 
 - acceptance report: `PASS proof=BLOCKED_ON_EXTERNAL_EVIDENCE`
 - completion audit: `complete=False`
 - acceptance matrix: `INCOMPLETE`
+- end-to-end acceptance: `COMPLETE`
 
 ## Still Required For Full Product Acceptance
 
