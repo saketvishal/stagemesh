@@ -59,6 +59,7 @@ def command_doctor(args: argparse.Namespace) -> int:
     print(f"imported package path: {Path(__file__).resolve().parent}")
     print(f"project: {project}")
     print(f"db: {db_path(project)}")
+    print(f"schema version: {store.schema_version()}")
     print(f"config source: {config.source}")
     print(f"github configured: {config.github.configured}")
     print(f"editable/development status: {'development' if 'site-packages' not in __file__ else 'installed'}")

@@ -35,6 +35,8 @@
 - Live acceptance harness that exercises configured GitHub/providers or reports not configured.
 - Machine-readable local acceptance report generator.
 - Release packaging is constrained to the project workspace boundary.
+- Idempotent migration runner with schema version reporting and migration audit table.
+- SQLite durability settings enable WAL and busy timeout.
 - GitHub Actions CI for Windows and Linux.
 - Stdlib invariant and acceptance runners for dependency-free verification.
 

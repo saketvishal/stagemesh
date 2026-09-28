@@ -75,7 +75,7 @@ def main() -> int:
         if "future work" in status:
             raise AssertionError("deferred task was dispatched")
         doctor = run([sys.executable, "-m", "stagemesh.cli", "--project", str(project), "doctor"], ROOT, env)
-        required = ["version:", "executable path:", "python interpreter:", "imported package path:", "db:"]
+        required = ["version:", "executable path:", "python interpreter:", "imported package path:", "db:", "schema version: 2"]
         missing = [item for item in required if item not in doctor]
         if missing:
             raise AssertionError(f"doctor missing {missing}")
