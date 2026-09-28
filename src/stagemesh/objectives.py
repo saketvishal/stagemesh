@@ -23,16 +23,18 @@ class ObjectivePlanner:
     REQUIRED_TASK_FIELDS = {"id", "title"}
 
     def parse(self, payload: str | dict[str, Any]) -> Objective:
-        data = json.loads(payload) if isinstance(payload, str) else payload
+        if isinstance(payload, str):
+            try:
+                data = json.loads(payload)
+            except json.JSONDecodeError as exc:
+                raise ObjectiveValidationError("planner output must be valid JSON") from exc
+        else:
+            data = payload
         if not isinstance(data, dict):
             raise ObjectiveValidationError("planner output must be an object")
-        objective_id = data.get("id")
-        title = data.get("title")
+        objective_id = _validate_text(data.get("id"), "objective id")
+        title = _validate_text(data.get("title"), "objective title")
         tasks = data.get("tasks")
-        if not isinstance(objective_id, str) or not objective_id:
-            raise ObjectiveValidationError("objective id is required")
-        if not isinstance(title, str) or not title:
-            raise ObjectiveValidationError("objective title is required")
         if not isinstance(tasks, list) or not tasks:
             raise ObjectiveValidationError("objective tasks must be a non-empty list")
         task_ids: list[str] = []
@@ -40,12 +42,12 @@ class ObjectivePlanner:
         for item in tasks:
             if not isinstance(item, dict) or not self.REQUIRED_TASK_FIELDS <= set(item):
                 raise ObjectiveValidationError("each task requires id and title")
-            if not isinstance(item["id"], str) or not isinstance(item["title"], str):
-                raise ObjectiveValidationError("task id and title must be strings")
-            if item["id"] in seen_task_ids:
-                raise ObjectiveValidationError(f"duplicate task id: {item['id']}")
-            seen_task_ids.add(item["id"])
-            task_ids.append(item["id"])
+            task_id = _validate_text(item["id"], "task id")
+            _validate_text(item["title"], "task title")
+            if task_id in seen_task_ids:
+                raise ObjectiveValidationError(f"duplicate task id: {task_id}")
+            seen_task_ids.add(task_id)
+            task_ids.append(task_id)
         for item in tasks:
             dependencies = item.get("dependencies", [])
             if not isinstance(dependencies, list):
@@ -58,18 +60,49 @@ class ObjectivePlanner:
         return Objective(objective_id, title, tuple(task_ids))
 
     def write_backlog(self, objective: Objective, source_payload: dict[str, Any], path: Path) -> None:
+        if not isinstance(objective, Objective):
+            raise ObjectiveValidationError("objective must be parsed before backlog writing")
+        if not isinstance(source_payload, dict):
+            raise ObjectiveValidationError("source payload must be an object")
+        source_tasks = source_payload.get("tasks")
+        if not isinstance(source_tasks, list):
+            raise ObjectiveValidationError("source payload tasks must be a list")
         tasks = []
-        by_id = {str(item["id"]): item for item in source_payload["tasks"]}
+        by_id: dict[str, dict[str, Any]] = {}
+        for item in source_tasks:
+            if not isinstance(item, dict):
+                raise ObjectiveValidationError("source payload task entries must be objects")
+            task_id = _validate_text(item.get("id"), "source payload task id")
+            by_id[task_id] = item
         for task_id in objective.tasks:
+            if task_id not in by_id:
+                raise ObjectiveValidationError(f"source payload is missing task: {task_id}")
             item = by_id[task_id]
+            eligible = item.get("eligible", True)
+            if not isinstance(eligible, bool):
+                raise ObjectiveValidationError("source payload task eligible must be a boolean")
+            state = item.get("state", "OPEN")
+            if not isinstance(state, str) or not state.strip():
+                raise ObjectiveValidationError("source payload task state must be a non-empty string")
+            dependencies = item.get("dependencies", [])
+            if not isinstance(dependencies, list) or not all(isinstance(dep, str) for dep in dependencies):
+                raise ObjectiveValidationError("source payload task dependencies must be a list of strings")
             tasks.append(
                 {
                     "id": item["id"],
-                    "title": item["title"],
-                    "eligible": bool(item.get("eligible", True)),
-                    "state": str(item.get("state", "OPEN")),
-                    "dependencies": list(item.get("dependencies", [])),
+                    "title": _validate_text(item.get("title"), "source payload task title"),
+                    "eligible": eligible,
+                    "state": state.strip(),
+                    "dependencies": dependencies,
                 }
             )
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps({"objective": objective.id, "tasks": tasks}, indent=2), encoding="utf-8")
+
+
+def _validate_text(value: object, field: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ObjectiveValidationError(f"{field} is required")
+    if len(value.strip()) > 200:
+        raise ObjectiveValidationError(f"{field} must be 200 characters or fewer")
+    return value.strip()
