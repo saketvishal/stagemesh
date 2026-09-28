@@ -297,6 +297,26 @@ def main() -> int:
         )
         if not repo_report.exists() or "acceptance report status: PASS" not in repo_report.read_text(encoding="utf-8"):
             raise AssertionError(repo_report_output)
+        readiness = ROOT / ".stagemesh" / "release-readiness.json"
+        readiness_output = run(
+            [
+                sys.executable,
+                "-m",
+                "stagemesh.cli",
+                "--project",
+                str(ROOT),
+                "release-readiness",
+                "--output",
+                str(readiness),
+                "--skip-acceptance",
+                "--skip-checks",
+            ],
+            ROOT,
+            env,
+        )
+        readiness_text = readiness.read_text(encoding="utf-8") if readiness.exists() else ""
+        if "release-readiness:" not in readiness_output or "BLOCKED_ON_EXTERNAL_EVIDENCE" not in readiness_text:
+            raise AssertionError(readiness_output + readiness_text)
         capacity = run(
             [
                 sys.executable,
