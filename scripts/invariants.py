@@ -23,7 +23,7 @@ from stagemesh.task_sources import DiscoveredTask, GitHubIssueSource, LocalBackl
 from stagemesh.workers import heartbeat_worker, register_worker
 from stagemesh.scheduling import Scheduler
 from stagemesh.remediation import RemediationPolicy, finding_identity
-from stagemesh.distributed import WorkQueue
+from stagemesh.distributed import WorkQueue, WorkQueueError
 from stagemesh.github import GitHubClient
 from stagemesh.task_sources import GitHubOutboundSync
 from stagemesh.attribution import attribution_for_worker
@@ -370,6 +370,19 @@ def main() -> int:
         assert second == []
         queue.ack(packet_id, "SUCCEEDED", {"candidate_sha": "abc"})
 
+    def distributed_work_ack_requires_claimed_terminal_status(store: Store, project: Path) -> None:
+        task_id = store.upsert_task("distributed ack")
+        queue = WorkQueue(store)
+        unclaimed = queue.enqueue(task_id, "VALIDATE")
+        assert_raises(WorkQueueError, queue.ack, unclaimed, "SUCCEEDED")
+        claimed = queue.poll("worker-a")
+        assert [packet.id for packet in claimed] == [unclaimed]
+        assert_raises(WorkQueueError, queue.ack, unclaimed, "BOGUS")
+        queue.ack(unclaimed, "failed", {"reason": "test"})
+        row = store.conn.execute("SELECT * FROM work_packets WHERE id=?", (unclaimed,)).fetchone()
+        assert row["status"] == "FAILED"
+        assert_raises(WorkQueueError, queue.ack, unclaimed, "SUCCEEDED")
+
     def distributed_work_packets_have_renewable_leases(store: Store, project: Path) -> None:
         task_id = store.upsert_task("leased distributed")
         queue = WorkQueue(store)
@@ -688,6 +701,7 @@ def main() -> int:
         global_registry_rejects_ambiguous_projects,
         finding_convergence_is_bounded,
         distributed_work_packets_are_claimed_once,
+        distributed_work_ack_requires_claimed_terminal_status,
         distributed_work_packets_have_renewable_leases,
         ci_wait_releases_worker_capacity_while_pending,
         github_outbound_sync_records_capacity_separately,

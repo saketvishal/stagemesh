@@ -407,6 +407,27 @@ def main() -> int:
         )
         if "renewed: True" not in renew_output:
             raise AssertionError(renew_output)
+        invalid_ack = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "stagemesh.cli",
+                "--project",
+                str(project),
+                "work",
+                "ack",
+                packet_id,
+                "--status",
+                "BOGUS",
+            ],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            env={**os.environ.copy(), **env},
+            check=False,
+        )
+        if invalid_ack.returncode != 2 or "work queue error:" not in (invalid_ack.stdout + invalid_ack.stderr):
+            raise AssertionError(invalid_ack.stdout + invalid_ack.stderr)
         run(
             [
                 sys.executable,

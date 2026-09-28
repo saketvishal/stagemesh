@@ -16,7 +16,7 @@ from .completion_audit import write_completion_audit
 from .config import ConfigValidationError, load_config
 from .dashboard import render_dashboard
 from .coordinator import Coordinator
-from .distributed import WorkQueue
+from .distributed import WorkQueue, WorkQueueError
 from .final_report import render_final_report
 from .external_evidence import external_evidence_records, record_external_evidence
 from .github_acceptance import run_github_acceptance
@@ -582,6 +582,9 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     except ReleaseValidationError as exc:
         print(f"release error: {exc}", file=sys.stderr)
+        return 2
+    except WorkQueueError as exc:
+        print(f"work queue error: {exc}", file=sys.stderr)
         return 2
 
 

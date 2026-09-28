@@ -600,12 +600,13 @@ class Store:
         self.conn.commit()
         return cursor.rowcount == 1
 
-    def ack_work_packet(self, packet_id: str, status: str, payload: dict[str, Any] | None = None) -> None:
-        self.conn.execute(
-            "UPDATE work_packets SET status=?, payload=?, updated_at=? WHERE id=?",
+    def ack_work_packet(self, packet_id: str, status: str, payload: dict[str, Any] | None = None) -> bool:
+        cursor = self.conn.execute(
+            "UPDATE work_packets SET status=?, payload=?, updated_at=? WHERE id=? AND status='CLAIMED'",
             (status, json.dumps(payload or {}, sort_keys=True), time.time(), packet_id),
         )
         self.conn.commit()
+        return cursor.rowcount == 1
 
     def add_audit_event(self, event_type: str, payload: dict[str, Any] | None = None) -> str:
         event_id = str(uuid.uuid4())
