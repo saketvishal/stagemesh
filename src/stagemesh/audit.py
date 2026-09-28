@@ -13,6 +13,7 @@ class AuditValidationError(ValueError):
 
 def record_audit(store: Store, event_type: str, payload: dict[str, object]) -> str:
     event_type = _validate_event_type(event_type)
+    payload = _validate_payload(payload)
     return store.add_audit_event(event_type, redact_mapping(payload))
 
 
@@ -44,8 +45,16 @@ def _validate_event_type(event_type: str) -> str:
 
 
 def _validate_limit(limit: int) -> int:
+    if not isinstance(limit, int):
+        raise AuditValidationError("audit export limit must be an integer")
     if limit < 1:
         raise AuditValidationError("audit export limit must be at least 1")
     if limit > 10000:
         raise AuditValidationError("audit export limit must be 10000 or fewer")
     return limit
+
+
+def _validate_payload(payload: dict[str, object]) -> dict[str, object]:
+    if not isinstance(payload, dict):
+        raise AuditValidationError("audit payload must be an object")
+    return payload
