@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import json
+import re
+import subprocess
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Protocol
 
 
@@ -17,6 +20,13 @@ class GitHubResult:
     status: str
     payload: object
     retry_after: float | None = None
+
+
+@dataclass(frozen=True)
+class GitHubRepository:
+    owner: str
+    repo: str
+    remote: str
 
 
 class UrlLibGitHubTransport:
@@ -74,3 +84,29 @@ class GitHubClient:
         if code in {401, 404}:
             return GitHubResult("STALE", payload)
         return GitHubResult("UNKNOWN", payload)
+
+
+def detect_github_repository(project: Path, remote: str = "origin") -> GitHubRepository | None:
+    result = subprocess.run(
+        ["git", "-c", f"safe.directory={project.resolve().as_posix()}", "remote", "get-url", remote],
+        cwd=project,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    return parse_github_remote(result.stdout.strip(), remote)
+
+
+def parse_github_remote(url: str, remote: str = "origin") -> GitHubRepository | None:
+    patterns = [
+        r"^https://github\.com/(?P<owner>[^/]+)/(?P<repo>[^/#?]+?)(?:\.git)?/?$",
+        r"^git@github\.com:(?P<owner>[^/]+)/(?P<repo>[^/#?]+?)(?:\.git)?$",
+        r"^ssh://git@github\.com/(?P<owner>[^/]+)/(?P<repo>[^/#?]+?)(?:\.git)?/?$",
+    ]
+    for pattern in patterns:
+        match = re.match(pattern, url)
+        if match:
+            return GitHubRepository(match.group("owner"), match.group("repo"), remote)
+    return None

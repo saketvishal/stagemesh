@@ -5,6 +5,8 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from .github import detect_github_repository
+
 
 @dataclass(frozen=True)
 class GitHubConfig:
@@ -41,9 +43,10 @@ def load_config(project: Path, config_path: Path | None = None) -> StageMeshConf
     providers = data.get("providers", {}) if isinstance(data.get("providers", {}), dict) else {}
     routing_data = data.get("routing", {}) if isinstance(data.get("routing", {}), dict) else {}
     stage_routes_data = routing_data.get("stage_routes", {}) if isinstance(routing_data.get("stage_routes", {}), dict) else {}
+    detected_github = detect_github_repository(project)
     github = GitHubConfig(
-        owner=os.environ.get("STAGEMESH_GITHUB_OWNER") or _string(github_data.get("owner")),
-        repo=os.environ.get("STAGEMESH_GITHUB_REPO") or _string(github_data.get("repo")),
+        owner=os.environ.get("STAGEMESH_GITHUB_OWNER") or _string(github_data.get("owner")) or (detected_github.owner if detected_github else None),
+        repo=os.environ.get("STAGEMESH_GITHUB_REPO") or _string(github_data.get("repo")) or (detected_github.repo if detected_github else None),
         token=os.environ.get("STAGEMESH_GITHUB_TOKEN") or _string(github_data.get("token")),
     )
     provider_commands = {str(key): str(value) for key, value in providers.items()}

@@ -11,7 +11,7 @@
 - Provider adapter SDK surface for Codex, Claude, Grok, and additional runtime commands.
 - Capacity registry with primary/secondary failover classification.
 - Configurable provider routing with SINGLE_AGENT and STAGED modes plus per-stage provider routes.
-- Local backlog source and GitHub issue-source models, including deferred, unknown, stale, auth, and rate-limit semantics.
+- Local backlog source and GitHub issue-source models, including zero-config remote detection, deferred, unknown, stale, auth, and rate-limit semantics.
 - Structured objective planner validation.
 - Built-in validation, independent review, and integration evidence.
 - Recovery behavior that preserves uncertain process identity and does not treat PID alone as proof of liveness or death.

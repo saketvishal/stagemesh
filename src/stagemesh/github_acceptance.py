@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .github import GitHubClient
+from .github import parse_github_remote
 from .persistence import Store
 from .task_sources import DiscoveredTask, GitHubOutboundSync, sync_source
 
@@ -15,6 +16,8 @@ class GitHubAcceptanceResult:
     deferred_skipped: bool
     outbound_status: str
     rate_limit_status: str
+    detected_owner: str | None
+    detected_repo: str | None
 
 
 class FakeGitHubTransport:
@@ -59,5 +62,23 @@ def run_github_acceptance(store: Store) -> GitHubAcceptanceResult:
     outbound = store.conn.execute("SELECT * FROM source_events WHERE id=?", (outbound_id,)).fetchone()
     rate_limited = GitHubClient("owner", "repo", FakeGitHubTransport(rate_limited=True)).list_open_issues()
     deferred_skipped = len(task_ids) == 1 and task_ids[0] == "1"
-    status = "PASS" if listed.status == "OK" and deferred_skipped and outbound["status"] == "OK" and rate_limited.status == "UNKNOWN" else "FAIL"
-    return GitHubAcceptanceResult(status, len(task_ids), deferred_skipped, outbound["status"], rate_limited.status)
+    detected = parse_github_remote("git@github.com:stage/mesh.git")
+    detected_ok = detected is not None and detected.owner == "stage" and detected.repo == "mesh"
+    status = (
+        "PASS"
+        if listed.status == "OK"
+        and deferred_skipped
+        and outbound["status"] == "OK"
+        and rate_limited.status == "UNKNOWN"
+        and detected_ok
+        else "FAIL"
+    )
+    return GitHubAcceptanceResult(
+        status,
+        len(task_ids),
+        deferred_skipped,
+        outbound["status"],
+        rate_limited.status,
+        detected.owner if detected else None,
+        detected.repo if detected else None,
+    )
