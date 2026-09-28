@@ -6,6 +6,13 @@ from dataclasses import dataclass
 from .persistence import Store
 
 
+class WorkQueueError(ValueError):
+    pass
+
+
+ACK_STATUSES = {"SUCCEEDED", "FAILED", "CANCELLED"}
+
+
 @dataclass(frozen=True)
 class WorkPacket:
     id: str
@@ -34,4 +41,8 @@ class WorkQueue:
         return self.store.renew_work_packet(packet_id, worker_id)
 
     def ack(self, packet_id: str, status: str, payload: dict[str, object] | None = None) -> None:
-        self.store.ack_work_packet(packet_id, status, payload or {})
+        normalized = status.upper()
+        if normalized not in ACK_STATUSES:
+            raise WorkQueueError(f"work packet ack status must be one of: {', '.join(sorted(ACK_STATUSES))}")
+        if not self.store.ack_work_packet(packet_id, normalized, payload or {}):
+            raise WorkQueueError(f"work packet is not claimed or does not exist: {packet_id}")
