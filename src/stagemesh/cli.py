@@ -24,7 +24,7 @@ from .operator import operator_report
 from .objectives import ObjectivePlanner
 from .persistence import Store
 from .persistence_backends import probe_backend
-from .postgres_store import PostgresStore
+from .postgres_store import PostgresStore, postgres_schema_contract
 from .provider_acceptance import run_provider_acceptance
 from .process_identity import current_process_identity
 from .registry import GlobalRegistry, ProjectRegistration
@@ -271,9 +271,11 @@ def command_config(args: argparse.Namespace) -> int:
 def command_backend(args: argparse.Namespace) -> int:
     config = load_config(Path(args.project).resolve(), Path(args.config).resolve() if args.config else None)
     probe = probe_backend(config.database_url, db_path(Path(args.project).resolve()))
+    postgres_contract = postgres_schema_contract()
     print(f"name: {probe.name}")
     print(f"available: {probe.available}")
     print(f"reason: {probe.reason}")
+    print(f"postgres schema contract: {len(postgres_contract['tables'])} tables")
     if args.ping and config.database_url and probe.name == "postgres":
         store = PostgresStore(config.database_url)
         try:
