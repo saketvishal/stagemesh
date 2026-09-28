@@ -135,6 +135,13 @@ def main() -> int:
         backend_output = run([sys.executable, "-m", "stagemesh.cli", "--project", str(project), "backend"], ROOT, env)
         if "name: sqlite" not in backend_output or "available: True" not in backend_output:
             raise AssertionError(backend_output)
+        provider_acceptance = run(
+            [sys.executable, "-m", "stagemesh.cli", "--project", str(project), "provider-acceptance"],
+            ROOT,
+            env,
+        )
+        if "status: PASS" not in provider_acceptance or "chosen_provider: secondary" not in provider_acceptance:
+            raise AssertionError(provider_acceptance)
         health = run([sys.executable, "-m", "stagemesh.cli", "--project", str(project), "health"], ROOT, env)
         if "ok: True" not in health or "done: 2" not in health:
             raise AssertionError(health)
