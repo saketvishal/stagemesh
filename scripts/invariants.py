@@ -55,7 +55,7 @@ from stagemesh.routing import Provider, Router, RoutingMode, RoutingValidationEr
 from stagemesh.github import parse_github_remote
 from stagemesh.operator import operator_report
 from stagemesh.dashboard import render_dashboard
-from stagemesh.acceptance import AcceptanceValidationError, local_acceptance_report, run_check, write_acceptance_report
+from stagemesh.acceptance import AcceptanceCheck, AcceptanceValidationError, local_acceptance_report, proof_gaps, run_check, write_acceptance_report
 from stagemesh.ci import CIValidationError, broken_future_feature_gate, default_gates, run_gate
 from stagemesh.ci_wait import decide_ci_wait
 from stagemesh.objectives import ObjectivePlanner, ObjectiveValidationError
@@ -612,6 +612,8 @@ def main() -> int:
         assert_raises(AcceptanceValidationError, run_check, "python", [sys.executable, ""], project)
         assert_raises(AcceptanceValidationError, run_check, "python", [sys.executable], project / "missing")
         assert_raises(AcceptanceValidationError, local_acceptance_report, project / "missing", False)
+        gaps = proof_gaps([AcceptanceCheck("live", "PASS", "provider:codex:execution: NOT_PROVEN\n")])
+        assert gaps == [{"check": "live", "evidence": "provider:codex:execution: NOT_PROVEN"}]
         assert_raises(SecurityBoundaryError, write_acceptance_report, project, project.parent / "acceptance.json", False)
         assert_raises(CIValidationError, run_gate, "", [sys.executable, "--version"], project)
         assert_raises(CIValidationError, run_gate, "python", [], project)
