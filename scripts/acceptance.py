@@ -138,6 +138,52 @@ def main() -> int:
         )
         if "archive:" not in release_output or not (release_dir / "stagemesh-release-manifest.json").exists():
             raise AssertionError(release_output)
+        packet_output = run(
+            [
+                sys.executable,
+                "-m",
+                "stagemesh.cli",
+                "--project",
+                str(project),
+                "work",
+                "enqueue",
+                "one",
+                "--stage",
+                "VALIDATE",
+            ],
+            ROOT,
+            env,
+        )
+        packet_id = packet_output.strip().split()[-1]
+        poll_output = run(
+            [sys.executable, "-m", "stagemesh.cli", "--project", str(project), "work", "poll", "worker-2"],
+            ROOT,
+            env,
+        )
+        if packet_id not in poll_output:
+            raise AssertionError(poll_output)
+        run(
+            [
+                sys.executable,
+                "-m",
+                "stagemesh.cli",
+                "--project",
+                str(project),
+                "work",
+                "ack",
+                packet_id,
+            ],
+            ROOT,
+            env,
+        )
+        report = project / "final-report.md"
+        report_output = run(
+            [sys.executable, "-m", "stagemesh.cli", "--project", str(project), "report", "--output", str(report)],
+            ROOT,
+            env,
+        )
+        if not report.exists() or "report:" not in report_output:
+            raise AssertionError(report_output)
         capacity = run(
             [
                 sys.executable,
