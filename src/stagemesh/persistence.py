@@ -42,6 +42,11 @@ class Store:
                 updated_at REAL NOT NULL,
                 UNIQUE(source, source_id)
             );
+            CREATE TABLE IF NOT EXISTS task_dependencies (
+                task_id TEXT NOT NULL REFERENCES tasks(id),
+                depends_on_task_id TEXT NOT NULL REFERENCES tasks(id),
+                PRIMARY KEY(task_id, depends_on_task_id)
+            );
             CREATE TABLE IF NOT EXISTS claims (
                 id TEXT PRIMARY KEY,
                 task_id TEXT NOT NULL REFERENCES tasks(id),
@@ -144,6 +149,28 @@ class Store:
         )
         self.conn.commit()
         return task_id
+
+    def add_dependency(self, task_id: str, depends_on_task_id: str) -> None:
+        self.conn.execute(
+            "INSERT OR IGNORE INTO task_dependencies VALUES (?, ?)",
+            (task_id, depends_on_task_id),
+        )
+        self.conn.commit()
+
+    def incomplete_dependencies(self, task_id: str) -> list[str]:
+        return [
+            str(row["depends_on_task_id"])
+            for row in self.conn.execute(
+                """
+                SELECT d.depends_on_task_id
+                FROM task_dependencies d
+                JOIN tasks t ON t.id = d.depends_on_task_id
+                WHERE d.task_id=? AND t.stage != ?
+                ORDER BY d.depends_on_task_id
+                """,
+                (task_id, Stage.DONE),
+            )
+        ]
 
     def tasks(self) -> list[sqlite3.Row]:
         return list(self.conn.execute("SELECT * FROM tasks ORDER BY created_at"))

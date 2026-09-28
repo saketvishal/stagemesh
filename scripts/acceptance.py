@@ -67,7 +67,7 @@ def main() -> int:
         )
         run([sys.executable, "-m", "stagemesh.cli", "--project", str(project), "plan", str(objective)], ROOT, env)
         backlog = project / ".stagemesh" / "backlog.json"
-        for _ in range(8):
+        for _ in range(16):
             run([sys.executable, "-m", "stagemesh.cli", "--project", str(project), "continue", "--once"], ROOT, env)
         status = run([sys.executable, "-m", "stagemesh.cli", "--project", str(project), "status"], ROOT, env)
         if "DONE DONE first task" not in status or "DONE DONE dependent task" not in status:
@@ -102,6 +102,23 @@ def main() -> int:
         operator = run([sys.executable, "-m", "stagemesh.cli", "--project", str(project), "operator"], ROOT, env)
         if "workers=1" not in operator or "worker worker-1 provider=codex" not in operator:
             raise AssertionError(operator)
+        dashboard = project / "dashboard.html"
+        dashboard_output = run(
+            [
+                sys.executable,
+                "-m",
+                "stagemesh.cli",
+                "--project",
+                str(project),
+                "dashboard",
+                "--output",
+                str(dashboard),
+            ],
+            ROOT,
+            env,
+        )
+        if not dashboard.exists() or "dashboard:" not in dashboard_output:
+            raise AssertionError(dashboard_output)
         capacity = run(
             [
                 sys.executable,
@@ -117,6 +134,8 @@ def main() -> int:
         )
         if "chosen: claude" not in capacity:
             raise AssertionError(capacity)
+        marker = ROOT / ".stagemesh-broken-feature"
+        marker.unlink(missing_ok=True)
         ci = run(
             [
                 sys.executable,
@@ -133,7 +152,6 @@ def main() -> int:
         )
         if "future-feature: PASS" not in ci:
             raise AssertionError(ci)
-        marker = ROOT / ".stagemesh-broken-feature"
         marker.write_text("broken\n", encoding="utf-8")
         try:
             failed = subprocess.run(

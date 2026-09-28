@@ -18,6 +18,7 @@ from stagemesh.process_identity import classify_process
 from stagemesh.review import Reviewer
 from stagemesh.task_sources import DiscoveredTask, GitHubIssueSource, OutboundSync, sync_source
 from stagemesh.workers import heartbeat_worker, register_worker
+from stagemesh.scheduling import Scheduler
 
 
 def assert_raises(exc_type, fn, *args, **kwargs) -> None:
@@ -143,6 +144,15 @@ def main() -> int:
         OutboundSync(store).publish("github", "1", "DONE", {"sha": "abc"})
         assert store.source_events()[0]["direction"] == "outbound"
 
+    def dependency_scheduling(store: Store, project: Path) -> None:
+        first = store.upsert_task("first", source="local", source_id="first")
+        second = store.upsert_task("second", source="local", source_id="second")
+        store.add_dependency(second, first)
+        scheduler = Scheduler(store)
+        assert scheduler.decision(second).eligible is False
+        store.advance_task(first, Stage.DONE)
+        assert scheduler.decision(second).eligible is True
+
     cases = [
         live_worker_restart,
         dead_worker_recovers,
@@ -155,6 +165,7 @@ def main() -> int:
         targeted_ops,
         source_semantics,
         worker_heartbeat_and_outbound_sync,
+        dependency_scheduling,
     ]
     for case in cases:
         with_store(case)

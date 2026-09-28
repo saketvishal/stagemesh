@@ -17,6 +17,7 @@ class DiscoveredTask:
     title: str
     eligible: bool = True
     state: str = "OPEN"
+    dependencies: tuple[str, ...] = ()
 
 
 class LocalBacklogSource:
@@ -36,6 +37,7 @@ class LocalBacklogSource:
                 title=str(item["title"]),
                 eligible=bool(item.get("eligible", True)),
                 state=str(item.get("state", "OPEN")),
+                dependencies=tuple(str(dep) for dep in item.get("dependencies", [])),
             )
             for item in data.get("tasks", [])
         ]
@@ -116,6 +118,8 @@ def sync_source(store: Store, tasks: list[DiscoveredTask]) -> list[str]:
         store.cache_source(task.source, task.source_id, {"eligible": task.eligible, "state": task.state}, task.state)
         if task.eligible and task.state == "OPEN":
             ids.append(store.upsert_task(task.title, task.source, task.source_id))
+            for dependency in task.dependencies:
+                store.add_dependency(task.source_id, dependency)
     return ids
 
 

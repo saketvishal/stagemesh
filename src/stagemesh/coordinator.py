@@ -8,6 +8,7 @@ from .integration import Integrator
 from .lifecycle import evidence_allows_advance
 from .persistence import Store
 from .review import Reviewer
+from .scheduling import Scheduler
 from .validation import Validator
 
 
@@ -38,6 +39,8 @@ class Coordinator:
         progressed = 0
         for task in self.store.tasks():
             if task["status"] == "DONE" or task["stage"] == Stage.DONE:
+                continue
+            if not Scheduler(self.store).decision(task["id"]).eligible:
                 continue
             progressed += self._advance_task(task["id"])
         return progressed

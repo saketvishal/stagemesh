@@ -20,6 +20,10 @@
 - Global multi-project registry file.
 - Outbound source synchronization event log that never becomes lifecycle truth.
 - Operator report command for dashboard/status integration.
+- Dependency-aware scheduling for planned tasks.
+- PostgreSQL-ready persistence backend interface.
+- CI wait decision helper that releases worker capacity while checks are pending.
+- Static HTML dashboard rendering from operator status.
 - GitHub Actions CI for Windows and Linux.
 - Stdlib invariant and acceptance runners for dependency-free verification.
 

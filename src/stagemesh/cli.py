@@ -8,6 +8,7 @@ from pathlib import Path
 from . import __version__
 from .capacity import CapacityKind, CapacityRegistry
 from .ci import broken_future_feature_gate, default_gates
+from .dashboard import render_dashboard
 from .coordinator import Coordinator
 from .observability import health
 from .operator import operator_report
@@ -144,6 +145,18 @@ def command_operator(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_dashboard(args: argparse.Namespace) -> int:
+    project = Path(args.project).resolve()
+    store = Store(db_path(project))
+    store.migrate()
+    output = Path(args.output).resolve()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(render_dashboard(store), encoding="utf-8")
+    store.close()
+    print(f"dashboard: {output}")
+    return 0
+
+
 def command_registry(args: argparse.Namespace) -> int:
     registry = GlobalRegistry(Path(args.registry).resolve())
     for project in registry.load():
@@ -205,6 +218,9 @@ def build_parser() -> argparse.ArgumentParser:
     worker.set_defaults(func=command_worker)
     operator = sub.add_parser("operator")
     operator.set_defaults(func=command_operator)
+    dashboard = sub.add_parser("dashboard")
+    dashboard.add_argument("--output", default="stagemesh-dashboard.html")
+    dashboard.set_defaults(func=command_dashboard)
     registry = sub.add_parser("registry")
     registry.add_argument("--registry", default=str(Path.home() / ".stagemesh" / "registry.json"))
     registry.set_defaults(func=command_registry)
