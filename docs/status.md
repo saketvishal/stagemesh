@@ -52,7 +52,7 @@
 - Deterministic provider dry-run acceptance proves capacity-aware failover and failure isolation without external credentials.
 - Deterministic GitHub dry-run acceptance proves discovery, deferred labels, outbound sync, and rate-limit classification without external credentials.
 - Release-readiness report aggregates local gates, external evidence records, and explicit evidence gaps.
-- External evidence registry records hosted CI, live provider, live GitHub, and database acceptance links against candidate SHAs.
+- External evidence registry records hosted CI, live provider, live GitHub, and database acceptance links against candidate SHAs, with structured candidate-match listing.
 - Passing external evidence must name a candidate SHA and only counts for the matching candidate.
 - Acceptance matrix artifact maps each major requirement to proven local evidence or an explicit external gap.
 - End-to-end acceptance artifact maps the requested 18 clean-environment acceptance steps to local proof evidence.

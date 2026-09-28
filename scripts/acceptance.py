@@ -276,6 +276,7 @@ def main() -> int:
         )
         if invalid_retry.returncode != 2 or "retry error:" not in (invalid_retry.stdout + invalid_retry.stderr):
             raise AssertionError(invalid_retry.stdout + invalid_retry.stderr)
+        project_candidate = run(["git", "rev-parse", "HEAD"], project).strip()
         evidence_add = run(
             [
                 sys.executable,
@@ -289,20 +290,51 @@ def main() -> int:
                 "PASS",
                 "https://example.invalid/run/acceptance",
                 "--candidate-sha",
-                "abc1234",
+                project_candidate,
             ],
             ROOT,
             env,
         )
         if "evidence:" not in evidence_add:
             raise AssertionError(evidence_add)
+        mismatch_evidence = run(
+            [
+                sys.executable,
+                "-m",
+                "stagemesh.cli",
+                "--project",
+                str(project),
+                "evidence",
+                "add",
+                "live-provider",
+                "PASS",
+                "https://example.invalid/provider",
+                "--candidate-sha",
+                "def5678",
+            ],
+            ROOT,
+            env,
+        )
+        if "evidence:" not in mismatch_evidence:
+            raise AssertionError(mismatch_evidence)
         evidence_list = run(
             [sys.executable, "-m", "stagemesh.cli", "--project", str(project), "evidence", "list"],
             ROOT,
             env,
         )
-        if "hosted-ci PASS abc1234" not in evidence_list:
+        if f"hosted-ci PASS {project_candidate}" not in evidence_list:
             raise AssertionError(evidence_list)
+        evidence_json = run(
+            [sys.executable, "-m", "stagemesh.cli", "--project", str(project), "evidence", "list", "--json"],
+            ROOT,
+            env,
+        )
+        evidence_data = json.loads(evidence_json)
+        if evidence_data["candidate_sha"] != project_candidate:
+            raise AssertionError(evidence_json)
+        evidence_matches = {record["kind"]: record["candidate_match"] for record in evidence_data["records"]}
+        if evidence_matches != {"hosted-ci": True, "live-provider": False}:
+            raise AssertionError(evidence_json)
         invalid_evidence = subprocess.run(
             [
                 sys.executable,

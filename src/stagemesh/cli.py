@@ -499,6 +499,31 @@ def command_evidence(args: argparse.Namespace) -> int:
         print(f"evidence: {evidence_id}")
     else:
         rows = external_evidence_records(store)
+        if args.json:
+            current_candidate = candidate_sha(project)
+            print(
+                json.dumps(
+                    {
+                        "candidate_sha": current_candidate,
+                        "records": [
+                            {
+                                "id": row.id,
+                                "kind": row.kind,
+                                "status": row.status,
+                                "url": row.url,
+                                "candidate_sha": row.candidate_sha,
+                                "candidate_match": row.candidate_sha == current_candidate,
+                                "notes": row.notes,
+                            }
+                            for row in rows
+                        ],
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+            store.close()
+            return 0
         if not rows:
             print("evidence: EMPTY")
         for row in rows:
@@ -674,6 +699,7 @@ def build_parser() -> argparse.ArgumentParser:
     evidence_add.add_argument("--notes", default="")
     evidence_add.set_defaults(func=command_evidence)
     evidence_list = evidence_sub.add_parser("list")
+    evidence_list.add_argument("--json", action="store_true")
     evidence_list.set_defaults(func=command_evidence)
     ci = sub.add_parser("ci")
     ci.add_argument("--future-feature-gate", action="store_true")
