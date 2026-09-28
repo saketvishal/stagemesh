@@ -758,6 +758,28 @@ class Store:
         url = _validate_text(url, "external evidence url", 1000)
         candidate_sha = _validate_optional_text(candidate_sha, "candidate sha")
         notes = _validate_text(notes, "external evidence notes", 2000) if notes else ""
+        if candidate_sha is None:
+            existing = self.conn.execute(
+                """
+                SELECT id FROM external_evidence
+                WHERE kind=? AND status=? AND url=? AND candidate_sha IS NULL AND notes=?
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (kind, status, url, notes),
+            ).fetchone()
+        else:
+            existing = self.conn.execute(
+                """
+                SELECT id FROM external_evidence
+                WHERE kind=? AND status=? AND url=? AND candidate_sha=? AND notes=?
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (kind, status, url, candidate_sha, notes),
+            ).fetchone()
+        if existing:
+            return str(existing["id"])
         evidence_id = str(uuid.uuid4())
         self.conn.execute(
             "INSERT INTO external_evidence VALUES (?, ?, ?, ?, ?, ?, ?)",
