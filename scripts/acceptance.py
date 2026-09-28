@@ -726,6 +726,8 @@ def main() -> int:
         workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
         if workflow.count("python -m stagemesh.cli --project . ci --future-feature-gate") != 2:
             raise AssertionError(workflow)
+        if workflow.count("PYTHONPATH: src") != 2:
+            raise AssertionError(workflow)
         readiness = ROOT / ".stagemesh" / "release-readiness.json"
         readiness_output = run(
             [
