@@ -415,6 +415,33 @@ def main() -> int:
             }
         )
         assert valid.tasks == ("a", "b")
+        backlog = project / "objective-backlog.json"
+        planner.write_backlog(
+            valid,
+            {
+                "id": "obj",
+                "title": "valid",
+                "tasks": [
+                    {"id": "a", "title": "a"},
+                    {"id": "b", "title": "b", "dependencies": ["a"], "eligible": True, "state": "OPEN"},
+                ],
+            },
+            backlog,
+        )
+        backlog_data = json.loads(backlog.read_text(encoding="utf-8"))
+        assert backlog_data["objective"] == "obj"
+        assert [task["id"] for task in backlog_data["tasks"]] == ["a", "b"]
+        assert_raises(ObjectiveValidationError, planner.parse, "{not-json")
+        assert_raises(
+            ObjectiveValidationError,
+            planner.parse,
+            {"id": "blank", "title": "blank", "tasks": [{"id": " ", "title": "bad"}]},
+        )
+        assert_raises(
+            ObjectiveValidationError,
+            planner.parse,
+            {"id": "blank", "title": "blank", "tasks": [{"id": "a", "title": ""}]},
+        )
         assert_raises(
             ObjectiveValidationError,
             planner.parse,
@@ -434,6 +461,22 @@ def main() -> int:
             ObjectiveValidationError,
             planner.parse,
             {"id": "baddep", "title": "baddep", "tasks": [{"id": "a", "title": "a", "dependencies": [1]}]},
+        )
+        assert_raises(ObjectiveValidationError, planner.write_backlog, valid, [], backlog)
+        assert_raises(ObjectiveValidationError, planner.write_backlog, valid, {"tasks": [{"id": "a", "title": "a"}]}, backlog)
+        assert_raises(
+            ObjectiveValidationError,
+            planner.write_backlog,
+            valid,
+            {"tasks": [{"id": "a", "title": "a"}, {"id": "b", "title": "b", "dependencies": "a"}]},
+            backlog,
+        )
+        assert_raises(
+            ObjectiveValidationError,
+            planner.write_backlog,
+            valid,
+            {"tasks": [{"id": "a", "title": "a"}, {"id": "b", "title": "b", "eligible": "yes"}]},
+            backlog,
         )
 
     def global_registry_rejects_ambiguous_projects(store: Store, project: Path) -> None:
