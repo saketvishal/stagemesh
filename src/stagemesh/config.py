@@ -8,6 +8,7 @@ from pathlib import Path
 from .domain import Stage
 from .github import detect_github_repository
 from .routing import RoutingMode
+from .security import SecurityBoundaryError, WorkspaceBoundary
 
 
 class ConfigValidationError(ValueError):
@@ -30,11 +31,19 @@ class StageMeshConfig:
     project: Path
     github: GitHubConfig
     provider_commands: dict[str, str]
+    task_sources: tuple["TaskSourceConfig", ...]
     routing_mode: str
     stage_routes: dict[str, str]
     single_agent_provider: str | None
     database_url: str | None
     source: str
+
+
+@dataclass(frozen=True)
+class TaskSourceConfig:
+    name: str
+    kind: str
+    path: Path | None = None
 
 
 def load_config(project: Path, config_path: Path | None = None) -> StageMeshConfig:
@@ -53,6 +62,7 @@ def load_config(project: Path, config_path: Path | None = None) -> StageMeshConf
         source = str(path)
     github_data = _optional_mapping(data, "github")
     providers = _optional_mapping(data, "providers")
+    task_sources_data = data.get("task_sources", [])
     routing_data = _optional_mapping(data, "routing")
     stage_routes_data = _optional_mapping(routing_data, "stage_routes")
     detected_github = detect_github_repository(project)
@@ -74,6 +84,7 @@ def load_config(project: Path, config_path: Path | None = None) -> StageMeshConf
         project=project,
         github=github,
         provider_commands=provider_commands,
+        task_sources=_task_sources(project, task_sources_data),
         routing_mode=routing_mode,
         stage_routes=_stage_routes(stage_routes_data),
         single_agent_provider=os.environ.get("STAGEMESH_SINGLE_AGENT_PROVIDER")
@@ -121,3 +132,36 @@ def _stage_routes(data: dict[str, object]) -> dict[str, str]:
             raise ConfigValidationError(f"stage route for {stage} must name a provider")
         routes[stage] = provider
     return routes
+
+
+def _task_sources(project: Path, value: object) -> tuple[TaskSourceConfig, ...]:
+    if value in (None, []):
+        return ()
+    if not isinstance(value, list):
+        raise ConfigValidationError("task_sources must be a list")
+    sources: list[TaskSourceConfig] = []
+    seen: set[str] = set()
+    for item in value:
+        if not isinstance(item, dict):
+            raise ConfigValidationError("task source entries must be objects")
+        name = _string(item.get("name"))
+        kind = _string(item.get("type")) or _string(item.get("kind"))
+        if not name or any(char.isspace() for char in name):
+            raise ConfigValidationError("task source name must be a non-empty string")
+        if name in seen:
+            raise ConfigValidationError(f"duplicate task source name: {name}")
+        if kind != "json":
+            raise ConfigValidationError(f"unsupported task source type for {name}: {kind}")
+        raw_path = _string(item.get("path"))
+        if not raw_path:
+            raise ConfigValidationError(f"task source {name} path must be a non-empty string")
+        path = Path(raw_path)
+        if not path.is_absolute():
+            path = project / path
+        try:
+            resolved_path = WorkspaceBoundary(project).require_inside(path.resolve())
+        except SecurityBoundaryError as exc:
+            raise ConfigValidationError(f"task source {name} path must stay inside the project") from exc
+        sources.append(TaskSourceConfig(name=name, kind=kind, path=resolved_path))
+        seen.add(name)
+    return tuple(sources)

@@ -35,7 +35,7 @@ from .release import ReleaseValidationError, build_release_artifact
 from .release_readiness import ReleaseReadinessValidationError, write_release_readiness
 from .retry import RetryRegistry, RetryValidationError
 from .security import SecurityBoundaryError, WorkspaceBoundary
-from .task_sources import LocalBacklogSource, TaskSourceValidationError, sync_source
+from .task_sources import LocalBacklogSource, TaskSourceValidationError, sync_source, task_sources_from_config
 from .workers import WorkerValidationError, heartbeat_worker, register_worker
 
 
@@ -91,10 +91,13 @@ def command_doctor(args: argparse.Namespace) -> int:
 
 def command_continue(args: argparse.Namespace) -> int:
     project = Path(args.project).resolve()
+    config = load_config(project)
     store = Store(db_path(project))
     store.migrate()
     backlog = project / ".stagemesh" / "backlog.json"
     sync_source(store, LocalBacklogSource(backlog).discover())
+    for source in task_sources_from_config(config):
+        sync_source(store, source.discover())
     coord = Coordinator(store, project)
     count = 0
     while True:
@@ -288,6 +291,8 @@ def command_config(args: argparse.Namespace) -> int:
         print(f"routing.stage.{stage}: {provider}")
     for name, command in sorted(config.provider_commands.items()):
         print(f"provider.{name}: {command}")
+    for source in config.task_sources:
+        print(f"task_source.{source.name}: {source.kind} {source.path}")
     return 0
 
 
