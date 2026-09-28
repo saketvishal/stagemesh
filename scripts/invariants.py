@@ -25,6 +25,7 @@ from stagemesh.scheduling import Scheduler
 from stagemesh.remediation import RemediationPolicy, finding_identity
 from stagemesh.distributed import WorkQueue, WorkQueueError
 from stagemesh.github import GitHubClient, parse_retry_after
+from stagemesh.git import GitValidationError, GitWorkspace
 from stagemesh.task_sources import GitHubOutboundSync
 from stagemesh.attribution import AttributionValidationError, attribution_for_worker
 from stagemesh.redaction import redact_mapping, redact_text
@@ -487,6 +488,25 @@ def main() -> int:
         assert_raises(AttributionValidationError, attribution_for_worker, "!!!", "codex")
         assert_raises(AttributionValidationError, attribution_for_worker, "worker", "!")
 
+    def git_workspace_rejects_unsafe_inputs(store: Store, project: Path) -> None:
+        workspace = GitWorkspace(project)
+        assert workspace.path == project.resolve()
+        workspace.init_if_needed()
+        (project / "proof.txt").write_text("hello\n", encoding="utf-8")
+        sha = workspace.commit_all("record proof", attribution_for_worker("worker 1", "codex"))
+        assert len(sha) == 40
+        assert workspace.head() == sha
+        assert_raises(GitValidationError, workspace.run)
+        assert_raises(GitValidationError, workspace.run, "")
+        assert_raises(GitValidationError, workspace.run, "status", " ")
+        assert_raises(GitValidationError, workspace.run, "status", env={"": "value"})
+        assert_raises(GitValidationError, workspace.run, "status", env={"KEY": ""})
+        assert_raises(GitValidationError, workspace.commit_all, "")
+        assert_raises(GitValidationError, workspace.create_worktree, project, "HEAD")
+        assert_raises(GitValidationError, workspace.create_worktree, project / "nested", "HEAD")
+        assert_raises(GitValidationError, workspace.create_worktree, project.parent, "HEAD")
+        assert_raises(GitValidationError, workspace.create_worktree, project.parent / "other", "")
+
     def secrets_are_redacted(store: Store, project: Path) -> None:
         redacted = redact_mapping({"github_token": "abc", "nested": {"password": "def"}, "safe": "ok"})
         assert redacted["github_token"] == "***REDACTED***"
@@ -825,6 +845,7 @@ def main() -> int:
         github_outbound_sync_records_capacity_separately,
         github_retry_after_parsing_is_defensive,
         git_attribution_is_worker_owned,
+        git_workspace_rejects_unsafe_inputs,
         secrets_are_redacted,
         config_loads_from_project_file,
         config_rejects_invalid_routing_and_provider_shapes,
