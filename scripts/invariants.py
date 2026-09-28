@@ -1115,6 +1115,13 @@ def main() -> int:
         data = release_readiness(ROOT, include_acceptance=False, run_checks=False, store=store)
         assert data["overall_status"] in {"BLOCKED_ON_EXTERNAL_EVIDENCE", "FAIL"}
         assert "external_gaps" in data
+        assert data["external_evidence"] == []
+        record_external_evidence(store, "hosted-ci", "PASS", "https://example.invalid/stale", "abc1234")
+        with_evidence = release_readiness(ROOT, include_acceptance=False, run_checks=False, store=store, candidate_sha="def5678")
+        evidence = with_evidence["external_evidence"]
+        assert len(evidence) == 1
+        assert evidence[0]["kind"] == "hosted-ci"
+        assert evidence[0]["candidate_match"] is False
         assert_raises(ReleaseReadinessValidationError, run_command_check, "", [sys.executable, "--version"], ROOT)
         assert_raises(ReleaseReadinessValidationError, run_command_check, "python", [], ROOT)
         assert_raises(ReleaseReadinessValidationError, run_command_check, "python", [sys.executable, ""], ROOT)

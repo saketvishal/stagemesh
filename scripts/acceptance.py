@@ -889,6 +889,9 @@ def main() -> int:
         readiness_text = readiness.read_text(encoding="utf-8") if readiness.exists() else ""
         if "release-readiness:" not in readiness_output or "BLOCKED_ON_EXTERNAL_EVIDENCE" not in readiness_text:
             raise AssertionError(readiness_output + readiness_text)
+        readiness_data = json.loads(readiness_text)
+        if "external_evidence" not in readiness_data or not isinstance(readiness_data["external_evidence"], list):
+            raise AssertionError(readiness_text)
         capacity = run(
             [
                 sys.executable,

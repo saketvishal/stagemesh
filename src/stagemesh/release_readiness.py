@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .completion_audit import completion_audit
+from .external_evidence import external_evidence_records
 from .persistence import Store
 from .security import WorkspaceBoundary
 
@@ -62,12 +63,14 @@ def release_readiness(
         item for item in audit["items"]
         if item["status"] in {"REQUIRES_CREDENTIALS", "MISSING_EXTERNAL_EVIDENCE", "INTERFACE_READY"}
     ]
+    evidence = _evidence_summary(store, candidate_sha)
     local_pass = all(check.status == "PASS" for check in checks) if checks else True
     return {
         "generated_at": time.time(),
         "local_status": "PASS" if local_pass else "FAIL",
         "overall_status": "BLOCKED_ON_EXTERNAL_EVIDENCE" if local_pass and external_gaps else ("PASS" if local_pass else "FAIL"),
         "checks": [check.__dict__ for check in checks],
+        "external_evidence": evidence,
         "external_gaps": external_gaps,
     }
 
@@ -111,3 +114,19 @@ def _validate_root(root: Path) -> Path:
     if not resolved.exists() or not resolved.is_dir():
         raise ReleaseReadinessValidationError("readiness root must be an existing directory")
     return resolved
+
+
+def _evidence_summary(store: Store | None, candidate_sha: str | None) -> list[dict[str, object]]:
+    if store is None:
+        return []
+    return [
+        {
+            "kind": record.kind,
+            "status": record.status,
+            "url": record.url,
+            "candidate_sha": record.candidate_sha,
+            "candidate_match": candidate_sha is not None and record.candidate_sha == candidate_sha,
+            "notes": record.notes,
+        }
+        for record in external_evidence_records(store)
+    ]
