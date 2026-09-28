@@ -555,8 +555,17 @@ class Store:
         self.conn.commit()
         return packet_id
 
-    def claim_work_packets(self, worker_id: str, limit: int = 1) -> list[sqlite3.Row]:
+    def claim_work_packets(self, worker_id: str, limit: int = 1, lease_seconds: float = 300) -> list[sqlite3.Row]:
         with self.conn:
+            now = time.time()
+            self.conn.execute(
+                """
+                UPDATE work_packets
+                SET status='QUEUED', worker_id=NULL, updated_at=?
+                WHERE status='CLAIMED' AND updated_at < ?
+                """,
+                (now, now - lease_seconds),
+            )
             rows = list(
                 self.conn.execute(
                     """
@@ -568,7 +577,6 @@ class Store:
                     (worker_id, limit),
                 )
             )
-            now = time.time()
             claimed: list[sqlite3.Row] = []
             for row in rows:
                 self.conn.execute(
@@ -579,6 +587,18 @@ class Store:
                 if claimed_row is not None:
                     claimed.append(claimed_row)
             return claimed
+
+    def renew_work_packet(self, packet_id: str, worker_id: str) -> bool:
+        cursor = self.conn.execute(
+            """
+            UPDATE work_packets
+            SET updated_at=?
+            WHERE id=? AND worker_id=? AND status='CLAIMED'
+            """,
+            (time.time(), packet_id, worker_id),
+        )
+        self.conn.commit()
+        return cursor.rowcount == 1
 
     def ack_work_packet(self, packet_id: str, status: str, payload: dict[str, Any] | None = None) -> None:
         self.conn.execute(

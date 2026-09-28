@@ -287,12 +287,30 @@ def main() -> int:
         )
         packet_id = packet_output.strip().split()[-1]
         poll_output = run(
-            [sys.executable, "-m", "stagemesh.cli", "--project", str(project), "work", "poll", "worker-2"],
+            [
+                sys.executable,
+                "-m",
+                "stagemesh.cli",
+                "--project",
+                str(project),
+                "work",
+                "poll",
+                "worker-2",
+                "--lease-seconds",
+                "60",
+            ],
             ROOT,
             env,
         )
         if packet_id not in poll_output:
             raise AssertionError(poll_output)
+        renew_output = run(
+            [sys.executable, "-m", "stagemesh.cli", "--project", str(project), "work", "renew", packet_id, "worker-2"],
+            ROOT,
+            env,
+        )
+        if "renewed: True" not in renew_output:
+            raise AssertionError(renew_output)
         run(
             [
                 sys.executable,

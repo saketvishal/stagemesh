@@ -28,7 +28,7 @@
 - Persistent review findings and bounded remediation attempts.
 - Release archive and manifest generation for public/demo packaging.
 - Release manifests include tracked source files, sizes, and SHA-256 hashes while excluding runtime state and symlink escapes.
-- Durable distributed work packets with poll and acknowledgement commands.
+- Durable distributed work packets with poll, lease renewal, stale-claim recovery, and acknowledgement commands.
 - Final report generation command with candidate, acceptance, and remaining-action inventory.
 - Transport-injected GitHub client for live inbound/outbound sync acceptance.
 - Git attribution helper for worker-owned authorship and StageMesh-owned commits.
@@ -69,7 +69,7 @@
 
 - Live GitHub API acceptance with credentials, outbound issue synchronization, and permission/auth matrix.
 - Full production provider adapters for Codex, Claude, Grok, and other approved workers.
-- Distributed worker transport and remote lease renewal.
+- Distributed worker transport beyond the local durable queue.
 - Operator dashboard and richer status UI.
 - Live PostgreSQL acceptance against a real service behind the persistence interface.
 - Real CI execution results from GitHub-hosted Windows and Linux runners.
