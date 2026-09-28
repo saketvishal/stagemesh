@@ -49,7 +49,7 @@ from stagemesh.github_acceptance import run_github_acceptance
 from stagemesh.release_readiness import release_readiness
 from stagemesh.external_evidence import ExternalEvidenceValidationError, record_external_evidence, external_evidence_records
 from stagemesh.acceptance_matrix import acceptance_matrix
-from stagemesh.routing import Provider, Router, RoutingMode
+from stagemesh.routing import Provider, Router, RoutingMode, RoutingValidationError
 from stagemesh.github import parse_github_remote
 from stagemesh.operator import operator_report
 from stagemesh.dashboard import render_dashboard
@@ -505,6 +505,16 @@ def main() -> int:
         assert single.choose_for_stage(Stage.REVIEW, "review").name == "codex"
         down = Router(providers, mode=RoutingMode.SINGLE_AGENT, single_agent_provider="missing")
         assert down.choose_for_stage(Stage.REVIEW, "review") is None
+        assert_raises(RoutingValidationError, Router, [Provider("", frozenset({"code"}))])
+        assert_raises(RoutingValidationError, Router, [Provider("codex", frozenset())])
+        assert_raises(
+            RoutingValidationError,
+            Router,
+            [Provider("codex", frozenset({"code"})), Provider("codex", frozenset({"review"}))],
+        )
+        assert_raises(RoutingValidationError, Router, providers, "ROUND_ROBIN")
+        assert_raises(RoutingValidationError, Router, providers, RoutingMode.STAGED, {"BOGUS": "codex"})
+        assert_raises(RoutingValidationError, staged.choose, "")
 
     def release_output_stays_inside_workspace(store: Store, project: Path) -> None:
         project.mkdir(parents=True, exist_ok=True)
