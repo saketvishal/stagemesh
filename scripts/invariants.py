@@ -23,7 +23,7 @@ from stagemesh.review import Reviewer
 from stagemesh.task_sources import DiscoveredTask, GitHubApiIssueSource, GitHubIssueSource, LocalBacklogSource, OutboundSync, TaskSourceValidationError, sync_source
 from stagemesh.workers import WorkerValidationError, heartbeat_worker, register_worker
 from stagemesh.scheduling import Scheduler
-from stagemesh.remediation import RemediationPolicy, finding_identity
+from stagemesh.remediation import RemediationPolicy, RemediationValidationError, finding_identity
 from stagemesh.distributed import WorkQueue, WorkQueueError
 from stagemesh.github import GitHubClient, parse_retry_after
 from stagemesh.git import GitValidationError, GitWorkspace
@@ -527,6 +527,11 @@ def main() -> int:
         assert policy.should_remediate(store, finding_id) is False
         store.close_finding(finding_id)
         assert policy.should_remediate(store, finding_id) is False
+        assert_raises(RemediationValidationError, RemediationPolicy, 0)
+        assert_raises(RemediationValidationError, RemediationPolicy, "three")
+        assert_raises(RemediationValidationError, finding_identity, "", "bug")
+        assert_raises(RemediationValidationError, finding_identity, sha, "")
+        assert_raises(RemediationValidationError, finding_identity, sha, "bug", "")
 
     def distributed_work_packets_are_claimed_once(store: Store, project: Path) -> None:
         task_id = store.upsert_task("distributed")
