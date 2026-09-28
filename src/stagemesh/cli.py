@@ -125,6 +125,8 @@ def command_status(args: argparse.Namespace) -> int:
                     "task_count": report.task_count,
                     "running_count": report.running_count,
                     "done_count": report.done_count,
+                    "failed_execution_count": report.failed_execution_count,
+                    "unknown_execution_count": report.unknown_execution_count,
                     "backlog_state": report.backlog_state,
                     "tasks": [
                         {
@@ -178,6 +180,8 @@ def command_health(args: argparse.Namespace) -> int:
     print(f"tasks: {report.task_count}")
     print(f"running: {report.running_count}")
     print(f"done: {report.done_count}")
+    print(f"failed_executions: {report.failed_execution_count}")
+    print(f"unknown_executions: {report.unknown_execution_count}")
     print(f"backlog: {report.backlog_state}")
     store.close()
     return 0

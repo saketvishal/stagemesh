@@ -151,7 +151,12 @@ def main() -> int:
             env,
         )
         status_data = json.loads(status_json)
-        if status_data["done_count"] != 2 or status_data["backlog_state"] != "ACTIVE":
+        if (
+            status_data["done_count"] != 2
+            or status_data["backlog_state"] != "ACTIVE"
+            or status_data["failed_execution_count"] != 0
+            or status_data["unknown_execution_count"] != 0
+        ):
             raise AssertionError(status_json)
         if {task["title"] for task in status_data["tasks"]} != {"first task", "dependent task"}:
             raise AssertionError(status_json)
@@ -471,7 +476,12 @@ def main() -> int:
         ):
             raise AssertionError(github_acceptance)
         health = run([sys.executable, "-m", "stagemesh.cli", "--project", str(project), "health"], ROOT, env)
-        if "ok: True" not in health or "done: 3" not in health:
+        if (
+            "ok: True" not in health
+            or "done: 3" not in health
+            or "failed_executions: 0" not in health
+            or "unknown_executions: 0" not in health
+        ):
             raise AssertionError(health)
         run(
             [
