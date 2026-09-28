@@ -24,6 +24,7 @@ from .persistence_backends import probe_backend
 from .process_identity import current_process_identity
 from .registry import GlobalRegistry, ProjectRegistration
 from .release import build_release_artifact
+from .retry import RetryRegistry
 from .task_sources import LocalBacklogSource, sync_source
 from .workers import heartbeat_worker, register_worker
 
@@ -271,6 +272,27 @@ def command_audit(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_retries(args: argparse.Namespace) -> int:
+    project = Path(args.project).resolve()
+    store = Store(db_path(project))
+    store.migrate()
+    registry = RetryRegistry(store)
+    if args.retry_command == "fail":
+        decision = registry.record_failure(args.key, args.reason)
+        print(f"{decision.key} attempts={decision.attempts} next_attempt_at={decision.next_attempt_at}")
+    elif args.retry_command == "success":
+        registry.record_success(args.key)
+        print(f"{args.key} cleared")
+    else:
+        rows = store.retry_states()
+        if not rows:
+            print("retries: EMPTY")
+        for row in rows:
+            print(f"{row['key']} attempts={row['attempts']} next_attempt_at={row['next_attempt_at']} reason={row['reason']}")
+    store.close()
+    return 0
+
+
 def command_ci(args: argparse.Namespace) -> int:
     root = Path(args.project).resolve()
     results = default_gates(root, include_acceptance=not args.skip_acceptance)
@@ -359,6 +381,17 @@ def build_parser() -> argparse.ArgumentParser:
     audit_log.add_argument("--output")
     audit_log.add_argument("--limit", type=int, default=500)
     audit_log.set_defaults(func=command_audit)
+    retries = sub.add_parser("retries")
+    retry_sub = retries.add_subparsers(dest="retry_command")
+    retry_list = retry_sub.add_parser("list")
+    retry_list.set_defaults(func=command_retries)
+    retry_fail = retry_sub.add_parser("fail")
+    retry_fail.add_argument("key")
+    retry_fail.add_argument("--reason", default="failure")
+    retry_fail.set_defaults(func=command_retries)
+    retry_success = retry_sub.add_parser("success")
+    retry_success.add_argument("key")
+    retry_success.set_defaults(func=command_retries)
     ci = sub.add_parser("ci")
     ci.add_argument("--future-feature-gate", action="store_true")
     ci.add_argument("--skip-acceptance", action="store_true")
