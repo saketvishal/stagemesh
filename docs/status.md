@@ -10,7 +10,7 @@
 - Fake and subprocess executors.
 - Provider adapter SDK surface for Codex, Claude, Grok, and additional runtime commands.
 - Configured provider commands are converted into runtime adapters for live acceptance.
-- Capacity registry with primary/secondary failover classification.
+- Capacity registry with primary/secondary failover classification and structured visibility.
 - Configurable provider routing with SINGLE_AGENT and STAGED modes plus per-stage provider routes.
 - Local backlog, configured JSON task-source adapters, and GitHub issue-source models, including zero-config remote detection, deferred, unknown, stale, auth, and rate-limit semantics.
 - Structured objective planner validation, including duplicate task and unknown dependency rejection.

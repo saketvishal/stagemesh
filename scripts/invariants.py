@@ -657,6 +657,11 @@ def main() -> int:
         registry.record("secondary", CapacityKind.AVAILABLE)
         assert registry.choose_primary_secondary("primary", "secondary") == "secondary"
         assert registry.get("missing").kind == CapacityKind.UNKNOWN
+        snapshot = registry.snapshot(("primary", "secondary", "missing"))
+        assert [item["provider"] for item in snapshot] == ["primary", "secondary", "missing"]
+        assert snapshot[0]["usable"] is False
+        assert snapshot[1]["usable"] is True
+        assert snapshot[2]["kind"] == CapacityKind.UNKNOWN
         assert_raises(CapacityValidationError, registry.record, "", CapacityKind.AVAILABLE)
         assert_raises(CapacityValidationError, registry.record, "provider", "BOGUS")
         assert_raises(CapacityValidationError, registry.record, "provider", CapacityKind.CAPACITY, -1)

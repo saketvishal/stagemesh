@@ -60,6 +60,19 @@ class CapacityRegistry:
             return secondary
         return None
 
+    def snapshot(self, providers: list[str] | tuple[str, ...] | None = None) -> list[dict[str, object]]:
+        names = list(providers) if providers is not None else sorted(self._states)
+        return [
+            {
+                "provider": state.provider,
+                "kind": state.kind,
+                "usable": state.usable,
+                "retry_after_seconds": state.retry_after_seconds,
+                "checked_at": state.checked_at,
+            }
+            for state in (self.get(name) for name in names)
+        ]
+
 
 def _validate_provider(provider: str) -> str:
     if not isinstance(provider, str) or not provider.strip():

@@ -815,6 +815,26 @@ def main() -> int:
         )
         if "chosen: claude" not in capacity:
             raise AssertionError(capacity)
+        capacity_json = run(
+            [
+                sys.executable,
+                "-m",
+                "stagemesh.cli",
+                "--project",
+                str(project),
+                "capacity",
+                "--primary-down",
+                "--json",
+            ],
+            ROOT,
+            env,
+        )
+        capacity_data = json.loads(capacity_json)
+        if capacity_data["chosen"] != "claude":
+            raise AssertionError(capacity_json)
+        capacity_states = {item["provider"]: item for item in capacity_data["providers"]}
+        if capacity_states["codex"]["kind"] != "CAPACITY" or capacity_states["claude"]["usable"] is not True:
+            raise AssertionError(capacity_json)
         invalid_capacity = subprocess.run(
             [
                 sys.executable,
