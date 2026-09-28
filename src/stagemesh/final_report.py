@@ -38,7 +38,7 @@ def render_final_report(root: Path, store: Store | None = None) -> str:
     sha = candidate_sha(root)
     task_count = len(store.tasks()) if store else 0
     worker_count = len(store.workers()) if store else 0
-    external_count = len(store.external_evidence()) if store else 0
+    external_count = _external_evidence_count(store, sha)
     acceptance = _acceptance_summary(root)
     audit = _completion_summary(root, sha, store)
     matrix = _matrix_summary(root, sha, store)
@@ -51,7 +51,7 @@ def render_final_report(root: Path, store: Store | None = None) -> str:
         f"- final candidate SHA: {sha}",
         f"- runtime task count: {task_count}",
         f"- registered worker count: {worker_count}",
-        f"- external evidence records: {external_count}",
+        f"- external evidence records for candidate: {external_count}",
         "",
         "## Final Architecture",
         "",
@@ -130,6 +130,12 @@ def _acceptance_summary(root: Path) -> str:
         return "invalid report"
     passed = sum(1 for check in checks if check.get("status") == "PASS")
     return f"{data.get('status', 'UNKNOWN')} ({passed}/{len(checks)} checks passing)"
+
+
+def _external_evidence_count(store: Store | None, candidate: str) -> int:
+    if store is None or candidate == "UNKNOWN":
+        return 0
+    return sum(1 for row in store.external_evidence() if row["candidate_sha"] == candidate and row["status"] == "PASS")
 
 
 def _completion_summary(root: Path, candidate: str, store: Store | None) -> str:

@@ -959,6 +959,7 @@ def main() -> int:
         assert "## Remaining Human-Only Actions" in report
         assert "## Roadmap Preservation" in report
         assert "acceptance report status: not generated" in report
+        assert "external evidence records for candidate: 0" in report
         assert "completion audit status: complete=False" in report
         assert "acceptance matrix status: INCOMPLETE" in report
         assert_raises(FinalReportValidationError, render_final_report, project / "missing", store)
