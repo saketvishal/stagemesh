@@ -17,7 +17,7 @@ from stagemesh.coordinator import Coordinator
 from stagemesh.domain import EvidenceKind, EvidenceStatus, ExecutionKind, ExecutionStatus, ProcessIdentity, Stage
 from stagemesh.execution import ExecutionResult, FakeExecutor
 from stagemesh.lifecycle import LifecycleError, evidence_allows_advance
-from stagemesh.persistence import Store
+from stagemesh.persistence import Store, StoreValidationError
 from stagemesh.process_identity import classify_process
 from stagemesh.review import Reviewer
 from stagemesh.task_sources import DiscoveredTask, GitHubApiIssueSource, GitHubIssueSource, LocalBacklogSource, OutboundSync, TaskSourceValidationError, sync_source
@@ -193,6 +193,25 @@ def main() -> int:
         coord.tick()
         coord.tick()
         assert store.latest_candidate(task_id)["durable_handoff"] == 1
+
+    def persistence_rejects_invalid_core_inputs(store: Store, project: Path) -> None:
+        task_id = store.upsert_task("valid", source="local", source_id="valid")
+        store.add_candidate(task_id, "abc123", "fake", True)
+        store.add_evidence(task_id, "abc123", EvidenceKind.VALIDATION, EvidenceStatus.PASSED, {"ok": True})
+        assert_raises(StoreValidationError, store.upsert_task, "")
+        assert_raises(StoreValidationError, store.upsert_task, "valid", "")
+        assert_raises(StoreValidationError, store.add_dependency, "", task_id)
+        assert_raises(StoreValidationError, store.acquire_claim, task_id, "")
+        assert_raises(StoreValidationError, store.start_execution, task_id=task_id, claim_id=None, kind="BAD")
+        assert_raises(StoreValidationError, store.finish_execution, "", ExecutionStatus.SUCCEEDED)
+        assert_raises(StoreValidationError, store.finish_execution, "execution", "BAD")
+        assert_raises(StoreValidationError, store.add_candidate, task_id, "", "fake", True)
+        assert_raises(StoreValidationError, store.add_candidate, task_id, "abc123", "", True)
+        assert_raises(StoreValidationError, store.add_candidate, task_id, "abc123", "fake", "yes")
+        assert_raises(StoreValidationError, store.add_evidence, task_id, "abc123", "BAD", EvidenceStatus.PASSED)
+        assert_raises(StoreValidationError, store.add_evidence, task_id, "abc123", EvidenceKind.VALIDATION, "BAD")
+        assert_raises(StoreValidationError, store.add_evidence, task_id, "abc123", EvidenceKind.VALIDATION, EvidenceStatus.PASSED, [])
+        assert_raises(StoreValidationError, store.advance_task, task_id, "BAD")
 
     def targeted_ops(store: Store, project: Path) -> None:
         first = store.upsert_task("first")
@@ -888,6 +907,7 @@ def main() -> int:
         reviewer_capacity_no_reimplementation,
         completed_not_redispatched,
         durable_handoff,
+        persistence_rejects_invalid_core_inputs,
         targeted_ops,
         source_semantics,
         local_backlog_source_rejects_malformed_tasks,

@@ -13,6 +13,10 @@ from .migrations import apply_migrations, current_schema_version
 SCHEMA_VERSION = 2
 
 
+class StoreValidationError(ValueError):
+    pass
+
+
 class Store:
     def __init__(self, db_path: Path):
         self.db_path = Path(db_path)
@@ -194,6 +198,10 @@ class Store:
         return current_schema_version(self.conn)
 
     def upsert_task(self, title: str, source: str = "local", source_id: str | None = None, project: str | None = None) -> str:
+        title = _validate_text(title, "task title")
+        source = _validate_text(source, "task source")
+        source_id = _validate_optional_text(source_id, "task source id")
+        project = _validate_optional_text(project, "task project")
         task_id = source_id or str(uuid.uuid4())
         now = time.time()
         self.conn.execute(
@@ -208,6 +216,8 @@ class Store:
         return task_id
 
     def add_dependency(self, task_id: str, depends_on_task_id: str) -> None:
+        task_id = _validate_text(task_id, "task id")
+        depends_on_task_id = _validate_text(depends_on_task_id, "dependency task id")
         self.conn.execute(
             "INSERT OR IGNORE INTO task_dependencies VALUES (?, ?)",
             (task_id, depends_on_task_id),
@@ -233,9 +243,12 @@ class Store:
         return list(self.conn.execute("SELECT * FROM tasks ORDER BY created_at"))
 
     def get_task(self, task_id: str) -> sqlite3.Row | None:
+        task_id = _validate_text(task_id, "task id")
         return self.conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
 
     def acquire_claim(self, task_id: str, worker_id: str, lease_seconds: float = 300) -> str | None:
+        task_id = _validate_text(task_id, "task id")
+        worker_id = _validate_text(worker_id, "worker id")
         task = self.get_task(task_id)
         if not task or task["status"] == TaskStatus.DONE or task["stage"] == Stage.DONE:
             return None
@@ -272,6 +285,10 @@ class Store:
         executable: str | None = None,
         candidate_sha: str | None = None,
     ) -> str:
+        task_id = _validate_text(task_id, "task id")
+        claim_id = _validate_optional_text(claim_id, "claim id")
+        kind = _validate_enum(kind, ExecutionKind, "execution kind")
+        candidate_sha = _validate_optional_text(candidate_sha, "candidate sha")
         execution_id = str(uuid.uuid4())
         now = time.time()
         self.conn.execute(
@@ -295,6 +312,9 @@ class Store:
         return execution_id
 
     def finish_execution(self, execution_id: str, status: ExecutionStatus, candidate_sha: str | None = None) -> None:
+        execution_id = _validate_text(execution_id, "execution id")
+        status = _validate_enum(status, ExecutionStatus, "execution status")
+        candidate_sha = _validate_optional_text(candidate_sha, "candidate sha")
         self.conn.execute(
             "UPDATE executions SET status=?, candidate_sha=COALESCE(?, candidate_sha), updated_at=? WHERE id=?",
             (status, candidate_sha, time.time(), execution_id),
@@ -302,6 +322,11 @@ class Store:
         self.conn.commit()
 
     def add_candidate(self, task_id: str, sha: str, produced_by: str, durable_handoff: bool) -> str:
+        task_id = _validate_text(task_id, "task id")
+        sha = _validate_text(sha, "candidate sha")
+        produced_by = _validate_text(produced_by, "candidate producer")
+        if not isinstance(durable_handoff, bool):
+            raise StoreValidationError("durable_handoff must be a boolean")
         cid = str(uuid.uuid4())
         self.conn.execute(
             "INSERT OR IGNORE INTO candidates VALUES (?, ?, ?, ?, ?, ?)",
@@ -324,6 +349,11 @@ class Store:
         status: EvidenceStatus,
         payload: dict[str, Any] | None = None,
     ) -> str:
+        task_id = _validate_text(task_id, "task id")
+        candidate_sha = _validate_text(candidate_sha, "candidate sha")
+        kind = _validate_enum(kind, EvidenceKind, "evidence kind")
+        status = _validate_enum(status, EvidenceStatus, "evidence status")
+        payload = _validate_payload(payload)
         eid = str(uuid.uuid4())
         self.conn.execute(
             "INSERT OR IGNORE INTO evidence VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -337,6 +367,10 @@ class Store:
         return str(row["id"])
 
     def has_evidence(self, task_id: str, sha: str, kind: EvidenceKind, status: EvidenceStatus = EvidenceStatus.PASSED) -> bool:
+        task_id = _validate_text(task_id, "task id")
+        sha = _validate_text(sha, "candidate sha")
+        kind = _validate_enum(kind, EvidenceKind, "evidence kind")
+        status = _validate_enum(status, EvidenceStatus, "evidence status")
         return (
             self.conn.execute(
                 "SELECT 1 FROM evidence WHERE task_id=? AND candidate_sha=? AND kind=? AND status=?",
@@ -346,6 +380,8 @@ class Store:
         )
 
     def advance_task(self, task_id: str, stage: Stage) -> None:
+        task_id = _validate_text(task_id, "task id")
+        stage = _validate_enum(stage, Stage, "task stage")
         status = TaskStatus.DONE if stage is Stage.DONE else TaskStatus.OPEN
         self.conn.execute(
             "UPDATE tasks SET stage=?, status=?, updated_at=? WHERE id=?", (stage, status, time.time(), task_id)
@@ -667,3 +703,35 @@ class Store:
 
     def external_evidence(self) -> list[sqlite3.Row]:
         return list(self.conn.execute("SELECT * FROM external_evidence ORDER BY created_at DESC"))
+
+
+def _validate_text(value: str, field: str, max_length: int = 200) -> str:
+    if not isinstance(value, str):
+        raise StoreValidationError(f"{field} must be a string")
+    normalized = value.strip()
+    if not normalized:
+        raise StoreValidationError(f"{field} must be a non-empty string")
+    if len(normalized) > max_length:
+        raise StoreValidationError(f"{field} must be {max_length} characters or fewer")
+    return normalized
+
+
+def _validate_optional_text(value: str | None, field: str, max_length: int = 200) -> str | None:
+    if value is None:
+        return None
+    return _validate_text(value, field, max_length)
+
+
+def _validate_enum(value, enum_type, field: str):
+    try:
+        return enum_type(value)
+    except (TypeError, ValueError) as exc:
+        raise StoreValidationError(f"{field} is unsupported: {value}") from exc
+
+
+def _validate_payload(payload: dict[str, Any] | None) -> dict[str, Any]:
+    if payload is None:
+        return {}
+    if not isinstance(payload, dict):
+        raise StoreValidationError("persistence payload must be an object")
+    return payload
