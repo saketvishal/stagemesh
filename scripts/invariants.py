@@ -268,6 +268,22 @@ def main() -> int:
         assert second == []
         queue.ack(packet_id, "SUCCEEDED", {"candidate_sha": "abc"})
 
+    def distributed_work_packets_have_renewable_leases(store: Store, project: Path) -> None:
+        task_id = store.upsert_task("leased distributed")
+        queue = WorkQueue(store)
+        packet_id = queue.enqueue(task_id, "VALIDATE")
+        assert [packet.id for packet in queue.poll("worker-a", lease_seconds=60)] == [packet_id]
+        assert queue.poll("worker-b", lease_seconds=60) == []
+        assert queue.renew(packet_id, "worker-b") is False
+        assert queue.renew(packet_id, "worker-a") is True
+        store.conn.execute(
+            "UPDATE work_packets SET updated_at=? WHERE id=?",
+            (0, packet_id),
+        )
+        store.conn.commit()
+        reclaimed = queue.poll("worker-b", lease_seconds=1)
+        assert [packet.id for packet in reclaimed] == [packet_id]
+
     def github_outbound_sync_records_capacity_separately(store: Store, project: Path) -> None:
         class RateLimitedTransport:
             def request(self, method, path, body=None):
@@ -519,6 +535,7 @@ def main() -> int:
         dependency_scheduling,
         finding_convergence_is_bounded,
         distributed_work_packets_are_claimed_once,
+        distributed_work_packets_have_renewable_leases,
         github_outbound_sync_records_capacity_separately,
         git_attribution_is_worker_owned,
         secrets_are_redacted,
