@@ -26,6 +26,7 @@
 - Static HTML dashboard rendering from operator status.
 - Persistent review findings and bounded remediation attempts.
 - Release archive and manifest generation for public/demo packaging.
+- Release manifests include tracked source files, sizes, and SHA-256 hashes while excluding runtime state.
 - Durable distributed work packets with poll and acknowledgement commands.
 - Final report generation command with candidate, acceptance, and remaining-action inventory.
 - Transport-injected GitHub client for live inbound/outbound sync acceptance.

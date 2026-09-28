@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import sys
 import tempfile
+import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -281,6 +283,23 @@ def main() -> int:
             "abc",
         )
 
+    def release_artifact_contains_tracked_source_manifest(store: Store, project: Path) -> None:
+        artifact = build_release_artifact(ROOT, ROOT / ".stagemesh" / "invariant-release", "0.1.0", "abc12345")
+        manifest = json.loads(artifact.manifest.read_text(encoding="utf-8"))
+        paths = {entry["path"] for entry in manifest["files"]}
+        assert manifest["file_count"] == len(manifest["files"])
+        assert "pyproject.toml" in paths
+        assert "src/stagemesh/cli.py" in paths
+        assert "scripts/clean_acceptance.py" in paths
+        assert all(".stagemesh" not in Path(path).parts for path in paths)
+        assert all(".tmp-install" not in Path(path).parts for path in paths)
+        assert all(entry["sha256"] for entry in manifest["files"])
+        with zipfile.ZipFile(artifact.archive) as archive:
+            names = set(archive.namelist())
+        assert "pyproject.toml" in names
+        assert "stagemesh-release-manifest.json" in names
+        assert not any(name.startswith(".stagemesh/") for name in names)
+
     def migrations_are_idempotent(store: Store, project: Path) -> None:
         first = store.schema_version()
         store.migrate()
@@ -424,6 +443,7 @@ def main() -> int:
         secrets_are_redacted,
         config_loads_from_project_file,
         release_output_stays_inside_workspace,
+        release_artifact_contains_tracked_source_manifest,
         migrations_are_idempotent,
         backend_probe_reports_postgres_dependency,
         postgres_schema_contract_covers_authoritative_tables,
