@@ -74,6 +74,46 @@ def main() -> int:
         )
         if "chosen: claude" not in capacity:
             raise AssertionError(capacity)
+        ci = run(
+            [
+                sys.executable,
+                "-m",
+                "stagemesh.cli",
+                "--project",
+                str(ROOT),
+                "ci",
+                "--future-feature-gate",
+                "--skip-acceptance",
+            ],
+            ROOT,
+            env,
+        )
+        if "future-feature: PASS" not in ci:
+            raise AssertionError(ci)
+        marker = ROOT / ".stagemesh-broken-feature"
+        marker.write_text("broken\n", encoding="utf-8")
+        try:
+            failed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "stagemesh.cli",
+                    "--project",
+                    str(ROOT),
+                    "ci",
+                    "--future-feature-gate",
+                    "--skip-acceptance",
+                ],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+                env={**os.environ.copy(), **env},
+                check=False,
+            )
+            if failed.returncode == 0 or "future-feature: FAIL" not in failed.stdout:
+                raise AssertionError(failed.stdout + failed.stderr)
+        finally:
+            marker.unlink(missing_ok=True)
         shutil.rmtree(project / ".git", ignore_errors=True)
     print("acceptance: passed")
     return 0
