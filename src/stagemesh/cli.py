@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 from . import __version__
+from .acceptance import write_acceptance_report
 from .capacity import CapacityKind, CapacityRegistry
 from .ci import broken_future_feature_gate, default_gates
 from .config import load_config
@@ -205,6 +206,14 @@ def command_report(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_acceptance_report(args: argparse.Namespace) -> int:
+    project = Path(args.project).resolve()
+    output = Path(args.output).resolve()
+    write_acceptance_report(project, output, include_acceptance=not args.skip_acceptance)
+    print(f"acceptance-report: {output}")
+    return 0
+
+
 def command_registry(args: argparse.Namespace) -> int:
     registry = GlobalRegistry(Path(args.registry).resolve())
     for project in registry.load():
@@ -309,6 +318,10 @@ def build_parser() -> argparse.ArgumentParser:
     report = sub.add_parser("report")
     report.add_argument("--output")
     report.set_defaults(func=command_report)
+    acceptance_report = sub.add_parser("acceptance-report")
+    acceptance_report.add_argument("--output", default=".stagemesh/acceptance-report.json")
+    acceptance_report.add_argument("--skip-acceptance", action="store_true")
+    acceptance_report.set_defaults(func=command_acceptance_report)
     ci = sub.add_parser("ci")
     ci.add_argument("--future-feature-gate", action="store_true")
     ci.add_argument("--skip-acceptance", action="store_true")

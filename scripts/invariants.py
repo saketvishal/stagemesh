@@ -26,6 +26,8 @@ from stagemesh.task_sources import GitHubOutboundSync
 from stagemesh.attribution import attribution_for_worker
 from stagemesh.redaction import redact_mapping, redact_text
 from stagemesh.config import load_config
+from stagemesh.release import build_release_artifact
+from stagemesh.security import SecurityBoundaryError
 
 
 def assert_raises(exc_type, fn, *args, **kwargs) -> None:
@@ -217,6 +219,17 @@ def main() -> int:
         assert config.github.configured is True
         assert config.provider_commands["codex"] == "codex --test"
 
+    def release_output_stays_inside_workspace(store: Store, project: Path) -> None:
+        project.mkdir(parents=True, exist_ok=True)
+        assert_raises(
+            SecurityBoundaryError,
+            build_release_artifact,
+            project,
+            project.parent / "outside",
+            "0.1.0",
+            "abc",
+        )
+
     cases = [
         live_worker_restart,
         dead_worker_recovers,
@@ -236,6 +249,7 @@ def main() -> int:
         git_attribution_is_worker_owned,
         secrets_are_redacted,
         config_loads_from_project_file,
+        release_output_stays_inside_workspace,
     ]
     for case in cases:
         with_store(case)

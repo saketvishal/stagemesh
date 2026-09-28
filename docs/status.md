@@ -33,6 +33,8 @@
 - Config loader for project files and environment overrides.
 - Secret redaction helpers for logs/reports.
 - Live acceptance harness that exercises configured GitHub/providers or reports not configured.
+- Machine-readable local acceptance report generator.
+- Release packaging is constrained to the project workspace boundary.
 - GitHub Actions CI for Windows and Linux.
 - Stdlib invariant and acceptance runners for dependency-free verification.
 

@@ -122,7 +122,7 @@ def main() -> int:
         )
         if not dashboard.exists() or "dashboard:" not in dashboard_output:
             raise AssertionError(dashboard_output)
-        release_dir = project / "release"
+        release_dir = ROOT / ".stagemesh" / "acceptance-release"
         release_output = run(
             [
                 sys.executable,
@@ -186,6 +186,24 @@ def main() -> int:
             env,
         )
         if not report.exists() or "report:" not in report_output:
+            raise AssertionError(report_output)
+        acceptance_report = project / ".stagemesh" / "acceptance-report.json"
+        report_output = run(
+            [
+                sys.executable,
+                "-m",
+                "stagemesh.cli",
+                "--project",
+                str(ROOT),
+                "acceptance-report",
+                "--output",
+                str(acceptance_report),
+                "--skip-acceptance",
+            ],
+            ROOT,
+            env,
+        )
+        if not acceptance_report.exists() or "acceptance-report:" not in report_output:
             raise AssertionError(report_output)
         capacity = run(
             [
