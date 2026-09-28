@@ -196,6 +196,29 @@ def main() -> int:
         )
         if "hosted-ci PASS abc1234" not in evidence_list:
             raise AssertionError(evidence_list)
+        invalid_evidence = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "stagemesh.cli",
+                "--project",
+                str(project),
+                "evidence",
+                "add",
+                "hosted-ci",
+                "PASS",
+                "not-a-url",
+            ],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            env={**os.environ.copy(), **env},
+            check=False,
+        )
+        if invalid_evidence.returncode != 2 or "external evidence error:" not in (
+            invalid_evidence.stdout + invalid_evidence.stderr
+        ):
+            raise AssertionError(invalid_evidence.stdout + invalid_evidence.stderr)
         doctor = run([sys.executable, "-m", "stagemesh.cli", "--project", str(project), "doctor"], ROOT, env)
         required = [
             "version:",

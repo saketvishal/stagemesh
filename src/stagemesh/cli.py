@@ -18,7 +18,7 @@ from .dashboard import render_dashboard
 from .coordinator import Coordinator
 from .distributed import WorkQueue, WorkQueueError
 from .final_report import render_final_report
-from .external_evidence import external_evidence_records, record_external_evidence
+from .external_evidence import ExternalEvidenceValidationError, external_evidence_records, record_external_evidence
 from .github_acceptance import run_github_acceptance
 from .observability import health
 from .operator import operator_report
@@ -585,6 +585,9 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     except WorkQueueError as exc:
         print(f"work queue error: {exc}", file=sys.stderr)
+        return 2
+    except ExternalEvidenceValidationError as exc:
+        print(f"external evidence error: {exc}", file=sys.stderr)
         return 2
 
 
