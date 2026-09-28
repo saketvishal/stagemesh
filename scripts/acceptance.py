@@ -155,7 +155,7 @@ def main() -> int:
         operator = run([sys.executable, "-m", "stagemesh.cli", "--project", str(project), "operator"], ROOT, env)
         if "workers=1" not in operator or "worker worker-1 provider=codex" not in operator:
             raise AssertionError(operator)
-        dashboard = project / "dashboard.html"
+        dashboard = project / ".stagemesh" / "dashboard.html"
         dashboard_output = run(
             [
                 sys.executable,
@@ -229,7 +229,7 @@ def main() -> int:
             ROOT,
             env,
         )
-        report = project / "final-report.md"
+        report = project / ".stagemesh" / "final-report.md"
         report_output = run(
             [sys.executable, "-m", "stagemesh.cli", "--project", str(project), "report", "--output", str(report)],
             ROOT,
@@ -237,7 +237,7 @@ def main() -> int:
         )
         if not report.exists() or "report:" not in report_output:
             raise AssertionError(report_output)
-        acceptance_report = project / ".stagemesh" / "acceptance-report.json"
+        acceptance_report = ROOT / ".stagemesh" / "acceptance-report.json"
         report_output = run(
             [
                 sys.executable,
@@ -255,14 +255,14 @@ def main() -> int:
         )
         if not acceptance_report.exists() or "acceptance-report:" not in report_output:
             raise AssertionError(report_output)
-        completion_audit = project / ".stagemesh" / "completion-audit.json"
+        completion_audit = ROOT / ".stagemesh" / "completion-audit.json"
         audit_output = run(
             [
                 sys.executable,
                 "-m",
                 "stagemesh.cli",
                 "--project",
-                str(project),
+                str(ROOT),
                 "completion-audit",
                 "--output",
                 str(completion_audit),

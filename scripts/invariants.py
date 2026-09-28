@@ -270,6 +270,11 @@ def main() -> int:
         retries.record_success("github:1")
         assert retries.decision("github:1", now=101).allowed is True
 
+    def workspace_boundary_rejects_outside_outputs(store: Store, project: Path) -> None:
+        project.mkdir(parents=True, exist_ok=True)
+        boundary = __import__("stagemesh.security", fromlist=["WorkspaceBoundary"]).WorkspaceBoundary(project)
+        assert_raises(SecurityBoundaryError, boundary.require_inside, project.parent / "outside.txt")
+
     cases = [
         live_worker_restart,
         dead_worker_recovers,
@@ -295,6 +300,7 @@ def main() -> int:
         completion_audit_is_not_falsely_complete,
         audit_events_are_redacted_and_exportable,
         retry_backoff_is_durable_and_clearable,
+        workspace_boundary_rejects_outside_outputs,
     ]
     for case in cases:
         with_store(case)
