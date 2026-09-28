@@ -80,10 +80,20 @@ class GitHubClient:
             return GitHubResult("OK", payload)
         if code in {403, 429}:
             retry_after = headers.get("Retry-After") or headers.get("retry-after")
-            return GitHubResult("UNKNOWN", payload, float(retry_after or 60))
+            return GitHubResult("UNKNOWN", payload, parse_retry_after(retry_after))
         if code in {401, 404}:
             return GitHubResult("STALE", payload)
         return GitHubResult("UNKNOWN", payload)
+
+
+def parse_retry_after(value: str | None, default: float = 60) -> float:
+    if value is None or value == "":
+        return default
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed >= 0 else default
 
 
 def detect_github_repository(project: Path, remote: str = "origin") -> GitHubRepository | None:
