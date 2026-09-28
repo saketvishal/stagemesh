@@ -400,6 +400,10 @@ class Store:
         status: str,
         retry_after: float | None = None,
     ) -> None:
+        source = _validate_text(source, "source")
+        source_id = _validate_text(source_id, "source id")
+        state = _validate_payload(state)
+        status = _validate_text(status, "source status")
         self.conn.execute(
             """
             INSERT INTO source_cache VALUES (?, ?, ?, ?, ?, ?)
@@ -410,6 +414,9 @@ class Store:
         self.conn.commit()
 
     def save_objective(self, objective_id: str, title: str, payload: dict[str, Any]) -> None:
+        objective_id = _validate_text(objective_id, "objective id")
+        title = _validate_text(title, "objective title")
+        payload = _validate_payload(payload)
         now = time.time()
         self.conn.execute(
             """
@@ -433,6 +440,15 @@ class Store:
         heartbeat_at: float,
         lease_expires_at: float,
     ) -> None:
+        worker_id = _validate_text(worker_id, "worker id")
+        provider = _validate_text(provider, "worker provider")
+        if not isinstance(capabilities, list) or not capabilities:
+            raise StoreValidationError("worker capabilities must be a non-empty list")
+        capabilities = [_validate_text(capability, "worker capability") for capability in capabilities]
+        if len(set(capabilities)) != len(capabilities):
+            raise StoreValidationError("worker capabilities must be unique")
+        boot_id = _validate_optional_text(boot_id, "worker boot id")
+        executable = _validate_optional_text(executable, "worker executable", 1000)
         self.conn.execute(
             """
             INSERT INTO workers VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -463,6 +479,7 @@ class Store:
         self.conn.commit()
 
     def heartbeat_worker(self, worker_id: str, heartbeat_at: float, lease_expires_at: float) -> None:
+        worker_id = _validate_text(worker_id, "worker id")
         self.conn.execute(
             "UPDATE workers SET heartbeat_at=?, lease_expires_at=?, updated_at=? WHERE id=?",
             (heartbeat_at, lease_expires_at, time.time(), worker_id),
@@ -480,6 +497,11 @@ class Store:
         status: str,
         payload: dict[str, Any] | None = None,
     ) -> str:
+        source = _validate_text(source, "source")
+        source_id = _validate_text(source_id, "source id")
+        direction = _validate_text(direction, "source event direction")
+        status = _validate_text(status, "source event status")
+        payload = _validate_payload(payload)
         event_id = str(uuid.uuid4())
         self.conn.execute(
             "INSERT INTO source_events VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -489,7 +511,7 @@ class Store:
                 source_id,
                 direction,
                 status,
-                json.dumps(payload or {}, sort_keys=True),
+                json.dumps(payload, sort_keys=True),
                 time.time(),
             ),
         )
@@ -497,6 +519,7 @@ class Store:
         return event_id
 
     def source_events(self, limit: int = 50) -> list[sqlite3.Row]:
+        limit = _validate_limit(limit, "source event limit", 10000)
         return list(
             self.conn.execute(
                 "SELECT * FROM source_events ORDER BY created_at DESC LIMIT ?",
@@ -513,6 +536,12 @@ class Store:
         message: str,
         status: str = "OPEN",
     ) -> str:
+        finding_id = _validate_text(finding_id, "finding id")
+        task_id = _validate_text(task_id, "task id")
+        candidate_sha = _validate_text(candidate_sha, "candidate sha")
+        severity = _validate_text(severity, "finding severity")
+        message = _validate_text(message, "finding message", 2000)
+        status = _validate_text(status, "finding status")
         now = time.time()
         self.conn.execute(
             """
@@ -529,9 +558,11 @@ class Store:
         return finding_id
 
     def get_finding(self, finding_id: str) -> sqlite3.Row | None:
+        finding_id = _validate_text(finding_id, "finding id")
         return self.conn.execute("SELECT * FROM findings WHERE id=?", (finding_id,)).fetchone()
 
     def close_finding(self, finding_id: str) -> None:
+        finding_id = _validate_text(finding_id, "finding id")
         self.conn.execute(
             "UPDATE findings SET status=?, updated_at=? WHERE id=?",
             ("RESOLVED", time.time(), finding_id),
@@ -539,6 +570,8 @@ class Store:
         self.conn.commit()
 
     def open_findings_for_candidate(self, task_id: str, candidate_sha: str) -> list[sqlite3.Row]:
+        task_id = _validate_text(task_id, "task id")
+        candidate_sha = _validate_text(candidate_sha, "candidate sha")
         return list(
             self.conn.execute(
                 "SELECT * FROM findings WHERE task_id=? AND candidate_sha=? AND status='OPEN' ORDER BY created_at",
@@ -549,15 +582,19 @@ class Store:
     def add_remediation_attempt(
         self, finding_id: str, status: str, payload: dict[str, Any] | None = None
     ) -> str:
+        finding_id = _validate_text(finding_id, "finding id")
+        status = _validate_text(status, "remediation status")
+        payload = _validate_payload(payload)
         attempt_id = str(uuid.uuid4())
         self.conn.execute(
             "INSERT INTO remediation_attempts VALUES (?, ?, ?, ?, ?)",
-            (attempt_id, finding_id, status, json.dumps(payload or {}, sort_keys=True), time.time()),
+            (attempt_id, finding_id, status, json.dumps(payload, sort_keys=True), time.time()),
         )
         self.conn.commit()
         return attempt_id
 
     def remediation_attempt_count(self, finding_id: str) -> int:
+        finding_id = _validate_text(finding_id, "finding id")
         row = self.conn.execute(
             "SELECT COUNT(*) AS count FROM remediation_attempts WHERE finding_id=?",
             (finding_id,),
@@ -572,6 +609,11 @@ class Store:
         candidate_sha: str | None,
         payload: dict[str, Any] | None = None,
     ) -> str:
+        task_id = _validate_text(task_id, "task id")
+        stage = _validate_enum(stage, Stage, "work packet stage")
+        worker_id = _validate_optional_text(worker_id, "work packet worker id")
+        candidate_sha = _validate_optional_text(candidate_sha, "work packet candidate sha")
+        payload = _validate_payload(payload)
         packet_id = str(uuid.uuid4())
         now = time.time()
         self.conn.execute(
@@ -583,7 +625,7 @@ class Store:
                 worker_id,
                 candidate_sha,
                 "QUEUED",
-                json.dumps(payload or {}, sort_keys=True),
+                json.dumps(payload, sort_keys=True),
                 now,
                 now,
             ),
@@ -592,6 +634,10 @@ class Store:
         return packet_id
 
     def claim_work_packets(self, worker_id: str, limit: int = 1, lease_seconds: float = 300) -> list[sqlite3.Row]:
+        worker_id = _validate_text(worker_id, "worker id")
+        limit = _validate_limit(limit, "work packet claim limit", 100)
+        if lease_seconds <= 0:
+            raise StoreValidationError("work packet lease seconds must be positive")
         with self.conn:
             now = time.time()
             self.conn.execute(
@@ -625,6 +671,8 @@ class Store:
             return claimed
 
     def renew_work_packet(self, packet_id: str, worker_id: str) -> bool:
+        packet_id = _validate_text(packet_id, "work packet id")
+        worker_id = _validate_text(worker_id, "worker id")
         cursor = self.conn.execute(
             """
             UPDATE work_packets
@@ -637,23 +685,29 @@ class Store:
         return cursor.rowcount == 1
 
     def ack_work_packet(self, packet_id: str, status: str, payload: dict[str, Any] | None = None) -> bool:
+        packet_id = _validate_text(packet_id, "work packet id")
+        status = _validate_text(status, "work packet status")
+        payload = _validate_payload(payload)
         cursor = self.conn.execute(
             "UPDATE work_packets SET status=?, payload=?, updated_at=? WHERE id=? AND status='CLAIMED'",
-            (status, json.dumps(payload or {}, sort_keys=True), time.time(), packet_id),
+            (status, json.dumps(payload, sort_keys=True), time.time(), packet_id),
         )
         self.conn.commit()
         return cursor.rowcount == 1
 
     def add_audit_event(self, event_type: str, payload: dict[str, Any] | None = None) -> str:
+        event_type = _validate_text(event_type, "audit event type")
+        payload = _validate_payload(payload)
         event_id = str(uuid.uuid4())
         self.conn.execute(
             "INSERT INTO audit_events VALUES (?, ?, ?, ?)",
-            (event_id, event_type, json.dumps(payload or {}, sort_keys=True), time.time()),
+            (event_id, event_type, json.dumps(payload, sort_keys=True), time.time()),
         )
         self.conn.commit()
         return event_id
 
     def audit_events(self, limit: int = 500) -> list[sqlite3.Row]:
+        limit = _validate_limit(limit, "audit event limit", 10000)
         return list(
             self.conn.execute(
                 "SELECT * FROM audit_events ORDER BY created_at DESC LIMIT ?",
@@ -662,9 +716,14 @@ class Store:
         )
 
     def get_retry_state(self, key: str) -> sqlite3.Row | None:
+        key = _validate_text(key, "retry key")
         return self.conn.execute("SELECT * FROM retry_state WHERE key=?", (key,)).fetchone()
 
     def upsert_retry_state(self, key: str, attempts: int, next_attempt_at: float, reason: str) -> None:
+        key = _validate_text(key, "retry key")
+        if not isinstance(attempts, int) or attempts < 0:
+            raise StoreValidationError("retry attempts must be a non-negative integer")
+        reason = _validate_text(reason, "retry reason")
         self.conn.execute(
             """
             INSERT INTO retry_state VALUES (?, ?, ?, ?, ?)
@@ -679,6 +738,7 @@ class Store:
         self.conn.commit()
 
     def clear_retry_state(self, key: str) -> None:
+        key = _validate_text(key, "retry key")
         self.conn.execute("DELETE FROM retry_state WHERE key=?", (key,))
         self.conn.commit()
 
@@ -693,6 +753,11 @@ class Store:
         candidate_sha: str | None = None,
         notes: str = "",
     ) -> str:
+        kind = _validate_text(kind, "external evidence kind")
+        status = _validate_text(status, "external evidence status")
+        url = _validate_text(url, "external evidence url", 1000)
+        candidate_sha = _validate_optional_text(candidate_sha, "candidate sha")
+        notes = _validate_text(notes, "external evidence notes", 2000) if notes else ""
         evidence_id = str(uuid.uuid4())
         self.conn.execute(
             "INSERT INTO external_evidence VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -735,3 +800,13 @@ def _validate_payload(payload: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise StoreValidationError("persistence payload must be an object")
     return payload
+
+
+def _validate_limit(limit: int, field: str, maximum: int) -> int:
+    if not isinstance(limit, int):
+        raise StoreValidationError(f"{field} must be an integer")
+    if limit < 1:
+        raise StoreValidationError(f"{field} must be at least 1")
+    if limit > maximum:
+        raise StoreValidationError(f"{field} must be {maximum} or fewer")
+    return limit
