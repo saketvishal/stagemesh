@@ -115,7 +115,7 @@ def main() -> int:
         if "future work" in status:
             raise AssertionError("deferred task was dispatched")
         original_backlog = backlog.read_text(encoding="utf-8")
-        backlog.write_text('{"tasks":[{"id":"bad","title":"bad","dependencies":"one"}]}', encoding="utf-8")
+        backlog.write_text('{"tasks":[{"id":"bad","title":"bad","dependencies":["missing"]}]}', encoding="utf-8")
         invalid_backlog = subprocess.run(
             [sys.executable, "-m", "stagemesh.cli", "--project", str(project), "continue", "--once"],
             cwd=ROOT,
