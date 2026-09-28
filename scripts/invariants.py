@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import urllib.request
 import zipfile
 from pathlib import Path
 
@@ -19,7 +20,7 @@ from stagemesh.lifecycle import LifecycleError, evidence_allows_advance
 from stagemesh.persistence import Store
 from stagemesh.process_identity import classify_process
 from stagemesh.review import Reviewer
-from stagemesh.task_sources import DiscoveredTask, GitHubIssueSource, LocalBacklogSource, OutboundSync, TaskSourceValidationError, sync_source
+from stagemesh.task_sources import DiscoveredTask, GitHubApiIssueSource, GitHubIssueSource, LocalBacklogSource, OutboundSync, TaskSourceValidationError, sync_source
 from stagemesh.workers import WorkerValidationError, heartbeat_worker, register_worker
 from stagemesh.scheduling import Scheduler
 from stagemesh.remediation import RemediationPolicy, finding_identity
@@ -236,6 +237,8 @@ def main() -> int:
         tasks = LocalBacklogSource(backlog).discover()
         assert [task.source_id for task in tasks] == ["one", "two"]
         assert tasks[1].dependencies == ("one",)
+        backlog.write_text("{not-json", encoding="utf-8")
+        assert_raises(TaskSourceValidationError, LocalBacklogSource(backlog).discover)
         backlog.write_text('{"tasks":[{"id":"one","title":"one"},{"id":"one","title":"again"}]}', encoding="utf-8")
         assert_raises(TaskSourceValidationError, LocalBacklogSource(backlog).discover)
         backlog.write_text('{"tasks":[{"id":"one","title":"one","dependencies":"two"}]}', encoding="utf-8")
@@ -484,6 +487,19 @@ def main() -> int:
             def request(self, method, path, body=None):
                 return 429, {"Retry-After": "not-a-number"}, {"message": "rate limit"}
 
+        class InvalidJsonResponse:
+            status = 200
+            headers: dict[str, str] = {}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return None
+
+            def read(self):
+                return b"{not-json"
+
         assert parse_retry_after(None) == 60
         assert parse_retry_after("") == 60
         assert parse_retry_after("not-a-number") == 60
@@ -492,6 +508,15 @@ def main() -> int:
         result = GitHubClient("owner", "repo", InvalidRetryAfterTransport()).list_open_issues()
         assert result.status == "UNKNOWN"
         assert result.retry_after == 60
+        original_urlopen = urllib.request.urlopen
+        urllib.request.urlopen = lambda request, timeout=20: InvalidJsonResponse()
+        try:
+            discovered, status, retry_after = GitHubApiIssueSource("owner", "repo").discover()
+            assert discovered == []
+            assert status == "UNKNOWN"
+            assert retry_after is None
+        finally:
+            urllib.request.urlopen = original_urlopen
 
     def git_attribution_is_worker_owned(store: Store, project: Path) -> None:
         attribution = attribution_for_worker("worker 1", "codex")

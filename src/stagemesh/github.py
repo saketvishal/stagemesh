@@ -43,10 +43,10 @@ class UrlLibGitHubTransport:
         try:
             with urllib.request.urlopen(request, timeout=20) as response:
                 raw = response.read().decode("utf-8")
-                return response.status, dict(response.headers), json.loads(raw) if raw else {}
+                return response.status, dict(response.headers), _decode_json(raw, "invalid GitHub response JSON")
         except urllib.error.HTTPError as exc:
             raw = exc.read().decode("utf-8")
-            payload = json.loads(raw) if raw else {"message": exc.reason}
+            payload = _decode_json(raw, str(exc.reason))
             return exc.code, dict(exc.headers), payload
 
 
@@ -120,3 +120,12 @@ def parse_github_remote(url: str, remote: str = "origin") -> GitHubRepository | 
         if match:
             return GitHubRepository(match.group("owner"), match.group("repo"), remote)
     return None
+
+
+def _decode_json(raw: str, fallback_message: str) -> object:
+    if not raw:
+        return {}
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return {"message": fallback_message}
