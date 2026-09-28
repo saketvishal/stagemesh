@@ -128,6 +128,23 @@ class Store:
                 payload TEXT NOT NULL,
                 created_at REAL NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS findings (
+                id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL REFERENCES tasks(id),
+                candidate_sha TEXT NOT NULL,
+                severity TEXT NOT NULL,
+                message TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS remediation_attempts (
+                id TEXT PRIMARY KEY,
+                finding_id TEXT NOT NULL REFERENCES findings(id),
+                status TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                created_at REAL NOT NULL
+            );
             """
         )
         self.conn.execute(
@@ -410,3 +427,63 @@ class Store:
                 (limit,),
             )
         )
+
+    def upsert_finding(
+        self,
+        finding_id: str,
+        task_id: str,
+        candidate_sha: str,
+        severity: str,
+        message: str,
+        status: str = "OPEN",
+    ) -> str:
+        now = time.time()
+        self.conn.execute(
+            """
+            INSERT INTO findings VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                severity=excluded.severity,
+                message=excluded.message,
+                status=excluded.status,
+                updated_at=excluded.updated_at
+            """,
+            (finding_id, task_id, candidate_sha, severity, message, status, now, now),
+        )
+        self.conn.commit()
+        return finding_id
+
+    def get_finding(self, finding_id: str) -> sqlite3.Row | None:
+        return self.conn.execute("SELECT * FROM findings WHERE id=?", (finding_id,)).fetchone()
+
+    def close_finding(self, finding_id: str) -> None:
+        self.conn.execute(
+            "UPDATE findings SET status=?, updated_at=? WHERE id=?",
+            ("RESOLVED", time.time(), finding_id),
+        )
+        self.conn.commit()
+
+    def open_findings_for_candidate(self, task_id: str, candidate_sha: str) -> list[sqlite3.Row]:
+        return list(
+            self.conn.execute(
+                "SELECT * FROM findings WHERE task_id=? AND candidate_sha=? AND status='OPEN' ORDER BY created_at",
+                (task_id, candidate_sha),
+            )
+        )
+
+    def add_remediation_attempt(
+        self, finding_id: str, status: str, payload: dict[str, Any] | None = None
+    ) -> str:
+        attempt_id = str(uuid.uuid4())
+        self.conn.execute(
+            "INSERT INTO remediation_attempts VALUES (?, ?, ?, ?, ?)",
+            (attempt_id, finding_id, status, json.dumps(payload or {}, sort_keys=True), time.time()),
+        )
+        self.conn.commit()
+        return attempt_id
+
+    def remediation_attempt_count(self, finding_id: str) -> int:
+        row = self.conn.execute(
+            "SELECT COUNT(*) AS count FROM remediation_attempts WHERE finding_id=?",
+            (finding_id,),
+        ).fetchone()
+        return int(row["count"])

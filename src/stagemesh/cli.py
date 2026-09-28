@@ -16,6 +16,7 @@ from .objectives import ObjectivePlanner
 from .persistence import Store
 from .process_identity import current_process_identity
 from .registry import GlobalRegistry, ProjectRegistration
+from .release import build_release_artifact
 from .task_sources import LocalBacklogSource, sync_source
 from .workers import heartbeat_worker, register_worker
 
@@ -157,6 +158,14 @@ def command_dashboard(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_release(args: argparse.Namespace) -> int:
+    project = Path(args.project).resolve()
+    artifact = build_release_artifact(project, Path(args.output).resolve(), __version__, args.candidate_sha)
+    print(f"archive: {artifact.archive}")
+    print(f"manifest: {artifact.manifest}")
+    return 0
+
+
 def command_registry(args: argparse.Namespace) -> int:
     registry = GlobalRegistry(Path(args.registry).resolve())
     for project in registry.load():
@@ -221,6 +230,10 @@ def build_parser() -> argparse.ArgumentParser:
     dashboard = sub.add_parser("dashboard")
     dashboard.add_argument("--output", default="stagemesh-dashboard.html")
     dashboard.set_defaults(func=command_dashboard)
+    release = sub.add_parser("release")
+    release.add_argument("--candidate-sha", required=True)
+    release.add_argument("--output", default="dist")
+    release.set_defaults(func=command_release)
     registry = sub.add_parser("registry")
     registry.add_argument("--registry", default=str(Path.home() / ".stagemesh" / "registry.json"))
     registry.set_defaults(func=command_registry)
