@@ -17,6 +17,7 @@ from .completion_audit import CompletionAuditValidationError, write_completion_a
 from .config import ConfigValidationError, load_config
 from .dashboard import render_dashboard
 from .coordinator import Coordinator
+from .demo import DemoValidationError, create_demo_project
 from .distributed import WorkQueue, WorkQueueError
 from .e2e_acceptance import EndToEndAcceptanceValidationError, write_end_to_end_acceptance
 from .final_report import FinalReportValidationError, candidate_sha, render_final_report
@@ -215,6 +216,15 @@ def command_dashboard(args: argparse.Namespace) -> int:
     output.write_text(render_dashboard(store), encoding="utf-8")
     store.close()
     print(f"dashboard: {output}")
+    return 0
+
+
+def command_demo(args: argparse.Namespace) -> int:
+    project = Path(args.project).resolve()
+    demo = create_demo_project(project, Path(args.output).resolve())
+    print(f"demo: {demo.root}")
+    print(f"objective: {demo.objective}")
+    print(f"readme: {demo.readme}")
     return 0
 
 
@@ -549,6 +559,9 @@ def build_parser() -> argparse.ArgumentParser:
     dashboard = sub.add_parser("dashboard")
     dashboard.add_argument("--output", default="stagemesh-dashboard.html")
     dashboard.set_defaults(func=command_dashboard)
+    demo = sub.add_parser("demo")
+    demo.add_argument("--output", default=".stagemesh/demo-project")
+    demo.set_defaults(func=command_demo)
     release = sub.add_parser("release")
     release.add_argument("--candidate-sha", required=True)
     release.add_argument("--output", default="dist")
@@ -695,6 +708,9 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     except WorkerValidationError as exc:
         print(f"worker error: {exc}", file=sys.stderr)
+        return 2
+    except DemoValidationError as exc:
+        print(f"demo error: {exc}", file=sys.stderr)
         return 2
 
 

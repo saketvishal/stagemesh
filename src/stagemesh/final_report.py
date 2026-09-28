@@ -81,7 +81,7 @@ def render_final_report(root: Path, store: Store | None = None) -> str:
         "- provider SDK, capacity-aware routing, failover, structured capacity visibility, configurable stage routing, single-agent mode, and staged execution mode",
         "- validated objective planning, dependency-aware scheduling, review findings, remediation attempts, and retry/backoff",
         "- worker registry, lease-renewable distributed work packets, CI-wait capacity release, global project registry, structured status/operator reports, dashboard tables, audit export, release artifact, acceptance matrix, completion audit, and release-readiness reports",
-        "- release packaging uses tracked source files plus a hashed manifest and excludes runtime state and symlink escapes",
+        "- release packaging uses tracked source files plus a hashed manifest, contributor demo scaffold, and excludes runtime state and symlink escapes",
         "",
         "## Acceptance Evidence",
         "",

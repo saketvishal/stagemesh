@@ -28,6 +28,7 @@
 - Static HTML dashboard rendering with task, worker, source-event, retry, and external-evidence tables.
 - Persistent review findings and bounded remediation attempts.
 - Release archive and manifest generation for public/demo packaging.
+- Contributor demo project scaffold command with local objective and run instructions.
 - Release manifests include tracked source files, sizes, and SHA-256 hashes while excluding runtime state and symlink escapes.
 - Durable distributed work packets with poll, lease renewal, stale-claim recovery, and acknowledgement commands.
 - Final report generation command with candidate, acceptance, and remaining-action inventory.
