@@ -172,6 +172,15 @@ class Store:
                 reason TEXT NOT NULL,
                 updated_at REAL NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS external_evidence (
+                id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                status TEXT NOT NULL,
+                url TEXT NOT NULL,
+                candidate_sha TEXT,
+                notes TEXT NOT NULL,
+                created_at REAL NOT NULL
+            );
             """
         )
         self.conn.execute(
@@ -618,3 +627,22 @@ class Store:
 
     def retry_states(self) -> list[sqlite3.Row]:
         return list(self.conn.execute("SELECT * FROM retry_state ORDER BY key"))
+
+    def add_external_evidence(
+        self,
+        kind: str,
+        status: str,
+        url: str,
+        candidate_sha: str | None = None,
+        notes: str = "",
+    ) -> str:
+        evidence_id = str(uuid.uuid4())
+        self.conn.execute(
+            "INSERT INTO external_evidence VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (evidence_id, kind, status, url, candidate_sha, notes, time.time()),
+        )
+        self.conn.commit()
+        return evidence_id
+
+    def external_evidence(self) -> list[sqlite3.Row]:
+        return list(self.conn.execute("SELECT * FROM external_evidence ORDER BY created_at DESC"))

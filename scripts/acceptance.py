@@ -116,6 +116,33 @@ def main() -> int:
         )
         if "github:acceptance" not in retry_list:
             raise AssertionError(retry_list)
+        evidence_add = run(
+            [
+                sys.executable,
+                "-m",
+                "stagemesh.cli",
+                "--project",
+                str(project),
+                "evidence",
+                "add",
+                "hosted-ci",
+                "PASS",
+                "https://example.invalid/run/acceptance",
+                "--candidate-sha",
+                "acceptance-sha",
+            ],
+            ROOT,
+            env,
+        )
+        if "evidence:" not in evidence_add:
+            raise AssertionError(evidence_add)
+        evidence_list = run(
+            [sys.executable, "-m", "stagemesh.cli", "--project", str(project), "evidence", "list"],
+            ROOT,
+            env,
+        )
+        if "hosted-ci PASS acceptance-sha" not in evidence_list:
+            raise AssertionError(evidence_list)
         doctor = run([sys.executable, "-m", "stagemesh.cli", "--project", str(project), "doctor"], ROOT, env)
         required = [
             "version:",

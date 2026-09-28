@@ -23,6 +23,7 @@ def render_final_report(root: Path, store: Store | None = None) -> str:
     sha = candidate_sha(root)
     task_count = len(store.tasks()) if store else 0
     worker_count = len(store.workers()) if store else 0
+    external_count = len(store.external_evidence()) if store else 0
     acceptance = _acceptance_summary(root)
     audit = _completion_summary(root)
     return "\n".join(
@@ -49,6 +50,7 @@ def render_final_report(root: Path, store: Store | None = None) -> str:
             "- independent review result: exact-SHA review evidence and findings are modeled; live independent provider review pending provider credentials",
             f"- runtime task count: {task_count}",
             f"- registered worker count: {worker_count}",
+            f"- external evidence records: {external_count}",
             "- remaining human-only actions: provide live provider/GitHub credentials and hosted CI runner access",
             "- roadmap preservation: tracked in `docs/status.md` with implemented and remaining items",
             "",

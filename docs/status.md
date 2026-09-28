@@ -47,6 +47,7 @@
 - Deterministic provider dry-run acceptance proves capacity-aware failover and failure isolation without external credentials.
 - Deterministic GitHub dry-run acceptance proves discovery, deferred labels, outbound sync, and rate-limit classification without external credentials.
 - Release-readiness report aggregates local gates and explicitly reports external evidence gaps.
+- External evidence registry records hosted CI, live provider, live GitHub, and database acceptance links against candidate SHAs.
 - GitHub Actions CI for Windows and Linux.
 - Stdlib invariant and acceptance runners for dependency-free verification.
 

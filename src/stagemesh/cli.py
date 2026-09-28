@@ -16,6 +16,7 @@ from .dashboard import render_dashboard
 from .coordinator import Coordinator
 from .distributed import WorkQueue
 from .final_report import render_final_report
+from .external_evidence import external_evidence_records, record_external_evidence
 from .github_acceptance import run_github_acceptance
 from .observability import health
 from .operator import operator_report
@@ -354,6 +355,30 @@ def command_retries(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_evidence(args: argparse.Namespace) -> int:
+    project = Path(args.project).resolve()
+    store = Store(db_path(project))
+    store.migrate()
+    if args.evidence_command == "add":
+        evidence_id = record_external_evidence(
+            store,
+            args.kind,
+            args.status,
+            args.url,
+            candidate_sha=args.candidate_sha,
+            notes=args.notes,
+        )
+        print(f"evidence: {evidence_id}")
+    else:
+        rows = external_evidence_records(store)
+        if not rows:
+            print("evidence: EMPTY")
+        for row in rows:
+            print(f"{row.id} {row.kind} {row.status} {row.candidate_sha or ''} {row.url}")
+    store.close()
+    return 0
+
+
 def command_ci(args: argparse.Namespace) -> int:
     root = Path(args.project).resolve()
     results = default_gates(root, include_acceptance=not args.skip_acceptance)
@@ -466,6 +491,17 @@ def build_parser() -> argparse.ArgumentParser:
     retry_success = retry_sub.add_parser("success")
     retry_success.add_argument("key")
     retry_success.set_defaults(func=command_retries)
+    evidence = sub.add_parser("evidence")
+    evidence_sub = evidence.add_subparsers(dest="evidence_command", required=True)
+    evidence_add = evidence_sub.add_parser("add")
+    evidence_add.add_argument("kind")
+    evidence_add.add_argument("status")
+    evidence_add.add_argument("url")
+    evidence_add.add_argument("--candidate-sha")
+    evidence_add.add_argument("--notes", default="")
+    evidence_add.set_defaults(func=command_evidence)
+    evidence_list = evidence_sub.add_parser("list")
+    evidence_list.set_defaults(func=command_evidence)
     ci = sub.add_parser("ci")
     ci.add_argument("--future-feature-gate", action="store_true")
     ci.add_argument("--skip-acceptance", action="store_true")
