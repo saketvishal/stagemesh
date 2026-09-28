@@ -232,7 +232,10 @@ def command_acceptance_report(args: argparse.Namespace) -> int:
 def command_acceptance_matrix(args: argparse.Namespace) -> int:
     project = Path(args.project).resolve()
     output = WorkspaceBoundary(project).require_inside(Path(args.output).resolve())
-    write_acceptance_matrix(output)
+    store = Store(db_path(project))
+    store.migrate()
+    write_acceptance_matrix(output, store)
+    store.close()
     print(f"acceptance-matrix: {output}")
     return 0
 
@@ -323,7 +326,10 @@ def command_release_readiness(args: argparse.Namespace) -> int:
 def command_completion_audit(args: argparse.Namespace) -> int:
     project = Path(args.project).resolve()
     output = WorkspaceBoundary(project).require_inside(Path(args.output).resolve())
-    write_completion_audit(output)
+    store = Store(db_path(project))
+    store.migrate()
+    write_completion_audit(output, store)
+    store.close()
     print(f"completion-audit: {output}")
     return 0
 

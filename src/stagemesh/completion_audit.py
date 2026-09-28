@@ -4,6 +4,8 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+from .persistence import Store
+
 
 @dataclass(frozen=True)
 class AuditItem:
@@ -29,11 +31,44 @@ CORE_AUDIT_ITEMS = (
 )
 
 
-def completion_audit() -> dict[str, object]:
-    items = [item.__dict__ for item in CORE_AUDIT_ITEMS]
+EVIDENCE_REQUIREMENTS = {
+    "hosted-ci": "Linux acceptance",
+    "live-github": "live GitHub sync",
+    "live-provider": "live provider execution",
+    "postgres": "PostgreSQL storage",
+}
+
+
+def completion_audit(store: Store | None = None) -> dict[str, object]:
+    evidence_by_requirement = _external_evidence_by_requirement(store)
+    items = []
+    for item in CORE_AUDIT_ITEMS:
+        if item.requirement in evidence_by_requirement:
+            items.append(
+                {
+                    "requirement": item.requirement,
+                    "status": "PROVEN",
+                    "evidence": evidence_by_requirement[item.requirement],
+                }
+            )
+        else:
+            items.append(item.__dict__)
     return {"complete": all(item["status"] == "PROVEN" for item in items), "items": items}
 
 
-def write_completion_audit(path: Path) -> None:
+def write_completion_audit(path: Path, store: Store | None = None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(completion_audit(), indent=2, sort_keys=True), encoding="utf-8")
+    path.write_text(json.dumps(completion_audit(store), indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _external_evidence_by_requirement(store: Store | None) -> dict[str, str]:
+    if store is None:
+        return {}
+    evidence: dict[str, str] = {}
+    for row in store.external_evidence():
+        if row["status"] != "PASS":
+            continue
+        requirement = EVIDENCE_REQUIREMENTS.get(row["kind"])
+        if requirement:
+            evidence[requirement] = f"external evidence {row['id']}: {row['url']}"
+    return evidence
