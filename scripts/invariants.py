@@ -19,7 +19,7 @@ from stagemesh.lifecycle import LifecycleError, evidence_allows_advance
 from stagemesh.persistence import Store
 from stagemesh.process_identity import classify_process
 from stagemesh.review import Reviewer
-from stagemesh.task_sources import DiscoveredTask, GitHubIssueSource, OutboundSync, sync_source
+from stagemesh.task_sources import DiscoveredTask, GitHubIssueSource, LocalBacklogSource, OutboundSync, TaskSourceValidationError, sync_source
 from stagemesh.workers import heartbeat_worker, register_worker
 from stagemesh.scheduling import Scheduler
 from stagemesh.remediation import RemediationPolicy, finding_identity
@@ -199,6 +199,32 @@ def main() -> int:
         tasks, status = GitHubIssueSource(error="rate-limit").discover()
         assert tasks == []
         assert status == "UNKNOWN"
+
+    def local_backlog_source_rejects_malformed_tasks(store: Store, project: Path) -> None:
+        project.mkdir(parents=True)
+        backlog = project / "backlog.json"
+        backlog.write_text(
+            json.dumps(
+                {
+                    "tasks": [
+                        {"id": "one", "title": "one"},
+                        {"id": "two", "title": "two", "dependencies": ["one"]},
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        tasks = LocalBacklogSource(backlog).discover()
+        assert [task.source_id for task in tasks] == ["one", "two"]
+        assert tasks[1].dependencies == ("one",)
+        backlog.write_text('{"tasks":[{"id":"one","title":"one"},{"id":"one","title":"again"}]}', encoding="utf-8")
+        assert_raises(TaskSourceValidationError, LocalBacklogSource(backlog).discover)
+        backlog.write_text('{"tasks":[{"id":"one","title":"one","dependencies":"two"}]}', encoding="utf-8")
+        assert_raises(TaskSourceValidationError, LocalBacklogSource(backlog).discover)
+        backlog.write_text('{"tasks":[{"id":"one","title":"one","eligible":"yes"}]}', encoding="utf-8")
+        assert_raises(TaskSourceValidationError, LocalBacklogSource(backlog).discover)
+        backlog.write_text('{"tasks":[{"id":"one","title":"one","state":"MAYBE"}]}', encoding="utf-8")
+        assert_raises(TaskSourceValidationError, LocalBacklogSource(backlog).discover)
 
     def worker_heartbeat_and_outbound_sync(store: Store, project: Path) -> None:
         register_worker(
@@ -619,6 +645,7 @@ def main() -> int:
         durable_handoff,
         targeted_ops,
         source_semantics,
+        local_backlog_source_rejects_malformed_tasks,
         worker_heartbeat_and_outbound_sync,
         operator_dashboard_exposes_structured_state,
         dependency_scheduling,

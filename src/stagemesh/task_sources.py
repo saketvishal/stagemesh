@@ -7,10 +7,15 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
+from .domain import TaskStatus
 from .persistence import Store
 from .github import GitHubClient
 from .audit import record_audit
 from .retry import RetryRegistry
+
+
+class TaskSourceValidationError(ValueError):
+    pass
 
 
 @dataclass(frozen=True)
@@ -33,17 +38,46 @@ class LocalBacklogSource:
         if not self.path.exists():
             return []
         data = json.loads(self.path.read_text(encoding="utf-8"))
-        return [
-            DiscoveredTask(
-                source=self.name,
-                source_id=str(item["id"]),
-                title=str(item["title"]),
-                eligible=bool(item.get("eligible", True)),
-                state=str(item.get("state", "OPEN")),
-                dependencies=tuple(str(dep) for dep in item.get("dependencies", [])),
+        if not isinstance(data, dict):
+            raise TaskSourceValidationError("local backlog root must be an object")
+        tasks = data.get("tasks", [])
+        if not isinstance(tasks, list):
+            raise TaskSourceValidationError("local backlog tasks must be a list")
+        discovered: list[DiscoveredTask] = []
+        seen: set[str] = set()
+        valid_states = {str(status) for status in TaskStatus}
+        for item in tasks:
+            if not isinstance(item, dict):
+                raise TaskSourceValidationError("local backlog task entries must be objects")
+            source_id = item.get("id")
+            title = item.get("title")
+            if not isinstance(source_id, str) or not source_id:
+                raise TaskSourceValidationError("local backlog task id must be a non-empty string")
+            if source_id in seen:
+                raise TaskSourceValidationError(f"duplicate local backlog task id: {source_id}")
+            if not isinstance(title, str) or not title:
+                raise TaskSourceValidationError(f"local backlog task {source_id} title must be a non-empty string")
+            eligible = item.get("eligible", True)
+            if not isinstance(eligible, bool):
+                raise TaskSourceValidationError(f"local backlog task {source_id} eligible must be a boolean")
+            state = item.get("state", "OPEN")
+            if not isinstance(state, str) or state not in valid_states:
+                raise TaskSourceValidationError(f"local backlog task {source_id} state is unsupported: {state}")
+            dependencies = item.get("dependencies", [])
+            if not isinstance(dependencies, list) or not all(isinstance(dep, str) for dep in dependencies):
+                raise TaskSourceValidationError(f"local backlog task {source_id} dependencies must be a list of strings")
+            seen.add(source_id)
+            discovered.append(
+                DiscoveredTask(
+                    source=self.name,
+                    source_id=source_id,
+                    title=title,
+                    eligible=eligible,
+                    state=state,
+                    dependencies=tuple(dependencies),
+                )
             )
-            for item in data.get("tasks", [])
-        ]
+        return discovered
 
 
 class GitHubIssueSource:
