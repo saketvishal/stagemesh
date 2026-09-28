@@ -32,7 +32,14 @@ from stagemesh.persistence_backends import probe_backend
 from stagemesh.completion_audit import completion_audit
 from stagemesh.audit import record_audit, export_audit_jsonl
 from stagemesh.retry import RetryRegistry
-from stagemesh.postgres_store import PostgresStore, PostgresUnavailable, postgres_available
+from stagemesh.postgres_store import (
+    POSTGRES_SCHEMA_TABLES,
+    PostgresStore,
+    PostgresUnavailable,
+    postgres_available,
+    postgres_schema_contract,
+    postgres_schema_statements,
+)
 from stagemesh.final_report import render_final_report
 from stagemesh.provider_acceptance import run_provider_acceptance
 from stagemesh.github_acceptance import run_github_acceptance
@@ -54,6 +61,39 @@ def run_until_idle(coord: Coordinator, limit: int = 20) -> None:
         if coord.tick() == 0:
             return
     raise AssertionError("coordinator did not become idle")
+
+
+class FakePostgresCursor:
+    def __init__(self) -> None:
+        self.statements: list[tuple[str, tuple[object, ...] | None]] = []
+
+    def __enter__(self) -> "FakePostgresCursor":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        return None
+
+    def execute(self, statement: str, params: tuple[object, ...] | None = None) -> None:
+        self.statements.append((statement, params))
+
+    def fetchone(self) -> tuple[int]:
+        return (1,)
+
+
+class FakePostgresConnection:
+    def __init__(self) -> None:
+        self.cursor_instance = FakePostgresCursor()
+        self.commits = 0
+        self.closed = False
+
+    def cursor(self) -> FakePostgresCursor:
+        return self.cursor_instance
+
+    def commit(self) -> None:
+        self.commits += 1
+
+    def close(self) -> None:
+        self.closed = True
 
 
 class HandoffExecutor(FakeExecutor):
@@ -255,6 +295,25 @@ def main() -> int:
         if not postgres_available():
             assert_raises(PostgresUnavailable, PostgresStore, "postgresql://example/db")
 
+    def postgres_schema_contract_covers_authoritative_tables(store: Store, project: Path) -> None:
+        contract = postgres_schema_contract()
+        assert contract["dialect"] == "postgresql"
+        assert tuple(contract["tables"]) == POSTGRES_SCHEMA_TABLES
+        schema_sql = str(contract["schema_sql"])
+        for table in POSTGRES_SCHEMA_TABLES:
+            assert f"CREATE TABLE IF NOT EXISTS {table}" in schema_sql
+        statements = postgres_schema_statements()
+        assert len(statements) >= len(POSTGRES_SCHEMA_TABLES)
+        fake_conn = FakePostgresConnection()
+        pg_store = object.__new__(PostgresStore)
+        pg_store.conn = fake_conn
+        pg_store.migrate()
+        executed = [statement for statement, _ in fake_conn.cursor_instance.statements]
+        assert any("CREATE TABLE IF NOT EXISTS tasks" in statement for statement in executed)
+        assert any("CREATE UNIQUE INDEX IF NOT EXISTS one_active_claim" in statement for statement in executed)
+        assert any("INSERT INTO schema_migrations" in statement for statement in executed)
+        assert fake_conn.commits == 1
+
     def completion_audit_is_not_falsely_complete(store: Store, project: Path) -> None:
         audit = completion_audit()
         assert audit["complete"] is False
@@ -362,6 +421,7 @@ def main() -> int:
         release_output_stays_inside_workspace,
         migrations_are_idempotent,
         backend_probe_reports_postgres_dependency,
+        postgres_schema_contract_covers_authoritative_tables,
         completion_audit_is_not_falsely_complete,
         audit_events_are_redacted_and_exportable,
         retry_backoff_is_durable_and_clearable,

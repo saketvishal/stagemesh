@@ -27,7 +27,11 @@ CORE_AUDIT_ITEMS = (
     AuditItem("Linux acceptance", "MISSING_EXTERNAL_EVIDENCE", "hosted CI result unavailable locally"),
     AuditItem("live GitHub sync", "REQUIRES_CREDENTIALS", "scripts/live_acceptance.py reports NOT_CONFIGURED without credentials"),
     AuditItem("live provider execution", "REQUIRES_CREDENTIALS", "external account execution not proven"),
-    AuditItem("PostgreSQL storage", "INTERFACE_READY", "backend probe exists; sqlite remains default implementation"),
+    AuditItem(
+        "PostgreSQL storage",
+        "INTERFACE_READY",
+        "backend probe and schema contract exist; live PostgreSQL evidence not proven",
+    ),
 )
 
 

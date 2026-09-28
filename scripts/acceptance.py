@@ -160,7 +160,11 @@ def main() -> int:
         if "github.configured: False" not in config_output or "database_url: sqlite://default" not in config_output:
             raise AssertionError(config_output)
         backend_output = run([sys.executable, "-m", "stagemesh.cli", "--project", str(project), "backend"], ROOT, env)
-        if "name: sqlite" not in backend_output or "available: True" not in backend_output:
+        if (
+            "name: sqlite" not in backend_output
+            or "available: True" not in backend_output
+            or "postgres schema contract: 18 tables" not in backend_output
+        ):
             raise AssertionError(backend_output)
         provider_acceptance = run(
             [sys.executable, "-m", "stagemesh.cli", "--project", str(project), "provider-acceptance"],
