@@ -90,19 +90,8 @@ class GitHubIssueSource:
     def discover(self) -> tuple[list[DiscoveredTask], str]:
         if self.error:
             return [], "UNKNOWN" if self.error in {"rate-limit", "capacity"} else "STALE"
-        return (
-            [
-                DiscoveredTask(
-                    source=self.name,
-                    source_id=str(issue["number"]),
-                    title=str(issue["title"]),
-                    eligible=not bool(issue.get("deferred", False)),
-                    state=str(issue.get("state", "OPEN")),
-                )
-                for issue in self.cached_issues
-            ],
-            "OK",
-        )
+        discovered = [_github_issue_to_task(issue) for issue in self.cached_issues if "pull_request" not in issue]
+        return ([task for task in discovered if task is not None], "OK")
 
 
 class GitHubApiIssueSource:
@@ -132,21 +121,44 @@ class GitHubApiIssueSource:
             if exc.code in {401, 404}:
                 return [], "STALE", None
             raise
-        return (
-            [
-                DiscoveredTask(
-                    source=self.name,
-                    source_id=str(issue["number"]),
-                    title=str(issue["title"]),
-                    eligible="stagemesh:deferred" not in [label.get("name") for label in issue.get("labels", [])],
-                    state="OPEN",
-                )
-                for issue in issues
-                if "pull_request" not in issue
-            ],
-            "OK",
-            None,
-        )
+        if not isinstance(issues, list):
+            raise TaskSourceValidationError("github issues response must be a list")
+        discovered = []
+        for issue in issues:
+            if not isinstance(issue, dict):
+                raise TaskSourceValidationError("github issue entries must be objects")
+            if "pull_request" not in issue:
+                discovered.append(_github_issue_to_task(issue))
+        return ([task for task in discovered if task is not None], "OK", None)
+
+
+def _github_issue_to_task(issue: dict[str, object]) -> DiscoveredTask:
+    number = issue.get("number")
+    title = issue.get("title")
+    if not isinstance(number, int) or number <= 0:
+        raise TaskSourceValidationError("github issue number must be a positive integer")
+    if not isinstance(title, str) or not title:
+        raise TaskSourceValidationError(f"github issue {number} title must be a non-empty string")
+    labels = issue.get("labels", [])
+    if not isinstance(labels, list):
+        raise TaskSourceValidationError(f"github issue {number} labels must be a list")
+    label_names: list[str] = []
+    for label in labels:
+        if not isinstance(label, dict):
+            raise TaskSourceValidationError(f"github issue {number} labels must be objects")
+        name = label.get("name")
+        if isinstance(name, str):
+            label_names.append(name)
+    state = issue.get("state", "OPEN")
+    if not isinstance(state, str):
+        raise TaskSourceValidationError(f"github issue {number} state must be a string")
+    return DiscoveredTask(
+        source=GitHubIssueSource.name,
+        source_id=str(number),
+        title=title,
+        eligible="stagemesh:deferred" not in label_names and state.lower() == "open",
+        state="OPEN" if state.lower() == "open" else state.upper(),
+    )
 
 
 def sync_source(store: Store, tasks: list[DiscoveredTask]) -> list[str]:

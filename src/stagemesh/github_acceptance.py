@@ -6,7 +6,7 @@ from typing import Any
 from .github import GitHubClient
 from .github import parse_github_remote
 from .persistence import Store
-from .task_sources import DiscoveredTask, GitHubOutboundSync, sync_source
+from .task_sources import GitHubIssueSource, GitHubOutboundSync, sync_source
 
 
 @dataclass(frozen=True)
@@ -46,17 +46,7 @@ def run_github_acceptance(store: Store) -> GitHubAcceptanceResult:
     client = GitHubClient("owner", "repo", FakeGitHubTransport())
     listed = client.list_open_issues()
     issues = listed.payload if isinstance(listed.payload, list) else []
-    discovered = [
-        DiscoveredTask(
-            "github",
-            str(issue["number"]),
-            str(issue["title"]),
-            eligible="stagemesh:deferred" not in [label.get("name") for label in issue.get("labels", [])],
-            state="OPEN",
-        )
-        for issue in issues
-        if "pull_request" not in issue
-    ]
+    discovered, _ = GitHubIssueSource(issues).discover()
     task_ids = sync_source(store, discovered)
     outbound_id = GitHubOutboundSync(store, client).publish_done("1", "abc123")
     outbound = store.conn.execute("SELECT * FROM source_events WHERE id=?", (outbound_id,)).fetchone()

@@ -199,6 +199,20 @@ def main() -> int:
         tasks, status = GitHubIssueSource(error="rate-limit").discover()
         assert tasks == []
         assert status == "UNKNOWN"
+        tasks, status = GitHubIssueSource(
+            [
+                {"number": 1, "title": "ready", "labels": []},
+                {"number": 2, "title": "deferred", "labels": [{"name": "stagemesh:deferred"}]},
+                {"number": 3, "title": "closed", "labels": [], "state": "closed"},
+                {"number": 4, "title": "pull", "pull_request": {}, "labels": []},
+            ]
+        ).discover()
+        assert status == "OK"
+        assert [task.source_id for task in tasks] == ["1", "2", "3"]
+        assert [task.eligible for task in tasks] == [True, False, False]
+        assert_raises(TaskSourceValidationError, GitHubIssueSource([{"number": "1", "title": "bad"}]).discover)
+        assert_raises(TaskSourceValidationError, GitHubIssueSource([{"number": 1, "title": ""}]).discover)
+        assert_raises(TaskSourceValidationError, GitHubIssueSource([{"number": 1, "title": "bad", "labels": "bug"}]).discover)
 
     def local_backlog_source_rejects_malformed_tasks(store: Store, project: Path) -> None:
         project.mkdir(parents=True)
