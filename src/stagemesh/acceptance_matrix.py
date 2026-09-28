@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .completion_audit import completion_audit
+from .persistence import Store
 
 
 @dataclass(frozen=True)
@@ -14,8 +15,8 @@ class MatrixRow:
     evidence: str
 
 
-def acceptance_matrix() -> dict[str, object]:
-    audit = completion_audit()
+def acceptance_matrix(store: Store | None = None) -> dict[str, object]:
+    audit = completion_audit(store)
     rows = [
         MatrixRow(str(item["requirement"]), str(item["status"]), str(item["evidence"]))
         for item in audit["items"]
@@ -29,6 +30,6 @@ def acceptance_matrix() -> dict[str, object]:
     }
 
 
-def write_acceptance_matrix(path: Path) -> None:
+def write_acceptance_matrix(path: Path, store: Store | None = None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(acceptance_matrix(), indent=2, sort_keys=True), encoding="utf-8")
+    path.write_text(json.dumps(acceptance_matrix(store), indent=2, sort_keys=True), encoding="utf-8")

@@ -328,6 +328,15 @@ def main() -> int:
         assert any(row["status"] == "PROVEN" for row in rows)
         assert any(row["status"] != "PROVEN" for row in rows)
 
+    def external_evidence_updates_audit_rows(store: Store, project: Path) -> None:
+        record_external_evidence(store, "hosted-ci", "PASS", "https://example.invalid/linux", "abc")
+        audit = completion_audit(store)
+        linux = [item for item in audit["items"] if item["requirement"] == "Linux acceptance"][0]
+        assert linux["status"] == "PROVEN"
+        matrix = acceptance_matrix(store)
+        linux_row = [row for row in matrix["rows"] if row["area"] == "Linux acceptance"][0]
+        assert linux_row["status"] == "PROVEN"
+
     cases = [
         live_worker_restart,
         dead_worker_recovers,
@@ -360,6 +369,7 @@ def main() -> int:
         release_readiness_reports_external_gaps,
         external_evidence_is_durable,
         acceptance_matrix_has_external_gaps,
+        external_evidence_updates_audit_rows,
     ]
     for case in cases:
         with_store(case)
