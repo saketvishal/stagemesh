@@ -3,7 +3,7 @@ from __future__ import annotations
 from urllib.parse import urlsplit, urlunsplit
 
 
-SECRET_MARKERS = ("token", "secret", "password", "authorization", "apikey", "api_key")
+SECRET_MARKERS = ("token", "secret", "password", "authorization", "apikey", "api_key", "api-key")
 
 
 def redact_mapping(data: dict[str, object]) -> dict[str, object]:
@@ -47,3 +47,30 @@ def redact_url_credentials(url: str | None) -> str | None:
     if parsed.port is not None:
         host = f"{host}:{parsed.port}"
     return urlunsplit((parsed.scheme, f"***REDACTED***@{host}", parsed.path, parsed.query, parsed.fragment))
+
+
+def redact_command_secrets(command: str) -> str:
+    import shlex
+
+    try:
+        parts = shlex.split(command)
+    except ValueError:
+        return "***REDACTED***" if any(marker in command.lower() for marker in SECRET_MARKERS) else command
+    redacted: list[str] = []
+    redact_next = False
+    for part in parts:
+        lower = part.lower()
+        if redact_next:
+            redacted.append("***REDACTED***")
+            redact_next = False
+            continue
+        if any(marker in lower for marker in SECRET_MARKERS):
+            if "=" in part:
+                key, _value = part.split("=", 1)
+                redacted.append(f"{key}=***REDACTED***")
+            else:
+                redacted.append(part)
+                redact_next = True
+            continue
+        redacted.append(part)
+    return shlex.join(redacted)

@@ -633,7 +633,7 @@ def main() -> int:
             raise AssertionError(config_json)
         redacted_config = project / "redacted-config.json"
         redacted_config.write_text(
-            '{"database_url":"postgresql://user:secret@example.invalid:5432/db?sslmode=require"}',
+            '{"database_url":"postgresql://user:secret@example.invalid:5432/db?sslmode=require","providers":{"secure":"runner --api-key abc --token=def --safe ok"}}',
             encoding="utf-8",
         )
         redacted_config_output = run(
@@ -650,7 +650,13 @@ def main() -> int:
             ROOT,
             env,
         )
-        if "secret" in redacted_config_output or "database_url: postgresql://***REDACTED***@example.invalid:5432/db?sslmode=require" not in redacted_config_output:
+        if (
+            "secret" in redacted_config_output
+            or " abc " in redacted_config_output
+            or "--token=def" in redacted_config_output
+            or "database_url: postgresql://***REDACTED***@example.invalid:5432/db?sslmode=require" not in redacted_config_output
+            or "provider.secure: runner --api-key '***REDACTED***' '--token=***REDACTED***' --safe ok" not in redacted_config_output
+        ):
             raise AssertionError(redacted_config_output)
         redacted_config_json = run(
             [
@@ -668,7 +674,11 @@ def main() -> int:
             env,
         )
         redacted_config_data = json.loads(redacted_config_json)
-        if redacted_config_data["database_url"] != "postgresql://***REDACTED***@example.invalid:5432/db?sslmode=require":
+        if (
+            redacted_config_data["database_url"] != "postgresql://***REDACTED***@example.invalid:5432/db?sslmode=require"
+            or redacted_config_data["providers"]["secure"]
+            != "runner --api-key '***REDACTED***' '--token=***REDACTED***' --safe ok"
+        ):
             raise AssertionError(redacted_config_json)
         invalid_config = project / "invalid-config.json"
         invalid_config.write_text('{"routing":{"mode":"ROUND_ROBIN"}}', encoding="utf-8")
