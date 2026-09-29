@@ -30,7 +30,7 @@
 - Release archive and manifest generation for public/demo packaging.
 - Contributor demo project scaffold command with local objective and run instructions.
 - Release manifests include tracked source files, sizes, and SHA-256 hashes while excluding runtime state and symlink escapes.
-- Durable distributed work packets with poll, lease renewal, stale-claim recovery, and acknowledgement commands.
+- Durable distributed work packets with plain/JSON enqueue, poll, lease renewal, stale-claim recovery, and acknowledgement commands.
 - Final report generation command with candidate, acceptance, and remaining-action inventory.
 - Transport-injected GitHub client for live inbound/outbound sync acceptance.
 - Git attribution helper for worker-owned authorship and StageMesh-owned commits.
