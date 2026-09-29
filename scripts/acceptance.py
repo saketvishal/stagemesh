@@ -221,6 +221,15 @@ def main() -> int:
         )
         if not audit_log.exists() or "audit:" not in audit_output:
             raise AssertionError(audit_output)
+        audit_json = run(
+            [sys.executable, "-m", "stagemesh.cli", "--project", str(project), "audit", "--json", "--limit", "5"],
+            ROOT,
+            env,
+        )
+        audit_data = json.loads(audit_json)
+        audit_event_types = {event["event_type"] for event in audit_data["events"]}
+        if "task.advance" not in audit_event_types or any(not isinstance(event["payload"], dict) for event in audit_data["events"]):
+            raise AssertionError(audit_json)
         invalid_audit = subprocess.run(
             [
                 sys.executable,
