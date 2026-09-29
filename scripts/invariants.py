@@ -606,7 +606,23 @@ def main() -> int:
             encoding="utf-8",
         )
         assert_raises(RegistryValidationError, GlobalRegistry(malformed).load)
+        malformed.write_text(
+            json.dumps(
+                {
+                    "projects": [
+                        {"name": "escape", "path": str(first), "db_path": str(project.parent / "escape.sqlite3")},
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        assert_raises(RegistryValidationError, GlobalRegistry(malformed).load)
         assert_raises(RegistryValidationError, registry.register, ProjectRegistration("", first, first / ".stagemesh" / "db.sqlite3"))
+        assert_raises(
+            RegistryValidationError,
+            registry.register,
+            ProjectRegistration("escape", first, project.parent / "escape.sqlite3"),
+        )
 
     def finding_convergence_is_bounded(store: Store, project: Path) -> None:
         task_id = store.upsert_task("review task")

@@ -30,7 +30,13 @@ class GlobalRegistry:
         name = project.name.strip()
         if not name:
             raise RegistryValidationError("project name is required")
-        return ProjectRegistration(name=name, path=project.path.resolve(), db_path=project.db_path.resolve())
+        path = project.path.resolve()
+        db_path = project.db_path.resolve()
+        try:
+            db_path.relative_to(path)
+        except ValueError as exc:
+            raise RegistryValidationError("registry db_path must be inside the project path") from exc
+        return ProjectRegistration(name=name, path=path, db_path=db_path)
 
     def load(self) -> list[ProjectRegistration]:
         if not self.path.exists():
