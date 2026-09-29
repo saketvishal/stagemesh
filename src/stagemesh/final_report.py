@@ -59,7 +59,7 @@ def render_final_report(root: Path, store: Store | None = None) -> str:
         "",
         "- domain models and lifecycle state machine own task/stage semantics",
         "- SQLite persistence with migrations is authoritative local state",
-        "- PostgreSQL backend contract mirrors the authoritative schema and remains optional behind the persistence interface",
+        "- PostgreSQL backend contract mirrors the authoritative schema and remains optional behind the persistence interface with structured probe output",
         "- execution, process identity, recovery, validation, review, remediation, and integration are separate components",
         "- provider routing, capacity classification, task sources, objective planning, registry, workers, dashboard, release packaging, and CLI remain narrow modules",
         "",

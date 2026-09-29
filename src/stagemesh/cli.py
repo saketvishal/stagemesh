@@ -400,16 +400,38 @@ def command_backend(args: argparse.Namespace) -> int:
     config = load_config(Path(args.project).resolve(), Path(args.config).resolve() if args.config else None)
     probe = probe_backend(config.database_url, db_path(Path(args.project).resolve()))
     postgres_contract = postgres_schema_contract()
+    ping_result = None
+    if args.ping and config.database_url and probe.name == "postgres":
+        store = PostgresStore(config.database_url)
+        try:
+            ping_result = store.ping()
+        finally:
+            store.close()
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "name": probe.name,
+                    "available": probe.available,
+                    "reason": probe.reason,
+                    "database_url": config.database_url or "sqlite://default",
+                    "postgres_schema_contract": {
+                        "table_count": len(postgres_contract["tables"]),
+                        "tables": list(postgres_contract["tables"]),
+                    },
+                    "ping": ping_result,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
     print(f"name: {probe.name}")
     print(f"available: {probe.available}")
     print(f"reason: {probe.reason}")
     print(f"postgres schema contract: {len(postgres_contract['tables'])} tables")
-    if args.ping and config.database_url and probe.name == "postgres":
-        store = PostgresStore(config.database_url)
-        try:
-            print(f"ping: {store.ping()}")
-        finally:
-            store.close()
+    if ping_result is not None:
+        print(f"ping: {ping_result}")
     return 0
 
 
@@ -653,6 +675,7 @@ def build_parser() -> argparse.ArgumentParser:
     backend = sub.add_parser("backend")
     backend.add_argument("--config")
     backend.add_argument("--ping", action="store_true")
+    backend.add_argument("--json", action="store_true")
     backend.set_defaults(func=command_backend)
     provider_acceptance = sub.add_parser("provider-acceptance")
     provider_acceptance.set_defaults(func=command_provider_acceptance)

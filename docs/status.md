@@ -42,7 +42,7 @@
 - Release packaging is constrained to the project workspace boundary.
 - Idempotent migration runner with schema version reporting and migration audit table.
 - SQLite durability settings enable WAL and busy timeout.
-- Backend probe for sqlite/postgres configuration with explicit PostgreSQL dependency reporting.
+- Backend probe for sqlite/postgres configuration with explicit PostgreSQL dependency reporting and JSON schema-contract visibility.
 - Machine-readable completion audit that refuses to mark external/credentialed requirements complete without evidence.
 - Persisted audit events with redacted JSONL export for shareable operational evidence.
 - Durable retry/backoff registry for source/provider failures with plain and JSON CLI inspection.

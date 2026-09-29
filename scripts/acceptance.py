@@ -539,6 +539,20 @@ def main() -> int:
             or "postgres schema contract: 18 tables" not in backend_output
         ):
             raise AssertionError(backend_output)
+        backend_json = run(
+            [sys.executable, "-m", "stagemesh.cli", "--project", str(project), "backend", "--json"],
+            ROOT,
+            env,
+        )
+        backend_data = json.loads(backend_json)
+        if (
+            backend_data["name"] != "sqlite"
+            or backend_data["available"] is not True
+            or backend_data["database_url"] != "sqlite://default"
+            or backend_data["postgres_schema_contract"]["table_count"] != 18
+            or "tasks" not in backend_data["postgres_schema_contract"]["tables"]
+        ):
+            raise AssertionError(backend_json)
         postgres_config = project / "postgres-config.json"
         postgres_config.write_text('{"database_url":"postgresql://example/db"}', encoding="utf-8")
         postgres_backend = run(
@@ -557,6 +571,28 @@ def main() -> int:
         )
         if "name: postgres" not in postgres_backend or "sqlite default available" in postgres_backend:
             raise AssertionError(postgres_backend)
+        postgres_backend_json = run(
+            [
+                sys.executable,
+                "-m",
+                "stagemesh.cli",
+                "--project",
+                str(project),
+                "backend",
+                "--config",
+                str(postgres_config),
+                "--json",
+            ],
+            ROOT,
+            env,
+        )
+        postgres_backend_data = json.loads(postgres_backend_json)
+        if (
+            postgres_backend_data["name"] != "postgres"
+            or postgres_backend_data["database_url"] != "postgresql://example/db"
+            or postgres_backend_data["postgres_schema_contract"]["table_count"] != 18
+        ):
+            raise AssertionError(postgres_backend_json)
         provider_acceptance = run(
             [sys.executable, "-m", "stagemesh.cli", "--project", str(project), "provider-acceptance"],
             ROOT,
