@@ -1486,6 +1486,30 @@ def main() -> int:
             or "end-to-end acceptance status: COMPLETE (18/18 steps proven)" not in repo_report_text
         ):
             raise AssertionError(repo_report_output)
+        repo_report_json = run(
+            [
+                sys.executable,
+                "-m",
+                "stagemesh.cli",
+                "--project",
+                str(ROOT),
+                "report",
+                "--output",
+                str(repo_report),
+                "--json",
+            ],
+            ROOT,
+            env,
+        )
+        repo_report_json_data = json.loads(repo_report_json)
+        if (
+            repo_report_json_data["candidate_sha"]
+            != run(["git", "-c", "safe.directory=C:/stagemesh-vnext", "rev-parse", "HEAD"], ROOT).strip()
+            or repo_report_json_data["output"] != str(repo_report.resolve())
+            or repo_report_json_data["bytes"] <= 0
+            or repo_report_json_data["external_evidence_records_for_candidate"] != 0
+        ):
+            raise AssertionError(repo_report_json)
         status_doc = (ROOT / "docs" / "status.md").read_text(encoding="utf-8")
         if "acceptance report: `PASS proof=BLOCKED_ON_EXTERNAL_EVIDENCE`" not in status_doc:
             raise AssertionError(status_doc)

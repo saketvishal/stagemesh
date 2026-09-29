@@ -451,11 +451,32 @@ def command_report(args: argparse.Namespace) -> int:
     store = Store(db_path(project))
     store.migrate()
     report = render_final_report(project, store)
+    output_path: Path | None = None
     if args.output:
-        output = WorkspaceBoundary(project).require_inside(Path(args.output).resolve())
-        output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text(report, encoding="utf-8")
-        print(f"report: {output}")
+        output_path = WorkspaceBoundary(project).require_inside(Path(args.output).resolve())
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(report, encoding="utf-8")
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "candidate_sha": candidate_sha(project),
+                    "output": str(output_path) if output_path else None,
+                    "bytes": len(report.encode("utf-8")),
+                    "runtime_task_count": len(store.tasks()),
+                    "registered_worker_count": len(store.workers()),
+                    "external_evidence_records_for_candidate": sum(
+                        1
+                        for row in store.external_evidence()
+                        if row["candidate_sha"] == candidate_sha(project) and row["status"] == "PASS"
+                    ),
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+    elif output_path:
+        print(f"report: {output_path}")
     else:
         print(report)
     store.close()
@@ -1061,6 +1082,7 @@ def build_parser() -> argparse.ArgumentParser:
     registry.set_defaults(func=command_registry)
     report = sub.add_parser("report")
     report.add_argument("--output")
+    report.add_argument("--json", action="store_true")
     report.set_defaults(func=command_report)
     acceptance_report = sub.add_parser("acceptance-report")
     acceptance_report.add_argument("--output", default=".stagemesh/acceptance-report.json")
