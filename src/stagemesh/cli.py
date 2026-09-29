@@ -7,8 +7,8 @@ import sys
 from pathlib import Path
 
 from . import __version__
-from .acceptance import AcceptanceValidationError, write_acceptance_report
-from .acceptance_matrix import AcceptanceMatrixValidationError, write_acceptance_matrix
+from .acceptance import AcceptanceValidationError, local_acceptance_report
+from .acceptance_matrix import AcceptanceMatrixValidationError, acceptance_matrix
 from .audit import AuditValidationError, export_audit_jsonl
 from .capacity import CapacityKind, CapacityRegistry, CapacityValidationError
 from .ci import CIValidationError, broken_future_feature_gate, default_gates
@@ -19,7 +19,7 @@ from .dashboard import render_dashboard
 from .coordinator import Coordinator
 from .demo import DemoValidationError, create_demo_project
 from .distributed import WorkQueue, WorkQueueError
-from .e2e_acceptance import EndToEndAcceptanceValidationError, write_end_to_end_acceptance
+from .e2e_acceptance import EndToEndAcceptanceValidationError, end_to_end_acceptance
 from .final_report import FinalReportValidationError, candidate_sha, render_final_report
 from .external_evidence import ExternalEvidenceValidationError, external_evidence_records, record_external_evidence
 from .github_acceptance import run_github_acceptance
@@ -333,7 +333,12 @@ def command_report(args: argparse.Namespace) -> int:
 def command_acceptance_report(args: argparse.Namespace) -> int:
     project = Path(args.project).resolve()
     output = WorkspaceBoundary(project).require_inside(Path(args.output).resolve())
-    write_acceptance_report(project, output, include_acceptance=not args.skip_acceptance)
+    data = local_acceptance_report(project, include_acceptance=not args.skip_acceptance)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+    if args.json:
+        print(json.dumps(data, indent=2, sort_keys=True))
+        return 0
     print(f"acceptance-report: {output}")
     return 0
 
@@ -343,8 +348,13 @@ def command_acceptance_matrix(args: argparse.Namespace) -> int:
     output = WorkspaceBoundary(project).require_inside(Path(args.output).resolve())
     store = Store(db_path(project))
     store.migrate()
-    write_acceptance_matrix(output, store, root=project, candidate_sha=candidate_sha(project))
+    data = acceptance_matrix(store, candidate_sha(project))
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
     store.close()
+    if args.json:
+        print(json.dumps(data, indent=2, sort_keys=True))
+        return 0
     print(f"acceptance-matrix: {output}")
     return 0
 
@@ -352,7 +362,12 @@ def command_acceptance_matrix(args: argparse.Namespace) -> int:
 def command_end_to_end_acceptance(args: argparse.Namespace) -> int:
     project = Path(args.project).resolve()
     output = WorkspaceBoundary(project).require_inside(Path(args.output).resolve())
-    write_end_to_end_acceptance(output, root=project)
+    data = end_to_end_acceptance()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+    if args.json:
+        print(json.dumps(data, indent=2, sort_keys=True))
+        return 0
     print(f"end-to-end-acceptance: {output}")
     return 0
 
@@ -870,12 +885,15 @@ def build_parser() -> argparse.ArgumentParser:
     acceptance_report = sub.add_parser("acceptance-report")
     acceptance_report.add_argument("--output", default=".stagemesh/acceptance-report.json")
     acceptance_report.add_argument("--skip-acceptance", action="store_true")
+    acceptance_report.add_argument("--json", action="store_true")
     acceptance_report.set_defaults(func=command_acceptance_report)
     acceptance_matrix = sub.add_parser("acceptance-matrix")
     acceptance_matrix.add_argument("--output", default=".stagemesh/acceptance-matrix.json")
+    acceptance_matrix.add_argument("--json", action="store_true")
     acceptance_matrix.set_defaults(func=command_acceptance_matrix)
     e2e = sub.add_parser("end-to-end-acceptance")
     e2e.add_argument("--output", default=".stagemesh/end-to-end-acceptance.json")
+    e2e.add_argument("--json", action="store_true")
     e2e.set_defaults(func=command_end_to_end_acceptance)
     audit = sub.add_parser("completion-audit")
     audit.add_argument("--output", default=".stagemesh/completion-audit.json")

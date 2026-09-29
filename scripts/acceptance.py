@@ -1064,6 +1064,29 @@ def main() -> int:
             raise AssertionError(acceptance_report_data)
         if "provider:codex:execution: NOT_PROVEN" not in proof_gap_text or "github:sync:" not in proof_gap_text:
             raise AssertionError(acceptance_report_data)
+        acceptance_report_json = run(
+            [
+                sys.executable,
+                "-m",
+                "stagemesh.cli",
+                "--project",
+                str(ROOT),
+                "acceptance-report",
+                "--output",
+                str(acceptance_report),
+                "--skip-acceptance",
+                "--json",
+            ],
+            ROOT,
+            env,
+        )
+        acceptance_report_json_data = json.loads(acceptance_report_json)
+        if (
+            acceptance_report_json_data["status"] != "PASS"
+            or acceptance_report_json_data["proof_status"] != "BLOCKED_ON_EXTERNAL_EVIDENCE"
+            or not isinstance(acceptance_report_json_data["checks"], list)
+        ):
+            raise AssertionError(acceptance_report_json)
         run(
             [
                 sys.executable,
@@ -1106,6 +1129,24 @@ def main() -> int:
             or "https://example.invalid/run/acceptance" in matrix_text
         ):
             raise AssertionError(matrix_text)
+        matrix_json = run(
+            [
+                sys.executable,
+                "-m",
+                "stagemesh.cli",
+                "--project",
+                str(ROOT),
+                "acceptance-matrix",
+                "--output",
+                str(acceptance_matrix),
+                "--json",
+            ],
+            ROOT,
+            env,
+        )
+        matrix_json_data = json.loads(matrix_json)
+        if matrix_json_data["status"] != "INCOMPLETE" or matrix_json_data["proven"] >= matrix_json_data["total"]:
+            raise AssertionError(matrix_json)
         e2e_acceptance = ROOT / ".stagemesh" / "end-to-end-acceptance.json"
         e2e_output = run(
             [
@@ -1129,6 +1170,24 @@ def main() -> int:
             or "interrupt validation" not in e2e_text
         ):
             raise AssertionError(e2e_output + e2e_text)
+        e2e_json = run(
+            [
+                sys.executable,
+                "-m",
+                "stagemesh.cli",
+                "--project",
+                str(ROOT),
+                "end-to-end-acceptance",
+                "--output",
+                str(e2e_acceptance),
+                "--json",
+            ],
+            ROOT,
+            env,
+        )
+        e2e_json_data = json.loads(e2e_json)
+        if e2e_json_data["status"] != "COMPLETE" or e2e_json_data["proven"] != 18 or e2e_json_data["total"] != 18:
+            raise AssertionError(e2e_json)
         completion_audit = ROOT / ".stagemesh" / "completion-audit.json"
         audit_output = run(
             [
