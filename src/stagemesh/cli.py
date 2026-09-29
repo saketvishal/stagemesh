@@ -825,6 +825,25 @@ def command_evidence(args: argparse.Namespace) -> int:
             candidate_sha=args.candidate_sha,
             notes=args.notes,
         )
+        if args.json:
+            current_candidate = candidate_sha(project)
+            print(
+                json.dumps(
+                    {
+                        "id": evidence_id,
+                        "kind": args.kind,
+                        "status": args.status.upper(),
+                        "url": args.url,
+                        "candidate_sha": args.candidate_sha,
+                        "candidate_match": args.candidate_sha == current_candidate,
+                        "notes": args.notes,
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+            store.close()
+            return 0
         print(f"evidence: {evidence_id}")
     else:
         rows = external_evidence_records(store)
@@ -1065,6 +1084,7 @@ def build_parser() -> argparse.ArgumentParser:
     evidence_add.add_argument("url")
     evidence_add.add_argument("--candidate-sha")
     evidence_add.add_argument("--notes", default="")
+    evidence_add.add_argument("--json", action="store_true")
     evidence_add.set_defaults(func=command_evidence)
     evidence_list = evidence_sub.add_parser("list")
     evidence_list.add_argument("--json", action="store_true")

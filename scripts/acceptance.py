@@ -402,6 +402,7 @@ def main() -> int:
         )
         if "evidence:" not in evidence_add:
             raise AssertionError(evidence_add)
+        evidence_id = evidence_add.strip().split()[-1]
         duplicate_evidence_add = run(
             [
                 sys.executable,
@@ -422,6 +423,34 @@ def main() -> int:
         )
         if duplicate_evidence_add != evidence_add:
             raise AssertionError(duplicate_evidence_add)
+        evidence_add_json = run(
+            [
+                sys.executable,
+                "-m",
+                "stagemesh.cli",
+                "--project",
+                str(project),
+                "evidence",
+                "add",
+                "hosted-ci",
+                "PASS",
+                "https://example.invalid/run/acceptance",
+                "--candidate-sha",
+                project_candidate,
+                "--json",
+            ],
+            ROOT,
+            env,
+        )
+        evidence_add_data = json.loads(evidence_add_json)
+        if (
+            evidence_add_data["id"] != evidence_id
+            or evidence_add_data["kind"] != "hosted-ci"
+            or evidence_add_data["status"] != "PASS"
+            or evidence_add_data["candidate_sha"] != project_candidate
+            or evidence_add_data["candidate_match"] is not True
+        ):
+            raise AssertionError(evidence_add_json)
         mismatch_evidence = run(
             [
                 sys.executable,
@@ -442,6 +471,27 @@ def main() -> int:
         )
         if "evidence:" not in mismatch_evidence:
             raise AssertionError(mismatch_evidence)
+        mismatch_evidence_json = run(
+            [
+                sys.executable,
+                "-m",
+                "stagemesh.cli",
+                "--project",
+                str(project),
+                "evidence",
+                "add",
+                "live-provider",
+                "PASS",
+                "https://example.invalid/provider",
+                "--candidate-sha",
+                "def5678",
+                "--json",
+            ],
+            ROOT,
+            env,
+        )
+        if json.loads(mismatch_evidence_json)["candidate_match"] is not False:
+            raise AssertionError(mismatch_evidence_json)
         evidence_list = run(
             [sys.executable, "-m", "stagemesh.cli", "--project", str(project), "evidence", "list"],
             ROOT,
