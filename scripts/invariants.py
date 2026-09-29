@@ -1054,6 +1054,7 @@ def main() -> int:
     def release_artifact_contains_tracked_source_manifest(store: Store, project: Path) -> None:
         artifact = build_release_artifact(ROOT, ROOT / ".stagemesh" / "invariant-release", "0.1.0", "abc12345")
         manifest = json.loads(artifact.manifest.read_text(encoding="utf-8"))
+        checksums = artifact.checksums.read_text(encoding="utf-8").splitlines()
         paths = {entry["path"] for entry in manifest["files"]}
         assert manifest["file_count"] == len(manifest["files"])
         assert "pyproject.toml" in paths
@@ -1067,6 +1068,9 @@ def main() -> int:
         assert "pyproject.toml" in names
         assert "stagemesh-release-manifest.json" in names
         assert not any(name.startswith(".stagemesh/") for name in names)
+        assert len(checksums) == 2
+        assert any(line.endswith(f"  {artifact.archive.name}") for line in checksums)
+        assert any(line.endswith("  stagemesh-release-manifest.json") for line in checksums)
 
     def release_files_reject_symlink_escape(store: Store, project: Path) -> None:
         project.mkdir(parents=True, exist_ok=True)

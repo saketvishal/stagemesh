@@ -1130,7 +1130,12 @@ def main() -> int:
             ROOT,
             env,
         )
-        if "archive:" not in release_output or not (release_dir / "stagemesh-release-manifest.json").exists():
+        if (
+            "archive:" not in release_output
+            or "checksums:" not in release_output
+            or not (release_dir / "stagemesh-release-manifest.json").exists()
+            or not (release_dir / "SHA256SUMS").exists()
+        ):
             raise AssertionError(release_output)
         release_json = run(
             [
@@ -1155,8 +1160,10 @@ def main() -> int:
             or release_json_data["version"] != "0.1.0"
             or release_json_data["file_count"] <= 0
             or release_json_data["archive_size"] <= 0
+            or release_json_data["checksums_size"] <= 0
             or not Path(release_json_data["archive"]).exists()
             or not Path(release_json_data["manifest"]).exists()
+            or not Path(release_json_data["checksums"]).exists()
         ):
             raise AssertionError(release_json)
         invalid_release = subprocess.run(
@@ -1193,6 +1200,9 @@ def main() -> int:
             archive_names = set(archive.namelist())
         if "stagemesh-release-manifest.json" not in archive_names or "pyproject.toml" not in archive_names:
             raise AssertionError(archive_names)
+        checksums = (release_dir / "SHA256SUMS").read_text(encoding="utf-8").splitlines()
+        if len(checksums) != 2 or not any(line.endswith("  stagemesh-release-manifest.json") for line in checksums):
+            raise AssertionError(checksums)
         packet_output = run(
             [
                 sys.executable,

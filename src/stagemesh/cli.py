@@ -380,10 +380,12 @@ def command_release(args: argparse.Namespace) -> int:
                 {
                     "archive": str(artifact.archive),
                     "manifest": str(artifact.manifest),
+                    "checksums": str(artifact.checksums),
                     "version": manifest_data["version"],
                     "candidate_sha": manifest_data["candidate_sha"],
                     "file_count": manifest_data["file_count"],
                     "archive_size": artifact.archive.stat().st_size,
+                    "checksums_size": artifact.checksums.stat().st_size,
                 },
                 indent=2,
                 sort_keys=True,
@@ -392,6 +394,7 @@ def command_release(args: argparse.Namespace) -> int:
         return 0
     print(f"archive: {artifact.archive}")
     print(f"manifest: {artifact.manifest}")
+    print(f"checksums: {artifact.checksums}")
     return 0
 
 

@@ -27,7 +27,7 @@
 - CI wait decision helper and plain/JSON CLI command that release worker capacity while checks are pending.
 - Static HTML dashboard rendering with health metrics, stage/status breakdowns, attention rows, task, worker, source-event, retry, and external-evidence tables plus structured artifact summary output.
 - Persistent review findings and bounded remediation attempts.
-- Release archive and manifest generation for public/demo packaging with structured JSON summary output.
+- Release archive, manifest, and SHA256SUMS generation for public/demo packaging with structured JSON summary output.
 - Contributor demo project scaffold command with local objective, run instructions, and structured artifact summary output.
 - Release manifests include tracked source files, sizes, and SHA-256 hashes while excluding runtime state and symlink escapes.
 - Durable distributed work packets with plain/JSON enqueue, list, poll, lease renewal, stale-claim recovery, acknowledgement, packet export, and ack-envelope import commands.
@@ -87,5 +87,5 @@ Current generated reports show local checks passing while proof remains blocked 
 - Networked/live operator dashboard UI beyond the generated static HTML status dashboard.
 - Live PostgreSQL acceptance against a real service behind the persistence interface.
 - Real CI execution results from GitHub-hosted Windows and Linux runners.
-- Public release artifacts and contributor demo packaging.
+- Public release publishing destination and hosted artifact URLs.
 - Deeper security hardening for sandbox, secrets, git attribution, and multi-project registry operation.
