@@ -55,14 +55,32 @@ def command_init(args: argparse.Namespace) -> int:
     store.migrate()
     if args.task:
         store.upsert_task(args.task)
+    schema_version = store.schema_version()
     store.close()
+    registered = False
     if args.register:
         registry = GlobalRegistry(Path(args.registry).resolve())
         try:
             registry.register(ProjectRegistration(project.name, project, db_path(project)))
+            registered = True
         except RegistryConflictError as exc:
             print(f"registry conflict: {exc}", file=sys.stderr)
             return 2
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "project": str(project),
+                    "runtime": str(runtime_dir(project)),
+                    "db": str(db_path(project)),
+                    "schema_version": schema_version,
+                    "registered": registered,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
     print(f"initialized StageMesh at {runtime_dir(project)}")
     return 0
 
@@ -72,6 +90,26 @@ def command_doctor(args: argparse.Namespace) -> int:
     config = load_config(project)
     store = Store(db_path(project))
     store.migrate()
+    backend = probe_backend(config.database_url, db_path(project))
+    data = {
+        "version": __version__,
+        "executable_path": str(Path(sys.argv[0]).resolve()),
+        "python_interpreter": sys.executable,
+        "imported_package_path": str(Path(__file__).resolve().parent),
+        "project": str(project),
+        "db": str(db_path(project)),
+        "schema_version": store.schema_version(),
+        "config_source": str(config.source),
+        "github_configured": config.github.configured,
+        "backend": backend.name,
+        "backend_available": backend.available,
+        "development_status": "development" if "site-packages" not in __file__ else "installed",
+        "platform": platform.platform(),
+    }
+    if args.json:
+        print(json.dumps(data, indent=2, sort_keys=True))
+        store.close()
+        return 0
     print(f"version: {__version__}")
     print(f"executable path: {Path(sys.argv[0]).resolve()}")
     print(f"python interpreter: {sys.executable}")
@@ -81,7 +119,6 @@ def command_doctor(args: argparse.Namespace) -> int:
     print(f"schema version: {store.schema_version()}")
     print(f"config source: {config.source}")
     print(f"github configured: {config.github.configured}")
-    backend = probe_backend(config.database_url, db_path(project))
     print(f"backend: {backend.name}")
     print(f"backend available: {backend.available}")
     print(f"editable/development status: {'development' if 'site-packages' not in __file__ else 'installed'}")
@@ -870,8 +907,10 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("--task")
     init.add_argument("--register", action="store_true")
     init.add_argument("--registry", default=str(Path.home() / ".stagemesh" / "registry.json"))
+    init.add_argument("--json", action="store_true")
     init.set_defaults(func=command_init)
     doctor = sub.add_parser("doctor")
+    doctor.add_argument("--json", action="store_true")
     doctor.set_defaults(func=command_doctor)
     cont = sub.add_parser("continue")
     cont.add_argument("--once", action="store_true")

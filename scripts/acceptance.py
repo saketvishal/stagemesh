@@ -37,6 +37,16 @@ def main() -> int:
         project.mkdir()
         env = {"PYTHONPATH": str(ROOT / "src")}
         run([sys.executable, "-m", "stagemesh.cli", "--project", str(project), "init"], ROOT, env)
+        init_json = run([sys.executable, "-m", "stagemesh.cli", "--project", str(project), "init", "--json"], ROOT, env)
+        init_data = json.loads(init_json)
+        if (
+            init_data["project"] != str(project.resolve())
+            or init_data["runtime"] != str((project / ".stagemesh").resolve())
+            or init_data["db"] != str((project / ".stagemesh" / "stagemesh.sqlite3").resolve())
+            or init_data["schema_version"] != 2
+            or init_data["registered"] is not False
+        ):
+            raise AssertionError(init_json)
         registry = project / "registry.json"
         run(
             [
@@ -488,6 +498,17 @@ def main() -> int:
         missing = [item for item in required if item not in doctor]
         if missing:
             raise AssertionError(f"doctor missing {missing}")
+        doctor_json = run([sys.executable, "-m", "stagemesh.cli", "--project", str(project), "doctor", "--json"], ROOT, env)
+        doctor_data = json.loads(doctor_json)
+        if (
+            doctor_data["schema_version"] != 2
+            or doctor_data["backend"] != "sqlite"
+            or doctor_data["backend_available"] is not True
+            or doctor_data["github_configured"] is not False
+            or doctor_data["project"] != str(project.resolve())
+            or doctor_data["db"] != str((project / ".stagemesh" / "stagemesh.sqlite3").resolve())
+        ):
+            raise AssertionError(doctor_json)
         config_output = run([sys.executable, "-m", "stagemesh.cli", "--project", str(project), "config"], ROOT, env)
         if (
             "github.configured: False" not in config_output
