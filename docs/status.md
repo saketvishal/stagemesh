@@ -35,14 +35,14 @@
 - Transport-injected GitHub client for live inbound/outbound sync acceptance.
 - Git attribution helper for worker-owned authorship and StageMesh-owned commits.
 - Config loader for project files and environment overrides.
-- Secret redaction helpers for logs/reports.
+- Secret redaction helpers for logs/reports and credentialed database URLs.
 - Live acceptance harness that exercises configured GitHub/providers, reports not configured, and fails malformed provider command definitions with structured JSON.
 - Live acceptance reports unproven sync/execution gates explicitly instead of treating command availability as execution proof.
 - Machine-readable local acceptance report generator with structured proof gaps and proof status, with artifact and direct JSON output.
 - Release packaging is constrained to the project workspace boundary.
 - Idempotent migration runner with schema version reporting and migration audit table.
 - SQLite durability settings enable WAL and busy timeout.
-- Backend probe for sqlite/postgres configuration with explicit PostgreSQL dependency reporting and JSON schema-contract visibility.
+- Backend probe for sqlite/postgres configuration with redacted database URL output, explicit PostgreSQL dependency reporting, and JSON schema-contract visibility.
 - Machine-readable completion audit that refuses to mark external/credentialed requirements complete without evidence, with artifact and direct JSON output.
 - Persisted audit events with redacted JSONL export and JSON inspection for shareable operational evidence.
 - Durable retry/backoff registry for source/provider failures with plain/JSON mutation and inspection.
