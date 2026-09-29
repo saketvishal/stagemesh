@@ -38,7 +38,7 @@
 - Secret redaction helpers for logs/reports.
 - Live acceptance harness that exercises configured GitHub/providers or reports not configured.
 - Live acceptance reports unproven sync/execution gates explicitly instead of treating command availability as execution proof.
-- Machine-readable local acceptance report generator with structured proof gaps and proof status.
+- Machine-readable local acceptance report generator with structured proof gaps and proof status, with artifact and direct JSON output.
 - Release packaging is constrained to the project workspace boundary.
 - Idempotent migration runner with schema version reporting and migration audit table.
 - SQLite durability settings enable WAL and busy timeout.
@@ -54,8 +54,8 @@
 - Release-readiness report aggregates local gates, external evidence records, and explicit evidence gaps with artifact and direct JSON output.
 - External evidence registry idempotently records hosted CI, live provider, live GitHub, and database acceptance links against candidate SHAs, with structured candidate-match listing.
 - Passing external evidence must name a candidate SHA and only counts for the matching candidate.
-- Acceptance matrix artifact maps each major requirement to proven local evidence or an explicit external gap.
-- End-to-end acceptance artifact maps the requested 18 clean-environment acceptance steps to local proof evidence.
+- Acceptance matrix artifact maps each major requirement to proven local evidence or an explicit external gap, with direct JSON output.
+- End-to-end acceptance artifact maps the requested 18 clean-environment acceptance steps to local proof evidence, with direct JSON output.
 - Completion audit and acceptance matrix consume durable external evidence records when available.
 - Final report summarizes local checks, candidate-scoped evidence, structured proof gaps, completion audit, acceptance matrix, and end-to-end acceptance state.
 - GitHub Actions CI for Windows and Linux.
