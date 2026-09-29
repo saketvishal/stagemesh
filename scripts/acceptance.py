@@ -1196,6 +1196,23 @@ def main() -> int:
         poll_data = json.loads(poll_json)
         if poll_data["packets"][0]["id"] != json_packet_id or poll_data["packets"][0]["stage"] != "REVIEW":
             raise AssertionError(poll_json)
+        work_list = run([sys.executable, "-m", "stagemesh.cli", "--project", str(project), "work", "list"], ROOT, env)
+        if packet_id not in work_list or json_packet_id not in work_list or "CLAIMED" not in work_list:
+            raise AssertionError(work_list)
+        work_list_json = run(
+            [sys.executable, "-m", "stagemesh.cli", "--project", str(project), "work", "list", "--json"],
+            ROOT,
+            env,
+        )
+        work_list_data = json.loads(work_list_json)
+        packet_states = {packet["id"]: packet for packet in work_list_data["packets"]}
+        if (
+            packet_states[packet_id]["status"] != "CLAIMED"
+            or packet_states[packet_id]["worker_id"] != "worker-2"
+            or packet_states[json_packet_id]["stage"] != "REVIEW"
+            or packet_states[json_packet_id]["worker_id"] != "worker-json"
+        ):
+            raise AssertionError(work_list_json)
         invalid_poll = subprocess.run(
             [
                 sys.executable,

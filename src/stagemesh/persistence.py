@@ -695,6 +695,9 @@ class Store:
         self.conn.commit()
         return cursor.rowcount == 1
 
+    def work_packets(self) -> list[sqlite3.Row]:
+        return list(self.conn.execute("SELECT * FROM work_packets ORDER BY created_at, id"))
+
     def add_audit_event(self, event_type: str, payload: dict[str, Any] | None = None) -> str:
         event_type = _validate_text(event_type, "audit event type")
         payload = _validate_payload(payload)

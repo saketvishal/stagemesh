@@ -430,6 +430,37 @@ def command_work(args: argparse.Namespace) -> int:
             return 0
         for packet in packets:
             print(f"{packet.id} {packet.task_id} {packet.stage} {packet.candidate_sha or ''}")
+    elif args.work_command == "list":
+        packets = queue.list()
+        if args.json:
+            print(
+                json.dumps(
+                    {
+                        "packets": [
+                            {
+                                "id": packet.id,
+                                "task_id": packet.task_id,
+                                "stage": packet.stage,
+                                "worker_id": packet.worker_id,
+                                "candidate_sha": packet.candidate_sha,
+                                "status": packet.status,
+                                "payload": packet.payload,
+                                "created_at": packet.created_at,
+                                "updated_at": packet.updated_at,
+                            }
+                            for packet in packets
+                        ],
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+            store.close()
+            return 0
+        if not packets:
+            print("work: EMPTY")
+        for packet in packets:
+            print(f"{packet.id} {packet.task_id} {packet.stage} {packet.status} {packet.worker_id or ''} {packet.candidate_sha or ''}")
     elif args.work_command == "renew":
         renewed = queue.renew(args.packet_id, args.worker_id)
         if args.json:
@@ -1083,6 +1114,9 @@ def build_parser() -> argparse.ArgumentParser:
     poll.add_argument("--lease-seconds", type=float, default=300)
     poll.add_argument("--json", action="store_true")
     poll.set_defaults(func=command_work)
+    work_list = work_sub.add_parser("list")
+    work_list.add_argument("--json", action="store_true")
+    work_list.set_defaults(func=command_work)
     renew = work_sub.add_parser("renew")
     renew.add_argument("packet_id")
     renew.add_argument("worker_id")

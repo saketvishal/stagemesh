@@ -613,11 +613,21 @@ def main() -> int:
         task_id = store.upsert_task("distributed")
         queue = WorkQueue(store)
         packet_id = queue.enqueue(task_id, "IMPLEMENT")
+        queued = queue.list()
+        assert [packet.id for packet in queued] == [packet_id]
+        assert queued[0].status == "QUEUED"
+        assert queued[0].worker_id is None
         first = queue.poll("worker-a")
         second = queue.poll("worker-b")
         assert [packet.id for packet in first] == [packet_id]
         assert second == []
+        claimed = queue.list()
+        assert claimed[0].status == "CLAIMED"
+        assert claimed[0].worker_id == "worker-a"
         queue.ack(packet_id, "SUCCEEDED", {"candidate_sha": "abc"})
+        done = queue.list()
+        assert done[0].status == "SUCCEEDED"
+        assert done[0].payload == {"candidate_sha": "abc"}
 
     def distributed_work_ack_requires_claimed_terminal_status(store: Store, project: Path) -> None:
         task_id = store.upsert_task("distributed ack")
