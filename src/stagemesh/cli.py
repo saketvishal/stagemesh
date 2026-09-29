@@ -474,6 +474,23 @@ def command_provider_acceptance(args: argparse.Namespace) -> int:
     store = Store(db_path(project))
     store.migrate()
     result = run_provider_acceptance(store, project)
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "status": result.status,
+                    "chosen_provider": result.chosen_provider,
+                    "execution_status": str(result.execution_status),
+                    "capacity_failure_isolated": result.capacity_failure_isolated,
+                    "single_agent_provider": result.single_agent_provider,
+                    "review_provider": result.review_provider,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        store.close()
+        return 0 if result.status == "PASS" else 1
     print(f"status: {result.status}")
     print(f"chosen_provider: {result.chosen_provider}")
     print(f"execution_status: {result.execution_status}")
@@ -489,6 +506,26 @@ def command_github_acceptance(args: argparse.Namespace) -> int:
     store = Store(db_path(project))
     store.migrate()
     result = run_github_acceptance(store)
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "status": result.status,
+                    "discovered": result.discovered,
+                    "deferred_skipped": result.deferred_skipped,
+                    "outbound_status": result.outbound_status,
+                    "rate_limit_status": result.rate_limit_status,
+                    "detected_repo": {
+                        "owner": result.detected_owner,
+                        "repo": result.detected_repo,
+                    },
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        store.close()
+        return 0 if result.status == "PASS" else 1
     print(f"status: {result.status}")
     print(f"discovered: {result.discovered}")
     print(f"deferred_skipped: {result.deferred_skipped}")
@@ -744,8 +781,10 @@ def build_parser() -> argparse.ArgumentParser:
     backend.add_argument("--json", action="store_true")
     backend.set_defaults(func=command_backend)
     provider_acceptance = sub.add_parser("provider-acceptance")
+    provider_acceptance.add_argument("--json", action="store_true")
     provider_acceptance.set_defaults(func=command_provider_acceptance)
     github_acceptance = sub.add_parser("github-acceptance")
+    github_acceptance.add_argument("--json", action="store_true")
     github_acceptance.set_defaults(func=command_github_acceptance)
     readiness = sub.add_parser("release-readiness")
     readiness.add_argument("--output", default=".stagemesh/release-readiness.json")

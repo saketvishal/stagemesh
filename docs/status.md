@@ -49,8 +49,8 @@
 - CLI-generated dashboard, reports, audits, and acceptance artifacts are constrained to the selected project boundary.
 - Optional psycopg-backed PostgreSQL store facade with explicit backend probe, ping command, schema contract, and migration path.
 - Final report now summarizes machine-readable acceptance and completion-audit artifacts when present.
-- Deterministic provider dry-run acceptance proves capacity-aware failover and failure isolation without external credentials.
-- Deterministic GitHub dry-run acceptance proves discovery, deferred labels, outbound sync, and rate-limit classification without external credentials.
+- Deterministic plain/JSON provider dry-run acceptance proves capacity-aware failover and failure isolation without external credentials.
+- Deterministic plain/JSON GitHub dry-run acceptance proves discovery, deferred labels, outbound sync, and rate-limit classification without external credentials.
 - Release-readiness report aggregates local gates, external evidence records, and explicit evidence gaps.
 - External evidence registry idempotently records hosted CI, live provider, live GitHub, and database acceptance links against candidate SHAs, with structured candidate-match listing.
 - Passing external evidence must name a candidate SHA and only counts for the matching candidate.
