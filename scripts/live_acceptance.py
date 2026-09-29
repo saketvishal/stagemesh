@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import argparse
+import json
 import os
 import sys
 from pathlib import Path
@@ -12,9 +14,9 @@ from stagemesh.github import GitHubClient, UrlLibGitHubTransport
 from stagemesh.providers import adapters_from_config
 
 
-def main() -> int:
+def live_acceptance_checks() -> list[dict[str, str]]:
     config = load_config(ROOT)
-    checks: list[str] = []
+    checks: list[dict[str, str]] = []
     if config.github.configured:
         client = GitHubClient(
             config.github.owner or "",
@@ -22,17 +24,28 @@ def main() -> int:
             UrlLibGitHubTransport(config.github.token),
         )
         result = client.list_open_issues()
-        checks.append(f"github: {result.status}")
+        checks.append({"name": "github", "status": result.status})
         if result.status not in {"OK", "UNKNOWN", "STALE"}:
             raise AssertionError(result)
-        checks.append("github:sync: NOT_PROVEN")
+        checks.append({"name": "github:sync", "status": "NOT_PROVEN"})
     else:
-        checks.append("github: NOT_CONFIGURED")
-        checks.append("github:sync: NOT_CONFIGURED")
+        checks.append({"name": "github", "status": "NOT_CONFIGURED"})
+        checks.append({"name": "github:sync", "status": "NOT_CONFIGURED"})
     for adapter in adapters_from_config(config):
-        checks.append(f"provider:{adapter.name}: {adapter.check_capacity()}")
-        checks.append(f"provider:{adapter.name}:execution: NOT_PROVEN")
-    print("\n".join(checks))
+        checks.append({"name": f"provider:{adapter.name}", "status": adapter.check_capacity()})
+        checks.append({"name": f"provider:{adapter.name}:execution", "status": "NOT_PROVEN"})
+    return checks
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args()
+    checks = live_acceptance_checks()
+    if args.json:
+        print(json.dumps({"status": "PASS", "checks": checks}, indent=2, sort_keys=True))
+        return 0
+    print("\n".join(f"{check['name']}: {check['status']}" for check in checks))
     return 0
 
 

@@ -9,7 +9,7 @@
 - Durable candidate and exact-SHA evidence model.
 - Fake and subprocess executors.
 - Provider adapter SDK surface for Codex, Claude, Grok, and additional runtime commands.
-- Configured provider commands are converted into runtime adapters for live acceptance.
+- Configured provider commands are converted into runtime adapters for plain/JSON live acceptance.
 - Capacity registry with primary/secondary failover classification and structured visibility.
 - Configurable provider routing with SINGLE_AGENT and STAGED modes plus per-stage provider routes.
 - Local backlog, configured JSON and Google AX export task-source adapters, and GitHub issue-source models, including zero-config remote detection, deferred, unknown, stale, auth, and rate-limit semantics.
@@ -61,7 +61,7 @@
 - GitHub Actions CI for Windows and Linux.
 - Stdlib invariant and acceptance runners for dependency-free verification.
 - Clean-tree acceptance copies only tracked files, installs StageMesh into an isolated target, and runs CLI smoke checks from the installed package.
-- Local `stagemesh ci` covers compile, invariants, provider acceptance, GitHub acceptance, live acceptance, clean acceptance, and optional full acceptance.
+- Local `stagemesh ci` covers compile, invariants, provider acceptance, GitHub acceptance, structured live acceptance, clean acceptance, and optional full acceptance.
 
 ## Verified Locally
 

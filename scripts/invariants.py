@@ -682,6 +682,19 @@ def main() -> int:
         assert_raises(AcceptanceValidationError, local_acceptance_report, project / "missing", False)
         gaps = proof_gaps([AcceptanceCheck("live", "PASS", "provider:codex:execution: NOT_PROVEN\n")])
         assert gaps == [{"check": "live", "evidence": "provider:codex:execution: NOT_PROVEN"}]
+        structured_gaps = proof_gaps(
+            [
+                AcceptanceCheck(
+                    "live",
+                    "PASS",
+                    '{"status":"PASS","checks":[{"name":"github","status":"NOT_CONFIGURED"},{"name":"provider:codex","status":"AVAILABLE"},{"name":"provider:codex:execution","status":"NOT_PROVEN"}]}',
+                )
+            ]
+        )
+        assert structured_gaps == [
+            {"check": "live", "evidence": "github: NOT_CONFIGURED"},
+            {"check": "live", "evidence": "provider:codex:execution: NOT_PROVEN"},
+        ]
         assert_raises(SecurityBoundaryError, write_acceptance_report, project, project.parent / "acceptance.json", False)
         assert_raises(CIValidationError, run_gate, "", [sys.executable, "--version"], project)
         assert_raises(CIValidationError, run_gate, "python", [], project)

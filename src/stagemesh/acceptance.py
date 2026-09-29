@@ -37,7 +37,7 @@ def local_acceptance_report(root: Path, include_acceptance: bool = True) -> dict
         run_check("invariants", [sys.executable, "scripts/invariants.py"], root),
         run_check("provider_acceptance", [sys.executable, "scripts/provider_acceptance.py"], root),
         run_check("github_acceptance", [sys.executable, "scripts/github_acceptance.py"], root),
-        run_check("live_acceptance", [sys.executable, "scripts/live_acceptance.py"], root),
+        run_check("live_acceptance", [sys.executable, "scripts/live_acceptance.py", "--json"], root),
         run_check("clean_acceptance", [sys.executable, "scripts/clean_acceptance.py"], root),
         run_check("install", [sys.executable, "-m", "pip", "install", ".", "--target", ".tmp-install", "--no-cache-dir", "--upgrade"], root),
     ]
@@ -69,9 +69,31 @@ def write_acceptance_report(root: Path, output: Path, include_acceptance: bool =
 def proof_gaps(checks: list[AcceptanceCheck]) -> list[dict[str, str]]:
     gaps: list[dict[str, str]] = []
     for check in checks:
+        parsed = _structured_proof_gaps(check)
+        if parsed:
+            gaps.extend(parsed)
+            continue
         for line in check.output.splitlines():
             if "NOT_CONFIGURED" in line or "NOT_PROVEN" in line:
                 gaps.append({"check": check.name, "evidence": line.strip()})
+    return gaps
+
+
+def _structured_proof_gaps(check: AcceptanceCheck) -> list[dict[str, str]]:
+    try:
+        data = json.loads(check.output)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(data, dict) or not isinstance(data.get("checks"), list):
+        return []
+    gaps: list[dict[str, str]] = []
+    for item in data["checks"]:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name")
+        status = item.get("status")
+        if isinstance(name, str) and status in {"NOT_CONFIGURED", "NOT_PROVEN"}:
+            gaps.append({"check": check.name, "evidence": f"{name}: {status}"})
     return gaps
 
 
