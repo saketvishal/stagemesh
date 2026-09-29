@@ -44,7 +44,7 @@
 - SQLite durability settings enable WAL and busy timeout.
 - Backend probe for sqlite/postgres configuration with explicit PostgreSQL dependency reporting and JSON schema-contract visibility.
 - Machine-readable completion audit that refuses to mark external/credentialed requirements complete without evidence.
-- Persisted audit events with redacted JSONL export for shareable operational evidence.
+- Persisted audit events with redacted JSONL export and JSON inspection for shareable operational evidence.
 - Durable retry/backoff registry for source/provider failures with plain and JSON CLI inspection.
 - CLI-generated dashboard, reports, audits, and acceptance artifacts are constrained to the selected project boundary.
 - Optional psycopg-backed PostgreSQL store facade with explicit backend probe, ping command, schema contract, and migration path.

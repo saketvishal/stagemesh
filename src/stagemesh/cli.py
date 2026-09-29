@@ -538,6 +538,24 @@ def command_audit(args: argparse.Namespace) -> int:
         output = WorkspaceBoundary(project).require_inside(Path(args.output).resolve())
         export_audit_jsonl(store, output, args.limit, root=project)
         print(f"audit: {output}")
+    elif args.json:
+        print(
+            json.dumps(
+                {
+                    "events": [
+                        {
+                            "id": event["id"],
+                            "event_type": event["event_type"],
+                            "payload": json.loads(event["payload"]),
+                            "created_at": event["created_at"],
+                        }
+                        for event in store.audit_events(args.limit)
+                    ],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
     else:
         for event in store.audit_events(args.limit):
             print(f"{event['id']} {event['event_type']} {event['created_at']}")
@@ -800,6 +818,7 @@ def build_parser() -> argparse.ArgumentParser:
     audit_log = sub.add_parser("audit")
     audit_log.add_argument("--output")
     audit_log.add_argument("--limit", type=int, default=500)
+    audit_log.add_argument("--json", action="store_true")
     audit_log.set_defaults(func=command_audit)
     retries = sub.add_parser("retries")
     retry_sub = retries.add_subparsers(dest="retry_command")
