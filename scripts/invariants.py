@@ -33,7 +33,7 @@ from stagemesh.github import GitHubClient, parse_retry_after
 from stagemesh.git import GitValidationError, GitWorkspace
 from stagemesh.task_sources import GitHubOutboundSync
 from stagemesh.attribution import AttributionValidationError, attribution_for_worker
-from stagemesh.redaction import redact_mapping, redact_text, redact_url_credentials
+from stagemesh.redaction import redact_command_secrets, redact_mapping, redact_text, redact_url_credentials
 from stagemesh.config import ConfigValidationError, load_config
 from stagemesh.release import ReleaseValidationError, build_release_artifact, release_files
 from stagemesh.security import SecurityBoundaryError
@@ -899,6 +899,11 @@ def main() -> int:
             == "postgresql://***REDACTED***@example.invalid:5432/db?sslmode=require"
         )
         assert redact_url_credentials("postgresql://example.invalid/db") == "postgresql://example.invalid/db"
+        assert (
+            redact_command_secrets("runner --api-key abc --token=def --safe ok")
+            == "runner --api-key '***REDACTED***' '--token=***REDACTED***' --safe ok"
+        )
+        assert redact_command_secrets('"runner --token abc') == "***REDACTED***"
 
     def config_loads_from_project_file(store: Store, project: Path) -> None:
         config_dir = project / ".stagemesh"

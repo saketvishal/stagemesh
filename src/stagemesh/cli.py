@@ -34,7 +34,7 @@ from .process_identity import current_process_identity
 from .registry import GlobalRegistry, ProjectRegistration, RegistryConflictError, RegistryValidationError
 from .release import ReleaseValidationError, build_release_artifact
 from .release_readiness import ReleaseReadinessValidationError, release_readiness
-from .redaction import redact_url_credentials
+from .redaction import redact_command_secrets, redact_url_credentials
 from .retry import RetryRegistry, RetryValidationError
 from .security import SecurityBoundaryError, WorkspaceBoundary
 from .task_sources import LocalBacklogSource, TaskSourceValidationError, sync_source, task_sources_from_config
@@ -641,6 +641,9 @@ def command_capacity(args: argparse.Namespace) -> int:
 def command_config(args: argparse.Namespace) -> int:
     config = load_config(Path(args.project).resolve(), Path(args.config).resolve() if args.config else None)
     display_database_url = redact_url_credentials(config.database_url) or "sqlite://default"
+    display_provider_commands = {
+        name: redact_command_secrets(command) for name, command in sorted(config.provider_commands.items())
+    }
     if args.json:
         print(
             json.dumps(
@@ -657,7 +660,7 @@ def command_config(args: argparse.Namespace) -> int:
                         "single_agent_provider": config.single_agent_provider,
                         "stage_routes": dict(sorted(config.stage_routes.items())),
                     },
-                    "providers": dict(sorted(config.provider_commands.items())),
+                    "providers": display_provider_commands,
                     "task_sources": [
                         {"name": source.name, "type": source.kind, "path": str(source.path)}
                         for source in config.task_sources
@@ -677,7 +680,7 @@ def command_config(args: argparse.Namespace) -> int:
     print(f"routing.single_agent_provider: {config.single_agent_provider or ''}")
     for stage, provider in sorted(config.stage_routes.items()):
         print(f"routing.stage.{stage}: {provider}")
-    for name, command in sorted(config.provider_commands.items()):
+    for name, command in display_provider_commands.items():
         print(f"provider.{name}: {command}")
     for source in config.task_sources:
         print(f"task_source.{source.name}: {source.kind} {source.path}")

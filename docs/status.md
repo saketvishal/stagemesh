@@ -35,7 +35,7 @@
 - Transport-injected GitHub client for live inbound/outbound sync acceptance.
 - Git attribution helper for worker-owned authorship and StageMesh-owned commits.
 - Config loader for project files and environment overrides.
-- Secret redaction helpers for logs/reports and credentialed database URLs.
+- Secret redaction helpers for logs/reports, provider command display, and credentialed database URLs.
 - Live acceptance harness that exercises configured GitHub/providers, reports not configured, and fails malformed provider command definitions with structured JSON.
 - Live acceptance reports unproven sync/execution gates explicitly instead of treating command availability as execution proof.
 - Machine-readable local acceptance report generator with structured proof gaps and proof status, with artifact and direct JSON output.
