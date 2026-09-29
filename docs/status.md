@@ -25,7 +25,7 @@
 - Dependency-aware scheduling for planned tasks.
 - PostgreSQL-ready persistence backend interface.
 - CI wait decision helper and plain/JSON CLI command that release worker capacity while checks are pending.
-- Static HTML dashboard rendering with status summary metrics, task, worker, source-event, retry, and external-evidence tables plus structured artifact summary output.
+- Static HTML dashboard rendering with health metrics, stage/status breakdowns, attention rows, task, worker, source-event, retry, and external-evidence tables plus structured artifact summary output.
 - Persistent review findings and bounded remediation attempts.
 - Release archive and manifest generation for public/demo packaging with structured JSON summary output.
 - Contributor demo project scaffold command with local objective, run instructions, and structured artifact summary output.
@@ -84,7 +84,7 @@ Current generated reports show local checks passing while proof remains blocked 
 - Live GitHub API acceptance with credentials, outbound issue synchronization, and permission/auth matrix.
 - Full production provider adapters for Codex, Claude, Grok, and other approved workers.
 - Networked distributed worker transport beyond local durable queue plus file-envelope handoff.
-- Operator dashboard and richer status UI.
+- Networked/live operator dashboard UI beyond the generated static HTML status dashboard.
 - Live PostgreSQL acceptance against a real service behind the persistence interface.
 - Real CI execution results from GitHub-hosted Windows and Linux runners.
 - Public release artifacts and contributor demo packaging.

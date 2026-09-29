@@ -418,15 +418,32 @@ def main() -> int:
         report = operator_report(store)
         assert "retry_states=1" in report.lines
         assert "external_evidence=1" in report.lines
+        assert "blocked_tasks=0" in report.lines
         section_names = {section.name for section in report.sections}
-        assert {"Tasks", "Workers", "Source Events", "Retries", "External Evidence"}.issubset(section_names)
+        assert {
+            "Stage Summary",
+            "Task Status Summary",
+            "Attention",
+            "Tasks",
+            "Workers",
+            "Source Events",
+            "Retries",
+            "External Evidence",
+        }.issubset(section_names)
+        stage_rows = [section.rows for section in report.sections if section.name == "Stage Summary"][0]
+        assert stage_rows == ({"stage": "PLAN", "count": 1},)
         summary = dashboard_summary(store)
         assert summary["tasks"] == "1"
+        assert summary["blocked tasks"] == "0"
         assert summary["workers"] == "1"
         assert summary["external evidence"] == "1"
         dashboard = render_dashboard(store)
         assert "<h2>Status Summary</h2>" in dashboard
         assert "<strong>tasks</strong><span>1</span>" in dashboard
+        assert "<strong>blocked tasks</strong><span>0</span>" in dashboard
+        assert "<h2>Stage Summary</h2>" in dashboard
+        assert "<h2>Task Status Summary</h2>" in dashboard
+        assert "<h2>Attention</h2>" in dashboard
         assert "<h2>Tasks</h2>" in dashboard
         assert "<h2>Retries</h2>" in dashboard
         assert "worker-observe" in dashboard

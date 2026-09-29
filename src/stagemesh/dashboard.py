@@ -45,7 +45,19 @@ def summary_pairs(lines: tuple[str, ...]) -> tuple[tuple[str, str], ...]:
         if "=" not in line:
             continue
         key, value = line.split("=", 1)
-        if key in {"tasks", "running", "done", "backlog", "workers", "recent_source_events", "retry_states", "external_evidence"}:
+        if key in {
+            "tasks",
+            "running",
+            "done",
+            "backlog",
+            "blocked_tasks",
+            "failed_executions",
+            "unknown_executions",
+            "workers",
+            "recent_source_events",
+            "retry_states",
+            "external_evidence",
+        }:
             pairs.append((key.replace("_", " "), value))
     return tuple(pairs)
 

@@ -328,6 +328,7 @@ def command_dashboard(args: argparse.Namespace) -> int:
     html = render_dashboard(store)
     output.write_text(html, encoding="utf-8")
     summary = dashboard_summary(store)
+    sections = ["Status Summary"] + [section.name for section in operator_report(store).sections]
     store.close()
     if args.json:
         print(
@@ -336,7 +337,7 @@ def command_dashboard(args: argparse.Namespace) -> int:
                     "output": str(output),
                     "bytes": output.stat().st_size,
                     "summary": summary,
-                    "sections": ["Status Summary", "Tasks", "Workers", "Source Events", "Retries", "External Evidence"],
+                    "sections": sections,
                 },
                 indent=2,
                 sort_keys=True,
