@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from urllib.parse import urlsplit, urlunsplit
+
 
 SECRET_MARKERS = ("token", "secret", "password", "authorization", "apikey", "api_key")
 
@@ -28,3 +30,20 @@ def redact_text(text: str, secrets: list[str | None]) -> str:
         if secret:
             result = result.replace(secret, "***REDACTED***")
     return result
+
+
+def redact_url_credentials(url: str | None) -> str | None:
+    if not url:
+        return url
+    try:
+        parsed = urlsplit(url)
+    except ValueError:
+        return url
+    if not parsed.username and not parsed.password:
+        return url
+    host = parsed.hostname or ""
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    if parsed.port is not None:
+        host = f"{host}:{parsed.port}"
+    return urlunsplit((parsed.scheme, f"***REDACTED***@{host}", parsed.path, parsed.query, parsed.fragment))

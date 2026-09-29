@@ -34,6 +34,7 @@ from .process_identity import current_process_identity
 from .registry import GlobalRegistry, ProjectRegistration, RegistryConflictError, RegistryValidationError
 from .release import ReleaseValidationError, build_release_artifact
 from .release_readiness import ReleaseReadinessValidationError, release_readiness
+from .redaction import redact_url_credentials
 from .retry import RetryRegistry, RetryValidationError
 from .security import SecurityBoundaryError, WorkspaceBoundary
 from .task_sources import LocalBacklogSource, TaskSourceValidationError, sync_source, task_sources_from_config
@@ -639,6 +640,7 @@ def command_capacity(args: argparse.Namespace) -> int:
 
 def command_config(args: argparse.Namespace) -> int:
     config = load_config(Path(args.project).resolve(), Path(args.config).resolve() if args.config else None)
+    display_database_url = redact_url_credentials(config.database_url) or "sqlite://default"
     if args.json:
         print(
             json.dumps(
@@ -649,7 +651,7 @@ def command_config(args: argparse.Namespace) -> int:
                         "repo": config.github.repo,
                         "configured": config.github.configured,
                     },
-                    "database_url": config.database_url or "sqlite://default",
+                    "database_url": display_database_url,
                     "routing": {
                         "mode": config.routing_mode,
                         "single_agent_provider": config.single_agent_provider,
@@ -670,7 +672,7 @@ def command_config(args: argparse.Namespace) -> int:
     print(f"github.owner: {config.github.owner or ''}")
     print(f"github.repo: {config.github.repo or ''}")
     print(f"github.configured: {config.github.configured}")
-    print(f"database_url: {config.database_url or 'sqlite://default'}")
+    print(f"database_url: {display_database_url}")
     print(f"routing.mode: {config.routing_mode}")
     print(f"routing.single_agent_provider: {config.single_agent_provider or ''}")
     for stage, provider in sorted(config.stage_routes.items()):
@@ -686,6 +688,7 @@ def command_backend(args: argparse.Namespace) -> int:
     config = load_config(Path(args.project).resolve(), Path(args.config).resolve() if args.config else None)
     probe = probe_backend(config.database_url, db_path(Path(args.project).resolve()))
     postgres_contract = postgres_schema_contract()
+    display_database_url = redact_url_credentials(config.database_url) or "sqlite://default"
     ping_result = None
     migration_applied = None
     if args.migrate and probe.name != "postgres":
@@ -711,7 +714,7 @@ def command_backend(args: argparse.Namespace) -> int:
                     "name": probe.name,
                     "available": probe.available,
                     "reason": probe.reason,
-                    "database_url": config.database_url or "sqlite://default",
+                    "database_url": display_database_url,
                     "postgres_schema_contract": {
                         "table_count": len(postgres_contract["tables"]),
                         "tables": list(postgres_contract["tables"]),

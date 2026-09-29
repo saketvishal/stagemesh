@@ -631,6 +631,45 @@ def main() -> int:
             or "token" in config_data["github"]
         ):
             raise AssertionError(config_json)
+        redacted_config = project / "redacted-config.json"
+        redacted_config.write_text(
+            '{"database_url":"postgresql://user:secret@example.invalid:5432/db?sslmode=require"}',
+            encoding="utf-8",
+        )
+        redacted_config_output = run(
+            [
+                sys.executable,
+                "-m",
+                "stagemesh.cli",
+                "--project",
+                str(project),
+                "config",
+                "--config",
+                str(redacted_config),
+            ],
+            ROOT,
+            env,
+        )
+        if "secret" in redacted_config_output or "database_url: postgresql://***REDACTED***@example.invalid:5432/db?sslmode=require" not in redacted_config_output:
+            raise AssertionError(redacted_config_output)
+        redacted_config_json = run(
+            [
+                sys.executable,
+                "-m",
+                "stagemesh.cli",
+                "--project",
+                str(project),
+                "config",
+                "--config",
+                str(redacted_config),
+                "--json",
+            ],
+            ROOT,
+            env,
+        )
+        redacted_config_data = json.loads(redacted_config_json)
+        if redacted_config_data["database_url"] != "postgresql://***REDACTED***@example.invalid:5432/db?sslmode=require":
+            raise AssertionError(redacted_config_json)
         invalid_config = project / "invalid-config.json"
         invalid_config.write_text('{"routing":{"mode":"ROUND_ROBIN"}}', encoding="utf-8")
         invalid_config_result = subprocess.run(
@@ -765,7 +804,7 @@ def main() -> int:
         ):
             raise AssertionError(backend_json)
         postgres_config = project / "postgres-config.json"
-        postgres_config.write_text('{"database_url":"postgresql://example/db"}', encoding="utf-8")
+        postgres_config.write_text('{"database_url":"postgresql://user:secret@example/db"}', encoding="utf-8")
         postgres_backend = run(
             [
                 sys.executable,
@@ -780,7 +819,7 @@ def main() -> int:
             ROOT,
             env,
         )
-        if "name: postgres" not in postgres_backend or "sqlite default available" in postgres_backend:
+        if "name: postgres" not in postgres_backend or "sqlite default available" in postgres_backend or "secret" in postgres_backend:
             raise AssertionError(postgres_backend)
         postgres_backend_json = run(
             [
@@ -800,7 +839,7 @@ def main() -> int:
         postgres_backend_data = json.loads(postgres_backend_json)
         if (
             postgres_backend_data["name"] != "postgres"
-            or postgres_backend_data["database_url"] != "postgresql://example/db"
+            or postgres_backend_data["database_url"] != "postgresql://***REDACTED***@example/db"
             or postgres_backend_data["migration_applied"] is not None
             or postgres_backend_data["postgres_schema_contract"]["table_count"] != 18
         ):

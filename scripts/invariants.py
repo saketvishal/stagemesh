@@ -33,7 +33,7 @@ from stagemesh.github import GitHubClient, parse_retry_after
 from stagemesh.git import GitValidationError, GitWorkspace
 from stagemesh.task_sources import GitHubOutboundSync
 from stagemesh.attribution import AttributionValidationError, attribution_for_worker
-from stagemesh.redaction import redact_mapping, redact_text
+from stagemesh.redaction import redact_mapping, redact_text, redact_url_credentials
 from stagemesh.config import ConfigValidationError, load_config
 from stagemesh.release import ReleaseValidationError, build_release_artifact, release_files
 from stagemesh.security import SecurityBoundaryError
@@ -894,6 +894,11 @@ def main() -> int:
         assert redacted["nested"] == {"password": "***REDACTED***"}
         assert redacted["events"] == [{"authorization": "***REDACTED***"}, {"safe": "ok"}]
         assert redact_text("token abc", ["abc"]) == "token ***REDACTED***"
+        assert (
+            redact_url_credentials("postgresql://user:secret@example.invalid:5432/db?sslmode=require")
+            == "postgresql://***REDACTED***@example.invalid:5432/db?sslmode=require"
+        )
+        assert redact_url_credentials("postgresql://example.invalid/db") == "postgresql://example.invalid/db"
 
     def config_loads_from_project_file(store: Store, project: Path) -> None:
         config_dir = project / ".stagemesh"
@@ -1110,7 +1115,7 @@ def main() -> int:
     def backend_command_can_apply_postgres_migrations(store: Store, project: Path) -> None:
         project.mkdir(parents=True)
         config_file = project / "postgres-config.json"
-        config_file.write_text('{"database_url":"postgresql://example/db"}', encoding="utf-8")
+        config_file.write_text('{"database_url":"postgresql://user:secret@example/db"}', encoding="utf-8")
 
         class FakeCommandPostgresStore:
             instances: list["FakeCommandPostgresStore"] = []
@@ -1150,11 +1155,12 @@ def main() -> int:
 
         data = json.loads(stdout.getvalue())
         assert data["name"] == "postgres"
+        assert data["database_url"] == "postgresql://***REDACTED***@example/db"
         assert data["ping"] is True
         assert data["migration_applied"] is True
         assert data["postgres_schema_contract"]["table_count"] == len(POSTGRES_SCHEMA_TABLES)
         instance = FakeCommandPostgresStore.instances[0]
-        assert instance.dsn == "postgresql://example/db"
+        assert instance.dsn == "postgresql://user:secret@example/db"
         assert instance.migrations == 1
         assert instance.pings == 1
         assert instance.closed is True
