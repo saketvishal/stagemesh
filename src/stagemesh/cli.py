@@ -28,7 +28,7 @@ from .operator import operator_report
 from .objectives import ObjectivePlanner, ObjectiveValidationError
 from .persistence import Store, StoreValidationError
 from .persistence_backends import probe_backend
-from .postgres_store import PostgresStore, postgres_schema_contract
+from .postgres_store import PostgresStore, PostgresUnavailable, postgres_schema_contract
 from .provider_acceptance import run_provider_acceptance
 from .process_identity import current_process_identity
 from .registry import GlobalRegistry, ProjectRegistration, RegistryConflictError, RegistryValidationError
@@ -618,10 +618,21 @@ def command_backend(args: argparse.Namespace) -> int:
     probe = probe_backend(config.database_url, db_path(Path(args.project).resolve()))
     postgres_contract = postgres_schema_contract()
     ping_result = None
-    if args.ping and config.database_url and probe.name == "postgres":
-        store = PostgresStore(config.database_url)
+    migration_applied = None
+    if args.migrate and probe.name != "postgres":
+        migration_applied = False
+    if (args.ping or args.migrate) and config.database_url and probe.name == "postgres":
         try:
-            ping_result = store.ping()
+            store = PostgresStore(config.database_url)
+        except PostgresUnavailable as exc:
+            print(f"backend error: {exc}", file=sys.stderr)
+            return 2
+        try:
+            if args.migrate:
+                store.migrate()
+                migration_applied = True
+            if args.ping:
+                ping_result = store.ping()
         finally:
             store.close()
     if args.json:
@@ -637,6 +648,7 @@ def command_backend(args: argparse.Namespace) -> int:
                         "tables": list(postgres_contract["tables"]),
                     },
                     "ping": ping_result,
+                    "migration_applied": migration_applied,
                 },
                 indent=2,
                 sort_keys=True,
@@ -649,6 +661,8 @@ def command_backend(args: argparse.Namespace) -> int:
     print(f"postgres schema contract: {len(postgres_contract['tables'])} tables")
     if ping_result is not None:
         print(f"ping: {ping_result}")
+    if migration_applied is not None:
+        print(f"migration_applied: {migration_applied}")
     return 0
 
 
@@ -1014,6 +1028,7 @@ def build_parser() -> argparse.ArgumentParser:
     backend = sub.add_parser("backend")
     backend.add_argument("--config")
     backend.add_argument("--ping", action="store_true")
+    backend.add_argument("--migrate", action="store_true")
     backend.add_argument("--json", action="store_true")
     backend.set_defaults(func=command_backend)
     provider_acceptance = sub.add_parser("provider-acceptance")

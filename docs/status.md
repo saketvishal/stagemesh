@@ -47,7 +47,7 @@
 - Persisted audit events with redacted JSONL export and JSON inspection for shareable operational evidence.
 - Durable retry/backoff registry for source/provider failures with plain/JSON mutation and inspection.
 - CLI-generated dashboard, reports, audits, and acceptance artifacts are constrained to the selected project boundary.
-- Optional psycopg-backed PostgreSQL store facade with explicit backend probe, ping command, schema contract, and migration path.
+- Optional psycopg-backed PostgreSQL store facade with explicit backend probe, ping/migrate commands, schema contract, and migration path.
 - Final report now summarizes machine-readable acceptance and completion-audit artifacts when present.
 - Deterministic plain/JSON provider dry-run acceptance proves capacity-aware failover and failure isolation without external credentials.
 - Deterministic plain/JSON GitHub dry-run acceptance proves discovery, deferred labels, outbound sync, and rate-limit classification without external credentials.
