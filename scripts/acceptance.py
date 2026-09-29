@@ -339,6 +339,31 @@ def main() -> int:
         retry_data = json.loads(retry_json)
         if retry_data["retries"][0]["key"] != "github:acceptance" or retry_data["retries"][0]["attempts"] != 1:
             raise AssertionError(retry_json)
+        retry_fail_json = run(
+            [
+                sys.executable,
+                "-m",
+                "stagemesh.cli",
+                "--project",
+                str(project),
+                "retries",
+                "fail",
+                "github:json",
+                "--reason",
+                "secondary-limit",
+                "--json",
+            ],
+            ROOT,
+            env,
+        )
+        retry_fail_data = json.loads(retry_fail_json)
+        if (
+            retry_fail_data["key"] != "github:json"
+            or retry_fail_data["allowed"] is not False
+            or retry_fail_data["attempts"] != 1
+            or retry_fail_data["reason"] != "secondary-limit"
+        ):
+            raise AssertionError(retry_fail_json)
         invalid_retry = subprocess.run(
             [
                 sys.executable,
@@ -374,6 +399,23 @@ def main() -> int:
             ROOT,
             env,
         )
+        retry_success_json = run(
+            [
+                sys.executable,
+                "-m",
+                "stagemesh.cli",
+                "--project",
+                str(project),
+                "retries",
+                "success",
+                "github:json",
+                "--json",
+            ],
+            ROOT,
+            env,
+        )
+        if json.loads(retry_success_json) != {"cleared": True, "key": "github:json"}:
+            raise AssertionError(retry_success_json)
         empty_retry_json = run(
             [sys.executable, "-m", "stagemesh.cli", "--project", str(project), "retries", "list", "--json"],
             ROOT,
