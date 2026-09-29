@@ -928,6 +928,8 @@ def main() -> int:
         if operator_data["summary"] != "ok":
             raise AssertionError(operator_json)
         section_rows = {section["name"]: section["rows"] for section in operator_data["sections"]}
+        if "Stage Summary" not in section_rows or "Task Status Summary" not in section_rows or "Attention" not in section_rows:
+            raise AssertionError(operator_json)
         worker_providers = {row["id"]: row["provider"] for row in section_rows.get("Workers", [])}
         if worker_providers.get("worker-1") != "codex" or worker_providers.get("worker-json") != "claude":
             raise AssertionError(operator_json)
@@ -972,6 +974,10 @@ def main() -> int:
         if (
             "<h2>Status Summary</h2>" not in dashboard_text
             or "<strong>tasks</strong>" not in dashboard_text
+            or "<strong>blocked tasks</strong>" not in dashboard_text
+            or "<h2>Stage Summary</h2>" not in dashboard_text
+            or "<h2>Task Status Summary</h2>" not in dashboard_text
+            or "<h2>Attention</h2>" not in dashboard_text
             or "<h2>Tasks</h2>" not in dashboard_text
             or "<h2>Workers</h2>" not in dashboard_text
             or "worker-1" not in dashboard_text
@@ -997,7 +1003,11 @@ def main() -> int:
             dashboard_json_data["output"] != str(dashboard.resolve())
             or dashboard_json_data["bytes"] <= 0
             or dashboard_json_data["summary"]["workers"] != "2"
+            or dashboard_json_data["summary"]["blocked tasks"] != "0"
             or "Status Summary" not in dashboard_json_data["sections"]
+            or "Stage Summary" not in dashboard_json_data["sections"]
+            or "Task Status Summary" not in dashboard_json_data["sections"]
+            or "Attention" not in dashboard_json_data["sections"]
             or "Tasks" not in dashboard_json_data["sections"]
             or "External Evidence" not in dashboard_json_data["sections"]
         ):

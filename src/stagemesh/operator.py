@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
 from typing import Mapping
 
@@ -28,11 +29,23 @@ def operator_report(store: Store) -> OperatorReport:
     events = store.source_events(limit=10)
     retries = store.retry_states()
     external_evidence = external_evidence_records(store)
+    stage_counts = Counter(str(task["stage"]) for task in tasks)
+    status_counts = Counter(str(task["status"]) for task in tasks)
+    attention_rows = []
+    if h.blocked_task_count:
+        attention_rows.append({"kind": "blocked_tasks", "count": h.blocked_task_count, "status": "ACTION"})
+    if h.failed_execution_count:
+        attention_rows.append({"kind": "failed_executions", "count": h.failed_execution_count, "status": "ACTION"})
+    if h.unknown_execution_count:
+        attention_rows.append({"kind": "unknown_executions", "count": h.unknown_execution_count, "status": "REVIEW"})
     lines = [
         f"tasks={h.task_count}",
         f"running={h.running_count}",
         f"done={h.done_count}",
         f"backlog={h.backlog_state}",
+        f"blocked_tasks={h.blocked_task_count}",
+        f"failed_executions={h.failed_execution_count}",
+        f"unknown_executions={h.unknown_execution_count}",
         f"workers={len(workers)}",
         f"recent_source_events={len(events)}",
         f"retry_states={len(retries)}",
@@ -49,6 +62,15 @@ def operator_report(store: Store) -> OperatorReport:
     for evidence in external_evidence:
         lines.append(f"external_evidence {evidence.kind} {evidence.status} {evidence.candidate_sha or ''}")
     sections = (
+        OperatorSection(
+            "Stage Summary",
+            tuple({"stage": stage, "count": count} for stage, count in sorted(stage_counts.items())),
+        ),
+        OperatorSection(
+            "Task Status Summary",
+            tuple({"status": status, "count": count} for status, count in sorted(status_counts.items())),
+        ),
+        OperatorSection("Attention", tuple(attention_rows)),
         OperatorSection(
             "Tasks",
             tuple(
