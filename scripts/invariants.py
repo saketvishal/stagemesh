@@ -25,6 +25,7 @@ from stagemesh.process_identity import classify_process
 from stagemesh.review import Reviewer
 from stagemesh.task_sources import DiscoveredTask, GitHubApiIssueSource, GitHubIssueSource, GoogleAxTaskSource, LocalBacklogSource, OutboundSync, TaskSourceValidationError, sync_source, task_sources_from_config
 from stagemesh.workers import WorkerValidationError, heartbeat_worker, register_worker
+from stagemesh.work_transport import WorkTransportError, import_ack, read_ack_envelope, write_ack_envelope, write_packet_envelope
 from stagemesh.scheduling import Scheduler
 from stagemesh.remediation import RemediationPolicy, RemediationValidationError, finding_identity
 from stagemesh.distributed import WorkQueue, WorkQueueError
@@ -672,6 +673,30 @@ def main() -> int:
         store.conn.commit()
         reclaimed = queue.poll("worker-b", lease_seconds=1)
         assert [packet.id for packet in reclaimed] == [packet_id]
+
+    def distributed_work_transport_round_trips_ack(store: Store, project: Path) -> None:
+        project.mkdir(parents=True)
+        task_id = store.upsert_task("transported distributed")
+        queue = WorkQueue(store)
+        packet_id = queue.enqueue(task_id, "REVIEW", candidate_sha="abc123")
+        assert [packet.id for packet in queue.poll("worker-a")] == [packet_id]
+        packet_path = project / "packet.json"
+        packet = queue.export(packet_id)
+        packet_envelope = write_packet_envelope(packet, packet_path)
+        assert packet_envelope["kind"] == "stagemesh.work_packet"
+        assert packet_envelope["packet"]["status"] == "CLAIMED"
+        assert json.loads(packet_path.read_text(encoding="utf-8"))["packet"]["candidate_sha"] == "abc123"
+        ack_path = project / "ack.json"
+        write_ack_envelope(packet_id, "succeeded", ack_path, {"review": "passed"})
+        ack = import_ack(queue, ack_path)
+        assert ack.status == "SUCCEEDED"
+        done = queue.export(packet_id)
+        assert done.status == "SUCCEEDED"
+        assert done.payload == {"review": "passed"}
+        invalid = project / "invalid-ack.json"
+        invalid.write_text('{"version":1,"kind":"stagemesh.work_packet"}', encoding="utf-8")
+        assert_raises(WorkTransportError, read_ack_envelope, invalid)
+        assert_raises(WorkQueueError, queue.export, "missing")
 
     def ci_wait_releases_worker_capacity_while_pending(store: Store, project: Path) -> None:
         pending = decide_ci_wait("pending", elapsed_seconds=30)
@@ -1430,6 +1455,7 @@ def main() -> int:
         distributed_work_ack_requires_claimed_terminal_status,
         distributed_work_rejects_invalid_queue_inputs,
         distributed_work_packets_have_renewable_leases,
+        distributed_work_transport_round_trips_ack,
         ci_wait_releases_worker_capacity_while_pending,
         acceptance_and_ci_gates_validate_inputs,
         capacity_registry_rejects_invalid_provider_state,

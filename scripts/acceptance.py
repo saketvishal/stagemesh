@@ -1311,7 +1311,8 @@ def main() -> int:
         )
         if invalid_ack.returncode != 2 or "work queue error:" not in (invalid_ack.stdout + invalid_ack.stderr):
             raise AssertionError(invalid_ack.stdout + invalid_ack.stderr)
-        run(
+        packet_envelope = project / ".stagemesh" / "packet.json"
+        export_json = run(
             [
                 sys.executable,
                 "-m",
@@ -1319,12 +1320,60 @@ def main() -> int:
                 "--project",
                 str(project),
                 "work",
-                "ack",
+                "export",
                 packet_id,
+                "--output",
+                str(packet_envelope),
+                "--json",
             ],
             ROOT,
             env,
         )
+        export_data = json.loads(export_json)
+        if export_data["packet_id"] != packet_id or not packet_envelope.exists():
+            raise AssertionError(export_json)
+        packet_data = json.loads(packet_envelope.read_text(encoding="utf-8"))
+        if packet_data["kind"] != "stagemesh.work_packet" or packet_data["packet"]["status"] != "CLAIMED":
+            raise AssertionError(packet_data)
+        ack_envelope = project / ".stagemesh" / "ack.json"
+        ack_file_json = run(
+            [
+                sys.executable,
+                "-m",
+                "stagemesh.cli",
+                "--project",
+                str(project),
+                "work",
+                "ack-file",
+                packet_id,
+                "--status",
+                "SUCCEEDED",
+                "--output",
+                str(ack_envelope),
+                "--json",
+            ],
+            ROOT,
+            env,
+        )
+        if json.loads(ack_file_json)["output"] != str(ack_envelope.resolve()):
+            raise AssertionError(ack_file_json)
+        import_ack_json = run(
+            [
+                sys.executable,
+                "-m",
+                "stagemesh.cli",
+                "--project",
+                str(project),
+                "work",
+                "import-ack",
+                str(ack_envelope),
+                "--json",
+            ],
+            ROOT,
+            env,
+        )
+        if json.loads(import_ack_json) != {"packet_id": packet_id, "status": "SUCCEEDED"}:
+            raise AssertionError(import_ack_json)
         ack_json = run(
             [
                 sys.executable,

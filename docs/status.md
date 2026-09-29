@@ -30,7 +30,7 @@
 - Release archive and manifest generation for public/demo packaging with structured JSON summary output.
 - Contributor demo project scaffold command with local objective, run instructions, and structured artifact summary output.
 - Release manifests include tracked source files, sizes, and SHA-256 hashes while excluding runtime state and symlink escapes.
-- Durable distributed work packets with plain/JSON enqueue, list, poll, lease renewal, stale-claim recovery, and acknowledgement commands.
+- Durable distributed work packets with plain/JSON enqueue, list, poll, lease renewal, stale-claim recovery, acknowledgement, packet export, and ack-envelope import commands.
 - Final report generation command with candidate, acceptance, remaining-action inventory, and structured JSON summary output.
 - Transport-injected GitHub client for live inbound/outbound sync acceptance.
 - Git attribution helper for worker-owned authorship and StageMesh-owned commits.
@@ -83,7 +83,7 @@ Current generated reports show local checks passing while proof remains blocked 
 
 - Live GitHub API acceptance with credentials, outbound issue synchronization, and permission/auth matrix.
 - Full production provider adapters for Codex, Claude, Grok, and other approved workers.
-- Distributed worker transport beyond the local durable queue.
+- Networked distributed worker transport beyond local durable queue plus file-envelope handoff.
 - Operator dashboard and richer status UI.
 - Live PostgreSQL acceptance against a real service behind the persistence interface.
 - Real CI execution results from GitHub-hosted Windows and Linux runners.
