@@ -119,7 +119,19 @@ def main() -> int:
             ),
             encoding="utf-8",
         )
-        run([sys.executable, "-m", "stagemesh.cli", "--project", str(project), "plan", str(objective)], ROOT, env)
+        plan_json = run(
+            [sys.executable, "-m", "stagemesh.cli", "--project", str(project), "plan", str(objective), "--json"],
+            ROOT,
+            env,
+        )
+        plan_data = json.loads(plan_json)
+        if (
+            plan_data["objective_id"] != "obj-1"
+            or plan_data["title"] != "synthetic objective"
+            or plan_data["task_count"] != 3
+            or plan_data["backlog"] != str((project / ".stagemesh" / "backlog.json").resolve())
+        ):
+            raise AssertionError(plan_json)
         invalid_objective = project / "invalid-objective.json"
         invalid_objective.write_text(
             json.dumps(
@@ -164,6 +176,13 @@ def main() -> int:
         ):
             raise AssertionError(outside_plan.stdout + outside_plan.stderr)
         backlog = project / ".stagemesh" / "backlog.json"
+        first_continue_json = run(
+            [sys.executable, "-m", "stagemesh.cli", "--project", str(project), "continue", "--once", "--json"],
+            ROOT,
+            env,
+        )
+        if json.loads(first_continue_json)["progressed"] <= 0:
+            raise AssertionError(first_continue_json)
         for _ in range(16):
             run([sys.executable, "-m", "stagemesh.cli", "--project", str(project), "continue", "--once"], ROOT, env)
         status = run([sys.executable, "-m", "stagemesh.cli", "--project", str(project), "status"], ROOT, env)
