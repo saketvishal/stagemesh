@@ -33,7 +33,7 @@ from .provider_acceptance import run_provider_acceptance
 from .process_identity import current_process_identity
 from .registry import GlobalRegistry, ProjectRegistration, RegistryConflictError, RegistryValidationError
 from .release import ReleaseValidationError, build_release_artifact
-from .release_readiness import ReleaseReadinessValidationError, write_release_readiness
+from .release_readiness import ReleaseReadinessValidationError, release_readiness
 from .retry import RetryRegistry, RetryValidationError
 from .security import SecurityBoundaryError, WorkspaceBoundary
 from .task_sources import LocalBacklogSource, TaskSourceValidationError, sync_source, task_sources_from_config
@@ -557,14 +557,18 @@ def command_release_readiness(args: argparse.Namespace) -> int:
     store = Store(db_path(project))
     store.migrate()
     try:
-        write_release_readiness(
+        data = release_readiness(
             project,
-            output,
             include_acceptance=not args.skip_acceptance,
             run_checks=not args.skip_checks,
             store=store,
             candidate_sha=candidate_sha(project),
         )
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+        if args.json:
+            print(json.dumps(data, indent=2, sort_keys=True))
+            return 0
     finally:
         store.close()
     print(f"release-readiness: {output}")
@@ -805,6 +809,7 @@ def build_parser() -> argparse.ArgumentParser:
     readiness.add_argument("--output", default=".stagemesh/release-readiness.json")
     readiness.add_argument("--skip-acceptance", action="store_true")
     readiness.add_argument("--skip-checks", action="store_true")
+    readiness.add_argument("--json", action="store_true")
     readiness.set_defaults(func=command_release_readiness)
     worker = sub.add_parser("worker")
     worker.add_argument("worker_id")
