@@ -1721,6 +1721,7 @@ def main() -> int:
         root_config.write_text('{"providers":{"custom":"python --version"}}', encoding="utf-8")
         try:
             live = run([sys.executable, "scripts/live_acceptance.py"], ROOT, env)
+            live_json = run([sys.executable, "scripts/live_acceptance.py", "--json"], ROOT, env)
         finally:
             if original_root_config is None:
                 root_config.unlink(missing_ok=True)
@@ -1735,6 +1736,17 @@ def main() -> int:
             or "provider:codex:execution: NOT_PROVEN" not in live
         ):
             raise AssertionError(live)
+        live_data = json.loads(live_json)
+        live_checks = {check["name"]: check["status"] for check in live_data["checks"]}
+        if (
+            live_data["status"] != "PASS"
+            or live_checks.get("github") not in {"NOT_CONFIGURED", "OK", "UNKNOWN", "STALE"}
+            or live_checks.get("github:sync") not in {"NOT_CONFIGURED", "NOT_PROVEN"}
+            or live_checks.get("provider:custom") != "AVAILABLE"
+            or live_checks.get("provider:custom:execution") != "NOT_PROVEN"
+            or live_checks.get("provider:codex:execution") != "NOT_PROVEN"
+        ):
+            raise AssertionError(live_json)
         marker.write_text("broken\n", encoding="utf-8")
         try:
             failed = subprocess.run(
