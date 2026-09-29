@@ -150,7 +150,7 @@ def _task_sources(project: Path, value: object) -> tuple[TaskSourceConfig, ...]:
             raise ConfigValidationError("task source name must be a non-empty string")
         if name in seen:
             raise ConfigValidationError(f"duplicate task source name: {name}")
-        if kind != "json":
+        if kind not in {"json", "google-ax"}:
             raise ConfigValidationError(f"unsupported task source type for {name}: {kind}")
         raw_path = _string(item.get("path"))
         if not raw_path:
