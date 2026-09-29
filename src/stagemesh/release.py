@@ -19,6 +19,7 @@ class ReleaseValidationError(ValueError):
 class ReleaseArtifact:
     archive: Path
     manifest: Path
+    checksums: Path
 
 
 def build_release_artifact(root: Path, output_dir: Path, version: str, candidate_sha: str) -> ReleaseArtifact:
@@ -29,6 +30,7 @@ def build_release_artifact(root: Path, output_dir: Path, version: str, candidate
     output_dir.mkdir(parents=True, exist_ok=True)
     manifest = output_dir / "stagemesh-release-manifest.json"
     archive = output_dir / f"stagemesh-{version}-{candidate_sha[:8]}.zip"
+    checksums = output_dir / "SHA256SUMS"
     files = release_files(root)
     file_entries = [
         {
@@ -56,7 +58,17 @@ def build_release_artifact(root: Path, output_dir: Path, version: str, candidate
         for path in files:
             zf.write(path, path.relative_to(root).as_posix())
         zf.write(manifest, manifest.name)
-    return ReleaseArtifact(archive=archive, manifest=manifest)
+    checksums.write_text(
+        "\n".join(
+            [
+                f"{sha256_file(archive)}  {archive.name}",
+                f"{sha256_file(manifest)}  {manifest.name}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return ReleaseArtifact(archive=archive, manifest=manifest, checksums=checksums)
 
 
 def validate_candidate_sha(candidate_sha: str) -> str:
