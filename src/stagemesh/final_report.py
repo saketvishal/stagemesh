@@ -8,6 +8,7 @@ from . import __version__
 from .acceptance_matrix import acceptance_matrix
 from .completion_audit import completion_audit
 from .e2e_acceptance import end_to_end_acceptance
+from .external_evidence import external_evidence_records
 from .persistence import Store
 from .release import validate_candidate_sha, ReleaseValidationError
 
@@ -80,7 +81,7 @@ def render_final_report(root: Path, store: Store | None = None) -> str:
         "- local backlog, configured JSON and Google AX export task-source adapters, and GitHub task-source contracts with deferred, stale, unknown, auth, and rate-limit states",
         "- provider SDK, capacity-aware routing, failover, structured capacity visibility and dry-run acceptance, configurable stage routing, single-agent mode, and staged execution mode",
         "- validated initialization, diagnostics, objective planning, and dependency-aware continue flow with structured visibility, review findings, remediation attempts, and retry/backoff mutation and inspection with structured visibility",
-        "- worker registry and lease-renewable distributed work packets with structured enqueue/list/poll/renew/ack CLI output, structured CI gates and CI-wait capacity release, ambiguity-checked global project registry with structured listing, structured config/status/operator reports with blocked-task and degraded execution health, idempotent structured external evidence add/listing, dashboard status metrics and artifact summaries, demo artifact summaries, audit export/inspection, final-report/release artifact summaries, acceptance reports, acceptance matrix, end-to-end acceptance, and completion-audit/release-readiness reports with artifact/direct JSON evidence summaries and structured live proof gaps",
+        "- worker registry and lease-renewable distributed work packets with structured enqueue/list/poll/renew/ack CLI output, structured CI gates and CI-wait capacity release, ambiguity-checked global project registry with structured listing, structured config/status/operator reports with blocked-task and degraded execution health, idempotent and deduped structured external evidence add/listing, dashboard status metrics and artifact summaries, demo artifact summaries, audit export/inspection, final-report/release artifact summaries, acceptance reports, acceptance matrix, end-to-end acceptance, and completion-audit/release-readiness reports with artifact/direct JSON evidence summaries and structured live proof gaps",
         "- workspace boundaries cover generated outputs, configured sources, demo scaffolds, objective inputs, and release packaging while excluding runtime state and symlink escapes",
         "",
         "## Acceptance Evidence",
@@ -142,7 +143,7 @@ def _acceptance_summary(root: Path) -> str:
 def _external_evidence_count(store: Store | None, candidate: str) -> int:
     if store is None or candidate == "UNKNOWN":
         return 0
-    return sum(1 for row in store.external_evidence() if row["candidate_sha"] == candidate and row["status"] == "PASS")
+    return sum(1 for row in external_evidence_records(store) if row.candidate_sha == candidate and row.status == "PASS")
 
 
 def _completion_summary(root: Path, candidate: str, store: Store | None) -> str:

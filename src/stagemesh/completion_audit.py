@@ -4,6 +4,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+from .external_evidence import external_evidence_records
 from .persistence import Store
 from .release import ReleaseValidationError, validate_candidate_sha
 from .security import WorkspaceBoundary
@@ -79,14 +80,14 @@ def _external_evidence_by_requirement(store: Store | None, candidate_sha: str | 
         return {}
     expected_sha = _validate_optional_sha(candidate_sha)
     evidence: dict[str, str] = {}
-    for row in store.external_evidence():
-        if row["status"] != "PASS":
+    for row in external_evidence_records(store):
+        if row.status != "PASS":
             continue
-        if expected_sha is not None and row["candidate_sha"] != expected_sha:
+        if expected_sha is not None and row.candidate_sha != expected_sha:
             continue
-        requirement = EVIDENCE_REQUIREMENTS.get(row["kind"])
+        requirement = EVIDENCE_REQUIREMENTS.get(row.kind)
         if requirement:
-            evidence[requirement] = f"external evidence {row['id']}: {row['url']}"
+            evidence[requirement] = f"external evidence {row.id}: {row.url}"
     return evidence
 
 
