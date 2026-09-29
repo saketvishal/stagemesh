@@ -725,6 +725,7 @@ def main() -> int:
             backend_data["name"] != "sqlite"
             or backend_data["available"] is not True
             or backend_data["database_url"] != "sqlite://default"
+            or backend_data["migration_applied"] is not None
             or backend_data["postgres_schema_contract"]["table_count"] != 18
             or "tasks" not in backend_data["postgres_schema_contract"]["tables"]
         ):
@@ -766,6 +767,7 @@ def main() -> int:
         if (
             postgres_backend_data["name"] != "postgres"
             or postgres_backend_data["database_url"] != "postgresql://example/db"
+            or postgres_backend_data["migration_applied"] is not None
             or postgres_backend_data["postgres_schema_contract"]["table_count"] != 18
         ):
             raise AssertionError(postgres_backend_json)

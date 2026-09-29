@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import argparse
+import contextlib
+import io
 import json
 import os
 import shutil
@@ -66,6 +69,7 @@ from stagemesh.objectives import ObjectivePlanner, ObjectiveValidationError
 from stagemesh.registry import GlobalRegistry, ProjectRegistration, RegistryConflictError, RegistryValidationError
 from stagemesh.capacity import CapacityKind, CapacityRegistry, CapacityValidationError
 from stagemesh.providers import ProviderValidationError, RuntimeCommandAdapter, adapters_from_config, approved_default_adapters
+import stagemesh.cli as cli_module
 
 
 def assert_raises(exc_type, fn, *args, **kwargs) -> None:
@@ -1004,6 +1008,58 @@ def main() -> int:
         if not postgres_available():
             assert_raises(PostgresUnavailable, PostgresStore, "postgresql://example/db")
 
+    def backend_command_can_apply_postgres_migrations(store: Store, project: Path) -> None:
+        project.mkdir(parents=True)
+        config_file = project / "postgres-config.json"
+        config_file.write_text('{"database_url":"postgresql://example/db"}', encoding="utf-8")
+
+        class FakeCommandPostgresStore:
+            instances: list["FakeCommandPostgresStore"] = []
+
+            def __init__(self, dsn: str) -> None:
+                self.dsn = dsn
+                self.migrations = 0
+                self.pings = 0
+                self.closed = False
+                self.instances.append(self)
+
+            def migrate(self) -> None:
+                self.migrations += 1
+
+            def ping(self) -> bool:
+                self.pings += 1
+                return True
+
+            def close(self) -> None:
+                self.closed = True
+
+        original_store = cli_module.PostgresStore
+        cli_module.PostgresStore = FakeCommandPostgresStore
+        try:
+            stdout = io.StringIO()
+            args = argparse.Namespace(
+                project=str(project),
+                config=str(config_file),
+                ping=True,
+                migrate=True,
+                json=True,
+            )
+            with contextlib.redirect_stdout(stdout):
+                assert cli_module.command_backend(args) == 0
+        finally:
+            cli_module.PostgresStore = original_store
+
+        data = json.loads(stdout.getvalue())
+        assert data["name"] == "postgres"
+        assert data["ping"] is True
+        assert data["migration_applied"] is True
+        assert data["postgres_schema_contract"]["table_count"] == len(POSTGRES_SCHEMA_TABLES)
+        instance = FakeCommandPostgresStore.instances[0]
+        assert instance.dsn == "postgresql://example/db"
+        assert instance.migrations == 1
+        assert instance.pings == 1
+        assert instance.closed is True
+
     def postgres_schema_contract_covers_authoritative_tables(store: Store, project: Path) -> None:
         contract = postgres_schema_contract()
         assert contract["dialect"] == "postgresql"
@@ -1307,6 +1363,7 @@ def main() -> int:
         release_files_reject_symlink_escape,
         migrations_are_idempotent,
         backend_probe_reports_postgres_dependency,
+        backend_command_can_apply_postgres_migrations,
         postgres_schema_contract_covers_authoritative_tables,
         completion_audit_is_not_falsely_complete,
         audit_events_are_redacted_and_exportable,
