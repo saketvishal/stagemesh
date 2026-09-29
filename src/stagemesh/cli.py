@@ -13,7 +13,7 @@ from .audit import AuditValidationError, export_audit_jsonl
 from .capacity import CapacityKind, CapacityRegistry, CapacityValidationError
 from .ci import CIValidationError, broken_future_feature_gate, default_gates
 from .ci_wait import decide_ci_wait
-from .completion_audit import CompletionAuditValidationError, write_completion_audit
+from .completion_audit import CompletionAuditValidationError, completion_audit
 from .config import ConfigValidationError, load_config
 from .dashboard import render_dashboard
 from .coordinator import Coordinator
@@ -580,8 +580,13 @@ def command_completion_audit(args: argparse.Namespace) -> int:
     output = WorkspaceBoundary(project).require_inside(Path(args.output).resolve())
     store = Store(db_path(project))
     store.migrate()
-    write_completion_audit(output, store, root=project, candidate_sha=candidate_sha(project))
+    data = completion_audit(store, candidate_sha(project))
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
     store.close()
+    if args.json:
+        print(json.dumps(data, indent=2, sort_keys=True))
+        return 0
     print(f"completion-audit: {output}")
     return 0
 
@@ -874,6 +879,7 @@ def build_parser() -> argparse.ArgumentParser:
     e2e.set_defaults(func=command_end_to_end_acceptance)
     audit = sub.add_parser("completion-audit")
     audit.add_argument("--output", default=".stagemesh/completion-audit.json")
+    audit.add_argument("--json", action="store_true")
     audit.set_defaults(func=command_completion_audit)
     audit_log = sub.add_parser("audit")
     audit_log.add_argument("--output")

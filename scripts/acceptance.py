@@ -1146,6 +1146,30 @@ def main() -> int:
         )
         if not completion_audit.exists() or "completion-audit:" not in audit_output:
             raise AssertionError(audit_output)
+        completion_json = run(
+            [
+                sys.executable,
+                "-m",
+                "stagemesh.cli",
+                "--project",
+                str(ROOT),
+                "completion-audit",
+                "--output",
+                str(completion_audit),
+                "--json",
+            ],
+            ROOT,
+            env,
+        )
+        completion_json_data = json.loads(completion_json)
+        completion_statuses = {item["requirement"]: item["status"] for item in completion_json_data["items"]}
+        if (
+            completion_json_data["complete"] is not False
+            or completion_statuses.get("Linux acceptance") != "MISSING_EXTERNAL_EVIDENCE"
+            or completion_statuses.get("live GitHub sync") != "REQUIRES_CREDENTIALS"
+            or completion_statuses.get("PostgreSQL storage") != "INTERFACE_READY"
+        ):
+            raise AssertionError(completion_json)
         repo_report = ROOT / ".stagemesh" / "final-report.md"
         repo_report_output = run(
             [sys.executable, "-m", "stagemesh.cli", "--project", str(ROOT), "report", "--output", str(repo_report)],
