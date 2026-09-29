@@ -759,6 +759,29 @@ def main() -> int:
         dashboard_text = dashboard.read_text(encoding="utf-8")
         if "<h2>Tasks</h2>" not in dashboard_text or "<h2>Workers</h2>" not in dashboard_text or "worker-1" not in dashboard_text:
             raise AssertionError(dashboard_text)
+        dashboard_json = run(
+            [
+                sys.executable,
+                "-m",
+                "stagemesh.cli",
+                "--project",
+                str(project),
+                "dashboard",
+                "--output",
+                str(dashboard),
+                "--json",
+            ],
+            ROOT,
+            env,
+        )
+        dashboard_json_data = json.loads(dashboard_json)
+        if (
+            dashboard_json_data["output"] != str(dashboard.resolve())
+            or dashboard_json_data["bytes"] <= 0
+            or "Tasks" not in dashboard_json_data["sections"]
+            or "External Evidence" not in dashboard_json_data["sections"]
+        ):
+            raise AssertionError(dashboard_json)
         demo_project = project / ".stagemesh" / "demo-project"
         demo_output = run(
             [
@@ -777,6 +800,29 @@ def main() -> int:
         demo_objective = demo_project / "objective.json"
         if "demo:" not in demo_output or not demo_objective.exists():
             raise AssertionError(demo_output)
+        demo_project_json = project / ".stagemesh" / "demo-project-json"
+        demo_json = run(
+            [
+                sys.executable,
+                "-m",
+                "stagemesh.cli",
+                "--project",
+                str(project),
+                "demo",
+                "--output",
+                str(demo_project_json),
+                "--json",
+            ],
+            ROOT,
+            env,
+        )
+        demo_json_data = json.loads(demo_json)
+        if (
+            demo_json_data["root"] != str(demo_project_json.resolve())
+            or not Path(demo_json_data["objective"]).exists()
+            or not Path(demo_json_data["readme"]).exists()
+        ):
+            raise AssertionError(demo_json)
         run([sys.executable, "-m", "stagemesh.cli", "--project", str(demo_project), "init"], ROOT, env)
         run([sys.executable, "-m", "stagemesh.cli", "--project", str(demo_project), "plan", str(demo_objective)], ROOT, env)
         for _ in range(10):

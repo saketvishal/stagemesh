@@ -236,8 +236,22 @@ def command_dashboard(args: argparse.Namespace) -> int:
     store.migrate()
     output = WorkspaceBoundary(project).require_inside(Path(args.output).resolve())
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(render_dashboard(store), encoding="utf-8")
+    html = render_dashboard(store)
+    output.write_text(html, encoding="utf-8")
     store.close()
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "output": str(output),
+                    "bytes": output.stat().st_size,
+                    "sections": ["Tasks", "Workers", "Source Events", "Retries", "External Evidence"],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
     print(f"dashboard: {output}")
     return 0
 
@@ -245,6 +259,19 @@ def command_dashboard(args: argparse.Namespace) -> int:
 def command_demo(args: argparse.Namespace) -> int:
     project = Path(args.project).resolve()
     demo = create_demo_project(project, Path(args.output).resolve())
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "root": str(demo.root),
+                    "objective": str(demo.objective),
+                    "readme": str(demo.readme),
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
     print(f"demo: {demo.root}")
     print(f"objective: {demo.objective}")
     print(f"readme: {demo.readme}")
@@ -859,9 +886,11 @@ def build_parser() -> argparse.ArgumentParser:
     operator.set_defaults(func=command_operator)
     dashboard = sub.add_parser("dashboard")
     dashboard.add_argument("--output", default="stagemesh-dashboard.html")
+    dashboard.add_argument("--json", action="store_true")
     dashboard.set_defaults(func=command_dashboard)
     demo = sub.add_parser("demo")
     demo.add_argument("--output", default=".stagemesh/demo-project")
+    demo.add_argument("--json", action="store_true")
     demo.set_defaults(func=command_demo)
     release = sub.add_parser("release")
     release.add_argument("--candidate-sha", required=True)
