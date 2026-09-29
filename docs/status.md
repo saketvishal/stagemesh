@@ -8,7 +8,7 @@
 - One-active-claim enforcement per task.
 - Durable candidate and exact-SHA evidence model.
 - Fake and subprocess executors.
-- Provider adapter SDK surface for Codex, Claude, Grok, and additional runtime commands with durable execution records.
+- Provider adapter SDK surface for Codex, Claude, Grok, and additional runtime commands with bounded command validation and durable execution records.
 - Configured provider commands are converted into runtime adapters for plain/JSON live acceptance.
 - Capacity registry with primary/secondary failover classification and structured visibility.
 - Configurable provider routing with SINGLE_AGENT and STAGED modes plus per-stage provider routes.
@@ -36,7 +36,7 @@
 - Git attribution helper for worker-owned authorship and StageMesh-owned commits.
 - Config loader for project files and environment overrides.
 - Secret redaction helpers for logs/reports.
-- Live acceptance harness that exercises configured GitHub/providers or reports not configured.
+- Live acceptance harness that exercises configured GitHub/providers, reports not configured, and fails malformed provider command definitions with structured JSON.
 - Live acceptance reports unproven sync/execution gates explicitly instead of treating command availability as execution proof.
 - Machine-readable local acceptance report generator with structured proof gaps and proof status, with artifact and direct JSON output.
 - Release packaging is constrained to the project workspace boundary.

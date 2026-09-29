@@ -69,7 +69,7 @@ from stagemesh.e2e_acceptance import EndToEndAcceptanceValidationError, end_to_e
 from stagemesh.objectives import ObjectivePlanner, ObjectiveValidationError
 from stagemesh.registry import GlobalRegistry, ProjectRegistration, RegistryConflictError, RegistryValidationError
 from stagemesh.capacity import CapacityKind, CapacityRegistry, CapacityValidationError
-from stagemesh.providers import ProviderValidationError, RuntimeCommandAdapter, adapters_from_config, approved_default_adapters
+from stagemesh.providers import ProviderValidationError, RuntimeCommandAdapter, adapters_from_commands, adapters_from_config, approved_default_adapters
 import stagemesh.cli as cli_module
 
 
@@ -1289,6 +1289,10 @@ def main() -> int:
         assert_raises(ProviderValidationError, RuntimeCommandAdapter, "codex", ("python", ""), frozenset({"code"}))
         assert_raises(ProviderValidationError, RuntimeCommandAdapter, "codex", ("python",), frozenset())
         assert_raises(ProviderValidationError, RuntimeCommandAdapter, "codex", ("python",), frozenset({""}))
+        assert_raises(ProviderValidationError, RuntimeCommandAdapter, "bad name", ("python",))
+        assert_raises(ProviderValidationError, RuntimeCommandAdapter, "codex", tuple(["python"] * 101))
+        assert_raises(ProviderValidationError, adapters_from_commands, {"bad": '"unterminated'})
+        assert_raises(ProviderValidationError, adapters_from_commands, {"bad": "x" * 2001})
         old = os.environ.get("STAGEMESH_CODEX_CMD")
         os.environ["STAGEMESH_CODEX_CMD"] = '"python" "-m" "stagemesh.cli"'
         try:
