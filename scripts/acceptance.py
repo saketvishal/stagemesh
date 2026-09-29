@@ -222,8 +222,13 @@ def main() -> int:
             encoding="utf-8",
         )
         config_file = project / ".stagemesh" / "config.json"
+        google_ax_tasks = project / "google-ax-tasks.json"
+        google_ax_tasks.write_text(
+            '{"tasks":[{"id":"google-ax-1","title":"google ax exported task"}]}',
+            encoding="utf-8",
+        )
         config_file.write_text(
-            '{"task_sources":[{"name":"linear","type":"json","path":"adapter-tasks.json"}]}',
+            '{"task_sources":[{"name":"linear","type":"json","path":"adapter-tasks.json"},{"name":"google-ax","type":"google-ax","path":"google-ax-tasks.json"}]}',
             encoding="utf-8",
         )
         config_with_source = run([sys.executable, "-m", "stagemesh.cli", "--project", str(project), "config"], ROOT, env)
@@ -236,15 +241,19 @@ def main() -> int:
         )
         config_source_data = json.loads(config_source_json)
         if (
-            config_source_data["task_sources"][0]["name"] != "linear"
+            len(config_source_data["task_sources"]) != 2
+            or config_source_data["task_sources"][0]["name"] != "linear"
             or config_source_data["task_sources"][0]["type"] != "json"
             or not config_source_data["task_sources"][0]["path"].endswith("adapter-tasks.json")
+            or config_source_data["task_sources"][1]["name"] != "google-ax"
+            or config_source_data["task_sources"][1]["type"] != "google-ax"
+            or not config_source_data["task_sources"][1]["path"].endswith("google-ax-tasks.json")
         ):
             raise AssertionError(config_source_json)
         for _ in range(8):
             run([sys.executable, "-m", "stagemesh.cli", "--project", str(project), "continue", "--once"], ROOT, env)
         status = run([sys.executable, "-m", "stagemesh.cli", "--project", str(project), "status"], ROOT, env)
-        if "DONE DONE configured adapter task" not in status:
+        if "DONE DONE configured adapter task" not in status or "DONE DONE google ax exported task" not in status:
             raise AssertionError(status)
         original_backlog = backlog.read_text(encoding="utf-8")
         backlog.write_text('{"tasks":[{"id":"bad","title":"bad","dependencies":["missing"]}]}', encoding="utf-8")
@@ -814,7 +823,7 @@ def main() -> int:
         health = run([sys.executable, "-m", "stagemesh.cli", "--project", str(project), "health"], ROOT, env)
         if (
             "ok: True" not in health
-            or "done: 3" not in health
+            or "done: 4" not in health
             or "blocked_tasks: 0" not in health
             or "failed_executions: 0" not in health
             or "unknown_executions: 0" not in health
@@ -824,7 +833,7 @@ def main() -> int:
         health_data = json.loads(health_json)
         if (
             health_data["ok"] is not True
-            or health_data["done_count"] != 3
+            or health_data["done_count"] != 4
             or health_data["blocked_task_count"] != 0
             or health_data["failed_execution_count"] != 0
             or health_data["unknown_execution_count"] != 0

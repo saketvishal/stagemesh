@@ -99,12 +99,17 @@ class JsonFileTaskSource(LocalBacklogSource):
     """Configurable JSON source using the local backlog task schema."""
 
 
-def task_sources_from_config(config: StageMeshConfig) -> list[JsonFileTaskSource]:
-    sources: list[JsonFileTaskSource] = []
+class GoogleAxTaskSource(LocalBacklogSource):
+    """Google AX export source using the local backlog task schema."""
+
+
+def task_sources_from_config(config: StageMeshConfig) -> list[LocalBacklogSource]:
+    sources: list[LocalBacklogSource] = []
     for source in config.task_sources:
-        if source.kind != "json" or source.path is None:
+        if source.kind not in {"json", "google-ax"} or source.path is None:
             raise TaskSourceValidationError(f"unsupported configured task source: {source.name}")
-        sources.append(JsonFileTaskSource(source.path, source.name))
+        source_class = GoogleAxTaskSource if source.kind == "google-ax" else JsonFileTaskSource
+        sources.append(source_class(source.path, source.name))
     return sources
 
 

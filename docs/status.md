@@ -12,7 +12,7 @@
 - Configured provider commands are converted into runtime adapters for live acceptance.
 - Capacity registry with primary/secondary failover classification and structured visibility.
 - Configurable provider routing with SINGLE_AGENT and STAGED modes plus per-stage provider routes.
-- Local backlog, configured JSON task-source adapters, and GitHub issue-source models, including zero-config remote detection, deferred, unknown, stale, auth, and rate-limit semantics.
+- Local backlog, configured JSON and Google AX export task-source adapters, and GitHub issue-source models, including zero-config remote detection, deferred, unknown, stale, auth, and rate-limit semantics.
 - Structured objective planner validation, including duplicate task and unknown dependency rejection.
 - Built-in validation, independent review, and integration evidence.
 - Recovery behavior that preserves uncertain process identity and does not treat PID alone as proof of liveness or death.

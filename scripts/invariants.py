@@ -20,7 +20,7 @@ from stagemesh.lifecycle import LifecycleError, evidence_allows_advance
 from stagemesh.persistence import Store, StoreValidationError
 from stagemesh.process_identity import classify_process
 from stagemesh.review import Reviewer
-from stagemesh.task_sources import DiscoveredTask, GitHubApiIssueSource, GitHubIssueSource, LocalBacklogSource, OutboundSync, TaskSourceValidationError, sync_source, task_sources_from_config
+from stagemesh.task_sources import DiscoveredTask, GitHubApiIssueSource, GitHubIssueSource, GoogleAxTaskSource, LocalBacklogSource, OutboundSync, TaskSourceValidationError, sync_source, task_sources_from_config
 from stagemesh.workers import WorkerValidationError, heartbeat_worker, register_worker
 from stagemesh.scheduling import Scheduler
 from stagemesh.remediation import RemediationPolicy, RemediationValidationError, finding_identity
@@ -811,6 +811,39 @@ def main() -> int:
         assert config.single_agent_provider == "codex"
         assert config.stage_routes["REVIEW"] == "claude"
 
+    def config_supports_google_ax_export_source(store: Store, project: Path) -> None:
+        project.mkdir(parents=True)
+        (project / "google-ax.json").write_text(
+            json.dumps({"tasks": [{"id": "ax-1", "title": "Google AX exported task"}]}),
+            encoding="utf-8",
+        )
+        config_dir = project / ".stagemesh"
+        config_dir.mkdir(parents=True)
+        (config_dir / "config.json").write_text(
+            json.dumps(
+                {
+                    "task_sources": [
+                        {
+                            "name": "google-ax",
+                            "type": "google-ax",
+                            "path": "google-ax.json",
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        config = load_config(project)
+        sources = task_sources_from_config(config)
+
+        assert len(sources) == 1
+        assert isinstance(sources[0], GoogleAxTaskSource)
+        tasks = sources[0].discover()
+        assert len(tasks) == 1
+        assert tasks[0].source == "google-ax"
+        assert tasks[0].title == "Google AX exported task"
+
     def config_rejects_invalid_routing_and_provider_shapes(store: Store, project: Path) -> None:
         config_dir = project / ".stagemesh"
         config_dir.mkdir(parents=True)
@@ -1263,6 +1296,7 @@ def main() -> int:
         git_workspace_rejects_unsafe_inputs,
         secrets_are_redacted,
         config_loads_from_project_file,
+        config_supports_google_ax_export_source,
         config_rejects_invalid_routing_and_provider_shapes,
         github_remote_detection_supports_zero_config,
         routing_modes_select_expected_provider,
