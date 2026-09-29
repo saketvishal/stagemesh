@@ -11,6 +11,11 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+
+from stagemesh.domain import ExecutionStatus
+from stagemesh.persistence import Store
+from stagemesh.providers import RuntimeCommandAdapter
 
 
 def run(command: list[str], cwd: Path, env: dict[str, str] | None = None) -> str:
@@ -798,6 +803,32 @@ def main() -> int:
             or provider_acceptance_data["review_provider"] != "reviewer"
         ):
             raise AssertionError(provider_acceptance_json)
+        provider_store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+        try:
+            provider_task = provider_store.upsert_task("runtime provider execution")
+            provider_result = RuntimeCommandAdapter("custom", (sys.executable, "--version")).execute(
+                provider_store,
+                provider_task,
+                None,
+                project,
+            )
+            provider_execution = provider_store.conn.execute(
+                "SELECT * FROM executions WHERE task_id=? ORDER BY updated_at DESC LIMIT 1",
+                (provider_task,),
+            ).fetchone()
+            provider_candidate = provider_store.latest_candidate(provider_task)
+        finally:
+            provider_store.close()
+        if (
+            provider_result.status is not ExecutionStatus.SUCCEEDED
+            or provider_result.candidate_sha is None
+            or provider_execution is None
+            or provider_execution["status"] != "SUCCEEDED"
+            or provider_execution["candidate_sha"] != provider_result.candidate_sha
+            or provider_candidate is None
+            or provider_candidate["produced_by"] != "custom"
+        ):
+            raise AssertionError("runtime provider execution was not durable")
         github_acceptance = run(
             [sys.executable, "-m", "stagemesh.cli", "--project", str(project), "github-acceptance"],
             ROOT,

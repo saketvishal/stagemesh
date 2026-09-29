@@ -1238,6 +1238,31 @@ def main() -> int:
         assert adapters["custom"] == ("python", "--version")
         assert adapters["codex"] == ("python", "-m", "stagemesh.cli")
 
+    def runtime_provider_execution_is_durable(store: Store, project: Path) -> None:
+        project.mkdir(parents=True)
+        task_id = store.upsert_task("provider execution")
+        adapter = RuntimeCommandAdapter("custom", (sys.executable, "--version"))
+        result = adapter.execute(store, task_id, None, project)
+        assert result.status is ExecutionStatus.SUCCEEDED
+        assert result.durable_handoff is True
+        assert result.candidate_sha is not None
+        candidate = store.latest_candidate(task_id)
+        assert candidate is not None
+        assert candidate["sha"] == result.candidate_sha
+        assert candidate["produced_by"] == "custom"
+        execution = store.conn.execute("SELECT * FROM executions WHERE task_id=?", (task_id,)).fetchone()
+        assert execution["status"] == ExecutionStatus.SUCCEEDED
+        assert execution["kind"] == ExecutionKind.IMPLEMENTATION
+        assert execution["candidate_sha"] == result.candidate_sha
+        assert execution["pid"] is not None
+        failed_task = store.upsert_task("provider execution fails")
+        failing = RuntimeCommandAdapter("custom", (sys.executable, "-c", "import sys; sys.exit(7)"))
+        failed = failing.execute(store, failed_task, None, project)
+        assert failed.status is ExecutionStatus.FAILED
+        failed_execution = store.conn.execute("SELECT * FROM executions WHERE task_id=?", (failed_task,)).fetchone()
+        assert failed_execution["status"] == ExecutionStatus.FAILED
+        assert failed_execution["candidate_sha"] is None
+
     def github_acceptance_models_sync_contract(store: Store, project: Path) -> None:
         result = run_github_acceptance(store)
         assert result.status == "PASS"
@@ -1425,6 +1450,7 @@ def main() -> int:
         final_report_mentions_missing_evidence,
         provider_acceptance_isolates_capacity_failure,
         runtime_provider_adapter_validates_definition,
+        runtime_provider_execution_is_durable,
         github_acceptance_models_sync_contract,
         release_readiness_reports_external_gaps,
         external_evidence_is_durable,

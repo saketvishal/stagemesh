@@ -10,9 +10,11 @@ from typing import Protocol
 
 from .capacity import CapacityKind, CapacityRegistry
 from .config import StageMeshConfig
-from .domain import ExecutionStatus
+from .domain import ExecutionKind, ExecutionStatus
 from .execution import ExecutionResult
+from .git import GitWorkspace
 from .persistence import Store
+from .process_identity import popen_identity
 
 
 class ProviderValidationError(ValueError):
@@ -50,10 +52,25 @@ class RuntimeCommandAdapter:
     def execute(self, store: Store, task_id: str, claim_id: str | None, project: Path) -> ExecutionResult:
         if self.check_capacity() != CapacityKind.AVAILABLE:
             return ExecutionResult(ExecutionStatus.FAILED, capacity_failure=True)
-        result = subprocess.run(list(self.command), cwd=project, text=True, capture_output=True, check=False)
-        if result.returncode != 0:
+        proc = subprocess.Popen(list(self.command), cwd=project, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        identity = popen_identity(proc)
+        execution_id = store.start_execution(
+            task_id=task_id,
+            claim_id=claim_id,
+            kind=ExecutionKind.IMPLEMENTATION,
+            pid=identity.pid,
+            process_create_time=identity.create_time,
+            boot_id=identity.boot_id,
+            executable=identity.executable,
+        )
+        proc.communicate()
+        if proc.returncode != 0:
+            store.finish_execution(execution_id, ExecutionStatus.FAILED)
             return ExecutionResult(ExecutionStatus.FAILED)
-        return ExecutionResult(ExecutionStatus.SUCCEEDED)
+        sha = GitWorkspace(project).head_or_synthetic()
+        store.add_candidate(task_id, sha, self.name, durable_handoff=True)
+        store.finish_execution(execution_id, ExecutionStatus.SUCCEEDED, sha)
+        return ExecutionResult(ExecutionStatus.SUCCEEDED, sha, durable_handoff=True)
 
 
 def approved_default_adapters() -> list[RuntimeCommandAdapter]:
