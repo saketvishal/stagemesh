@@ -359,7 +359,22 @@ def command_end_to_end_acceptance(args: argparse.Namespace) -> int:
 
 def command_registry(args: argparse.Namespace) -> int:
     registry = GlobalRegistry(Path(args.registry).resolve())
-    for project in registry.load():
+    projects = registry.load()
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "projects": [
+                        {"name": project.name, "path": str(project.path), "db_path": str(project.db_path)}
+                        for project in projects
+                    ],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
+    for project in projects:
         print(f"{project.name} {project.path} {project.db_path}")
     return 0
 
@@ -837,6 +852,7 @@ def build_parser() -> argparse.ArgumentParser:
     ack.set_defaults(func=command_work)
     registry = sub.add_parser("registry")
     registry.add_argument("--registry", default=str(Path.home() / ".stagemesh" / "registry.json"))
+    registry.add_argument("--json", action="store_true")
     registry.set_defaults(func=command_registry)
     report = sub.add_parser("report")
     report.add_argument("--output")

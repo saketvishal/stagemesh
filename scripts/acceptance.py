@@ -75,6 +75,32 @@ def main() -> int:
         )
         if "project" not in registry_output:
             raise AssertionError(registry_output)
+        registry_json_output = run(
+            [
+                sys.executable,
+                "-m",
+                "stagemesh.cli",
+                "--project",
+                str(project),
+                "registry",
+                "--registry",
+                str(registry),
+                "--json",
+            ],
+            ROOT,
+            env,
+        )
+        registry_json_data = json.loads(registry_json_output)
+        if registry_json_data != {
+            "projects": [
+                {
+                    "name": "project",
+                    "path": str(project.resolve()),
+                    "db_path": str(project.resolve() / ".stagemesh" / "stagemesh.sqlite3"),
+                }
+            ]
+        }:
+            raise AssertionError(registry_json_data)
         registry_data = json.loads(registry.read_text(encoding="utf-8"))
         if len(registry_data["projects"]) != 1 or Path(registry_data["projects"][0]["path"]) != project.resolve():
             raise AssertionError(registry_data)
