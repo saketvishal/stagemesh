@@ -8,7 +8,7 @@
 - One-active-claim enforcement per task.
 - Durable candidate and exact-SHA evidence model.
 - Fake and subprocess executors.
-- Provider adapter SDK surface for Codex, Claude, Grok, and additional runtime commands.
+- Provider adapter SDK surface for Codex, Claude, Grok, and additional runtime commands with durable execution records.
 - Configured provider commands are converted into runtime adapters for plain/JSON live acceptance.
 - Capacity registry with primary/secondary failover classification and structured visibility.
 - Configurable provider routing with SINGLE_AGENT and STAGED modes plus per-stage provider routes.
