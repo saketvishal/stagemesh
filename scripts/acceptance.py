@@ -938,7 +938,13 @@ def main() -> int:
         if not dashboard.exists() or "dashboard:" not in dashboard_output:
             raise AssertionError(dashboard_output)
         dashboard_text = dashboard.read_text(encoding="utf-8")
-        if "<h2>Tasks</h2>" not in dashboard_text or "<h2>Workers</h2>" not in dashboard_text or "worker-1" not in dashboard_text:
+        if (
+            "<h2>Status Summary</h2>" not in dashboard_text
+            or "<strong>tasks</strong>" not in dashboard_text
+            or "<h2>Tasks</h2>" not in dashboard_text
+            or "<h2>Workers</h2>" not in dashboard_text
+            or "worker-1" not in dashboard_text
+        ):
             raise AssertionError(dashboard_text)
         dashboard_json = run(
             [
@@ -959,6 +965,8 @@ def main() -> int:
         if (
             dashboard_json_data["output"] != str(dashboard.resolve())
             or dashboard_json_data["bytes"] <= 0
+            or dashboard_json_data["summary"]["workers"] != "2"
+            or "Status Summary" not in dashboard_json_data["sections"]
             or "Tasks" not in dashboard_json_data["sections"]
             or "External Evidence" not in dashboard_json_data["sections"]
         ):

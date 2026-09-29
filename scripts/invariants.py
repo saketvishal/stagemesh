@@ -58,7 +58,7 @@ from stagemesh.acceptance_matrix import AcceptanceMatrixValidationError, accepta
 from stagemesh.routing import Provider, Router, RoutingMode, RoutingValidationError
 from stagemesh.github import parse_github_remote
 from stagemesh.operator import operator_report
-from stagemesh.dashboard import render_dashboard
+from stagemesh.dashboard import dashboard_summary, render_dashboard
 from stagemesh.observability import health
 from stagemesh.demo import DemoValidationError, create_demo_project
 from stagemesh.acceptance import AcceptanceCheck, AcceptanceValidationError, local_acceptance_report, proof_gaps, run_check, write_acceptance_report
@@ -419,7 +419,13 @@ def main() -> int:
         assert "external_evidence=1" in report.lines
         section_names = {section.name for section in report.sections}
         assert {"Tasks", "Workers", "Source Events", "Retries", "External Evidence"}.issubset(section_names)
+        summary = dashboard_summary(store)
+        assert summary["tasks"] == "1"
+        assert summary["workers"] == "1"
+        assert summary["external evidence"] == "1"
         dashboard = render_dashboard(store)
+        assert "<h2>Status Summary</h2>" in dashboard
+        assert "<strong>tasks</strong><span>1</span>" in dashboard
         assert "<h2>Tasks</h2>" in dashboard
         assert "<h2>Retries</h2>" in dashboard
         assert "worker-observe" in dashboard

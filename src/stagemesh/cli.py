@@ -15,7 +15,7 @@ from .ci import CIValidationError, broken_future_feature_gate, default_gates
 from .ci_wait import decide_ci_wait
 from .completion_audit import CompletionAuditValidationError, completion_audit
 from .config import ConfigValidationError, load_config
-from .dashboard import render_dashboard
+from .dashboard import dashboard_summary, render_dashboard
 from .coordinator import Coordinator
 from .demo import DemoValidationError, create_demo_project
 from .distributed import WorkQueue, WorkQueueError
@@ -326,6 +326,7 @@ def command_dashboard(args: argparse.Namespace) -> int:
     output.parent.mkdir(parents=True, exist_ok=True)
     html = render_dashboard(store)
     output.write_text(html, encoding="utf-8")
+    summary = dashboard_summary(store)
     store.close()
     if args.json:
         print(
@@ -333,7 +334,8 @@ def command_dashboard(args: argparse.Namespace) -> int:
                 {
                     "output": str(output),
                     "bytes": output.stat().st_size,
-                    "sections": ["Tasks", "Workers", "Source Events", "Retries", "External Evidence"],
+                    "summary": summary,
+                    "sections": ["Status Summary", "Tasks", "Workers", "Source Events", "Retries", "External Evidence"],
                 },
                 indent=2,
                 sort_keys=True,
