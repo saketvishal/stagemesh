@@ -756,8 +756,34 @@ def main() -> int:
             ROOT,
             env,
         )
+        worker_json = run(
+            [
+                sys.executable,
+                "-m",
+                "stagemesh.cli",
+                "--project",
+                str(project),
+                "worker",
+                "worker-json",
+                "--provider",
+                "claude",
+                "--capability",
+                "review",
+                "--json",
+            ],
+            ROOT,
+            env,
+        )
+        worker_data = json.loads(worker_json)
+        if (
+            worker_data["worker_id"] != "worker-json"
+            or worker_data["provider"] != "claude"
+            or worker_data["capabilities"] != ["review"]
+            or worker_data["lease_seconds"] != 300
+        ):
+            raise AssertionError(worker_json)
         operator = run([sys.executable, "-m", "stagemesh.cli", "--project", str(project), "operator"], ROOT, env)
-        if "workers=1" not in operator or "worker worker-1 provider=codex" not in operator:
+        if "workers=2" not in operator or "worker worker-1 provider=codex" not in operator:
             raise AssertionError(operator)
         operator_json = run(
             [sys.executable, "-m", "stagemesh.cli", "--project", str(project), "operator", "--json"],
@@ -768,7 +794,8 @@ def main() -> int:
         if operator_data["summary"] != "ok":
             raise AssertionError(operator_json)
         section_rows = {section["name"]: section["rows"] for section in operator_data["sections"]}
-        if "Workers" not in section_rows or section_rows["Workers"][0]["provider"] != "codex":
+        worker_providers = {row["id"]: row["provider"] for row in section_rows.get("Workers", [])}
+        if worker_providers.get("worker-1") != "codex" or worker_providers.get("worker-json") != "claude":
             raise AssertionError(operator_json)
         invalid_worker = subprocess.run(
             [

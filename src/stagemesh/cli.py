@@ -271,6 +271,20 @@ def command_worker(args: argparse.Namespace) -> int:
     register_worker(store, args.worker_id, args.provider, capabilities, current_process_identity(), args.lease_seconds)
     heartbeat_worker(store, args.worker_id, args.lease_seconds)
     store.close()
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "worker_id": args.worker_id,
+                    "provider": args.provider,
+                    "capabilities": sorted(capabilities),
+                    "lease_seconds": args.lease_seconds,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
     print(f"worker: {args.worker_id}")
     return 0
 
@@ -959,6 +973,7 @@ def build_parser() -> argparse.ArgumentParser:
     worker.add_argument("--provider", default="local")
     worker.add_argument("--capability", action="append")
     worker.add_argument("--lease-seconds", type=float, default=300)
+    worker.add_argument("--json", action="store_true")
     worker.set_defaults(func=command_worker)
     operator = sub.add_parser("operator")
     operator.add_argument("--json", action="store_true")
