@@ -1573,6 +1573,7 @@ def main() -> int:
         if (
             readiness_json_data["overall_status"] != "BLOCKED_ON_EXTERNAL_EVIDENCE"
             or readiness_json_data["local_status"] != "PASS"
+            or not isinstance(readiness_json_data["local_proof_gaps"], list)
             or not isinstance(readiness_json_data["external_gaps"], list)
             or not isinstance(readiness_json_data["external_evidence"], list)
         ):
