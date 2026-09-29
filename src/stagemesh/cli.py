@@ -106,6 +106,10 @@ def command_continue(args: argparse.Namespace) -> int:
         count += progressed
         if args.once or progressed == 0:
             break
+    if args.json:
+        print(json.dumps({"progressed": count}, indent=2, sort_keys=True))
+        store.close()
+        return 0
     print(f"progressed: {count}")
     store.close()
     return 0
@@ -168,6 +172,20 @@ def command_plan(args: argparse.Namespace) -> int:
     planner.write_backlog(objective, payload, runtime_dir(project) / "backlog.json")
     sync_source(store, LocalBacklogSource(runtime_dir(project) / "backlog.json").discover())
     store.close()
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "objective_id": objective.id,
+                    "title": objective.title,
+                    "task_count": len(objective.tasks),
+                    "backlog": str((runtime_dir(project) / "backlog.json").resolve()),
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
     print(f"planned objective: {objective.id} ({len(objective.tasks)} tasks)")
     return 0
 
@@ -857,12 +875,14 @@ def build_parser() -> argparse.ArgumentParser:
     doctor.set_defaults(func=command_doctor)
     cont = sub.add_parser("continue")
     cont.add_argument("--once", action="store_true")
+    cont.add_argument("--json", action="store_true")
     cont.set_defaults(func=command_continue)
     status = sub.add_parser("status")
     status.add_argument("--json", action="store_true")
     status.set_defaults(func=command_status)
     plan = sub.add_parser("plan")
     plan.add_argument("file")
+    plan.add_argument("--json", action="store_true")
     plan.set_defaults(func=command_plan)
     health_cmd = sub.add_parser("health")
     health_cmd.add_argument("--json", action="store_true")
