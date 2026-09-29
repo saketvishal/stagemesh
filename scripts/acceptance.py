@@ -688,6 +688,17 @@ def main() -> int:
             or "unknown_executions: 0" not in health
         ):
             raise AssertionError(health)
+        health_json = run([sys.executable, "-m", "stagemesh.cli", "--project", str(project), "health", "--json"], ROOT, env)
+        health_data = json.loads(health_json)
+        if (
+            health_data["ok"] is not True
+            or health_data["done_count"] != 3
+            or health_data["blocked_task_count"] != 0
+            or health_data["failed_execution_count"] != 0
+            or health_data["unknown_execution_count"] != 0
+            or health_data["backlog_state"] != "ACTIVE"
+        ):
+            raise AssertionError(health_json)
         run(
             [
                 sys.executable,
