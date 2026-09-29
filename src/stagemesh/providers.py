@@ -91,10 +91,20 @@ def adapters_from_config(config: StageMeshConfig) -> list[RuntimeCommandAdapter]
 
 
 def adapters_from_commands(commands: dict[str, str]) -> list[RuntimeCommandAdapter]:
-    return [
-        RuntimeCommandAdapter(name=name, command=tuple(shlex.split(command)))
-        for name, command in sorted(commands.items())
-    ]
+    if not isinstance(commands, dict):
+        raise ProviderValidationError("provider commands must be an object")
+    adapters: list[RuntimeCommandAdapter] = []
+    for name, command in sorted(commands.items()):
+        if not isinstance(command, str) or not command.strip():
+            raise ProviderValidationError(f"provider command for {name} must be a non-empty string")
+        if len(command) > 2000:
+            raise ProviderValidationError(f"provider command for {name} must be 2000 characters or fewer")
+        try:
+            parts = tuple(shlex.split(command))
+        except ValueError as exc:
+            raise ProviderValidationError(f"provider command for {name} must be valid shell-style syntax") from exc
+        adapters.append(RuntimeCommandAdapter(name=name, command=parts))
+    return adapters
 
 
 def record_provider_capacity(registry: CapacityRegistry, adapters: list[ProviderAdapter]) -> None:
@@ -105,13 +115,23 @@ def record_provider_capacity(registry: CapacityRegistry, adapters: list[Provider
 def _validate_name(name: str) -> str:
     if not isinstance(name, str) or not name.strip():
         raise ProviderValidationError("provider adapter name must be a non-empty string")
-    return name.strip()
+    normalized = name.strip()
+    if len(normalized) > 100:
+        raise ProviderValidationError("provider adapter name must be 100 characters or fewer")
+    if any(char.isspace() for char in normalized):
+        raise ProviderValidationError("provider adapter name must not contain whitespace")
+    return normalized
 
 
 def _validate_command(command: tuple[str, ...]) -> tuple[str, ...]:
     if not command or any(not isinstance(part, str) or not part.strip() for part in command):
         raise ProviderValidationError("provider adapter command must contain non-empty arguments")
-    return tuple(part.strip() for part in command)
+    normalized = tuple(part.strip() for part in command)
+    if len(normalized) > 100:
+        raise ProviderValidationError("provider adapter command must contain 100 arguments or fewer")
+    if any(len(part) > 1000 for part in normalized):
+        raise ProviderValidationError("provider adapter command arguments must be 1000 characters or fewer")
+    return normalized
 
 
 def _validate_capabilities(capabilities: frozenset[str]) -> frozenset[str]:

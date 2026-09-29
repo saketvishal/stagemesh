@@ -1902,6 +1902,27 @@ def main() -> int:
             or live_checks.get("provider:codex:execution") != "NOT_PROVEN"
         ):
             raise AssertionError(live_json)
+        root_config.write_text('{"providers":{"bad":"\\"unterminated"}}', encoding="utf-8")
+        try:
+            invalid_live = subprocess.run(
+                [sys.executable, "scripts/live_acceptance.py", "--json"],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+                env={**os.environ.copy(), **env},
+                check=False,
+            )
+        finally:
+            if original_root_config is None:
+                root_config.unlink(missing_ok=True)
+            else:
+                root_config.write_text(original_root_config, encoding="utf-8")
+        if invalid_live.returncode != 1:
+            raise AssertionError(invalid_live.stdout + invalid_live.stderr)
+        invalid_live_data = json.loads(invalid_live.stdout)
+        invalid_live_checks = {check["name"]: check["status"] for check in invalid_live_data["checks"]}
+        if invalid_live_data["status"] != "FAIL" or invalid_live_checks.get("provider:config") != "INVALID":
+            raise AssertionError(invalid_live.stdout)
         marker.write_text("broken\n", encoding="utf-8")
         try:
             failed = subprocess.run(
