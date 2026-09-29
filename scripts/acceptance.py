@@ -174,6 +174,18 @@ def main() -> int:
         config_with_source = run([sys.executable, "-m", "stagemesh.cli", "--project", str(project), "config"], ROOT, env)
         if "task_source.linear: json" not in config_with_source:
             raise AssertionError(config_with_source)
+        config_source_json = run(
+            [sys.executable, "-m", "stagemesh.cli", "--project", str(project), "config", "--json"],
+            ROOT,
+            env,
+        )
+        config_source_data = json.loads(config_source_json)
+        if (
+            config_source_data["task_sources"][0]["name"] != "linear"
+            or config_source_data["task_sources"][0]["type"] != "json"
+            or not config_source_data["task_sources"][0]["path"].endswith("adapter-tasks.json")
+        ):
+            raise AssertionError(config_source_json)
         for _ in range(8):
             run([sys.executable, "-m", "stagemesh.cli", "--project", str(project), "continue", "--once"], ROOT, env)
         status = run([sys.executable, "-m", "stagemesh.cli", "--project", str(project), "status"], ROOT, env)
@@ -429,6 +441,15 @@ def main() -> int:
             or "routing.mode: STAGED" not in config_output
         ):
             raise AssertionError(config_output)
+        config_json = run([sys.executable, "-m", "stagemesh.cli", "--project", str(project), "config", "--json"], ROOT, env)
+        config_data = json.loads(config_json)
+        if (
+            config_data["github"]["configured"] is not False
+            or config_data["database_url"] != "sqlite://default"
+            or config_data["routing"]["mode"] != "STAGED"
+            or "token" in config_data["github"]
+        ):
+            raise AssertionError(config_json)
         invalid_config = project / "invalid-config.json"
         invalid_config.write_text('{"routing":{"mode":"ROUND_ROBIN"}}', encoding="utf-8")
         invalid_config_result = subprocess.run(

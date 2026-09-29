@@ -353,6 +353,33 @@ def command_capacity(args: argparse.Namespace) -> int:
 
 def command_config(args: argparse.Namespace) -> int:
     config = load_config(Path(args.project).resolve(), Path(args.config).resolve() if args.config else None)
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "source": config.source,
+                    "github": {
+                        "owner": config.github.owner,
+                        "repo": config.github.repo,
+                        "configured": config.github.configured,
+                    },
+                    "database_url": config.database_url or "sqlite://default",
+                    "routing": {
+                        "mode": config.routing_mode,
+                        "single_agent_provider": config.single_agent_provider,
+                        "stage_routes": dict(sorted(config.stage_routes.items())),
+                    },
+                    "providers": dict(sorted(config.provider_commands.items())),
+                    "task_sources": [
+                        {"name": source.name, "type": source.kind, "path": str(source.path)}
+                        for source in config.task_sources
+                    ],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
     print(f"source: {config.source}")
     print(f"github.owner: {config.github.owner or ''}")
     print(f"github.repo: {config.github.repo or ''}")
@@ -621,6 +648,7 @@ def build_parser() -> argparse.ArgumentParser:
     capacity.set_defaults(func=command_capacity)
     config = sub.add_parser("config")
     config.add_argument("--config")
+    config.add_argument("--json", action="store_true")
     config.set_defaults(func=command_config)
     backend = sub.add_parser("backend")
     backend.add_argument("--config")
