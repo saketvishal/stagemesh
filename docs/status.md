@@ -25,7 +25,7 @@
 - Dependency-aware scheduling for planned tasks.
 - PostgreSQL-ready persistence backend interface.
 - CI wait decision helper and plain/JSON CLI command that release worker capacity while checks are pending.
-- Static HTML dashboard rendering with task, worker, source-event, retry, and external-evidence tables plus structured artifact summary output.
+- Static HTML dashboard rendering with status summary metrics, task, worker, source-event, retry, and external-evidence tables plus structured artifact summary output.
 - Persistent review findings and bounded remediation attempts.
 - Release archive and manifest generation for public/demo packaging with structured JSON summary output.
 - Contributor demo project scaffold command with local objective, run instructions, and structured artifact summary output.
