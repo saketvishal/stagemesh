@@ -1191,6 +1191,31 @@ def main() -> int:
         readiness_data = json.loads(readiness_text)
         if "external_evidence" not in readiness_data or not isinstance(readiness_data["external_evidence"], list):
             raise AssertionError(readiness_text)
+        readiness_json = run(
+            [
+                sys.executable,
+                "-m",
+                "stagemesh.cli",
+                "--project",
+                str(ROOT),
+                "release-readiness",
+                "--output",
+                str(readiness),
+                "--skip-acceptance",
+                "--skip-checks",
+                "--json",
+            ],
+            ROOT,
+            env,
+        )
+        readiness_json_data = json.loads(readiness_json)
+        if (
+            readiness_json_data["overall_status"] != "BLOCKED_ON_EXTERNAL_EVIDENCE"
+            or readiness_json_data["local_status"] != "PASS"
+            or not isinstance(readiness_json_data["external_gaps"], list)
+            or not isinstance(readiness_json_data["external_evidence"], list)
+        ):
+            raise AssertionError(readiness_json)
         capacity = run(
             [
                 sys.executable,
