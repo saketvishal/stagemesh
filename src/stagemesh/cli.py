@@ -778,9 +778,29 @@ def command_retries(args: argparse.Namespace) -> int:
     registry = RetryRegistry(store)
     if args.retry_command == "fail":
         decision = registry.record_failure(args.key, args.reason)
+        if args.json:
+            print(
+                json.dumps(
+                    {
+                        "key": decision.key,
+                        "allowed": decision.allowed,
+                        "attempts": decision.attempts,
+                        "next_attempt_at": decision.next_attempt_at,
+                        "reason": decision.reason,
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+            store.close()
+            return 0
         print(f"{decision.key} attempts={decision.attempts} next_attempt_at={decision.next_attempt_at}")
     elif args.retry_command == "success":
         registry.record_success(args.key)
+        if args.json:
+            print(json.dumps({"key": args.key, "cleared": True}, indent=2, sort_keys=True))
+            store.close()
+            return 0
         print(f"{args.key} cleared")
     else:
         rows = store.retry_states()
@@ -1072,9 +1092,11 @@ def build_parser() -> argparse.ArgumentParser:
     retry_fail = retry_sub.add_parser("fail")
     retry_fail.add_argument("key")
     retry_fail.add_argument("--reason", default="failure")
+    retry_fail.add_argument("--json", action="store_true")
     retry_fail.set_defaults(func=command_retries)
     retry_success = retry_sub.add_parser("success")
     retry_success.add_argument("key")
+    retry_success.add_argument("--json", action="store_true")
     retry_success.set_defaults(func=command_retries)
     evidence = sub.add_parser("evidence")
     evidence_sub = evidence.add_subparsers(dest="evidence_command", required=True)

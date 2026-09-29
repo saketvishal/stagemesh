@@ -45,7 +45,7 @@
 - Backend probe for sqlite/postgres configuration with explicit PostgreSQL dependency reporting and JSON schema-contract visibility.
 - Machine-readable completion audit that refuses to mark external/credentialed requirements complete without evidence, with artifact and direct JSON output.
 - Persisted audit events with redacted JSONL export and JSON inspection for shareable operational evidence.
-- Durable retry/backoff registry for source/provider failures with plain and JSON CLI inspection.
+- Durable retry/backoff registry for source/provider failures with plain/JSON mutation and inspection.
 - CLI-generated dashboard, reports, audits, and acceptance artifacts are constrained to the selected project boundary.
 - Optional psycopg-backed PostgreSQL store facade with explicit backend probe, ping command, schema contract, and migration path.
 - Final report now summarizes machine-readable acceptance and completion-audit artifacts when present.
