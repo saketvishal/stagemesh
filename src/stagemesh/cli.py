@@ -266,15 +266,49 @@ def command_work(args: argparse.Namespace) -> int:
     queue = WorkQueue(store)
     if args.work_command == "enqueue":
         packet_id = queue.enqueue(args.task_id, args.stage, args.worker_id, args.candidate_sha)
+        if args.json:
+            print(json.dumps({"packet_id": packet_id}, indent=2, sort_keys=True))
+            store.close()
+            return 0
         print(f"packet: {packet_id}")
     elif args.work_command == "poll":
-        for packet in queue.poll(args.worker_id, args.limit, args.lease_seconds):
+        packets = queue.poll(args.worker_id, args.limit, args.lease_seconds)
+        if args.json:
+            print(
+                json.dumps(
+                    {
+                        "packets": [
+                            {
+                                "id": packet.id,
+                                "task_id": packet.task_id,
+                                "stage": packet.stage,
+                                "candidate_sha": packet.candidate_sha,
+                                "payload": packet.payload,
+                            }
+                            for packet in packets
+                        ],
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+            store.close()
+            return 0
+        for packet in packets:
             print(f"{packet.id} {packet.task_id} {packet.stage} {packet.candidate_sha or ''}")
     elif args.work_command == "renew":
         renewed = queue.renew(args.packet_id, args.worker_id)
+        if args.json:
+            print(json.dumps({"packet_id": args.packet_id, "renewed": renewed}, indent=2, sort_keys=True))
+            store.close()
+            return 0
         print(f"renewed: {renewed}")
     elif args.work_command == "ack":
         queue.ack(args.packet_id, args.status)
+        if args.json:
+            print(json.dumps({"packet_id": args.packet_id, "status": args.status.upper()}, indent=2, sort_keys=True))
+            store.close()
+            return 0
         print(f"ack: {args.packet_id}")
     store.close()
     return 0
@@ -712,19 +746,23 @@ def build_parser() -> argparse.ArgumentParser:
     enqueue.add_argument("--stage", default="IMPLEMENT")
     enqueue.add_argument("--worker-id")
     enqueue.add_argument("--candidate-sha")
+    enqueue.add_argument("--json", action="store_true")
     enqueue.set_defaults(func=command_work)
     poll = work_sub.add_parser("poll")
     poll.add_argument("worker_id")
     poll.add_argument("--limit", type=int, default=1)
     poll.add_argument("--lease-seconds", type=float, default=300)
+    poll.add_argument("--json", action="store_true")
     poll.set_defaults(func=command_work)
     renew = work_sub.add_parser("renew")
     renew.add_argument("packet_id")
     renew.add_argument("worker_id")
+    renew.add_argument("--json", action="store_true")
     renew.set_defaults(func=command_work)
     ack = work_sub.add_parser("ack")
     ack.add_argument("packet_id")
     ack.add_argument("--status", default="SUCCEEDED")
+    ack.add_argument("--json", action="store_true")
     ack.set_defaults(func=command_work)
     registry = sub.add_parser("registry")
     registry.add_argument("--registry", default=str(Path.home() / ".stagemesh" / "registry.json"))

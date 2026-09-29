@@ -815,6 +815,24 @@ def main() -> int:
             env,
         )
         packet_id = packet_output.strip().split()[-1]
+        json_packet_output = run(
+            [
+                sys.executable,
+                "-m",
+                "stagemesh.cli",
+                "--project",
+                str(project),
+                "work",
+                "enqueue",
+                "one",
+                "--stage",
+                "REVIEW",
+                "--json",
+            ],
+            ROOT,
+            env,
+        )
+        json_packet_id = json.loads(json_packet_output)["packet_id"]
         poll_output = run(
             [
                 sys.executable,
@@ -833,6 +851,26 @@ def main() -> int:
         )
         if packet_id not in poll_output:
             raise AssertionError(poll_output)
+        poll_json = run(
+            [
+                sys.executable,
+                "-m",
+                "stagemesh.cli",
+                "--project",
+                str(project),
+                "work",
+                "poll",
+                "worker-json",
+                "--lease-seconds",
+                "60",
+                "--json",
+            ],
+            ROOT,
+            env,
+        )
+        poll_data = json.loads(poll_json)
+        if poll_data["packets"][0]["id"] != json_packet_id or poll_data["packets"][0]["stage"] != "REVIEW":
+            raise AssertionError(poll_json)
         invalid_poll = subprocess.run(
             [
                 sys.executable,
@@ -861,6 +899,24 @@ def main() -> int:
         )
         if "renewed: True" not in renew_output:
             raise AssertionError(renew_output)
+        renew_json = run(
+            [
+                sys.executable,
+                "-m",
+                "stagemesh.cli",
+                "--project",
+                str(project),
+                "work",
+                "renew",
+                json_packet_id,
+                "worker-json",
+                "--json",
+            ],
+            ROOT,
+            env,
+        )
+        if json.loads(renew_json) != {"packet_id": json_packet_id, "renewed": True}:
+            raise AssertionError(renew_json)
         invalid_ack = subprocess.run(
             [
                 sys.executable,
@@ -896,6 +952,23 @@ def main() -> int:
             ROOT,
             env,
         )
+        ack_json = run(
+            [
+                sys.executable,
+                "-m",
+                "stagemesh.cli",
+                "--project",
+                str(project),
+                "work",
+                "ack",
+                json_packet_id,
+                "--json",
+            ],
+            ROOT,
+            env,
+        )
+        if json.loads(ack_json) != {"packet_id": json_packet_id, "status": "SUCCEEDED"}:
+            raise AssertionError(ack_json)
         report = project / ".stagemesh" / "final-report.md"
         report_output = run(
             [sys.executable, "-m", "stagemesh.cli", "--project", str(project), "report", "--output", str(report)],
