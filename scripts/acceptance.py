@@ -827,6 +827,33 @@ def main() -> int:
         )
         if "archive:" not in release_output or not (release_dir / "stagemesh-release-manifest.json").exists():
             raise AssertionError(release_output)
+        release_json = run(
+            [
+                sys.executable,
+                "-m",
+                "stagemesh.cli",
+                "--project",
+                str(ROOT),
+                "release",
+                "--candidate-sha",
+                "abc1234",
+                "--output",
+                str(release_dir),
+                "--json",
+            ],
+            ROOT,
+            env,
+        )
+        release_json_data = json.loads(release_json)
+        if (
+            release_json_data["candidate_sha"] != "abc1234"
+            or release_json_data["version"] != "0.1.0"
+            or release_json_data["file_count"] <= 0
+            or release_json_data["archive_size"] <= 0
+            or not Path(release_json_data["archive"]).exists()
+            or not Path(release_json_data["manifest"]).exists()
+        ):
+            raise AssertionError(release_json)
         invalid_release = subprocess.run(
             [
                 sys.executable,
