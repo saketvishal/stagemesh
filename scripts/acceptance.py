@@ -1243,6 +1243,29 @@ def main() -> int:
         )
         if "should_wait: True" not in ci_wait or "release_worker: True" not in ci_wait:
             raise AssertionError(ci_wait)
+        ci_wait_json = run(
+            [
+                sys.executable,
+                "-m",
+                "stagemesh.cli",
+                "--project",
+                str(ROOT),
+                "ci-wait",
+                "pending",
+                "--elapsed-seconds",
+                "30",
+                "--json",
+            ],
+            ROOT,
+            env,
+        )
+        ci_wait_data = json.loads(ci_wait_json)
+        if (
+            ci_wait_data["should_wait"] is not True
+            or ci_wait_data["release_worker"] is not True
+            or ci_wait_data["reason"] != "ci pending"
+        ):
+            raise AssertionError(ci_wait_json)
         root_config = ROOT / ".stagemesh" / "config.json"
         original_root_config = root_config.read_text(encoding="utf-8") if root_config.exists() else None
         root_config.parent.mkdir(parents=True, exist_ok=True)

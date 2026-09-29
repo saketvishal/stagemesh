@@ -666,6 +666,20 @@ def command_ci(args: argparse.Namespace) -> int:
 
 def command_ci_wait(args: argparse.Namespace) -> int:
     decision = decide_ci_wait(args.status, args.elapsed_seconds, args.max_seconds)
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "should_wait": decision.should_wait,
+                    "release_worker": decision.release_worker,
+                    "poll_after_seconds": decision.poll_after_seconds,
+                    "reason": decision.reason,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
     print(f"should_wait: {decision.should_wait}")
     print(f"release_worker: {decision.release_worker}")
     print(f"poll_after_seconds: {decision.poll_after_seconds}")
@@ -820,6 +834,7 @@ def build_parser() -> argparse.ArgumentParser:
     ci_wait.add_argument("status")
     ci_wait.add_argument("--elapsed-seconds", type=float, default=0)
     ci_wait.add_argument("--max-seconds", type=float, default=1800)
+    ci_wait.add_argument("--json", action="store_true")
     ci_wait.set_defaults(func=command_ci_wait)
     return parser
 
