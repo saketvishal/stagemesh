@@ -177,6 +177,25 @@ def command_health(args: argparse.Namespace) -> int:
     store = Store(db_path(project))
     store.migrate()
     report = health(store)
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "ok": report.ok,
+                    "task_count": report.task_count,
+                    "blocked_task_count": report.blocked_task_count,
+                    "running_count": report.running_count,
+                    "done_count": report.done_count,
+                    "failed_execution_count": report.failed_execution_count,
+                    "unknown_execution_count": report.unknown_execution_count,
+                    "backlog_state": report.backlog_state,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        store.close()
+        return 0
     print(f"ok: {report.ok}")
     print(f"tasks: {report.task_count}")
     print(f"blocked_tasks: {report.blocked_task_count}")
@@ -846,6 +865,7 @@ def build_parser() -> argparse.ArgumentParser:
     plan.add_argument("file")
     plan.set_defaults(func=command_plan)
     health_cmd = sub.add_parser("health")
+    health_cmd.add_argument("--json", action="store_true")
     health_cmd.set_defaults(func=command_health)
     capacity = sub.add_parser("capacity")
     capacity.add_argument("--primary", default="codex")
