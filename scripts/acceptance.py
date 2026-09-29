@@ -614,6 +614,21 @@ def main() -> int:
             or "review_provider: reviewer" not in provider_acceptance
         ):
             raise AssertionError(provider_acceptance)
+        provider_acceptance_json = run(
+            [sys.executable, "-m", "stagemesh.cli", "--project", str(project), "provider-acceptance", "--json"],
+            ROOT,
+            env,
+        )
+        provider_acceptance_data = json.loads(provider_acceptance_json)
+        if (
+            provider_acceptance_data["status"] != "PASS"
+            or provider_acceptance_data["chosen_provider"] != "secondary"
+            or provider_acceptance_data["execution_status"] != "SUCCEEDED"
+            or provider_acceptance_data["capacity_failure_isolated"] is not True
+            or provider_acceptance_data["single_agent_provider"] != "solo"
+            or provider_acceptance_data["review_provider"] != "reviewer"
+        ):
+            raise AssertionError(provider_acceptance_json)
         github_acceptance = run(
             [sys.executable, "-m", "stagemesh.cli", "--project", str(project), "github-acceptance"],
             ROOT,
@@ -625,6 +640,19 @@ def main() -> int:
             or "detected_repo: stage/mesh" not in github_acceptance
         ):
             raise AssertionError(github_acceptance)
+        github_acceptance_json = run(
+            [sys.executable, "-m", "stagemesh.cli", "--project", str(project), "github-acceptance", "--json"],
+            ROOT,
+            env,
+        )
+        github_acceptance_data = json.loads(github_acceptance_json)
+        if (
+            github_acceptance_data["status"] != "PASS"
+            or github_acceptance_data["rate_limit_status"] != "UNKNOWN"
+            or github_acceptance_data["detected_repo"] != {"owner": "stage", "repo": "mesh"}
+            or github_acceptance_data["deferred_skipped"] is not True
+        ):
+            raise AssertionError(github_acceptance_json)
         health = run([sys.executable, "-m", "stagemesh.cli", "--project", str(project), "health"], ROOT, env)
         if (
             "ok: True" not in health
