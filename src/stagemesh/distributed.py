@@ -71,6 +71,23 @@ class WorkQueue:
         if not self.store.ack_work_packet(packet_id, normalized, payload or {}):
             raise WorkQueueError(f"work packet is not claimed or does not exist: {packet_id}")
 
+    def export(self, packet_id: str) -> WorkPacketSnapshot:
+        packet_id = _validate_text(packet_id, "work packet id")
+        row = self.store.work_packet(packet_id)
+        if row is None:
+            raise WorkQueueError(f"work packet does not exist: {packet_id}")
+        return WorkPacketSnapshot(
+            row["id"],
+            row["task_id"],
+            row["stage"],
+            row["worker_id"],
+            row["candidate_sha"],
+            row["status"],
+            json.loads(row["payload"]),
+            row["created_at"],
+            row["updated_at"],
+        )
+
     def list(self) -> list[WorkPacketSnapshot]:
         return [
             WorkPacketSnapshot(

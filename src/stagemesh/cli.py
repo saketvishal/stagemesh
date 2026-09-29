@@ -37,6 +37,7 @@ from .release_readiness import ReleaseReadinessValidationError, release_readines
 from .retry import RetryRegistry, RetryValidationError
 from .security import SecurityBoundaryError, WorkspaceBoundary
 from .task_sources import LocalBacklogSource, TaskSourceValidationError, sync_source, task_sources_from_config
+from .work_transport import WorkTransportError, import_ack, write_ack_envelope, write_packet_envelope
 from .workers import WorkerValidationError, heartbeat_worker, register_worker
 
 
@@ -475,6 +476,37 @@ def command_work(args: argparse.Namespace) -> int:
             store.close()
             return 0
         print(f"ack: {args.packet_id}")
+    elif args.work_command == "export":
+        output = WorkspaceBoundary(project).require_inside(Path(args.output).resolve())
+        packet = queue.export(args.packet_id)
+        write_packet_envelope(packet, output)
+        if args.json:
+            print(json.dumps({"packet_id": args.packet_id, "output": str(output)}, indent=2, sort_keys=True))
+            store.close()
+            return 0
+        print(f"work-packet: {output}")
+    elif args.work_command == "ack-file":
+        output = WorkspaceBoundary(project).require_inside(Path(args.output).resolve())
+        write_ack_envelope(args.packet_id, args.status, output)
+        if args.json:
+            print(
+                json.dumps(
+                    {"packet_id": args.packet_id, "status": args.status.upper(), "output": str(output)},
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+            store.close()
+            return 0
+        print(f"work-ack: {output}")
+    elif args.work_command == "import-ack":
+        ack_path = WorkspaceBoundary(project).require_inside(Path(args.file).resolve())
+        ack = import_ack(queue, ack_path)
+        if args.json:
+            print(json.dumps({"packet_id": ack.packet_id, "status": ack.status}, indent=2, sort_keys=True))
+            store.close()
+            return 0
+        print(f"imported-ack: {ack.packet_id}")
     store.close()
     return 0
 
@@ -1127,6 +1159,21 @@ def build_parser() -> argparse.ArgumentParser:
     ack.add_argument("--status", default="SUCCEEDED")
     ack.add_argument("--json", action="store_true")
     ack.set_defaults(func=command_work)
+    work_export = work_sub.add_parser("export")
+    work_export.add_argument("packet_id")
+    work_export.add_argument("--output", required=True)
+    work_export.add_argument("--json", action="store_true")
+    work_export.set_defaults(func=command_work)
+    ack_file = work_sub.add_parser("ack-file")
+    ack_file.add_argument("packet_id")
+    ack_file.add_argument("--status", default="SUCCEEDED")
+    ack_file.add_argument("--output", required=True)
+    ack_file.add_argument("--json", action="store_true")
+    ack_file.set_defaults(func=command_work)
+    import_ack_cmd = work_sub.add_parser("import-ack")
+    import_ack_cmd.add_argument("file")
+    import_ack_cmd.add_argument("--json", action="store_true")
+    import_ack_cmd.set_defaults(func=command_work)
     registry = sub.add_parser("registry")
     registry.add_argument("--registry", default=str(Path.home() / ".stagemesh" / "registry.json"))
     registry.add_argument("--json", action="store_true")
@@ -1247,6 +1294,9 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     except WorkQueueError as exc:
         print(f"work queue error: {exc}", file=sys.stderr)
+        return 2
+    except WorkTransportError as exc:
+        print(f"work transport error: {exc}", file=sys.stderr)
         return 2
     except ExternalEvidenceValidationError as exc:
         print(f"external evidence error: {exc}", file=sys.stderr)
