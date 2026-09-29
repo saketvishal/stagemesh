@@ -43,7 +43,7 @@
 - Idempotent migration runner with schema version reporting and migration audit table.
 - SQLite durability settings enable WAL and busy timeout.
 - Backend probe for sqlite/postgres configuration with explicit PostgreSQL dependency reporting and JSON schema-contract visibility.
-- Machine-readable completion audit that refuses to mark external/credentialed requirements complete without evidence.
+- Machine-readable completion audit that refuses to mark external/credentialed requirements complete without evidence, with artifact and direct JSON output.
 - Persisted audit events with redacted JSONL export and JSON inspection for shareable operational evidence.
 - Durable retry/backoff registry for source/provider failures with plain and JSON CLI inspection.
 - CLI-generated dashboard, reports, audits, and acceptance artifacts are constrained to the selected project boundary.
