@@ -254,6 +254,23 @@ def command_demo(args: argparse.Namespace) -> int:
 def command_release(args: argparse.Namespace) -> int:
     project = Path(args.project).resolve()
     artifact = build_release_artifact(project, Path(args.output).resolve(), __version__, args.candidate_sha)
+    if args.json:
+        manifest_data = json.loads(artifact.manifest.read_text(encoding="utf-8"))
+        print(
+            json.dumps(
+                {
+                    "archive": str(artifact.archive),
+                    "manifest": str(artifact.manifest),
+                    "version": manifest_data["version"],
+                    "candidate_sha": manifest_data["candidate_sha"],
+                    "file_count": manifest_data["file_count"],
+                    "archive_size": artifact.archive.stat().st_size,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
     print(f"archive: {artifact.archive}")
     print(f"manifest: {artifact.manifest}")
     return 0
@@ -849,6 +866,7 @@ def build_parser() -> argparse.ArgumentParser:
     release = sub.add_parser("release")
     release.add_argument("--candidate-sha", required=True)
     release.add_argument("--output", default="dist")
+    release.add_argument("--json", action="store_true")
     release.set_defaults(func=command_release)
     work = sub.add_parser("work")
     work_sub = work.add_subparsers(dest="work_command", required=True)
