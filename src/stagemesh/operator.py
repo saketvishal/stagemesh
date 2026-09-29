@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Mapping
 
+from .external_evidence import external_evidence_records
 from .observability import health
 from .persistence import Store
 
@@ -26,7 +27,7 @@ def operator_report(store: Store) -> OperatorReport:
     workers = store.workers()
     events = store.source_events(limit=10)
     retries = store.retry_states()
-    external_evidence = store.external_evidence()
+    external_evidence = external_evidence_records(store)
     lines = [
         f"tasks={h.task_count}",
         f"running={h.running_count}",
@@ -46,7 +47,7 @@ def operator_report(store: Store) -> OperatorReport:
     for retry in retries:
         lines.append(f"retry {retry['key']} attempts={retry['attempts']} reason={retry['reason']}")
     for evidence in external_evidence:
-        lines.append(f"external_evidence {evidence['kind']} {evidence['status']} {evidence['candidate_sha'] or ''}")
+        lines.append(f"external_evidence {evidence.kind} {evidence.status} {evidence.candidate_sha or ''}")
     sections = (
         OperatorSection(
             "Tasks",
@@ -101,10 +102,10 @@ def operator_report(store: Store) -> OperatorReport:
             "External Evidence",
             tuple(
                 {
-                    "kind": evidence["kind"],
-                    "status": evidence["status"],
-                    "candidate_sha": evidence["candidate_sha"] or "",
-                    "url": evidence["url"],
+                    "kind": evidence.kind,
+                    "status": evidence.status,
+                    "candidate_sha": evidence.candidate_sha or "",
+                    "url": evidence.url,
                 }
                 for evidence in external_evidence
             ),

@@ -1296,6 +1296,22 @@ def main() -> int:
         assert records[0].kind == "hosted-ci"
         assert records[0].status == "PASS"
         assert records[0].candidate_sha == "abc1234"
+        store.conn.execute(
+            "INSERT INTO external_evidence VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                "legacy-duplicate",
+                "hosted-ci",
+                "PASS",
+                "https://example.invalid/run/1",
+                "abc1234",
+                "synthetic",
+                0.0,
+            ),
+        )
+        store.conn.commit()
+        deduped_records = external_evidence_records(store)
+        assert len(deduped_records) == 1
+        assert deduped_records[0].id == evidence_id
         assert_raises(ExternalEvidenceValidationError, record_external_evidence, store, "unknown", "PASS", "https://example.invalid")
         assert_raises(ExternalEvidenceValidationError, record_external_evidence, store, "hosted-ci", "MAYBE", "https://example.invalid")
         assert_raises(ExternalEvidenceValidationError, record_external_evidence, store, "hosted-ci", "PASS", "https://example.invalid")

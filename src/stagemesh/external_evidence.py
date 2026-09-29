@@ -46,17 +46,24 @@ def record_external_evidence(
 
 
 def external_evidence_records(store: Store) -> list[ExternalEvidenceRecord]:
-    return [
-        ExternalEvidenceRecord(
-            id=row["id"],
-            kind=row["kind"],
-            status=row["status"],
-            url=row["url"],
-            candidate_sha=row["candidate_sha"],
-            notes=row["notes"],
+    records: list[ExternalEvidenceRecord] = []
+    seen: set[tuple[str, str, str, str | None, str]] = set()
+    for row in store.external_evidence():
+        key = (row["kind"], row["status"], row["url"], row["candidate_sha"], row["notes"])
+        if key in seen:
+            continue
+        seen.add(key)
+        records.append(
+            ExternalEvidenceRecord(
+                id=row["id"],
+                kind=row["kind"],
+                status=row["status"],
+                url=row["url"],
+                candidate_sha=row["candidate_sha"],
+                notes=row["notes"],
+            )
         )
-        for row in store.external_evidence()
-    ]
+    return records
 
 
 def _validate_kind(kind: str) -> str:
