@@ -23,6 +23,19 @@ class WorkPacket:
     payload: dict[str, object]
 
 
+@dataclass(frozen=True)
+class WorkPacketSnapshot:
+    id: str
+    task_id: str
+    stage: str
+    worker_id: str | None
+    candidate_sha: str | None
+    status: str
+    payload: dict[str, object]
+    created_at: float
+    updated_at: float
+
+
 class WorkQueue:
     def __init__(self, store: Store):
         self.store = store
@@ -57,6 +70,22 @@ class WorkQueue:
             raise WorkQueueError(f"work packet ack status must be one of: {', '.join(sorted(ACK_STATUSES))}")
         if not self.store.ack_work_packet(packet_id, normalized, payload or {}):
             raise WorkQueueError(f"work packet is not claimed or does not exist: {packet_id}")
+
+    def list(self) -> list[WorkPacketSnapshot]:
+        return [
+            WorkPacketSnapshot(
+                row["id"],
+                row["task_id"],
+                row["stage"],
+                row["worker_id"],
+                row["candidate_sha"],
+                row["status"],
+                json.loads(row["payload"]),
+                row["created_at"],
+                row["updated_at"],
+            )
+            for row in self.store.work_packets()
+        ]
 
 
 def _validate_text(value: str, field: str) -> str:
