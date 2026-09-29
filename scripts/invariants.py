@@ -1232,7 +1232,15 @@ def main() -> int:
         data = release_readiness(ROOT, include_acceptance=False, run_checks=False, store=store)
         assert data["overall_status"] in {"BLOCKED_ON_EXTERNAL_EVIDENCE", "FAIL"}
         assert "external_gaps" in data
+        assert data["local_proof_gaps"] == []
         assert data["external_evidence"] == []
+        live_check = run_command_check(
+            "live_acceptance_json",
+            [sys.executable, "scripts/live_acceptance.py", "--json"],
+            ROOT,
+        )
+        live_gap_data = proof_gaps([AcceptanceCheck(live_check.name, live_check.status, live_check.detail)])
+        assert any(gap["evidence"].endswith("NOT_PROVEN") for gap in live_gap_data)
         record_external_evidence(store, "hosted-ci", "PASS", "https://example.invalid/stale", "abc1234")
         with_evidence = release_readiness(ROOT, include_acceptance=False, run_checks=False, store=store, candidate_sha="def5678")
         evidence = with_evidence["external_evidence"]

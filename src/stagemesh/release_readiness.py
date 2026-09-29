@@ -7,6 +7,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from .acceptance import AcceptanceCheck, proof_gaps
 from .completion_audit import completion_audit
 from .external_evidence import external_evidence_records
 from .persistence import Store
@@ -49,7 +50,7 @@ def release_readiness(
             run_command_check("invariants", [sys.executable, "scripts/invariants.py"], root),
             run_command_check("provider_acceptance", [sys.executable, "scripts/provider_acceptance.py"], root),
             run_command_check("github_acceptance", [sys.executable, "scripts/github_acceptance.py"], root),
-            run_command_check("live_acceptance", [sys.executable, "scripts/live_acceptance.py"], root),
+            run_command_check("live_acceptance", [sys.executable, "scripts/live_acceptance.py", "--json"], root),
             run_command_check(
                 "install",
                 [sys.executable, "-m", "pip", "install", ".", "--target", ".tmp-install", "--no-cache-dir", "--upgrade"],
@@ -65,11 +66,13 @@ def release_readiness(
     ]
     evidence = _evidence_summary(store, candidate_sha)
     local_pass = all(check.status == "PASS" for check in checks) if checks else True
+    local_gaps = proof_gaps([AcceptanceCheck(check.name, check.status, check.detail) for check in checks])
     return {
         "generated_at": time.time(),
         "local_status": "PASS" if local_pass else "FAIL",
         "overall_status": "BLOCKED_ON_EXTERNAL_EVIDENCE" if local_pass and external_gaps else ("PASS" if local_pass else "FAIL"),
         "checks": [check.__dict__ for check in checks],
+        "local_proof_gaps": local_gaps,
         "external_evidence": evidence,
         "external_gaps": external_gaps,
     }
