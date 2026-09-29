@@ -9,11 +9,17 @@ def redact_mapping(data: dict[str, object]) -> dict[str, object]:
     for key, value in data.items():
         if any(marker in key.lower() for marker in SECRET_MARKERS):
             redacted[key] = "***REDACTED***"
-        elif isinstance(value, dict):
-            redacted[key] = redact_mapping(value)
         else:
-            redacted[key] = value
+            redacted[key] = _redact_value(value)
     return redacted
+
+
+def _redact_value(value: object) -> object:
+    if isinstance(value, dict):
+        return redact_mapping(value)
+    if isinstance(value, list):
+        return [_redact_value(item) for item in value]
+    return value
 
 
 def redact_text(text: str, secrets: list[str | None]) -> str:

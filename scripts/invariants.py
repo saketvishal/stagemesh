@@ -824,9 +824,17 @@ def main() -> int:
         assert_raises(GitValidationError, workspace.create_worktree, project.parent / "other", "")
 
     def secrets_are_redacted(store: Store, project: Path) -> None:
-        redacted = redact_mapping({"github_token": "abc", "nested": {"password": "def"}, "safe": "ok"})
+        redacted = redact_mapping(
+            {
+                "github_token": "abc",
+                "nested": {"password": "def"},
+                "events": [{"authorization": "Bearer ghi"}, {"safe": "ok"}],
+                "safe": "ok",
+            }
+        )
         assert redacted["github_token"] == "***REDACTED***"
         assert redacted["nested"] == {"password": "***REDACTED***"}
+        assert redacted["events"] == [{"authorization": "***REDACTED***"}, {"safe": "ok"}]
         assert redact_text("token abc", ["abc"]) == "token ***REDACTED***"
 
     def config_loads_from_project_file(store: Store, project: Path) -> None:
@@ -1125,7 +1133,7 @@ def main() -> int:
         assert_raises(CompletionAuditValidationError, write_completion_audit, Path(""), store)
 
     def audit_events_are_redacted_and_exportable(store: Store, project: Path) -> None:
-        record_audit(store, "secret.test", {"token": "abc", "safe": "ok"})
+        record_audit(store, "secret.test", {"token": "abc", "events": [{"password": "def"}], "safe": "ok"})
         record_audit(store, "secret.second", {"safe": "later"})
         output = project / "audit.jsonl"
         export_audit_jsonl(store, output)
@@ -1133,6 +1141,7 @@ def main() -> int:
         exported = [json.loads(line) for line in text.strip().splitlines()]
         secret = [event for event in exported if event["event_type"] == "secret.test"][0]
         assert secret["payload"]["token"] == "***REDACTED***"
+        assert secret["payload"]["events"] == [{"password": "***REDACTED***"}]
         assert secret["payload"]["safe"] == "ok"
         limited = project / "audit-limited.jsonl"
         export_audit_jsonl(store, limited, limit=1)
