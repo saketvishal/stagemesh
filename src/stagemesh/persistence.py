@@ -18,6 +18,46 @@ class StoreValidationError(ValueError):
     pass
 
 
+class DatabaseBusyError(RuntimeError):
+    """Raised when SQLite write contention persisted through every retry."""
+
+    def __str__(self) -> str:
+        return f"STAGEMESH_SQLITE_BUSY: {self.args[0]}" if self.args else "STAGEMESH_SQLITE_BUSY"
+
+
+def _is_transient_sqlite_lock_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return "database is locked" in message or "database is busy" in message
+
+
+def with_sqlite_retry(
+    fn: Any,
+    *,
+    attempts: int = 5,
+    base_delay: float = 0.05,
+    max_delay: float = 1.0,
+    is_retryable: Any = _is_transient_sqlite_lock_error,
+) -> Any:
+    for attempt in range(1, attempts + 1):
+        try:
+            return fn()
+        except DatabaseBusyError as exc:
+            if attempt == attempts:
+                raise
+            delay = min(max_delay, base_delay * (2 ** (attempt - 1)))
+            time.sleep(delay)
+        except sqlite3.OperationalError as exc:
+            if not is_retryable(exc):
+                raise
+            if attempt == attempts:
+                raise DatabaseBusyError(
+                    f"SQLite write contention persisted after {attempts} attempts: {exc}"
+                ) from exc
+            delay = min(max_delay, base_delay * (2 ** (attempt - 1)))
+            time.sleep(delay)
+    raise AssertionError("unreachable")
+
+
 class Store:
     def __init__(self, db_path: Path):
         self.db_path = Path(db_path)
@@ -46,6 +86,12 @@ class Store:
         if hasattr(self._local, "conn") and self._local.conn:
             self._local.conn.close()
             self._local.conn = None
+
+    def execute_with_retry(self, query: str, params: tuple[Any, ...] = ()) -> sqlite3.Cursor:
+        return with_sqlite_retry(lambda: self.conn.execute(query, params))
+
+    def commit_with_retry(self) -> None:
+        with_sqlite_retry(lambda: self.conn.commit())
 
     def migrate(self) -> None:
         self.conn.executescript(

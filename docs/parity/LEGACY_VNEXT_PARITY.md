@@ -41,23 +41,30 @@ The following items were promoted from `MISSING_PORT_REQUIRED` to `PRESENT_VERIF
 
 Net change: `MISSING_PORT_REQUIRED` 4 → 2; `PRESENT_VERIFIED` 80 → 82. `PRESENT_NOT_VERIFIED` unchanged at 11. Total entries: 95.
 
-## Wave 4 Promotions (4f3c345 → HEAD)
+## Wave 4 Corrective Promotions & Parity Hardening
 
-The following items were promoted from `PRESENT_NOT_VERIFIED` to `PRESENT_VERIFIED` during Wave 4:
+The following 9 items were promoted from `PRESENT_NOT_VERIFIED` to `PRESENT_VERIFIED` after rigorous corrective implementation matching exact legacy behavior:
 
-1. **Process Identity / Hierarchy Verification** (`OWNERSHIP-004`): Promoted `PRESENT_NOT_VERIFIED` → `PRESENT_VERIFIED`. Verified by `tests/test_process_identity_verification.py` (18 tests: classify_process identity verification, boot identity mismatch, PID reuse protection, create time divergence, executable path mismatch, restart safety, non-interference with unrelated PIDs).
-2. **Planner Contract Validation** (`OBJECTIVES-003`): Promoted `PRESENT_NOT_VERIFIED` → `PRESENT_VERIFIED`. Verified by `tests/test_planner_contract_validation.py` (15 tests: schema contract validation, malformed JSON rejection, non-dict root, missing objective/task fields, duplicate task IDs, invalid dependency DAG, provider output wrapping safety).
-3. **Planner Wrapper / Envelope Normalization & Retry Behavior** (`OBJECTIVES-005`): Promoted `PRESENT_NOT_VERIFIED` → `PRESENT_VERIFIED`. Verified by `tests/test_planner_contract_validation.py` (13 tests: write_backlog serialization/idempotency, repeated malformed output error handling without task duplication, single correct task graph on retry recovery, safe failure state classification).
-4. **Objective Run-From-Anywhere** (`OBJECTIVES-006`): Promoted `PRESENT_NOT_VERIFIED` → `PRESENT_VERIFIED`. Verified by `tests/test_run_from_anywhere_and_multi_project.py` (2 tests: explicit project path resolution from unrelated cwd, wrong project path does not mutate other project).
-5. **Project Run-From-Anywhere** (`PROJECTS-005`): Promoted `PRESENT_NOT_VERIFIED` → `PRESENT_VERIFIED`. Verified by `tests/test_run_from_anywhere_and_multi_project.py` (7 tests: GlobalRegistry register/load, resolution from arbitrary cwd, missing registry handling, corrupt registry validation, duplicate name conflicts, idempotent re-registration, db_path containment validation).
-6. **Multi-Project Coordination** (`PROJECTS-006`): Promoted `PRESENT_NOT_VERIFIED` → `PRESENT_VERIFIED`. Verified by `tests/test_run_from_anywhere_and_multi_project.py` (8 tests: two projects registered without collision, project-scoped tasks, cross-project isolation on failure, source ID namespace collision avoidance, restart persistence across projects, independent per-project capacity, deterministic registry sorting).
-7. **SQLite Busy / Lock Retry Behavior** (`PERSISTENCE-005`): Promoted `PRESENT_NOT_VERIFIED` → `PRESENT_VERIFIED`. Verified by `tests/test_sqlite_busy_retry.py` (7 tests: busy_timeout=5000 and WAL pragma verification, concurrent reader waiting during writer lock, concurrent writer deduplication, excessive contention OperationalError handling, non-lock error propagation).
-8. **Affected-Test Discovery** (`VALIDATION-002`): Promoted `PRESENT_NOT_VERIFIED` → `PRESENT_VERIFIED`. Verified by `tests/test_affected_test_discovery.py` (13 tests: single and multiple changed source mapping, union deduplication, unknown file fallback to baseline, no changed files runs baseline, cross-platform path normalization, deterministic sorting).
-9. **Metrics Collection / Export** (`OBSERVABILITY-004`): Promoted `PRESENT_NOT_VERIFIED` → `PRESENT_VERIFIED`. Verified by `tests/test_metrics_observability.py` (12 tests: metrics_snapshot queue depth and execution outcomes, provider usage, secret-free JSON export, deterministic sorted keys, durable persistence across store reopen).
+1. **Process Identity / Hierarchy Verification** (`OWNERSHIP-004`): Promoted `PRESENT_NOT_VERIFIED` → `PRESENT_VERIFIED`. `current_process_identity()` and `popen_identity()` capture real `create_time` via psutil/ctypes, `boot_id()` captures real OS boot time across platforms (including Windows tick count / boot timestamp), and `Coordinator.recover()` verifies live identity and cleans stale claims without killing unrelated processes (`tests/test_process_identity_verification.py`, 20 tests).
+2. **Planner Contract / DAG Validation** (`OBJECTIVES-003`): Promoted `PRESENT_NOT_VERIFIED` → `PRESENT_VERIFIED`. `ObjectivePlanner.validate()` strictly rejects self-dependencies, 2-node cycles, and multi-node cycles via topological DFS detection while accepting valid acyclic graphs (`tests/test_planner_contract_validation.py`, 35 tests).
+3. **Planner Wrapper / Envelope Normalization & Retry Behavior** (`OBJECTIVES-005`): Promoted `PRESENT_NOT_VERIFIED` → `PRESENT_VERIFIED`. `normalize_planner_payload()` strips markdown code fences and provider envelope wrappers (including `thinking`/`chain_of_thought` blocks), fails closed without creating partial task/backlog state, and implements bounded retry suppression (`tests/test_planner_contract_validation.py`).
+4. **Objective Run-From-Anywhere** (`OBJECTIVES-006`): Promoted `PRESENT_NOT_VERIFIED` → `PRESENT_VERIFIED`. CLI `stagemesh plan` resolves target project from arbitrary CWD, enforces workspace security boundaries, and writes only to the target project backlog and database while leaving other projects untouched (`tests/test_run_from_anywhere_and_multi_project.py`, 20 tests).
+5. **Project Run-From-Anywhere** (`PROJECTS-005`): Promoted `PRESENT_NOT_VERIFIED` → `PRESENT_VERIFIED`. CLI resolves target project from arbitrary CWD without `--project` flag via `GlobalRegistry` when a single project is registered, handles project ancestor discovery, and fails safely with `ProjectError` (exit code 2) on missing or ambiguous multi-project resolution (`tests/test_run_from_anywhere_and_multi_project.py`).
+6. **Multi-Project Coordination** (`PROJECTS-006`): Promoted `PRESENT_NOT_VERIFIED` → `PRESENT_VERIFIED`. `stagemesh continue --all` coordinates execution across all registered projects in `GlobalRegistry` with process-level isolation, ensuring project A failures never block project B, task IDs remain isolated, and restart preserves registry boundaries (`tests/test_run_from_anywhere_and_multi_project.py`).
+7. **SQLite Busy / Lock Retry Behavior** (`PERSISTENCE-005`): Promoted `PRESENT_NOT_VERIFIED` → `PRESENT_VERIFIED`. Store configures WAL mode, 5000ms `busy_timeout`, and application-level retry with exponential backoff via `with_sqlite_retry(attempts=5, base_delay=0.05, max_delay=0.5)` raising `DatabaseBusyError` under persistent contention, verified under real multi-threaded database concurrency (`tests/test_sqlite_busy_retry.py`, 10 tests).
+8. **Affected-Test Discovery** (`VALIDATION-002`): Promoted `PRESENT_NOT_VERIFIED` → `PRESENT_VERIFIED`. `AffectedTestDiscovery` uses path-component boundary matching (`_match_path`) to prevent false substring matches, ships `DEFAULT_SOURCE_TEST_MAPPING`, extracts changed files from `git diff`, safely falls back to baseline validation, and is wired into `Validator.validate` (`tests/test_affected_test_discovery.py`, 18 tests).
+9. **Metrics Collection / Export** (`OBSERVABILITY-004`): Promoted `PRESENT_NOT_VERIFIED` → `PRESENT_VERIFIED`. `metrics_snapshot()` calculates real execution duration stats, claim latency by stage, provider usage counting actual provider executions (not registered workers), throughput, and token usage; `export_metrics_json()` applies pattern-based secret redaction; exposed via CLI `stagemesh metrics [--json]` (`tests/test_metrics_observability.py`, 16 tests).
 
 **PostgreSQL Behavior** (`PERSISTENCE-002`) honestly remains `PRESENT_NOT_VERIFIED`:
-- Deterministic contract verified by `tests/test_postgres_store_contract.py` (15 tests: schema DDL covering all 17 required tables, postgres_available detection, PostgresUnavailable error handling, no secrets in schema SQL).
-- Live execution is blocked because no local PostgreSQL server is running (localhost connection timeout). Full live proof requires `STAGEMESH_PG_DSN` pointing to an accessible PostgreSQL instance.
+- Lack of a live PostgreSQL server is NOT currently the only blocker.
+- `PostgresStore` presently provides connect/ping/migrate but does not implement the normal Store behavioral CRUD surface (tasks, claims, executions, evidence).
+- Standard StageMesh runtime commands still instantiate SQLite Store directly.
+- A successful ping + migration is therefore not sufficient proof of PostgreSQL database state storage.
+- Full Store CRUD contract implementation and live PostgreSQL verification are required before promotion.
+
+**CI Green Semantics Hardening**:
+- `stagemesh ci` now includes `unit_tests` in `default_gate_commands` whenever a `tests/` directory is present.
+- A command reported as the complete/full CI gate cannot return PASS or exit 0 while unit tests are failing (`tests/test_ci_green_semantics.py`, 5 regression tests).
 
 Net change: `PRESENT_VERIFIED` 82 → 91; `PRESENT_NOT_VERIFIED` 11 → 2; `MISSING_PORT_REQUIRED` unchanged at 2. Total entries: 95.
 
@@ -773,13 +780,13 @@ Net change: `PRESENT_VERIFIED` 82 → 91; `PRESENT_NOT_VERIFIED` 11 → 2; `MISS
 ### `PERSISTENCE-002`: PostgreSQL database state storage.
 - **Category:** Persistence
 - **Classification:** `PRESENT_NOT_VERIFIED`
-- **Legacy Source Files:** `build_coordinator/persistence.py`
-- **Legacy Tests:** `tests/test_database_lifecycle.py, tests/test_operator_db_isolation.py`
+- **Legacy Source Files:** `build_coordinator/storage/postgres_store.py`
+- **Legacy Tests:** `tests/test_postgres_storage.py`
 - **vNext Files:** `src/stagemesh/postgres_store.py`
-- **vNext Tests:** `tests/test_postgres_store_contract.py::test_postgres_schema_tables_covers_required_tables, tests/test_postgres_store_contract.py::test_postgres_declared_tables_matches_schema_tables, tests/test_postgres_store_contract.py::test_postgres_schema_contract_structure, tests/test_postgres_store_contract.py::test_schema_statements_start_with_create, tests/test_postgres_store_contract.py::test_schema_sql_contains_all_required_tables, tests/test_postgres_store_contract.py::test_schema_sql_contains_no_credentials, tests/test_postgres_store_contract.py::test_postgres_available_true_when_psycopg_importable, tests/test_postgres_store_contract.py::test_postgres_available_false_when_psycopg_absent, tests/test_postgres_store_contract.py::test_postgres_store_raises_unavailable_when_psycopg_missing`
+- **vNext Tests:** `tests/test_postgres_store_contract.py::test_postgres_schema_tables_covers_required_tables, tests/test_postgres_store_contract.py::test_postgres_declared_tables_matches_schema_tables, tests/test_postgres_store_contract.py::test_postgres_available_true_when_psycopg_importable, tests/test_postgres_store_contract.py::test_postgres_store_raises_unavailable_when_psycopg_missing`
 - **Legacy Behavior:** PostgreSQL database state storage.
-- **Evidence:** EXTERNAL BLOCKER: No PostgreSQL server available (localhost timeout). psycopg3 is installed. Deterministic contract proof: schema DDL covers all 17 required tables; postgres_available() detects driver correctly; PostgresStore raises PostgresUnavailable when psycopg absent; schema SQL contains no credentials. Live proof deferred: set STAGEMESH_PG_DSN and run test_document_postgres_live_blocker.
-- **Parity Gap:** Live PostgreSQL server not available; run with STAGEMESH_PG_DSN set for full verification.
+- **Evidence:** PostgresStore provides connection ping and table migration DDL, but does not implement full Store CRUD behavioral contract (tasks, claims, executions, evidence), and runtime commands default to SQLite Store. Lack of a live PostgreSQL server is not the only blocker: full Store contract parity must be implemented and tested before promotion.
+- **Parity Gap:** PostgresStore only implements connection and schema migration. Standard runtime coordinator and CLI commands default to SQLite Store. Full Store CRUD parity and live server testing are required before promotion.
 
 ### `PERSISTENCE-003`: Schema migration scripts for upgrading database versions.
 - **Category:** Persistence

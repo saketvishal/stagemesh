@@ -148,6 +148,77 @@ class TestGlobalRegistryRunFromAnywhere:
                 db_path=outside_db,
             ))
 
+    def test_cli_resolves_single_registered_project_from_unrelated_cwd_without_flag(self, tmp_path: Path):
+        """PROJECTS-005: Running CLI from unrelated cwd without --project resolves single registered project."""
+        import os
+        project_dir, store = _make_project(tmp_path, "single_target")
+        store.upsert_task("Task in single target", source="local")
+        store.close()
+
+        reg_path = tmp_path / "global_registry.json"
+        registry = GlobalRegistry(reg_path)
+        registry.register(ProjectRegistration(
+            name="single_target",
+            path=project_dir,
+            db_path=project_dir / ".stagemesh" / "stagemesh.sqlite3",
+        ))
+
+        unrelated = tmp_path / "elsewhere"
+        unrelated.mkdir()
+
+        cmd = [sys.executable, "-m", "stagemesh.cli", "status", "--json"]
+        env = {**os.environ, "STAGEMESH_REGISTRY": str(reg_path)}
+        res = subprocess.run(cmd, cwd=unrelated, env=env, capture_output=True, text=True)
+        assert res.returncode == 0, f"CLI stderr: {res.stderr}"
+        data = json.loads(res.stdout)
+        assert data["task_count"] == 1
+        assert data["tasks"][0]["title"] == "Task in single target"
+
+    def test_cli_ambiguous_resolution_fails_safely_when_multiple_registered(self, tmp_path: Path):
+        """PROJECTS-005: Running CLI from unrelated cwd with multiple registered projects fails safely."""
+        import os
+        p1, _ = _make_project(tmp_path, "proj_one")
+        p2, _ = _make_project(tmp_path, "proj_two")
+        reg_path = tmp_path / "global_registry.json"
+        registry = GlobalRegistry(reg_path)
+        registry.register(ProjectRegistration("proj_one", p1, p1 / ".stagemesh" / "stagemesh.sqlite3"))
+        registry.register(ProjectRegistration("proj_two", p2, p2 / ".stagemesh" / "stagemesh.sqlite3"))
+
+        unrelated = tmp_path / "elsewhere_ambig"
+        unrelated.mkdir()
+
+        cmd = [sys.executable, "-m", "stagemesh.cli", "status"]
+        env = {**os.environ, "STAGEMESH_REGISTRY": str(reg_path)}
+        res = subprocess.run(cmd, cwd=unrelated, env=env, capture_output=True, text=True)
+        assert res.returncode == 2
+        assert "ambiguous" in res.stderr.lower()
+
+    def test_cli_resolves_named_registered_project_from_unrelated_cwd(self, tmp_path: Path):
+        """PROJECTS-005: Running CLI from unrelated cwd with --project <name> resolves project from registry."""
+        import os
+        p1, s1 = _make_project(tmp_path, "alpha_proj")
+        p2, s2 = _make_project(tmp_path, "beta_proj")
+        s1.upsert_task("Alpha Task", source="local")
+        s2.upsert_task("Beta Task", source="local")
+        s1.close()
+        s2.close()
+
+        reg_path = tmp_path / "global_registry.json"
+        registry = GlobalRegistry(reg_path)
+        registry.register(ProjectRegistration("alpha_proj", p1, p1 / ".stagemesh" / "stagemesh.sqlite3"))
+        registry.register(ProjectRegistration("beta_proj", p2, p2 / ".stagemesh" / "stagemesh.sqlite3"))
+
+        unrelated = tmp_path / "elsewhere_named"
+        unrelated.mkdir()
+
+        cmd = [sys.executable, "-m", "stagemesh.cli", "status", "--project", "beta_proj", "--json"]
+        env = {**os.environ, "STAGEMESH_REGISTRY": str(reg_path)}
+        res = subprocess.run(cmd, cwd=unrelated, env=env, capture_output=True, text=True)
+        assert res.returncode == 0
+        data = json.loads(res.stdout)
+        assert data["task_count"] == 1
+        assert data["tasks"][0]["title"] == "Beta Task"
+
 
 # ---------------------------------------------------------------------------
 # OBJECTIVES-006: objective operations from unrelated cwd
@@ -155,39 +226,56 @@ class TestGlobalRegistryRunFromAnywhere:
 
 class TestObjectiveRunFromAnywhere:
     """
-    The --project flag on the CLI provides an explicit project path,
-    enabling objective/task operations regardless of cwd.
-
-    We test the underlying registry + store contract here (no subprocess needed).
+    OBJECTIVES-006: objective operations work from unrelated cwd via CLI.
+    Verify target project is changed and another project remains untouched.
     """
 
-    def test_explicit_project_path_resolves_independently_of_cwd(self, tmp_path: Path):
-        """
-        Store opened with an explicit absolute path works regardless of cwd.
-        """
-        project_dir, store = _make_project(tmp_path, "zeta")
-        task_id = store.upsert_task("Task from explicit path", source="local")
-        store.close()
+    def test_cli_plan_from_unrelated_cwd_modifies_target_and_leaves_other_untouched(self, tmp_path: Path):
+        """Run real CLI stagemesh plan from unrelated cwd targeting project A."""
+        target_dir, target_store = _make_project(tmp_path, "target_app")
+        other_dir, other_store = _make_project(tmp_path, "other_app")
+        target_store.close()
+        other_store.close()
 
-        # Simulate re-opening the store from "any cwd" via explicit db_path
-        explicit_db = project_dir / ".stagemesh" / "stagemesh.sqlite3"
-        store2 = Store(explicit_db)
-        store2.migrate()
-        tasks = store2.tasks()
-        assert any(t["id"] == task_id for t in tasks)
-        store2.close()
+        unrelated = tmp_path / "unrelated_workspace"
+        unrelated.mkdir()
 
-    def test_wrong_project_path_does_not_mutate_correct_project(self, tmp_path: Path):
-        """Targeting project A does not add tasks to project B."""
-        _, store_a = _make_project(tmp_path, "proj_a")
-        _, store_b = _make_project(tmp_path, "proj_b")
+        plan_file = target_dir / "new_feature_plan.json"
+        plan_content = {
+            "id": "OBJ-CLI-ANYWHERE",
+            "title": "Objective Run Anywhere",
+            "tasks": [
+                {"id": "TASK-1", "title": "First Step"},
+                {"id": "TASK-2", "title": "Second Step", "dependencies": ["TASK-1"]},
+            ],
+        }
+        plan_file.write_text(json.dumps(plan_content), encoding="utf-8")
 
-        store_a.upsert_task("Task only in A", source="local")
-        store_a.close()
+        # Invoke CLI plan from unrelated cwd
+        cmd = [
+            sys.executable,
+            "-m",
+            "stagemesh.cli",
+            "plan",
+            str(plan_file),
+            "--project",
+            str(target_dir),
+            "--json",
+        ]
+        res = subprocess.run(cmd, cwd=unrelated, capture_output=True, text=True)
+        assert res.returncode == 0, f"plan failed: {res.stderr}"
 
-        tasks_b = store_b.tasks()
-        assert len(tasks_b) == 0
-        store_b.close()
+        # Target project received the tasks
+        s_target = Store(target_dir / ".stagemesh" / "stagemesh.sqlite3")
+        tasks_target = s_target.tasks()
+        assert len(tasks_target) == 2
+        assert {t["id"] for t in tasks_target} == {"TASK-1", "TASK-2"}
+        s_target.close()
+
+        # Other project is untouched (0 tasks)
+        s_other = Store(other_dir / ".stagemesh" / "stagemesh.sqlite3")
+        assert len(s_other.tasks()) == 0
+        s_other.close()
 
 
 # ---------------------------------------------------------------------------
@@ -321,3 +409,77 @@ class TestMultiProjectCoordination:
         # After save/reload, order should be deterministic (alphabetical)
         names = [p.name for p in loaded]
         assert sorted(names) == names
+
+    def test_continue_all_coordinates_multiple_registered_projects(self, tmp_path: Path):
+        """PROJECTS-006: Real CLI continue --all discovers and coordinates multiple registered projects."""
+        import os
+        p1, s1 = _make_project(tmp_path, "proj_coord1")
+        p2, s2 = _make_project(tmp_path, "proj_coord2")
+
+        # Give each project a task in PLAN stage
+        t1 = s1.upsert_task("Coordinate Task 1", source="local")
+        t2 = s2.upsert_task("Coordinate Task 2", source="local")
+        s1.close()
+        s2.close()
+
+        reg_path = tmp_path / "global_registry.json"
+        registry = GlobalRegistry(reg_path)
+        registry.register(ProjectRegistration("proj_coord1", p1, p1 / ".stagemesh" / "stagemesh.sqlite3"))
+        registry.register(ProjectRegistration("proj_coord2", p2, p2 / ".stagemesh" / "stagemesh.sqlite3"))
+
+        unrelated = tmp_path / "outside_all"
+        unrelated.mkdir()
+
+        # Execute continue --all from unrelated directory
+        cmd = [sys.executable, "-m", "stagemesh.cli", "continue", "--all", "--once", "--json"]
+        env = {**os.environ, "STAGEMESH_REGISTRY": str(reg_path)}
+        res = subprocess.run(cmd, cwd=unrelated, env=env, capture_output=True, text=True)
+        assert res.returncode == 0, f"continue --all failed: {res.stderr}"
+        data = json.loads(res.stdout)
+        assert data["mode"] == "global"
+        assert "proj_coord1" in data["projects"]
+        assert "proj_coord2" in data["projects"]
+        assert data["projects"]["proj_coord1"]["status"] == "OK"
+        assert data["projects"]["proj_coord2"]["status"] == "OK"
+
+        # Verify both projects progressed independently
+        s1b = Store(p1 / ".stagemesh" / "stagemesh.sqlite3")
+        s2b = Store(p2 / ".stagemesh" / "stagemesh.sqlite3")
+        assert s1b.get_task(t1)["stage"] != "PLAN"
+        assert s2b.get_task(t2)["stage"] != "PLAN"
+        s1b.close()
+        s2b.close()
+
+    def test_continue_all_failure_in_project_a_does_not_block_project_b(self, tmp_path: Path):
+        """PROJECTS-006: Failure/corruption in one registered project does not halt progress on other projects."""
+        import os
+        p_corrupt, s_corrupt = _make_project(tmp_path, "corrupt_proj")
+        p_healthy, s_healthy = _make_project(tmp_path, "healthy_proj")
+
+        s_corrupt.close()
+        t_healthy = s_healthy.upsert_task("Healthy Task", source="local")
+        s_healthy.close()
+
+        # Corrupt project database file
+        (p_corrupt / ".stagemesh" / "stagemesh.sqlite3").write_text("CORRUPTED_DB_NOT_SQLITE", encoding="utf-8")
+
+        reg_path = tmp_path / "global_registry.json"
+        registry = GlobalRegistry(reg_path)
+        registry.register(ProjectRegistration("corrupt_proj", p_corrupt, p_corrupt / ".stagemesh" / "stagemesh.sqlite3"))
+        registry.register(ProjectRegistration("healthy_proj", p_healthy, p_healthy / ".stagemesh" / "stagemesh.sqlite3"))
+
+        unrelated = tmp_path / "outside_fail"
+        unrelated.mkdir()
+
+        cmd = [sys.executable, "-m", "stagemesh.cli", "continue", "--all", "--once", "--json"]
+        env = {**os.environ, "STAGEMESH_REGISTRY": str(reg_path)}
+        res = subprocess.run(cmd, cwd=unrelated, env=env, capture_output=True, text=True)
+        assert res.returncode == 0
+        data = json.loads(res.stdout)
+        # Corrupt project is marked ERROR, but healthy project still progresses OK
+        assert data["projects"]["corrupt_proj"]["status"] == "ERROR"
+        assert data["projects"]["healthy_proj"]["status"] == "OK"
+
+        s_h = Store(p_healthy / ".stagemesh" / "stagemesh.sqlite3")
+        assert s_h.get_task(t_healthy)["stage"] != "PLAN"
+        s_h.close()

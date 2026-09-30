@@ -209,3 +209,73 @@ def test_schema_not_present_raises_on_bad_query(tmp_path: Path):
     with pytest.raises(sqlite3.OperationalError):
         raw.execute("SELECT * FROM nonexistent_table_xyz").fetchall()
     raw.close()
+
+
+# ---------------------------------------------------------------------------
+# PERSISTENCE-005: Application-level with_sqlite_retry & DatabaseBusyError
+# ---------------------------------------------------------------------------
+
+def test_with_sqlite_retry_recovers_from_transient_busy():
+    from stagemesh.persistence import with_sqlite_retry
+
+    calls = 0
+
+    def transient_op():
+        nonlocal calls
+        calls += 1
+        if calls < 3:
+            raise sqlite3.OperationalError("database is locked")
+        return "success"
+
+    result = with_sqlite_retry(transient_op, attempts=5, base_delay=0.01)
+    assert result == "success"
+    assert calls == 3
+
+
+def test_with_sqlite_retry_raises_database_busy_error_on_persistent_contention():
+    from stagemesh.persistence import DatabaseBusyError, with_sqlite_retry
+
+    def always_busy():
+        raise sqlite3.OperationalError("database is locked")
+
+    with pytest.raises(DatabaseBusyError, match="contention persisted"):
+        with_sqlite_retry(always_busy, attempts=3, base_delay=0.01)
+
+
+def test_store_contention_recovery_using_store_api(tmp_path: Path):
+    """
+    Exercise Store operations under real contention using Store APIs.
+    Store write recovers and inserts successfully without corrupting state.
+    """
+    from stagemesh.persistence import with_sqlite_retry
+
+    db_path = tmp_path / "store_contention.db"
+    store1 = Store(db_path)
+    store1.migrate()
+
+    barrier = threading.Barrier(2, timeout=10)
+
+    def locker():
+        store_lock = Store(db_path)
+        store_lock.conn.execute("BEGIN EXCLUSIVE")
+        barrier.wait()
+        time.sleep(0.15)
+        store_lock.conn.execute("COMMIT")
+        store_lock.close()
+
+    t = threading.Thread(target=locker, daemon=True)
+    t.start()
+    barrier.wait()
+
+    # store1 attempts an upsert with retry
+    task_id = with_sqlite_retry(
+        lambda: store1.upsert_task("Contention Task", source="local"),
+        attempts=5,
+        base_delay=0.05,
+    )
+    t.join(timeout=5)
+
+    assert task_id is not None
+    assert store1.get_task(task_id)["title"] == "Contention Task"
+    store1.close()
+

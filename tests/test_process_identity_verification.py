@@ -168,28 +168,105 @@ def test_popen_identity_boot_id_matches_parent():
 # Restart / recovery does not inherit stale identity
 # ---------------------------------------------------------------------------
 
-def test_restart_uses_new_identity_not_stale_saved():
-    """
-    Simulates: worker saved identity before restart; after restart,
-    current_process_identity() returns a different pid — classify
-    correctly shows DEAD (old), LIVE (new).
-    """
-    old_saved = _identity(pid=os.getpid() + 100_000, create_time=1.0, bid="old-boot")
-    new_current = current_process_identity()
-
-    # Old saved identity against new observed → UNKNOWN (create_time=None in current)
-    # or DEAD if the PIDs/boot-ids differ.  Either way, NOT LIVE.
-    result = classify_process(old_saved, new_current)
-    assert result in ("DEAD", "UNKNOWN")
+def test_current_process_identity_is_known():
+    ident = current_process_identity()
+    assert ident.pid == os.getpid()
+    assert ident.create_time is not None
+    assert ident.create_time > 0
+    assert ident.boot_id is not None
+    assert ident.is_known
 
 
-def test_identity_mismatch_does_not_kill_unrelated_processes():
+def test_popen_identity_has_real_create_time_and_is_known():
+    import subprocess, sys
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(5)"],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        ident = popen_identity(proc)
+        assert ident.pid == proc.pid
+        assert ident.create_time is not None
+        assert ident.create_time > 0
+        assert ident.boot_id == boot_id()
+        assert ident.is_known
+    finally:
+        proc.kill()
+        proc.wait()
+
+
+def test_observe_process_identity_matches_popen_identity():
+    import subprocess, sys
+    from stagemesh.process_identity import observe_process_identity
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(5)"],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        ident = popen_identity(proc)
+        observed = observe_process_identity(proc.pid)
+        assert observed.pid == proc.pid
+        assert observed.is_known
+        assert classify_process(ident, observed) == "LIVE"
+    finally:
+        proc.kill()
+        proc.wait()
+
+
+def test_coordinator_recovery_detects_pid_reuse_and_preserves_unrelated_process(tmp_path):
     """
-    classify_process must not execute any system calls that could affect
-    unrelated processes. Verify it is a pure classification function.
+    Test real Coordinator.recover() path:
+    When a saved execution has a different create_time or boot_id than the currently running
+    process at that PID, Coordinator.recover() treats it as DEAD (PID reuse detected),
+    reclaims the claim, and NEVER kills or mutates the running process.
     """
-    saved = _identity(pid=1, create_time=1.0, bid="boot-1")  # PID 1 = system init
-    observed = _identity(pid=1, create_time=2.0, bid="boot-2")  # different boot
-    # Should return DEAD, not raise, not kill anything
-    result = classify_process(saved, observed)
-    assert result == "DEAD"
+    import subprocess, sys
+    from stagemesh.coordinator import Coordinator
+    from stagemesh.domain import Stage, TaskStatus
+    from stagemesh.persistence import Store
+
+    db = tmp_path / "stagemesh.sqlite3"
+    store = Store(db)
+    store.migrate()
+
+    # Launch a real running subprocess
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(10)"],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        # Create a task and claim
+        from stagemesh.workers import register_worker
+        task_id = store.upsert_task("Test task for recovery", source="local")
+        worker_id = "worker-1"
+        register_worker(store, worker_id, "codex", {"code"}, current_process_identity(), 300)
+        claim_id = store.acquire_claim(task_id, worker_id, lease_seconds=300)
+
+        # Simulate PID reuse: record execution with proc.pid but a DIFFERENT create_time (500 seconds earlier)
+        real_ident = popen_identity(proc)
+        reused_ident = ProcessIdentity(
+            pid=proc.pid,
+            create_time=(real_ident.create_time or 100.0) - 500.0,
+            boot_id=boot_id(),
+            executable=sys.executable,
+        )
+        from stagemesh.domain import ExecutionKind
+        exec_id = store.start_execution(
+            task_id=task_id,
+            claim_id=claim_id,
+            kind=ExecutionKind.IMPLEMENTATION,
+            pid=reused_ident.pid,
+            process_create_time=reused_ident.create_time,
+            boot_id=reused_ident.boot_id,
+            executable=reused_ident.executable,
+        )
+
+        coordinator = Coordinator(store, tmp_path)
+        recovered = coordinator.recover()
+
+        # The PID-reused execution was recovered (reclaimed)
+        assert recovered == 1
+        # The running process was NOT killed or mutated
+        assert proc.poll() is None
+
+        # The claim was released/deactivated
+        claims = list(store.conn.execute("SELECT active FROM claims WHERE id=?", (claim_id,)))
+        assert claims[0][0] == 0
+    finally:
+        proc.kill()
+        proc.wait()
+
