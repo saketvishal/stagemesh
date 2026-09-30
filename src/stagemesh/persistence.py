@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -21,14 +22,30 @@ class Store:
     def __init__(self, db_path: Path):
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(self.db_path)
-        self.conn.row_factory = sqlite3.Row
-        self.conn.execute("PRAGMA foreign_keys = ON")
-        self.conn.execute("PRAGMA journal_mode = WAL")
-        self.conn.execute("PRAGMA busy_timeout = 5000")
+        self._local = threading.local()
+        conn = self._get_conn()
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("PRAGMA busy_timeout = 5000")
+
+    @property
+    def conn(self) -> sqlite3.Connection:
+        return self._get_conn()
+
+    def _get_conn(self) -> sqlite3.Connection:
+        if not hasattr(self._local, "conn") or self._local.conn is None:
+            c = sqlite3.connect(self.db_path, timeout=10.0)
+            c.row_factory = sqlite3.Row
+            c.execute("PRAGMA foreign_keys = ON")
+            c.execute("PRAGMA journal_mode = WAL")
+            c.execute("PRAGMA busy_timeout = 5000")
+            self._local.conn = c
+        return self._local.conn
 
     def close(self) -> None:
-        self.conn.close()
+        if hasattr(self._local, "conn") and self._local.conn:
+            self._local.conn.close()
+            self._local.conn = None
 
     def migrate(self) -> None:
         self.conn.executescript(
@@ -197,12 +214,23 @@ class Store:
     def schema_version(self) -> int:
         return current_schema_version(self.conn)
 
-    def upsert_task(self, title: str, source: str = "local", source_id: str | None = None, project: str | None = None) -> str:
+    def upsert_task(
+        self,
+        title: str,
+        source: str = "local",
+        source_id: str | None = None,
+        project: str | None = None,
+        task_id: str | None = None,
+    ) -> str:
         title = _validate_text(title, "task title")
         source = _validate_text(source, "task source")
         source_id = _validate_optional_text(source_id, "task source id")
         project = _validate_optional_text(project, "task project")
-        task_id = source_id or str(uuid.uuid4())
+        if not task_id:
+            if source == "azure-devops" and source_id:
+                task_id = f"ADO-{source_id}"
+            else:
+                task_id = source_id or str(uuid.uuid4())
         now = time.time()
         self.conn.execute(
             """
@@ -235,7 +263,7 @@ class Store:
                 WHERE d.task_id=? AND t.stage != ?
                 ORDER BY d.depends_on_task_id
                 """,
-                (task_id, Stage.DONE),
+                (task_id, Stage.DONE.value),
             )
         ]
 
@@ -245,6 +273,13 @@ class Store:
     def get_task(self, task_id: str) -> sqlite3.Row | None:
         task_id = _validate_text(task_id, "task id")
         return self.conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+
+    def get_task_by_source(self, source: str, source_id: str) -> sqlite3.Row | None:
+        source = _validate_text(source, "source")
+        source_id = _validate_text(source_id, "source_id")
+        return self.conn.execute(
+            "SELECT * FROM tasks WHERE source=? AND source_id=?", (source, source_id)
+        ).fetchone()
 
     def acquire_claim(self, task_id: str, worker_id: str, lease_seconds: float = 300) -> str | None:
         task_id = _validate_text(task_id, "task id")

@@ -753,7 +753,7 @@
   {
     "id": "SOURCES-003",
     "category": "Task sources",
-    "classification": "MISSING_PORT_REQUIRED",
+    "classification": "PRESENT_VERIFIED",
     "legacy_source_files": [
       "build_coordinator/task_source/azure_devops.py"
     ],
@@ -761,15 +761,22 @@
       "tests/test_azure_devops_task_source.py"
     ],
     "legacy_behavior": "Discovers and ingests work items from Azure DevOps boards/backlogs.",
-    "vnext_files": [],
-    "vnext_tests": [],
-    "evidence": "Azure DevOps task source is completely absent from src/stagemesh/task_sources.py.",
-    "parity_gap": "AzureDevOpsTaskSource missing in vNext."
+    "vnext_files": [
+      "src/stagemesh/azure_devops.py"
+    ],
+    "vnext_tests": [
+      "tests/test_azure_devops_task_source.py::test_azure_devops_task_discovery_and_mapping",
+      "tests/test_azure_devops_task_source.py::test_azure_devops_duplicate_safe_sync",
+      "tests/test_azure_devops_task_source.py::test_azure_devops_source_state_reconciliation",
+      "tests/test_azure_devops_task_source.py::test_azure_devops_failure_classification"
+    ],
+    "evidence": "AzureDevOpsTaskSource discovers work items, maps to ADO-{id} identity, handles open/closed states, deduplicates insertions, projects internal state onto ADO System.State, and classifies auth/rate-limit failures.",
+    "parity_gap": "None"
   },
   {
     "id": "SOURCES-004",
     "category": "Task sources",
-    "classification": "MISSING_PORT_REQUIRED",
+    "classification": "PRESENT_VERIFIED",
     "legacy_source_files": [
       "build_coordinator/watcher/labels.py"
     ],
@@ -778,10 +785,17 @@
       "tests/test_watcher_labels.py"
     ],
     "legacy_behavior": "Provisions GitHub lifecycle labels (stagemesh:claimed, stagemesh:validating, etc.) and transitions issue labels.",
-    "vnext_files": [],
-    "vnext_tests": [],
-    "evidence": "GitHub label setup and automated label state machine transitions missing in vNext.",
-    "parity_gap": "Lifecycle label provisioning and state machine transitions missing in vNext."
+    "vnext_files": [
+      "src/stagemesh/labels.py"
+    ],
+    "vnext_tests": [
+      "tests/test_github_lifecycle_labels.py::test_labels_setup_creates_missing_labels_idempotently",
+      "tests/test_github_lifecycle_labels.py::test_existing_labels_preserved_safely",
+      "tests/test_github_lifecycle_labels.py::test_github_lifecycle_transitions_update_correct_issue_and_remove_stale",
+      "tests/test_github_lifecycle_labels.py::test_source_synchronization_failure_does_not_corrupt_internal_lifecycle"
+    ],
+    "evidence": "provision_labels idempotently creates/edits stagemesh:* and taxonomy labels; sync_issue_lifecycle_label projects StageMesh stage onto remote issue labels while removing stale mutually exclusive lifecycle labels without corrupting internal store state.",
+    "parity_gap": "None"
   },
   {
     "id": "SOURCES-005",
