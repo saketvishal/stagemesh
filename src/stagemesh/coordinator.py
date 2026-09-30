@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .domain import EvidenceKind, EvidenceStatus, ExecutionStatus, Stage
+from .domain import EvidenceKind, EvidenceStatus, ExecutionStatus, ProcessIdentity, Stage
 from .execution import Executor, FakeExecutor
 from .integration import Integrator
 from .lifecycle import evidence_allows_advance
 from .persistence import Store
+from .process_identity import classify_process, observe_process_identity
 from .review import Reviewer
 from .scheduling import Scheduler
 from .audit import record_audit
@@ -30,10 +31,53 @@ class Coordinator:
         self.reviewer = reviewer or Reviewer()
         self.integrator = integrator or Integrator()
 
-    def recover(self) -> None:
+    def recover(self) -> int:
+        recovered = 0
         for execution in self.store.running_executions():
-            if execution["pid"] is None or execution["process_create_time"] is None or execution["boot_id"] is None:
-                continue
+            pid = execution["pid"]
+            saved = ProcessIdentity(
+                pid=pid,
+                create_time=execution["process_create_time"],
+                boot_id=execution["boot_id"],
+                executable=execution["executable"],
+            )
+            observed = observe_process_identity(pid) if pid else None
+            classification = classify_process(saved, observed)
+            if classification == "DEAD":
+                execution_id = execution["id"]
+                task_id = execution["task_id"]
+                claim_id = execution["claim_id"]
+                self.store.finish_execution(
+                    execution_id,
+                    ExecutionStatus.FAILED,
+                    execution["candidate_sha"] or None,
+                )
+                if claim_id:
+                    self.store.release_claim(claim_id)
+                record_audit(
+                    self.store,
+                    "execution.recovered",
+                    {"execution_id": execution_id, "task_id": task_id, "reason": "process_dead_or_reused"},
+                )
+                recovered += 1
+            elif classification == "UNKNOWN" and saved.pid is not None:
+                execution_id = execution["id"]
+                task_id = execution["task_id"]
+                claim_id = execution["claim_id"]
+                self.store.finish_execution(
+                    execution_id,
+                    ExecutionStatus.UNKNOWN,
+                    execution["candidate_sha"] or None,
+                )
+                if claim_id:
+                    self.store.release_claim(claim_id)
+                record_audit(
+                    self.store,
+                    "execution.recovered",
+                    {"execution_id": execution_id, "task_id": task_id, "reason": "unknown_process_identity"},
+                )
+                recovered += 1
+        return recovered
 
     def tick(self) -> int:
         self.recover()

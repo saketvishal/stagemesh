@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import platform
 import sys
 from pathlib import Path
@@ -24,7 +25,7 @@ from .e2e_acceptance import EndToEndAcceptanceValidationError, end_to_end_accept
 from .final_report import FinalReportValidationError, candidate_sha, render_final_report
 from .external_evidence import ExternalEvidenceValidationError, external_evidence_records, record_external_evidence
 from .github_acceptance import run_github_acceptance
-from .observability import health
+from .observability import export_metrics_json, health, metrics_snapshot
 from .operator import operator_report
 from .objectives import ObjectivePlanner, ObjectiveValidationError
 from .persistence import Store, StoreValidationError
@@ -45,6 +46,61 @@ from .workers import WorkerValidationError, heartbeat_worker, register_worker
 from .azure_devops import AzureDevOpsTaskSource, AzureDevOpsClientShim
 from .labels import GitHubLabelGateway, provision_labels, sync_issue_lifecycle_label
 from .watcher import WatcherLock, WatcherLockError, WatcherLoop
+
+
+class ProjectError(ValueError):
+    pass
+
+
+def default_registry_path() -> Path:
+    env_path = os.getenv("STAGEMESH_REGISTRY")
+    if env_path:
+        return Path(env_path).resolve()
+    home = os.getenv("STAGEMESH_HOME")
+    return (Path(home).expanduser() if home else Path.home() / ".stagemesh") / "registry.json"
+
+
+def find_project_root(start: Path | None = None) -> Path | None:
+    current = (start or Path.cwd()).resolve()
+    for directory in (current, *current.parents):
+        if (directory / ".stagemesh").is_dir() or (directory / "stagemesh.yaml").is_file():
+            return directory
+    return None
+
+
+def resolve_project_root(raw_target: str | None = None, registry_path: Path | None = None) -> Path:
+    reg_path = registry_path or default_registry_path()
+    registry = GlobalRegistry(reg_path)
+
+    if raw_target and raw_target != ".":
+        candidate = Path(raw_target).resolve()
+        if (candidate / ".stagemesh").is_dir() or (candidate / "stagemesh.yaml").is_file() or candidate.is_dir():
+            return candidate
+        # Look up by name in registry
+        for p in registry.load():
+            if p.name == raw_target:
+                return p.path
+        raise ProjectError(f"no StageMesh project found for {raw_target!r}")
+
+    # No explicit target (or ".")
+    here = find_project_root(Path.cwd())
+    if here is not None:
+        return here
+
+    # Outside any project root — look up registry
+    projects = registry.load()
+    if len(projects) == 1:
+        return projects[0].path
+    if len(projects) > 1:
+        names = ", ".join(sorted(p.name for p in projects))
+        raise ProjectError(
+            f"project resolution is ambiguous: multiple projects registered ({names}). "
+            "Specify --project <name> or use --all."
+        )
+    raise ProjectError(
+        "no StageMesh project specified and none found above current directory; "
+        "specify --project or register one with `stagemesh init --register`"
+    )
 
 
 def runtime_dir(project: Path) -> Path:
@@ -92,8 +148,49 @@ def command_init(args: argparse.Namespace) -> int:
     return 0
 
 
+def _handle_global_continue(args: argparse.Namespace) -> int:
+    registry = GlobalRegistry(default_registry_path())
+    projects = registry.load()
+    if not projects:
+        print("no StageMesh projects registered in global registry", file=sys.stderr)
+        return 2
+
+    runs: dict[str, Any] = {}
+    total_progressed = 0
+    for reg in projects:
+        try:
+            store = Store(reg.db_path)
+            store.migrate()
+            config = load_config(reg.path)
+            backlog = reg.path / ".stagemesh" / "backlog.json"
+            if backlog.exists():
+                sync_source(store, LocalBacklogSource(backlog).discover())
+            for source in task_sources_from_config(config):
+                sync_source(store, source.discover())
+            coord = Coordinator(store, reg.path)
+            count = 0
+            while True:
+                p = coord.tick()
+                count += p
+                if getattr(args, "once", False) or p == 0:
+                    break
+            runs[reg.name] = {"progressed": count, "status": "OK"}
+            total_progressed += count
+            store.close()
+        except Exception as exc:
+            runs[reg.name] = {"progressed": 0, "status": "ERROR", "error": str(exc)}
+
+    if getattr(args, "json", False):
+        print(json.dumps({"mode": "global", "total_progressed": total_progressed, "projects": runs}, indent=2, sort_keys=True))
+    else:
+        print(f"coordinated {len(projects)} registered projects: {total_progressed} total progressed")
+        for name, run in sorted(runs.items()):
+            print(f"  {name}: {run['status']} (progressed: {run['progressed']})")
+    return 0
+
+
 def command_doctor(args: argparse.Namespace) -> int:
-    project = Path(args.project).resolve()
+    project = resolve_project_root(args.project)
     config = load_config(project)
     store = Store(db_path(project))
     store.migrate()
@@ -135,7 +232,9 @@ def command_doctor(args: argparse.Namespace) -> int:
 
 
 def command_continue(args: argparse.Namespace) -> int:
-    project = Path(args.project).resolve()
+    if getattr(args, "all", False):
+        return _handle_global_continue(args)
+    project = resolve_project_root(args.project)
     config = load_config(project)
     store = Store(db_path(project))
     store.migrate()
@@ -185,7 +284,7 @@ def command_continue(args: argparse.Namespace) -> int:
 
 
 def command_status(args: argparse.Namespace) -> int:
-    project = Path(args.project).resolve()
+    project = resolve_project_root(args.project)
     store = Store(db_path(project))
     store.migrate()
     rows = store.tasks()
@@ -229,9 +328,12 @@ def command_status(args: argparse.Namespace) -> int:
 
 
 def command_plan(args: argparse.Namespace) -> int:
-    project = Path(args.project).resolve()
-    payload_path = WorkspaceBoundary(project).require_inside(Path(args.file).resolve())
-    raw_payload = payload_path.read_text(encoding="utf-8")
+    project = resolve_project_root(args.project)
+    payload_file = WorkspaceBoundary(project).require_inside(Path(args.file).resolve())
+    if not payload_file.is_file():
+        print(f"plan file not found: {payload_file}", file=sys.stderr)
+        return 2
+    raw_payload = payload_file.read_text(encoding="utf-8")
     planner = ObjectivePlanner()
     objective = planner.parse(raw_payload)
     payload = json.loads(raw_payload)
@@ -259,8 +361,23 @@ def command_plan(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_metrics(args: argparse.Namespace) -> int:
+    project = resolve_project_root(args.project)
+    store = Store(db_path(project))
+    store.migrate()
+    if getattr(args, "json", False):
+        print(export_metrics_json(store))
+    else:
+        snapshot = metrics_snapshot(store)
+        print(f"queue_depth: {snapshot['queue_depth']['total']}")
+        print(f"execution_outcomes: {snapshot['execution_outcomes']['total']}")
+        print(f"providers: {len(snapshot['provider_usage'])}")
+    store.close()
+    return 0
+
+
 def command_health(args: argparse.Namespace) -> int:
-    project = Path(args.project).resolve()
+    project = resolve_project_root(args.project)
     store = Store(db_path(project))
     store.migrate()
     report = health(store)
@@ -1041,7 +1158,7 @@ def command_evidence(args: argparse.Namespace) -> int:
 
 
 def command_ci(args: argparse.Namespace) -> int:
-    root = Path(args.project).resolve()
+    root = resolve_project_root(getattr(args, "project", None))
     results = default_gates(root, include_acceptance=not args.skip_acceptance)
     if args.future_feature_gate:
         results.append(broken_future_feature_gate(root))
@@ -1144,23 +1261,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--project", default=".")
     sub = parser.add_subparsers(dest="command", required=True)
     daemon = sub.add_parser("daemon")
-    daemon.add_argument("--project", default=".")
+    daemon.add_argument("--project", default=argparse.SUPPRESS)
     daemon.add_argument("--once", action="store_true")
     daemon.add_argument("--interval", type=float, default=1.0)
     daemon.add_argument("--json", action="store_true")
     daemon.set_defaults(func=command_daemon)
     watch = sub.add_parser("watch")
-    watch.add_argument("--project", default=".")
+    watch.add_argument("--project", default=argparse.SUPPRESS)
     watch.add_argument("--daemon", action="store_true")
     watch.add_argument("--once", action="store_true")
     watch.add_argument("--interval", type=float, default=1.0)
     watch.add_argument("--json", action="store_true")
     watch.set_defaults(func=command_watch)
     labels = sub.add_parser("labels")
-    labels.add_argument("--project", default=".")
+    labels.add_argument("--project", default=argparse.SUPPRESS)
     labels_sub = labels.add_subparsers(dest="labels_command", required=True)
     labels_setup = labels_sub.add_parser("setup")
-    labels_setup.add_argument("--project", default=".")
+    labels_setup.add_argument("--project", default=argparse.SUPPRESS)
     labels_setup.add_argument("--repo")
     labels_setup.add_argument("--json", action="store_true")
     labels_setup.set_defaults(func=command_labels)
@@ -1171,22 +1288,32 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("--json", action="store_true")
     init.set_defaults(func=command_init)
     doctor = sub.add_parser("doctor")
+    doctor.add_argument("--project", default=argparse.SUPPRESS)
     doctor.add_argument("--json", action="store_true")
     doctor.set_defaults(func=command_doctor)
     cont = sub.add_parser("continue")
+    cont.add_argument("--project", default=argparse.SUPPRESS)
     cont.add_argument("--once", action="store_true")
     cont.add_argument("--json", action="store_true")
     cont.add_argument("--provider", help="Provider name to use for implementation (e.g. claude, codex)")
     cont.add_argument("--dry-run", action="store_true", help="Use FakeExecutor instead of a real provider")
+    cont.add_argument("--all", action="store_true", help="Coordinate across all registered projects in global registry")
     cont.set_defaults(func=command_continue)
     status = sub.add_parser("status")
+    status.add_argument("--project", default=argparse.SUPPRESS)
     status.add_argument("--json", action="store_true")
     status.set_defaults(func=command_status)
     plan = sub.add_parser("plan")
     plan.add_argument("file")
+    plan.add_argument("--project", default=argparse.SUPPRESS)
     plan.add_argument("--json", action="store_true")
     plan.set_defaults(func=command_plan)
+    metrics_cmd = sub.add_parser("metrics")
+    metrics_cmd.add_argument("--project", default=argparse.SUPPRESS)
+    metrics_cmd.add_argument("--json", action="store_true")
+    metrics_cmd.set_defaults(func=command_metrics)
     health_cmd = sub.add_parser("health")
+    health_cmd.add_argument("--project", default=argparse.SUPPRESS)
     health_cmd.add_argument("--json", action="store_true")
     health_cmd.set_defaults(func=command_health)
     capacity = sub.add_parser("capacity")
@@ -1342,6 +1469,7 @@ def build_parser() -> argparse.ArgumentParser:
     evidence_list.add_argument("--json", action="store_true")
     evidence_list.set_defaults(func=command_evidence)
     ci = sub.add_parser("ci")
+    ci.add_argument("--project", default=argparse.SUPPRESS, help="Target project root directory")
     ci.add_argument("--future-feature-gate", action="store_true")
     ci.add_argument("--skip-acceptance", action="store_true")
     ci.add_argument("--json", action="store_true")
@@ -1377,6 +1505,9 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     except RegistryValidationError as exc:
         print(f"registry error: {exc}", file=sys.stderr)
+        return 2
+    except ProjectError as exc:
+        print(f"project error: {exc}", file=sys.stderr)
         return 2
     except SecurityBoundaryError as exc:
         print(f"security boundary error: {exc}", file=sys.stderr)

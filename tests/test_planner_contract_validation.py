@@ -332,3 +332,173 @@ def test_exactly_200_char_id_accepted():
     planner = ObjectivePlanner()
     obj = planner.parse({"id": "X" * 200, "title": "t", "tasks": [{"id": "T1", "title": "t"}]})
     assert len(obj.id) == 200
+
+
+# ---------------------------------------------------------------------------
+# OBJECTIVES-003: DAG cycle validation (self, 2-node, multi-node)
+# ---------------------------------------------------------------------------
+
+def test_dag_self_dependency_rejected():
+    planner = ObjectivePlanner()
+    payload = {
+        "id": "OBJ-CYCLE-1",
+        "title": "Self cycle",
+        "tasks": [
+            {"id": "T1", "title": "Self dep", "dependencies": ["T1"]},
+        ],
+    }
+    with pytest.raises(ObjectiveValidationError, match="dependency cycle detected"):
+        planner.parse(payload)
+
+
+def test_dag_two_node_cycle_rejected():
+    planner = ObjectivePlanner()
+    payload = {
+        "id": "OBJ-CYCLE-2",
+        "title": "Two node cycle",
+        "tasks": [
+            {"id": "T1", "title": "Task 1", "dependencies": ["T2"]},
+            {"id": "T2", "title": "Task 2", "dependencies": ["T1"]},
+        ],
+    }
+    with pytest.raises(ObjectiveValidationError, match="dependency cycle detected"):
+        planner.parse(payload)
+
+
+def test_dag_three_node_cycle_rejected():
+    planner = ObjectivePlanner()
+    payload = {
+        "id": "OBJ-CYCLE-3",
+        "title": "Three node cycle",
+        "tasks": [
+            {"id": "T1", "title": "Task 1", "dependencies": ["T2"]},
+            {"id": "T2", "title": "Task 2", "dependencies": ["T3"]},
+            {"id": "T3", "title": "Task 3", "dependencies": ["T1"]},
+        ],
+    }
+    with pytest.raises(ObjectiveValidationError, match="dependency cycle detected"):
+        planner.parse(payload)
+
+
+def test_dag_valid_complex_acyclic_graph_passes():
+    planner = ObjectivePlanner()
+    payload = {
+        "id": "OBJ-DAG-VALID",
+        "title": "Complex acyclic graph",
+        "tasks": [
+            {"id": "T1", "title": "Base 1"},
+            {"id": "T2", "title": "Base 2"},
+            {"id": "T3", "title": "Middle", "dependencies": ["T1", "T2"]},
+            {"id": "T4", "title": "Final", "dependencies": ["T3"]},
+        ],
+    }
+    obj = planner.parse(payload)
+    assert set(obj.tasks) == {"T1", "T2", "T3", "T4"}
+
+
+# ---------------------------------------------------------------------------
+# OBJECTIVES-005: Wrapper normalization & retry suppression with Store
+# ---------------------------------------------------------------------------
+
+def test_wrapper_normalization_markdown_fences():
+    from stagemesh.objectives import normalize_planner_payload
+    raw = """Here is the plan:
+```json
+{
+  "id": "OBJ-FENCE",
+  "title": "Fenced Plan",
+  "tasks": [{"id": "T1", "title": "Task 1"}]
+}
+```
+Hope this helps!"""
+    normalized = normalize_planner_payload(raw)
+    assert normalized["id"] == "OBJ-FENCE"
+    assert len(normalized["tasks"]) == 1
+
+
+def test_wrapper_normalization_envelope_with_thinking_stripped():
+    from stagemesh.objectives import normalize_planner_payload
+    envelope = {
+        "thinking": "Step 1: plan the tasks carefully...",
+        "chain_of_thought": "I will decompose this into two steps.",
+        "plan": {
+            "id": "OBJ-ENVELOPE",
+            "title": "Enveloped Plan",
+            "tasks": [
+                {"id": "T1", "title": "First"},
+                {"id": "T2", "title": "Second", "dependencies": ["T1"]},
+            ],
+        },
+    }
+    normalized = normalize_planner_payload(envelope)
+    assert normalized["id"] == "OBJ-ENVELOPE"
+    assert "thinking" not in normalized
+    assert "chain_of_thought" not in normalized
+    assert len(normalized["tasks"]) == 2
+
+
+def test_retry_suppression_and_no_partial_store_corruption(tmp_path: Path):
+    """
+    Exercise the real planner/store orchestration:
+    - Multiple malformed attempts must fail closed and record retry failures.
+    - No partial task/objective state is inserted into Store.
+    - Subsequent successful plan execution produces exactly one objective and correct task set.
+    """
+    from stagemesh.persistence import Store
+    from stagemesh.retry import RetryRegistry
+
+    db = tmp_path / "stagemesh.sqlite3"
+    store = Store(db)
+    store.migrate()
+
+    planner = ObjectivePlanner()
+    retry_reg = RetryRegistry(store)
+
+    malformed_attempt_1 = "{malformed json"
+    malformed_attempt_2 = json.dumps({"id": "OBJ-RETRY", "tasks": [{"title": "missing id"}]})
+    valid_attempt = json.dumps({
+        "id": "OBJ-RETRY",
+        "title": "Recovered Objective",
+        "tasks": [
+            {"id": "TASK-1", "title": "First Task"},
+            {"id": "TASK-2", "title": "Second Task", "dependencies": ["TASK-1"]},
+        ],
+    })
+
+    # Attempt 1 fails
+    with pytest.raises(ObjectiveValidationError):
+        planner.parse(malformed_attempt_1)
+    d1 = retry_reg.record_failure("planner:OBJ-RETRY", "malformed_json")
+    assert d1.attempts == 1
+
+    # Attempt 2 fails
+    with pytest.raises(ObjectiveValidationError):
+        planner.parse(malformed_attempt_2)
+    d2 = retry_reg.record_failure("planner:OBJ-RETRY", "schema_validation_error")
+    assert d2.attempts == 2
+
+    # Verify no tasks or objectives exist in the store yet
+    assert len(store.tasks()) == 0
+    assert len(list(store.conn.execute("SELECT * FROM objectives"))) == 0
+
+    # Successful attempt
+    obj = planner.parse(valid_attempt)
+    payload = json.loads(valid_attempt)
+    store.save_objective(obj.id, obj.title, payload)
+    for tid in obj.tasks:
+        store.upsert_task(f"Task {tid}", task_id=tid, source="objective", source_id=f"{obj.id}:{tid}")
+    retry_reg.record_success("planner:OBJ-RETRY")
+
+    # Store now has exactly 1 objective and 2 tasks — no duplicate or corrupted state
+    objectives = list(store.conn.execute("SELECT * FROM objectives"))
+    assert len(objectives) == 1
+    assert objectives[0]["id"] == "OBJ-RETRY"
+
+    tasks = store.tasks()
+    assert len(tasks) == 2
+    assert {t["id"] for t in tasks} == {"TASK-1", "TASK-2"}
+
+    # Retry state was cleared
+    retries = store.retry_states()
+    assert len(retries) == 0
+

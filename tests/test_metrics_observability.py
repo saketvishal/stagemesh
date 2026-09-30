@@ -206,3 +206,147 @@ def test_metrics_persisted_across_store_close_reopen(tmp_path: Path):
     assert snap["execution_outcomes"]["total"] == 1
     assert snap["execution_outcomes"]["by_status"]["SUCCEEDED"] == 1
     store2.close()
+
+
+# ---------------------------------------------------------------------------
+# OBSERVABILITY-004: Exact deterministic tests for required metric calculations
+# ---------------------------------------------------------------------------
+
+def test_execution_duration_and_claim_latency_calculation(tmp_path: Path):
+    """Verify execution duration and claim latency calculations matching legacy contract."""
+    from stagemesh.workers import register_worker
+    from stagemesh.domain import ProcessIdentity
+
+    store = _store(tmp_path)
+    now = 1000.0
+
+    # Task 1 created at 700.0
+    task_1 = store.upsert_task("Task 1", source="local")
+    store.conn.execute("UPDATE tasks SET created_at=? WHERE id=?", (700.0, task_1))
+
+    # Worker registered
+    ident = ProcessIdentity(pid=None, create_time=None, boot_id=None, executable=None)
+    register_worker(store, "w-1", "codex", {"code"}, ident, 300)
+
+    # Task claimed at 850.0 (claim latency = 150.0)
+    claim_1 = store.acquire_claim(task_1, "w-1", lease_seconds=300)
+    store.conn.execute("UPDATE claims SET created_at=? WHERE id=?", (850.0, claim_1))
+
+    # Execution started at 860.0, completed at 920.0 (duration = 60.0s)
+    exec_1 = store.start_execution(
+        task_id=task_1,
+        claim_id=claim_1,
+        kind=ExecutionKind.IMPLEMENTATION,
+    )
+    store.conn.execute("UPDATE executions SET started_at=?, updated_at=? WHERE id=?", (860.0, 920.0, exec_1))
+    store.finish_execution(exec_1, ExecutionStatus.SUCCEEDED, "c" * 40)
+    store.conn.execute("UPDATE executions SET updated_at=? WHERE id=?", (920.0, exec_1))
+
+    snap = metrics_snapshot(store, now=now)
+
+    # Claim latency
+    assert snap["claim_latency"]["implementation"]["count"] == 1
+    assert snap["claim_latency"]["implementation"]["avg_seconds"] == 150.0
+
+    # Execution duration
+    assert snap["execution_outcomes"]["duration_seconds"]["count"] == 1
+    assert snap["execution_outcomes"]["duration_seconds"]["avg_seconds"] == 60.0
+    assert snap["execution_outcomes"]["duration_seconds"]["max_seconds"] == 60.0
+    store.close()
+
+
+def test_provider_usage_counts_executions_not_workers(tmp_path: Path):
+    """
+    OBSERVABILITY-004: provider_usage must measure execution counts by provider,
+    not merely the count of registered workers.
+    """
+    from stagemesh.workers import register_worker
+    from stagemesh.domain import ProcessIdentity
+
+    store = _store(tmp_path)
+    ident = ProcessIdentity(pid=None, create_time=None, boot_id=None, executable=None)
+
+    # Register two workers for codex, one for claude
+    register_worker(store, "codex-w1", "codex", {"code"}, ident, 300)
+    register_worker(store, "codex-w2", "codex", {"code"}, ident, 300)
+    register_worker(store, "claude-w1", "claude", {"code"}, ident, 300)
+
+    t1 = store.upsert_task("T1", source="local")
+    t2 = store.upsert_task("T2", source="local")
+    t3 = store.upsert_task("T3", source="local")
+
+    c1 = store.acquire_claim(t1, "codex-w1")
+    e1 = store.start_execution(task_id=t1, claim_id=c1, kind=ExecutionKind.IMPLEMENTATION)
+    store.finish_execution(e1, ExecutionStatus.SUCCEEDED, "a" * 40)
+
+    c2 = store.acquire_claim(t2, "codex-w2")
+    e2 = store.start_execution(task_id=t2, claim_id=c2, kind=ExecutionKind.IMPLEMENTATION)
+    store.finish_execution(e2, ExecutionStatus.FAILED)
+
+    c3 = store.acquire_claim(t3, "claude-w1")
+    e3 = store.start_execution(task_id=t3, claim_id=c3, kind=ExecutionKind.REVIEW)
+    store.finish_execution(e3, ExecutionStatus.SUCCEEDED, "a" * 40)
+
+    snap = metrics_snapshot(store, now=1000.0)
+
+    assert "codex" in snap["provider_usage"]
+    assert "claude" in snap["provider_usage"]
+    # Total executions: codex ran 2 executions (across 2 workers), claude ran 1 execution
+    assert snap["provider_usage"]["codex"]["total_executions"] == 2
+    assert snap["provider_usage"]["codex"]["completed_executions"] == 2
+    assert snap["provider_usage"]["claude"]["total_executions"] == 1
+    assert snap["provider_usage"]["claude"]["completed_executions"] == 1
+    store.close()
+
+
+def test_throughput_and_token_usage_metrics(tmp_path: Path):
+    """Verify throughput and token usage metrics."""
+    store = _store(tmp_path)
+    t1 = store.upsert_task("Task with estimated tokens", source="local")
+    store.conn.execute("UPDATE tasks SET stage=?, status=? WHERE id=?", (Stage.DONE, TaskStatus.DONE, t1))
+
+    # Add evidence with token metadata
+    store.add_evidence(
+        t1,
+        "a" * 40,
+        EvidenceKind.VALIDATION,
+        EvidenceStatus.PASSED,
+        {"usage": {"total_tokens": 450}, "tokens": 450},
+    )
+
+    snap = metrics_snapshot(store)
+    assert snap["throughput"]["completed_tasks"] == 1
+    assert snap["token_usage"]["reported_evidence_tokens"] == 450
+    assert snap["token_usage"]["total_tokens"] >= 450
+    store.close()
+
+
+def test_realistic_secret_redaction_scrubs_credentials(tmp_path: Path):
+    """
+    OBSERVABILITY-004: Tests must insert realistic secret-bearing input and prove
+    that export_metrics_json scrubs API keys, GitHub PATs, and bearer tokens.
+    """
+    store = _store(tmp_path)
+    # Insert realistic secrets in task title and evidence
+    secret_pat = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+    secret_sk = "sk-1234567890abcdefghijklmnopqrstuvwxyz"
+    secret_auth = "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
+
+    task_id = store.upsert_task(f"Task with token {secret_pat}", source="local")
+    store.add_evidence(
+        task_id,
+        "a" * 40,
+        EvidenceKind.VALIDATION,
+        EvidenceStatus.PASSED,
+        {"auth": secret_auth, "api_key": secret_sk, "tokens": 100},
+    )
+
+    exported = export_metrics_json(store)
+
+    # Prove raw secrets are NOT present anywhere in the exported JSON
+    assert secret_pat not in exported
+    assert secret_sk not in exported
+    assert secret_auth not in exported
+    assert "[REDACTED]" in exported
+    store.close()
+

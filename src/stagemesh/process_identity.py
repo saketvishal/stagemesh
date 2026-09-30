@@ -3,7 +3,9 @@ from __future__ import annotations
 import os
 import platform
 import subprocess
+import sys
 from pathlib import Path
+from typing import Any
 
 from .domain import ProcessIdentity
 
@@ -12,20 +14,98 @@ def boot_id() -> str:
     path = Path("/proc/sys/kernel/random/boot_id")
     if path.exists():
         return path.read_text(encoding="utf-8").strip()
+    try:
+        import psutil
+
+        return f"boot:{psutil.boot_time()}"
+    except Exception:
+        pass
+    if platform.system() == "Windows":
+        try:
+            import ctypes
+
+            uptime_ms = ctypes.windll.kernel32.GetTickCount64()
+            return f"win_boot:{uptime_ms // 1000}"
+        except Exception:
+            pass
     return f"{platform.system()}:{platform.node()}"
 
 
-def current_process_identity() -> ProcessIdentity:
+def get_process_create_time(pid: int) -> float | None:
+    try:
+        import psutil
+
+        p = psutil.Process(pid)
+        return float(p.create_time())
+    except Exception:
+        pass
+    if platform.system() == "Windows":
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            k32 = ctypes.windll.kernel32
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            h = k32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+            if h:
+                try:
+                    c, e, k, u = wintypes.FILETIME(), wintypes.FILETIME(), wintypes.FILETIME(), wintypes.FILETIME()
+                    if k32.GetProcessTimes(h, ctypes.byref(c), ctypes.byref(e), ctypes.byref(k), ctypes.byref(u)):
+                        ft = (c.dwHighDateTime << 32) + c.dwLowDateTime
+                        # 100-ns intervals since Jan 1 1601 to unix epoch
+                        return (ft - 116444736000000000) / 10000000.0
+                finally:
+                    k32.CloseHandle(h)
+        except Exception:
+            pass
+    return None
+
+
+def get_process_executable(pid: int) -> str | None:
+    try:
+        import psutil
+
+        p = psutil.Process(pid)
+        return str(p.exe())
+    except Exception:
+        return None
+
+
+def observe_process_identity(pid: int | None) -> ProcessIdentity | None:
+    if pid is None or pid <= 0:
+        return None
+    create_time = get_process_create_time(pid)
+    if create_time is None:
+        return None
+    executable = get_process_executable(pid)
     return ProcessIdentity(
-        pid=os.getpid(),
-        create_time=None,
+        pid=pid,
+        create_time=create_time,
         boot_id=boot_id(),
-        executable=None,
+        executable=executable,
     )
 
 
-def popen_identity(proc: subprocess.Popen[str]) -> ProcessIdentity:
-    return ProcessIdentity(pid=proc.pid, create_time=None, boot_id=boot_id(), executable=proc.args[0] if proc.args else None)
+def current_process_identity() -> ProcessIdentity:
+    pid = os.getpid()
+    return ProcessIdentity(
+        pid=pid,
+        create_time=get_process_create_time(pid),
+        boot_id=boot_id(),
+        executable=sys.executable,
+    )
+
+
+def popen_identity(proc: subprocess.Popen[Any]) -> ProcessIdentity:
+    pid = proc.pid
+    exe = str(proc.args[0]) if proc.args and isinstance(proc.args, (list, tuple)) else sys.executable
+    create_time = get_process_create_time(pid)
+    return ProcessIdentity(
+        pid=pid,
+        create_time=create_time,
+        boot_id=boot_id(),
+        executable=exe,
+    )
 
 
 def classify_process(saved: ProcessIdentity, observed: ProcessIdentity | None) -> str:
@@ -37,8 +117,15 @@ def classify_process(saved: ProcessIdentity, observed: ProcessIdentity | None) -
 def is_pid_alive(pid: int, expected_boot_id: str | None = None) -> bool:
     if pid <= 0:
         return False
-    if expected_boot_id and expected_boot_id != boot_id():
+    current_boot = boot_id()
+    if expected_boot_id and expected_boot_id != current_boot:
         return False
+    try:
+        import psutil
+
+        return psutil.pid_exists(pid)
+    except Exception:
+        pass
     try:
         if platform.system() == "Windows":
             cmd = ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"]
