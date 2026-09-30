@@ -192,14 +192,14 @@ def main() -> int:
             raise AssertionError(outside_plan.stdout + outside_plan.stderr)
         backlog = project / ".stagemesh" / "backlog.json"
         first_continue_json = run(
-            [sys.executable, "-m", "stagemesh.cli", "--project", str(project), "continue", "--once", "--json"],
+            [sys.executable, "-m", "stagemesh.cli", "--project", str(project), "continue", "--once", "--dry-run", "--json"],
             ROOT,
             env,
         )
         if json.loads(first_continue_json)["progressed"] <= 0:
             raise AssertionError(first_continue_json)
         for _ in range(16):
-            run([sys.executable, "-m", "stagemesh.cli", "--project", str(project), "continue", "--once"], ROOT, env)
+            run([sys.executable, "-m", "stagemesh.cli", "--project", str(project), "continue", "--once", "--dry-run"], ROOT, env)
         status = run([sys.executable, "-m", "stagemesh.cli", "--project", str(project), "status"], ROOT, env)
         if "DONE DONE first task" not in status or "DONE DONE dependent task" not in status:
             raise AssertionError(status)
@@ -256,14 +256,14 @@ def main() -> int:
         ):
             raise AssertionError(config_source_json)
         for _ in range(8):
-            run([sys.executable, "-m", "stagemesh.cli", "--project", str(project), "continue", "--once"], ROOT, env)
+            run([sys.executable, "-m", "stagemesh.cli", "--project", str(project), "continue", "--once", "--dry-run"], ROOT, env)
         status = run([sys.executable, "-m", "stagemesh.cli", "--project", str(project), "status"], ROOT, env)
         if "DONE DONE configured adapter task" not in status or "DONE DONE google ax exported task" not in status:
             raise AssertionError(status)
         original_backlog = backlog.read_text(encoding="utf-8")
         backlog.write_text('{"tasks":[{"id":"bad","title":"bad","dependencies":["missing"]}]}', encoding="utf-8")
         invalid_backlog = subprocess.run(
-            [sys.executable, "-m", "stagemesh.cli", "--project", str(project), "continue", "--once"],
+            [sys.executable, "-m", "stagemesh.cli", "--project", str(project), "continue", "--once", "--dry-run"],
             cwd=ROOT,
             text=True,
             capture_output=True,
@@ -1134,7 +1134,7 @@ def main() -> int:
         run([sys.executable, "-m", "stagemesh.cli", "--project", str(demo_project), "init"], ROOT, env)
         run([sys.executable, "-m", "stagemesh.cli", "--project", str(demo_project), "plan", str(demo_objective)], ROOT, env)
         for _ in range(10):
-            run([sys.executable, "-m", "stagemesh.cli", "--project", str(demo_project), "continue", "--once"], ROOT, env)
+            run([sys.executable, "-m", "stagemesh.cli", "--project", str(demo_project), "continue", "--once", "--dry-run"], ROOT, env)
         demo_status = run(
             [sys.executable, "-m", "stagemesh.cli", "--project", str(demo_project), "status", "--json"],
             ROOT,

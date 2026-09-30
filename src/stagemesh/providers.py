@@ -52,7 +52,16 @@ class RuntimeCommandAdapter:
     def execute(self, store: Store, task_id: str, claim_id: str | None, project: Path) -> ExecutionResult:
         if self.check_capacity() != CapacityKind.AVAILABLE:
             return ExecutionResult(ExecutionStatus.FAILED, capacity_failure=True)
-        proc = subprocess.Popen(list(self.command), cwd=project, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        task = store.get_task(task_id)
+        task_prompt = _build_task_prompt(task_id, task)
+        proc = subprocess.Popen(
+            list(self.command),
+            cwd=project,
+            text=True,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
         identity = popen_identity(proc)
         execution_id = store.start_execution(
             task_id=task_id,
@@ -63,7 +72,7 @@ class RuntimeCommandAdapter:
             boot_id=identity.boot_id,
             executable=identity.executable,
         )
-        proc.communicate()
+        proc.communicate(input=task_prompt)
         if proc.returncode != 0:
             store.finish_execution(execution_id, ExecutionStatus.FAILED)
             return ExecutionResult(ExecutionStatus.FAILED)
@@ -141,3 +150,20 @@ def _validate_capabilities(capabilities: frozenset[str]) -> frozenset[str]:
     if len(normalized) != len(capabilities):
         raise ProviderValidationError("provider adapter capabilities must be non-empty strings")
     return normalized
+
+
+def _build_task_prompt(task_id: str, task: object) -> str:
+    """Build the prompt string sent via stdin to a provider CLI.
+
+    The prompt gives the agent its task title and a reminder to commit any
+    changes via git so StageMesh can capture the resulting SHA for evidence.
+    """
+    import sqlite3 as _sqlite3
+
+    title = task["title"] if isinstance(task, _sqlite3.Row) and "title" in task.keys() else str(task_id)
+    return (
+        f"StageMesh task: {title}\n\n"
+        "Please implement the changes described above. "
+        "When you are done, commit all changes to git with a descriptive commit message "
+        "so StageMesh can record the resulting commit SHA as the implementation candidate.\n"
+    )
