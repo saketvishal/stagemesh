@@ -1,14 +1,22 @@
 from __future__ import annotations
 
+import json
+import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
+from .attribution import attribution_for_worker
 from .domain import ExecutionKind, ExecutionStatus
 from .git import GitWorkspace
 from .persistence import Store
 from .process_identity import popen_identity
-from .attribution import attribution_for_worker
+from .process_tree import kill_process_tree
+
+
+class StructuredResultValidationError(ValueError):
+    """Raised when a worker emits an invalid structured result payload."""
 
 
 @dataclass(frozen=True)
@@ -18,6 +26,64 @@ class ExecutionResult:
     durable_handoff: bool = False
     capacity_failure: bool = False
     failure_reason: str | None = None
+    metadata: dict[str, Any] | None = None
+
+
+def parse_structured_result(
+    payload: str | dict[str, Any],
+    *,
+    expected_task_id: str | None = None,
+) -> ExecutionResult:
+    """Parse and validate a structured worker result JSON payload.
+
+    Fails closed (raises StructuredResultValidationError) if malformed or invalid.
+    """
+    if isinstance(payload, str):
+        try:
+            data = json.loads(payload)
+        except Exception as exc:
+            raise StructuredResultValidationError(f"invalid JSON payload: {exc}") from exc
+    elif isinstance(payload, dict):
+        data = payload
+    else:
+        raise StructuredResultValidationError(f"expected dict or JSON string, got {type(payload).__name__}")
+
+    if not isinstance(data, dict):
+        raise StructuredResultValidationError("structured result payload must be a JSON object")
+
+    raw_status = data.get("status")
+    if not raw_status or not isinstance(raw_status, str):
+        raise StructuredResultValidationError("missing or invalid 'status' field in result payload")
+
+    status_upper = raw_status.upper()
+    try:
+        status = ExecutionStatus[status_upper]
+    except KeyError:
+        raise StructuredResultValidationError(f"unknown status '{raw_status}' in result payload")
+
+    sha = data.get("candidate_sha")
+    if sha is not None:
+        if not isinstance(sha, str) or not re.match(r"^[0-9a-fA-F]{40}$", sha):
+            raise StructuredResultValidationError(f"invalid candidate_sha format: {sha}")
+
+    durable_handoff = bool(data.get("durable_handoff", False))
+    capacity_failure = bool(data.get("capacity_failure", False))
+    failure_reason = data.get("failure_reason")
+    if failure_reason is not None and not isinstance(failure_reason, str):
+        raise StructuredResultValidationError("invalid failure_reason field")
+
+    metadata = data.get("metadata")
+    if metadata is not None and not isinstance(metadata, dict):
+        raise StructuredResultValidationError("metadata field must be a JSON object")
+
+    return ExecutionResult(
+        status=status,
+        candidate_sha=sha,
+        durable_handoff=durable_handoff,
+        capacity_failure=capacity_failure,
+        failure_reason=failure_reason,
+        metadata=metadata,
+    )
 
 
 def classify_failure(
@@ -108,7 +174,12 @@ class SubprocessExecutor(Executor):
         from .providers import _build_task_prompt
         task_prompt = _build_task_prompt(task_id, task)
 
+        result_file = project / f".stagemesh-result-{task_id}.json"
+        extra_env = {"STAGEMESH_RESULT_PATH": str(result_file)}
+
         try:
+            env = dict(subprocess.os.environ)
+            env.update(extra_env)
             proc = subprocess.Popen(
                 self.command,
                 cwd=project,
@@ -116,6 +187,7 @@ class SubprocessExecutor(Executor):
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
+                env=env,
             )
         except FileNotFoundError as exc:
             is_cap, reason = classify_failure(1, exc=exc)
@@ -135,8 +207,33 @@ class SubprocessExecutor(Executor):
             boot_id=ident.boot_id,
             executable=ident.executable,
         )
-        stdout, stderr = proc.communicate(input=task_prompt)
-        code = proc.returncode
+
+        try:
+            stdout, stderr = proc.communicate(input=task_prompt)
+            code = proc.returncode
+        except Exception:
+            kill_process_tree(ident.pid)
+            store.finish_execution(execution_id, ExecutionStatus.FAILED)
+            raise
+
+        # 1. Ingest structured result if present
+        if result_file.exists():
+            try:
+                res_content = result_file.read_text(encoding="utf-8")
+                parsed = parse_structured_result(res_content, expected_task_id=task_id)
+                if parsed.candidate_sha:
+                    store.add_candidate(task_id, parsed.candidate_sha, self.name, durable_handoff=parsed.durable_handoff)
+                store.finish_execution(execution_id, parsed.status, parsed.candidate_sha)
+                return parsed
+            except StructuredResultValidationError as exc:
+                store.finish_execution(execution_id, ExecutionStatus.FAILED)
+                return ExecutionResult(
+                    ExecutionStatus.FAILED,
+                    capacity_failure=False,
+                    failure_reason=f"structured_result_invalid: {exc}",
+                )
+            finally:
+                result_file.unlink(missing_ok=True)
 
         if code != 0:
             is_cap, reason = classify_failure(code, stdout, stderr)

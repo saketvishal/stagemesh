@@ -1,0 +1,154 @@
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+import pytest
+
+from stagemesh.process_identity import ProcessIdentity, current_process_identity
+from stagemesh.process_tree import kill_process_tree, ProcessTree
+
+
+def _alive(pid: int) -> bool:
+    if sys.platform == "win32":
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        STILL_ACTIVE = 259
+        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not handle:
+            return False
+        try:
+            exit_code = wintypes.DWORD()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                return False
+            return exit_code.value == STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        try:
+            reaped, _ = os.waitpid(pid, os.WNOHANG)
+            if reaped == pid:
+                return False
+        except OSError:
+            pass
+
+        proc_status = Path(f"/proc/{pid}/status")
+        if proc_status.is_file():
+            try:
+                for line in proc_status.read_text(encoding="utf-8").splitlines():
+                    if line.startswith("State:"):
+                        state = line.split(":", 1)[1].strip()
+                        if state.startswith("Z"):
+                            return False
+                        break
+            except OSError:
+                return False
+
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def _write_tree_scripts(pid_dir: Path) -> Path:
+    grandchild = pid_dir / "grandchild.py"
+    grandchild.write_text(
+        "import os, sys, time\n"
+        "from pathlib import Path\n"
+        "pid_dir = Path(sys.argv[1])\n"
+        "(pid_dir / 'grandchild.pid').write_text(str(os.getpid()), encoding='utf-8')\n"
+        "time.sleep(60)\n",
+        encoding="utf-8",
+    )
+    child = pid_dir / "child.py"
+    child.write_text(
+        "import os, sys, time\n"
+        "from pathlib import Path\n"
+        "pid_dir = Path(sys.argv[1])\n"
+        "(pid_dir / 'child.pid').write_text(str(os.getpid()), encoding='utf-8')\n"
+        "gc = pid_dir / 'grandchild.py'\n"
+        "import subprocess\n"
+        "subprocess.Popen([sys.executable, str(gc), str(pid_dir)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+        "time.sleep(60)\n",
+        encoding="utf-8",
+    )
+    worker = pid_dir / "worker.py"
+    worker.write_text(
+        "import os, sys, time\n"
+        "from pathlib import Path\n"
+        "pid_dir = Path(sys.argv[1])\n"
+        "(pid_dir / 'worker.pid').write_text(str(os.getpid()), encoding='utf-8')\n"
+        "child = pid_dir / 'child.py'\n"
+        "import subprocess\n"
+        "subprocess.Popen([sys.executable, str(child), str(pid_dir)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+        "time.sleep(60)\n",
+        encoding="utf-8",
+    )
+    return worker
+
+
+def test_terminate_kills_worker_child_and_grandchild(tmp_path: Path):
+    pid_dir = tmp_path / "pids"
+    pid_dir.mkdir()
+    worker = _write_tree_scripts(pid_dir)
+    unrelated_proc = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    unrelated = unrelated_proc.pid
+
+    proc = subprocess.Popen(
+        [sys.executable, str(worker), str(pid_dir)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+    deadline = time.time() + 15
+    while time.time() < deadline:
+        if all((pid_dir / name).is_file() for name in ("worker.pid", "child.pid", "grandchild.pid")):
+            break
+        time.sleep(0.05)
+
+    pids = {
+        name: int((pid_dir / f"{name}.pid").read_text(encoding="utf-8"))
+        for name in ("worker", "child", "grandchild")
+    }
+    for pid in pids.values():
+        assert _alive(pid)
+    assert _alive(unrelated)
+
+    kill_process_tree(proc.pid)
+
+    deadline = time.time() + 15
+    while time.time() < deadline and any(_alive(pid) for pid in pids.values()):
+        time.sleep(0.1)
+
+    for name, pid in pids.items():
+        assert not _alive(pid), f"{name} pid {pid} still alive"
+
+    assert _alive(unrelated)
+
+    # Cleanup unrelated
+    if sys.platform == "win32":
+        import ctypes
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        handle_p = kernel32.OpenProcess(0x0001, False, unrelated)
+        if handle_p:
+            kernel32.TerminateProcess(handle_p, 1)
+            kernel32.CloseHandle(handle_p)
+    else:
+        os.kill(unrelated, 9)
+    unrelated_proc.wait(timeout=5)
+
+
+def test_kill_process_tree_fails_safely_on_unknown_or_reused_identity():
+    # Attempting to kill negative or non-existent PID should not raise unhandled crash
+    kill_process_tree(-1)
+    kill_process_tree(9999999)

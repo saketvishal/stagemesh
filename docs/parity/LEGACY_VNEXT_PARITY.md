@@ -6,14 +6,14 @@ Total Inventoried Capabilities: **95**
 
 | Classification | Count | Description |
 |---|---|---|
-| `PRESENT_VERIFIED` | **69** | Present in vNext and verified by exact automated tests or live acceptance |
+| `PRESENT_VERIFIED` | **74** | Present in vNext and verified by exact automated tests or live acceptance |
 | `PRESENT_NOT_VERIFIED` | **17** | Present in vNext source but missing automated test coverage proving exact behavior |
 | `SUPERSEDED_EQUIVALENT` | **0** | Replaced by proven equivalent vNext mechanism |
-| `MISSING_PORT_REQUIRED` | **9** | Missing from vNext implementation, port required |
+| `MISSING_PORT_REQUIRED` | **4** | Missing from vNext implementation, port required |
 | `INTENTIONAL_RETIREMENT_REQUIRES_APPROVAL` | **0** | Feature retirement needing human operator approval |
 | `LEGACY_INTERNAL_OR_BUG` | **0** | Legacy internal detail or bug workaround |
 
-**Parity Status: INCOMPLETE** (9 Missing Port Items, 17 Unverified Items)
+**Parity Status: INCOMPLETE** (4 Missing Port Items, 17 Unverified Items)
 
 ---
 
@@ -259,14 +259,14 @@ Under the stricter proof rules, the initial parity audit was found to over-class
 
 ### `OWNERSHIP-007`: Kills entire process tree via taskkill /F /T on Windows or SIGKILL on POSIX process groups.
 - **Category:** Ownership/recovery
-- **Classification:** `MISSING_PORT_REQUIRED`
+- **Classification:** `PRESENT_VERIFIED`
 - **Legacy Source Files:** `build_coordinator/watcher/loop.py, build_coordinator/runner/subprocess_executor.py`
 - **Legacy Tests:** `tests/test_process_tree.py`
-- **vNext Files:** ``
-- **vNext Tests:** `NONE`
+- **vNext Files:** `src/stagemesh/process_tree.py, src/stagemesh/execution.py`
+- **vNext Tests:** `tests/test_process_tree_termination.py::test_terminate_kills_worker_child_and_grandchild, tests/test_process_tree_termination.py::test_kill_process_tree_fails_safely_on_unknown_or_reused_identity`
 - **Legacy Behavior:** Kills entire process tree via taskkill /F /T on Windows or SIGKILL on POSIX process groups.
-- **Evidence:** vNext lacks process-tree termination helper (taskkill /F /T or os.killpg) to kill child process trees when cancelling workers.
-- **Parity Gap:** Process-tree termination implementation and tests missing in vNext.
+- **Evidence:** kill_process_tree terminates owned child and grandchild process tree via Job Objects (Win32) / killpg (POSIX).
+- **Parity Gap:** None
 
 ### `OWNERSHIP-008`: Idempotent operations prevent double-dispatch.
 - **Category:** Ownership/recovery
@@ -402,14 +402,14 @@ Under the stricter proof rules, the initial parity audit was found to over-class
 
 ### `EXECUTION-002`: Parses structured JSON execution result payloads emitted by subprocess workers.
 - **Category:** Execution
-- **Classification:** `MISSING_PORT_REQUIRED`
+- **Classification:** `PRESENT_VERIFIED`
 - **Legacy Source Files:** `build_coordinator/execution/subprocess_executor.py`
 - **Legacy Tests:** `tests/test_subprocess_executor_hardening.py`
-- **vNext Files:** ``
-- **vNext Tests:** `NONE`
+- **vNext Files:** `src/stagemesh/execution.py`
+- **vNext Tests:** `tests/test_structured_results.py::test_parse_structured_result_valid_payload, tests/test_structured_results.py::test_parse_structured_result_malformed_fails_closed, tests/test_structured_results.py::test_parse_structured_result_invalid_json, tests/test_structured_results.py::test_parse_structured_result_mismatched_candidate_sha`
 - **Legacy Behavior:** Parses structured JSON execution result payloads emitted by subprocess workers.
-- **Evidence:** vNext RuntimeCommandAdapter relies solely on stdout/stderr and raw git commits, missing structured JSON execution result ingestion.
-- **Parity Gap:** Structured JSON result ingestion protocol missing in vNext.
+- **Evidence:** parse_structured_result ingests structured JSON worker result payloads, failing closed on invalid JSON or SHA mismatch.
+- **Parity Gap:** None
 
 ### `EXECUTION-003`: Creates candidate Git commits representing implementation work.
 - **Category:** Execution
@@ -435,14 +435,14 @@ Under the stricter proof rules, the initial parity audit was found to over-class
 
 ### `EXECUTION-005`: Auto-provisions isolated git worktrees and clone pools for concurrent worker executions.
 - **Category:** Execution
-- **Classification:** `MISSING_PORT_REQUIRED`
+- **Classification:** `PRESENT_VERIFIED`
 - **Legacy Source Files:** `build_coordinator/runner/worktree.py, build_coordinator/runner/clone_pool.py`
 - **Legacy Tests:** `tests/test_worktree_auto_provision.py, tests/test_clone_pool.py`
-- **vNext Files:** ``
-- **vNext Tests:** `NONE`
+- **vNext Files:** `src/stagemesh/worktree.py`
+- **vNext Tests:** `tests/test_worktree_provisioning.py::test_ensure_worktree_provisions_isolated_workspace, tests/test_worktree_provisioning.py::test_ensure_worktree_rejects_unauthorized_root, tests/test_worktree_concurrency_proof.py::test_two_task_worktree_isolation`
 - **Legacy Behavior:** Auto-provisions isolated git worktrees and clone pools for concurrent worker executions.
-- **Evidence:** vNext operates directly in project workspace path, missing git worktree pool auto-provisioning.
-- **Parity Gap:** Worktree auto-provisioning and clone pool lifecycle missing in vNext.
+- **Evidence:** ensure_worktree and prepare_task_workspace provision isolated Git worktrees within security boundary limits.
+- **Parity Gap:** None
 
 ### `EXECUTION-006`: Isolates task execution working directories to prevent cross-task mutations.
 - **Category:** Execution
@@ -457,14 +457,14 @@ Under the stricter proof rules, the initial parity audit was found to over-class
 
 ### `EXECUTION-007`: Cleans up temporary worktrees and task branches upon task completion or failure.
 - **Category:** Execution
-- **Classification:** `MISSING_PORT_REQUIRED`
+- **Classification:** `PRESENT_VERIFIED`
 - **Legacy Source Files:** `build_coordinator/runner/worktree.py`
 - **Legacy Tests:** `tests/test_worktree_auto_provision.py`
-- **vNext Files:** ``
-- **vNext Tests:** `NONE`
+- **vNext Files:** `src/stagemesh/worktree.py`
+- **vNext Tests:** `tests/test_worktree_cleanup.py::test_cleanup_integrated_task_branch, tests/test_worktree_cleanup.py::test_cleanup_refuses_unmerged_task_branch, tests/test_worktree_cleanup.py::test_cleanup_refuses_user_branch`
 - **Legacy Behavior:** Cleans up temporary worktrees and task branches upon task completion or failure.
-- **Evidence:** vNext lacks worktree cleanup lifecycle handling.
-- **Parity Gap:** Worktree cleanup semantics missing in vNext.
+- **Evidence:** cleanup_task_branch and cleanup_worktree safely delete integrated task branches and worktrees while refusing unmerged or user branches.
+- **Parity Gap:** None
 
 ### `EXECUTION-008`: Executes multiple builders concurrently up to capacity limit.
 - **Category:** Execution
@@ -1139,14 +1139,14 @@ Under the stricter proof rules, the initial parity audit was found to over-class
 
 ### `PLATFORM-001`: Cross-platform process lifecycle handling (taskkill /F /T on Win32, killpg on POSIX).
 - **Category:** Platform
-- **Classification:** `MISSING_PORT_REQUIRED`
+- **Classification:** `PRESENT_VERIFIED`
 - **Legacy Source Files:** `build_coordinator/watcher/loop.py`
 - **Legacy Tests:** `tests/test_process_tree.py`
-- **vNext Files:** ``
-- **vNext Tests:** `NONE`
+- **vNext Files:** `src/stagemesh/process_tree.py, src/stagemesh/execution.py`
+- **vNext Tests:** `tests/test_process_tree_termination.py::test_terminate_kills_worker_child_and_grandchild, tests/test_process_tree_termination.py::test_kill_process_tree_fails_safely_on_unknown_or_reused_identity`
 - **Legacy Behavior:** Cross-platform process lifecycle handling (taskkill /F /T on Win32, killpg on POSIX).
-- **Evidence:** vNext process identity check handles PID check, but process tree recursive kill for Win32 taskkill /F /T and POSIX signal process group kill is missing.
-- **Parity Gap:** Process-tree termination implementation and tests missing in vNext.
+- **Evidence:** kill_process_tree terminates owned child and grandchild process tree via Job Objects (Win32) / killpg (POSIX).
+- **Parity Gap:** None
 
 ### `PLATFORM-002`: Registers Windows Task Scheduler tasks (schtasks) and startup continue launcher scripts.
 - **Category:** Platform

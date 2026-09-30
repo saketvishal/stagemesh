@@ -269,7 +269,7 @@
   {
     "id": "OWNERSHIP-007",
     "category": "Ownership/recovery",
-    "classification": "MISSING_PORT_REQUIRED",
+    "classification": "PRESENT_VERIFIED",
     "legacy_source_files": [
       "build_coordinator/watcher/loop.py",
       "build_coordinator/runner/subprocess_executor.py"
@@ -278,10 +278,16 @@
       "tests/test_process_tree.py"
     ],
     "legacy_behavior": "Kills entire process tree via taskkill /F /T on Windows or SIGKILL on POSIX process groups.",
-    "vnext_files": [],
-    "vnext_tests": [],
-    "evidence": "vNext lacks process-tree termination helper (taskkill /F /T or os.killpg) to kill child process trees when cancelling workers.",
-    "parity_gap": "Process-tree termination implementation and tests missing in vNext."
+    "vnext_files": [
+      "src/stagemesh/process_tree.py",
+      "src/stagemesh/execution.py"
+    ],
+    "vnext_tests": [
+      "tests/test_process_tree_termination.py::test_terminate_kills_worker_child_and_grandchild",
+      "tests/test_process_tree_termination.py::test_kill_process_tree_fails_safely_on_unknown_or_reused_identity"
+    ],
+    "evidence": "kill_process_tree terminates owned child and grandchild process tree via Job Objects (Win32) / killpg (POSIX).",
+    "parity_gap": "None"
   },
   {
     "id": "OWNERSHIP-008",
@@ -519,7 +525,7 @@
   {
     "id": "EXECUTION-002",
     "category": "Execution",
-    "classification": "MISSING_PORT_REQUIRED",
+    "classification": "PRESENT_VERIFIED",
     "legacy_source_files": [
       "build_coordinator/execution/subprocess_executor.py"
     ],
@@ -527,10 +533,17 @@
       "tests/test_subprocess_executor_hardening.py"
     ],
     "legacy_behavior": "Parses structured JSON execution result payloads emitted by subprocess workers.",
-    "vnext_files": [],
-    "vnext_tests": [],
-    "evidence": "vNext RuntimeCommandAdapter relies solely on stdout/stderr and raw git commits, missing structured JSON execution result ingestion.",
-    "parity_gap": "Structured JSON result ingestion protocol missing in vNext."
+    "vnext_files": [
+      "src/stagemesh/execution.py"
+    ],
+    "vnext_tests": [
+      "tests/test_structured_results.py::test_parse_structured_result_valid_payload",
+      "tests/test_structured_results.py::test_parse_structured_result_malformed_fails_closed",
+      "tests/test_structured_results.py::test_parse_structured_result_invalid_json",
+      "tests/test_structured_results.py::test_parse_structured_result_mismatched_candidate_sha"
+    ],
+    "evidence": "parse_structured_result ingests structured JSON worker result payloads, failing closed on invalid JSON or SHA mismatch.",
+    "parity_gap": "None"
   },
   {
     "id": "EXECUTION-003",
@@ -577,7 +590,7 @@
   {
     "id": "EXECUTION-005",
     "category": "Execution",
-    "classification": "MISSING_PORT_REQUIRED",
+    "classification": "PRESENT_VERIFIED",
     "legacy_source_files": [
       "build_coordinator/runner/worktree.py",
       "build_coordinator/runner/clone_pool.py"
@@ -587,10 +600,16 @@
       "tests/test_clone_pool.py"
     ],
     "legacy_behavior": "Auto-provisions isolated git worktrees and clone pools for concurrent worker executions.",
-    "vnext_files": [],
-    "vnext_tests": [],
-    "evidence": "vNext operates directly in project workspace path, missing git worktree pool auto-provisioning.",
-    "parity_gap": "Worktree auto-provisioning and clone pool lifecycle missing in vNext."
+    "vnext_files": [
+      "src/stagemesh/worktree.py"
+    ],
+    "vnext_tests": [
+      "tests/test_worktree_provisioning.py::test_ensure_worktree_provisions_isolated_workspace",
+      "tests/test_worktree_provisioning.py::test_ensure_worktree_rejects_unauthorized_root",
+      "tests/test_worktree_concurrency_proof.py::test_two_task_worktree_isolation"
+    ],
+    "evidence": "ensure_worktree and prepare_task_workspace provision isolated Git worktrees within security boundary limits.",
+    "parity_gap": "None"
   },
   {
     "id": "EXECUTION-006",
@@ -615,7 +634,7 @@
   {
     "id": "EXECUTION-007",
     "category": "Execution",
-    "classification": "MISSING_PORT_REQUIRED",
+    "classification": "PRESENT_VERIFIED",
     "legacy_source_files": [
       "build_coordinator/runner/worktree.py"
     ],
@@ -623,10 +642,16 @@
       "tests/test_worktree_auto_provision.py"
     ],
     "legacy_behavior": "Cleans up temporary worktrees and task branches upon task completion or failure.",
-    "vnext_files": [],
-    "vnext_tests": [],
-    "evidence": "vNext lacks worktree cleanup lifecycle handling.",
-    "parity_gap": "Worktree cleanup semantics missing in vNext."
+    "vnext_files": [
+      "src/stagemesh/worktree.py"
+    ],
+    "vnext_tests": [
+      "tests/test_worktree_cleanup.py::test_cleanup_integrated_task_branch",
+      "tests/test_worktree_cleanup.py::test_cleanup_refuses_unmerged_task_branch",
+      "tests/test_worktree_cleanup.py::test_cleanup_refuses_user_branch"
+    ],
+    "evidence": "cleanup_task_branch and cleanup_worktree safely delete integrated task branches and worktrees while refusing unmerged or user branches.",
+    "parity_gap": "None"
   },
   {
     "id": "EXECUTION-008",
@@ -1826,7 +1851,7 @@
   {
     "id": "PLATFORM-001",
     "category": "Platform",
-    "classification": "MISSING_PORT_REQUIRED",
+    "classification": "PRESENT_VERIFIED",
     "legacy_source_files": [
       "build_coordinator/watcher/loop.py"
     ],
@@ -1834,10 +1859,16 @@
       "tests/test_process_tree.py"
     ],
     "legacy_behavior": "Cross-platform process lifecycle handling (taskkill /F /T on Win32, killpg on POSIX).",
-    "vnext_files": [],
-    "vnext_tests": [],
-    "evidence": "vNext process identity check handles PID check, but process tree recursive kill for Win32 taskkill /F /T and POSIX signal process group kill is missing.",
-    "parity_gap": "Process-tree termination implementation and tests missing in vNext."
+    "vnext_files": [
+      "src/stagemesh/process_tree.py",
+      "src/stagemesh/execution.py"
+    ],
+    "vnext_tests": [
+      "tests/test_process_tree_termination.py::test_terminate_kills_worker_child_and_grandchild",
+      "tests/test_process_tree_termination.py::test_kill_process_tree_fails_safely_on_unknown_or_reused_identity"
+    ],
+    "evidence": "kill_process_tree terminates owned child and grandchild process tree via Job Objects (Win32) / killpg (POSIX).",
+    "parity_gap": "None"
   },
   {
     "id": "PLATFORM-002",
