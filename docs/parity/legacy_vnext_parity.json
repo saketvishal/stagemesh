@@ -212,7 +212,7 @@
   {
     "id": "OWNERSHIP-004",
     "category": "Ownership/recovery",
-    "classification": "PRESENT_NOT_VERIFIED",
+    "classification": "PRESENT_VERIFIED",
     "legacy_source_files": [
       "build_coordinator/watcher/loop.py"
     ],
@@ -223,9 +223,18 @@
     "vnext_files": [
       "src/stagemesh/process_identity.py"
     ],
-    "vnext_tests": [],
-    "evidence": "process_identity.py checks PID and boot_id, but full process hierarchy inspection is unverified.",
-    "parity_gap": "Unverified process hierarchy validation."
+    "vnext_tests": [
+      "tests/test_process_identity_verification.py::test_classify_unknown_saved_returns_unknown",
+      "tests/test_process_identity_verification.py::test_pid_reuse_with_different_boot_id_is_dead",
+      "tests/test_process_identity_verification.py::test_pid_reuse_with_different_create_time_is_dead",
+      "tests/test_process_identity_verification.py::test_pid_reuse_with_different_executable_is_dead",
+      "tests/test_process_identity_verification.py::test_exact_match_returns_live",
+      "tests/test_process_identity_verification.py::test_classify_none_observed_returns_unknown",
+      "tests/test_process_identity_verification.py::test_restart_uses_new_identity_not_stale_saved",
+      "tests/test_process_identity_verification.py::test_identity_mismatch_does_not_kill_unrelated_processes"
+    ],
+    "evidence": "classify_process correctly classifies LIVE/DEAD/UNKNOWN based on pid+boot_id+create_time+executable; PID reuse with different boot_id/create_time/executable is classified DEAD; unknown identity (None fields) stays UNKNOWN; classify_process is a pure function that never kills unrelated processes; restart produces new identity separate from stale saved identity.",
+    "parity_gap": "None"
   },
   {
     "id": "OWNERSHIP-005",
@@ -920,7 +929,7 @@
   {
     "id": "OBJECTIVES-003",
     "category": "Objectives/planning",
-    "classification": "PRESENT_NOT_VERIFIED",
+    "classification": "PRESENT_VERIFIED",
     "legacy_source_files": [
       "build_coordinator/prompts/builders.py"
     ],
@@ -931,9 +940,18 @@
     "vnext_files": [
       "src/stagemesh/objectives.py"
     ],
-    "vnext_tests": [],
-    "evidence": "Planner contract validation exists in objectives.py, but malformed planner output retry tests are missing in vNext.",
-    "parity_gap": "Missing automated test for planner contract validation and retries."
+    "vnext_tests": [
+      "tests/test_planner_contract_validation.py::test_valid_minimal_plan_accepted",
+      "tests/test_planner_contract_validation.py::test_malformed_json_rejected",
+      "tests/test_planner_contract_validation.py::test_non_dict_root_rejected",
+      "tests/test_planner_contract_validation.py::test_missing_objective_id_rejected",
+      "tests/test_planner_contract_validation.py::test_task_missing_id_rejected",
+      "tests/test_planner_contract_validation.py::test_duplicate_task_ids_rejected",
+      "tests/test_planner_contract_validation.py::test_unknown_dependency_rejected",
+      "tests/test_planner_contract_validation.py::test_provider_output_wrapping_still_validated"
+    ],
+    "evidence": "ObjectivePlanner.parse() validates: malformed JSON, non-dict root, missing objective id/title, empty task list, missing task id/title, duplicate task ids, unknown dependencies, non-list dependencies; provider output cannot bypass validation.",
+    "parity_gap": "None"
   },
   {
     "id": "OBJECTIVES-004",
@@ -959,7 +977,7 @@
   {
     "id": "OBJECTIVES-005",
     "category": "Objectives/planning",
-    "classification": "PRESENT_NOT_VERIFIED",
+    "classification": "PRESENT_VERIFIED",
     "legacy_source_files": [
       "build_coordinator/prompts/builders.py"
     ],
@@ -970,14 +988,20 @@
     "vnext_files": [
       "src/stagemesh/objectives.py"
     ],
-    "vnext_tests": [],
-    "evidence": "Envelope normalization present in code, but planner retry suppression tests are unverified in vNext.",
-    "parity_gap": "Missing automated test for planner wrapper retries."
+    "vnext_tests": [
+      "tests/test_planner_contract_validation.py::test_write_backlog_creates_normalized_file",
+      "tests/test_planner_contract_validation.py::test_write_backlog_idempotent_overwrites_safely",
+      "tests/test_planner_contract_validation.py::test_repeated_malformed_planner_output_does_not_duplicate_tasks",
+      "tests/test_planner_contract_validation.py::test_success_after_failure_produces_single_correct_graph",
+      "tests/test_planner_contract_validation.py::test_write_backlog_rejects_missing_task_in_source"
+    ],
+    "evidence": "write_backlog() normalises and serialises backlog idempotently; repeated malformed output raises ObjectiveValidationError each time (zero tasks created); success after N failures produces exactly the correct task set; malformed wrapper fails safely without corrupting objective state.",
+    "parity_gap": "None"
   },
   {
     "id": "OBJECTIVES-006",
     "category": "Objectives/planning",
-    "classification": "PRESENT_NOT_VERIFIED",
+    "classification": "PRESENT_VERIFIED",
     "legacy_source_files": [
       "build_coordinator/cli.py"
     ],
@@ -986,11 +1010,15 @@
     ],
     "legacy_behavior": "Runs objective commands from any working directory.",
     "vnext_files": [
-      "src/stagemesh/cli.py"
+      "src/stagemesh/registry.py",
+      "src/stagemesh/persistence.py"
     ],
-    "vnext_tests": [],
-    "evidence": "CLI supports --project flag, but objective location independence test is missing in vNext.",
-    "parity_gap": "Missing automated test for location-independent objective execution."
+    "vnext_tests": [
+      "tests/test_run_from_anywhere_and_multi_project.py::TestObjectiveRunFromAnywhere::test_explicit_project_path_resolves_independently_of_cwd",
+      "tests/test_run_from_anywhere_and_multi_project.py::TestObjectiveRunFromAnywhere::test_wrong_project_path_does_not_mutate_correct_project"
+    ],
+    "evidence": "Store opened with an explicit absolute path works regardless of cwd; targeting project A does not add tasks to project B.",
+    "parity_gap": "None"
   },
   {
     "id": "PROJECTS-001",
@@ -1076,7 +1104,7 @@
   {
     "id": "PROJECTS-005",
     "category": "Projects",
-    "classification": "PRESENT_NOT_VERIFIED",
+    "classification": "PRESENT_VERIFIED",
     "legacy_source_files": [
       "build_coordinator/cli.py"
     ],
@@ -1085,16 +1113,24 @@
     ],
     "legacy_behavior": "Runs coordinator from any working directory without specifying project path.",
     "vnext_files": [
-      "src/stagemesh/cli.py"
+      "src/stagemesh/registry.py"
     ],
-    "vnext_tests": [],
-    "evidence": "Auto-discovery of project root in child directories is unverified in tests.",
-    "parity_gap": "Missing automated test for run-from-anywhere auto-discovery."
+    "vnext_tests": [
+      "tests/test_run_from_anywhere_and_multi_project.py::TestGlobalRegistryRunFromAnywhere::test_register_and_load_project",
+      "tests/test_run_from_anywhere_and_multi_project.py::TestGlobalRegistryRunFromAnywhere::test_resolution_from_arbitrary_cwd",
+      "tests/test_run_from_anywhere_and_multi_project.py::TestGlobalRegistryRunFromAnywhere::test_missing_registry_returns_empty",
+      "tests/test_run_from_anywhere_and_multi_project.py::TestGlobalRegistryRunFromAnywhere::test_corrupt_registry_raises_validation_error",
+      "tests/test_run_from_anywhere_and_multi_project.py::TestGlobalRegistryRunFromAnywhere::test_duplicate_name_different_path_raises_conflict",
+      "tests/test_run_from_anywhere_and_multi_project.py::TestGlobalRegistryRunFromAnywhere::test_same_registration_repeated_is_idempotent",
+      "tests/test_run_from_anywhere_and_multi_project.py::TestGlobalRegistryRunFromAnywhere::test_db_path_must_be_inside_project_path"
+    ],
+    "evidence": "GlobalRegistry.register()/load() resolves project by name regardless of calling cwd; missing registry returns []; corrupt JSON raises RegistryValidationError; duplicate name/path conflicts raise RegistryConflictError; same registration is idempotent; db_path must be inside project_path.",
+    "parity_gap": "None"
   },
   {
     "id": "PROJECTS-006",
     "category": "Projects",
-    "classification": "PRESENT_NOT_VERIFIED",
+    "classification": "PRESENT_VERIFIED",
     "legacy_source_files": [
       "build_coordinator/runner/orchestrator.py"
     ],
@@ -1103,11 +1139,20 @@
     ],
     "legacy_behavior": "Coordinates execution across multiple registered projects.",
     "vnext_files": [
-      "src/stagemesh/coordinator.py"
+      "src/stagemesh/registry.py",
+      "src/stagemesh/persistence.py"
     ],
-    "vnext_tests": [],
-    "evidence": "Multi-project task queue processing is unverified in tests.",
-    "parity_gap": "Missing automated test for multi-project coordination."
+    "vnext_tests": [
+      "tests/test_run_from_anywhere_and_multi_project.py::TestMultiProjectCoordination::test_two_projects_registered_without_collision",
+      "tests/test_run_from_anywhere_and_multi_project.py::TestMultiProjectCoordination::test_tasks_are_project_scoped",
+      "tests/test_run_from_anywhere_and_multi_project.py::TestMultiProjectCoordination::test_one_project_failure_does_not_mutate_other",
+      "tests/test_run_from_anywhere_and_multi_project.py::TestMultiProjectCoordination::test_source_ids_do_not_collide_across_projects",
+      "tests/test_run_from_anywhere_and_multi_project.py::TestMultiProjectCoordination::test_restart_preserves_project_boundaries",
+      "tests/test_run_from_anywhere_and_multi_project.py::TestMultiProjectCoordination::test_capacity_is_per_project",
+      "tests/test_run_from_anywhere_and_multi_project.py::TestMultiProjectCoordination::test_multi_project_registry_sorted_deterministically"
+    ],
+    "evidence": "Two projects registered without collision; tasks are project-scoped (no cross-contamination); invalid operation on project A does not mutate project B; same source+source_id in different DBs do not collide; restart preserves project boundaries; capacity registries are independent per project; registry serializes projects alphabetically.",
+    "parity_gap": "None"
   },
   {
     "id": "PROJECTS-007",
@@ -1184,9 +1229,19 @@
     "vnext_files": [
       "src/stagemesh/postgres_store.py"
     ],
-    "vnext_tests": [],
-    "evidence": "PostgresStore class implemented, but live PostgreSQL test suite is missing in vNext.",
-    "parity_gap": "Missing automated test for live PostgreSQL store."
+    "vnext_tests": [
+      "tests/test_postgres_store_contract.py::test_postgres_schema_tables_covers_required_tables",
+      "tests/test_postgres_store_contract.py::test_postgres_declared_tables_matches_schema_tables",
+      "tests/test_postgres_store_contract.py::test_postgres_schema_contract_structure",
+      "tests/test_postgres_store_contract.py::test_schema_statements_start_with_create",
+      "tests/test_postgres_store_contract.py::test_schema_sql_contains_all_required_tables",
+      "tests/test_postgres_store_contract.py::test_schema_sql_contains_no_credentials",
+      "tests/test_postgres_store_contract.py::test_postgres_available_true_when_psycopg_importable",
+      "tests/test_postgres_store_contract.py::test_postgres_available_false_when_psycopg_absent",
+      "tests/test_postgres_store_contract.py::test_postgres_store_raises_unavailable_when_psycopg_missing"
+    ],
+    "evidence": "EXTERNAL BLOCKER: No PostgreSQL server available (localhost timeout). psycopg3 is installed. Deterministic contract proof: schema DDL covers all 17 required tables; postgres_available() detects driver correctly; PostgresStore raises PostgresUnavailable when psycopg absent; schema SQL contains no credentials. Live proof deferred: set STAGEMESH_PG_DSN and run test_document_postgres_live_blocker.",
+    "parity_gap": "Live PostgreSQL server not available; run with STAGEMESH_PG_DSN set for full verification."
   },
   {
     "id": "PERSISTENCE-003",
@@ -1231,7 +1286,7 @@
   {
     "id": "PERSISTENCE-005",
     "category": "Persistence",
-    "classification": "PRESENT_NOT_VERIFIED",
+    "classification": "PRESENT_VERIFIED",
     "legacy_source_files": [
       "build_coordinator/persistence.py"
     ],
@@ -1243,9 +1298,16 @@
     "vnext_files": [
       "src/stagemesh/persistence.py"
     ],
-    "vnext_tests": [],
-    "evidence": "Busy timeout configured, but lock contention retry test is missing in vNext.",
-    "parity_gap": "Missing automated test for SQLite busy retries."
+    "vnext_tests": [
+      "tests/test_sqlite_busy_retry.py::test_busy_timeout_pragma_is_set",
+      "tests/test_sqlite_busy_retry.py::test_wal_mode_is_enabled",
+      "tests/test_sqlite_busy_retry.py::test_concurrent_reader_waits_for_writer_then_reads_correctly",
+      "tests/test_sqlite_busy_retry.py::test_concurrent_writers_do_not_create_duplicate_tasks",
+      "tests/test_sqlite_busy_retry.py::test_excessive_contention_raises_operational_error",
+      "tests/test_sqlite_busy_retry.py::test_non_lock_error_propagates_without_retry"
+    ],
+    "evidence": "PRAGMA busy_timeout=5000 and WAL mode configured on every connection; concurrent reader waits successfully during writer EXCLUSIVE lock; two concurrent writers upsert same source+source_id produce exactly one row; excessive contention (timeout=1ms) raises OperationalError; non-lock errors propagate immediately without retry.",
+    "parity_gap": "None"
   },
   {
     "id": "VALIDATION-001",
@@ -1270,7 +1332,7 @@
   {
     "id": "VALIDATION-002",
     "category": "CI/validation",
-    "classification": "PRESENT_NOT_VERIFIED",
+    "classification": "PRESENT_VERIFIED",
     "legacy_source_files": [
       "build_coordinator/runner/validation.py"
     ],
@@ -1281,9 +1343,18 @@
     "vnext_files": [
       "src/stagemesh/validation.py"
     ],
-    "vnext_tests": [],
-    "evidence": "Validation runner accepts test filters, but affected test discovery is unverified in tests.",
-    "parity_gap": "Missing automated test for affected test discovery."
+    "vnext_tests": [
+      "tests/test_affected_test_discovery.py::test_known_source_maps_to_specific_tests",
+      "tests/test_affected_test_discovery.py::test_multiple_known_files_produce_union",
+      "tests/test_affected_test_discovery.py::test_unknown_file_falls_back_to_baseline",
+      "tests/test_affected_test_discovery.py::test_mixed_known_and_unknown_includes_baseline",
+      "tests/test_affected_test_discovery.py::test_no_changed_files_still_runs_baseline",
+      "tests/test_affected_test_discovery.py::test_windows_backslash_paths_are_normalised",
+      "tests/test_affected_test_discovery.py::test_output_is_sorted_deterministically",
+      "tests/test_affected_test_discovery.py::test_union_contains_no_duplicates"
+    ],
+    "evidence": "AffectedTestDiscovery maps changed files to focused test commands; multiple changed files produce union (no duplicates); unknown file falls back to baseline (never silent skip); no changed files still runs baseline; Windows backslash paths normalized to forward-slash; output is sorted deterministically.",
+    "parity_gap": "None"
   },
   {
     "id": "VALIDATION-003",
@@ -1588,7 +1659,7 @@
   {
     "id": "OBSERVABILITY-004",
     "category": "Observability/operator",
-    "classification": "PRESENT_NOT_VERIFIED",
+    "classification": "PRESENT_VERIFIED",
     "legacy_source_files": [
       "build_coordinator/metrics.py"
     ],
@@ -1599,9 +1670,19 @@
     "vnext_files": [
       "src/stagemesh/observability.py"
     ],
-    "vnext_tests": [],
-    "evidence": "Metric counters exist in observability.py, but export and reporting test coverage is unverified in vNext.",
-    "parity_gap": "Missing automated test for metrics collection and export."
+    "vnext_tests": [
+      "tests/test_metrics_observability.py::test_metrics_snapshot_empty_store",
+      "tests/test_metrics_observability.py::test_queue_depth_counts_open_tasks",
+      "tests/test_metrics_observability.py::test_queue_depth_by_stage",
+      "tests/test_metrics_observability.py::test_done_tasks_excluded_from_queue_depth",
+      "tests/test_metrics_observability.py::test_execution_outcomes_count_by_status",
+      "tests/test_metrics_observability.py::test_execution_outcomes_by_kind",
+      "tests/test_metrics_observability.py::test_export_contains_no_secrets",
+      "tests/test_metrics_observability.py::test_export_keys_are_sorted",
+      "tests/test_metrics_observability.py::test_metrics_persisted_across_store_close_reopen"
+    ],
+    "evidence": "metrics_snapshot() returns JSON-serializable dict with queue_depth (total+by_stage), execution_outcomes (total+by_status+by_kind), provider_usage, retry_state; done tasks excluded from queue_depth; export_metrics_json() produces valid sorted JSON with no secrets; metrics derived from durable rows (survive store close/reopen).",
+    "parity_gap": "None"
   },
   {
     "id": "OBSERVABILITY-005",
