@@ -17,6 +17,48 @@ class ExecutionResult:
     candidate_sha: str | None = None
     durable_handoff: bool = False
     capacity_failure: bool = False
+    failure_reason: str | None = None
+
+
+def classify_failure(
+    returncode: int,
+    stdout: str = "",
+    stderr: str = "",
+    exc: Exception | None = None,
+) -> tuple[bool, str]:
+    """Classify execution failure into capacity/provider failure vs code defect.
+
+    Returns (is_capacity_failure: bool, reason: str).
+    """
+    if exc is not None and isinstance(exc, FileNotFoundError):
+        return True, "provider_unavailable"
+
+    combined = f"{stdout}\n{stderr}".lower()
+
+    if any(m in combined for m in ["not found", "no such file or directory", "command not found", "cannot find"]):
+        return True, "provider_unavailable"
+
+    if any(m in combined for m in [
+        "unauthorized", "authentication", "not logged in", "login required",
+        "invalid api key", "auth failure", "missing credentials", "authenticate",
+        "invalid_api_key", "authentication_error", "forbidden", "401", "403"
+    ]):
+        return True, "authentication_failure"
+
+    if any(m in combined for m in [
+        "rate limit", "rate_limit", "quota", "too many requests", "429",
+        "exceeded your current quota", "capacity exhausted", "overloaded_error",
+        "rate_limit_error", "insufficient_quota"
+    ]):
+        return True, "quota_rate_limit"
+
+    if any(m in combined for m in [
+        "503", "502", "service unavailable", "bad gateway", "connection refused",
+        "connection reset", "overloaded", "server_error", "timed out", "timeout"
+    ]):
+        return True, "transient_provider_failure"
+
+    return False, "implementation_failure"
 
 
 class Executor:
@@ -53,7 +95,36 @@ class SubprocessExecutor(Executor):
             self.name = name
 
     def run(self, store: Store, task_id: str, claim_id: str | None, project: Path) -> ExecutionResult:
-        proc = subprocess.Popen(self.command, cwd=project, text=True)
+        import shutil
+        executable = self.command[0] if self.command else ""
+        if not executable or not shutil.which(executable):
+            return ExecutionResult(
+                ExecutionStatus.FAILED,
+                capacity_failure=True,
+                failure_reason="provider_unavailable",
+            )
+
+        task = store.get_task(task_id)
+        from .providers import _build_task_prompt
+        task_prompt = _build_task_prompt(task_id, task)
+
+        try:
+            proc = subprocess.Popen(
+                self.command,
+                cwd=project,
+                text=True,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+        except FileNotFoundError as exc:
+            is_cap, reason = classify_failure(1, exc=exc)
+            return ExecutionResult(
+                ExecutionStatus.FAILED,
+                capacity_failure=is_cap,
+                failure_reason=reason,
+            )
+
         ident = popen_identity(proc)
         execution_id = store.start_execution(
             task_id=task_id,
@@ -64,10 +135,25 @@ class SubprocessExecutor(Executor):
             boot_id=ident.boot_id,
             executable=ident.executable,
         )
-        code = proc.wait()
-        status = ExecutionStatus.SUCCEEDED if code == 0 else ExecutionStatus.FAILED
-        sha = GitWorkspace(project).head_or_synthetic() if code == 0 else None
+        stdout, stderr = proc.communicate(input=task_prompt)
+        code = proc.returncode
+
+        if code != 0:
+            is_cap, reason = classify_failure(code, stdout, stderr)
+            store.finish_execution(execution_id, ExecutionStatus.FAILED)
+            return ExecutionResult(
+                ExecutionStatus.FAILED,
+                capacity_failure=is_cap,
+                failure_reason=reason,
+            )
+
+        workspace = GitWorkspace(project)
+        workspace.init_if_needed()
+        sha = workspace.commit_all(
+            f"StageMesh implementation for {task_id}",
+            attribution=attribution_for_worker("local-worker", self.name),
+        )
         if sha:
             store.add_candidate(task_id, sha, self.name, durable_handoff=True)
-        store.finish_execution(execution_id, status, sha)
-        return ExecutionResult(status, sha, durable_handoff=bool(sha))
+        store.finish_execution(execution_id, ExecutionStatus.SUCCEEDED, sha)
+        return ExecutionResult(ExecutionStatus.SUCCEEDED, sha, durable_handoff=bool(sha))

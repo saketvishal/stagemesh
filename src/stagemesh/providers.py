@@ -8,10 +8,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from .attribution import attribution_for_worker
 from .capacity import CapacityKind, CapacityRegistry
 from .config import StageMeshConfig
 from .domain import ExecutionKind, ExecutionStatus
-from .execution import ExecutionResult
+from .execution import ExecutionResult, classify_failure
 from .git import GitWorkspace
 from .persistence import Store
 from .process_identity import popen_identity
@@ -51,17 +52,21 @@ class RuntimeCommandAdapter:
 
     def execute(self, store: Store, task_id: str, claim_id: str | None, project: Path) -> ExecutionResult:
         if self.check_capacity() != CapacityKind.AVAILABLE:
-            return ExecutionResult(ExecutionStatus.FAILED, capacity_failure=True)
+            return ExecutionResult(ExecutionStatus.FAILED, capacity_failure=True, failure_reason="provider_unavailable")
         task = store.get_task(task_id)
         task_prompt = _build_task_prompt(task_id, task)
-        proc = subprocess.Popen(
-            list(self.command),
-            cwd=project,
-            text=True,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
+        try:
+            proc = subprocess.Popen(
+                list(self.command),
+                cwd=project,
+                text=True,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+        except FileNotFoundError as exc:
+            is_cap, reason = classify_failure(1, exc=exc)
+            return ExecutionResult(ExecutionStatus.FAILED, capacity_failure=is_cap, failure_reason=reason)
         identity = popen_identity(proc)
         execution_id = store.start_execution(
             task_id=task_id,
@@ -72,14 +77,23 @@ class RuntimeCommandAdapter:
             boot_id=identity.boot_id,
             executable=identity.executable,
         )
-        proc.communicate(input=task_prompt)
+        stdout, stderr = proc.communicate(input=task_prompt)
         if proc.returncode != 0:
+            is_cap, reason = classify_failure(proc.returncode, stdout, stderr)
             store.finish_execution(execution_id, ExecutionStatus.FAILED)
-            return ExecutionResult(ExecutionStatus.FAILED)
-        sha = GitWorkspace(project).head_or_synthetic()
+            return ExecutionResult(ExecutionStatus.FAILED, capacity_failure=is_cap, failure_reason=reason)
+        workspace = GitWorkspace(project)
+        workspace.init_if_needed()
+        sha = workspace.commit_all(
+            f"StageMesh implementation for {task_id}",
+            attribution=attribution_for_worker("local-worker", self.name),
+        )
         store.add_candidate(task_id, sha, self.name, durable_handoff=True)
         store.finish_execution(execution_id, ExecutionStatus.SUCCEEDED, sha)
         return ExecutionResult(ExecutionStatus.SUCCEEDED, sha, durable_handoff=True)
+
+    def run(self, store: Store, task_id: str, claim_id: str | None, project: Path) -> ExecutionResult:
+        return self.execute(store, task_id, claim_id, project)
 
 
 def approved_default_adapters() -> list[RuntimeCommandAdapter]:

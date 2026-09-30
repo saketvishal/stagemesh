@@ -1,4 +1,4 @@
-﻿"""Regression tests for defects found and fixed during the low-risk canary run.
+"""Regression tests for defects found and fixed during the low-risk canary run.
 
 DEF-1: command_continue used FakeExecutor even when real providers were configured.
 DEF-2: No --provider flag existed to select a specific provider.
@@ -14,7 +14,7 @@ import pytest
 
 from stagemesh.coordinator import Coordinator
 from stagemesh.domain import ExecutionStatus, Stage, TaskStatus
-from stagemesh.execution import ExecutionResult, FakeExecutor, SubprocessExecutor
+from stagemesh.execution import ExecutionResult, FakeExecutor, SubprocessExecutor, classify_failure
 from stagemesh.persistence import Store
 
 
@@ -199,3 +199,174 @@ def test_capacity_failure_is_distinguishable_from_code_failure() -> None:
     assert code_fail.capacity_failure is False
     assert cap_fail.status is ExecutionStatus.FAILED
     assert code_fail.status is ExecutionStatus.FAILED
+
+
+# ---------------------------------------------------------------------------
+# Provider Failure Classification: 5 distinct categories
+# ---------------------------------------------------------------------------
+
+
+def test_failure_classification_all_five_categories() -> None:
+    """StageMesh must classify failures into:
+    1. Provider unavailable (missing executable or command not found)
+    2. Authentication failure (unauthorized, invalid key, login required)
+    3. Quota / rate limit (429, quota exceeded, too many requests)
+    4. Transient provider failure (502, 503, service unavailable, overloaded)
+    5. Implementation / code defect (syntax error, test failure, non-zero code)
+    """
+    # 1. Provider unavailable
+    is_cap, reason = classify_failure(1, exc=FileNotFoundError("not found"))
+    assert is_cap is True
+    assert reason == "provider_unavailable"
+
+    is_cap, reason = classify_failure(127, stderr="/bin/sh: claude: command not found")
+    assert is_cap is True
+    assert reason == "provider_unavailable"
+
+    # 2. Authentication failure
+    is_cap, reason = classify_failure(1, stderr="Error 401: Unauthorized. Invalid API key provided.")
+    assert is_cap is True
+    assert reason == "authentication_failure"
+
+    is_cap, reason = classify_failure(1, stdout="You are not logged in. Please run `claude auth login`.")
+    assert is_cap is True
+    assert reason == "authentication_failure"
+
+    # 3. Quota / rate limit
+    is_cap, reason = classify_failure(1, stderr="Rate limit exceeded: 429 Too Many Requests")
+    assert is_cap is True
+    assert reason == "quota_rate_limit"
+
+    is_cap, reason = classify_failure(1, stdout="You have exceeded your current quota. Please upgrade plan.")
+    assert is_cap is True
+    assert reason == "quota_rate_limit"
+
+    # 4. Transient provider failure
+    is_cap, reason = classify_failure(1, stderr="503 Service Unavailable: server is overloaded")
+    assert is_cap is True
+    assert reason == "transient_provider_failure"
+
+    is_cap, reason = classify_failure(1, stderr="Connection reset by peer; timed out waiting for upstream")
+    assert is_cap is True
+    assert reason == "transient_provider_failure"
+
+    # 5. Implementation / code defect
+    is_cap, reason = classify_failure(1, stderr="AssertionError: 2 != 3\nFAILED tests/test_calc.py")
+    assert is_cap is False
+    assert reason == "implementation_failure"
+
+    is_cap, reason = classify_failure(2, stderr="SyntaxError: invalid syntax at line 42")
+    assert is_cap is False
+    assert reason == "implementation_failure"
+
+
+# ---------------------------------------------------------------------------
+# Prompt Piping: SubprocessExecutor sends task title via stdin
+# ---------------------------------------------------------------------------
+
+
+def test_subprocess_executor_pipes_prompt_to_stdin(store: Store, tmp_path: Path) -> None:
+    """SubprocessExecutor must pipe task prompt to stdin of the provider process."""
+    task_id = store.upsert_task("write a helper function")
+    # Python script that reads stdin and writes it to a file
+    script = (
+        "import sys\n"
+        "data = sys.stdin.read()\n"
+        "with open('captured_prompt.txt', 'w') as f:\n"
+        "    f.write(data)\n"
+    )
+    executor = SubprocessExecutor([sys.executable, "-c", script], name="test-stdin")
+    store.advance_task(task_id, Stage.IMPLEMENT)
+    coord = Coordinator(store, tmp_path, executor=executor)
+    assert coord.tick() == 1
+
+    captured_file = tmp_path / "captured_prompt.txt"
+    assert captured_file.exists()
+    content = captured_file.read_text(encoding="utf-8")
+    assert "write a helper function" in content
+    assert "StageMesh task:" in content
+
+
+# ---------------------------------------------------------------------------
+# Exact SHA Integrity: Candidate SHA carried through entire lifecycle
+# ---------------------------------------------------------------------------
+
+
+def test_exact_sha_preserved_through_validation_review_integration(store: Store, tmp_path: Path) -> None:
+    """Candidate SHA produced at IMPLEMENT must be the EXACT same SHA used in
+    VALIDATE, REVIEW, and INTEGRATE stages."""
+    task_id = store.upsert_task("exact-sha-task")
+    coord = Coordinator(store, tmp_path)
+
+    # 1. PLAN -> IMPLEMENT
+    assert coord.tick() == 1
+    assert store.get_task(task_id)["stage"] == Stage.IMPLEMENT
+
+    # 2. IMPLEMENT -> VALIDATE (produces candidate commit)
+    assert coord.tick() == 1
+    assert store.get_task(task_id)["stage"] == Stage.VALIDATE
+    candidate = store.latest_candidate(task_id)
+    assert candidate is not None
+    impl_sha = candidate["sha"]
+    assert len(impl_sha) >= 7
+
+    # 3. VALIDATE -> REVIEW
+    assert coord.tick() == 1
+    assert store.get_task(task_id)["stage"] == Stage.REVIEW
+    from stagemesh.domain import EvidenceKind, EvidenceStatus
+    val_evidence = store.has_evidence(task_id, impl_sha, EvidenceKind.VALIDATION, EvidenceStatus.PASSED)
+    assert val_evidence is True
+
+    # 4. REVIEW -> INTEGRATE
+    assert coord.tick() == 1
+    assert store.get_task(task_id)["stage"] == Stage.INTEGRATE
+    rev_evidence = store.has_evidence(task_id, impl_sha, EvidenceKind.REVIEW, EvidenceStatus.PASSED)
+    assert rev_evidence is True
+
+    # 5. INTEGRATE -> DONE
+    assert coord.tick() == 1
+    assert store.get_task(task_id)["stage"] == Stage.DONE
+    int_evidence = store.has_evidence(task_id, impl_sha, EvidenceKind.INTEGRATION, EvidenceStatus.PASSED)
+    assert int_evidence is True
+
+    # Verify no mismatched evidence exists
+    rows = list(store.conn.execute("SELECT candidate_sha FROM evidence WHERE task_id=?", (task_id,)))
+    assert all(row["candidate_sha"] == impl_sha for row in rows)
+
+
+# ---------------------------------------------------------------------------
+# Idempotency: Repeated continue on completed tasks does not duplicate work
+# ---------------------------------------------------------------------------
+
+
+def test_restart_after_done_is_idempotent_no_duplicate_work(store: Store, tmp_path: Path) -> None:
+    """Re-running coordinator ticks on completed tasks must be a no-op:
+    no duplicate commits, no evidence duplication, no stage regression."""
+    task_id = store.upsert_task("idempotency-task")
+    coord = Coordinator(store, tmp_path)
+
+    # Run through to completion
+    for _ in range(10):
+        if coord.tick() == 0:
+            break
+
+    assert store.get_task(task_id)["stage"] == Stage.DONE
+    initial_candidates = list(store.conn.execute("SELECT * FROM candidates WHERE task_id=?", (task_id,)))
+    initial_evidence = list(store.conn.execute("SELECT * FROM evidence WHERE task_id=?", (task_id,)))
+    initial_executions = list(store.conn.execute("SELECT * FROM executions WHERE task_id=?", (task_id,)))
+
+    # Re-run multiple ticks
+    restarted = Coordinator(store, tmp_path)
+    for _ in range(5):
+        assert restarted.tick() == 0
+
+    # Ensure zero mutation
+    after_candidates = list(store.conn.execute("SELECT * FROM candidates WHERE task_id=?", (task_id,)))
+    after_evidence = list(store.conn.execute("SELECT * FROM evidence WHERE task_id=?", (task_id,)))
+    after_executions = list(store.conn.execute("SELECT * FROM executions WHERE task_id=?", (task_id,)))
+
+    assert len(after_candidates) == len(initial_candidates)
+    assert len(after_evidence) == len(initial_evidence)
+    assert len(after_executions) == len(initial_executions)
+    assert store.get_task(task_id)["stage"] == Stage.DONE
+
