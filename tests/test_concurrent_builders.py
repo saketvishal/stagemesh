@@ -7,9 +7,10 @@ import pytest
 
 from stagemesh.capacity import CapacityRegistry
 from stagemesh.coordinator import Coordinator
-from stagemesh.domain import Stage
+from stagemesh.domain import EvidenceKind, EvidenceStatus, Stage
 from stagemesh.execution import ExecutionResult, ExecutionStatus, Executor
 from stagemesh.persistence import Store
+from stagemesh.review import Reviewer
 
 
 class BarrierExecutor(Executor):
@@ -65,6 +66,57 @@ def test_concurrent_multi_builder_execution_capacity_two(tmp_path: Path):
     cand1 = store.latest_candidate(t1)
     cand2 = store.latest_candidate(t2)
     assert cand1["sha"] != cand2["sha"]
+
+
+def test_two_concurrent_tasks_full_lifecycle_isolation(tmp_path: Path):
+    store = Store(tmp_path / "test_full.db")
+    store.migrate()
+    t1 = store.upsert_task("Task Full 1", source_id="T-FULL-1")
+    t2 = store.upsert_task("Task Full 2", source_id="T-FULL-2")
+    store.advance_task(t1, Stage.IMPLEMENT)
+    store.advance_task(t2, Stage.IMPLEMENT)
+
+    barrier = threading.Barrier(2)
+    exec_1 = BarrierExecutor("builder-1", barrier)
+    exec_2 = BarrierExecutor("builder-2", barrier)
+
+    def _full_lifecycle_thread(task_id: str, executor: Executor, worker_name: str):
+        proj = tmp_path / task_id
+        reviewer = Reviewer(worker_id=f"reviewer-{task_id}", provider="reviewer-provider")
+        coord = Coordinator(store=store, project=proj, executor=executor, reviewer=reviewer)
+        # Advance through IMPLEMENT -> VALIDATE -> REVIEW -> INTEGRATE -> DONE
+        for _ in range(10):
+            coord.tick()
+            t = store.get_task(task_id)
+            if t["stage"] == Stage.DONE:
+                break
+            time.sleep(0.01)
+
+    th1 = threading.Thread(target=_full_lifecycle_thread, args=(t1, exec_1, "worker-1"))
+    th2 = threading.Thread(target=_full_lifecycle_thread, args=(t2, exec_2, "worker-2"))
+
+    th1.start()
+    th2.start()
+    th1.join(timeout=10.0)
+    th2.join(timeout=10.0)
+
+    task1 = store.get_task(t1)
+    task2 = store.get_task(t2)
+    assert task1["stage"] == Stage.DONE
+    assert task2["stage"] == Stage.DONE
+
+    cand1 = store.latest_candidate(t1)["sha"]
+    cand2 = store.latest_candidate(t2)["sha"]
+    assert cand1 != cand2
+
+    # Verify task-scoped evidence isolation
+    ev1 = store.has_evidence(t1, cand1, EvidenceKind.VALIDATION, EvidenceStatus.PASSED)
+    ev2 = store.has_evidence(t2, cand2, EvidenceKind.VALIDATION, EvidenceStatus.PASSED)
+    assert ev1 is True
+    assert ev2 is True
+
+    # Check evidence from t1 is NOT present for t2 candidate
+    assert store.has_evidence(t2, cand1, EvidenceKind.VALIDATION, EvidenceStatus.PASSED) is False
 
 
 def test_capacity_one_prevents_illegal_concurrent_claim(tmp_path: Path):

@@ -9,14 +9,16 @@ from stagemesh.execution import ExecutionResult, ExecutionStatus, Executor
 from stagemesh.persistence import Store
 
 
-class FailingPrimaryExecutor(Executor):
-    name = "primary-provider"
+class CategorizedFailingExecutor(Executor):
+    def __init__(self, name: str, failure_reason: str):
+        self.name = name
+        self.failure_reason = failure_reason
 
     def run(self, store: Store, task_id: str, claim_id: str | None, project: Path) -> ExecutionResult:
         return ExecutionResult(
             status=ExecutionStatus.FAILED,
             capacity_failure=True,
-            failure_reason="quota_rate_limit",
+            failure_reason=self.failure_reason,
         )
 
 
@@ -31,22 +33,34 @@ class WorkingFallbackExecutor(Executor):
         return ExecutionResult(ExecutionStatus.SUCCEEDED, sha, durable_handoff=True)
 
 
-def test_automatic_cross_provider_failover_recovers_task(tmp_path: Path):
-    store = Store(tmp_path / "test.db")
+@pytest.mark.parametrize("failure_reason", [
+    "quota_rate_limit",
+    "quota_exhausted",
+    "provider_unavailable",
+    "authentication_failure",
+    "transient_provider_failure",
+])
+def test_automatic_cross_provider_failover_all_categories(tmp_path: Path, failure_reason: str):
+    store = Store(tmp_path / f"test_{failure_reason}.db")
     store.migrate()
-    task_id = store.upsert_task("Test Provider Failover", source_id="T-3")
+    task_id = store.upsert_task(f"Test Failover {failure_reason}", source_id=f"T-FAILOVER-{failure_reason}")
     store.advance_task(task_id, Stage.IMPLEMENT)
 
-    # 1. Primary executor fails with capacity error (rate limit)
-    failing_exec = FailingPrimaryExecutor()
+    # 1. Primary executor fails with specific capacity failure category
+    failing_exec = CategorizedFailingExecutor("primary-provider", failure_reason)
     coord = Coordinator(store=store, project=tmp_path, executor=failing_exec)
     coord.tick()
 
-    # Task is still in IMPLEMENT stage, claim released immediately
+    # Task is still in IMPLEMENT stage, claim released immediately, audit event recorded
     task = store.get_task(task_id)
     assert task["stage"] == Stage.IMPLEMENT
     claims = list(store.conn.execute("SELECT * FROM claims WHERE active=1"))
     assert len(claims) == 0
+
+    audits = store.audit_events()
+    cap_events = [e for e in audits if e.get("event") == "task.capacity_failure"]
+    assert len(cap_events) > 0
+    assert cap_events[0].get("data", {}).get("reason") == failure_reason
 
     # 2. Re-dispatch with fallback executor succeeds
     fallback_exec = WorkingFallbackExecutor()
