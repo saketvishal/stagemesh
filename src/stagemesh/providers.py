@@ -12,7 +12,7 @@ from .attribution import attribution_for_worker
 from .capacity import CapacityKind, CapacityRegistry
 from .config import StageMeshConfig
 from .domain import ExecutionKind, ExecutionStatus
-from .execution import ExecutionResult, classify_failure
+from .execution import ExecutionResult, classify_failure, _capture_baseline_sha
 from .git import GitWorkspace
 from .persistence import Store
 from .process_identity import popen_identity
@@ -55,6 +55,7 @@ class RuntimeCommandAdapter:
             return ExecutionResult(ExecutionStatus.FAILED, capacity_failure=True, failure_reason="provider_unavailable")
         task = store.get_task(task_id)
         task_prompt = _build_task_prompt(task_id, task)
+        base_sha = _capture_baseline_sha(project)
         try:
             proc = subprocess.Popen(
                 list(self.command),
@@ -88,7 +89,7 @@ class RuntimeCommandAdapter:
             f"StageMesh implementation for {task_id}",
             attribution=attribution_for_worker("local-worker", self.name),
         )
-        store.add_candidate(task_id, sha, self.name, durable_handoff=True)
+        store.add_candidate(task_id, sha, self.name, durable_handoff=True, base_sha=base_sha)
         store.finish_execution(execution_id, ExecutionStatus.SUCCEEDED, sha)
         return ExecutionResult(ExecutionStatus.SUCCEEDED, sha, durable_handoff=True)
 

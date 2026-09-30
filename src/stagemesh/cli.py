@@ -181,12 +181,67 @@ def command_init(args: argparse.Namespace) -> int:
     return 0
 
 
+def _global_capacity_batches(
+    projects: list[Any],
+    capacity: int | None,
+) -> list[dict[str, int]]:
+    if capacity is None:
+        return [{getattr(p, "name", getattr(p, "project_id", str(p))): getattr(p, "concurrency", 1) for p in projects}]
+    if capacity < 1:
+        raise ValueError("--capacity must be a positive integer")
+    pending = list(projects)
+    batches: list[dict[str, int]] = []
+    while pending:
+        allocations = {getattr(p, "name", getattr(p, "project_id", str(p))): 0 for p in pending}
+        remaining = capacity
+        progressed = False
+        for p in pending:
+            p_key = getattr(p, "name", getattr(p, "project_id", str(p)))
+            allocations[p_key] += 1
+            remaining -= 1
+            progressed = True
+            if remaining == 0:
+                break
+        if remaining > 0:
+            for p in pending:
+                p_key = getattr(p, "name", getattr(p, "project_id", str(p)))
+                p_concurrency = getattr(p, "concurrency", 1)
+                while allocations[p_key] < p_concurrency and remaining > 0:
+                    allocations[p_key] += 1
+                    remaining -= 1
+                if remaining == 0:
+                    break
+        if not progressed:
+            break
+        batch = {p_key: slots for p_key, slots in allocations.items() if slots > 0}
+        batches.append(batch)
+        pending = [p for p in pending if getattr(p, "name", getattr(p, "project_id", str(p))) not in batch]
+    return batches
+
+
 def _handle_global_continue(args: argparse.Namespace) -> int:
     registry = GlobalRegistry(default_registry_path())
     projects = registry.load()
     if not projects:
         print("no StageMesh projects registered in global registry", file=sys.stderr)
         return 2
+
+    requested_capacity = getattr(args, "capacity", None)
+    if requested_capacity is not None and requested_capacity < 1:
+        print("--capacity must be a positive integer", file=sys.stderr)
+        return 2
+
+    try:
+        capacity_batches = _global_capacity_batches(projects, requested_capacity)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
+    allocations = {
+        project_name: slots
+        for batch in capacity_batches
+        for project_name, slots in batch.items()
+    }
 
     forward_flags: list[str] = []
     if getattr(args, "once", False):
@@ -197,17 +252,11 @@ def _handle_global_continue(args: argparse.Namespace) -> int:
         forward_flags.extend(["--provider", str(args.provider)])
     forward_flags.append("--json")
 
-    requested_capacity = getattr(args, "capacity", None)
-    if requested_capacity is not None and requested_capacity > 0:
-        batch_size = requested_capacity
-    else:
-        batch_size = len(projects)
-
     runs: dict[str, Any] = {}
     any_failed = False
     lock = threading.Lock()
 
-    def drive(reg: ProjectRegistration) -> None:
+    def drive(reg: ProjectRegistration, slots: int) -> None:
         nonlocal any_failed
         cmd = [
             sys.executable,
@@ -216,8 +265,12 @@ def _handle_global_continue(args: argparse.Namespace) -> int:
             "continue",
             "--project",
             str(reg.path),
+            "--capacity",
+            str(slots),
             *forward_flags,
         ]
+        child_env = dict(os.environ)
+        child_env["STAGEMESH_PROJECT_CAPACITY_OVERRIDE"] = str(slots)
         proc = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
@@ -225,6 +278,7 @@ def _handle_global_continue(args: argparse.Namespace) -> int:
             text=True,
             encoding="utf-8",
             errors="replace",
+            env=child_env,
             stdin=subprocess.DEVNULL,
         )
 
@@ -253,6 +307,7 @@ def _handle_global_continue(args: argparse.Namespace) -> int:
                     "progressed": detail.get("progressed", 0),
                     "error": detail.get("error", f"exit code {proc.returncode}"),
                     "pid": proc.pid,
+                    "allocated_capacity": slots,
                 }
             else:
                 runs[reg.name] = {
@@ -261,11 +316,15 @@ def _handle_global_continue(args: argparse.Namespace) -> int:
                     "progressed": detail.get("progressed", 0),
                     "provider": detail.get("provider", "fake"),
                     "pid": proc.pid,
+                    "allocated_capacity": slots,
                 }
 
-    for i in range(0, len(projects), batch_size):
-        batch = projects[i : i + batch_size]
-        threads = [threading.Thread(target=drive, args=(reg,)) for reg in batch]
+    by_name = {p.name: p for p in projects}
+    for batch in capacity_batches:
+        threads = [
+            threading.Thread(target=drive, args=(by_name[p_name], slots))
+            for p_name, slots in batch.items()
+        ]
         for t in threads:
             t.start()
         for t in threads:
@@ -278,6 +337,9 @@ def _handle_global_continue(args: argparse.Namespace) -> int:
             json.dumps(
                 {
                     "mode": "global",
+                    "capacity": requested_capacity if requested_capacity is not None else sum(allocations.values()),
+                    "allocations": allocations,
+                    "capacity_batches": capacity_batches,
                     "total_progressed": total_progressed,
                     "projects": runs,
                 },
@@ -288,7 +350,7 @@ def _handle_global_continue(args: argparse.Namespace) -> int:
     else:
         print(f"coordinated {len(projects)} registered projects: {total_progressed} total progressed")
         for name, run in sorted(runs.items()):
-            print(f"  {name}: {run['status']} (progressed: {run.get('progressed', 0)})")
+            print(f"  {name}: {run['status']} (progressed: {run.get('progressed', 0)}, capacity: {run.get('allocated_capacity')})")
 
     return 1 if any_failed else 0
 
@@ -338,6 +400,12 @@ def command_doctor(args: argparse.Namespace) -> int:
 def command_continue(args: argparse.Namespace) -> int:
     if getattr(args, "all", False):
         return _handle_global_continue(args)
+    capacity_override = os.environ.get("STAGEMESH_PROJECT_CAPACITY_OVERRIDE")
+    if capacity_override:
+        try:
+            args.capacity = int(capacity_override)
+        except ValueError:
+            pass
     project = resolve_project_root(args.project)
     config = load_config(project)
     store = Store(db_path(project))
