@@ -57,10 +57,11 @@ def test_automatic_cross_provider_failover_all_categories(tmp_path: Path, failur
     claims = list(store.conn.execute("SELECT * FROM claims WHERE active=1"))
     assert len(claims) == 0
 
+    import json
     audits = store.audit_events()
-    cap_events = [e for e in audits if e.get("event") == "task.capacity_failure"]
+    cap_events = [e for e in audits if e["event_type"] == "task.capacity_failure"]
     assert len(cap_events) > 0
-    assert cap_events[0].get("data", {}).get("reason") == failure_reason
+    assert json.loads(cap_events[0]["payload"]).get("reason") == failure_reason
 
     # 2. Re-dispatch with fallback executor succeeds
     fallback_exec = WorkingFallbackExecutor()

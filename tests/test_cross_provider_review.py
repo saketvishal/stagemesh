@@ -34,6 +34,7 @@ def test_cross_provider_independent_review_preserves_sha_and_records_identity(tm
     evidence = store.has_evidence(task_id, sha, EvidenceKind.REVIEW, EvidenceStatus.PASSED)
     assert evidence is True
 
+    import json
     audits = store.audit_events()
-    review_events = [e for e in audits if e.get("event") == "evidence.added" and e.get("data", {}).get("kind") == "REVIEW"]
+    review_events = [e for e in audits if e["event_type"] == "evidence.added" and json.loads(e["payload"]).get("kind") == "REVIEW"]
     assert len(review_events) > 0

@@ -6,14 +6,14 @@ Total Inventoried Capabilities: **95**
 
 | Classification | Count | Description |
 |---|---|---|
-| `PRESENT_VERIFIED` | **80** | Present in vNext and verified by exact automated tests or live acceptance |
+| `PRESENT_VERIFIED` | **82** | Present in vNext and verified by exact automated tests or live acceptance |
 | `PRESENT_NOT_VERIFIED` | **11** | Present in vNext source but missing automated test coverage proving exact behavior |
 | `SUPERSEDED_EQUIVALENT` | **0** | Replaced by proven equivalent vNext mechanism |
-| `MISSING_PORT_REQUIRED` | **4** | Missing from vNext implementation, port required |
+| `MISSING_PORT_REQUIRED` | **2** | Missing from vNext implementation, port required |
 | `INTENTIONAL_RETIREMENT_REQUIRES_APPROVAL` | **0** | Feature retirement needing human operator approval |
 | `LEGACY_INTERNAL_OR_BUG` | **0** | Legacy internal detail or bug workaround |
 
-**Parity Status: INCOMPLETE** (4 Missing Port Items, 11 Unverified Items)
+**Parity Status: INCOMPLETE** (2 Missing Port Items, 11 Unverified Items)
 
 ---
 
@@ -39,7 +39,7 @@ Under the stricter proof rules, the initial parity audit was found to over-class
 | Legacy Test File | Legacy Scenarios | Classification | vNext Proof Test | Notes |
 |---|---|---|---|---|
 | `test_adapter_sdk_acceptance.py` | 4 | `PRESENT_NOT_VERIFIED` | `Partial / Architectural support` | Underlying vNext code exists, but dedicated test scenario reconciliation is unverified. |
-| `test_azure_devops_task_source.py` | 11 | `MISSING_PORT_REQUIRED` | `NONE` | Legacy feature or helper module absent in vNext implementation. |
+| `test_azure_devops_task_source.py` | 11 | `PRESENT_VERIFIED` | `tests/test_azure_devops_task_source.py` | Ported to vNext with exact test proof for work item discovery, identity mapping, state sync, and failure classification. |
 | `test_ci_reconciliation.py` | 20 | `PRESENT_VERIFIED` | `tests/test_canary_regression.py, tests/test_invariants.py, scripts/acceptance.py, scripts/github_acceptance.py` | Covered by vNext automated test suite or acceptance script. |
 | `test_clone_pool.py` | 9 | `MISSING_PORT_REQUIRED` | `NONE` | Legacy feature or helper module absent in vNext implementation. |
 | `test_coordinator_config.py` | 13 | `PRESENT_VERIFIED` | `tests/test_canary_regression.py, tests/test_invariants.py, scripts/acceptance.py, scripts/github_acceptance.py` | Covered by vNext automated test suite or acceptance script. |
@@ -51,7 +51,7 @@ Under the stricter proof rules, the initial parity audit was found to over-class
 | `test_gh101_persistence_retries.py` | 4 | `PRESENT_NOT_VERIFIED` | `Partial / Architectural support` | Underlying vNext code exists, but dedicated test scenario reconciliation is unverified. |
 | `test_gh87_completion_sync_regression.py` | 2 | `PRESENT_NOT_VERIFIED` | `Partial / Architectural support` | Underlying vNext code exists, but dedicated test scenario reconciliation is unverified. |
 | `test_git_identity_and_blocker_recovery.py` | 8 | `PRESENT_NOT_VERIFIED` | `Partial / Architectural support` | Underlying vNext code exists, but dedicated test scenario reconciliation is unverified. |
-| `test_github_label_provisioning.py` | 17 | `MISSING_PORT_REQUIRED` | `NONE` | Legacy feature or helper module absent in vNext implementation. |
+| `test_github_label_provisioning.py` | 17 | `PRESENT_VERIFIED` | `tests/test_github_lifecycle_labels.py` | Ported to vNext with exact test proof for label provisioning, issue label state transitions, and error isolation. |
 | `test_github_outbound_sync.py` | 15 | `PRESENT_VERIFIED` | `tests/test_canary_regression.py, tests/test_invariants.py, scripts/acceptance.py, scripts/github_acceptance.py` | Covered by vNext automated test suite or acceptance script. |
 | `test_github_sqlite_busy_retry.py` | 6 | `PRESENT_NOT_VERIFIED` | `Partial / Architectural support` | Underlying vNext code exists, but dedicated test scenario reconciliation is unverified. |
 | `test_github_task_source_activation.py` | 17 | `PRESENT_VERIFIED` | `tests/test_canary_regression.py, tests/test_invariants.py, scripts/acceptance.py, scripts/github_acceptance.py` | Covered by vNext automated test suite or acceptance script. |

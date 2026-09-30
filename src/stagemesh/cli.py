@@ -42,6 +42,9 @@ from .providers import ProviderValidationError, adapters_from_config
 from .task_sources import LocalBacklogSource, TaskSourceValidationError, sync_source, task_sources_from_config
 from .work_transport import WorkTransportError, import_ack, write_ack_envelope, write_packet_envelope
 from .workers import WorkerValidationError, heartbeat_worker, register_worker
+from .azure_devops import AzureDevOpsTaskSource, AzureDevOpsClientShim
+from .labels import GitHubLabelGateway, provision_labels, sync_issue_lifecycle_label
+from .watcher import WatcherLock, WatcherLockError, WatcherLoop
 
 
 def runtime_dir(project: Path) -> Path:
@@ -1089,10 +1092,78 @@ def command_ci_wait(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_daemon(args: argparse.Namespace) -> int:
+    project = Path(args.project).resolve()
+    store = Store(db_path(project))
+    store.migrate()
+    lock_file = runtime_dir(project) / "stagemesh.lock"
+    lock = WatcherLock(lock_file)
+    interval = float(getattr(args, "interval", 1.0) or 1.0)
+    loop = WatcherLoop(store=store, project=project, interval_seconds=interval, lock=lock)
+    max_ticks = 1 if getattr(args, "once", False) else None
+    ticks = loop.run(max_ticks=max_ticks)
+    if getattr(args, "json", False):
+        print(json.dumps({"status": "OK", "mode": "daemon", "ticks_executed": ticks}))
+    else:
+        print(f"Daemon background loop finished ({ticks} ticks)")
+    return 0
+
+
+def command_watch(args: argparse.Namespace) -> int:
+    project = Path(args.project).resolve()
+    store = Store(db_path(project))
+    store.migrate()
+    lock_file = runtime_dir(project) / "stagemesh.lock"
+    lock = WatcherLock(lock_file)
+    interval = float(getattr(args, "interval", 1.0) or 1.0)
+    loop = WatcherLoop(store=store, project=project, interval_seconds=interval, lock=lock)
+    max_ticks = 1 if getattr(args, "once", False) else None
+    ticks = loop.run(max_ticks=max_ticks)
+    if getattr(args, "json", False):
+        print(json.dumps({"status": "OK", "mode": "watch", "ticks_executed": ticks}))
+    else:
+        print(f"Watcher tick complete ({ticks} ticks)")
+    return 0
+
+
+def command_labels(args: argparse.Namespace) -> int:
+    repo = getattr(args, "repo", None)
+    gateway = GitHubLabelGateway(repo=repo)
+    if getattr(args, "labels_command", None) == "setup":
+        created = provision_labels(gateway)
+        if getattr(args, "json", False):
+            print(json.dumps({"status": "OK", "provisioned": created}))
+        else:
+            print(f"Labels setup complete: provisioned {created} missing labels")
+        return 0
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="stagemesh")
     parser.add_argument("--project", default=".")
     sub = parser.add_subparsers(dest="command", required=True)
+    daemon = sub.add_parser("daemon")
+    daemon.add_argument("--project", default=".")
+    daemon.add_argument("--once", action="store_true")
+    daemon.add_argument("--interval", type=float, default=1.0)
+    daemon.add_argument("--json", action="store_true")
+    daemon.set_defaults(func=command_daemon)
+    watch = sub.add_parser("watch")
+    watch.add_argument("--project", default=".")
+    watch.add_argument("--daemon", action="store_true")
+    watch.add_argument("--once", action="store_true")
+    watch.add_argument("--interval", type=float, default=1.0)
+    watch.add_argument("--json", action="store_true")
+    watch.set_defaults(func=command_watch)
+    labels = sub.add_parser("labels")
+    labels.add_argument("--project", default=".")
+    labels_sub = labels.add_subparsers(dest="labels_command", required=True)
+    labels_setup = labels_sub.add_parser("setup")
+    labels_setup.add_argument("--project", default=".")
+    labels_setup.add_argument("--repo")
+    labels_setup.add_argument("--json", action="store_true")
+    labels_setup.set_defaults(func=command_labels)
     init = sub.add_parser("init")
     init.add_argument("--task")
     init.add_argument("--register", action="store_true")
@@ -1289,6 +1360,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         return int(args.func(args))
+    except WatcherLockError as exc:
+        print(f"watcher lock error: {exc}", file=sys.stderr)
+        return 2
     except ConfigValidationError as exc:
         print(f"config error: {exc}", file=sys.stderr)
         return 2
