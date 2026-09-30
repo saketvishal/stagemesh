@@ -30,6 +30,20 @@ def _is_transient_sqlite_lock_error(exc: Exception) -> bool:
     return "database is locked" in message or "database is busy" in message
 
 
+def commit_or_busy(conn: sqlite3.Connection) -> None:
+    """Commit transaction on conn, converting transient SQLite lock contention into DatabaseBusyError."""
+    try:
+        conn.commit()
+    except sqlite3.OperationalError as exc:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        if not _is_transient_sqlite_lock_error(exc):
+            raise
+        raise DatabaseBusyError(f"SQLite write contention on commit: {exc}") from exc
+
+
 def with_sqlite_retry(
     fn: Any,
     *,
@@ -42,6 +56,9 @@ def with_sqlite_retry(
         try:
             return fn()
         except DatabaseBusyError as exc:
+            cause = exc.__cause__
+            if isinstance(cause, sqlite3.OperationalError) and not is_retryable(cause):
+                raise
             if attempt == attempts:
                 raise
             delay = min(max_delay, base_delay * (2 ** (attempt - 1)))
@@ -87,11 +104,36 @@ class Store:
             self._local.conn.close()
             self._local.conn = None
 
+    def _mutate(self, fn: Any) -> Any:
+        def _operation():
+            try:
+                res = fn()
+                commit_or_busy(self.conn)
+                return res
+            except DatabaseBusyError:
+                raise
+            except sqlite3.OperationalError as exc:
+                try:
+                    self.conn.rollback()
+                except Exception:
+                    pass
+                if not _is_transient_sqlite_lock_error(exc):
+                    raise
+                raise DatabaseBusyError(f"SQLite write contention: {exc}") from exc
+            except Exception:
+                try:
+                    self.conn.rollback()
+                except Exception:
+                    pass
+                raise
+
+        return with_sqlite_retry(_operation, attempts=5, base_delay=0.05)
+
     def execute_with_retry(self, query: str, params: tuple[Any, ...] = ()) -> sqlite3.Cursor:
         return with_sqlite_retry(lambda: self.conn.execute(query, params))
 
     def commit_with_retry(self) -> None:
-        with_sqlite_retry(lambda: self.conn.commit())
+        with_sqlite_retry(lambda: commit_or_busy(self.conn))
 
     def migrate(self) -> None:
         self.conn.executescript(
@@ -149,6 +191,7 @@ class Store:
                 produced_by TEXT NOT NULL,
                 durable_handoff INTEGER NOT NULL,
                 created_at REAL NOT NULL,
+                base_sha TEXT,
                 UNIQUE(task_id, sha)
             );
             CREATE TABLE IF NOT EXISTS evidence (
@@ -255,6 +298,10 @@ class Store:
             (1, time.time()),
         )
         apply_migrations(self.conn)
+        try:
+            self.conn.execute("ALTER TABLE candidates ADD COLUMN base_sha TEXT")
+        except sqlite3.OperationalError:
+            pass
         self.conn.commit()
 
     def schema_version(self) -> int:
@@ -278,25 +325,27 @@ class Store:
             else:
                 task_id = source_id or str(uuid.uuid4())
         now = time.time()
-        self.conn.execute(
-            """
-            INSERT INTO tasks(id, title, stage, status, source, source_id, project, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(source, source_id) DO UPDATE SET title=excluded.title, updated_at=excluded.updated_at
-            """,
-            (task_id, title, Stage.PLAN, TaskStatus.OPEN, source, source_id, project, now, now),
-        )
-        self.conn.commit()
-        return task_id
+        def _do_upsert():
+            self.conn.execute(
+                """
+                INSERT INTO tasks(id, title, stage, status, source, source_id, project, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(source, source_id) DO UPDATE SET title=excluded.title, updated_at=excluded.updated_at
+                """,
+                (task_id, title, Stage.PLAN, TaskStatus.OPEN, source, source_id, project, now, now),
+            )
+            return task_id
+        return self._mutate(_do_upsert)
 
     def add_dependency(self, task_id: str, depends_on_task_id: str) -> None:
         task_id = _validate_text(task_id, "task id")
         depends_on_task_id = _validate_text(depends_on_task_id, "dependency task id")
-        self.conn.execute(
-            "INSERT OR IGNORE INTO task_dependencies VALUES (?, ?)",
-            (task_id, depends_on_task_id),
+        self._mutate(
+            lambda: self.conn.execute(
+                "INSERT OR IGNORE INTO task_dependencies VALUES (?, ?)",
+                (task_id, depends_on_task_id),
+            )
         )
-        self.conn.commit()
 
     def incomplete_dependencies(self, task_id: str) -> list[str]:
         return [
@@ -334,7 +383,8 @@ class Store:
         if not task or task["status"] == TaskStatus.DONE or task["stage"] == Stage.DONE:
             return None
         now = time.time()
-        with self.conn:
+
+        def _op():
             self.conn.execute(
                 "UPDATE claims SET active=0 WHERE task_id=? AND active=1 AND lease_expires_at < ?",
                 (task_id, now),
@@ -354,6 +404,8 @@ class Store:
             )
             return claim_id
 
+        return self._mutate(_op)
+
     def start_execution(
         self,
         *,
@@ -372,50 +424,68 @@ class Store:
         candidate_sha = _validate_optional_text(candidate_sha, "candidate sha")
         execution_id = str(uuid.uuid4())
         now = time.time()
-        self.conn.execute(
-            "INSERT INTO executions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                execution_id,
-                task_id,
-                claim_id,
-                kind,
-                ExecutionStatus.RUNNING,
-                pid,
-                process_create_time,
-                boot_id,
-                executable,
-                candidate_sha,
-                now,
-                now,
-            ),
-        )
-        self.conn.commit()
-        return execution_id
+
+        def _op():
+            self.conn.execute(
+                "INSERT INTO executions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    execution_id,
+                    task_id,
+                    claim_id,
+                    kind,
+                    ExecutionStatus.RUNNING,
+                    pid,
+                    process_create_time,
+                    boot_id,
+                    executable,
+                    candidate_sha,
+                    now,
+                    now,
+                ),
+            )
+            return execution_id
+
+        return self._mutate(_op)
 
     def finish_execution(self, execution_id: str, status: ExecutionStatus, candidate_sha: str | None = None) -> None:
         execution_id = _validate_text(execution_id, "execution id")
         status = _validate_enum(status, ExecutionStatus, "execution status")
         candidate_sha = _validate_optional_text(candidate_sha, "candidate sha")
-        self.conn.execute(
-            "UPDATE executions SET status=?, candidate_sha=COALESCE(?, candidate_sha), updated_at=? WHERE id=?",
-            (status, candidate_sha, time.time(), execution_id),
+        now = time.time()
+        self._mutate(
+            lambda: self.conn.execute(
+                "UPDATE executions SET status=?, candidate_sha=COALESCE(?, candidate_sha), updated_at=? WHERE id=?",
+                (status, candidate_sha, now, execution_id),
+            )
         )
-        self.conn.commit()
 
-    def add_candidate(self, task_id: str, sha: str, produced_by: str, durable_handoff: bool) -> str:
+    def add_candidate(
+        self,
+        task_id: str,
+        sha: str,
+        produced_by: str,
+        durable_handoff: bool,
+        base_sha: str | None = None,
+    ) -> str:
         task_id = _validate_text(task_id, "task id")
         sha = _validate_text(sha, "candidate sha")
         produced_by = _validate_text(produced_by, "candidate producer")
         if not isinstance(durable_handoff, bool):
             raise StoreValidationError("durable_handoff must be a boolean")
+        if base_sha is not None:
+            base_sha = _validate_text(base_sha, "base sha")
         cid = str(uuid.uuid4())
-        self.conn.execute(
-            "INSERT OR IGNORE INTO candidates VALUES (?, ?, ?, ?, ?, ?)",
-            (cid, task_id, sha, produced_by, int(durable_handoff), time.time()),
-        )
-        self.conn.commit()
-        row = self.conn.execute("SELECT id FROM candidates WHERE task_id=? AND sha=?", (task_id, sha)).fetchone()
-        return str(row["id"])
+        now = time.time()
+
+        def _op():
+            self.conn.execute(
+                "INSERT OR IGNORE INTO candidates (id, task_id, sha, produced_by, durable_handoff, created_at, base_sha) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (cid, task_id, sha, produced_by, int(durable_handoff), now, base_sha),
+            )
+            row = self.conn.execute("SELECT id FROM candidates WHERE task_id=? AND sha=?", (task_id, sha)).fetchone()
+            return str(row["id"])
+
+        return self._mutate(_op)
 
     def latest_candidate(self, task_id: str) -> sqlite3.Row | None:
         return self.conn.execute(
@@ -436,16 +506,21 @@ class Store:
         status = _validate_enum(status, EvidenceStatus, "evidence status")
         payload = _validate_payload(payload)
         eid = str(uuid.uuid4())
-        self.conn.execute(
-            "INSERT OR IGNORE INTO evidence VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (eid, task_id, candidate_sha, kind, status, json.dumps(payload or {}, sort_keys=True), time.time()),
-        )
-        self.conn.commit()
-        row = self.conn.execute(
-            "SELECT id FROM evidence WHERE task_id=? AND candidate_sha=? AND kind=? AND status=?",
-            (task_id, candidate_sha, kind, status),
-        ).fetchone()
-        return str(row["id"])
+        now = time.time()
+        payload_str = json.dumps(payload or {}, sort_keys=True)
+
+        def _op():
+            self.conn.execute(
+                "INSERT OR IGNORE INTO evidence VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (eid, task_id, candidate_sha, kind, status, payload_str, now),
+            )
+            row = self.conn.execute(
+                "SELECT id FROM evidence WHERE task_id=? AND candidate_sha=? AND kind=? AND status=?",
+                (task_id, candidate_sha, kind, status),
+            ).fetchone()
+            return str(row["id"])
+
+        return self._mutate(_op)
 
     def has_evidence(self, task_id: str, sha: str, kind: EvidenceKind, status: EvidenceStatus = EvidenceStatus.PASSED) -> bool:
         task_id = _validate_text(task_id, "task id")
@@ -464,11 +539,15 @@ class Store:
         task_id = _validate_text(task_id, "task id")
         stage = _validate_enum(stage, Stage, "task stage")
         status = TaskStatus.DONE if stage is Stage.DONE else TaskStatus.OPEN
-        self.conn.execute(
-            "UPDATE tasks SET stage=?, status=?, updated_at=? WHERE id=?", (stage, status, time.time(), task_id)
-        )
-        self.conn.execute("UPDATE claims SET active=0 WHERE task_id=?", (task_id,))
-        self.conn.commit()
+        now = time.time()
+
+        def _op():
+            self.conn.execute(
+                "UPDATE tasks SET stage=?, status=?, updated_at=? WHERE id=?", (stage, status, now, task_id)
+            )
+            self.conn.execute("UPDATE claims SET active=0 WHERE task_id=?", (task_id,))
+
+        self._mutate(_op)
 
     def release_claim(self, claim_id: str) -> None:
         """Deactivate a claim without advancing the task stage, restoring the task to OPEN.
@@ -478,16 +557,20 @@ class Store:
         after the lease TTL.
         """
         claim_id = _validate_text(claim_id, "claim id")
-        row = self.conn.execute("SELECT task_id FROM claims WHERE id=?", (claim_id,)).fetchone()
-        if row is None:
-            return
-        task_id = str(row["task_id"])
-        with self.conn:
+        now = time.time()
+
+        def _op():
+            row = self.conn.execute("SELECT task_id FROM claims WHERE id=?", (claim_id,)).fetchone()
+            if row is None:
+                return
+            task_id = str(row["task_id"])
             self.conn.execute("UPDATE claims SET active=0 WHERE id=?", (claim_id,))
             self.conn.execute(
                 "UPDATE tasks SET status=?, updated_at=? WHERE id=? AND status=?",
-                (TaskStatus.OPEN, time.time(), task_id, TaskStatus.CLAIMED),
+                (TaskStatus.OPEN, now, task_id, TaskStatus.CLAIMED),
             )
+
+        self._mutate(_op)
 
     def running_executions(self) -> Iterable[sqlite3.Row]:
         return self.conn.execute("SELECT * FROM executions WHERE status=?", (ExecutionStatus.RUNNING,))
@@ -504,28 +587,30 @@ class Store:
         source_id = _validate_text(source_id, "source id")
         state = _validate_payload(state)
         status = _validate_text(status, "source status")
-        self.conn.execute(
-            """
-            INSERT INTO source_cache VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(source, source_id) DO UPDATE SET state=excluded.state, status=excluded.status, retry_after=excluded.retry_after, updated_at=excluded.updated_at
-            """,
-            (source, source_id, json.dumps(state, sort_keys=True), status, retry_after, time.time()),
+        self._mutate(
+            lambda: self.conn.execute(
+                """
+                INSERT INTO source_cache VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(source, source_id) DO UPDATE SET state=excluded.state, status=excluded.status, retry_after=excluded.retry_after, updated_at=excluded.updated_at
+                """,
+                (source, source_id, json.dumps(state, sort_keys=True), status, retry_after, time.time()),
+            )
         )
-        self.conn.commit()
 
     def save_objective(self, objective_id: str, title: str, payload: dict[str, Any]) -> None:
         objective_id = _validate_text(objective_id, "objective id")
         title = _validate_text(title, "objective title")
         payload = _validate_payload(payload)
         now = time.time()
-        self.conn.execute(
-            """
-            INSERT INTO objectives VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET title=excluded.title, payload=excluded.payload, updated_at=excluded.updated_at
-            """,
-            (objective_id, title, json.dumps(payload, sort_keys=True), now, now),
+        self._mutate(
+            lambda: self.conn.execute(
+                """
+                INSERT INTO objectives VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET title=excluded.title, payload=excluded.payload, updated_at=excluded.updated_at
+                """,
+                (objective_id, title, json.dumps(payload, sort_keys=True), now, now),
+            )
         )
-        self.conn.commit()
 
     def upsert_worker(
         self,
@@ -549,42 +634,44 @@ class Store:
             raise StoreValidationError("worker capabilities must be unique")
         boot_id = _validate_optional_text(boot_id, "worker boot id")
         executable = _validate_optional_text(executable, "worker executable", 1000)
-        self.conn.execute(
-            """
-            INSERT INTO workers VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
-                provider=excluded.provider,
-                capabilities=excluded.capabilities,
-                pid=excluded.pid,
-                process_create_time=excluded.process_create_time,
-                boot_id=excluded.boot_id,
-                executable=excluded.executable,
-                heartbeat_at=excluded.heartbeat_at,
-                lease_expires_at=excluded.lease_expires_at,
-                updated_at=excluded.updated_at
-            """,
-            (
-                worker_id,
-                provider,
-                json.dumps(capabilities),
-                pid,
-                process_create_time,
-                boot_id,
-                executable,
-                heartbeat_at,
-                lease_expires_at,
-                time.time(),
-            ),
+        self._mutate(
+            lambda: self.conn.execute(
+                """
+                INSERT INTO workers VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    provider=excluded.provider,
+                    capabilities=excluded.capabilities,
+                    pid=excluded.pid,
+                    process_create_time=excluded.process_create_time,
+                    boot_id=excluded.boot_id,
+                    executable=excluded.executable,
+                    heartbeat_at=excluded.heartbeat_at,
+                    lease_expires_at=excluded.lease_expires_at,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    worker_id,
+                    provider,
+                    json.dumps(capabilities),
+                    pid,
+                    process_create_time,
+                    boot_id,
+                    executable,
+                    heartbeat_at,
+                    lease_expires_at,
+                    time.time(),
+                ),
+            )
         )
-        self.conn.commit()
 
     def heartbeat_worker(self, worker_id: str, heartbeat_at: float, lease_expires_at: float) -> None:
         worker_id = _validate_text(worker_id, "worker id")
-        self.conn.execute(
-            "UPDATE workers SET heartbeat_at=?, lease_expires_at=?, updated_at=? WHERE id=?",
-            (heartbeat_at, lease_expires_at, time.time(), worker_id),
+        self._mutate(
+            lambda: self.conn.execute(
+                "UPDATE workers SET heartbeat_at=?, lease_expires_at=?, updated_at=? WHERE id=?",
+                (heartbeat_at, lease_expires_at, time.time(), worker_id),
+            )
         )
-        self.conn.commit()
 
     def workers(self) -> list[sqlite3.Row]:
         return list(self.conn.execute("SELECT * FROM workers ORDER BY id"))
@@ -603,20 +690,21 @@ class Store:
         status = _validate_text(status, "source event status")
         payload = _validate_payload(payload)
         event_id = str(uuid.uuid4())
-        self.conn.execute(
-            "INSERT INTO source_events VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (
-                event_id,
-                source,
-                source_id,
-                direction,
-                status,
-                json.dumps(payload, sort_keys=True),
-                time.time(),
-            ),
-        )
-        self.conn.commit()
-        return event_id
+        def _op():
+            self.conn.execute(
+                "INSERT INTO source_events VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    event_id,
+                    source,
+                    source_id,
+                    direction,
+                    status,
+                    json.dumps(payload, sort_keys=True),
+                    time.time(),
+                ),
+            )
+            return event_id
+        return self._mutate(_op)
 
     def source_events(self, limit: int = 50) -> list[sqlite3.Row]:
         limit = _validate_limit(limit, "source event limit", 10000)
@@ -643,19 +731,20 @@ class Store:
         message = _validate_text(message, "finding message", 2000)
         status = _validate_text(status, "finding status")
         now = time.time()
-        self.conn.execute(
-            """
-            INSERT INTO findings VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
-                severity=excluded.severity,
-                message=excluded.message,
-                status=excluded.status,
-                updated_at=excluded.updated_at
-            """,
-            (finding_id, task_id, candidate_sha, severity, message, status, now, now),
-        )
-        self.conn.commit()
-        return finding_id
+        def _op():
+            self.conn.execute(
+                """
+                INSERT INTO findings VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    severity=excluded.severity,
+                    message=excluded.message,
+                    status=excluded.status,
+                    updated_at=excluded.updated_at
+                """,
+                (finding_id, task_id, candidate_sha, severity, message, status, now, now),
+            )
+            return finding_id
+        return self._mutate(_op)
 
     def get_finding(self, finding_id: str) -> sqlite3.Row | None:
         finding_id = _validate_text(finding_id, "finding id")
@@ -663,11 +752,12 @@ class Store:
 
     def close_finding(self, finding_id: str) -> None:
         finding_id = _validate_text(finding_id, "finding id")
-        self.conn.execute(
-            "UPDATE findings SET status=?, updated_at=? WHERE id=?",
-            ("RESOLVED", time.time(), finding_id),
+        self._mutate(
+            lambda: self.conn.execute(
+                "UPDATE findings SET status=?, updated_at=? WHERE id=?",
+                ("RESOLVED", time.time(), finding_id),
+            )
         )
-        self.conn.commit()
 
     def open_findings_for_candidate(self, task_id: str, candidate_sha: str) -> list[sqlite3.Row]:
         task_id = _validate_text(task_id, "task id")
@@ -686,12 +776,13 @@ class Store:
         status = _validate_text(status, "remediation status")
         payload = _validate_payload(payload)
         attempt_id = str(uuid.uuid4())
-        self.conn.execute(
-            "INSERT INTO remediation_attempts VALUES (?, ?, ?, ?, ?)",
-            (attempt_id, finding_id, status, json.dumps(payload, sort_keys=True), time.time()),
-        )
-        self.conn.commit()
-        return attempt_id
+        def _op():
+            self.conn.execute(
+                "INSERT INTO remediation_attempts VALUES (?, ?, ?, ?, ?)",
+                (attempt_id, finding_id, status, json.dumps(payload, sort_keys=True), time.time()),
+            )
+            return attempt_id
+        return self._mutate(_op)
 
     def remediation_attempt_count(self, finding_id: str) -> int:
         finding_id = _validate_text(finding_id, "finding id")
@@ -716,30 +807,31 @@ class Store:
         payload = _validate_payload(payload)
         packet_id = str(uuid.uuid4())
         now = time.time()
-        self.conn.execute(
-            "INSERT INTO work_packets VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                packet_id,
-                task_id,
-                stage,
-                worker_id,
-                candidate_sha,
-                "QUEUED",
-                json.dumps(payload, sort_keys=True),
-                now,
-                now,
-            ),
-        )
-        self.conn.commit()
-        return packet_id
+        def _op():
+            self.conn.execute(
+                "INSERT INTO work_packets VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    packet_id,
+                    task_id,
+                    stage,
+                    worker_id,
+                    candidate_sha,
+                    "QUEUED",
+                    json.dumps(payload, sort_keys=True),
+                    now,
+                    now,
+                ),
+            )
+            return packet_id
+        return self._mutate(_op)
 
     def claim_work_packets(self, worker_id: str, limit: int = 1, lease_seconds: float = 300) -> list[sqlite3.Row]:
         worker_id = _validate_text(worker_id, "worker id")
         limit = _validate_limit(limit, "work packet claim limit", 100)
         if lease_seconds <= 0:
             raise StoreValidationError("work packet lease seconds must be positive")
-        with self.conn:
-            now = time.time()
+        now = time.time()
+        def _op():
             self.conn.execute(
                 """
                 UPDATE work_packets
@@ -769,31 +861,34 @@ class Store:
                 if claimed_row is not None:
                     claimed.append(claimed_row)
             return claimed
+        return self._mutate(_op)
 
     def renew_work_packet(self, packet_id: str, worker_id: str) -> bool:
         packet_id = _validate_text(packet_id, "work packet id")
         worker_id = _validate_text(worker_id, "worker id")
-        cursor = self.conn.execute(
-            """
-            UPDATE work_packets
-            SET updated_at=?
-            WHERE id=? AND worker_id=? AND status='CLAIMED'
-            """,
-            (time.time(), packet_id, worker_id),
-        )
-        self.conn.commit()
-        return cursor.rowcount == 1
+        def _op():
+            cursor = self.conn.execute(
+                """
+                UPDATE work_packets
+                SET updated_at=?
+                WHERE id=? AND worker_id=? AND status='CLAIMED'
+                """,
+                (time.time(), packet_id, worker_id),
+            )
+            return cursor.rowcount == 1
+        return self._mutate(_op)
 
     def ack_work_packet(self, packet_id: str, status: str, payload: dict[str, Any] | None = None) -> bool:
         packet_id = _validate_text(packet_id, "work packet id")
         status = _validate_text(status, "work packet status")
         payload = _validate_payload(payload)
-        cursor = self.conn.execute(
-            "UPDATE work_packets SET status=?, payload=?, updated_at=? WHERE id=? AND status='CLAIMED'",
-            (status, json.dumps(payload, sort_keys=True), time.time(), packet_id),
-        )
-        self.conn.commit()
-        return cursor.rowcount == 1
+        def _op():
+            cursor = self.conn.execute(
+                "UPDATE work_packets SET status=?, payload=?, updated_at=? WHERE id=? AND status='CLAIMED'",
+                (status, json.dumps(payload, sort_keys=True), time.time(), packet_id),
+            )
+            return cursor.rowcount == 1
+        return self._mutate(_op)
 
     def work_packets(self) -> list[sqlite3.Row]:
         return list(self.conn.execute("SELECT * FROM work_packets ORDER BY created_at, id"))
@@ -806,12 +901,13 @@ class Store:
         event_type = _validate_text(event_type, "audit event type")
         payload = _validate_payload(payload)
         event_id = str(uuid.uuid4())
-        self.conn.execute(
-            "INSERT INTO audit_events VALUES (?, ?, ?, ?)",
-            (event_id, event_type, json.dumps(payload, sort_keys=True), time.time()),
-        )
-        self.conn.commit()
-        return event_id
+        def _op():
+            self.conn.execute(
+                "INSERT INTO audit_events VALUES (?, ?, ?, ?)",
+                (event_id, event_type, json.dumps(payload, sort_keys=True), time.time()),
+            )
+            return event_id
+        return self._mutate(_op)
 
     def audit_events(self, limit: int = 500) -> list[sqlite3.Row]:
         limit = _validate_limit(limit, "audit event limit", 10000)
@@ -831,23 +927,25 @@ class Store:
         if not isinstance(attempts, int) or attempts < 0:
             raise StoreValidationError("retry attempts must be a non-negative integer")
         reason = _validate_text(reason, "retry reason")
-        self.conn.execute(
-            """
-            INSERT INTO retry_state VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(key) DO UPDATE SET
-                attempts=excluded.attempts,
-                next_attempt_at=excluded.next_attempt_at,
-                reason=excluded.reason,
-                updated_at=excluded.updated_at
-            """,
-            (key, attempts, next_attempt_at, reason, time.time()),
+        self._mutate(
+            lambda: self.conn.execute(
+                """
+                INSERT INTO retry_state VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET
+                    attempts=excluded.attempts,
+                    next_attempt_at=excluded.next_attempt_at,
+                    reason=excluded.reason,
+                    updated_at=excluded.updated_at
+                """,
+                (key, attempts, next_attempt_at, reason, time.time()),
+            )
         )
-        self.conn.commit()
 
     def clear_retry_state(self, key: str) -> None:
         key = _validate_text(key, "retry key")
-        self.conn.execute("DELETE FROM retry_state WHERE key=?", (key,))
-        self.conn.commit()
+        self._mutate(
+            lambda: self.conn.execute("DELETE FROM retry_state WHERE key=?", (key,))
+        )
 
     def retry_states(self) -> list[sqlite3.Row]:
         return list(self.conn.execute("SELECT * FROM retry_state ORDER BY key"))
@@ -865,35 +963,36 @@ class Store:
         url = _validate_text(url, "external evidence url", 1000)
         candidate_sha = _validate_optional_text(candidate_sha, "candidate sha")
         notes = _validate_text(notes, "external evidence notes", 2000) if notes else ""
-        if candidate_sha is None:
-            existing = self.conn.execute(
-                """
-                SELECT id FROM external_evidence
-                WHERE kind=? AND status=? AND url=? AND candidate_sha IS NULL AND notes=?
-                ORDER BY created_at DESC
-                LIMIT 1
-                """,
-                (kind, status, url, notes),
-            ).fetchone()
-        else:
-            existing = self.conn.execute(
-                """
-                SELECT id FROM external_evidence
-                WHERE kind=? AND status=? AND url=? AND candidate_sha=? AND notes=?
-                ORDER BY created_at DESC
-                LIMIT 1
-                """,
-                (kind, status, url, candidate_sha, notes),
-            ).fetchone()
-        if existing:
-            return str(existing["id"])
-        evidence_id = str(uuid.uuid4())
-        self.conn.execute(
-            "INSERT INTO external_evidence VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (evidence_id, kind, status, url, candidate_sha, notes, time.time()),
-        )
-        self.conn.commit()
-        return evidence_id
+        def _op():
+            if candidate_sha is None:
+                existing = self.conn.execute(
+                    """
+                    SELECT id FROM external_evidence
+                    WHERE kind=? AND status=? AND url=? AND candidate_sha IS NULL AND notes=?
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    """,
+                    (kind, status, url, notes),
+                ).fetchone()
+            else:
+                existing = self.conn.execute(
+                    """
+                    SELECT id FROM external_evidence
+                    WHERE kind=? AND status=? AND url=? AND candidate_sha=? AND notes=?
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    """,
+                    (kind, status, url, candidate_sha, notes),
+                ).fetchone()
+            if existing:
+                return str(existing["id"])
+            evidence_id = str(uuid.uuid4())
+            self.conn.execute(
+                "INSERT INTO external_evidence VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (evidence_id, kind, status, url, candidate_sha, notes, time.time()),
+            )
+            return evidence_id
+        return self._mutate(_op)
 
     def external_evidence(self) -> list[sqlite3.Row]:
         return list(self.conn.execute("SELECT * FROM external_evidence ORDER BY created_at DESC"))

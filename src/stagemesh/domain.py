@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
+from pathlib import Path
 from typing import Any
 
 
@@ -61,7 +62,28 @@ class ProcessIdentity:
         return self.pid is not None and self.create_time is not None and self.boot_id is not None
 
     def matches(self, other: "ProcessIdentity") -> bool:
-        return self.is_known and other.is_known and self == other
+        if not self.is_known or not other.is_known:
+            return False
+        if self.pid != other.pid:
+            return False
+        if self.boot_id != other.boot_id:
+            return False
+        if abs((self.create_time or 0.0) - (other.create_time or 0.0)) > 1e-4:
+            return False
+        if self.executable and other.executable:
+            s_name = Path(self.executable).name.lower()
+            o_name = Path(other.executable).name.lower()
+            if s_name == o_name or self.executable == other.executable:
+                return True
+            alias_groups = [
+                {"claude", "claude.cmd", "claude.exe", "node", "node.exe"},
+                {"codex", "codex.cmd", "codex.exe", "node", "node.exe", "python", "python.exe"},
+            ]
+            for group in alias_groups:
+                if s_name in group and o_name in group:
+                    return True
+            return False
+        return True
 
 
 @dataclass(frozen=True)

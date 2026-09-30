@@ -266,9 +266,9 @@ Net change: `PRESENT_VERIFIED` 82 → 91; `PRESENT_NOT_VERIFIED` 11 → 2; `MISS
 - **Legacy Source Files:** `build_coordinator/watcher/loop.py`
 - **Legacy Tests:** `tests/test_process_tree.py`
 - **vNext Files:** `src/stagemesh/process_identity.py`
-- **vNext Tests:** `tests/test_process_identity_verification.py::test_classify_unknown_saved_returns_unknown, tests/test_process_identity_verification.py::test_pid_reuse_with_different_boot_id_is_dead, tests/test_process_identity_verification.py::test_pid_reuse_with_different_create_time_is_dead, tests/test_process_identity_verification.py::test_pid_reuse_with_different_executable_is_dead, tests/test_process_identity_verification.py::test_exact_match_returns_live, tests/test_process_identity_verification.py::test_classify_none_observed_returns_unknown, tests/test_process_identity_verification.py::test_restart_uses_new_identity_not_stale_saved, tests/test_process_identity_verification.py::test_identity_mismatch_does_not_kill_unrelated_processes`
+- **vNext Tests:** tests/test_process_identity_verification.py::test_popen_identity_has_real_create_time_and_is_known, tests/test_process_identity_verification.py::test_windows_boot_id_stable_across_repeated_calls_during_one_boot, tests/test_process_identity_verification.py::test_windows_boot_id_differs_after_simulated_reboot, tests/test_process_identity_verification.py::test_unknown_live_identity_remains_untouched_in_recovery, tests/test_process_identity_verification.py::test_coordinator_recovery_detects_pid_reuse_and_preserves_unrelated_process, tests/test_process_identity_verification.py::test_pid_reuse_with_different_create_time_is_dead, tests/test_process_identity_verification.py::test_alias_command_matches_observed_executable
 - **Legacy Behavior:** Worker identity verified via PID and creation time.
-- **Evidence:** classify_process correctly classifies LIVE/DEAD/UNKNOWN based on pid+boot_id+create_time+executable; PID reuse with different boot_id/create_time/executable is classified DEAD; unknown identity (None fields) stays UNKNOWN; classify_process is a pure function that never kills unrelated processes; restart produces new identity separate from stale saved identity.
+- **Evidence:** ProcessIdentity captures real create_time and stable boot epoch across platforms including Windows. Coordinator.recover() verifies live process identity, fails closed on UNKNOWN identity without reclaiming claims, and preserves unrelated processes across alias commands.
 - **Parity Gap:** None
 
 ### `OWNERSHIP-005`: Reclaims stale claims when lease expires.
@@ -640,9 +640,9 @@ Net change: `PRESENT_VERIFIED` 82 → 91; `PRESENT_NOT_VERIFIED` 11 → 2; `MISS
 - **Legacy Source Files:** `build_coordinator/prompts/builders.py`
 - **Legacy Tests:** `tests/test_objective_planner.py`
 - **vNext Files:** `src/stagemesh/objectives.py`
-- **vNext Tests:** `tests/test_planner_contract_validation.py::test_valid_minimal_plan_accepted, tests/test_planner_contract_validation.py::test_malformed_json_rejected, tests/test_planner_contract_validation.py::test_non_dict_root_rejected, tests/test_planner_contract_validation.py::test_missing_objective_id_rejected, tests/test_planner_contract_validation.py::test_task_missing_id_rejected, tests/test_planner_contract_validation.py::test_duplicate_task_ids_rejected, tests/test_planner_contract_validation.py::test_unknown_dependency_rejected, tests/test_planner_contract_validation.py::test_provider_output_wrapping_still_validated`
+- **vNext Tests:** tests/test_planner_contract_validation.py::test_dag_self_dependency_rejected, tests/test_planner_contract_validation.py::test_dag_two_node_cycle_rejected, tests/test_planner_contract_validation.py::test_dag_three_node_cycle_rejected, tests/test_planner_contract_validation.py::test_dag_valid_complex_acyclic_graph_passes, tests/test_planner_contract_validation.py::test_unknown_dependency_rejected
 - **Legacy Behavior:** Validates planner output against contract schema.
-- **Evidence:** ObjectivePlanner.parse() validates: malformed JSON, non-dict root, missing objective id/title, empty task list, missing task id/title, duplicate task ids, unknown dependencies, non-list dependencies; provider output cannot bypass validation.
+- **Evidence:** ObjectivePlanner validates objective structure and enforces strict DAG validation, rejecting self-dependencies, 2-node cycles, and multi-node cycles while accepting valid acyclic graphs.
 - **Parity Gap:** None
 
 ### `OBJECTIVES-004`: Autonomous execution of objective DAG tasks in topological order.
@@ -662,9 +662,9 @@ Net change: `PRESENT_VERIFIED` 82 → 91; `PRESENT_NOT_VERIFIED` 11 → 2; `MISS
 - **Legacy Source Files:** `build_coordinator/prompts/builders.py`
 - **Legacy Tests:** `tests/test_objective_planner.py`
 - **vNext Files:** `src/stagemesh/objectives.py`
-- **vNext Tests:** `tests/test_planner_contract_validation.py::test_write_backlog_creates_normalized_file, tests/test_planner_contract_validation.py::test_write_backlog_idempotent_overwrites_safely, tests/test_planner_contract_validation.py::test_repeated_malformed_planner_output_does_not_duplicate_tasks, tests/test_planner_contract_validation.py::test_success_after_failure_produces_single_correct_graph, tests/test_planner_contract_validation.py::test_write_backlog_rejects_missing_task_in_source`
+- **vNext Tests:** tests/test_planner_contract_validation.py::test_wrapper_normalization_markdown_fences, tests/test_planner_contract_validation.py::test_wrapper_normalization_envelope_with_thinking_stripped, tests/test_planner_contract_validation.py::test_retry_suppression_and_no_partial_store_corruption, tests/test_planner_contract_validation.py::test_provider_output_requires_full_envelope_and_rejects_bare_plan, tests/test_planner_contract_validation.py::test_planner_sanitization_drops_thinking_and_lifecycle_identity_from_cli_plan, tests/test_planner_contract_validation.py::test_command_plan_atomic_all_or_nothing_on_failure, tests/test_planner_contract_validation.py::test_durable_retry_suppression_and_contract_revision_recovery_production_path
 - **Legacy Behavior:** Planner wrapper envelope normalization and retry suppression.
-- **Evidence:** write_backlog() normalises and serialises backlog idempotently; repeated malformed output raises ObjectiveValidationError each time (zero tasks created); success after N failures produces exactly the correct task set; malformed wrapper fails safely without corrupting objective state.
+- **Evidence:** ObjectivePlanner requires full executor envelope for provider output (rejecting bare plans), strips thinking/chain-of-thought blocks, validates DAG without partial persistent state, applies atomic objective and backlog mutations, and durably suppresses unchanged malformed contract retries across coordinator cycles until contract revision.
 - **Parity Gap:** None
 
 ### `OBJECTIVES-006`: Runs objective commands from any working directory.
@@ -673,9 +673,9 @@ Net change: `PRESENT_VERIFIED` 82 → 91; `PRESENT_NOT_VERIFIED` 11 → 2; `MISS
 - **Legacy Source Files:** `build_coordinator/cli.py`
 - **Legacy Tests:** `tests/test_objective_cli_location_independence.py`
 - **vNext Files:** `src/stagemesh/registry.py, src/stagemesh/persistence.py`
-- **vNext Tests:** `tests/test_run_from_anywhere_and_multi_project.py::TestObjectiveRunFromAnywhere::test_explicit_project_path_resolves_independently_of_cwd, tests/test_run_from_anywhere_and_multi_project.py::TestObjectiveRunFromAnywhere::test_wrong_project_path_does_not_mutate_correct_project`
+- **vNext Tests:** tests/test_run_from_anywhere_and_multi_project.py::TestObjectiveRunFromAnywhere::test_cli_plan_from_unrelated_cwd_modifies_target_and_leaves_other_untouched
 - **Legacy Behavior:** Runs objective commands from any working directory.
-- **Evidence:** Store opened with an explicit absolute path works regardless of cwd; targeting project A does not add tasks to project B.
+- **Evidence:** stagemesh plan runs from arbitrary CWD targeting registered or explicit project path, verifies project boundary, and writes to target database while leaving other projects untouched.
 - **Parity Gap:** None
 
 ### `PROJECTS-001`: Initializes new project workspace with stagemesh configuration.
@@ -728,9 +728,9 @@ Net change: `PRESENT_VERIFIED` 82 → 91; `PRESENT_NOT_VERIFIED` 11 → 2; `MISS
 - **Legacy Source Files:** `build_coordinator/cli.py`
 - **Legacy Tests:** `tests/test_operator_location_independence.py`
 - **vNext Files:** `src/stagemesh/registry.py`
-- **vNext Tests:** `tests/test_run_from_anywhere_and_multi_project.py::TestGlobalRegistryRunFromAnywhere::test_register_and_load_project, tests/test_run_from_anywhere_and_multi_project.py::TestGlobalRegistryRunFromAnywhere::test_resolution_from_arbitrary_cwd, tests/test_run_from_anywhere_and_multi_project.py::TestGlobalRegistryRunFromAnywhere::test_missing_registry_returns_empty, tests/test_run_from_anywhere_and_multi_project.py::TestGlobalRegistryRunFromAnywhere::test_corrupt_registry_raises_validation_error, tests/test_run_from_anywhere_and_multi_project.py::TestGlobalRegistryRunFromAnywhere::test_duplicate_name_different_path_raises_conflict, tests/test_run_from_anywhere_and_multi_project.py::TestGlobalRegistryRunFromAnywhere::test_same_registration_repeated_is_idempotent, tests/test_run_from_anywhere_and_multi_project.py::TestGlobalRegistryRunFromAnywhere::test_db_path_must_be_inside_project_path`
+- **vNext Tests:** tests/test_run_from_anywhere_and_multi_project.py::TestGlobalRegistryRunFromAnywhere::test_cli_resolves_single_registered_project_from_unrelated_cwd_without_flag, tests/test_run_from_anywhere_and_multi_project.py::TestGlobalRegistryRunFromAnywhere::test_cli_ambiguous_resolution_fails_safely_when_multiple_registered, tests/test_run_from_anywhere_and_multi_project.py::TestGlobalRegistryRunFromAnywhere::test_cli_resolves_named_registered_project_from_unrelated_cwd, tests/test_run_from_anywhere_and_multi_project.py::TestGlobalRegistryRunFromAnywhere::test_cli_resolves_registered_project_name_when_unrelated_cwd_has_same_name_dir
 - **Legacy Behavior:** Runs coordinator from any working directory without specifying project path.
-- **Evidence:** GlobalRegistry.register()/load() resolves project by name regardless of calling cwd; missing registry returns []; corrupt JSON raises RegistryValidationError; duplicate name/path conflicts raise RegistryConflictError; same registration is idempotent; db_path must be inside project_path.
+- **Evidence:** CLI resolves target project from arbitrary CWD without --project flag via GlobalRegistry when single project registered, handles directory ancestor lookup, distinguishes explicit filesystem paths from registered project names without collision, and fails safely with ProjectError on ambiguous multi-project resolution.
 - **Parity Gap:** None
 
 ### `PROJECTS-006`: Coordinates execution across multiple registered projects.
@@ -739,9 +739,9 @@ Net change: `PRESENT_VERIFIED` 82 → 91; `PRESENT_NOT_VERIFIED` 11 → 2; `MISS
 - **Legacy Source Files:** `build_coordinator/runner/orchestrator.py`
 - **Legacy Tests:** `tests/test_project_backlog.py`
 - **vNext Files:** `src/stagemesh/registry.py, src/stagemesh/persistence.py`
-- **vNext Tests:** `tests/test_run_from_anywhere_and_multi_project.py::TestMultiProjectCoordination::test_two_projects_registered_without_collision, tests/test_run_from_anywhere_and_multi_project.py::TestMultiProjectCoordination::test_tasks_are_project_scoped, tests/test_run_from_anywhere_and_multi_project.py::TestMultiProjectCoordination::test_one_project_failure_does_not_mutate_other, tests/test_run_from_anywhere_and_multi_project.py::TestMultiProjectCoordination::test_source_ids_do_not_collide_across_projects, tests/test_run_from_anywhere_and_multi_project.py::TestMultiProjectCoordination::test_restart_preserves_project_boundaries, tests/test_run_from_anywhere_and_multi_project.py::TestMultiProjectCoordination::test_capacity_is_per_project, tests/test_run_from_anywhere_and_multi_project.py::TestMultiProjectCoordination::test_multi_project_registry_sorted_deterministically`
+- **vNext Tests:** tests/test_run_from_anywhere_and_multi_project.py::TestMultiProjectCoordination::test_continue_all_coordinates_multiple_registered_projects, tests/test_run_from_anywhere_and_multi_project.py::TestMultiProjectCoordination::test_continue_all_failure_in_project_a_does_not_block_project_b, tests/test_run_from_anywhere_and_multi_project.py::TestMultiProjectCoordination::test_continue_all_without_dry_run_cannot_silently_use_fake_executor, tests/test_run_from_anywhere_and_multi_project.py::TestMultiProjectCoordination::test_continue_all_process_isolation_and_capacity_allocation, tests/test_run_from_anywhere_and_multi_project.py::TestMultiProjectCoordination::test_tasks_are_project_scoped, tests/test_run_from_anywhere_and_multi_project.py::TestMultiProjectCoordination::test_source_ids_do_not_collide_across_projects, tests/test_run_from_anywhere_and_multi_project.py::TestMultiProjectCoordination::test_restart_preserves_project_boundaries
 - **Legacy Behavior:** Coordinates execution across multiple registered projects.
-- **Evidence:** Two projects registered without collision; tasks are project-scoped (no cross-contamination); invalid operation on project A does not mutate project B; same source+source_id in different DBs do not collide; restart preserves project boundaries; capacity registries are independent per project; registry serializes projects alphabetically.
+- **Evidence:** Global continue (stagemesh continue --all) discovers registered projects, executes isolated child processes per project with flag and capacity propagation, uses configured providers (rejecting unconfigured providers without --dry-run), preserves task and source ID boundaries, continues remaining projects after failures, and exits nonzero on any child failure.
 - **Parity Gap:** None
 
 ### `PROJECTS-007`: Enforces concurrency limits across multiple projects.
@@ -816,9 +816,9 @@ Net change: `PRESENT_VERIFIED` 82 → 91; `PRESENT_NOT_VERIFIED` 11 → 2; `MISS
 - **Legacy Source Files:** `build_coordinator/persistence.py`
 - **Legacy Tests:** `tests/test_sqlite_retry.py, tests/test_github_sqlite_busy_retry.py`
 - **vNext Files:** `src/stagemesh/persistence.py`
-- **vNext Tests:** `tests/test_sqlite_busy_retry.py::test_busy_timeout_pragma_is_set, tests/test_sqlite_busy_retry.py::test_wal_mode_is_enabled, tests/test_sqlite_busy_retry.py::test_concurrent_reader_waits_for_writer_then_reads_correctly, tests/test_sqlite_busy_retry.py::test_concurrent_writers_do_not_create_duplicate_tasks, tests/test_sqlite_busy_retry.py::test_excessive_contention_raises_operational_error, tests/test_sqlite_busy_retry.py::test_non_lock_error_propagates_without_retry`
+- **vNext Tests:** tests/test_sqlite_busy_retry.py::test_with_sqlite_retry_recovers_from_transient_busy, tests/test_sqlite_busy_retry.py::test_production_persistent_contention_raises_typed_database_busy_error, tests/test_sqlite_busy_retry.py::test_production_non_lock_error_propagates_without_retry, tests/test_sqlite_busy_retry.py::test_store_contention_recovery_using_store_api, tests/test_sqlite_busy_retry.py::test_commit_or_busy_converts_lock_contention_to_typed_error
 - **Legacy Behavior:** Retries DB operations on SQLITE_BUSY / lock contention.
-- **Evidence:** PRAGMA busy_timeout=5000 and WAL mode configured on every connection; concurrent reader waits successfully during writer EXCLUSIVE lock; two concurrent writers upsert same source+source_id produce exactly one row; excessive contention (timeout=1ms) raises OperationalError; non-lock errors propagate immediately without retry.
+- **Evidence:** Store wraps mutations in with_sqlite_retry with exponential backoff on SQLITE_BUSY / locked contention and commit_or_busy. Raises DatabaseBusyError on persistent contention without retrying non-lock errors.
 - **Parity Gap:** None
 
 ### `VALIDATION-001`: Runs deterministic validation commands against candidate commit.
@@ -838,9 +838,9 @@ Net change: `PRESENT_VERIFIED` 82 → 91; `PRESENT_NOT_VERIFIED` 11 → 2; `MISS
 - **Legacy Source Files:** `build_coordinator/runner/validation.py`
 - **Legacy Tests:** `tests/test_runner.py`
 - **vNext Files:** `src/stagemesh/validation.py`
-- **vNext Tests:** `tests/test_affected_test_discovery.py::test_known_source_maps_to_specific_tests, tests/test_affected_test_discovery.py::test_multiple_known_files_produce_union, tests/test_affected_test_discovery.py::test_unknown_file_falls_back_to_baseline, tests/test_affected_test_discovery.py::test_mixed_known_and_unknown_includes_baseline, tests/test_affected_test_discovery.py::test_no_changed_files_still_runs_baseline, tests/test_affected_test_discovery.py::test_windows_backslash_paths_are_normalised, tests/test_affected_test_discovery.py::test_output_is_sorted_deterministically, tests/test_affected_test_discovery.py::test_union_contains_no_duplicates`
+- **vNext Tests:** tests/test_affected_test_discovery.py::test_safe_path_boundary_matching_prevents_false_substring_matches, tests/test_affected_test_discovery.py::test_default_source_test_mapping_present, tests/test_affected_test_discovery.py::test_validator_validate_wires_affected_tests_integration, tests/test_affected_test_discovery.py::test_split_command_and_build_executable_argv_safety, tests/test_affected_test_discovery.py::test_real_subprocess_validation_executes_pytest, tests/test_affected_test_discovery.py::test_multi_commit_candidate_range_discovers_all_changed_files
 - **Legacy Behavior:** Identifies affected tests based on modified files.
-- **Evidence:** AffectedTestDiscovery maps changed files to focused test commands; multiple changed files produce union (no duplicates); unknown file falls back to baseline (never silent skip); no changed files still runs baseline; Windows backslash paths normalized to forward-slash; output is sorted deterministically.
+- **Evidence:** AffectedTestDiscovery uses path component boundary matching and DEFAULT_SOURCE_TEST_MAPPING with complete executable test commands. Validator.validate splits commands safely, normalizes test paths to pytest invocations, executes real subprocesses, and computes changed file ranges across multi-commit candidates back to baseline.
 - **Parity Gap:** None
 
 ### `VALIDATION-003`: Waits for external CI completion and reconciles CI status.
@@ -1014,9 +1014,9 @@ Net change: `PRESENT_VERIFIED` 82 → 91; `PRESENT_NOT_VERIFIED` 11 → 2; `MISS
 - **Legacy Source Files:** `build_coordinator/metrics.py`
 - **Legacy Tests:** `tests/test_metrics.py`
 - **vNext Files:** `src/stagemesh/observability.py`
-- **vNext Tests:** `tests/test_metrics_observability.py::test_metrics_snapshot_empty_store, tests/test_metrics_observability.py::test_queue_depth_counts_open_tasks, tests/test_metrics_observability.py::test_queue_depth_by_stage, tests/test_metrics_observability.py::test_done_tasks_excluded_from_queue_depth, tests/test_metrics_observability.py::test_execution_outcomes_count_by_status, tests/test_metrics_observability.py::test_execution_outcomes_by_kind, tests/test_metrics_observability.py::test_export_contains_no_secrets, tests/test_metrics_observability.py::test_export_keys_are_sorted, tests/test_metrics_observability.py::test_metrics_persisted_across_store_close_reopen`
-- **Legacy Behavior:** Execution time, token usage, throughput, and error metrics.
-- **Evidence:** metrics_snapshot() returns JSON-serializable dict with queue_depth (total+by_stage), execution_outcomes (total+by_status+by_kind), provider_usage, retry_state; done tasks excluded from queue_depth; export_metrics_json() produces valid sorted JSON with no secrets; metrics derived from durable rows (survive store close/reopen).
+- **vNext Tests:** tests/test_metrics_observability.py::test_execution_duration_and_claim_latency_calculation, tests/test_metrics_observability.py::test_active_claims_honor_lease_expiry_in_worker_utilisation, tests/test_metrics_observability.py::test_execution_kinds_not_classified_as_provider_or_worker, tests/test_metrics_observability.py::test_exported_token_usage_remains_structured_and_visible, tests/test_metrics_observability.py::test_direct_unit_tests_for_secret_redaction_helper, tests/test_metrics_observability.py::test_metrics_persisted_across_store_close_reopen
+- **Legacy Behavior:** Durable coordinator metrics including queue depth, claim latency, execution outcomes (by status and role), and worker utilisation with active lease filtering.
+- **Evidence:** metrics_snapshot computes durable metrics matching legacy behavior: queue depth (total and by claimable state), claim latency (implementation and by claim type), execution outcomes (total, by status, and by role), and worker utilisation honoring lease expiration. Token usage and throughput are separately exported as modern extensions. export_metrics_json applies secret redaction without redacting metric keys.
 - **Parity Gap:** None
 
 ### `OBSERVABILITY-005`: Real-time terminal dashboard of system status.

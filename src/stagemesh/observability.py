@@ -63,10 +63,12 @@ _SECRET_PATTERNS = (
     re.compile(r"github_pat_[A-Za-z0-9_]{20,}"),
     re.compile(r"sk-[A-Za-z0-9_-]{20,}"),
     re.compile(r"(?i)\b(bearer\s+)[A-Za-z0-9_\-\.]{15,}"),
-    re.compile(r"(?i)\b(api[_-]?key|token|secret|password|passwd|auth)\b\s*[:=]\s*([^\s,;\"']+)"),
+    re.compile(r"(?i)\b(api[_-]?key|secret|password|passwd|auth)\s*[:=]\s*([^\s,;\"']+)"),
 )
 
-_SENSITIVE_KEY_PATTERN = re.compile(r"(?i)(token|secret|password|key|credential|auth)")
+_SENSITIVE_KEY_PATTERN = re.compile(
+    r"(?i)(api[_-]?key|password|passwd|credential|private[_-]?key|client[_-]?secret|^auth$|^secret$|^token$|.*_secret$|.*_password$|.*_token$)"
+)
 
 
 def redact_sensitive_value(value: Any) -> Any:
@@ -74,6 +76,7 @@ def redact_sensitive_value(value: Any) -> Any:
 
     Applies value-based pattern matching (GitHub PATs, API keys, Bearer tokens,
     credential assignments) and key-based masking for sensitive fields.
+    Does NOT redact legitimate metric names like token_usage or total_tokens.
     """
     if isinstance(value, str):
         result = value
@@ -112,11 +115,14 @@ def _latency_summary(values: list[float]) -> dict[str, float | int | None]:
 def metrics_snapshot(store: Store, now: float | None = None) -> dict[str, Any]:
     """Return a metrics dictionary derived from durable coordinator rows.
 
-    Observable categories (matching legacy build_coordinator/metrics.py):
-      - queue_depth: total open tasks + breakdown by stage and status
-      - claim_latency: task creation to claim latency (implementation and by_stage)
-      - execution_outcomes: total + by_status + by_kind + duration stats
-      - provider_usage: execution counts, active claims, busy seconds, and outcomes per provider
+    Legacy parity categories (matching build_coordinator/metrics.py):
+      - queue_depth: total open tasks + breakdown by state, stage, status
+      - claim_latency: task creation to claim latency (implementation and by_claim_type)
+      - execution_outcomes: total + by_status + by_role / by_kind + duration stats
+      - worker_utilisation: active claims (honoring lease expiry), active executions,
+                            busy time, and outcomes per worker
+    Optional extended categories:
+      - provider_usage: aggregated by provider
       - throughput: completed tasks and executions with total busy time
       - token_usage: estimated context tokens and reported evidence tokens
       - retry_state: active retry entries count
@@ -130,14 +136,17 @@ def metrics_snapshot(store: Store, now: float | None = None) -> dict[str, Any]:
     # 1. Queue depth
     by_stage: dict[str, int] = {}
     by_status: dict[str, int] = {}
+    by_state: dict[str, int] = {}
     for t in open_tasks:
         stage = str(t["stage"])
         status = str(t["status"])
         by_stage[stage] = by_stage.get(stage, 0) + 1
         by_status[status] = by_status.get(status, 0) + 1
+        by_state[status] = by_state.get(status, 0) + 1
 
     queue_depth: dict[str, Any] = {
         "total": len(open_tasks),
+        "by_state": dict(sorted(by_state.items())),
         "by_stage": dict(sorted(by_stage.items())),
         "by_status": dict(sorted(by_status.items())),
     }
@@ -145,7 +154,7 @@ def metrics_snapshot(store: Store, now: float | None = None) -> dict[str, Any]:
     # 2. Claim latency: time between task created_at and claim created_at
     task_created_map = {t["id"]: float(t["created_at"]) for t in tasks}
     claims_rows = list(
-        store.conn.execute("SELECT id, task_id, stage, created_at FROM claims ORDER BY created_at ASC")
+        store.conn.execute("SELECT id, task_id, worker_id, stage, lease_expires_at, active, created_at FROM claims ORDER BY created_at ASC")
     )
     claim_exec_kinds = {
         str(r["claim_id"]): str(r["kind"])
@@ -179,6 +188,7 @@ def metrics_snapshot(store: Store, now: float | None = None) -> dict[str, Any]:
 
     claim_latency: dict[str, Any] = {
         "implementation": _latency_summary(implementation_latencies),
+        "by_claim_type": {stg: _latency_summary(lats) for stg, lats in sorted(by_claim_stage.items())},
         "by_stage": {stg: _latency_summary(lats) for stg, lats in sorted(by_claim_stage.items())},
     }
 
@@ -188,6 +198,7 @@ def metrics_snapshot(store: Store, now: float | None = None) -> dict[str, Any]:
     )
     exec_by_status: dict[str, int] = {}
     exec_by_kind: dict[str, int] = {}
+    exec_by_role: dict[str, dict[str, int]] = {}
     durations: list[float] = []
     total_exec_busy_seconds = 0.0
 
@@ -196,6 +207,9 @@ def metrics_snapshot(store: Store, now: float | None = None) -> dict[str, Any]:
         k = str(row["kind"])
         exec_by_status[s] = exec_by_status.get(s, 0) + 1
         exec_by_kind[k] = exec_by_kind.get(k, 0) + 1
+        if k not in exec_by_role:
+            exec_by_role[k] = {}
+        exec_by_role[k][s] = exec_by_role[k].get(s, 0) + 1
 
         started = float(row["started_at"])
         updated = float(row["updated_at"])
@@ -212,12 +226,12 @@ def metrics_snapshot(store: Store, now: float | None = None) -> dict[str, Any]:
         "total": len(exec_rows),
         "failures": failures_count,
         "by_status": dict(sorted(exec_by_status.items())),
+        "by_role": {role: dict(sorted(st.items())) for role, st in sorted(exec_by_role.items())},
         "by_kind": dict(sorted(exec_by_kind.items())),
         "duration_seconds": _latency_summary(durations),
     }
 
-    # 4. Provider usage — counting actual executions and claims per provider
-    # Map claim_id -> worker_id, and worker_id -> provider
+    # 4. Worker utilisation & provider usage
     claims_to_worker = {
         str(row["id"]): str(row["worker_id"])
         for row in store.conn.execute("SELECT id, worker_id FROM claims")
@@ -227,35 +241,46 @@ def metrics_snapshot(store: Store, now: float | None = None) -> dict[str, Any]:
         for row in store.conn.execute("SELECT id, provider FROM workers")
     }
 
-    # Active claims per worker
+    # Active claims honoring lease expiry (legacy build_coordinator/metrics.py)
     active_claims_by_worker: dict[str, int] = {}
-    for row in store.conn.execute("SELECT worker_id, COUNT(*) FROM claims WHERE active = 1 GROUP BY worker_id"):
+    for row in store.conn.execute(
+        "SELECT worker_id, COUNT(*) FROM claims WHERE active = 1 AND lease_expires_at > ? GROUP BY worker_id",
+        (now,),
+    ):
         active_claims_by_worker[str(row[0])] = int(row[1])
 
-    provider_metrics: dict[str, dict[str, Any]] = {}
-
-    # Initialize from known workers
-    for wid, prov in worker_to_provider.items():
-        if prov not in provider_metrics:
-            provider_metrics[prov] = {
-                "active_claims": 0,
+    worker_metrics: dict[str, dict[str, Any]] = {}
+    for r in store.conn.execute("SELECT id FROM workers"):
+        wid = str(r[0])
+        worker_metrics[wid] = {
+            "active_claims": active_claims_by_worker.get(wid, 0),
+            "active_executions": 0,
+            "total_executions": 0,
+            "completed_executions": 0,
+            "total_busy_seconds": 0.0,
+            "outcomes": {},
+        }
+    for wid, count in active_claims_by_worker.items():
+        if wid not in worker_metrics:
+            worker_metrics[wid] = {
+                "active_claims": count,
                 "active_executions": 0,
                 "total_executions": 0,
                 "completed_executions": 0,
                 "total_busy_seconds": 0.0,
                 "outcomes": {},
             }
-        provider_metrics[prov]["active_claims"] += active_claims_by_worker.get(wid, 0)
 
-    # Accumulate execution counts and durations by provider
     for row in exec_rows:
         cid = str(row["claim_id"]) if row["claim_id"] else None
         wid = claims_to_worker.get(cid) if cid else None
-        prov = worker_to_provider.get(wid) if wid else (str(row["kind"]) if row["kind"] else "default")
+        if not wid:
+            # Fall back to worker known from task or default; never classify execution kind as worker
+            wid = "worker-default"
 
-        if prov not in provider_metrics:
-            provider_metrics[prov] = {
-                "active_claims": 0,
+        if wid not in worker_metrics:
+            worker_metrics[wid] = {
+                "active_claims": active_claims_by_worker.get(wid, 0),
                 "active_executions": 0,
                 "total_executions": 0,
                 "completed_executions": 0,
@@ -263,7 +288,7 @@ def metrics_snapshot(store: Store, now: float | None = None) -> dict[str, Any]:
                 "outcomes": {},
             }
 
-        m = provider_metrics[prov]
+        m = worker_metrics[wid]
         m["total_executions"] += 1
         st = str(row["status"])
         m["outcomes"][st] = m["outcomes"].get(st, 0) + 1
@@ -277,13 +302,39 @@ def metrics_snapshot(store: Store, now: float | None = None) -> dict[str, Any]:
             m["completed_executions"] += 1
             m["total_busy_seconds"] += max(0.0, updated - started)
 
-    for prov, data in provider_metrics.items():
+    for wid, data in worker_metrics.items():
         data["total_busy_seconds"] = round(data["total_busy_seconds"], 3)
+        data["active_units"] = max(data["active_claims"], data["active_executions"])
+        data["outcomes"] = dict(sorted(data["outcomes"].items()))
+
+    # Aggregated provider usage
+    provider_metrics: dict[str, dict[str, Any]] = {}
+    for wid, w_data in worker_metrics.items():
+        prov = worker_to_provider.get(wid, wid if wid != "worker-default" else "default")
+        if prov not in provider_metrics:
+            provider_metrics[prov] = {
+                "active_claims": 0,
+                "active_executions": 0,
+                "total_executions": 0,
+                "completed_executions": 0,
+                "total_busy_seconds": 0.0,
+                "outcomes": {},
+            }
+        pm = provider_metrics[prov]
+        pm["active_claims"] += w_data["active_claims"]
+        pm["active_executions"] += w_data["active_executions"]
+        pm["total_executions"] += w_data["total_executions"]
+        pm["completed_executions"] += w_data["completed_executions"]
+        pm["total_busy_seconds"] = round(pm["total_busy_seconds"] + w_data["total_busy_seconds"], 3)
+        for st, count in w_data["outcomes"].items():
+            pm["outcomes"][st] = pm["outcomes"].get(st, 0) + count
+
+    for prov, data in provider_metrics.items():
         data["outcomes"] = dict(sorted(data["outcomes"].items()))
 
     # 5. Throughput
     done_tasks = [t for t in tasks if t["stage"] in (Stage.DONE,) or t["status"] in (TaskStatus.DONE,)]
-    completed_executions = sum(m["completed_executions"] for m in provider_metrics.values())
+    completed_executions = sum(m["completed_executions"] for m in worker_metrics.values())
     throughput: dict[str, Any] = {
         "completed_tasks": len(done_tasks),
         "completed_executions": completed_executions,
@@ -291,7 +342,6 @@ def metrics_snapshot(store: Store, now: float | None = None) -> dict[str, Any]:
     }
 
     # 6. Token usage
-    # Estimate tokens (~4 chars per token) across tasks + extract reported token counts from evidence
     estimated_context_tokens = sum(len(str(t["title"] or "")) // 4 for t in tasks)
     reported_tokens = 0
     evidence_rows = list(store.conn.execute("SELECT payload FROM evidence"))
@@ -323,10 +373,12 @@ def metrics_snapshot(store: Store, now: float | None = None) -> dict[str, Any]:
     )
 
     snapshot = {
+        "observed_at": now,
         "generated_at": now,
         "queue_depth": queue_depth,
         "claim_latency": claim_latency,
         "execution_outcomes": execution_outcomes,
+        "worker_utilisation": dict(sorted(worker_metrics.items())),
         "provider_usage": dict(sorted(provider_metrics.items())),
         "throughput": throughput,
         "token_usage": token_usage,

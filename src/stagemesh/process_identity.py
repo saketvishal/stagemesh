@@ -17,15 +17,19 @@ def boot_id() -> str:
     try:
         import psutil
 
-        return f"boot:{psutil.boot_time()}"
+        return f"boot:{int(psutil.boot_time())}"
     except Exception:
         pass
     if platform.system() == "Windows":
         try:
             import ctypes
+            import time
 
             uptime_ms = ctypes.windll.kernel32.GetTickCount64()
-            return f"win_boot:{uptime_ms // 1000}"
+            boot_epoch = int(time.time() - (uptime_ms / 1000.0))
+            # Round to 2-second bucket to absorb sub-millisecond clock jitter between calls
+            boot_epoch = (boot_epoch // 2) * 2
+            return f"win_boot:{boot_epoch}"
         except Exception:
             pass
     return f"{platform.system()}:{platform.node()}"

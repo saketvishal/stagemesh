@@ -502,3 +502,171 @@ def test_retry_suppression_and_no_partial_store_corruption(tmp_path: Path):
     retries = store.retry_states()
     assert len(retries) == 0
 
+
+def test_provider_output_requires_full_envelope_and_rejects_bare_plan():
+    from stagemesh.objectives import parse_planner_envelope
+
+    # Bare plan must be rejected (legacy test_planner_wrapper_rejects_bare_objective_plan)
+    with pytest.raises(ObjectiveValidationError, match="requires full envelope containing 'plan' mapping"):
+        parse_planner_envelope('{"tasks": []}')
+
+    with pytest.raises(ObjectiveValidationError, match="requires full envelope containing 'plan' mapping"):
+        parse_planner_envelope({"id": "OBJ-BARE", "title": "Bare", "tasks": []})
+
+    # Full envelope accepted
+    full_envelope = {
+        "schema_version": 1,
+        "execution_id": "exec-1",
+        "task_id": "OBJ-1-PLANNER",
+        "role": "PLANNER",
+        "status": "SUCCEEDED",
+        "plan": {
+            "id": "OBJ-1",
+            "title": "Enveloped",
+            "tasks": [{"id": "T1", "title": "Task 1"}],
+        },
+    }
+    extracted = parse_planner_envelope(full_envelope)
+    assert extracted["id"] == "OBJ-1"
+    assert "role" not in extracted
+    assert "execution_id" not in extracted
+
+
+def test_planner_sanitization_drops_thinking_and_lifecycle_identity_from_cli_plan(tmp_path: Path):
+    import argparse
+    from stagemesh.cli import command_plan
+    from stagemesh.persistence import Store
+
+    (tmp_path / ".stagemesh").mkdir(parents=True, exist_ok=True)
+    plan_file = tmp_path / "plan.json"
+    plan_content = {
+        "id": "OBJ-CLEAN",
+        "title": "Clean Plan",
+        "thinking": "Secret thoughts that must not survive",
+        "chain_of_thought": "Private reasoning chain",
+        "scratchpad": "Internal work",
+        "model_identity": "secret-model-v1",
+        "tasks": [
+            {
+                "id": "T1",
+                "title": "First Task",
+                "thinking": "task secret",
+                "chain_of_thought": "task cot",
+                "eligible": True,
+                "state": "OPEN",
+            }
+        ],
+    }
+    plan_file.write_text(json.dumps(plan_content), encoding="utf-8")
+
+    args = argparse.Namespace(project=str(tmp_path), file=str(plan_file), json=False)
+    ret = command_plan(args)
+    assert ret == 0
+
+    # Read back objective from store and assert secrets are gone
+    store = Store(tmp_path / ".stagemesh" / "stagemesh.sqlite3")
+    row = store.conn.execute("SELECT payload FROM objectives WHERE id=?", ("OBJ-CLEAN",)).fetchone()
+    assert row is not None
+    persisted = json.loads(row["payload"])
+
+    assert "thinking" not in persisted
+    assert "chain_of_thought" not in persisted
+    assert "scratchpad" not in persisted
+    assert "model_identity" not in persisted
+    assert "thinking" not in persisted["tasks"][0]
+    assert "chain_of_thought" not in persisted["tasks"][0]
+
+
+def test_command_plan_atomic_all_or_nothing_on_failure(tmp_path: Path):
+    import argparse
+    from stagemesh.cli import command_plan
+    from stagemesh.persistence import Store
+
+    (tmp_path / ".stagemesh").mkdir(parents=True, exist_ok=True)
+    plan_file = tmp_path / "invalid_plan.json"
+    # An invalid plan with missing required title on task
+    invalid_content = {
+        "id": "OBJ-FAIL",
+        "title": "Failing Objective",
+        "tasks": [{"id": "T1"}],  # missing title
+    }
+    plan_file.write_text(json.dumps(invalid_content), encoding="utf-8")
+
+    args = argparse.Namespace(project=str(tmp_path), file=str(plan_file), json=False)
+    with pytest.raises(ObjectiveValidationError):
+        command_plan(args)
+
+    # Verify nothing was persisted in Store
+    db_file = tmp_path / ".stagemesh" / "stagemesh.sqlite3"
+    if db_file.exists():
+        store = Store(db_file)
+        rows = store.conn.execute("SELECT * FROM objectives").fetchall()
+        assert len(rows) == 0
+
+
+def test_durable_retry_suppression_and_contract_revision_recovery_production_path(tmp_path: Path):
+    """Real production-path test:
+    - ObjectivePlanner wired to durable Store.
+    - Contract C1 with malformed output suppresses further retries.
+    - Contract revision C2 clears suppression and allows successful recovery.
+    """
+    from stagemesh.objectives import ObjectivePlanner
+    from stagemesh.persistence import Store
+
+    db = tmp_path / "stagemesh.sqlite3"
+    store = Store(db)
+    store.migrate()
+
+    planner = ObjectivePlanner(store=store)
+
+    c1_prompt = "Plan objective OBJ-PROD with contract v1"
+    bad_payload = {
+        "schema_version": 1,
+        "execution_id": "exec-bad",
+        "role": "PLANNER",
+        "status": "SUCCEEDED",
+        "plan": {
+            "id": "OBJ-PROD",
+            "title": "Title",
+            "tasks": [{"title": "missing id"}],
+        },
+    }
+
+    # Attempt 1: fails and records durable failure in store
+    with pytest.raises(ObjectiveValidationError):
+        planner.parse_provider_plan(bad_payload, contract=c1_prompt, target_key="OBJ-PROD")
+
+    # Cycle 2 with unchanged contract C1: production method is suppressed!
+    with pytest.raises(ObjectiveValidationError, match="planner retry suppressed: unchanged malformed output"):
+        planner.parse_provider_plan(bad_payload, contract=c1_prompt, target_key="OBJ-PROD")
+
+    # Verify durable retry state in Store
+    retry_state = store.get_retry_state("planner:OBJ-PROD")
+    assert retry_state is not None
+    assert retry_state["attempts"] == 1
+
+    # Contract revision: prompt changes to C2!
+    c2_prompt = "Plan objective OBJ-PROD with contract v2 (fixed task ids)"
+    good_payload = {
+        "schema_version": 1,
+        "execution_id": "exec-good",
+        "role": "PLANNER",
+        "status": "SUCCEEDED",
+        "plan": {
+            "id": "OBJ-PROD",
+            "title": "Recovered Title",
+            "tasks": [{"id": "T1", "title": "Task 1"}],
+        },
+    }
+
+    # Cycle 3 with revised contract C2: suppression is cleared and succeeds!
+    obj, plan = planner.parse_provider_plan(good_payload, contract=c2_prompt, target_key="OBJ-PROD")
+    assert obj.id == "OBJ-PROD"
+    assert obj.tasks == ("T1",)
+    assert plan["title"] == "Recovered Title"
+
+    # Durable retry state is cleared in Store!
+    assert store.get_retry_state("planner:OBJ-PROD") is None
+
+
+

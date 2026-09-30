@@ -4,7 +4,9 @@ import argparse
 import json
 import os
 import platform
+import subprocess
 import sys
+import threading
 from pathlib import Path
 
 from . import __version__
@@ -19,7 +21,7 @@ from .config import ConfigValidationError, load_config
 from .dashboard import dashboard_summary, render_dashboard
 from .coordinator import Coordinator
 from .demo import DemoValidationError, create_demo_project
-from .execution import SubprocessExecutor
+from .execution import FakeExecutor, SubprocessExecutor
 from .distributed import WorkQueue, WorkQueueError
 from .e2e_acceptance import EndToEndAcceptanceValidationError, end_to_end_acceptance
 from .final_report import FinalReportValidationError, candidate_sha, render_final_report
@@ -68,21 +70,51 @@ def find_project_root(start: Path | None = None) -> Path | None:
     return None
 
 
+def _has_project_marker(path: Path) -> bool:
+    return (
+        (path / ".stagemesh").is_dir()
+        or (path / "stagemesh.yaml").is_file()
+        or (path / "stagemesh.sqlite3").is_file()
+    )
+
+
+def _is_explicit_path(target: str) -> bool:
+    return (
+        target.startswith(".")
+        or "/" in target
+        or "\\" in target
+        or (len(target) >= 2 and target[1] == ":")
+    )
+
+
 def resolve_project_root(raw_target: str | None = None, registry_path: Path | None = None) -> Path:
     reg_path = registry_path or default_registry_path()
     registry = GlobalRegistry(reg_path)
 
-    if raw_target and raw_target != ".":
-        candidate = Path(raw_target).resolve()
-        if (candidate / ".stagemesh").is_dir() or (candidate / "stagemesh.yaml").is_file() or candidate.is_dir():
-            return candidate
-        # Look up by name in registry
+    if raw_target:
+        if _is_explicit_path(raw_target):
+            candidate = Path(raw_target).resolve()
+            if _has_project_marker(candidate):
+                return candidate
+            if candidate.is_dir():
+                raise ProjectError(
+                    f"directory {raw_target!r} is not an initialized StageMesh project (missing .stagemesh or stagemesh.yaml)"
+                )
+            raise ProjectError(f"no StageMesh project found for path {raw_target!r}")
+
+        # Deterministic distinction: simple names check registered project name first
         for p in registry.load():
             if p.name == raw_target:
                 return p.path
+
+        # If not found in registry, check if raw_target refers to a local project with marker
+        local_candidate = (Path.cwd() / raw_target).resolve()
+        if _has_project_marker(local_candidate):
+            return local_candidate
+
         raise ProjectError(f"no StageMesh project found for {raw_target!r}")
 
-    # No explicit target (or ".")
+    # No explicit target: walk up from CWD
     here = find_project_root(Path.cwd())
     if here is not None:
         return here
@@ -112,7 +144,8 @@ def db_path(project: Path) -> Path:
 
 
 def command_init(args: argparse.Namespace) -> int:
-    project = Path(args.project).resolve()
+    raw_project = getattr(args, "project", None) or "."
+    project = Path(raw_project).resolve()
     runtime_dir(project).mkdir(parents=True, exist_ok=True)
     store = Store(db_path(project))
     store.migrate()
@@ -155,38 +188,109 @@ def _handle_global_continue(args: argparse.Namespace) -> int:
         print("no StageMesh projects registered in global registry", file=sys.stderr)
         return 2
 
+    forward_flags: list[str] = []
+    if getattr(args, "once", False):
+        forward_flags.append("--once")
+    if getattr(args, "dry_run", False):
+        forward_flags.append("--dry-run")
+    if getattr(args, "provider", None):
+        forward_flags.extend(["--provider", str(args.provider)])
+    forward_flags.append("--json")
+
+    requested_capacity = getattr(args, "capacity", None)
+    if requested_capacity is not None and requested_capacity > 0:
+        batch_size = requested_capacity
+    else:
+        batch_size = len(projects)
+
     runs: dict[str, Any] = {}
-    total_progressed = 0
-    for reg in projects:
+    any_failed = False
+    lock = threading.Lock()
+
+    def drive(reg: ProjectRegistration) -> None:
+        nonlocal any_failed
+        cmd = [
+            sys.executable,
+            "-m",
+            "stagemesh.cli",
+            "continue",
+            "--project",
+            str(reg.path),
+            *forward_flags,
+        ]
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            stdin=subprocess.DEVNULL,
+        )
+
+        def relay_stderr():
+            if proc.stderr:
+                for line in proc.stderr:
+                    print(line.rstrip(), file=sys.stderr, flush=True)
+
+        t_relay = threading.Thread(target=relay_stderr, daemon=True)
+        t_relay.start()
+        out, _ = proc.communicate()
+        t_relay.join(timeout=1.0)
+
+        detail: dict[str, Any] = {}
         try:
-            store = Store(reg.db_path)
-            store.migrate()
-            config = load_config(reg.path)
-            backlog = reg.path / ".stagemesh" / "backlog.json"
-            if backlog.exists():
-                sync_source(store, LocalBacklogSource(backlog).discover())
-            for source in task_sources_from_config(config):
-                sync_source(store, source.discover())
-            coord = Coordinator(store, reg.path)
-            count = 0
-            while True:
-                p = coord.tick()
-                count += p
-                if getattr(args, "once", False) or p == 0:
-                    break
-            runs[reg.name] = {"progressed": count, "status": "OK"}
-            total_progressed += count
-            store.close()
-        except Exception as exc:
-            runs[reg.name] = {"progressed": 0, "status": "ERROR", "error": str(exc)}
+            detail = json.loads(out)
+        except Exception:
+            detail = {"error": (out or "").strip()[-400:]}
+
+        with lock:
+            if proc.returncode != 0:
+                any_failed = True
+                runs[reg.name] = {
+                    "status": "ERROR",
+                    "returncode": proc.returncode,
+                    "progressed": detail.get("progressed", 0),
+                    "error": detail.get("error", f"exit code {proc.returncode}"),
+                    "pid": proc.pid,
+                }
+            else:
+                runs[reg.name] = {
+                    "status": "OK",
+                    "returncode": 0,
+                    "progressed": detail.get("progressed", 0),
+                    "provider": detail.get("provider", "fake"),
+                    "pid": proc.pid,
+                }
+
+    for i in range(0, len(projects), batch_size):
+        batch = projects[i : i + batch_size]
+        threads = [threading.Thread(target=drive, args=(reg,)) for reg in batch]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+    total_progressed = sum(r.get("progressed", 0) for r in runs.values())
 
     if getattr(args, "json", False):
-        print(json.dumps({"mode": "global", "total_progressed": total_progressed, "projects": runs}, indent=2, sort_keys=True))
+        print(
+            json.dumps(
+                {
+                    "mode": "global",
+                    "total_progressed": total_progressed,
+                    "projects": runs,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
     else:
         print(f"coordinated {len(projects)} registered projects: {total_progressed} total progressed")
         for name, run in sorted(runs.items()):
-            print(f"  {name}: {run['status']} (progressed: {run['progressed']})")
-    return 0
+            print(f"  {name}: {run['status']} (progressed: {run.get('progressed', 0)})")
+
+    return 1 if any_failed else 0
 
 
 def command_doctor(args: argparse.Namespace) -> int:
@@ -265,6 +369,12 @@ def command_continue(args: argparse.Namespace) -> int:
             adapter = None
         if adapter is not None:
             executor = SubprocessExecutor(list(adapter.command), name=adapter.name)
+        else:
+            print("no provider configured; configure a provider or use --dry-run", file=sys.stderr)
+            store.close()
+            return 2
+    else:
+        executor = FakeExecutor()
     coord = Coordinator(store, project, executor=executor)
     count = 0
     while True:
@@ -328,21 +438,39 @@ def command_status(args: argparse.Namespace) -> int:
 
 
 def command_plan(args: argparse.Namespace) -> int:
+    import uuid
     project = resolve_project_root(args.project)
     payload_file = WorkspaceBoundary(project).require_inside(Path(args.file).resolve())
     if not payload_file.is_file():
         print(f"plan file not found: {payload_file}", file=sys.stderr)
         return 2
     raw_payload = payload_file.read_text(encoding="utf-8")
-    planner = ObjectivePlanner()
-    objective = planner.parse(raw_payload)
-    payload = json.loads(raw_payload)
     store = Store(db_path(project))
     store.migrate()
-    store.save_objective(objective.id, objective.title, payload)
-    planner.write_backlog(objective, payload, runtime_dir(project) / "backlog.json")
-    sync_source(store, LocalBacklogSource(runtime_dir(project) / "backlog.json").discover())
-    store.close()
+    planner = ObjectivePlanner(store=store)
+
+    try:
+        objective, sanitized_payload = planner.parse_user_plan(raw_payload)
+        backlog_data = planner.build_backlog_data(objective, sanitized_payload)
+
+        backlog_path = runtime_dir(project) / "backlog.json"
+        temp_backlog = runtime_dir(project) / f"backlog.json.{uuid.uuid4().hex}.tmp"
+        try:
+            temp_backlog.parent.mkdir(parents=True, exist_ok=True)
+            temp_backlog.write_text(json.dumps(backlog_data, indent=2), encoding="utf-8")
+
+            def _persist_atomic():
+                store.save_objective(objective.id, objective.title, sanitized_payload)
+                temp_backlog.replace(backlog_path)
+                sync_source(store, LocalBacklogSource(backlog_path).discover())
+
+            store._mutate(_persist_atomic)
+        except Exception:
+            if temp_backlog.exists():
+                temp_backlog.unlink(missing_ok=True)
+            raise
+    finally:
+        store.close()
     if args.json:
         print(
             json.dumps(
@@ -350,7 +478,7 @@ def command_plan(args: argparse.Namespace) -> int:
                     "objective_id": objective.id,
                     "title": objective.title,
                     "task_count": len(objective.tasks),
-                    "backlog": str((runtime_dir(project) / "backlog.json").resolve()),
+                    "backlog": str(backlog_path.resolve()),
                 },
                 indent=2,
                 sort_keys=True,
@@ -1158,7 +1286,19 @@ def command_evidence(args: argparse.Namespace) -> int:
 
 
 def command_ci(args: argparse.Namespace) -> int:
-    root = resolve_project_root(getattr(args, "project", None))
+    target = getattr(args, "project", None)
+    if target:
+        if _is_explicit_path(target) or Path(target).is_dir():
+            root = Path(target).resolve()
+            if not root.is_dir():
+                raise ProjectError(f"project directory {target!r} does not exist")
+        else:
+            root = resolve_project_root(target)
+    else:
+        try:
+            root = resolve_project_root(None)
+        except ProjectError:
+            root = Path.cwd().resolve()
     results = default_gates(root, include_acceptance=not args.skip_acceptance)
     if args.future_feature_gate:
         results.append(broken_future_feature_gate(root))
@@ -1258,7 +1398,7 @@ def command_labels(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="stagemesh")
-    parser.add_argument("--project", default=".")
+    parser.add_argument("--project", default=None)
     sub = parser.add_subparsers(dest="command", required=True)
     daemon = sub.add_parser("daemon")
     daemon.add_argument("--project", default=argparse.SUPPRESS)
@@ -1282,6 +1422,7 @@ def build_parser() -> argparse.ArgumentParser:
     labels_setup.add_argument("--json", action="store_true")
     labels_setup.set_defaults(func=command_labels)
     init = sub.add_parser("init")
+    init.add_argument("--project", default=argparse.SUPPRESS)
     init.add_argument("--task")
     init.add_argument("--register", action="store_true")
     init.add_argument("--registry", default=str(Path.home() / ".stagemesh" / "registry.json"))
@@ -1298,6 +1439,7 @@ def build_parser() -> argparse.ArgumentParser:
     cont.add_argument("--provider", help="Provider name to use for implementation (e.g. claude, codex)")
     cont.add_argument("--dry-run", action="store_true", help="Use FakeExecutor instead of a real provider")
     cont.add_argument("--all", action="store_true", help="Coordinate across all registered projects in global registry")
+    cont.add_argument("--capacity", type=int, default=None, help="Global concurrency/capacity allocation")
     cont.set_defaults(func=command_continue)
     status = sub.add_parser("status")
     status.add_argument("--project", default=argparse.SUPPRESS)

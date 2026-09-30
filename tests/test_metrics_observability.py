@@ -321,32 +321,117 @@ def test_throughput_and_token_usage_metrics(tmp_path: Path):
     store.close()
 
 
-def test_realistic_secret_redaction_scrubs_credentials(tmp_path: Path):
-    """
-    OBSERVABILITY-004: Tests must insert realistic secret-bearing input and prove
-    that export_metrics_json scrubs API keys, GitHub PATs, and bearer tokens.
-    """
+def test_exported_token_usage_remains_structured_and_visible(tmp_path: Path):
+    """OBSERVABILITY-004: token_usage metric name must NOT be redacted by key filtering."""
     store = _store(tmp_path)
-    # Insert realistic secrets in task title and evidence
+    t1 = store.upsert_task("Task for token export", source="local")
+    store.add_evidence(
+        t1,
+        "a" * 40,
+        EvidenceKind.VALIDATION,
+        EvidenceStatus.PASSED,
+        {"usage": {"total_tokens": 123}},
+    )
+
+    exported = export_metrics_json(store)
+    data = json.loads(exported)
+
+    assert isinstance(data["token_usage"], dict)
+    assert data["token_usage"]["reported_evidence_tokens"] == 123
+    assert "total_tokens" in data["token_usage"]
+    assert data["token_usage"] != "[REDACTED]"
+    store.close()
+
+
+def test_direct_unit_tests_for_secret_redaction_helper():
+    """OBSERVABILITY-004: Direct unit tests for secret-redaction helper using actual secret-bearing values."""
+    from stagemesh.observability import redact_sensitive_value
+
     secret_pat = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
     secret_sk = "sk-1234567890abcdefghijklmnopqrstuvwxyz"
     secret_auth = "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
 
-    task_id = store.upsert_task(f"Task with token {secret_pat}", source="local")
-    store.add_evidence(
-        task_id,
-        "a" * 40,
-        EvidenceKind.VALIDATION,
-        EvidenceStatus.PASSED,
-        {"auth": secret_auth, "api_key": secret_sk, "tokens": 100},
-    )
+    # String values with embedded secrets
+    assert redact_sensitive_value(f"Token is {secret_pat}") == "Token is [REDACTED]"
+    assert redact_sensitive_value(f"Key is {secret_sk}") == "Key is [REDACTED]"
+    assert redact_sensitive_value(f"Header: {secret_auth}") == "Header: [REDACTED]"
+    assert redact_sensitive_value("password=super_secret_123") == "[REDACTED]"
 
-    exported = export_metrics_json(store)
+    # Sensitive dictionary keys are masked
+    sensitive_dict = {
+        "api_key": "plain-secret-value",
+        "password": "super-secret-password",
+        "client_secret": "my-client-secret",
+        "github_token": "my-token",
+        "token": "bearer-token",
+        "auth": "auth-header",
+    }
+    cleaned_dict = redact_sensitive_value(sensitive_dict)
+    for k in sensitive_dict:
+        assert cleaned_dict[k] == "[REDACTED]"
 
-    # Prove raw secrets are NOT present anywhere in the exported JSON
-    assert secret_pat not in exported
-    assert secret_sk not in exported
-    assert secret_auth not in exported
-    assert "[REDACTED]" in exported
+    # Legitimate metric names must NOT be masked
+    safe_metrics = {
+        "token_usage": {"total_tokens": 500, "estimated_context_tokens": 200},
+        "total_tokens": 500,
+        "tokens": 500,
+        "reported_tokens": 300,
+        "worker_utilisation": {"builder-a": {"active_claims": 1}},
+    }
+    cleaned_metrics = redact_sensitive_value(safe_metrics)
+    assert isinstance(cleaned_metrics["token_usage"], dict)
+    assert cleaned_metrics["token_usage"]["total_tokens"] == 500
+    assert cleaned_metrics["total_tokens"] == 500
+    assert cleaned_metrics["tokens"] == 500
+
+
+def test_active_claims_honor_lease_expiry_in_worker_utilisation(tmp_path: Path):
+    """OBSERVABILITY-004: Active claims must honor lease expiry as legacy does."""
+    store = _store(tmp_path)
+    now = 1000.0
+
+    t1 = store.upsert_task("T1", source="local")
+    t2 = store.upsert_task("T2", source="local")
+
+    # Claim 1: ACTIVE and lease expires in future (now + 500) -> counted
+    c1 = store.acquire_claim(t1, "worker-1", lease_seconds=500)
+    store.conn.execute("UPDATE claims SET lease_expires_at=? WHERE id=?", (now + 500, c1))
+
+    # Claim 2: ACTIVE in DB but lease expired in past (now - 50) -> NOT counted as active
+    c2 = store.acquire_claim(t2, "worker-1", lease_seconds=10)
+    store.conn.execute("UPDATE claims SET lease_expires_at=? WHERE id=?", (now - 50, c2))
+    store.conn.commit()
+
+    snap = metrics_snapshot(store, now=now)
+    assert snap["worker_utilisation"]["worker-1"]["active_claims"] == 1
     store.close()
+
+
+def test_execution_kinds_not_classified_as_provider_or_worker(tmp_path: Path):
+    """OBSERVABILITY-004: Do not classify validation/review/integration execution kinds as provider or worker names."""
+    store = _store(tmp_path)
+    t1 = store.upsert_task("T1", source="local")
+
+    e1 = store.start_execution(task_id=t1, claim_id=None, kind=ExecutionKind.VALIDATION)
+    store.finish_execution(e1, ExecutionStatus.SUCCEEDED, "a" * 40)
+
+    e2 = store.start_execution(task_id=t1, claim_id=None, kind=ExecutionKind.REVIEW)
+    store.finish_execution(e2, ExecutionStatus.SUCCEEDED, "a" * 40)
+
+    e3 = store.start_execution(task_id=t1, claim_id=None, kind=ExecutionKind.INTEGRATION)
+    store.finish_execution(e3, ExecutionStatus.SUCCEEDED, "a" * 40)
+
+    snap = metrics_snapshot(store)
+
+    # Neither worker_utilisation nor provider_usage may contain execution kinds
+    for kind_name in ("VALIDATION", "REVIEW", "INTEGRATION"):
+        assert kind_name not in snap["worker_utilisation"]
+        assert kind_name not in snap["provider_usage"]
+
+    # But execution_outcomes.by_kind / by_role tracks them properly
+    assert snap["execution_outcomes"]["by_kind"]["VALIDATION"] == 1
+    assert snap["execution_outcomes"]["by_kind"]["REVIEW"] == 1
+    assert snap["execution_outcomes"]["by_kind"]["INTEGRATION"] == 1
+    store.close()
+
 

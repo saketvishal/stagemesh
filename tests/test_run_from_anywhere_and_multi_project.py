@@ -219,6 +219,37 @@ class TestGlobalRegistryRunFromAnywhere:
         assert data["task_count"] == 1
         assert data["tasks"][0]["title"] == "Beta Task"
 
+    def test_cli_resolves_registered_project_name_when_unrelated_cwd_has_same_name_dir(self, tmp_path: Path):
+        """PROJECTS-005: A registered project name must not be shadowed accidentally by an unrelated same-named directory in caller's CWD."""
+        import os
+        reg_dir, reg_store = _make_project(tmp_path, "registered_beta")
+        reg_store.upsert_task("Registered Beta Task", source="local")
+        reg_store.close()
+
+        reg_path = tmp_path / "global_registry.json"
+        registry = GlobalRegistry(reg_path)
+        registry.register(ProjectRegistration("beta", reg_dir, reg_dir / ".stagemesh" / "stagemesh.sqlite3"))
+
+        # Caller CWD contains an ordinary unrelated subdirectory named "beta" (no .stagemesh)
+        caller_cwd = tmp_path / "caller_workdir"
+        caller_cwd.mkdir()
+        unrelated_subfolder = caller_cwd / "beta"
+        unrelated_subfolder.mkdir()
+
+        # 1. Specifying registered name "beta" resolves to registered project, NOT the local ./beta folder
+        cmd = [sys.executable, "-m", "stagemesh.cli", "status", "--project", "beta", "--json"]
+        env = {**os.environ, "STAGEMESH_REGISTRY": str(reg_path)}
+        res = subprocess.run(cmd, cwd=caller_cwd, env=env, capture_output=True, text=True)
+        assert res.returncode == 0, f"Expected registered project beta to resolve: {res.stderr}"
+        data = json.loads(res.stdout)
+        assert data["tasks"][0]["title"] == "Registered Beta Task"
+
+        # 2. Specifying explicit path "./beta" must NOT treat ordinary directory as initialized project
+        cmd_explicit = [sys.executable, "-m", "stagemesh.cli", "status", "--project", "./beta", "--json"]
+        res_explicit = subprocess.run(cmd_explicit, cwd=caller_cwd, env=env, capture_output=True, text=True)
+        assert res_explicit.returncode != 0
+        assert "not an initialized stagemesh project" in res_explicit.stderr.lower()
+
 
 # ---------------------------------------------------------------------------
 # OBJECTIVES-006: objective operations from unrelated cwd
@@ -430,8 +461,8 @@ class TestMultiProjectCoordination:
         unrelated = tmp_path / "outside_all"
         unrelated.mkdir()
 
-        # Execute continue --all from unrelated directory
-        cmd = [sys.executable, "-m", "stagemesh.cli", "continue", "--all", "--once", "--json"]
+        # Execute continue --all from unrelated directory with --dry-run
+        cmd = [sys.executable, "-m", "stagemesh.cli", "continue", "--all", "--dry-run", "--once", "--json"]
         env = {**os.environ, "STAGEMESH_REGISTRY": str(reg_path)}
         res = subprocess.run(cmd, cwd=unrelated, env=env, capture_output=True, text=True)
         assert res.returncode == 0, f"continue --all failed: {res.stderr}"
@@ -451,7 +482,7 @@ class TestMultiProjectCoordination:
         s2b.close()
 
     def test_continue_all_failure_in_project_a_does_not_block_project_b(self, tmp_path: Path):
-        """PROJECTS-006: Failure/corruption in one registered project does not halt progress on other projects."""
+        """PROJECTS-006: Failure/corruption in one registered project does not halt other projects, but overall exit code is nonzero."""
         import os
         p_corrupt, s_corrupt = _make_project(tmp_path, "corrupt_proj")
         p_healthy, s_healthy = _make_project(tmp_path, "healthy_proj")
@@ -471,10 +502,11 @@ class TestMultiProjectCoordination:
         unrelated = tmp_path / "outside_fail"
         unrelated.mkdir()
 
-        cmd = [sys.executable, "-m", "stagemesh.cli", "continue", "--all", "--once", "--json"]
+        cmd = [sys.executable, "-m", "stagemesh.cli", "continue", "--all", "--dry-run", "--once", "--json"]
         env = {**os.environ, "STAGEMESH_REGISTRY": str(reg_path)}
         res = subprocess.run(cmd, cwd=unrelated, env=env, capture_output=True, text=True)
-        assert res.returncode == 0
+        # Overall result must be nonzero when any project child fails
+        assert res.returncode == 1
         data = json.loads(res.stdout)
         # Corrupt project is marked ERROR, but healthy project still progresses OK
         assert data["projects"]["corrupt_proj"]["status"] == "ERROR"
@@ -483,3 +515,72 @@ class TestMultiProjectCoordination:
         s_h = Store(p_healthy / ".stagemesh" / "stagemesh.sqlite3")
         assert s_h.get_task(t_healthy)["stage"] != "PLAN"
         s_h.close()
+
+    def test_continue_all_without_dry_run_cannot_silently_use_fake_executor(self, tmp_path: Path):
+        """PROJECTS-006: continue --all without --dry-run must wire real provider and cannot silently use FakeExecutor."""
+        import os
+        p1, s1 = _make_project(tmp_path, "unconfigured_proj")
+        s1.upsert_task("Task needing real provider", source="local")
+        s1.close()
+
+        reg_path = tmp_path / "global_registry.json"
+        registry = GlobalRegistry(reg_path)
+        registry.register(ProjectRegistration("unconfigured_proj", p1, p1 / ".stagemesh" / "stagemesh.sqlite3"))
+
+        unrelated = tmp_path / "outside_nofake"
+        unrelated.mkdir()
+
+        # 1. Specifying an invalid/nonexistent provider without --dry-run must fail, NOT silently fall back to FakeExecutor
+        cmd_fail = [sys.executable, "-m", "stagemesh.cli", "continue", "--all", "--provider", "nonexistent_provider_xyz", "--once", "--json"]
+        env = {**os.environ, "STAGEMESH_REGISTRY": str(reg_path)}
+        res_fail = subprocess.run(cmd_fail, cwd=unrelated, env=env, capture_output=True, text=True)
+        assert res_fail.returncode != 0
+        data_fail = json.loads(res_fail.stdout)
+        assert data_fail["projects"]["unconfigured_proj"]["status"] == "ERROR"
+
+        # 2. Running with --dry-run explicitly records provider 'fake'
+        cmd_dry = [sys.executable, "-m", "stagemesh.cli", "continue", "--all", "--dry-run", "--once", "--json"]
+        res_dry = subprocess.run(cmd_dry, cwd=unrelated, env=env, capture_output=True, text=True)
+        assert res_dry.returncode == 0
+        data_dry = json.loads(res_dry.stdout)
+        assert data_dry["projects"]["unconfigured_proj"]["provider"] == "fake"
+
+        # 3. Running without --dry-run uses real provider, NEVER FakeExecutor ('fake')
+        cmd_real = [sys.executable, "-m", "stagemesh.cli", "continue", "--all", "--once", "--json"]
+        res_real = subprocess.run(cmd_real, cwd=unrelated, env=env, capture_output=True, text=True)
+        assert res_real.returncode == 0
+        data_real = json.loads(res_real.stdout)
+        assert data_real["projects"]["unconfigured_proj"]["provider"] != "fake"
+
+    def test_continue_all_process_isolation_and_capacity_allocation(self, tmp_path: Path):
+        """PROJECTS-006: Each project runs in an isolated child process with separate PID and capacity batching."""
+        import os
+        p1, s1 = _make_project(tmp_path, "iso_proj1")
+        p2, s2 = _make_project(tmp_path, "iso_proj2")
+        s1.upsert_task("Task 1", source="local")
+        s2.upsert_task("Task 2", source="local")
+        s1.close()
+        s2.close()
+
+        reg_path = tmp_path / "global_registry.json"
+        registry = GlobalRegistry(reg_path)
+        registry.register(ProjectRegistration("iso_proj1", p1, p1 / ".stagemesh" / "stagemesh.sqlite3"))
+        registry.register(ProjectRegistration("iso_proj2", p2, p2 / ".stagemesh" / "stagemesh.sqlite3"))
+
+        unrelated = tmp_path / "outside_iso"
+        unrelated.mkdir()
+
+        current_pid = os.getpid()
+        cmd = [sys.executable, "-m", "stagemesh.cli", "continue", "--all", "--dry-run", "--once", "--capacity", "1", "--json"]
+        env = {**os.environ, "STAGEMESH_REGISTRY": str(reg_path)}
+        res = subprocess.run(cmd, cwd=unrelated, env=env, capture_output=True, text=True)
+        assert res.returncode == 0
+        data = json.loads(res.stdout)
+        pid1 = data["projects"]["iso_proj1"]["pid"]
+        pid2 = data["projects"]["iso_proj2"]["pid"]
+        # Isolated child processes: PIDs must differ from current process
+        assert pid1 != current_pid
+        assert pid2 != current_pid
+        assert data["projects"]["iso_proj1"]["status"] == "OK"
+        assert data["projects"]["iso_proj2"]["status"] == "OK"
+

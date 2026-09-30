@@ -270,3 +270,81 @@ def test_coordinator_recovery_detects_pid_reuse_and_preserves_unrelated_process(
         proc.kill()
         proc.wait()
 
+
+def test_unknown_live_identity_remains_untouched_in_recovery(tmp_path):
+    """
+    OWNERSHIP-004: UNKNOWN/uncertain identity must NOT cause task redispatch or
+    claim release merely because identity could not be confirmed.
+    """
+    import subprocess, sys
+    from stagemesh.coordinator import Coordinator
+    from stagemesh.persistence import Store
+    from stagemesh.domain import ExecutionKind
+    from stagemesh.workers import register_worker
+
+    db = tmp_path / "stagemesh.sqlite3"
+    store = Store(db)
+    store.migrate()
+
+    task_id = store.upsert_task("Test uncertain task", source="local")
+    worker_id = "worker-uncertain"
+    register_worker(store, worker_id, "codex", {"code"}, current_process_identity(), 300)
+    claim_id = store.acquire_claim(task_id, worker_id, lease_seconds=300)
+
+    # Saved execution with missing create_time -> UNKNOWN identity
+    store.start_execution(
+        task_id=task_id,
+        claim_id=claim_id,
+        kind=ExecutionKind.IMPLEMENTATION,
+        pid=999999,
+        process_create_time=None,
+        boot_id=None,
+    )
+
+    coordinator = Coordinator(store, tmp_path)
+    recovered = coordinator.recover()
+
+    # Must NOT be recovered/reclaimed (uncertain identity fails closed)
+    assert recovered == 0
+    claims = list(store.conn.execute("SELECT active FROM claims WHERE id=?", (claim_id,)))
+    assert claims[0][0] == 1, "Claim must remain active for uncertain identity"
+    store.close()
+
+
+def test_alias_command_matches_observed_executable():
+    """Executable alias ('claude', 'codex', 'node') matches observed executable path."""
+    b_id = boot_id()
+    saved = ProcessIdentity(pid=100, create_time=500.0, boot_id=b_id, executable="claude")
+    observed = ProcessIdentity(pid=100, create_time=500.0, boot_id=b_id, executable=r"C:\Program Files\nodejs\node.exe")
+    assert saved.matches(observed)
+    assert classify_process(saved, observed) == "LIVE"
+
+
+def test_windows_boot_id_stable_across_repeated_calls_during_one_boot():
+    """Repeated calls to boot_id() during a single OS boot return the identical string."""
+    import time
+    id1 = boot_id()
+    time.sleep(0.05)
+    id2 = boot_id()
+    time.sleep(0.05)
+    id3 = boot_id()
+    assert id1 == id2 == id3
+
+
+def test_windows_boot_id_differs_after_simulated_reboot(monkeypatch):
+    """Simulated reboot (reset uptime tick count) produces a distinct boot ID."""
+    from stagemesh import process_identity
+    b1 = process_identity.boot_id()
+
+    # Simulate reboot: uptime resets to 10 seconds
+    if hasattr(process_identity, "platform") and process_identity.platform.system() == "Windows":
+        class MockK32:
+            def GetTickCount64(self):
+                return 10_000  # 10 seconds after reboot
+
+        monkeypatch.setattr("ctypes.windll.kernel32", MockK32())
+        monkeypatch.setattr("psutil.boot_time", lambda: 9999999999.0)
+        b2 = process_identity.boot_id()
+        assert b1 != b2
+
+
