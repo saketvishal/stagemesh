@@ -6,14 +6,14 @@ Total Inventoried Capabilities: **95**
 
 | Classification | Count | Description |
 |---|---|---|
-| `PRESENT_VERIFIED` | **90** | Present in vNext and verified by exact automated tests or live acceptance |
-| `PRESENT_NOT_VERIFIED` | **3** | Present in vNext source but missing automated test coverage proving exact behavior |
+| `PRESENT_VERIFIED` | **89** | Present in vNext and verified by exact automated tests or live acceptance |
+| `PRESENT_NOT_VERIFIED` | **4** | Present in vNext source but missing automated test coverage proving exact behavior |
 | `SUPERSEDED_EQUIVALENT` | **0** | Replaced by proven equivalent vNext mechanism |
 | `MISSING_PORT_REQUIRED` | **2** | Missing from vNext implementation, port required |
 | `INTENTIONAL_RETIREMENT_REQUIRES_APPROVAL` | **0** | Feature retirement needing human operator approval |
 | `LEGACY_INTERNAL_OR_BUG` | **0** | Legacy internal detail or bug workaround |
 
-**Parity Status: INCOMPLETE** (2 Missing Port Items, 2 Unverified Items)
+**Parity Status: INCOMPLETE** (2 Missing Port Items, 4 Unverified Items)
 
 ---
 
@@ -43,17 +43,22 @@ Net change: `MISSING_PORT_REQUIRED` 4 → 2; `PRESENT_VERIFIED` 80 → 82. `PRES
 
 ## Wave 4 Corrective Promotions & Parity Hardening
 
-The following 9 items were promoted from `PRESENT_NOT_VERIFIED` to `PRESENT_VERIFIED` after rigorous corrective implementation matching exact legacy behavior:
+The following 7 items were promoted from `PRESENT_NOT_VERIFIED` to `PRESENT_VERIFIED` after rigorous corrective implementation matching exact legacy behavior (with `OBJECTIVES-005` and `PROJECTS-006` remaining `PRESENT_NOT_VERIFIED` pending full production lifecycle / concurrency parity verification):
 
 1. **Process Identity / Hierarchy Verification** (`OWNERSHIP-004`): Promoted `PRESENT_NOT_VERIFIED` → `PRESENT_VERIFIED`. `current_process_identity()` and `popen_identity()` capture real `create_time` via psutil/ctypes, `boot_id()` captures real OS boot time across platforms (including Windows tick count / boot timestamp), and `Coordinator.recover()` verifies live identity and cleans stale claims without killing unrelated processes (`tests/test_process_identity_verification.py`, 20 tests).
 2. **Planner Contract / DAG Validation** (`OBJECTIVES-003`): Promoted `PRESENT_NOT_VERIFIED` → `PRESENT_VERIFIED`. `ObjectivePlanner.validate()` strictly rejects self-dependencies, 2-node cycles, and multi-node cycles via topological DFS detection while accepting valid acyclic graphs (`tests/test_planner_contract_validation.py`, 35 tests).
 3. **Planner Contract / Normalization & Retry Helpers** (`OBJECTIVES-005`): Remains `PRESENT_NOT_VERIFIED`. Normalization, markdown fence stripping, envelope validation, and retry suppression helpers are implemented, but full provider-planner lifecycle integration and atomic DB+filesystem transactions are not yet wired.
 4. **Objective Run-From-Anywhere** (`OBJECTIVES-006`): Promoted `PRESENT_NOT_VERIFIED` → `PRESENT_VERIFIED`. CLI `stagemesh plan` resolves target project from arbitrary CWD, enforces workspace security boundaries, and writes only to the target project backlog and database while leaving other projects untouched (`tests/test_run_from_anywhere_and_multi_project.py`, 20 tests).
 5. **Project Run-From-Anywhere** (`PROJECTS-005`): Promoted `PRESENT_NOT_VERIFIED` → `PRESENT_VERIFIED`. CLI resolves target project from arbitrary CWD without `--project` flag via `GlobalRegistry` when a single project is registered, handles project ancestor discovery, and fails safely with `ProjectError` (exit code 2) on missing or ambiguous multi-project resolution (`tests/test_run_from_anywhere_and_multi_project.py`).
-6. **Multi-Project Coordination** (`PROJECTS-006`): Promoted `PRESENT_NOT_VERIFIED` → `PRESENT_VERIFIED`. `stagemesh continue --all` coordinates execution across all registered projects in `GlobalRegistry` with process-level isolation, ensuring project A failures never block project B, task IDs remain isolated, and restart preserves registry boundaries (`tests/test_run_from_anywhere_and_multi_project.py`).
+6. **Multi-Project Coordination & Capacity Helpers** (`PROJECTS-006`): Remains `PRESENT_NOT_VERIFIED`. Subprocess isolation, failure isolation, global capacity capping, child capacity propagation, and invalid capacity rejection are implemented and tested, but exact legacy allocation based on each project's configured concurrency is not yet verified.
 7. **SQLite Busy / Lock Retry Behavior** (`PERSISTENCE-005`): Promoted `PRESENT_NOT_VERIFIED` → `PRESENT_VERIFIED`. Store configures WAL mode, 5000ms `busy_timeout`, and application-level retry with exponential backoff via `with_sqlite_retry(attempts=5, base_delay=0.05, max_delay=0.5)` raising `DatabaseBusyError` under persistent contention, verified under real multi-threaded database concurrency (`tests/test_sqlite_busy_retry.py`, 10 tests).
 8. **Affected-Test Discovery** (`VALIDATION-002`): Promoted `PRESENT_NOT_VERIFIED` → `PRESENT_VERIFIED`. `AffectedTestDiscovery` uses path-component boundary matching (`_match_path`) to prevent false substring matches, ships `DEFAULT_SOURCE_TEST_MAPPING`, extracts changed files from `git diff`, safely falls back to baseline validation, and is wired into `Validator.validate` (`tests/test_affected_test_discovery.py`, 18 tests).
 9. **Metrics Collection / Export** (`OBSERVABILITY-004`): Promoted `PRESENT_NOT_VERIFIED` → `PRESENT_VERIFIED`. `metrics_snapshot()` calculates real execution duration stats, claim latency by stage, provider usage counting actual provider executions (not registered workers), throughput, and token usage; `export_metrics_json()` applies pattern-based secret redaction; exposed via CLI `stagemesh metrics [--json]` (`tests/test_metrics_observability.py`, 16 tests).
+
+**Multi-Project Capacity Allocation** (`PROJECTS-006`) honestly remains `PRESENT_NOT_VERIFIED`:
+- Registered projects execute in isolated child processes; one project failure does not stop another; global capacity is never exceeded; invalid global capacity is rejected; and capacity allocation is passed to child processes.
+- However, exact legacy capacity parity is not yet verified: legacy StageMesh allocates worker slots according to each project's configured concurrency. Current vNext `ProjectRegistration` contains `(name, path, db_path)` and does not persist per-project concurrency, so `_global_capacity_batches()` falls back to concurrency 1 for real `ProjectRegistration` instances.
+- The implementation is safe with respect to the global capacity ceiling, but does not reproduce exact legacy allocation based on each project's configured concurrency.
 
 **Planner Integration** (`OBJECTIVES-005`) honestly remains `PRESENT_NOT_VERIFIED`:
 - `parse_provider_plan()` has unit/method-level coverage for markdown stripping, payload sanitization, and envelope verification, but is not yet wired into an active provider-planner coordinator execution lifecycle.
@@ -70,7 +75,7 @@ The following 9 items were promoted from `PRESENT_NOT_VERIFIED` to `PRESENT_VERI
 - `stagemesh ci` now includes `unit_tests` in `default_gate_commands` whenever a `tests/` directory is present.
 - A command reported as the complete/full CI gate cannot return PASS or exit 0 while unit tests are failing (`tests/test_ci_green_semantics.py`, 5 regression tests).
 
-Net change: `PRESENT_VERIFIED` 82 → 91; `PRESENT_NOT_VERIFIED` 11 → 2; `MISSING_PORT_REQUIRED` unchanged at 2. Total entries: 95.
+Net change: `PRESENT_VERIFIED` 82 → 89; `PRESENT_NOT_VERIFIED` 11 → 4; `MISSING_PORT_REQUIRED` unchanged at 2. Total entries: 95.
 
 ---
 
@@ -739,14 +744,14 @@ Net change: `PRESENT_VERIFIED` 82 → 91; `PRESENT_NOT_VERIFIED` 11 → 2; `MISS
 
 ### `PROJECTS-006`: Coordinates execution across multiple registered projects.
 - **Category:** Projects
-- **Classification:** `PRESENT_VERIFIED` *(promoted Wave 4)*
+- **Classification:** `PRESENT_NOT_VERIFIED`
 - **Legacy Source Files:** `build_coordinator/runner/orchestrator.py`
 - **Legacy Tests:** `tests/test_project_backlog.py`
 - **vNext Files:** `src/stagemesh/registry.py, src/stagemesh/persistence.py`
 - **vNext Tests:** tests/test_run_from_anywhere_and_multi_project.py::TestMultiProjectCoordination::test_continue_all_coordinates_multiple_registered_projects, tests/test_run_from_anywhere_and_multi_project.py::TestMultiProjectCoordination::test_continue_all_failure_in_project_a_does_not_block_project_b, tests/test_run_from_anywhere_and_multi_project.py::TestMultiProjectCoordination::test_continue_all_without_dry_run_cannot_silently_use_fake_executor, tests/test_run_from_anywhere_and_multi_project.py::TestMultiProjectCoordination::test_continue_all_process_isolation_and_capacity_allocation, tests/test_run_from_anywhere_and_multi_project.py::TestMultiProjectCoordination::test_tasks_are_project_scoped, tests/test_run_from_anywhere_and_multi_project.py::TestMultiProjectCoordination::test_source_ids_do_not_collide_across_projects, tests/test_run_from_anywhere_and_multi_project.py::TestMultiProjectCoordination::test_restart_preserves_project_boundaries, tests/test_run_from_anywhere_and_multi_project.py::TestMultiProjectCoordination::test_global_capacity_allocation_slots_never_exceed_capacity
 - **Legacy Behavior:** Coordinates execution across multiple registered projects.
-- **Evidence:** Global continue (stagemesh continue --all) discovers registered projects, executes isolated child processes per project with flag and capacity propagation, uses configured providers (rejecting unconfigured providers without --dry-run), preserves task and source ID boundaries, continues remaining projects after failures, and exits nonzero on any child failure.
-- **Parity Gap:** None
+- **Evidence:** Registered projects execute in isolated child processes; one project failure does not stop another; global capacity is never exceeded; invalid global capacity is rejected; capacity allocation is passed to child processes.
+- **Parity Gap:** Exact legacy capacity parity is not yet verified. Legacy StageMesh allocates worker slots according to each project's configured concurrency. Current vNext ProjectRegistration contains (name, path, db_path) and does not persist per-project concurrency, so _global_capacity_batches() falls back to concurrency 1 for real ProjectRegistration instances. The implementation is safe with respect to the global capacity ceiling, but does not reproduce exact legacy allocation based on each project's configured concurrency.
 
 ### `PROJECTS-007`: Enforces concurrency limits across multiple projects.
 - **Category:** Projects

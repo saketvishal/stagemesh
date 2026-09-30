@@ -1123,8 +1123,8 @@
   },
   {
     "category": "Projects",
-    "classification": "PRESENT_VERIFIED",
-    "evidence": "Global continue (stagemesh continue --all) discovers registered projects, executes isolated child processes per project with flag and legacy-equivalent capacity slot allocation batches (_global_capacity_batches), rejects capacity < 1, uses configured providers (rejecting unconfigured providers without --dry-run), preserves task and source ID boundaries, continues remaining projects after failures, and exits nonzero on any child failure.",
+    "classification": "PRESENT_NOT_VERIFIED",
+    "evidence": "Registered projects execute in isolated child processes; one project failure does not stop another; global capacity is never exceeded; invalid global capacity is rejected; capacity allocation is passed to child processes.",
     "id": "PROJECTS-006",
     "legacy_behavior": "Coordinates execution across multiple registered projects.",
     "legacy_source_files": [
@@ -1133,7 +1133,7 @@
     "legacy_tests": [
       "tests/test_project_backlog.py"
     ],
-    "parity_gap": "None",
+    "parity_gap": "Exact legacy capacity parity is not yet verified. Legacy StageMesh allocates worker slots according to each project's configured concurrency. Current vNext ProjectRegistration contains (name, path, db_path) and does not persist per-project concurrency, so _global_capacity_batches() falls back to concurrency 1 for real ProjectRegistration instances. The implementation is safe with respect to the global capacity ceiling, but does not reproduce exact legacy allocation based on each project's configured concurrency.",
     "vnext_files": [
       "src/stagemesh/registry.py",
       "src/stagemesh/persistence.py"
