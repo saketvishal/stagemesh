@@ -6,14 +6,14 @@ Total Inventoried Capabilities: **95**
 
 | Classification | Count | Description |
 |---|---|---|
-| `PRESENT_VERIFIED` | **81** | Present in vNext and verified by exact automated tests or live acceptance |
-| `PRESENT_NOT_VERIFIED` | **10** | Present in vNext source but missing automated test coverage proving exact behavior |
+| `PRESENT_VERIFIED` | **80** | Present in vNext and verified by exact automated tests or live acceptance |
+| `PRESENT_NOT_VERIFIED` | **11** | Present in vNext source but missing automated test coverage proving exact behavior |
 | `SUPERSEDED_EQUIVALENT` | **0** | Replaced by proven equivalent vNext mechanism |
 | `MISSING_PORT_REQUIRED` | **4** | Missing from vNext implementation, port required |
 | `INTENTIONAL_RETIREMENT_REQUIRES_APPROVAL` | **0** | Feature retirement needing human operator approval |
 | `LEGACY_INTERNAL_OR_BUG` | **0** | Legacy internal detail or bug workaround |
 
-**Parity Status: INCOMPLETE** (4 Missing Port Items, 10 Unverified Items)
+**Parity Status: INCOMPLETE** (4 Missing Port Items, 11 Unverified Items)
 
 ---
 
@@ -303,14 +303,14 @@ Under the stricter proof rules, the initial parity audit was found to over-class
 
 ### `PROVIDERS-003`: Routes implementation tasks to xAI Grok agent.
 - **Category:** Providers
-- **Classification:** `PRESENT_VERIFIED`
+- **Classification:** `PRESENT_NOT_VERIFIED`
 - **Legacy Source Files:** `build_coordinator/runner/routing.py`
 - **Legacy Tests:** `tests/test_provider_routing_and_recovery.py`
 - **vNext Files:** `src/stagemesh/providers.py`
 - **vNext Tests:** `tests/test_grok_provider.py::test_grok_deterministic_command_adapter_contract`
 - **Legacy Behavior:** Routes implementation tasks to xAI Grok agent.
-- **Evidence:** approved_default_adapters defines grok adapter and RuntimeCommandAdapter executes Grok CLI adapter protocol.
-- **Parity Gap:** None
+- **Evidence:** Deterministic command adapter contract test passed, but live Grok execution is unverified due to missing local Grok CLI binary on system PATH.
+- **Parity Gap:** Live Grok execution unverified on system PATH.
 
 ### `PROVIDERS-004`: Generic CLI agent adapter support.
 - **Category:** Providers
@@ -362,9 +362,9 @@ Under the stricter proof rules, the initial parity audit was found to over-class
 - **Legacy Source Files:** `build_coordinator/runner/routing.py`
 - **Legacy Tests:** `tests/test_provider_routing_and_recovery.py`
 - **vNext Files:** `src/stagemesh/coordinator.py, src/stagemesh/execution.py`
-- **vNext Tests:** `tests/test_provider_failover.py::test_automatic_cross_provider_failover_recovers_task`
+- **vNext Tests:** `tests/test_provider_failover.py::test_automatic_cross_provider_failover_all_categories[quota_rate_limit], tests/test_provider_failover.py::test_automatic_cross_provider_failover_all_categories[quota_exhausted], tests/test_provider_failover.py::test_automatic_cross_provider_failover_all_categories[provider_unavailable], tests/test_provider_failover.py::test_automatic_cross_provider_failover_all_categories[authentication_failure], tests/test_provider_failover.py::test_automatic_cross_provider_failover_all_categories[transient_provider_failure]`
 - **Legacy Behavior:** Automatic fallback to alternative provider when primary provider fails or rate-limits.
-- **Evidence:** Coordinator releases claims on capacity/rate-limit failure and allows immediate re-dispatch to alternate provider.
+- **Evidence:** Coordinator releases claims on capacity/rate-limit/auth/unavailable failures and allows immediate re-dispatch to alternate provider across all 5 failure categories.
 - **Parity Gap:** None
 
 ### `PROVIDERS-009`: Distinguishes rate limit / capacity errors from code errors.
@@ -472,9 +472,9 @@ Under the stricter proof rules, the initial parity audit was found to over-class
 - **Legacy Source Files:** `build_coordinator/runner/worker_pool.py`
 - **Legacy Tests:** `tests/test_worker_routing.py`
 - **vNext Files:** `src/stagemesh/capacity.py, src/stagemesh/coordinator.py`
-- **vNext Tests:** `tests/test_concurrent_builders.py::test_concurrent_multi_builder_execution_capacity_two, tests/test_concurrent_builders.py::test_capacity_one_prevents_illegal_concurrent_claim`
+- **vNext Tests:** `tests/test_concurrent_builders.py::test_concurrent_multi_builder_execution_capacity_two, tests/test_concurrent_builders.py::test_two_concurrent_tasks_full_lifecycle_isolation, tests/test_concurrent_builders.py::test_capacity_one_prevents_illegal_concurrent_claim`
 - **Legacy Behavior:** Executes multiple builders concurrently up to capacity limit.
-- **Evidence:** BarrierExecutor and Store verify concurrent multi-builder execution at capacity 2 and claim queuing at capacity 1.
+- **Evidence:** BarrierExecutor and Store verify multi-stage concurrent lifecycle execution at capacity 2 and claim queuing at capacity 1.
 - **Parity Gap:** None
 
 ### `EXECUTION-009`: Enforces provider capacity limits and defers task dispatch when slots full.

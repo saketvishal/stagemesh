@@ -353,7 +353,7 @@
   {
     "id": "PROVIDERS-003",
     "category": "Providers",
-    "classification": "PRESENT_VERIFIED",
+    "classification": "PRESENT_NOT_VERIFIED",
     "legacy_source_files": [
       "build_coordinator/runner/routing.py"
     ],
@@ -367,8 +367,8 @@
     "vnext_tests": [
       "tests/test_grok_provider.py::test_grok_deterministic_command_adapter_contract"
     ],
-    "evidence": "approved_default_adapters defines grok adapter and RuntimeCommandAdapter executes Grok CLI adapter protocol.",
-    "parity_gap": "None"
+    "evidence": "Deterministic command adapter contract test passed, but live Grok execution is unverified due to missing local Grok CLI binary on system PATH.",
+    "parity_gap": "Live Grok execution unverified on system PATH."
   },
   {
     "id": "PROVIDERS-004",
@@ -466,9 +466,13 @@
       "src/stagemesh/execution.py"
     ],
     "vnext_tests": [
-      "tests/test_provider_failover.py::test_automatic_cross_provider_failover_recovers_task"
+      "tests/test_provider_failover.py::test_automatic_cross_provider_failover_all_categories[quota_rate_limit]",
+      "tests/test_provider_failover.py::test_automatic_cross_provider_failover_all_categories[quota_exhausted]",
+      "tests/test_provider_failover.py::test_automatic_cross_provider_failover_all_categories[provider_unavailable]",
+      "tests/test_provider_failover.py::test_automatic_cross_provider_failover_all_categories[authentication_failure]",
+      "tests/test_provider_failover.py::test_automatic_cross_provider_failover_all_categories[transient_provider_failure]"
     ],
-    "evidence": "Coordinator releases claims on capacity/rate-limit failure and allows immediate re-dispatch to alternate provider.",
+    "evidence": "Coordinator releases claims on capacity/rate-limit/auth/unavailable failures and allows immediate re-dispatch to alternate provider across all 5 failure categories.",
     "parity_gap": "None"
   },
   {
@@ -679,9 +683,10 @@
     ],
     "vnext_tests": [
       "tests/test_concurrent_builders.py::test_concurrent_multi_builder_execution_capacity_two",
+      "tests/test_concurrent_builders.py::test_two_concurrent_tasks_full_lifecycle_isolation",
       "tests/test_concurrent_builders.py::test_capacity_one_prevents_illegal_concurrent_claim"
     ],
-    "evidence": "BarrierExecutor and Store verify concurrent multi-builder execution at capacity 2 and claim queuing at capacity 1.",
+    "evidence": "BarrierExecutor and Store verify multi-stage concurrent lifecycle execution at capacity 2 and claim queuing at capacity 1.",
     "parity_gap": "None"
   },
   {
