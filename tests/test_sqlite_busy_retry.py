@@ -244,11 +244,10 @@ def test_with_sqlite_retry_raises_database_busy_error_on_persistent_contention()
 
 def test_store_contention_recovery_using_store_api(tmp_path: Path):
     """
-    Exercise Store operations under real contention using Store APIs.
-    Store write recovers and inserts successfully without corrupting state.
+    Exercise Store operations under real contention using Store APIs directly.
+    Production Store.upsert_task internally retries on lock contention and succeeds
+    without any explicit retry wrapper in the test.
     """
-    from stagemesh.persistence import with_sqlite_retry
-
     db_path = tmp_path / "store_contention.db"
     store1 = Store(db_path)
     store1.migrate()
@@ -267,15 +266,104 @@ def test_store_contention_recovery_using_store_api(tmp_path: Path):
     t.start()
     barrier.wait()
 
-    # store1 attempts an upsert with retry
-    task_id = with_sqlite_retry(
-        lambda: store1.upsert_task("Contention Task", source="local"),
-        attempts=5,
-        base_delay=0.05,
-    )
+    # store1 calls upsert_task directly — internal _mutate / with_sqlite_retry handles contention
+    task_id = store1.upsert_task("Contention Task", source="local")
     t.join(timeout=5)
 
     assert task_id is not None
     assert store1.get_task(task_id)["title"] == "Contention Task"
     store1.close()
+
+
+def test_production_persistent_contention_raises_typed_database_busy_error(tmp_path: Path):
+    """
+    When SQLite write contention persists beyond all retry attempts in production Store,
+    it raises a typed DatabaseBusyError with 'STAGEMESH_SQLITE_BUSY:'.
+    """
+    from stagemesh.persistence import DatabaseBusyError
+
+    db_path = tmp_path / "persistent_busy.db"
+    store = Store(db_path)
+    store.migrate()
+
+    # Hold exclusive lock on another connection permanently
+    lock_conn = sqlite3.connect(str(db_path), timeout=0.01)
+    lock_conn.execute("BEGIN EXCLUSIVE")
+
+    try:
+        # Production call without wrapper must raise DatabaseBusyError
+        with pytest.raises(DatabaseBusyError) as exc_info:
+            store.upsert_task("Should Fail Task", source="local")
+        assert "STAGEMESH_SQLITE_BUSY:" in str(exc_info.value)
+    finally:
+        lock_conn.execute("ROLLBACK")
+        lock_conn.close()
+        store.close()
+
+
+def test_production_non_lock_error_propagates_without_retry(tmp_path: Path):
+    """
+    Non-lock OperationalError (e.g., query against dropped table) propagates immediately
+    without wasting retry attempts.
+    """
+    from unittest.mock import MagicMock
+    db_path = tmp_path / "non_lock.db"
+    store = Store(db_path)
+    store.migrate()
+
+    calls = 0
+    def failing_op():
+        nonlocal calls
+        calls += 1
+        raise sqlite3.OperationalError("no such table: non_existent_table")
+
+    with pytest.raises(sqlite3.OperationalError, match="no such table"):
+        store._mutate(failing_op)
+    # Must have failed immediately on 1st call without retrying
+    assert calls == 1
+    store.close()
+
+
+class _FakeConn:
+    def __init__(self, commit_error: Exception | None = None) -> None:
+        self._commit_error = commit_error
+        self.committed = False
+        self.rolled_back = False
+
+    def commit(self):
+        if self._commit_error is not None:
+            raise self._commit_error
+        self.committed = True
+
+    def rollback(self):
+        self.rolled_back = True
+
+
+def test_commit_or_busy_succeeds_when_no_contention():
+    from stagemesh.persistence import commit_or_busy
+
+    conn = _FakeConn()
+    commit_or_busy(conn)
+    assert conn.committed is True
+    assert conn.rolled_back is False
+
+
+def test_commit_or_busy_converts_lock_contention_to_typed_error():
+    from stagemesh.persistence import DatabaseBusyError, commit_or_busy
+
+    conn = _FakeConn(commit_error=sqlite3.OperationalError("database is locked"))
+    with pytest.raises(DatabaseBusyError) as exc_info:
+        commit_or_busy(conn)
+    assert "STAGEMESH_SQLITE_BUSY:" in str(exc_info.value)
+    assert conn.rolled_back is True
+
+
+def test_commit_or_busy_propagates_non_lock_operational_error():
+    from stagemesh.persistence import commit_or_busy
+
+    conn = _FakeConn(commit_error=sqlite3.OperationalError("disk I/O error"))
+    with pytest.raises(sqlite3.OperationalError, match="disk I/O error"):
+        commit_or_busy(conn)
+    assert conn.rolled_back is True
+
 

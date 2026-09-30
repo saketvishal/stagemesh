@@ -152,6 +152,7 @@ def test_cli_continue_dry_run_uses_fake_executor(tmp_path: Path) -> None:
 
     project = tmp_path / "proj"
     project.mkdir()
+    (project / ".stagemesh").mkdir()
 
     args = argparse.Namespace(
         project=str(project),

@@ -236,3 +236,148 @@ def test_validator_validate_wires_affected_tests_integration(tmp_path: Path):
     assert status.name == "PASSED"
     assert len(executed) > 0
 
+
+def test_split_command_and_build_executable_argv_safety():
+    import sys
+    from stagemesh.validation import build_executable_argv, split_command
+
+    # Never invoke .py directly
+    cmd_py = "tests/test_foo.py"
+    argv = build_executable_argv(cmd_py)
+    assert argv[0] == sys.executable
+    assert argv[1:3] == ["-m", "pytest"]
+    assert argv[3] == "tests/test_foo.py"
+
+    # Pytest command transformed to sys.executable -m pytest
+    cmd_pytest = "pytest tests/test_foo.py -q -k 'my_test'"
+    argv_pytest = build_executable_argv(cmd_pytest)
+    assert argv_pytest[0] == sys.executable
+    assert argv_pytest[1:3] == ["-m", "pytest"]
+    assert argv_pytest[3] == "tests/test_foo.py"
+
+    # Robust legacy shlex splitting handles quotes without empty strings
+    parts = split_command('pytest "tests/my file.py" -q')
+    assert parts == ["pytest", "tests/my file.py", "-q"]
+
+
+def test_real_subprocess_validation_executes_pytest(tmp_path: Path):
+    import subprocess
+    import sys
+    from stagemesh.domain import EvidenceStatus
+    from stagemesh.persistence import Store
+    from stagemesh.validation import AffectedTestDiscovery, Validator
+
+    # Initialize a real git repo
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
+
+    src_dir = tmp_path / "src"
+    src_dir.mkdir(parents=True)
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir(parents=True)
+
+    calc_file = src_dir / "calc.py"
+    calc_file.write_text("def add(a, b): return a + b\n", encoding="utf-8")
+    test_file = tests_dir / "test_calc.py"
+    test_file.write_text("from src.calc import add\ndef test_add(): assert add(2, 3) == 5\n", encoding="utf-8")
+
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "initial commit"], cwd=tmp_path, check=True, capture_output=True)
+    base_sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=tmp_path, check=True, capture_output=True, text=True).stdout.strip()
+
+    # Modify calc.py to trigger candidate change
+    calc_file.write_text("def add(a, b): return a + b + 0\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "candidate change"], cwd=tmp_path, check=True, capture_output=True)
+    candidate_sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=tmp_path, check=True, capture_output=True, text=True).stdout.strip()
+
+    db = tmp_path / "stagemesh.sqlite3"
+    store = Store(db)
+    store.migrate()
+    task_id = store.upsert_task("Test task for real validation", source="local")
+    store.add_candidate(task_id, candidate_sha, "test-builder", durable_handoff=True, base_sha=base_sha)
+
+    discovery = AffectedTestDiscovery({
+        "src/calc.py": ["pytest tests/test_calc.py -q"],
+    })
+    # Real validator with NO mock runner
+    validator = Validator(discovery=discovery)
+    status = validator.validate(store, task_id, candidate_sha, tmp_path, base_sha=base_sha)
+
+    assert status == EvidenceStatus.PASSED
+    # Check that execution and evidence were recorded in store
+    evidence = store.has_evidence(task_id, candidate_sha, kind=from_str_kind("VALIDATION"))
+    assert evidence is True
+
+
+def test_multi_commit_candidate_range_discovers_all_changed_files(tmp_path: Path):
+    import subprocess
+    from stagemesh.domain import EvidenceStatus
+    from stagemesh.persistence import Store
+    from stagemesh.validation import AffectedTestDiscovery, Validator
+
+    # Initialize a real git repo
+    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
+
+    src_dir = tmp_path / "src"
+    src_dir.mkdir(parents=True)
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir(parents=True)
+
+    file_a = src_dir / "mod_a.py"
+    file_a.write_text("x = 1\n", encoding="utf-8")
+    file_b = src_dir / "mod_b.py"
+    file_b.write_text("y = 2\n", encoding="utf-8")
+
+    test_a = tests_dir / "test_a.py"
+    test_a.write_text("def test_a(): pass\n", encoding="utf-8")
+    test_b = tests_dir / "test_b.py"
+    test_b.write_text("def test_b(): pass\n", encoding="utf-8")
+
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "initial baseline"], cwd=tmp_path, check=True, capture_output=True)
+    base_sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=tmp_path, check=True, capture_output=True, text=True).stdout.strip()
+
+    # Multi-commit candidate:
+    # Commit 1: modifies mod_a.py
+    file_a.write_text("x = 10\n", encoding="utf-8")
+    subprocess.run(["git", "add", "src/mod_a.py"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "commit 1: mod_a"], cwd=tmp_path, check=True, capture_output=True)
+
+    # Commit 2: modifies mod_b.py (this is candidate_sha)
+    file_b.write_text("y = 20\n", encoding="utf-8")
+    subprocess.run(["git", "add", "src/mod_b.py"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "commit 2: mod_b"], cwd=tmp_path, check=True, capture_output=True)
+    candidate_sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=tmp_path, check=True, capture_output=True, text=True).stdout.strip()
+
+    executed_commands = []
+    def recording_runner(cmd, cwd):
+        executed_commands.append(cmd)
+        return True, "ok"
+
+    discovery = AffectedTestDiscovery({
+        "src/mod_a.py": ["pytest tests/test_a.py -q"],
+        "src/mod_b.py": ["pytest tests/test_b.py -q"],
+    })
+    validator = Validator(discovery=discovery, command_runner=recording_runner)
+
+    db = tmp_path / "stagemesh.sqlite3"
+    store = Store(db)
+    store.migrate()
+    task_id = store.upsert_task("Multi-commit validation task", source="local")
+
+    # When base_sha is passed or resolved from baseline, BOTH test_a and test_b must be discovered!
+    status = validator.validate(store, task_id, candidate_sha, tmp_path, base_sha=base_sha)
+    assert status == EvidenceStatus.PASSED
+    assert "pytest tests/test_a.py -q" in executed_commands
+    assert "pytest tests/test_b.py -q" in executed_commands
+
+
+def from_str_kind(name: str):
+    from stagemesh.domain import EvidenceKind
+    return EvidenceKind[name]
+
+

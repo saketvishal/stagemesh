@@ -212,7 +212,7 @@
   {
     "category": "Ownership/recovery",
     "classification": "PRESENT_VERIFIED",
-    "evidence": "ProcessIdentity captures real create_time and boot_id across platforms including Windows. Coordinator.recover() verifies live process identity before reclaiming expired claims and never kills unrelated processes.",
+    "evidence": "ProcessIdentity captures real create_time and stable boot epoch across platforms including Windows. Coordinator.recover() verifies live process identity, fails closed on UNKNOWN identity without reclaiming claims, and preserves unrelated processes across alias commands.",
     "id": "OWNERSHIP-004",
     "legacy_behavior": "Worker identity verified via PID and creation time.",
     "legacy_source_files": [
@@ -226,12 +226,13 @@
       "src/stagemesh/process_identity.py"
     ],
     "vnext_tests": [
-      "tests/test_process_identity_verification.py::test_current_and_popen_identity_capture_real_create_time_and_boot_id",
-      "tests/test_process_identity_verification.py::test_windows_boot_id_changes_across_reboots_not_just_hostname",
-      "tests/test_process_identity_verification.py::test_coordinator_recovery_cleans_dead_worker_using_verified_identity",
-      "tests/test_process_identity_verification.py::test_coordinator_recovery_does_not_kill_or_mutate_live_or_uncertain_workers",
+      "tests/test_process_identity_verification.py::test_popen_identity_has_real_create_time_and_is_known",
+      "tests/test_process_identity_verification.py::test_windows_boot_id_stable_across_repeated_calls_during_one_boot",
+      "tests/test_process_identity_verification.py::test_windows_boot_id_differs_after_simulated_reboot",
+      "tests/test_process_identity_verification.py::test_unknown_live_identity_remains_untouched_in_recovery",
+      "tests/test_process_identity_verification.py::test_coordinator_recovery_detects_pid_reuse_and_preserves_unrelated_process",
       "tests/test_process_identity_verification.py::test_pid_reuse_with_different_create_time_is_dead",
-      "tests/test_process_identity_verification.py::test_identity_mismatch_does_not_kill_unrelated_processes"
+      "tests/test_process_identity_verification.py::test_alias_command_matches_observed_executable"
     ]
   },
   {
@@ -941,10 +942,9 @@
       "src/stagemesh/objectives.py"
     ],
     "vnext_tests": [
-      "tests/test_planner_contract_validation.py::test_dag_cycle_self_dependency_rejected",
-      "tests/test_planner_contract_validation.py::test_dag_cycle_two_nodes_rejected",
-      "tests/test_planner_contract_validation.py::test_dag_cycle_three_nodes_rejected",
-      "tests/test_planner_contract_validation.py::test_dag_cycle_indirect_diamond_rejected",
+      "tests/test_planner_contract_validation.py::test_dag_self_dependency_rejected",
+      "tests/test_planner_contract_validation.py::test_dag_two_node_cycle_rejected",
+      "tests/test_planner_contract_validation.py::test_dag_three_node_cycle_rejected",
       "tests/test_planner_contract_validation.py::test_dag_valid_complex_acyclic_graph_passes",
       "tests/test_planner_contract_validation.py::test_unknown_dependency_rejected"
     ]
@@ -973,7 +973,7 @@
   {
     "category": "Objectives/planning",
     "classification": "PRESENT_VERIFIED",
-    "evidence": "ObjectivePlanner normalizes markdown code fences and executor envelope wrappers (stripping thinking/chain-of-thought blocks), rejects malformed outputs cleanly without partial state, and implements retry suppression.",
+    "evidence": "ObjectivePlanner requires full executor envelope for provider output (rejecting bare plans), strips thinking/chain-of-thought blocks, validates DAG without partial persistent state, applies atomic objective and backlog mutations, and durably suppresses unchanged malformed contract retries across coordinator cycles until contract revision.",
     "id": "OBJECTIVES-005",
     "legacy_behavior": "Planner wrapper envelope normalization and retry suppression.",
     "legacy_source_files": [
@@ -990,8 +990,10 @@
       "tests/test_planner_contract_validation.py::test_wrapper_normalization_markdown_fences",
       "tests/test_planner_contract_validation.py::test_wrapper_normalization_envelope_with_thinking_stripped",
       "tests/test_planner_contract_validation.py::test_retry_suppression_and_no_partial_store_corruption",
-      "tests/test_planner_contract_validation.py::test_repeated_malformed_planner_output_does_not_duplicate_tasks",
-      "tests/test_planner_contract_validation.py::test_success_after_failure_produces_single_correct_graph"
+      "tests/test_planner_contract_validation.py::test_provider_output_requires_full_envelope_and_rejects_bare_plan",
+      "tests/test_planner_contract_validation.py::test_planner_sanitization_drops_thinking_and_lifecycle_identity_from_cli_plan",
+      "tests/test_planner_contract_validation.py::test_command_plan_atomic_all_or_nothing_on_failure",
+      "tests/test_planner_contract_validation.py::test_durable_retry_suppression_and_contract_revision_recovery_production_path"
     ]
   },
   {
@@ -1012,8 +1014,7 @@
       "src/stagemesh/persistence.py"
     ],
     "vnext_tests": [
-      "tests/test_run_from_anywhere_and_multi_project.py::TestObjectiveRunFromAnywhere::test_cli_plan_from_unrelated_cwd_modifies_target_and_leaves_other_untouched",
-      "tests/test_run_from_anywhere_and_multi_project.py::TestObjectiveRunFromAnywhere::test_explicit_project_path_resolves_independently_of_cwd"
+      "tests/test_run_from_anywhere_and_multi_project.py::TestObjectiveRunFromAnywhere::test_cli_plan_from_unrelated_cwd_modifies_target_and_leaves_other_untouched"
     ]
   },
   {
@@ -1100,7 +1101,7 @@
   {
     "category": "Projects",
     "classification": "PRESENT_VERIFIED",
-    "evidence": "CLI resolves target project from arbitrary CWD without --project flag via GlobalRegistry when single project registered, handles directory ancestor lookup, and fails safely with ProjectError on ambiguous multi-project resolution.",
+    "evidence": "CLI resolves target project from arbitrary CWD without --project flag via GlobalRegistry when single project registered, handles directory ancestor lookup, distinguishes explicit filesystem paths from registered project names without collision, and fails safely with ProjectError on ambiguous multi-project resolution.",
     "id": "PROJECTS-005",
     "legacy_behavior": "Runs coordinator from any working directory without specifying project path.",
     "legacy_source_files": [
@@ -1116,13 +1117,14 @@
     "vnext_tests": [
       "tests/test_run_from_anywhere_and_multi_project.py::TestGlobalRegistryRunFromAnywhere::test_cli_resolves_single_registered_project_from_unrelated_cwd_without_flag",
       "tests/test_run_from_anywhere_and_multi_project.py::TestGlobalRegistryRunFromAnywhere::test_cli_ambiguous_resolution_fails_safely_when_multiple_registered",
-      "tests/test_run_from_anywhere_and_multi_project.py::TestGlobalRegistryRunFromAnywhere::test_cli_resolves_named_registered_project_from_unrelated_cwd"
+      "tests/test_run_from_anywhere_and_multi_project.py::TestGlobalRegistryRunFromAnywhere::test_cli_resolves_named_registered_project_from_unrelated_cwd",
+      "tests/test_run_from_anywhere_and_multi_project.py::TestGlobalRegistryRunFromAnywhere::test_cli_resolves_registered_project_name_when_unrelated_cwd_has_same_name_dir"
     ]
   },
   {
     "category": "Projects",
     "classification": "PRESENT_VERIFIED",
-    "evidence": "Global continue (stagemesh continue --all) discovers registered projects, executes isolated coordinator runs per project, preserves task and source ID boundaries, and ensures failure in project A does not block project B.",
+    "evidence": "Global continue (stagemesh continue --all) discovers registered projects, executes isolated child processes per project with flag and capacity propagation, uses configured providers (rejecting unconfigured providers without --dry-run), preserves task and source ID boundaries, continues remaining projects after failures, and exits nonzero on any child failure.",
     "id": "PROJECTS-006",
     "legacy_behavior": "Coordinates execution across multiple registered projects.",
     "legacy_source_files": [
@@ -1139,6 +1141,8 @@
     "vnext_tests": [
       "tests/test_run_from_anywhere_and_multi_project.py::TestMultiProjectCoordination::test_continue_all_coordinates_multiple_registered_projects",
       "tests/test_run_from_anywhere_and_multi_project.py::TestMultiProjectCoordination::test_continue_all_failure_in_project_a_does_not_block_project_b",
+      "tests/test_run_from_anywhere_and_multi_project.py::TestMultiProjectCoordination::test_continue_all_without_dry_run_cannot_silently_use_fake_executor",
+      "tests/test_run_from_anywhere_and_multi_project.py::TestMultiProjectCoordination::test_continue_all_process_isolation_and_capacity_allocation",
       "tests/test_run_from_anywhere_and_multi_project.py::TestMultiProjectCoordination::test_tasks_are_project_scoped",
       "tests/test_run_from_anywhere_and_multi_project.py::TestMultiProjectCoordination::test_source_ids_do_not_collide_across_projects",
       "tests/test_run_from_anywhere_and_multi_project.py::TestMultiProjectCoordination::test_restart_preserves_project_boundaries"
@@ -1271,7 +1275,7 @@
   {
     "category": "Persistence",
     "classification": "PRESENT_VERIFIED",
-    "evidence": "Store configures WAL journal mode and busy_timeout=5000ms. with_sqlite_retry provides application-level exponential backoff retry on SQLITE_BUSY/locked contention and raises DatabaseBusyError on persistent contention.",
+    "evidence": "Store wraps mutations in with_sqlite_retry with exponential backoff on SQLITE_BUSY / locked contention and commit_or_busy. Raises DatabaseBusyError on persistent contention without retrying non-lock errors.",
     "id": "PERSISTENCE-005",
     "legacy_behavior": "Retries DB operations on SQLITE_BUSY / lock contention.",
     "legacy_source_files": [
@@ -1287,10 +1291,10 @@
     ],
     "vnext_tests": [
       "tests/test_sqlite_busy_retry.py::test_with_sqlite_retry_recovers_from_transient_busy",
-      "tests/test_sqlite_busy_retry.py::test_with_sqlite_retry_raises_database_busy_error_on_persistent_contention",
+      "tests/test_sqlite_busy_retry.py::test_production_persistent_contention_raises_typed_database_busy_error",
+      "tests/test_sqlite_busy_retry.py::test_production_non_lock_error_propagates_without_retry",
       "tests/test_sqlite_busy_retry.py::test_store_contention_recovery_using_store_api",
-      "tests/test_sqlite_busy_retry.py::test_concurrent_writers_do_not_create_duplicate_tasks",
-      "tests/test_sqlite_busy_retry.py::test_excessive_contention_raises_operational_error"
+      "tests/test_sqlite_busy_retry.py::test_commit_or_busy_converts_lock_contention_to_typed_error"
     ]
   },
   {
@@ -1316,7 +1320,7 @@
   {
     "category": "CI/validation",
     "classification": "PRESENT_VERIFIED",
-    "evidence": "AffectedTestDiscovery uses path component boundary matching to prevent false substring matches, provides DEFAULT_SOURCE_TEST_MAPPING, discovers changed files via git_changed_files, safely falls back to baseline tests, and is wired into Validator.validate.",
+    "evidence": "AffectedTestDiscovery uses path component boundary matching and DEFAULT_SOURCE_TEST_MAPPING with complete executable test commands. Validator.validate splits commands safely, normalizes test paths to pytest invocations, executes real subprocesses, and computes changed file ranges across multi-commit candidates back to baseline.",
     "id": "VALIDATION-002",
     "legacy_behavior": "Identifies affected tests based on modified files.",
     "legacy_source_files": [
@@ -1333,9 +1337,9 @@
       "tests/test_affected_test_discovery.py::test_safe_path_boundary_matching_prevents_false_substring_matches",
       "tests/test_affected_test_discovery.py::test_default_source_test_mapping_present",
       "tests/test_affected_test_discovery.py::test_validator_validate_wires_affected_tests_integration",
-      "tests/test_affected_test_discovery.py::test_known_source_maps_to_specific_tests",
-      "tests/test_affected_test_discovery.py::test_multiple_known_files_produce_union",
-      "tests/test_affected_test_discovery.py::test_unknown_file_falls_back_to_baseline"
+      "tests/test_affected_test_discovery.py::test_split_command_and_build_executable_argv_safety",
+      "tests/test_affected_test_discovery.py::test_real_subprocess_validation_executes_pytest",
+      "tests/test_affected_test_discovery.py::test_multi_commit_candidate_range_discovers_all_changed_files"
     ]
   },
   {
@@ -1641,9 +1645,9 @@
   {
     "category": "Observability/operator",
     "classification": "PRESENT_VERIFIED",
-    "evidence": "metrics_snapshot computes execution durations, claim latencies, provider usage counting actual executions (not registered workers), throughput, and token usage. export_metrics_json applies pattern-based secret redaction and stagemesh metrics CLI command exposes metrics.",
+    "evidence": "metrics_snapshot computes durable metrics matching legacy behavior: queue depth (total and by claimable state), claim latency (implementation and by claim type), execution outcomes (total, by status, and by role), and worker utilisation honoring lease expiration. Token usage and throughput are separately exported as modern extensions. export_metrics_json applies secret redaction without redacting metric keys.",
     "id": "OBSERVABILITY-004",
-    "legacy_behavior": "Execution time, token usage, throughput, and error metrics.",
+    "legacy_behavior": "Durable coordinator metrics including queue depth, claim latency, execution outcomes (by status and role), and worker utilisation with active lease filtering.",
     "legacy_source_files": [
       "build_coordinator/metrics.py"
     ],
@@ -1656,9 +1660,10 @@
     ],
     "vnext_tests": [
       "tests/test_metrics_observability.py::test_execution_duration_and_claim_latency_calculation",
-      "tests/test_metrics_observability.py::test_provider_usage_counts_executions_not_workers",
-      "tests/test_metrics_observability.py::test_throughput_and_token_usage_metrics",
-      "tests/test_metrics_observability.py::test_realistic_secret_redaction_scrubs_credentials",
+      "tests/test_metrics_observability.py::test_active_claims_honor_lease_expiry_in_worker_utilisation",
+      "tests/test_metrics_observability.py::test_execution_kinds_not_classified_as_provider_or_worker",
+      "tests/test_metrics_observability.py::test_exported_token_usage_remains_structured_and_visible",
+      "tests/test_metrics_observability.py::test_direct_unit_tests_for_secret_redaction_helper",
       "tests/test_metrics_observability.py::test_metrics_persisted_across_store_close_reopen"
     ]
   },

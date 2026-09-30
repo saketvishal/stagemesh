@@ -60,23 +60,6 @@ class Coordinator:
                     {"execution_id": execution_id, "task_id": task_id, "reason": "process_dead_or_reused"},
                 )
                 recovered += 1
-            elif classification == "UNKNOWN" and saved.pid is not None:
-                execution_id = execution["id"]
-                task_id = execution["task_id"]
-                claim_id = execution["claim_id"]
-                self.store.finish_execution(
-                    execution_id,
-                    ExecutionStatus.UNKNOWN,
-                    execution["candidate_sha"] or None,
-                )
-                if claim_id:
-                    self.store.release_claim(claim_id)
-                record_audit(
-                    self.store,
-                    "execution.recovered",
-                    {"execution_id": execution_id, "task_id": task_id, "reason": "unknown_process_identity"},
-                )
-                recovered += 1
         return recovered
 
     def tick(self) -> int:
