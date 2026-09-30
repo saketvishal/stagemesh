@@ -32,6 +32,15 @@ Under the stricter proof rules, the initial parity audit was found to over-class
 9. **PostgreSQL Live Behavior** (`PERSISTENCE-002`): Reclassified from `PRESENT_VERIFIED` -> `PRESENT_NOT_VERIFIED`. `PostgresStore` class exists, but live PostgreSQL test suite is missing.
 10. **Independent Review & Cross-Provider Recovery** (`LIFECYCLE-005`, `PROVIDERS-008`, `PROVIDERS-010`): Reclassified from `PRESENT_VERIFIED` -> `PRESENT_NOT_VERIFIED`. Enforcement of reviewer != builder provider and automatic provider failover during tick dispatch unverified in vNext tests.
 
+## Wave 3 Promotions (ded7e31 → 6c4cc40)
+
+The following items were promoted from `MISSING_PORT_REQUIRED` to `PRESENT_VERIFIED` during Wave 3:
+
+1. **Azure DevOps Task Source** (`SOURCES-003`): Promoted `MISSING_PORT_REQUIRED` → `PRESENT_VERIFIED`. `AzureDevOpsTaskSource` implemented in `src/stagemesh/azure_devops.py`; verified by `tests/test_azure_devops_task_source.py` (4 tests: work-item discovery, identity mapping, state reconciliation, failure classification).
+2. **GitHub Lifecycle Label Provisioning** (`SOURCES-004`): Promoted `MISSING_PORT_REQUIRED` → `PRESENT_VERIFIED`. `GitHubLabelGateway` implemented in `src/stagemesh/labels.py`; verified by `tests/test_github_lifecycle_labels.py` (4 tests: idempotent label creation, existing-label preservation, lifecycle-label transitions, source-failure store isolation).
+
+Net change: `MISSING_PORT_REQUIRED` 4 → 2; `PRESENT_VERIFIED` 80 → 82. `PRESENT_NOT_VERIFIED` unchanged at 11. Total entries: 95.
+
 ---
 
 ## Legacy Test Scenario Reconciliation Matrix
@@ -512,25 +521,25 @@ Under the stricter proof rules, the initial parity audit was found to over-class
 
 ### `SOURCES-003`: Discovers and ingests work items from Azure DevOps boards/backlogs.
 - **Category:** Task sources
-- **Classification:** `MISSING_PORT_REQUIRED`
+- **Classification:** `PRESENT_VERIFIED` *(promoted Wave 3)*
 - **Legacy Source Files:** `build_coordinator/task_source/azure_devops.py`
 - **Legacy Tests:** `tests/test_azure_devops_task_source.py`
-- **vNext Files:** ``
-- **vNext Tests:** `NONE`
+- **vNext Files:** `src/stagemesh/azure_devops.py`
+- **vNext Tests:** `tests/test_azure_devops_task_source.py::test_azure_devops_task_discovery_and_mapping`, `tests/test_azure_devops_task_source.py::test_azure_devops_duplicate_safe_sync`, `tests/test_azure_devops_task_source.py::test_azure_devops_source_state_reconciliation`, `tests/test_azure_devops_task_source.py::test_azure_devops_failure_classification`
 - **Legacy Behavior:** Discovers and ingests work items from Azure DevOps boards/backlogs.
-- **Evidence:** Azure DevOps task source is completely absent from src/stagemesh/task_sources.py.
-- **Parity Gap:** AzureDevOpsTaskSource missing in vNext.
+- **Evidence:** AzureDevOpsTaskSource discovers work items, maps to ADO-{id} identity, handles open/closed states, deduplicates insertions, projects internal state onto ADO System.State, and classifies auth/rate-limit failures.
+- **Parity Gap:** None
 
 ### `SOURCES-004`: Provisions GitHub lifecycle labels (stagemesh:claimed, stagemesh:validating, etc.) and transitions issue labels.
 - **Category:** Task sources
-- **Classification:** `MISSING_PORT_REQUIRED`
+- **Classification:** `PRESENT_VERIFIED` *(promoted Wave 3)*
 - **Legacy Source Files:** `build_coordinator/watcher/labels.py`
 - **Legacy Tests:** `tests/test_github_label_provisioning.py, tests/test_watcher_labels.py`
-- **vNext Files:** ``
-- **vNext Tests:** `NONE`
+- **vNext Files:** `src/stagemesh/labels.py`
+- **vNext Tests:** `tests/test_github_lifecycle_labels.py::test_labels_setup_creates_missing_labels_idempotently`, `tests/test_github_lifecycle_labels.py::test_existing_labels_preserved_safely`, `tests/test_github_lifecycle_labels.py::test_github_lifecycle_transitions_update_correct_issue_and_remove_stale`, `tests/test_github_lifecycle_labels.py::test_source_synchronization_failure_does_not_corrupt_internal_lifecycle`
 - **Legacy Behavior:** Provisions GitHub lifecycle labels (stagemesh:claimed, stagemesh:validating, etc.) and transitions issue labels.
-- **Evidence:** GitHub label setup and automated label state machine transitions missing in vNext.
-- **Parity Gap:** Lifecycle label provisioning and state machine transitions missing in vNext.
+- **Evidence:** provision_labels idempotently creates/edits stagemesh:* and taxonomy labels; sync_issue_lifecycle_label projects StageMesh stage onto remote issue labels while removing stale mutually exclusive lifecycle labels without corrupting internal store state.
+- **Parity Gap:** None
 
 ### `SOURCES-005`: Synchronizes state from external task source into internal store.
 - **Category:** Task sources
