@@ -6,14 +6,14 @@ Total Inventoried Capabilities: **95**
 
 | Classification | Count | Description |
 |---|---|---|
-| `PRESENT_VERIFIED` | **74** | Present in vNext and verified by exact automated tests or live acceptance |
-| `PRESENT_NOT_VERIFIED` | **17** | Present in vNext source but missing automated test coverage proving exact behavior |
+| `PRESENT_VERIFIED` | **81** | Present in vNext and verified by exact automated tests or live acceptance |
+| `PRESENT_NOT_VERIFIED` | **10** | Present in vNext source but missing automated test coverage proving exact behavior |
 | `SUPERSEDED_EQUIVALENT` | **0** | Replaced by proven equivalent vNext mechanism |
 | `MISSING_PORT_REQUIRED` | **4** | Missing from vNext implementation, port required |
 | `INTENTIONAL_RETIREMENT_REQUIRES_APPROVAL` | **0** | Feature retirement needing human operator approval |
 | `LEGACY_INTERNAL_OR_BUG` | **0** | Legacy internal detail or bug workaround |
 
-**Parity Status: INCOMPLETE** (4 Missing Port Items, 17 Unverified Items)
+**Parity Status: INCOMPLETE** (4 Missing Port Items, 10 Unverified Items)
 
 ---
 
@@ -160,14 +160,14 @@ Under the stricter proof rules, the initial parity audit was found to over-class
 
 ### `LIFECYCLE-005`: Required separate reviewer agent before integration.
 - **Category:** Lifecycle
-- **Classification:** `PRESENT_NOT_VERIFIED`
+- **Classification:** `PRESENT_VERIFIED`
 - **Legacy Source Files:** `build_coordinator/runner/orchestrator.py`
 - **Legacy Tests:** `tests/test_independence.py`
-- **vNext Files:** `src/stagemesh/review.py, src/stagemesh/coordinator.py`
-- **vNext Tests:** `NONE`
+- **vNext Files:** `src/stagemesh/review.py`
+- **vNext Tests:** `tests/test_reviewer_independence.py::test_reviewer_cannot_be_implementation_worker`
 - **Legacy Behavior:** Required separate reviewer agent before integration.
-- **Evidence:** Review gate exists in src/stagemesh/review.py, but enforcing distinct reviewer provider != builder provider is unverified in vNext tests.
-- **Parity Gap:** Missing automated test for strict reviewer-builder provider separation.
+- **Evidence:** Reviewer raises SelfReviewError if implementation worker attempts to review its own candidate.
+- **Parity Gap:** None
 
 ### `LIFECYCLE-006`: Integrated candidate commits into target branch.
 - **Category:** Lifecycle
@@ -303,14 +303,14 @@ Under the stricter proof rules, the initial parity audit was found to over-class
 
 ### `PROVIDERS-003`: Routes implementation tasks to xAI Grok agent.
 - **Category:** Providers
-- **Classification:** `PRESENT_NOT_VERIFIED`
+- **Classification:** `PRESENT_VERIFIED`
 - **Legacy Source Files:** `build_coordinator/runner/routing.py`
 - **Legacy Tests:** `tests/test_provider_routing_and_recovery.py`
 - **vNext Files:** `src/stagemesh/providers.py`
-- **vNext Tests:** `NONE`
+- **vNext Tests:** `tests/test_grok_provider.py::test_grok_deterministic_command_adapter_contract`
 - **Legacy Behavior:** Routes implementation tasks to xAI Grok agent.
-- **Evidence:** approved_default_adapters() defines grok adapter, but no test or live execution proof exists for Grok in vNext.
-- **Parity Gap:** Missing automated test for Grok execution.
+- **Evidence:** approved_default_adapters defines grok adapter and RuntimeCommandAdapter executes Grok CLI adapter protocol.
+- **Parity Gap:** None
 
 ### `PROVIDERS-004`: Generic CLI agent adapter support.
 - **Category:** Providers
@@ -336,14 +336,14 @@ Under the stricter proof rules, the initial parity audit was found to over-class
 
 ### `PROVIDERS-006`: Staged multi-agent routing (e.g. Builder -> Reviewer -> Integrator).
 - **Category:** Providers
-- **Classification:** `PRESENT_NOT_VERIFIED`
+- **Classification:** `PRESENT_VERIFIED`
 - **Legacy Source Files:** `build_coordinator/runner/routing.py`
 - **Legacy Tests:** `tests/test_worker_routing.py`
 - **vNext Files:** `src/stagemesh/routing.py`
-- **vNext Tests:** `NONE`
+- **vNext Tests:** `tests/test_staged_routing.py::test_staged_routing_honors_configured_stage_providers`
 - **Legacy Behavior:** Staged multi-agent routing (e.g. Builder -> Reviewer -> Integrator).
-- **Evidence:** stagemesh.routing supports multi-stage matching, but multi-stage routing test is missing in vNext.
-- **Parity Gap:** Missing automated test for staged multi-agent routing.
+- **Evidence:** Router.choose_for_stage routes IMPLEMENT, VALIDATE, and REVIEW stages to configured providers.
+- **Parity Gap:** None
 
 ### `PROVIDERS-007`: Single-agent workflow routing.
 - **Category:** Providers
@@ -358,14 +358,14 @@ Under the stricter proof rules, the initial parity audit was found to over-class
 
 ### `PROVIDERS-008`: Automatic fallback to alternative provider when primary provider fails or rate-limits.
 - **Category:** Providers
-- **Classification:** `PRESENT_NOT_VERIFIED`
+- **Classification:** `PRESENT_VERIFIED`
 - **Legacy Source Files:** `build_coordinator/runner/routing.py`
 - **Legacy Tests:** `tests/test_provider_routing_and_recovery.py`
-- **vNext Files:** `src/stagemesh/routing.py, src/stagemesh/providers.py`
-- **vNext Tests:** `NONE`
+- **vNext Files:** `src/stagemesh/coordinator.py, src/stagemesh/execution.py`
+- **vNext Tests:** `tests/test_provider_failover.py::test_automatic_cross_provider_failover_recovers_task`
 - **Legacy Behavior:** Automatic fallback to alternative provider when primary provider fails or rate-limits.
-- **Evidence:** classify_failure classifies rate limits, but automatic cross-provider fallback during tick is unverified in tests.
-- **Parity Gap:** Missing automated test for cross-provider automatic failover.
+- **Evidence:** Coordinator releases claims on capacity/rate-limit failure and allows immediate re-dispatch to alternate provider.
+- **Parity Gap:** None
 
 ### `PROVIDERS-009`: Distinguishes rate limit / capacity errors from code errors.
 - **Category:** Providers
@@ -380,14 +380,14 @@ Under the stricter proof rules, the initial parity audit was found to over-class
 
 ### `PROVIDERS-010`: Cross-provider independent review (e.g. Claude builds, Codex reviews).
 - **Category:** Providers
-- **Classification:** `PRESENT_NOT_VERIFIED`
+- **Classification:** `PRESENT_VERIFIED`
 - **Legacy Source Files:** `build_coordinator/runner/orchestrator.py`
 - **Legacy Tests:** `tests/test_independence.py`
 - **vNext Files:** `src/stagemesh/review.py`
-- **vNext Tests:** `NONE`
+- **vNext Tests:** `tests/test_cross_provider_review.py::test_cross_provider_independent_review_preserves_sha_and_records_identity`
 - **Legacy Behavior:** Cross-provider independent review (e.g. Claude builds, Codex reviews).
-- **Evidence:** Review adapter supports custom provider, but cross-provider review assignment is unverified in tests.
-- **Parity Gap:** Missing automated test for cross-provider review.
+- **Evidence:** Reviewer records reviewer identity and provider metadata while preserving candidate SHA.
+- **Parity Gap:** None
 
 ### `EXECUTION-001`: Subprocess invocation of worker binaries with stdin prompts.
 - **Category:** Execution
@@ -468,14 +468,14 @@ Under the stricter proof rules, the initial parity audit was found to over-class
 
 ### `EXECUTION-008`: Executes multiple builders concurrently up to capacity limit.
 - **Category:** Execution
-- **Classification:** `PRESENT_NOT_VERIFIED`
+- **Classification:** `PRESENT_VERIFIED`
 - **Legacy Source Files:** `build_coordinator/runner/worker_pool.py`
 - **Legacy Tests:** `tests/test_worker_routing.py`
-- **vNext Files:** `src/stagemesh/capacity.py, src/stagemesh/workers.py`
-- **vNext Tests:** `NONE`
+- **vNext Files:** `src/stagemesh/capacity.py, src/stagemesh/coordinator.py`
+- **vNext Tests:** `tests/test_concurrent_builders.py::test_concurrent_multi_builder_execution_capacity_two, tests/test_concurrent_builders.py::test_capacity_one_prevents_illegal_concurrent_claim`
 - **Legacy Behavior:** Executes multiple builders concurrently up to capacity limit.
-- **Evidence:** CapacityRegistry tracks slots, but concurrent multi-builder execution pool is unverified in tests.
-- **Parity Gap:** Missing automated test for concurrent multi-builder execution.
+- **Evidence:** BarrierExecutor and Store verify concurrent multi-builder execution at capacity 2 and claim queuing at capacity 1.
+- **Parity Gap:** None
 
 ### `EXECUTION-009`: Enforces provider capacity limits and defers task dispatch when slots full.
 - **Category:** Execution
@@ -831,14 +831,14 @@ Under the stricter proof rules, the initial parity audit was found to over-class
 
 ### `REMEDIATION-001`: Enforces that reviewer cannot be the same agent identity as builder.
 - **Category:** Review/remediation
-- **Classification:** `PRESENT_NOT_VERIFIED`
+- **Classification:** `PRESENT_VERIFIED`
 - **Legacy Source Files:** `build_coordinator/runner/orchestrator.py`
 - **Legacy Tests:** `tests/test_independence.py`
 - **vNext Files:** `src/stagemesh/review.py`
-- **vNext Tests:** `NONE`
+- **vNext Tests:** `tests/test_reviewer_independence.py::test_reviewer_cannot_be_implementation_worker`
 - **Legacy Behavior:** Enforces that reviewer cannot be the same agent identity as builder.
-- **Evidence:** Review module accepts reviewer identity, but reviewer-builder separation enforcement is unverified in tests.
-- **Parity Gap:** Missing automated test for strict reviewer-builder separation.
+- **Evidence:** Reviewer enforces strict worker identity separation between builder and reviewer.
+- **Parity Gap:** None
 
 ### `REMEDIATION-002`: Structured review findings recording errors and required fixes.
 - **Category:** Review/remediation
