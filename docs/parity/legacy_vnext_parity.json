@@ -2,7 +2,7 @@
   {
     "id": "LIFECYCLE-001",
     "category": "Lifecycle",
-    "capability": "Planning Stage (PLAN -> IMPLEMENT transition)",
+    "classification": "PRESENT_VERIFIED",
     "legacy_source_files": [
       "build_coordinator/runner/orchestrator.py",
       "build_coordinator/cli.py"
@@ -11,99 +11,85 @@
       "tests/test_runner.py",
       "tests/test_engine_lifecycle.py"
     ],
-    "legacy_behavior": "Advanced tasks from PLAN to IMPLEMENT stage upon dispatch.",
-    "vnext_equivalent_files": [
+    "legacy_behavior": "Advances tasks from PLAN to IMPLEMENT stage upon dispatch.",
+    "vnext_files": [
       "src/stagemesh/coordinator.py",
       "src/stagemesh/lifecycle.py"
     ],
     "vnext_tests": [
       "tests/test_canary_regression.py::test_exact_sha_preserved_through_validation_review_integration"
     ],
-    "classification": "PRESENT_VERIFIED",
     "evidence": "Coordinator.tick() advances PLAN tasks to IMPLEMENT with audit trail.",
-    "parity_gap": "None",
-    "required_implementation_task": null
+    "parity_gap": "None"
   },
   {
     "id": "LIFECYCLE-002",
     "category": "Lifecycle",
-    "capability": "Implementation Stage (IMPLEMENT execution & candidate commit creation)",
+    "classification": "PRESENT_VERIFIED",
     "legacy_source_files": [
-      "build_coordinator/execution/subprocess_executor.py",
-      "build_coordinator/runner/orchestrator.py"
+      "build_coordinator/execution/subprocess_executor.py"
     ],
     "legacy_tests": [
-      "tests/test_subprocess_executor_hardening.py",
-      "tests/test_runner.py"
+      "tests/test_subprocess_executor_hardening.py"
     ],
-    "legacy_behavior": "Executed worker process on task context and captured output files.",
-    "vnext_equivalent_files": [
+    "legacy_behavior": "Executes worker process on task context and captured output files.",
+    "vnext_files": [
       "src/stagemesh/execution.py",
-      "src/stagemesh/providers.py",
-      "src/stagemesh/coordinator.py"
+      "src/stagemesh/providers.py"
     ],
     "vnext_tests": [
       "tests/test_canary_regression.py::test_subprocess_executor_name_round_trips_through_coordinator"
     ],
-    "classification": "PRESENT_VERIFIED",
     "evidence": "SubprocessExecutor and RuntimeCommandAdapter execute implementation tasks and create candidate commits.",
-    "parity_gap": "None",
-    "required_implementation_task": null
+    "parity_gap": "None"
   },
   {
     "id": "LIFECYCLE-003",
     "category": "Lifecycle",
-    "capability": "Validation Stage (VALIDATE gate with exact candidate SHA check)",
+    "classification": "PRESENT_VERIFIED",
     "legacy_source_files": [
-      "build_coordinator/runner/validation.py",
-      "build_coordinator/runner/orchestrator.py"
+      "build_coordinator/runner/validation.py"
     ],
     "legacy_tests": [
       "tests/test_runner.py"
     ],
     "legacy_behavior": "Ran validation suite against candidate commit SHA.",
-    "vnext_equivalent_files": [
+    "vnext_files": [
       "src/stagemesh/validation.py",
       "src/stagemesh/coordinator.py"
     ],
     "vnext_tests": [
-      "tests/test_invariants.py::test_implementation_survives_validation_interruption",
-      "tests/test_canary_regression.py::test_exact_sha_preserved_through_validation_review_integration"
+      "tests/test_invariants.py::test_implementation_survives_validation_interruption"
     ],
-    "classification": "PRESENT_VERIFIED",
     "evidence": "Validator verifies candidate SHA and adds EvidenceKind.VALIDATION record.",
-    "parity_gap": "None",
-    "required_implementation_task": null
+    "parity_gap": "None"
   },
   {
     "id": "LIFECYCLE-004",
     "category": "Lifecycle",
-    "capability": "Remediation Stage (REMEDIATE rework loop when review/validation fails)",
+    "classification": "PRESENT_VERIFIED",
     "legacy_source_files": [
-      "build_coordinator/runner/findings.py",
-      "build_coordinator/runner/orchestrator.py"
+      "build_coordinator/runner/findings.py"
     ],
     "legacy_tests": [
       "tests/test_finding_reconciliation.py",
       "tests/test_review_environment_remediation.py"
     ],
     "legacy_behavior": "Logged findings and routed failed tasks back to builder for rework.",
-    "vnext_equivalent_files": [
+    "vnext_files": [
       "src/stagemesh/remediation.py",
       "src/stagemesh/review.py"
     ],
     "vnext_tests": [
       "scripts/invariants.py::remediation_findings"
     ],
-    "classification": "PRESENT_VERIFIED",
     "evidence": "RemediationPolicy and finding tracking model bounded rework cycles.",
-    "parity_gap": "None",
-    "required_implementation_task": null
+    "parity_gap": "None"
   },
   {
     "id": "LIFECYCLE-005",
     "category": "Lifecycle",
-    "capability": "Independent Review Stage (REVIEW gate with reviewer separation)",
+    "classification": "PRESENT_NOT_VERIFIED",
     "legacy_source_files": [
       "build_coordinator/runner/orchestrator.py"
     ],
@@ -111,2020 +97,1752 @@
       "tests/test_independence.py"
     ],
     "legacy_behavior": "Required separate reviewer agent before integration.",
-    "vnext_equivalent_files": [
+    "vnext_files": [
       "src/stagemesh/review.py",
       "src/stagemesh/coordinator.py"
     ],
-    "vnext_tests": [
-      "tests/test_invariants.py::test_reviewer_provider_failure_does_not_restart_implementation"
-    ],
-    "classification": "PRESENT_VERIFIED",
-    "evidence": "Reviewer executes review gate and records EvidenceKind.REVIEW.",
-    "parity_gap": "None",
-    "required_implementation_task": null
+    "vnext_tests": [],
+    "evidence": "Review gate exists in src/stagemesh/review.py, but enforcing distinct reviewer provider != builder provider is unverified in vNext tests.",
+    "parity_gap": "Missing automated test for strict reviewer-builder provider separation."
   },
   {
     "id": "LIFECYCLE-006",
     "category": "Lifecycle",
-    "capability": "Integration Stage (INTEGRATE gate merging candidate to main/target)",
+    "classification": "PRESENT_VERIFIED",
     "legacy_source_files": [
-      "build_coordinator/execution/git_integrator.py",
-      "build_coordinator/runner/orchestrator.py"
+      "build_coordinator/execution/git_integrator.py"
     ],
     "legacy_tests": [
       "tests/test_runner.py"
     ],
     "legacy_behavior": "Integrated candidate commits into target branch.",
-    "vnext_equivalent_files": [
+    "vnext_files": [
       "src/stagemesh/integration.py",
       "src/stagemesh/coordinator.py"
     ],
     "vnext_tests": [
       "tests/test_canary_regression.py::test_exact_sha_preserved_through_validation_review_integration"
     ],
-    "classification": "PRESENT_VERIFIED",
     "evidence": "Integrator records EvidenceKind.INTEGRATION and advances task to DONE.",
-    "parity_gap": "None",
-    "required_implementation_task": null
+    "parity_gap": "None"
   },
   {
     "id": "LIFECYCLE-007",
     "category": "Lifecycle",
-    "capability": "Completion Stage (DONE status, backlog cleanup, final state)",
-    "legacy_source_files": [
-      "build_coordinator/service.py",
-      "build_coordinator/cli.py"
-    ],
-    "legacy_tests": [
-      "tests/test_engine_lifecycle.py"
-    ],
-    "legacy_behavior": "Marked task DONE and cleaned up workspace resources.",
-    "vnext_equivalent_files": [
-      "src/stagemesh/coordinator.py",
-      "src/stagemesh/domain.py"
-    ],
-    "vnext_tests": [
-      "tests/test_invariants.py::test_completed_task_remains_completed_after_restart",
-      "tests/test_canary_regression.py::test_restart_after_done_is_idempotent_no_duplicate_work"
-    ],
     "classification": "PRESENT_VERIFIED",
-    "evidence": "Tasks reach Stage.DONE and TaskStatus.DONE permanently.",
-    "parity_gap": "None",
-    "required_implementation_task": null
-  },
-  {
-    "id": "OWNERSHIP-001",
-    "category": "Ownership/recovery",
-    "capability": "Exclusive Task Claims (worker claim lease acquisition & TTL)",
     "legacy_source_files": [
-      "build_coordinator/claims.py"
-    ],
-    "legacy_tests": [
-      "tests/test_runner.py"
-    ],
-    "legacy_behavior": "Acquired database claim lease with expiration TTL.",
-    "vnext_equivalent_files": [
-      "src/stagemesh/persistence.py",
-      "src/stagemesh/coordinator.py"
-    ],
-    "vnext_tests": [
-      "tests/test_canary_regression.py::test_capacity_failure_releases_claim_immediately",
-      "tests/test_canary_regression.py::test_release_claim_is_idempotent"
-    ],
-    "classification": "PRESENT_VERIFIED",
-    "evidence": "Store.acquire_claim and Store.release_claim manage worker claims.",
-    "parity_gap": "None",
-    "required_implementation_task": null
-  },
-  {
-    "id": "OWNERSHIP-002",
-    "category": "Ownership/recovery",
-    "capability": "Lease Renewal / Heartbeat (active claim heartbeat & lease extension)",
-    "legacy_source_files": [
-      "build_coordinator/claims.py",
-      "build_coordinator/cli.py"
-    ],
-    "legacy_tests": [
-      "tests/test_runner.py"
-    ],
-    "legacy_behavior": "Allowed active workers to renew claim lease.",
-    "vnext_equivalent_files": [
-      "src/stagemesh/workers.py",
-      "src/stagemesh/distributed.py"
-    ],
-    "vnext_tests": [
-      "tests/test_invariants.py"
-    ],
-    "classification": "PRESENT_VERIFIED",
-    "evidence": "heartbeat_worker and distributed packet renewal refresh worker leases.",
-    "parity_gap": "None",
-    "required_implementation_task": null
-  },
-  {
-    "id": "OWNERSHIP-003",
-    "category": "Ownership/recovery",
-    "capability": "Execution Checkpoints (structured checkpoint persistence)",
-    "legacy_source_files": [
-      "build_coordinator/events.py",
       "build_coordinator/service.py"
     ],
     "legacy_tests": [
       "tests/test_engine_lifecycle.py"
     ],
-    "legacy_behavior": "Persisted progress event JSON blobs.",
-    "vnext_equivalent_files": [
-      "src/stagemesh/persistence.py",
-      "src/stagemesh/audit.py"
-    ],
-    "vnext_tests": [
-      "scripts/invariants.py"
-    ],
-    "classification": "SUPERSEDED_EQUIVALENT",
-    "evidence": "vNext records structured execution start/finish records, candidate SHAs, and audit events.",
-    "parity_gap": "None",
-    "required_implementation_task": null
-  },
-  {
-    "id": "OWNERSHIP-004",
-    "category": "Ownership/recovery",
-    "capability": "Process Identity & Worker Identity (pid, boot_id, create_time process matching)",
-    "legacy_source_files": [
-      "build_coordinator/runner/worker_health.py",
-      "build_coordinator/execution/process_tree.py"
-    ],
-    "legacy_tests": [
-      "tests/test_process_tree.py"
-    ],
-    "legacy_behavior": "Checked process start time and host identity to prevent PID impersonation.",
-    "vnext_equivalent_files": [
-      "src/stagemesh/process_identity.py",
+    "legacy_behavior": "Marked task DONE and cleaned up workspace resources.",
+    "vnext_files": [
+      "src/stagemesh/coordinator.py",
       "src/stagemesh/domain.py"
     ],
     "vnext_tests": [
-      "tests/test_invariants.py::test_pid_reuse_cannot_impersonate_old_worker",
-      "tests/test_invariants.py::test_identity_uncertainty_fails_safely"
+      "tests/test_invariants.py::test_completed_task_remains_completed_after_restart"
     ],
-    "classification": "PRESENT_VERIFIED",
-    "evidence": "ProcessIdentity tracks pid, boot_id, create_time, and executable.",
-    "parity_gap": "None",
-    "required_implementation_task": null
+    "evidence": "Tasks reach Stage.DONE and TaskStatus.DONE permanently.",
+    "parity_gap": "None"
   },
   {
-    "id": "OWNERSHIP-005",
+    "id": "OWNERSHIP-001",
     "category": "Ownership/recovery",
-    "capability": "Stale Claim / Lease Recovery (reclaiming tasks after lease expiry)",
+    "classification": "PRESENT_VERIFIED",
     "legacy_source_files": [
-      "build_coordinator/claims.py"
+      "build_coordinator/runner/worker_pool.py"
+    ],
+    "legacy_tests": [
+      "tests/test_worker_health.py"
+    ],
+    "legacy_behavior": "Exclusive task claim acquisition with TTL.",
+    "vnext_files": [
+      "src/stagemesh/persistence.py",
+      "src/stagemesh/coordinator.py"
+    ],
+    "vnext_tests": [
+      "tests/test_canary_regression.py::test_capacity_failure_releases_claim_immediately"
+    ],
+    "evidence": "acquire_claim and release_claim in store maintain single-worker claim ownership.",
+    "parity_gap": "None"
+  },
+  {
+    "id": "OWNERSHIP-002",
+    "category": "Ownership/recovery",
+    "classification": "PRESENT_VERIFIED",
+    "legacy_source_files": [
+      "build_coordinator/runner/worker_health.py"
+    ],
+    "legacy_tests": [
+      "tests/test_worker_health.py"
+    ],
+    "legacy_behavior": "Worker heartbeat lease renewal.",
+    "vnext_files": [
+      "src/stagemesh/persistence.py"
+    ],
+    "vnext_tests": [
+      "tests/test_invariants.py::test_live_validation_survives_restart_lease_expiry"
+    ],
+    "evidence": "Store renews lease time on active executions.",
+    "parity_gap": "None"
+  },
+  {
+    "id": "OWNERSHIP-003",
+    "category": "Ownership/recovery",
+    "classification": "PRESENT_VERIFIED",
+    "legacy_source_files": [
+      "build_coordinator/runner/orchestrator.py"
     ],
     "legacy_tests": [
       "tests/test_runner.py"
     ],
-    "legacy_behavior": "Reclaimed tasks whose leases expired without worker activity.",
-    "vnext_equivalent_files": [
-      "src/stagemesh/persistence.py",
-      "src/stagemesh/scheduling.py"
+    "legacy_behavior": "Durable execution checkpoints saved to sqlite DB.",
+    "vnext_files": [
+      "src/stagemesh/persistence.py"
     ],
     "vnext_tests": [
       "tests/test_invariants.py::test_dead_worker_recovers_safely_after_lease"
     ],
-    "classification": "PRESENT_VERIFIED",
-    "evidence": "Scheduler and Store recover expired claims automatically.",
-    "parity_gap": "None",
-    "required_implementation_task": null
+    "evidence": "Executions and candidate SHAs stored durably in WAL SQLite.",
+    "parity_gap": "None"
   },
   {
-    "id": "OWNERSHIP-006",
+    "id": "OWNERSHIP-004",
     "category": "Ownership/recovery",
-    "capability": "Coordinator Restart & Recovery (recover() scanning running executions)",
+    "classification": "PRESENT_NOT_VERIFIED",
     "legacy_source_files": [
-      "build_coordinator/runner/orchestrator.py"
-    ],
-    "legacy_tests": [
-      "tests/test_self_hosting_recovery_regression.py"
-    ],
-    "legacy_behavior": "Scanned running executions on startup and verified process health.",
-    "vnext_equivalent_files": [
-      "src/stagemesh/coordinator.py"
-    ],
-    "vnext_tests": [
-      "tests/test_invariants.py::test_live_worker_survives_coordinator_restart_without_duplicate_dispatch"
-    ],
-    "classification": "PRESENT_VERIFIED",
-    "evidence": "Coordinator.recover() cleans up orphaned executions upon restart.",
-    "parity_gap": "None",
-    "required_implementation_task": null
-  },
-  {
-    "id": "OWNERSHIP-007",
-    "category": "Ownership/recovery",
-    "capability": "Process Tree Lifecycle (clean termination of worker child/grandchild processes)",
-    "legacy_source_files": [
-      "build_coordinator/execution/process_tree.py"
+      "build_coordinator/watcher/loop.py"
     ],
     "legacy_tests": [
       "tests/test_process_tree.py"
     ],
-    "legacy_behavior": "Terminated process trees cleanly when killing workers.",
-    "vnext_equivalent_files": [
+    "legacy_behavior": "Worker identity verified via PID and creation time.",
+    "vnext_files": [
       "src/stagemesh/process_identity.py"
     ],
-    "vnext_tests": [
-      "tests/test_invariants.py"
-    ],
-    "classification": "PRESENT_VERIFIED",
-    "evidence": "classify_process identifies live vs dead process trees.",
-    "parity_gap": "None",
-    "required_implementation_task": null
+    "vnext_tests": [],
+    "evidence": "process_identity.py checks PID and boot_id, but full process hierarchy inspection is unverified.",
+    "parity_gap": "Unverified process hierarchy validation."
   },
   {
-    "id": "OWNERSHIP-008",
+    "id": "OWNERSHIP-005",
     "category": "Ownership/recovery",
-    "capability": "Coordinator Loop Idempotency (repeated ticks on DONE/running tasks produce zero side effects)",
+    "classification": "PRESENT_VERIFIED",
+    "legacy_source_files": [
+      "build_coordinator/runner/steward.py"
+    ],
+    "legacy_tests": [
+      "tests/test_steward.py"
+    ],
+    "legacy_behavior": "Reclaims stale claims when lease expires.",
+    "vnext_files": [
+      "src/stagemesh/coordinator.py"
+    ],
+    "vnext_tests": [
+      "tests/test_invariants.py::test_dead_worker_recovers_safely_after_lease"
+    ],
+    "evidence": "Stale claims automatically recovered on subsequent coordinator ticks.",
+    "parity_gap": "None"
+  },
+  {
+    "id": "OWNERSHIP-006",
+    "category": "Ownership/recovery",
+    "classification": "PRESENT_VERIFIED",
     "legacy_source_files": [
       "build_coordinator/runner/orchestrator.py"
     ],
     "legacy_tests": [
       "tests/test_runner.py"
     ],
-    "legacy_behavior": "Repeated coordinator loops were safe and non-mutating on completed work.",
-    "vnext_equivalent_files": [
+    "legacy_behavior": "Resumes task execution safely from stored stage without duplicating work.",
+    "vnext_files": [
       "src/stagemesh/coordinator.py"
     ],
     "vnext_tests": [
-      "tests/test_canary_regression.py::test_restart_after_done_is_idempotent_no_duplicate_work"
+      "tests/test_invariants.py::test_completed_task_remains_completed_after_restart"
     ],
+    "evidence": "Coordinator tick resumes at current task stage.",
+    "parity_gap": "None"
+  },
+  {
+    "id": "OWNERSHIP-007",
+    "category": "Ownership/recovery",
+    "classification": "MISSING_PORT_REQUIRED",
+    "legacy_source_files": [
+      "build_coordinator/watcher/loop.py",
+      "build_coordinator/runner/subprocess_executor.py"
+    ],
+    "legacy_tests": [
+      "tests/test_process_tree.py"
+    ],
+    "legacy_behavior": "Kills entire process tree via taskkill /F /T on Windows or SIGKILL on POSIX process groups.",
+    "vnext_files": [],
+    "vnext_tests": [],
+    "evidence": "vNext lacks process-tree termination helper (taskkill /F /T or os.killpg) to kill child process trees when cancelling workers.",
+    "parity_gap": "Process-tree termination implementation and tests missing in vNext."
+  },
+  {
+    "id": "OWNERSHIP-008",
+    "category": "Ownership/recovery",
     "classification": "PRESENT_VERIFIED",
-    "evidence": "Coordinator.tick() on completed tasks returns 0 and mutates no database tables.",
-    "parity_gap": "None",
-    "required_implementation_task": null
+    "legacy_source_files": [
+      "build_coordinator/runner/orchestrator.py"
+    ],
+    "legacy_tests": [
+      "tests/test_runner.py"
+    ],
+    "legacy_behavior": "Idempotent operations prevent double-dispatch.",
+    "vnext_files": [
+      "src/stagemesh/coordinator.py"
+    ],
+    "vnext_tests": [
+      "tests/test_canary_regression.py::test_release_claim_is_idempotent"
+    ],
+    "evidence": "Claims and stage transitions operate idempotently.",
+    "parity_gap": "None"
   },
   {
     "id": "PROVIDERS-001",
     "category": "Providers",
-    "capability": "Codex CLI Provider Adapter (OpenAI CLI execution & capacity check)",
+    "classification": "PRESENT_VERIFIED",
     "legacy_source_files": [
-      "build_coordinator/agents/profiles.py"
+      "build_coordinator/runner/routing.py"
     ],
     "legacy_tests": [
       "tests/test_provider_routing_and_recovery.py"
     ],
-    "legacy_behavior": "Executed codex CLI for implementation and review tasks.",
-    "vnext_equivalent_files": [
+    "legacy_behavior": "Routes implementation tasks to OpenAI Codex agent.",
+    "vnext_files": [
       "src/stagemesh/providers.py"
     ],
     "vnext_tests": [
-      "scripts/invariants.py",
-      "scripts/live_acceptance.py"
+      "scripts/provider_acceptance.py"
     ],
-    "classification": "PRESENT_VERIFIED",
-    "evidence": "RuntimeCommandAdapter maps codex CLI command and checks binary availability.",
-    "parity_gap": "None",
-    "required_implementation_task": null
+    "evidence": "RuntimeCommandAdapter executes Codex CLI adapter.",
+    "parity_gap": "None"
   },
   {
     "id": "PROVIDERS-002",
     "category": "Providers",
-    "capability": "Claude Code CLI Provider Adapter (Anthropic Claude CLI execution & capacity check)",
+    "classification": "PRESENT_VERIFIED",
     "legacy_source_files": [
-      "build_coordinator/agents/profiles.py"
+      "build_coordinator/runner/routing.py"
     ],
     "legacy_tests": [
       "tests/test_provider_routing_and_recovery.py"
     ],
-    "legacy_behavior": "Executed claude CLI for implementation tasks.",
-    "vnext_equivalent_files": [
+    "legacy_behavior": "Routes implementation tasks to Anthropic Claude Code agent.",
+    "vnext_files": [
       "src/stagemesh/providers.py"
     ],
     "vnext_tests": [
-      "tests/test_canary_regression.py",
       "scripts/live_acceptance.py"
     ],
-    "classification": "PRESENT_VERIFIED",
-    "evidence": "RuntimeCommandAdapter handles claude CLI execution with prompt piping via stdin.",
-    "parity_gap": "None",
-    "required_implementation_task": null
+    "evidence": "Live provider acceptance executed with Claude CLI on disposable repo.",
+    "parity_gap": "None"
   },
   {
     "id": "PROVIDERS-003",
     "category": "Providers",
-    "capability": "Grok CLI Provider Adapter (xAI Grok CLI execution & capacity check)",
+    "classification": "PRESENT_NOT_VERIFIED",
     "legacy_source_files": [
-      "build_coordinator/agents/profiles.py"
+      "build_coordinator/runner/routing.py"
     ],
     "legacy_tests": [
       "tests/test_provider_routing_and_recovery.py"
     ],
-    "legacy_behavior": "Executed grok CLI for implementation tasks.",
-    "vnext_equivalent_files": [
+    "legacy_behavior": "Routes implementation tasks to xAI Grok agent.",
+    "vnext_files": [
       "src/stagemesh/providers.py"
     ],
-    "vnext_tests": [
-      "scripts/invariants.py",
-      "scripts/live_acceptance.py"
-    ],
-    "classification": "PRESENT_VERIFIED",
-    "evidence": "RuntimeCommandAdapter maps grok CLI command and checks binary availability.",
-    "parity_gap": "None",
-    "required_implementation_task": null
+    "vnext_tests": [],
+    "evidence": "approved_default_adapters() defines grok adapter, but no test or live execution proof exists for Grok in vNext.",
+    "parity_gap": "Missing automated test for Grok execution."
   },
   {
     "id": "PROVIDERS-004",
     "category": "Providers",
-    "capability": "Generic Subprocess Provider / Command Adapter (custom shell commands in config)",
+    "classification": "PRESENT_VERIFIED",
     "legacy_source_files": [
       "build_coordinator/execution/subprocess_executor.py"
     ],
     "legacy_tests": [
       "tests/test_subprocess_executor_hardening.py"
     ],
-    "legacy_behavior": "Configured arbitrary shell commands as worker executors.",
-    "vnext_equivalent_files": [
-      "src/stagemesh/execution.py",
+    "legacy_behavior": "Generic CLI agent adapter support.",
+    "vnext_files": [
       "src/stagemesh/providers.py"
     ],
     "vnext_tests": [
       "tests/test_canary_regression.py::test_subprocess_executor_pipes_prompt_to_stdin"
     ],
-    "classification": "PRESENT_VERIFIED",
-    "evidence": "SubprocessExecutor accepts command tuples and executes them in workspace.",
-    "parity_gap": "None",
-    "required_implementation_task": null
+    "evidence": "RuntimeCommandAdapter provides generic execution protocol.",
+    "parity_gap": "None"
   },
   {
     "id": "PROVIDERS-005",
     "category": "Providers",
-    "capability": "Capability-Based Provider Routing (matching provider capabilities to stage requirements)",
+    "classification": "PRESENT_VERIFIED",
     "legacy_source_files": [
       "build_coordinator/runner/routing.py"
     ],
     "legacy_tests": [
       "tests/test_worker_routing.py"
     ],
-    "legacy_behavior": "Routed tasks based on declared capabilities (code, review, validate).",
-    "vnext_equivalent_files": [
-      "src/stagemesh/routing.py",
-      "src/stagemesh/capacity.py"
+    "legacy_behavior": "Capability-based task routing.",
+    "vnext_files": [
+      "src/stagemesh/routing.py"
     ],
     "vnext_tests": [
-      "scripts/invariants.py::routing_policy_verification"
+      "tests/test_invariants.py::test_targeted_operations_do_not_mutate_unrelated_tasks"
     ],
-    "classification": "PRESENT_VERIFIED",
-    "evidence": "Router matches stage requirements to provider capabilities.",
-    "parity_gap": "None",
-    "required_implementation_task": null
+    "evidence": "Routing match selects capable adapter.",
+    "parity_gap": "None"
   },
   {
     "id": "PROVIDERS-006",
     "category": "Providers",
-    "capability": "Staged Routing Mode (routing different stages to different providers)",
+    "classification": "PRESENT_NOT_VERIFIED",
     "legacy_source_files": [
       "build_coordinator/runner/routing.py"
     ],
     "legacy_tests": [
       "tests/test_worker_routing.py"
     ],
-    "legacy_behavior": "Routed implementation to builder provider and review to reviewer provider.",
-    "vnext_equivalent_files": [
-      "src/stagemesh/routing.py",
-      "src/stagemesh/config.py"
+    "legacy_behavior": "Staged multi-agent routing (e.g. Builder -> Reviewer -> Integrator).",
+    "vnext_files": [
+      "src/stagemesh/routing.py"
     ],
-    "vnext_tests": [
-      "scripts/invariants.py"
-    ],
-    "classification": "PRESENT_VERIFIED",
-    "evidence": "RoutingMode.STAGED routes stages per configured stage_routes.",
-    "parity_gap": "None",
-    "required_implementation_task": null
+    "vnext_tests": [],
+    "evidence": "stagemesh.routing supports multi-stage matching, but multi-stage routing test is missing in vNext.",
+    "parity_gap": "Missing automated test for staged multi-agent routing."
   },
   {
     "id": "PROVIDERS-007",
     "category": "Providers",
-    "capability": "Single-Agent Routing Mode (routing all stages to a single provider)",
+    "classification": "PRESENT_VERIFIED",
     "legacy_source_files": [
       "build_coordinator/runner/routing.py"
     ],
     "legacy_tests": [
       "tests/test_worker_routing.py"
     ],
-    "legacy_behavior": "Routed all task stages to a single assigned agent profile.",
-    "vnext_equivalent_files": [
-      "src/stagemesh/routing.py",
-      "src/stagemesh/config.py"
+    "legacy_behavior": "Single-agent workflow routing.",
+    "vnext_files": [
+      "src/stagemesh/routing.py"
     ],
     "vnext_tests": [
-      "scripts/invariants.py"
+      "tests/test_canary_regression.py"
     ],
-    "classification": "PRESENT_VERIFIED",
-    "evidence": "RoutingMode.SINGLE_AGENT routes all stages to single_agent_provider.",
-    "parity_gap": "None",
-    "required_implementation_task": null
+    "evidence": "Single agent handles task lifecycle.",
+    "parity_gap": "None"
   },
   {
     "id": "PROVIDERS-008",
     "category": "Providers",
-    "capability": "Provider Failover & Cooldown (automatic fallback to secondary provider when primary is unavailable/cooldown)",
+    "classification": "PRESENT_NOT_VERIFIED",
     "legacy_source_files": [
-      "build_coordinator/runner/routing.py",
-      "build_coordinator/runner/worker_health.py"
+      "build_coordinator/runner/routing.py"
     ],
     "legacy_tests": [
-      "tests/test_worker_health.py",
       "tests/test_provider_routing_and_recovery.py"
     ],
-    "legacy_behavior": "Felled over to secondary provider when primary entered cooldown.",
-    "vnext_equivalent_files": [
-      "src/stagemesh/capacity.py",
-      "src/stagemesh/retry.py"
+    "legacy_behavior": "Automatic fallback to alternative provider when primary provider fails or rate-limits.",
+    "vnext_files": [
+      "src/stagemesh/routing.py",
+      "src/stagemesh/providers.py"
     ],
-    "vnext_tests": [
-      "scripts/invariants.py::provider_capacity_routing"
-    ],
-    "classification": "PRESENT_VERIFIED",
-    "evidence": "CapacityRegistry.choose_primary_secondary selects usable provider.",
-    "parity_gap": "None",
-    "required_implementation_task": null
+    "vnext_tests": [],
+    "evidence": "classify_failure classifies rate limits, but automatic cross-provider fallback during tick is unverified in tests.",
+    "parity_gap": "Missing automated test for cross-provider automatic failover."
   },
   {
     "id": "PROVIDERS-009",
     "category": "Providers",
-    "capability": "Provider Capacity / Quota Failure Classification (distinguishing 5 failure categories)",
+    "classification": "PRESENT_VERIFIED",
     "legacy_source_files": [
       "build_coordinator/watcher/failure_classification.py"
     ],
     "legacy_tests": [
       "tests/test_watcher_failure_classification.py"
     ],
-    "legacy_behavior": "Classified provider exit codes into capacity vs code failures.",
-    "vnext_equivalent_files": [
-      "src/stagemesh/execution.py",
-      "src/stagemesh/capacity.py"
+    "legacy_behavior": "Distinguishes rate limit / capacity errors from code errors.",
+    "vnext_files": [
+      "src/stagemesh/execution.py"
     ],
     "vnext_tests": [
       "tests/test_canary_regression.py::test_failure_classification_all_five_categories"
     ],
-    "classification": "PRESENT_VERIFIED",
-    "evidence": "classify_failure categorizes provider_unavailable, authentication_failure, quota_rate_limit, transient_provider_failure, and implementation_failure.",
-    "parity_gap": "None",
-    "required_implementation_task": null
+    "evidence": "classify_failure categorizes output into 5 distinct categories.",
+    "parity_gap": "None"
   },
   {
     "id": "PROVIDERS-010",
     "category": "Providers",
-    "capability": "Cross-Provider Replacement (resuming implementation with a replacement provider)",
+    "classification": "PRESENT_NOT_VERIFIED",
     "legacy_source_files": [
       "build_coordinator/runner/orchestrator.py"
     ],
     "legacy_tests": [
-      "tests/test_provider_routing_and_recovery.py"
-    ],
-    "legacy_behavior": "Dispatched task to alternate provider if primary failed with capacity error.",
-    "vnext_equivalent_files": [
-      "src/stagemesh/coordinator.py",
-      "src/stagemesh/persistence.py"
-    ],
-    "vnext_tests": [
-      "tests/test_canary_regression.py::test_capacity_failure_allows_immediate_re_dispatch"
-    ],
-    "classification": "PRESENT_VERIFIED",
-    "evidence": "Releasing claim on capacity failure allows immediate re-dispatch to alternate provider.",
-    "parity_gap": "None",
-    "required_implementation_task": null
-  },
-  {
-    "id": "PROVIDERS-011",
-    "category": "Providers",
-    "capability": "Cross-Provider Independent Review (enforcing different provider for review than implementation)",
-    "legacy_source_files": [
-      "build_coordinator/runner/routing.py"
-    ],
-    "legacy_tests": [
       "tests/test_independence.py"
     ],
-    "legacy_behavior": "Enforced separate provider identity for review stage.",
-    "vnext_equivalent_files": [
-      "src/stagemesh/review.py",
-      "src/stagemesh/routing.py"
+    "legacy_behavior": "Cross-provider independent review (e.g. Claude builds, Codex reviews).",
+    "vnext_files": [
+      "src/stagemesh/review.py"
     ],
-    "vnext_tests": [
-      "tests/test_invariants.py::test_reviewer_provider_failure_does_not_restart_implementation"
-    ],
-    "classification": "PRESENT_VERIFIED",
-    "evidence": "Reviewer operates independently from implementation provider.",
-    "parity_gap": "None",
-    "required_implementation_task": null
+    "vnext_tests": [],
+    "evidence": "Review adapter supports custom provider, but cross-provider review assignment is unverified in tests.",
+    "parity_gap": "Missing automated test for cross-provider review."
   },
   {
     "id": "EXECUTION-001",
     "category": "Execution",
-    "capability": "Subprocess Execution Engine (SubprocessExecutor with stdin prompt piping & stdout/stderr capture)",
+    "classification": "PRESENT_VERIFIED",
     "legacy_source_files": [
       "build_coordinator/execution/subprocess_executor.py"
     ],
     "legacy_tests": [
       "tests/test_subprocess_executor_hardening.py"
     ],
-    "legacy_behavior": "Ran CLI process with environment overrides and captured logs.",
-    "vnext_equivalent_files": [
-      "src/stagemesh/execution.py"
+    "legacy_behavior": "Subprocess invocation of worker binaries with stdin prompts.",
+    "vnext_files": [
+      "src/stagemesh/providers.py"
     ],
     "vnext_tests": [
       "tests/test_canary_regression.py::test_subprocess_executor_pipes_prompt_to_stdin"
     ],
-    "classification": "PRESENT_VERIFIED",
-    "evidence": "SubprocessExecutor runs provider processes and captures stdout/stderr/prompt.",
-    "parity_gap": "None",
-    "required_implementation_task": null
+    "evidence": "RuntimeCommandAdapter pipes prompts to stdin and captures output.",
+    "parity_gap": "None"
   },
   {
     "id": "EXECUTION-002",
     "category": "Execution",
-    "capability": "Structured Execution Results (ExecutionResult object contract)",
+    "classification": "MISSING_PORT_REQUIRED",
     "legacy_source_files": [
-      "build_coordinator/execution/results.py"
+      "build_coordinator/execution/subprocess_executor.py"
     ],
     "legacy_tests": [
       "tests/test_subprocess_executor_hardening.py"
     ],
-    "legacy_behavior": "Parsed result JSON files emitted by worker wrapper scripts.",
-    "vnext_equivalent_files": [
-      "src/stagemesh/execution.py"
-    ],
-    "vnext_tests": [
-      "tests/test_canary_regression.py::test_capacity_failure_is_distinguishable_from_code_failure"
-    ],
-    "classification": "PRESENT_VERIFIED",
-    "evidence": "ExecutionResult dataclass specifies status, candidate_sha, durable_handoff, capacity_failure, and failure_reason.",
-    "parity_gap": "None",
-    "required_implementation_task": null
+    "legacy_behavior": "Parses structured JSON execution result payloads emitted by subprocess workers.",
+    "vnext_files": [],
+    "vnext_tests": [],
+    "evidence": "vNext RuntimeCommandAdapter relies solely on stdout/stderr and raw git commits, missing structured JSON execution result ingestion.",
+    "parity_gap": "Structured JSON result ingestion protocol missing in vNext."
   },
   {
     "id": "EXECUTION-003",
     "category": "Execution",
-    "capability": "Candidate Commit Creation (GitWorkspace.commit_all producing SHA and candidate record)",
+    "classification": "PRESENT_VERIFIED",
     "legacy_source_files": [
-      "build_coordinator/execution/git_integrator.py"
+      "build_coordinator/runner/orchestrator.py"
     ],
     "legacy_tests": [
       "tests/test_runner.py"
     ],
-    "legacy_behavior": "Committed worker changes into candidate branch.",
-    "vnext_equivalent_files": [
+    "legacy_behavior": "Creates candidate Git commits representing implementation work.",
+    "vnext_files": [
       "src/stagemesh/git.py",
-      "src/stagemesh/execution.py"
+      "src/stagemesh/persistence.py"
     ],
     "vnext_tests": [
-      "tests/test_canary_regression.py::test_subprocess_executor_name_round_trips_through_coordinator"
+      "tests/test_canary_regression.py::test_exact_sha_preserved_through_validation_review_integration"
     ],
-    "classification": "PRESENT_VERIFIED",
-    "evidence": "GitWorkspace.commit_all stages and commits all changes and registers candidate SHA in store.",
-    "parity_gap": "None",
-    "required_implementation_task": null
+    "evidence": "add_candidate records commit SHA in WAL store.",
+    "parity_gap": "None"
   },
   {
     "id": "EXECUTION-004",
     "category": "Execution",
-    "capability": "Exact Candidate SHA Integrity (carrying exact candidate SHA across all stages)",
+    "classification": "PRESENT_VERIFIED",
     "legacy_source_files": [
-      "build_coordinator/runner/orchestrator.py"
+      "build_coordinator/runner/validation.py"
     ],
     "legacy_tests": [
       "tests/test_runner.py"
     ],
-    "legacy_behavior": "Ensured same SHA was tested, reviewed, and merged.",
-    "vnext_equivalent_files": [
-      "src/stagemesh/lifecycle.py",
-      "src/stagemesh/coordinator.py"
+    "legacy_behavior": "Ensures validation and review verify exact candidate commit SHA.",
+    "vnext_files": [
+      "src/stagemesh/validation.py",
+      "src/stagemesh/review.py"
     ],
     "vnext_tests": [
-      "tests/test_invariants.py::test_stale_sha_cannot_advance",
-      "tests/test_canary_regression.py::test_exact_sha_preserved_through_validation_review_integration"
+      "tests/test_invariants.py::test_stale_sha_cannot_advance"
     ],
-    "classification": "PRESENT_VERIFIED",
-    "evidence": "evidence_allows_advance throws LifecycleError if evidence_sha != candidate_sha.",
-    "parity_gap": "None",
-    "required_implementation_task": null
+    "evidence": "Validator rejects candidate if SHA does not match current target candidate.",
+    "parity_gap": "None"
   },
   {
     "id": "EXECUTION-005",
     "category": "Execution",
-    "capability": "Git Worktrees & Workspace Isolation (task-specific worktree isolation)",
+    "classification": "MISSING_PORT_REQUIRED",
     "legacy_source_files": [
-      "build_coordinator/runner/worktree.py"
+      "build_coordinator/runner/worktree.py",
+      "build_coordinator/runner/clone_pool.py"
     ],
     "legacy_tests": [
-      "tests/test_worktree_auto_provision.py"
+      "tests/test_worktree_auto_provision.py",
+      "tests/test_clone_pool.py"
     ],
-    "legacy_behavior": "Provisioned git worktrees for isolated task execution.",
-    "vnext_equivalent_files": [
-      "src/stagemesh/git.py"
-    ],
-    "vnext_tests": [
-      "scripts/invariants.py::git_workspace_operations"
-    ],
-    "classification": "PRESENT_VERIFIED",
-    "evidence": "GitWorkspace.create_worktree provisions isolated worktree directories.",
-    "parity_gap": "None",
-    "required_implementation_task": null
+    "legacy_behavior": "Auto-provisions isolated git worktrees and clone pools for concurrent worker executions.",
+    "vnext_files": [],
+    "vnext_tests": [],
+    "evidence": "vNext operates directly in project workspace path, missing git worktree pool auto-provisioning.",
+    "parity_gap": "Worktree auto-provisioning and clone pool lifecycle missing in vNext."
   },
   {
     "id": "EXECUTION-006",
     "category": "Execution",
-    "capability": "Clone Pool & Repository Isolation (repo-level isolation for workers)",
+    "classification": "PRESENT_VERIFIED",
     "legacy_source_files": [
-      "build_coordinator/runner/clone_pool.py"
+      "build_coordinator/task_context.py"
     ],
     "legacy_tests": [
-      "tests/test_clone_pool.py"
+      "tests/test_task_workspaces.py"
     ],
-    "legacy_behavior": "Maintained pool of local repository clones for workers.",
-    "vnext_equivalent_files": [
-      "src/stagemesh/git.py",
-      "src/stagemesh/security.py"
+    "legacy_behavior": "Isolates task execution working directories to prevent cross-task mutations.",
+    "vnext_files": [
+      "src/stagemesh/git.py"
     ],
     "vnext_tests": [
-      "scripts/invariants.py"
+      "tests/test_invariants.py::test_targeted_operations_do_not_mutate_unrelated_tasks"
     ],
-    "classification": "SUPERSEDED_EQUIVALENT",
-    "evidence": "vNext uses light-weight GitWorkspace boundaries & worktree creation instead of disk-heavy clone pools.",
-    "parity_gap": "None",
-    "required_implementation_task": null
+    "evidence": "Targeted operations execute in isolated workspace boundaries.",
+    "parity_gap": "None"
   },
   {
     "id": "EXECUTION-007",
     "category": "Execution",
-    "capability": "Workspace Cleanup (removing merged task branches/worktrees)",
+    "classification": "MISSING_PORT_REQUIRED",
     "legacy_source_files": [
       "build_coordinator/runner/worktree.py"
     ],
     "legacy_tests": [
       "tests/test_worktree_auto_provision.py"
     ],
-    "legacy_behavior": "Cleaned up worktrees after task integration.",
-    "vnext_equivalent_files": [
-      "src/stagemesh/git.py"
-    ],
-    "vnext_tests": [
-      "scripts/invariants.py"
-    ],
-    "classification": "PRESENT_VERIFIED",
-    "evidence": "GitWorkspace removes worktrees and task branches upon task completion.",
-    "parity_gap": "None",
-    "required_implementation_task": null
+    "legacy_behavior": "Cleans up temporary worktrees and task branches upon task completion or failure.",
+    "vnext_files": [],
+    "vnext_tests": [],
+    "evidence": "vNext lacks worktree cleanup lifecycle handling.",
+    "parity_gap": "Worktree cleanup semantics missing in vNext."
   },
   {
     "id": "EXECUTION-008",
     "category": "Execution",
-    "capability": "Concurrent Builder Execution (launching multiple task claims within capacity limit)",
+    "classification": "PRESENT_NOT_VERIFIED",
     "legacy_source_files": [
-      "build_coordinator/runner/orchestrator.py"
+      "build_coordinator/runner/worker_pool.py"
     ],
     "legacy_tests": [
-      "tests/test_runner.py"
+      "tests/test_worker_routing.py"
     ],
-    "legacy_behavior": "Dispatched multiple builder claims up to capacity concurrency limit.",
-    "vnext_equivalent_files": [
-      "src/stagemesh/coordinator.py",
-      "src/stagemesh/distributed.py"
+    "legacy_behavior": "Executes multiple builders concurrently up to capacity limit.",
+    "vnext_files": [
+      "src/stagemesh/capacity.py",
+      "src/stagemesh/workers.py"
     ],
-    "vnext_tests": [
-      "scripts/invariants.py"
-    ],
-    "classification": "PRESENT_VERIFIED",
-    "evidence": "Coordinator.tick() and WorkQueue handle concurrent eligible task claims.",
-    "parity_gap": "None",
-    "required_implementation_task": null
+    "vnext_tests": [],
+    "evidence": "CapacityRegistry tracks slots, but concurrent multi-builder execution pool is unverified in tests.",
+    "parity_gap": "Missing automated test for concurrent multi-builder execution."
   },
   {
     "id": "EXECUTION-009",
     "category": "Execution",
-    "capability": "Capacity Enforcement (throttling worker dispatch based on global/project capacity limit)",
+    "classification": "PRESENT_VERIFIED",
     "legacy_source_files": [
-      "build_coordinator/runner/scheduling.py"
+      "build_coordinator/runner/worker_pool.py"
     ],
     "legacy_tests": [
-      "tests/test_runner.py"
+      "tests/test_worker_health.py"
     ],
-    "legacy_behavior": "Enforced maximum concurrent worker capacity.",
-    "vnext_equivalent_files": [
-      "src/stagemesh/capacity.py",
-      "src/stagemesh/scheduling.py"
+    "legacy_behavior": "Enforces provider capacity limits and defers task dispatch when slots full.",
+    "vnext_files": [
+      "src/stagemesh/capacity.py"
     ],
     "vnext_tests": [
-      "scripts/invariants.py"
+      "tests/test_canary_regression.py::test_capacity_failure_releases_claim_immediately"
     ],
-    "classification": "PRESENT_VERIFIED",
-    "evidence": "Scheduler.decision verifies capacity constraints before task eligibility.",
-    "parity_gap": "None",
-    "required_implementation_task": null
+    "evidence": "Capacity limit check defers dispatch and immediately releases claim on capacity exhaustion.",
+    "parity_gap": "None"
   },
   {
     "id": "SOURCES-001",
     "category": "Task sources",
-    "capability": "Local Backlog Source (backlog.json / task file discovery)",
-    "legacy_source_files": [
-      "build_coordinator/project/backlog.py"
-    ],
-    "legacy_tests": [
-      "tests/test_project_backlog.py"
-    ],
-    "legacy_behavior": "Discovered tasks from local backlog.json file.",
-    "vnext_equivalent_files": [
-      "src/stagemesh/task_sources.py"
-    ],
-    "vnext_tests": [
-      "scripts/invariants.py::local_backlog_discovery"
-    ],
     "classification": "PRESENT_VERIFIED",
-    "evidence": "LocalBacklogSource reads backlog.json and returns DiscoveredTask list.",
-    "parity_gap": "None",
-    "required_implementation_task": null
-  },
-  {
-    "id": "SOURCES-002",
-    "category": "Task sources",
-    "capability": "GitHub Issue Source (GitHubApiIssueSource / REST issue discovery)",
-    "legacy_source_files": [
-      "build_coordinator/task_source/github.py"
-    ],
-    "legacy_tests": [
-      "tests/test_github_task_source_activation.py",
-      "tests/test_task_source.py"
-    ],
-    "legacy_behavior": "Discovered open GitHub issues using GitHub API.",
-    "vnext_equivalent_files": [
-      "src/stagemesh/task_sources.py",
-      "src/stagemesh/github.py"
-    ],
-    "vnext_tests": [
-      "tests/test_invariants.py::test_source_sync_distinguishes_empty_unknown_and_deferred"
-    ],
-    "classification": "PRESENT_VERIFIED",
-    "evidence": "GitHubIssueSource and GitHubApiIssueSource discover remote GitHub issues.",
-    "parity_gap": "None",
-    "required_implementation_task": null
-  },
-  {
-    "id": "SOURCES-003",
-    "category": "Task sources",
-    "capability": "Azure DevOps Task Source (Azure DevOps work item discovery)",
-    "legacy_source_files": [
-      "build_coordinator/task_source/azure_devops.py"
-    ],
-    "legacy_tests": [
-      "tests/test_azure_devops_task_source.py"
-    ],
-    "legacy_behavior": "Polled Azure DevOps work item queries for task discovery.",
-    "vnext_equivalent_files": [
-      "src/stagemesh/task_sources.py"
-    ],
-    "vnext_tests": [
-      "scripts/invariants.py"
-    ],
-    "classification": "SUPERSEDED_EQUIVALENT",
-    "evidence": "vNext uses generic TaskSource protocol adapters which easily support Azure DevOps endpoints without legacy-specific SDK locks.",
-    "parity_gap": "None",
-    "required_implementation_task": null
-  },
-  {
-    "id": "SOURCES-004",
-    "category": "Task sources",
-    "capability": "Task Source Discovery Protocol (TaskSource protocol)",
     "legacy_source_files": [
       "build_coordinator/task_source/base.py"
     ],
     "legacy_tests": [
       "tests/test_task_source.py"
     ],
-    "legacy_behavior": "Abstract base class defining discover() contract.",
-    "vnext_equivalent_files": [
+    "legacy_behavior": "Discovers and ingests tasks from local directory backlog.",
+    "vnext_files": [
       "src/stagemesh/task_sources.py"
     ],
     "vnext_tests": [
-      "scripts/invariants.py"
+      "scripts/acceptance.py"
     ],
-    "classification": "PRESENT_VERIFIED",
-    "evidence": "DiscoveredTask dataclass defines generic task source items.",
-    "parity_gap": "None",
-    "required_implementation_task": null
+    "evidence": "LocalTaskSource reads backlog directory and imports tasks.",
+    "parity_gap": "None"
   },
   {
-    "id": "SOURCES-005",
+    "id": "SOURCES-002",
     "category": "Task sources",
-    "capability": "Lifecycle Labels & Deferred Tasks (stagemesh:deferred, stagemesh:blocked, etc.)",
+    "classification": "PRESENT_VERIFIED",
+    "legacy_source_files": [
+      "build_coordinator/task_source/github.py"
+    ],
+    "legacy_tests": [
+      "tests/test_github_task_source_activation.py"
+    ],
+    "legacy_behavior": "Discovers and ingests tasks from GitHub repo issues.",
+    "vnext_files": [
+      "src/stagemesh/task_sources.py",
+      "src/stagemesh/github.py"
+    ],
+    "vnext_tests": [
+      "scripts/github_acceptance.py"
+    ],
+    "evidence": "GitHubTaskSource imports issues and synchronizes state.",
+    "parity_gap": "None"
+  },
+  {
+    "id": "SOURCES-003",
+    "category": "Task sources",
+    "classification": "MISSING_PORT_REQUIRED",
+    "legacy_source_files": [
+      "build_coordinator/task_source/azure_devops.py"
+    ],
+    "legacy_tests": [
+      "tests/test_azure_devops_task_source.py"
+    ],
+    "legacy_behavior": "Discovers and ingests work items from Azure DevOps boards/backlogs.",
+    "vnext_files": [],
+    "vnext_tests": [],
+    "evidence": "Azure DevOps task source is completely absent from src/stagemesh/task_sources.py.",
+    "parity_gap": "AzureDevOpsTaskSource missing in vNext."
+  },
+  {
+    "id": "SOURCES-004",
+    "category": "Task sources",
+    "classification": "MISSING_PORT_REQUIRED",
     "legacy_source_files": [
       "build_coordinator/watcher/labels.py"
     ],
     "legacy_tests": [
+      "tests/test_github_label_provisioning.py",
       "tests/test_watcher_labels.py"
     ],
-    "legacy_behavior": "Filtered tasks carrying deferred/blocked labels.",
-    "vnext_equivalent_files": [
+    "legacy_behavior": "Provisions GitHub lifecycle labels (stagemesh:claimed, stagemesh:validating, etc.) and transitions issue labels.",
+    "vnext_files": [],
+    "vnext_tests": [],
+    "evidence": "GitHub label setup and automated label state machine transitions missing in vNext.",
+    "parity_gap": "Lifecycle label provisioning and state machine transitions missing in vNext."
+  },
+  {
+    "id": "SOURCES-005",
+    "category": "Task sources",
+    "classification": "PRESENT_VERIFIED",
+    "legacy_source_files": [
+      "build_coordinator/task_source/base.py"
+    ],
+    "legacy_tests": [
+      "tests/test_task_source.py"
+    ],
+    "legacy_behavior": "Synchronizes state from external task source into internal store.",
+    "vnext_files": [
       "src/stagemesh/task_sources.py"
     ],
     "vnext_tests": [
       "tests/test_invariants.py::test_source_sync_distinguishes_empty_unknown_and_deferred"
     ],
-    "classification": "PRESENT_VERIFIED",
-    "evidence": "DiscoveredTask sets eligible=False when stagemesh:deferred label is present.",
-    "parity_gap": "None",
-    "required_implementation_task": null
+    "evidence": "sync_inbound fetches external state and creates tasks.",
+    "parity_gap": "None"
   },
   {
     "id": "SOURCES-006",
     "category": "Task sources",
-    "capability": "Inbound Task Synchronization (sync_source upserting discovered tasks into store)",
-    "legacy_source_files": [
-      "build_coordinator/github/ingestion.py"
-    ],
-    "legacy_tests": [
-      "tests/test_github_task_source_activation.py"
-    ],
-    "legacy_behavior": "Ingested discovered tasks into local database.",
-    "vnext_equivalent_files": [
-      "src/stagemesh/task_sources.py"
-    ],
-    "vnext_tests": [
-      "scripts/invariants.py"
-    ],
     "classification": "PRESENT_VERIFIED",
-    "evidence": "sync_source upserts discovered tasks and records source cache.",
-    "parity_gap": "None",
-    "required_implementation_task": null
-  },
-  {
-    "id": "SOURCES-007",
-    "category": "Task sources",
-    "capability": "Outbound Task Synchronization (GitHubOutboundSync commenting & closing resolved issues)",
     "legacy_source_files": [
-      "build_coordinator/github/sync.py"
+      "build_coordinator/task_source/github.py"
     ],
     "legacy_tests": [
       "tests/test_github_outbound_sync.py"
     ],
-    "legacy_behavior": "Commented candidate SHA and closed resolved GitHub issues.",
-    "vnext_equivalent_files": [
+    "legacy_behavior": "Synchronizes task completion / candidate SHAs back to external task source.",
+    "vnext_files": [
       "src/stagemesh/task_sources.py"
     ],
     "vnext_tests": [
-      "scripts/invariants.py"
+      "scripts/github_acceptance.py"
     ],
-    "classification": "PRESENT_VERIFIED",
-    "evidence": "GitHubOutboundSync.publish_done posts candidate SHA comment and closes issue (verified live against saketvishal/sm-disposable-canary issue #1).",
-    "parity_gap": "None",
-    "required_implementation_task": null
+    "evidence": "sync_outbound comments candidate SHA and closes GitHub issue.",
+    "parity_gap": "None"
   },
   {
-    "id": "SOURCES-008",
+    "id": "SOURCES-007",
     "category": "Task sources",
-    "capability": "Source Reconciliation & State Tracking (tracking state, retry backoff, and state changes)",
-    "legacy_source_files": [
-      "build_coordinator/github/controller.py"
-    ],
-    "legacy_tests": [
-      "tests/test_gh87_completion_sync_regression.py"
-    ],
-    "legacy_behavior": "Reconciled local store task state with external source state.",
-    "vnext_equivalent_files": [
-      "src/stagemesh/persistence.py",
-      "src/stagemesh/retry.py"
-    ],
-    "vnext_tests": [
-      "scripts/invariants.py"
-    ],
     "classification": "PRESENT_VERIFIED",
-    "evidence": "Store.cache_source and Store.source_events record source reconciliation state.",
-    "parity_gap": "None",
-    "required_implementation_task": null
-  },
-  {
-    "id": "SOURCES-009",
-    "category": "Task sources",
-    "capability": "API Rate Limit Classification & Retry Backoff (exponential backoff & rate-limit handling)",
     "legacy_source_files": [
-      "build_coordinator/github/client.py"
+      "build_coordinator/runner/orchestrator.py"
     ],
     "legacy_tests": [
-      "tests/test_github_sqlite_busy_retry.py"
+      "tests/test_task_source.py"
     ],
-    "legacy_behavior": "Parsed Retry-After headers and applied exponential backoff.",
-    "vnext_equivalent_files": [
-      "src/stagemesh/github.py",
-      "src/stagemesh/retry.py"
-    ],
-    "vnext_tests": [
-      "scripts/invariants.py"
-    ],
-    "classification": "PRESENT_VERIFIED",
-    "evidence": "parse_retry_after and RetryRegistry calculate backoff duration on 429/403 responses.",
-    "parity_gap": "None",
-    "required_implementation_task": null
-  },
-  {
-    "id": "SOURCES-010",
-    "category": "Task sources",
-    "capability": "Deferred / Stale / Closed State Handling (filtering non-eligible/closed tasks)",
-    "legacy_source_files": [
-      "build_coordinator/github/ingestion.py"
-    ],
-    "legacy_tests": [
-      "tests/test_github_task_source_activation.py"
-    ],
-    "legacy_behavior": "Skipped closed or stale issues from task discovery.",
-    "vnext_equivalent_files": [
+    "legacy_behavior": "Reconciles task state between local database and remote source.",
+    "vnext_files": [
       "src/stagemesh/task_sources.py"
     ],
     "vnext_tests": [
       "tests/test_invariants.py::test_source_sync_distinguishes_empty_unknown_and_deferred"
     ],
+    "evidence": "reconcile_sources updates internal task status.",
+    "parity_gap": "None"
+  },
+  {
+    "id": "SOURCES-008",
+    "category": "Task sources",
     "classification": "PRESENT_VERIFIED",
-    "evidence": "DiscoveredTask filters out closed and deferred tasks during discovery.",
-    "parity_gap": "None",
-    "required_implementation_task": null
+    "legacy_source_files": [
+      "build_coordinator/task_source/github.py"
+    ],
+    "legacy_tests": [
+      "tests/test_github_outbound_sync.py"
+    ],
+    "legacy_behavior": "Handles rate limits, closed state, and deferred tasks cleanly.",
+    "vnext_files": [
+      "src/stagemesh/task_sources.py"
+    ],
+    "vnext_tests": [
+      "tests/test_invariants.py::test_source_sync_distinguishes_empty_unknown_and_deferred"
+    ],
+    "evidence": "SourceSyncResult distinguishes deferred and unknown source tasks.",
+    "parity_gap": "None"
   },
   {
     "id": "OBJECTIVES-001",
     "category": "Objectives/planning",
-    "capability": "Objective Creation & Goal Decomposition (ObjectivePlanner decomposing high-level goal into tasks)",
+    "classification": "PRESENT_VERIFIED",
     "legacy_source_files": [
-      "build_coordinator/objectives.py",
-      "build_coordinator/planner.py"
+      "build_coordinator/cli.py"
     ],
     "legacy_tests": [
-      "tests/test_objective_planner.py"
+      "tests/test_objective_lifecycle.py"
     ],
-    "legacy_behavior": "Decomposed natural language objective into structured task DAG.",
-    "vnext_equivalent_files": [
+    "legacy_behavior": "Creates high-level objectives from specification files or CLI.",
+    "vnext_files": [
       "src/stagemesh/objectives.py"
     ],
     "vnext_tests": [
-      "scripts/invariants.py::objective_planner_decomposition"
+      "scripts/acceptance.py"
     ],
-    "classification": "PRESENT_VERIFIED",
-    "evidence": "ObjectivePlanner decomposes high-level goals into DAG tasks.",
-    "parity_gap": "None",
-    "required_implementation_task": null
+    "evidence": "create_objective creates objective and child tasks.",
+    "parity_gap": "None"
   },
   {
     "id": "OBJECTIVES-002",
     "category": "Objectives/planning",
-    "capability": "Objective DAG & Task Dependency Management (task dependency graph scheduling)",
+    "classification": "PRESENT_VERIFIED",
     "legacy_source_files": [
-      "build_coordinator/objectives.py"
+      "build_coordinator/prompts/builders.py"
     ],
     "legacy_tests": [
       "tests/test_objective_dag_scheduler.py"
     ],
-    "legacy_behavior": "Scheduled task execution honoring parent dependency ordering.",
-    "vnext_equivalent_files": [
-      "src/stagemesh/objectives.py",
-      "src/stagemesh/scheduling.py"
+    "legacy_behavior": "Decomposes objective into DAG of dependent tasks.",
+    "vnext_files": [
+      "src/stagemesh/objectives.py"
     ],
     "vnext_tests": [
-      "scripts/invariants.py"
+      "scripts/acceptance.py"
     ],
-    "classification": "PRESENT_VERIFIED",
-    "evidence": "Scheduler verifies task dependencies before marking tasks eligible.",
-    "parity_gap": "None",
-    "required_implementation_task": null
+    "evidence": "Objective DAG scheduler manages prerequisite dependencies.",
+    "parity_gap": "None"
   },
   {
     "id": "OBJECTIVES-003",
     "category": "Objectives/planning",
-    "capability": "Planner Agent Validation (validating planner outputs against safety schemas)",
+    "classification": "PRESENT_NOT_VERIFIED",
     "legacy_source_files": [
-      "build_coordinator/planner.py"
+      "build_coordinator/prompts/builders.py"
     ],
     "legacy_tests": [
       "tests/test_objective_planner.py"
     ],
-    "legacy_behavior": "Validated LLM planner JSON output against schema contract.",
-    "vnext_equivalent_files": [
+    "legacy_behavior": "Validates planner output against contract schema.",
+    "vnext_files": [
       "src/stagemesh/objectives.py"
     ],
-    "vnext_tests": [
-      "scripts/invariants.py"
-    ],
-    "classification": "PRESENT_VERIFIED",
-    "evidence": "ObjectivePlanner validates generated task payloads prior to storage.",
-    "parity_gap": "None",
-    "required_implementation_task": null
+    "vnext_tests": [],
+    "evidence": "Planner contract validation exists in objectives.py, but malformed planner output retry tests are missing in vNext.",
+    "parity_gap": "Missing automated test for planner contract validation and retries."
   },
   {
     "id": "OBJECTIVES-004",
     "category": "Objectives/planning",
-    "capability": "Autonomous Objective Lifecycle Execution (running complete objective to completion)",
+    "classification": "PRESENT_VERIFIED",
     "legacy_source_files": [
-      "build_coordinator/objectives.py"
+      "build_coordinator/cli.py"
     ],
     "legacy_tests": [
       "tests/test_objective_runner_integration.py"
     ],
-    "legacy_behavior": "Executed all tasks in an objective DAG autonomously until objective completed.",
-    "vnext_equivalent_files": [
+    "legacy_behavior": "Autonomous execution of objective DAG tasks in topological order.",
+    "vnext_files": [
       "src/stagemesh/objectives.py",
       "src/stagemesh/coordinator.py"
     ],
     "vnext_tests": [
-      "scripts/invariants.py"
+      "scripts/acceptance.py"
     ],
-    "classification": "PRESENT_VERIFIED",
-    "evidence": "ObjectivePlanner and Coordinator execute complete objective DAGs.",
-    "parity_gap": "None",
-    "required_implementation_task": null
+    "evidence": "Coordinator executes ready objective tasks in dependency order.",
+    "parity_gap": "None"
+  },
+  {
+    "id": "OBJECTIVES-005",
+    "category": "Objectives/planning",
+    "classification": "PRESENT_NOT_VERIFIED",
+    "legacy_source_files": [
+      "build_coordinator/prompts/builders.py"
+    ],
+    "legacy_tests": [
+      "tests/test_objective_planner.py"
+    ],
+    "legacy_behavior": "Planner wrapper envelope normalization and retry suppression.",
+    "vnext_files": [
+      "src/stagemesh/objectives.py"
+    ],
+    "vnext_tests": [],
+    "evidence": "Envelope normalization present in code, but planner retry suppression tests are unverified in vNext.",
+    "parity_gap": "Missing automated test for planner wrapper retries."
+  },
+  {
+    "id": "OBJECTIVES-006",
+    "category": "Objectives/planning",
+    "classification": "PRESENT_NOT_VERIFIED",
+    "legacy_source_files": [
+      "build_coordinator/cli.py"
+    ],
+    "legacy_tests": [
+      "tests/test_objective_cli_location_independence.py"
+    ],
+    "legacy_behavior": "Runs objective commands from any working directory.",
+    "vnext_files": [
+      "src/stagemesh/cli.py"
+    ],
+    "vnext_tests": [],
+    "evidence": "CLI supports --project flag, but objective location independence test is missing in vNext.",
+    "parity_gap": "Missing automated test for location-independent objective execution."
   },
   {
     "id": "PROJECTS-001",
     "category": "Projects",
-    "capability": "Project Initialization (stagemesh init creating .stagemesh runtime)",
-    "legacy_source_files": [
-      "build_coordinator/project/onboarding.py",
-      "build_coordinator/project/definition.py"
-    ],
-    "legacy_tests": [
-      "tests/test_global_and_onboarding.py"
-    ],
-    "legacy_behavior": "Created .stagemesh directory and sqlite database.",
-    "vnext_equivalent_files": [
-      "src/stagemesh/cli.py"
-    ],
-    "vnext_tests": [
-      "scripts/invariants.py"
-    ],
     "classification": "PRESENT_VERIFIED",
-    "evidence": "command_init initializes .stagemesh directory and migrates store schema.",
-    "parity_gap": "None",
-    "required_implementation_task": null
-  },
-  {
-    "id": "PROJECTS-002",
-    "category": "Projects",
-    "capability": "Project Definition & Configuration (stagemesh.config.json loading)",
-    "legacy_source_files": [
-      "build_coordinator/project/definition.py"
-    ],
-    "legacy_tests": [
-      "tests/test_global_and_onboarding.py"
-    ],
-    "legacy_behavior": "Loaded project configuration from .stagemesh/config.json or project.yaml.",
-    "vnext_equivalent_files": [
-      "src/stagemesh/config.py"
-    ],
-    "vnext_tests": [
-      "scripts/invariants.py"
-    ],
-    "classification": "PRESENT_VERIFIED",
-    "evidence": "load_config loads project JSON config and environment variable overrides.",
-    "parity_gap": "None",
-    "required_implementation_task": null
-  },
-  {
-    "id": "PROJECTS-003",
-    "category": "Projects",
-    "capability": "Global Project Registry (GlobalRegistry tracking registered projects)",
-    "legacy_source_files": [
-      "build_coordinator/project/runtime.py"
-    ],
-    "legacy_tests": [
-      "tests/test_global_and_onboarding.py"
-    ],
-    "legacy_behavior": "Registered projects in global registry database.",
-    "vnext_equivalent_files": [
-      "src/stagemesh/registry.py"
-    ],
-    "vnext_tests": [
-      "scripts/invariants.py::global_registry_registration"
-    ],
-    "classification": "PRESENT_VERIFIED",
-    "evidence": "GlobalRegistry stores ProjectRegistration records.",
-    "parity_gap": "None",
-    "required_implementation_task": null
-  },
-  {
-    "id": "PROJECTS-004",
-    "category": "Projects",
-    "capability": "Run-from-Project CLI Execution (stagemesh continue inside a project)",
-    "legacy_source_files": [
-      "build_coordinator/project/commands.py"
-    ],
-    "legacy_tests": [
-      "tests/test_project_backlog.py"
-    ],
-    "legacy_behavior": "Executed coordinator loop for current working directory project.",
-    "vnext_equivalent_files": [
-      "src/stagemesh/cli.py"
-    ],
-    "vnext_tests": [
-      "tests/test_canary_regression.py::test_cli_continue_dry_run_uses_fake_executor"
-    ],
-    "classification": "PRESENT_VERIFIED",
-    "evidence": "command_continue executes tick loop on local project store.",
-    "parity_gap": "None",
-    "required_implementation_task": null
-  },
-  {
-    "id": "PROJECTS-005",
-    "category": "Projects",
-    "capability": "Run-from-Anywhere Location Independence (stagemesh continue outside project targeting registered backlogs)",
-    "legacy_source_files": [
-      "build_coordinator/project/commands.py"
-    ],
-    "legacy_tests": [
-      "tests/test_operator_location_independence.py"
-    ],
-    "legacy_behavior": "Coordinated all registered project backlogs when run outside any project directory.",
-    "vnext_equivalent_files": [
-      "src/stagemesh/cli.py",
-      "src/stagemesh/registry.py"
-    ],
-    "vnext_tests": [
-      "scripts/invariants.py"
-    ],
-    "classification": "PRESENT_VERIFIED",
-    "evidence": "GlobalRegistry allows running coordinator commands from arbitrary directories.",
-    "parity_gap": "None",
-    "required_implementation_task": null
-  },
-  {
-    "id": "PROJECTS-006",
-    "category": "Projects",
-    "capability": "Multi-Project Coordination (coordinating backlogs across multiple projects)",
-    "legacy_source_files": [
-      "build_coordinator/project/commands.py"
-    ],
-    "legacy_tests": [
-      "tests/test_project_backlog.py"
-    ],
-    "legacy_behavior": "Iterated registered projects and allocated builder concurrency across backlogs.",
-    "vnext_equivalent_files": [
-      "src/stagemesh/cli.py",
-      "src/stagemesh/coordinator.py"
-    ],
-    "vnext_tests": [
-      "scripts/invariants.py"
-    ],
-    "classification": "PRESENT_VERIFIED",
-    "evidence": "GlobalRegistry and Coordinator coordinate multiple registered projects.",
-    "parity_gap": "None",
-    "required_implementation_task": null
-  },
-  {
-    "id": "PROJECTS-007",
-    "category": "Projects",
-    "capability": "Project Concurrency & Capacity Budgeting (fair distribution of builder capacity across projects)",
-    "legacy_source_files": [
-      "build_coordinator/project/commands.py"
-    ],
-    "legacy_tests": [
-      "tests/test_project_backlog.py"
-    ],
-    "legacy_behavior": "Batched builder capacity fairly across projects.",
-    "vnext_equivalent_files": [
-      "src/stagemesh/capacity.py",
-      "src/stagemesh/scheduling.py"
-    ],
-    "vnext_tests": [
-      "scripts/invariants.py"
-    ],
-    "classification": "PRESENT_VERIFIED",
-    "evidence": "CapacityRegistry and Scheduler enforce capacity limits across tasks.",
-    "parity_gap": "None",
-    "required_implementation_task": null
-  },
-  {
-    "id": "PROJECTS-008",
-    "category": "Projects",
-    "capability": "Onboarding Diagnostics & Doctor (stagemesh doctor environment check)",
-    "legacy_source_files": [
-      "build_coordinator/project/doctor.py"
-    ],
-    "legacy_tests": [
-      "tests/test_global_and_onboarding.py"
-    ],
-    "legacy_behavior": "Checked Python interpreter, database URL, and backend health.",
-    "vnext_equivalent_files": [
-      "src/stagemesh/cli.py"
-    ],
-    "vnext_tests": [
-      "scripts/invariants.py"
-    ],
-    "classification": "PRESENT_VERIFIED",
-    "evidence": "command_doctor returns structured JSON health diagnostic.",
-    "parity_gap": "None",
-    "required_implementation_task": null
-  },
-  {
-    "id": "PERSISTENCE-001",
-    "category": "Persistence",
-    "capability": "SQLite Store Implementation (Store with WAL mode & busy timeout)",
-    "legacy_source_files": [
-      "build_coordinator/db.py"
-    ],
-    "legacy_tests": [
-      "tests/test_database_lifecycle.py"
-    ],
-    "legacy_behavior": "Persisted tasks, claims, candidates, evidence, executions in SQLite.",
-    "vnext_equivalent_files": [
-      "src/stagemesh/persistence.py"
-    ],
-    "vnext_tests": [
-      "scripts/invariants.py"
-    ],
-    "classification": "PRESENT_VERIFIED",
-    "evidence": "Store implements SQLite schema with PRAGMA journal_mode=WAL and busy_timeout=5000.",
-    "parity_gap": "None",
-    "required_implementation_task": null
-  },
-  {
-    "id": "PERSISTENCE-002",
-    "category": "Persistence",
-    "capability": "PostgreSQL Store Implementation (PostgresStore backend support)",
-    "legacy_source_files": [
-      "build_coordinator/db.py"
-    ],
-    "legacy_tests": [
-      "tests/test_database_lifecycle.py"
-    ],
-    "legacy_behavior": "Supported PostgreSQL database backend connection.",
-    "vnext_equivalent_files": [
-      "src/stagemesh/postgres_store.py"
-    ],
-    "vnext_tests": [
-      "scripts/invariants.py::postgres_store_contract"
-    ],
-    "classification": "PRESENT_VERIFIED",
-    "evidence": "PostgresStore validates schema contract and executes PostgreSQL statements.",
-    "parity_gap": "None",
-    "required_implementation_task": null
-  },
-  {
-    "id": "PERSISTENCE-003",
-    "category": "Persistence",
-    "capability": "Database Schema & Migration Wave Engine (migrate() version tracking)",
-    "legacy_source_files": [
-      "build_coordinator/project/state_migration.py"
-    ],
-    "legacy_tests": [
-      "tests/test_p0_migration_wave.py"
-    ],
-    "legacy_behavior": "Migrated database schema through ordered migration waves.",
-    "vnext_equivalent_files": [
-      "src/stagemesh/migrations.py",
-      "src/stagemesh/persistence.py"
-    ],
-    "vnext_tests": [
-      "scripts/invariants.py"
-    ],
-    "classification": "PRESENT_VERIFIED",
-    "evidence": "Store.migrate() applies schema migrations up to current version.",
-    "parity_gap": "None",
-    "required_implementation_task": null
-  },
-  {
-    "id": "PERSISTENCE-004",
-    "category": "Persistence",
-    "capability": "State Durability & Retry Resilience (retrying transient SQLite locks/busy states)",
-    "legacy_source_files": [
-      "build_coordinator/db.py"
-    ],
-    "legacy_tests": [
-      "tests/test_sqlite_retry.py"
-    ],
-    "legacy_behavior": "Retried transient SQLite locked/busy exceptions.",
-    "vnext_equivalent_files": [
-      "src/stagemesh/persistence.py",
-      "src/stagemesh/retry.py"
-    ],
-    "vnext_tests": [
-      "scripts/invariants.py"
-    ],
-    "classification": "PRESENT_VERIFIED",
-    "evidence": "Store configures busy_timeout=5000 and RetryRegistry handles retries.",
-    "parity_gap": "None",
-    "required_implementation_task": null
-  },
-  {
-    "id": "CI-001",
-    "category": "CI/validation",
-    "capability": "Deterministic Validation Gate (Validator executing project validation commands)",
-    "legacy_source_files": [
-      "build_coordinator/runner/validation.py"
-    ],
-    "legacy_tests": [
-      "tests/test_runner.py"
-    ],
-    "legacy_behavior": "Executed project validation command before review.",
-    "vnext_equivalent_files": [
-      "src/stagemesh/validation.py"
-    ],
-    "vnext_tests": [
-      "tests/test_invariants.py::test_failed_validation_cannot_advance"
-    ],
-    "classification": "PRESENT_VERIFIED",
-    "evidence": "Validator executes validation checks and records EvidenceKind.VALIDATION.",
-    "parity_gap": "None",
-    "required_implementation_task": null
-  },
-  {
-    "id": "CI-002",
-    "category": "CI/validation",
-    "capability": "Affected Test Selection (running tests targeted to modified files)",
-    "legacy_source_files": [
-      "build_coordinator/runner/validation.py"
-    ],
-    "legacy_tests": [
-      "tests/test_runner.py"
-    ],
-    "legacy_behavior": "Filtered tests to run based on modified file paths.",
-    "vnext_equivalent_files": [
-      "src/stagemesh/validation.py"
-    ],
-    "vnext_tests": [
-      "scripts/invariants.py"
-    ],
-    "classification": "SUPERSEDED_EQUIVALENT",
-    "evidence": "vNext validates exact candidate SHA against explicit project acceptance gates rather than relying on heuristic test-file filtering.",
-    "parity_gap": "None",
-    "required_implementation_task": null
-  },
-  {
-    "id": "CI-003",
-    "category": "CI/validation",
-    "capability": "CI Wait & Reconciliation Loop (ci_wait / waiting on external CI builds)",
-    "legacy_source_files": [
-      "build_coordinator/runner/ci_reconciliation.py"
-    ],
-    "legacy_tests": [
-      "tests/test_ci_reconciliation.py"
-    ],
-    "legacy_behavior": "Waited for external CI pipeline results.",
-    "vnext_equivalent_files": [
-      "src/stagemesh/ci_wait.py",
-      "src/stagemesh/ci.py"
-    ],
-    "vnext_tests": [
-      "scripts/invariants.py"
-    ],
-    "classification": "PRESENT_VERIFIED",
-    "evidence": "decide_ci_wait evaluates external CI status and wait timeouts.",
-    "parity_gap": "None",
-    "required_implementation_task": null
-  },
-  {
-    "id": "CI-004",
-    "category": "CI/validation",
-    "capability": "Hosted CI Evidence Recording (recording external CI check status into store)",
-    "legacy_source_files": [
-      "build_coordinator/runner/ci_reconciliation.py"
-    ],
-    "legacy_tests": [
-      "tests/test_ci_reconciliation.py"
-    ],
-    "legacy_behavior": "Recorded external CI evidence into database.",
-    "vnext_equivalent_files": [
-      "src/stagemesh/external_evidence.py"
-    ],
-    "vnext_tests": [
-      "scripts/invariants.py::external_evidence_recording"
-    ],
-    "classification": "PRESENT_VERIFIED",
-    "evidence": "record_external_evidence writes external CI evidence records to store.",
-    "parity_gap": "None",
-    "required_implementation_task": null
-  },
-  {
-    "id": "REVIEW-001",
-    "category": "Review/remediation",
-    "capability": "Independent Reviewer Separation (Reviewer enforcing author != reviewer)",
-    "legacy_source_files": [
-      "build_coordinator/runner/routing.py"
-    ],
-    "legacy_tests": [
-      "tests/test_independence.py"
-    ],
-    "legacy_behavior": "Prevented implementation worker from acting as reviewer.",
-    "vnext_equivalent_files": [
-      "src/stagemesh/review.py",
-      "src/stagemesh/routing.py"
-    ],
-    "vnext_tests": [
-      "tests/test_invariants.py::test_reviewer_provider_failure_does_not_restart_implementation"
-    ],
-    "classification": "PRESENT_VERIFIED",
-    "evidence": "Reviewer executes review gate and enforces independent review policy.",
-    "parity_gap": "None",
-    "required_implementation_task": null
-  },
-  {
-    "id": "REVIEW-002",
-    "category": "Review/remediation",
-    "capability": "Structured Findings Tracking (ReviewFinding / findings table persistence)",
-    "legacy_source_files": [
-      "build_coordinator/runner/findings.py"
-    ],
-    "legacy_tests": [
-      "tests/test_finding_reconciliation.py"
-    ],
-    "legacy_behavior": "Persisted review findings with severity and finding identity.",
-    "vnext_equivalent_files": [
-      "src/stagemesh/remediation.py",
-      "src/stagemesh/review.py"
-    ],
-    "vnext_tests": [
-      "scripts/invariants.py"
-    ],
-    "classification": "PRESENT_VERIFIED",
-    "evidence": "ReviewFinding and Store.upsert_finding persist findings.",
-    "parity_gap": "None",
-    "required_implementation_task": null
-  },
-  {
-    "id": "REVIEW-003",
-    "category": "Review/remediation",
-    "capability": "Bounded Remediation Loop (retry policy for failed reviews/validations)",
-    "legacy_source_files": [
-      "build_coordinator/runner/findings.py"
-    ],
-    "legacy_tests": [
-      "tests/test_finding_reconciliation.py"
-    ],
-    "legacy_behavior": "Bounded maximum remediation retries before escalating.",
-    "vnext_equivalent_files": [
-      "src/stagemesh/remediation.py"
-    ],
-    "vnext_tests": [
-      "scripts/invariants.py"
-    ],
-    "classification": "PRESENT_VERIFIED",
-    "evidence": "RemediationPolicy calculates bounded remediation attempts.",
-    "parity_gap": "None",
-    "required_implementation_task": null
-  },
-  {
-    "id": "REVIEW-004",
-    "category": "Review/remediation",
-    "capability": "Rework Lifecycle (routing failed candidate back to IMPLEMENT for remediation)",
-    "legacy_source_files": [
-      "build_coordinator/runner/orchestrator.py"
-    ],
-    "legacy_tests": [
-      "tests/test_review_environment_remediation.py"
-    ],
-    "legacy_behavior": "Routed failed candidate back to IMPLEMENT stage.",
-    "vnext_equivalent_files": [
-      "src/stagemesh/coordinator.py",
-      "src/stagemesh/remediation.py"
-    ],
-    "vnext_tests": [
-      "scripts/invariants.py"
-    ],
-    "classification": "PRESENT_VERIFIED",
-    "evidence": "Coordinator advances task through remediation flow on failed evidence.",
-    "parity_gap": "None",
-    "required_implementation_task": null
-  },
-  {
-    "id": "SECURITY-001",
-    "category": "Security",
-    "capability": "Provider Output Trust Boundary (untrusted stdout/stderr parsing)",
-    "legacy_source_files": [
-      "build_coordinator/execution/results.py"
-    ],
-    "legacy_tests": [
-      "tests/test_security_boundary.py"
-    ],
-    "legacy_behavior": "Untrusted worker output was sanitized before storage.",
-    "vnext_equivalent_files": [
-      "src/stagemesh/execution.py",
-      "src/stagemesh/security.py"
-    ],
-    "vnext_tests": [
-      "tests/test_canary_regression.py::test_capacity_failure_is_distinguishable_from_code_failure"
-    ],
-    "classification": "PRESENT_VERIFIED",
-    "evidence": "ExecutionResult and classify_failure safely parse process output.",
-    "parity_gap": "None",
-    "required_implementation_task": null
-  },
-  {
-    "id": "SECURITY-002",
-    "category": "Security",
-    "capability": "Workspace & Path Isolation (WorkspaceBoundary restricting file accesses)",
-    "legacy_source_files": [
-      "build_coordinator/runner/git_safety.py"
-    ],
-    "legacy_tests": [
-      "tests/test_security_boundary.py"
-    ],
-    "legacy_behavior": "Restricted file system accesses to within project workspace boundary.",
-    "vnext_equivalent_files": [
-      "src/stagemesh/security.py"
-    ],
-    "vnext_tests": [
-      "scripts/invariants.py"
-    ],
-    "classification": "PRESENT_VERIFIED",
-    "evidence": "WorkspaceBoundary.require_inside raises SecurityBoundaryError on path traversal.",
-    "parity_gap": "None",
-    "required_implementation_task": null
-  },
-  {
-    "id": "SECURITY-003",
-    "category": "Security",
-    "capability": "Secret & Credential Redaction (redact_command_secrets, redact_url_credentials)",
-    "legacy_source_files": [
-      "build_coordinator/watcher/safe_logging.py"
-    ],
-    "legacy_tests": [
-      "tests/test_watcher_safe_logging.py"
-    ],
-    "legacy_behavior": "Redacted API tokens and passwords from logs and CLI output.",
-    "vnext_equivalent_files": [
-      "src/stagemesh/redaction.py"
-    ],
-    "vnext_tests": [
-      "scripts/invariants.py"
-    ],
-    "classification": "PRESENT_VERIFIED",
-    "evidence": "redact_command_secrets and redact_url_credentials strip secrets from output.",
-    "parity_gap": "None",
-    "required_implementation_task": null
-  },
-  {
-    "id": "SECURITY-004",
-    "category": "Security",
-    "capability": "SCM & Git Safety Boundaries (preventing destructive git pushes/resets on non-task branches)",
-    "legacy_source_files": [
-      "build_coordinator/runner/git_safety.py"
-    ],
-    "legacy_tests": [
-      "tests/test_git_identity_and_blocker_recovery.py"
-    ],
-    "legacy_behavior": "Enforced git safe directory and branch boundaries.",
-    "vnext_equivalent_files": [
-      "src/stagemesh/git.py"
-    ],
-    "vnext_tests": [
-      "scripts/invariants.py"
-    ],
-    "classification": "PRESENT_VERIFIED",
-    "evidence": "GitWorkspace validates arguments and safe directory configs.",
-    "parity_gap": "None",
-    "required_implementation_task": null
-  },
-  {
-    "id": "SECURITY-005",
-    "category": "Security",
-    "capability": "Worker Git Attribution (GitAttribution headers on commits)",
-    "legacy_source_files": [
-      "build_coordinator/execution/git_integrator.py"
-    ],
-    "legacy_tests": [
-      "tests/test_rewrite_history_remove_ai_attribution.py"
-    ],
-    "legacy_behavior": "Applied Git author and committer attribution to worker commits.",
-    "vnext_equivalent_files": [
-      "src/stagemesh/attribution.py"
-    ],
-    "vnext_tests": [
-      "scripts/invariants.py"
-    ],
-    "classification": "PRESENT_VERIFIED",
-    "evidence": "attribution_for_worker formats author and committer headers.",
-    "parity_gap": "None",
-    "required_implementation_task": null
-  },
-  {
-    "id": "SECURITY-006",
-    "category": "Security",
-    "capability": "Forged / Malformed Result Handling (failing closed on malformed result JSON)",
-    "legacy_source_files": [
-      "build_coordinator/execution/subprocess_executor.py"
-    ],
-    "legacy_tests": [
-      "tests/test_subprocess_executor_hardening.py"
-    ],
-    "legacy_behavior": "Failed closed if worker emitted invalid or tampered result payload.",
-    "vnext_equivalent_files": [
-      "src/stagemesh/execution.py",
-      "src/stagemesh/providers.py"
-    ],
-    "vnext_tests": [
-      "tests/test_canary_regression.py"
-    ],
-    "classification": "PRESENT_VERIFIED",
-    "evidence": "ExecutionResult and SubprocessExecutor fail closed on non-zero exit codes or unparseable output.",
-    "parity_gap": "None",
-    "required_implementation_task": null
-  },
-  {
-    "id": "OBSERVABILITY-001",
-    "category": "Observability/operator",
-    "capability": "Operator Status Report (stagemesh status task overview)",
-    "legacy_source_files": [
-      "build_coordinator/cli.py"
-    ],
-    "legacy_tests": [
-      "tests/test_operator_dashboard.py"
-    ],
-    "legacy_behavior": "Printed human-readable and JSON status reports.",
-    "vnext_equivalent_files": [
-      "src/stagemesh/cli.py",
-      "src/stagemesh/observability.py"
-    ],
-    "vnext_tests": [
-      "scripts/invariants.py"
-    ],
-    "classification": "PRESENT_VERIFIED",
-    "evidence": "command_status outputs task counts, running executions, and health report.",
-    "parity_gap": "None",
-    "required_implementation_task": null
-  },
-  {
-    "id": "OBSERVABILITY-002",
-    "category": "Observability/operator",
-    "capability": "Health Diagnostics (stagemesh health health report)",
-    "legacy_source_files": [
-      "build_coordinator/cli.py"
-    ],
-    "legacy_tests": [
-      "tests/test_operator_dashboard.py"
-    ],
-    "legacy_behavior": "Checked database health and worker execution state.",
-    "vnext_equivalent_files": [
-      "src/stagemesh/observability.py",
-      "src/stagemesh/cli.py"
-    ],
-    "vnext_tests": [
-      "scripts/invariants.py"
-    ],
-    "classification": "PRESENT_VERIFIED",
-    "evidence": "health function checks task counts, failed execution counts, and status.",
-    "parity_gap": "None",
-    "required_implementation_task": null
-  },
-  {
-    "id": "OBSERVABILITY-003",
-    "category": "Observability/operator",
-    "capability": "Audit Event Trail (record_audit & export_audit_jsonl)",
-    "legacy_source_files": [
-      "build_coordinator/events.py"
-    ],
-    "legacy_tests": [
-      "tests/test_events_stream.py"
-    ],
-    "legacy_behavior": "Recorded system audit events and exported JSONL stream.",
-    "vnext_equivalent_files": [
-      "src/stagemesh/audit.py"
-    ],
-    "vnext_tests": [
-      "scripts/invariants.py"
-    ],
-    "classification": "PRESENT_VERIFIED",
-    "evidence": "record_audit and export_audit_jsonl manage redacted audit trail.",
-    "parity_gap": "None",
-    "required_implementation_task": null
-  },
-  {
-    "id": "OBSERVABILITY-004",
-    "category": "Observability/operator",
-    "capability": "Execution Metrics (metrics.py tracking timings and throughput)",
-    "legacy_source_files": [
-      "build_coordinator/metrics.py"
-    ],
-    "legacy_tests": [
-      "tests/test_metrics.py"
-    ],
-    "legacy_behavior": "Tracked worker task execution times and success rates.",
-    "vnext_equivalent_files": [
-      "src/stagemesh/cli.py"
-    ],
-    "vnext_tests": [
-      "scripts/invariants.py"
-    ],
-    "classification": "SUPERSEDED_EQUIVALENT",
-    "evidence": "vNext replaces standalone metrics collectors with structured audit logs & dashboard summaries.",
-    "parity_gap": "None",
-    "required_implementation_task": null
-  },
-  {
-    "id": "OBSERVABILITY-005",
-    "category": "Observability/operator",
-    "capability": "Operator Dashboard (stagemesh dashboard TUI/text summary)",
-    "legacy_source_files": [
-      "build_coordinator/operator_dashboard.py"
-    ],
-    "legacy_tests": [
-      "tests/test_operator_dashboard.py"
-    ],
-    "legacy_behavior": "Rendered terminal dashboard showing active workers and task queue.",
-    "vnext_equivalent_files": [
-      "src/stagemesh/dashboard.py"
-    ],
-    "vnext_tests": [
-      "scripts/invariants.py"
-    ],
-    "classification": "PRESENT_VERIFIED",
-    "evidence": "render_dashboard and dashboard_summary display operator dashboard.",
-    "parity_gap": "None",
-    "required_implementation_task": null
-  },
-  {
-    "id": "OBSERVABILITY-006",
-    "category": "Observability/operator",
-    "capability": "Final Report Generation (stagemesh report summary)",
-    "legacy_source_files": [
-      "build_coordinator/cli.py"
-    ],
-    "legacy_tests": [
-      "tests/test_operator_dashboard.py"
-    ],
-    "legacy_behavior": "Generated final execution summary report.",
-    "vnext_equivalent_files": [
-      "src/stagemesh/final_report.py"
-    ],
-    "vnext_tests": [
-      "scripts/invariants.py"
-    ],
-    "classification": "PRESENT_VERIFIED",
-    "evidence": "render_final_report builds final markdown report.",
-    "parity_gap": "None",
-    "required_implementation_task": null
-  },
-  {
-    "id": "OBSERVABILITY-007",
-    "category": "Observability/operator",
-    "capability": "Retry Visibility (stagemesh retries inspecting backoff states)",
-    "legacy_source_files": [
-      "build_coordinator/cli.py"
-    ],
-    "legacy_tests": [
-      "tests/test_gh101_persistence_retries.py"
-    ],
-    "legacy_behavior": "Inspected retry backoff states and allowed manual clearance.",
-    "vnext_equivalent_files": [
-      "src/stagemesh/retry.py",
-      "src/stagemesh/cli.py"
-    ],
-    "vnext_tests": [
-      "scripts/invariants.py::retry_backoff_is_durable_and_clearable"
-    ],
-    "classification": "PRESENT_VERIFIED",
-    "evidence": "RetryRegistry records and clears retry backoffs.",
-    "parity_gap": "None",
-    "required_implementation_task": null
-  },
-  {
-    "id": "DISTRIBUTION-001",
-    "category": "Distribution",
-    "capability": "Distributed Work Packet Envelopes (write_packet_envelope, write_ack_envelope)",
-    "legacy_source_files": [
-      "build_coordinator/execution/results.py"
-    ],
-    "legacy_tests": [
-      "tests/test_adapter_sdk_acceptance.py"
-    ],
-    "legacy_behavior": "Serialized work packet JSON envelopes for remote workers.",
-    "vnext_equivalent_files": [
-      "src/stagemesh/work_transport.py"
-    ],
-    "vnext_tests": [
-      "scripts/invariants.py"
-    ],
-    "classification": "PRESENT_VERIFIED",
-    "evidence": "write_packet_envelope and write_ack_envelope format packet envelopes.",
-    "parity_gap": "None",
-    "required_implementation_task": null
-  },
-  {
-    "id": "DISTRIBUTION-002",
-    "category": "Distribution",
-    "capability": "Worker Queue Polling (WorkQueue / packet queue polling)",
-    "legacy_source_files": [
-      "build_coordinator/service.py"
-    ],
-    "legacy_tests": [
-      "tests/test_engine_lifecycle.py"
-    ],
-    "legacy_behavior": "Polled work queue directory for incoming packets.",
-    "vnext_equivalent_files": [
-      "src/stagemesh/distributed.py"
-    ],
-    "vnext_tests": [
-      "scripts/invariants.py"
-    ],
-    "classification": "PRESENT_VERIFIED",
-    "evidence": "WorkQueue manages distributed packet enqueueing and polling.",
-    "parity_gap": "None",
-    "required_implementation_task": null
-  },
-  {
-    "id": "DISTRIBUTION-003",
-    "category": "Distribution",
-    "capability": "Packet Acknowledgement & Ingestion (import_ack / packet processing)",
-    "legacy_source_files": [
-      "build_coordinator/execution/results.py"
-    ],
-    "legacy_tests": [
-      "tests/test_adapter_sdk_acceptance.py"
-    ],
-    "legacy_behavior": "Imported acknowledgement envelopes from remote workers.",
-    "vnext_equivalent_files": [
-      "src/stagemesh/work_transport.py"
-    ],
-    "vnext_tests": [
-      "scripts/invariants.py"
-    ],
-    "classification": "PRESENT_VERIFIED",
-    "evidence": "import_ack reads and validates ACK envelope JSON.",
-    "parity_gap": "None",
-    "required_implementation_task": null
-  },
-  {
-    "id": "DISTRIBUTION-004",
-    "category": "Distribution",
-    "capability": "Work Transport Protocol (work_transport.py envelope serialization)",
-    "legacy_source_files": [
-      "build_coordinator/execution/results.py"
-    ],
-    "legacy_tests": [
-      "tests/test_adapter_sdk_acceptance.py"
-    ],
-    "legacy_behavior": "Defined protocol schema for distributed worker transport.",
-    "vnext_equivalent_files": [
-      "src/stagemesh/work_transport.py"
-    ],
-    "vnext_tests": [
-      "scripts/invariants.py"
-    ],
-    "classification": "PRESENT_VERIFIED",
-    "evidence": "work_transport module handles packet serialization.",
-    "parity_gap": "None",
-    "required_implementation_task": null
-  },
-  {
-    "id": "RELEASE-001",
-    "category": "Release/user experience",
-    "capability": "Installation & Packaging (pip install -e ., pyproject.toml console scripts)",
-    "legacy_source_files": [
-      "pyproject.toml",
-      "build_coordinator/bin/"
-    ],
-    "legacy_tests": [
-      "tests/test_packaging_metadata.py"
-    ],
-    "legacy_behavior": "Installed editable package and registered console scripts.",
-    "vnext_equivalent_files": [
-      "pyproject.toml",
-      "src/stagemesh/release.py"
-    ],
-    "vnext_tests": [
-      "scripts/invariants.py"
-    ],
-    "classification": "PRESENT_VERIFIED",
-    "evidence": "pyproject.toml defines stagemesh and build-coordinator entry points.",
-    "parity_gap": "None",
-    "required_implementation_task": null
-  },
-  {
-    "id": "RELEASE-002",
-    "category": "Release/user experience",
-    "capability": "CLI Aliases & Binaries (stagemesh primary CLI, legacy build-coordinator alias)",
-    "legacy_source_files": [
-      "build_coordinator/bin/stagemesh",
-      "build_coordinator/bin/build-coordinator"
-    ],
-    "legacy_tests": [
-      "tests/test_launchers.py"
-    ],
-    "legacy_behavior": "Provided build-coordinator executable script alias.",
-    "vnext_equivalent_files": [
-      "pyproject.toml"
-    ],
-    "vnext_tests": [
-      "scripts/invariants.py"
-    ],
-    "classification": "PRESENT_VERIFIED",
-    "evidence": "Both stagemesh and build-coordinator entry points invoke stagemesh.cli:main.",
-    "parity_gap": "None",
-    "required_implementation_task": null
-  },
-  {
-    "id": "RELEASE-003",
-    "category": "Release/user experience",
-    "capability": "First-Run Onboarding (stagemesh init & demo creation)",
     "legacy_source_files": [
       "build_coordinator/project/onboarding.py"
     ],
     "legacy_tests": [
       "tests/test_global_and_onboarding.py"
     ],
-    "legacy_behavior": "Created initial demo projects for first-time users.",
-    "vnext_equivalent_files": [
-      "src/stagemesh/demo.py",
+    "legacy_behavior": "Initializes new project workspace with stagemesh configuration.",
+    "vnext_files": [
+      "src/stagemesh/cli.py",
+      "src/stagemesh/config.py"
+    ],
+    "vnext_tests": [
+      "tests/test_canary_regression.py"
+    ],
+    "evidence": "stagemesh init generates valid project.toml configuration.",
+    "parity_gap": "None"
+  },
+  {
+    "id": "PROJECTS-002",
+    "category": "Projects",
+    "classification": "PRESENT_VERIFIED",
+    "legacy_source_files": [
+      "build_coordinator/project/runtime.py"
+    ],
+    "legacy_tests": [
+      "tests/test_coordinator_config.py"
+    ],
+    "legacy_behavior": "Defines project metadata, task directory, and provider commands.",
+    "vnext_files": [
+      "src/stagemesh/config.py"
+    ],
+    "vnext_tests": [
+      "tests/test_canary_regression.py"
+    ],
+    "evidence": "StageMeshConfig parses project.toml schema.",
+    "parity_gap": "None"
+  },
+  {
+    "id": "PROJECTS-003",
+    "category": "Projects",
+    "classification": "PRESENT_VERIFIED",
+    "legacy_source_files": [
+      "build_coordinator/project/runtime.py"
+    ],
+    "legacy_tests": [
+      "tests/test_coordinator_config.py"
+    ],
+    "legacy_behavior": "Registry of configured projects.",
+    "vnext_files": [
+      "src/stagemesh/registry.py"
+    ],
+    "vnext_tests": [
+      "tests/test_canary_regression.py"
+    ],
+    "evidence": "ProjectRegistry manages known projects.",
+    "parity_gap": "None"
+  },
+  {
+    "id": "PROJECTS-004",
+    "category": "Projects",
+    "classification": "PRESENT_VERIFIED",
+    "legacy_source_files": [
+      "build_coordinator/cli.py"
+    ],
+    "legacy_tests": [
+      "tests/test_operator_location_independence.py"
+    ],
+    "legacy_behavior": "Runs coordinator targeting specific project directory.",
+    "vnext_files": [
       "src/stagemesh/cli.py"
     ],
     "vnext_tests": [
-      "scripts/invariants.py"
+      "tests/test_canary_regression.py"
     ],
+    "evidence": "--project flag specifies target project directory.",
+    "parity_gap": "None"
+  },
+  {
+    "id": "PROJECTS-005",
+    "category": "Projects",
+    "classification": "PRESENT_NOT_VERIFIED",
+    "legacy_source_files": [
+      "build_coordinator/cli.py"
+    ],
+    "legacy_tests": [
+      "tests/test_operator_location_independence.py"
+    ],
+    "legacy_behavior": "Runs coordinator from any working directory without specifying project path.",
+    "vnext_files": [
+      "src/stagemesh/cli.py"
+    ],
+    "vnext_tests": [],
+    "evidence": "Auto-discovery of project root in child directories is unverified in tests.",
+    "parity_gap": "Missing automated test for run-from-anywhere auto-discovery."
+  },
+  {
+    "id": "PROJECTS-006",
+    "category": "Projects",
+    "classification": "PRESENT_NOT_VERIFIED",
+    "legacy_source_files": [
+      "build_coordinator/runner/orchestrator.py"
+    ],
+    "legacy_tests": [
+      "tests/test_project_backlog.py"
+    ],
+    "legacy_behavior": "Coordinates execution across multiple registered projects.",
+    "vnext_files": [
+      "src/stagemesh/coordinator.py"
+    ],
+    "vnext_tests": [],
+    "evidence": "Multi-project task queue processing is unverified in tests.",
+    "parity_gap": "Missing automated test for multi-project coordination."
+  },
+  {
+    "id": "PROJECTS-007",
+    "category": "Projects",
     "classification": "PRESENT_VERIFIED",
-    "evidence": "command_demo provisions demo projects with sample backlogs.",
-    "parity_gap": "None",
-    "required_implementation_task": null
+    "legacy_source_files": [
+      "build_coordinator/runner/worker_pool.py"
+    ],
+    "legacy_tests": [
+      "tests/test_worker_health.py"
+    ],
+    "legacy_behavior": "Enforces concurrency limits across multiple projects.",
+    "vnext_files": [
+      "src/stagemesh/capacity.py"
+    ],
+    "vnext_tests": [
+      "tests/test_canary_regression.py::test_capacity_failure_releases_claim_immediately"
+    ],
+    "evidence": "CapacityRegistry tracks cross-project slot limits.",
+    "parity_gap": "None"
+  },
+  {
+    "id": "PROJECTS-008",
+    "category": "Projects",
+    "classification": "PRESENT_VERIFIED",
+    "legacy_source_files": [
+      "build_coordinator/project/doctor.py"
+    ],
+    "legacy_tests": [
+      "tests/test_global_and_onboarding.py"
+    ],
+    "legacy_behavior": "Diagnostics tool verifying tools, credentials, git state, and database.",
+    "vnext_files": [
+      "src/stagemesh/operator.py"
+    ],
+    "vnext_tests": [
+      "tests/test_canary_regression.py"
+    ],
+    "evidence": "stagemesh doctor verifies git, python, providers, and store status.",
+    "parity_gap": "None"
+  },
+  {
+    "id": "PERSISTENCE-001",
+    "category": "Persistence",
+    "classification": "PRESENT_VERIFIED",
+    "legacy_source_files": [
+      "build_coordinator/persistence.py"
+    ],
+    "legacy_tests": [
+      "tests/test_database_lifecycle.py"
+    ],
+    "legacy_behavior": "SQLite database state storage.",
+    "vnext_files": [
+      "src/stagemesh/persistence.py"
+    ],
+    "vnext_tests": [
+      "tests/test_invariants.py"
+    ],
+    "evidence": "SQLiteStore manages relational task schema.",
+    "parity_gap": "None"
+  },
+  {
+    "id": "PERSISTENCE-002",
+    "category": "Persistence",
+    "classification": "PRESENT_NOT_VERIFIED",
+    "legacy_source_files": [
+      "build_coordinator/persistence.py"
+    ],
+    "legacy_tests": [
+      "tests/test_database_lifecycle.py",
+      "tests/test_operator_db_isolation.py"
+    ],
+    "legacy_behavior": "PostgreSQL database state storage.",
+    "vnext_files": [
+      "src/stagemesh/postgres_store.py"
+    ],
+    "vnext_tests": [],
+    "evidence": "PostgresStore class implemented, but live PostgreSQL test suite is missing in vNext.",
+    "parity_gap": "Missing automated test for live PostgreSQL store."
+  },
+  {
+    "id": "PERSISTENCE-003",
+    "category": "Persistence",
+    "classification": "PRESENT_VERIFIED",
+    "legacy_source_files": [
+      "build_coordinator/project/state_migration.py"
+    ],
+    "legacy_tests": [
+      "tests/test_p0_migration_wave.py"
+    ],
+    "legacy_behavior": "Schema migration scripts for upgrading database versions.",
+    "vnext_files": [
+      "src/stagemesh/migrations.py"
+    ],
+    "vnext_tests": [
+      "tests/test_invariants.py"
+    ],
+    "evidence": "Migrations runner updates schema version.",
+    "parity_gap": "None"
+  },
+  {
+    "id": "PERSISTENCE-004",
+    "category": "Persistence",
+    "classification": "PRESENT_VERIFIED",
+    "legacy_source_files": [
+      "build_coordinator/persistence.py"
+    ],
+    "legacy_tests": [
+      "tests/test_database_lifecycle.py"
+    ],
+    "legacy_behavior": "WAL journal mode and immediate transactions for concurrency safety.",
+    "vnext_files": [
+      "src/stagemesh/persistence.py"
+    ],
+    "vnext_tests": [
+      "tests/test_invariants.py"
+    ],
+    "evidence": "WAL mode enabled on SQLite database connection.",
+    "parity_gap": "None"
+  },
+  {
+    "id": "PERSISTENCE-005",
+    "category": "Persistence",
+    "classification": "PRESENT_NOT_VERIFIED",
+    "legacy_source_files": [
+      "build_coordinator/persistence.py"
+    ],
+    "legacy_tests": [
+      "tests/test_sqlite_retry.py",
+      "tests/test_github_sqlite_busy_retry.py"
+    ],
+    "legacy_behavior": "Retries DB operations on SQLITE_BUSY / lock contention.",
+    "vnext_files": [
+      "src/stagemesh/persistence.py"
+    ],
+    "vnext_tests": [],
+    "evidence": "Busy timeout configured, but lock contention retry test is missing in vNext.",
+    "parity_gap": "Missing automated test for SQLite busy retries."
+  },
+  {
+    "id": "VALIDATION-001",
+    "category": "CI/validation",
+    "classification": "PRESENT_VERIFIED",
+    "legacy_source_files": [
+      "build_coordinator/runner/validation.py"
+    ],
+    "legacy_tests": [
+      "tests/test_runner.py"
+    ],
+    "legacy_behavior": "Runs deterministic validation commands against candidate commit.",
+    "vnext_files": [
+      "src/stagemesh/validation.py"
+    ],
+    "vnext_tests": [
+      "scripts/acceptance.py"
+    ],
+    "evidence": "Validator runs pytest/command suite against target branch/SHA.",
+    "parity_gap": "None"
+  },
+  {
+    "id": "VALIDATION-002",
+    "category": "CI/validation",
+    "classification": "PRESENT_NOT_VERIFIED",
+    "legacy_source_files": [
+      "build_coordinator/runner/validation.py"
+    ],
+    "legacy_tests": [
+      "tests/test_runner.py"
+    ],
+    "legacy_behavior": "Identifies affected tests based on modified files.",
+    "vnext_files": [
+      "src/stagemesh/validation.py"
+    ],
+    "vnext_tests": [],
+    "evidence": "Validation runner accepts test filters, but affected test discovery is unverified in tests.",
+    "parity_gap": "Missing automated test for affected test discovery."
+  },
+  {
+    "id": "VALIDATION-003",
+    "category": "CI/validation",
+    "classification": "PRESENT_VERIFIED",
+    "legacy_source_files": [
+      "build_coordinator/runner/ci_reconciliation.py"
+    ],
+    "legacy_tests": [
+      "tests/test_ci_reconciliation.py"
+    ],
+    "legacy_behavior": "Waits for external CI completion and reconciles CI status.",
+    "vnext_files": [
+      "src/stagemesh/ci_wait.py"
+    ],
+    "vnext_tests": [
+      "tests/test_canary_regression.py"
+    ],
+    "evidence": "wait_for_ci checks external build status.",
+    "parity_gap": "None"
+  },
+  {
+    "id": "VALIDATION-004",
+    "category": "CI/validation",
+    "classification": "PRESENT_VERIFIED",
+    "legacy_source_files": [
+      "build_coordinator/cli.py"
+    ],
+    "legacy_tests": [
+      "tests/test_ci_reconciliation.py"
+    ],
+    "legacy_behavior": "CI gate command enforcing strict feature and quality standards.",
+    "vnext_files": [
+      "src/stagemesh/ci.py"
+    ],
+    "vnext_tests": [
+      "stagemesh ci --future-feature-gate"
+    ],
+    "evidence": "stagemesh ci --future-feature-gate evaluates 8 production quality gates.",
+    "parity_gap": "None"
+  },
+  {
+    "id": "REMEDIATION-001",
+    "category": "Review/remediation",
+    "classification": "PRESENT_NOT_VERIFIED",
+    "legacy_source_files": [
+      "build_coordinator/runner/orchestrator.py"
+    ],
+    "legacy_tests": [
+      "tests/test_independence.py"
+    ],
+    "legacy_behavior": "Enforces that reviewer cannot be the same agent identity as builder.",
+    "vnext_files": [
+      "src/stagemesh/review.py"
+    ],
+    "vnext_tests": [],
+    "evidence": "Review module accepts reviewer identity, but reviewer-builder separation enforcement is unverified in tests.",
+    "parity_gap": "Missing automated test for strict reviewer-builder separation."
+  },
+  {
+    "id": "REMEDIATION-002",
+    "category": "Review/remediation",
+    "classification": "PRESENT_VERIFIED",
+    "legacy_source_files": [
+      "build_coordinator/runner/findings.py"
+    ],
+    "legacy_tests": [
+      "tests/test_finding_reconciliation.py"
+    ],
+    "legacy_behavior": "Structured review findings recording errors and required fixes.",
+    "vnext_files": [
+      "src/stagemesh/remediation.py"
+    ],
+    "vnext_tests": [
+      "scripts/invariants.py::remediation_findings"
+    ],
+    "evidence": "Findings model records file, line, and description of issues.",
+    "parity_gap": "None"
+  },
+  {
+    "id": "REMEDIATION-003",
+    "category": "Review/remediation",
+    "classification": "PRESENT_VERIFIED",
+    "legacy_source_files": [
+      "build_coordinator/runner/findings.py"
+    ],
+    "legacy_tests": [
+      "tests/test_finding_reconciliation.py"
+    ],
+    "legacy_behavior": "Limits maximum remediation rework attempts to prevent infinite loops.",
+    "vnext_files": [
+      "src/stagemesh/remediation.py"
+    ],
+    "vnext_tests": [
+      "scripts/invariants.py::remediation_findings"
+    ],
+    "evidence": "RemediationPolicy enforces max_attempts limit.",
+    "parity_gap": "None"
+  },
+  {
+    "id": "REMEDIATION-004",
+    "category": "Review/remediation",
+    "classification": "PRESENT_VERIFIED",
+    "legacy_source_files": [
+      "build_coordinator/runner/orchestrator.py"
+    ],
+    "legacy_tests": [
+      "tests/test_review_environment_remediation.py"
+    ],
+    "legacy_behavior": "Transitions failed review tasks to REMEDIATE and re-dispatches to builder.",
+    "vnext_files": [
+      "src/stagemesh/coordinator.py"
+    ],
+    "vnext_tests": [
+      "scripts/invariants.py::remediation_findings"
+    ],
+    "evidence": "Coordinator tick re-dispatches REMEDIATE tasks with finding feedback.",
+    "parity_gap": "None"
+  },
+  {
+    "id": "SECURITY-001",
+    "category": "Security",
+    "classification": "PRESENT_VERIFIED",
+    "legacy_source_files": [
+      "build_coordinator/execution/subprocess_executor.py"
+    ],
+    "legacy_tests": [
+      "tests/test_security_boundary.py"
+    ],
+    "legacy_behavior": "Sanitizes provider subprocess output against injection.",
+    "vnext_files": [
+      "src/stagemesh/security.py"
+    ],
+    "vnext_tests": [
+      "tests/test_canary_regression.py"
+    ],
+    "evidence": "sanitize_output strips control codes and validates boundaries.",
+    "parity_gap": "None"
+  },
+  {
+    "id": "SECURITY-002",
+    "category": "Security",
+    "classification": "PRESENT_VERIFIED",
+    "legacy_source_files": [
+      "build_coordinator/task_context.py"
+    ],
+    "legacy_tests": [
+      "tests/test_task_workspaces.py"
+    ],
+    "legacy_behavior": "Ensures file operations cannot escape project directory bounds.",
+    "vnext_files": [
+      "src/stagemesh/security.py"
+    ],
+    "vnext_tests": [
+      "tests/test_invariants.py::test_targeted_operations_do_not_mutate_unrelated_tasks"
+    ],
+    "evidence": "Path resolution validates absolute path stays within project root.",
+    "parity_gap": "None"
+  },
+  {
+    "id": "SECURITY-003",
+    "category": "Security",
+    "classification": "PRESENT_VERIFIED",
+    "legacy_source_files": [
+      "build_coordinator/watcher/safe_logging.py"
+    ],
+    "legacy_tests": [
+      "tests/test_watcher_safe_logging.py"
+    ],
+    "legacy_behavior": "Redacts API keys, tokens, and passwords from logs and CLI output.",
+    "vnext_files": [
+      "src/stagemesh/redaction.py"
+    ],
+    "vnext_tests": [
+      "tests/test_canary_regression.py"
+    ],
+    "evidence": "redact_secrets replaces tokens and passwords with [REDACTED].",
+    "parity_gap": "None"
+  },
+  {
+    "id": "SECURITY-004",
+    "category": "Security",
+    "classification": "PRESENT_VERIFIED",
+    "legacy_source_files": [
+      "build_coordinator/runner/git_safety.py"
+    ],
+    "legacy_tests": [
+      "tests/test_security_boundary.py"
+    ],
+    "legacy_behavior": "Validates SCM branch names and remote URLs before execution.",
+    "vnext_files": [
+      "src/stagemesh/security.py"
+    ],
+    "vnext_tests": [
+      "tests/test_canary_regression.py"
+    ],
+    "evidence": "validate_git_ref rejects unsafe ref names.",
+    "parity_gap": "None"
+  },
+  {
+    "id": "SECURITY-005",
+    "category": "Security",
+    "classification": "PRESENT_VERIFIED",
+    "legacy_source_files": [
+      "build_coordinator/execution/git_integrator.py"
+    ],
+    "legacy_tests": [
+      "tests/test_rewrite_history_remove_ai_attribution.py"
+    ],
+    "legacy_behavior": "Applies proper Git author and committer attribution to candidate commits.",
+    "vnext_files": [
+      "src/stagemesh/attribution.py"
+    ],
+    "vnext_tests": [
+      "tests/test_canary_regression.py"
+    ],
+    "evidence": "attribution_for_worker formats git author metadata.",
+    "parity_gap": "None"
+  },
+  {
+    "id": "SECURITY-006",
+    "category": "Security",
+    "classification": "PRESENT_VERIFIED",
+    "legacy_source_files": [
+      "build_coordinator/watcher/loop.py"
+    ],
+    "legacy_tests": [
+      "tests/test_watcher_safe_logging.py"
+    ],
+    "legacy_behavior": "Rejects malformed, incomplete, or forged worker result payloads.",
+    "vnext_files": [
+      "src/stagemesh/execution.py"
+    ],
+    "vnext_tests": [
+      "tests/test_canary_regression.py::test_failure_classification_all_five_categories"
+    ],
+    "evidence": "Result verification validates exit status and stdout.",
+    "parity_gap": "None"
+  },
+  {
+    "id": "OBSERVABILITY-001",
+    "category": "Observability/operator",
+    "classification": "PRESENT_VERIFIED",
+    "legacy_source_files": [
+      "build_coordinator/cli.py"
+    ],
+    "legacy_tests": [
+      "tests/test_operator_dashboard.py"
+    ],
+    "legacy_behavior": "Prints task stages, active claims, and coordinator state.",
+    "vnext_files": [
+      "src/stagemesh/operator.py"
+    ],
+    "vnext_tests": [
+      "tests/test_canary_regression.py"
+    ],
+    "evidence": "stagemesh status renders summary table of tasks and workers.",
+    "parity_gap": "None"
+  },
+  {
+    "id": "OBSERVABILITY-002",
+    "category": "Observability/operator",
+    "classification": "PRESENT_VERIFIED",
+    "legacy_source_files": [
+      "build_coordinator/project/doctor.py"
+    ],
+    "legacy_tests": [
+      "tests/test_global_and_onboarding.py"
+    ],
+    "legacy_behavior": "System health check verifying environment, database, and git.",
+    "vnext_files": [
+      "src/stagemesh/operator.py"
+    ],
+    "vnext_tests": [
+      "tests/test_canary_regression.py"
+    ],
+    "evidence": "stagemesh doctor evaluates health indicators.",
+    "parity_gap": "None"
+  },
+  {
+    "id": "OBSERVABILITY-003",
+    "category": "Observability/operator",
+    "classification": "PRESENT_VERIFIED",
+    "legacy_source_files": [
+      "build_coordinator/service.py"
+    ],
+    "legacy_tests": [
+      "tests/test_events_stream.py"
+    ],
+    "legacy_behavior": "Structured JSON event logging for external monitoring.",
+    "vnext_files": [
+      "src/stagemesh/audit.py"
+    ],
+    "vnext_tests": [
+      "tests/test_canary_regression.py"
+    ],
+    "evidence": "AuditEventLogger emits JSON event stream.",
+    "parity_gap": "None"
+  },
+  {
+    "id": "OBSERVABILITY-004",
+    "category": "Observability/operator",
+    "classification": "PRESENT_NOT_VERIFIED",
+    "legacy_source_files": [
+      "build_coordinator/metrics.py"
+    ],
+    "legacy_tests": [
+      "tests/test_metrics.py"
+    ],
+    "legacy_behavior": "Execution time, token usage, throughput, and error metrics.",
+    "vnext_files": [
+      "src/stagemesh/observability.py"
+    ],
+    "vnext_tests": [],
+    "evidence": "Metric counters exist in observability.py, but export and reporting test coverage is unverified in vNext.",
+    "parity_gap": "Missing automated test for metrics collection and export."
+  },
+  {
+    "id": "OBSERVABILITY-005",
+    "category": "Observability/operator",
+    "classification": "PRESENT_VERIFIED",
+    "legacy_source_files": [
+      "build_coordinator/cli.py"
+    ],
+    "legacy_tests": [
+      "tests/test_operator_dashboard.py"
+    ],
+    "legacy_behavior": "Real-time terminal dashboard of system status.",
+    "vnext_files": [
+      "src/stagemesh/dashboard.py"
+    ],
+    "vnext_tests": [
+      "tests/test_canary_regression.py"
+    ],
+    "evidence": "Terminal dashboard displays current operations.",
+    "parity_gap": "None"
+  },
+  {
+    "id": "OBSERVABILITY-006",
+    "category": "Observability/operator",
+    "classification": "PRESENT_VERIFIED",
+    "legacy_source_files": [
+      "build_coordinator/cli.py"
+    ],
+    "legacy_tests": [
+      "tests/test_events_stream.py"
+    ],
+    "legacy_behavior": "Displays task retries, failure reasons, and recovery attempts.",
+    "vnext_files": [
+      "src/stagemesh/retry.py"
+    ],
+    "vnext_tests": [
+      "tests/test_canary_regression.py"
+    ],
+    "evidence": "RetryTracker reports failure classification and retry attempts.",
+    "parity_gap": "None"
+  },
+  {
+    "id": "DISTRIBUTION-001",
+    "category": "Distribution",
+    "classification": "PRESENT_VERIFIED",
+    "legacy_source_files": [
+      "build_coordinator/runner/worker_pool.py"
+    ],
+    "legacy_tests": [
+      "tests/test_worker_routing.py"
+    ],
+    "legacy_behavior": "Serializes task context into JSON work packet payloads.",
+    "vnext_files": [
+      "src/stagemesh/distributed.py"
+    ],
+    "vnext_tests": [
+      "tests/test_canary_regression.py"
+    ],
+    "evidence": "create_work_packet serializes task data for remote execution.",
+    "parity_gap": "None"
+  },
+  {
+    "id": "DISTRIBUTION-002",
+    "category": "Distribution",
+    "classification": "PRESENT_VERIFIED",
+    "legacy_source_files": [
+      "build_coordinator/runner/worker_pool.py"
+    ],
+    "legacy_tests": [
+      "tests/test_worker_routing.py"
+    ],
+    "legacy_behavior": "Workers poll central queue for available tasks matching capabilities.",
+    "vnext_files": [
+      "src/stagemesh/distributed.py"
+    ],
+    "vnext_tests": [
+      "tests/test_canary_regression.py"
+    ],
+    "evidence": "poll_work_packet retrieves claimable work.",
+    "parity_gap": "None"
+  },
+  {
+    "id": "DISTRIBUTION-003",
+    "category": "Distribution",
+    "classification": "PRESENT_VERIFIED",
+    "legacy_source_files": [
+      "build_coordinator/runner/worker_health.py"
+    ],
+    "legacy_tests": [
+      "tests/test_worker_health.py"
+    ],
+    "legacy_behavior": "Remote workers send lease heartbeats to maintain claim.",
+    "vnext_files": [
+      "src/stagemesh/distributed.py"
+    ],
+    "vnext_tests": [
+      "tests/test_invariants.py::test_live_validation_survives_restart_lease_expiry"
+    ],
+    "evidence": "renew_packet_lease extends lease expiration time.",
+    "parity_gap": "None"
+  },
+  {
+    "id": "DISTRIBUTION-004",
+    "category": "Distribution",
+    "classification": "PRESENT_VERIFIED",
+    "legacy_source_files": [
+      "build_coordinator/runner/worker_pool.py"
+    ],
+    "legacy_tests": [
+      "tests/test_worker_health.py"
+    ],
+    "legacy_behavior": "Workers send completion result packets back to coordinator.",
+    "vnext_files": [
+      "src/stagemesh/distributed.py"
+    ],
+    "vnext_tests": [
+      "tests/test_canary_regression.py"
+    ],
+    "evidence": "acknowledge_packet records execution result.",
+    "parity_gap": "None"
+  },
+  {
+    "id": "DISTRIBUTION-005",
+    "category": "Distribution",
+    "classification": "PRESENT_VERIFIED",
+    "legacy_source_files": [
+      "build_coordinator/types.py"
+    ],
+    "legacy_tests": [
+      "tests/test_packaging_metadata.py"
+    ],
+    "legacy_behavior": "Validated JSON transport envelope format for work packets.",
+    "vnext_files": [
+      "src/stagemesh/work_transport.py"
+    ],
+    "vnext_tests": [
+      "tests/test_canary_regression.py"
+    ],
+    "evidence": "WorkTransportEnvelope validates schema version and signatures.",
+    "parity_gap": "None"
+  },
+  {
+    "id": "RELEASE-001",
+    "category": "Release/user experience",
+    "classification": "PRESENT_VERIFIED",
+    "legacy_source_files": [
+      "pyproject.toml"
+    ],
+    "legacy_tests": [
+      "tests/test_packaging_metadata.py"
+    ],
+    "legacy_behavior": "Standard PyPI wheel / sdist package installation.",
+    "vnext_files": [
+      "pyproject.toml"
+    ],
+    "vnext_tests": [
+      "pip install -e ."
+    ],
+    "evidence": "pip install installs stagemesh executable.",
+    "parity_gap": "None"
+  },
+  {
+    "id": "RELEASE-002",
+    "category": "Release/user experience",
+    "classification": "MISSING_PORT_REQUIRED",
+    "legacy_source_files": [
+      "pyproject.toml"
+    ],
+    "legacy_tests": [
+      "tests/test_packaging_metadata.py"
+    ],
+    "legacy_behavior": "Exposes build-coordinator executable script alias in addition to stagemesh.",
+    "vnext_files": [
+      "pyproject.toml"
+    ],
+    "vnext_tests": [],
+    "evidence": "pyproject.toml only exposes stagemesh script entry point, missing build-coordinator alias.",
+    "parity_gap": "build-coordinator script alias missing in pyproject.toml."
+  },
+  {
+    "id": "RELEASE-003",
+    "category": "Release/user experience",
+    "classification": "PRESENT_VERIFIED",
+    "legacy_source_files": [
+      "build_coordinator/project/onboarding.py"
+    ],
+    "legacy_tests": [
+      "tests/test_global_and_onboarding.py"
+    ],
+    "legacy_behavior": "Interactive or automated setup wizard.",
+    "vnext_files": [
+      "src/stagemesh/cli.py"
+    ],
+    "vnext_tests": [
+      "tests/test_canary_regression.py"
+    ],
+    "evidence": "stagemesh init guides first-run configuration.",
+    "parity_gap": "None"
   },
   {
     "id": "RELEASE-004",
     "category": "Release/user experience",
-    "capability": "Example Configurations & Manifests (examples/ directory configurations)",
+    "classification": "PRESENT_VERIFIED",
     "legacy_source_files": [
-      "examples/build-coordinator.example.json"
+      "examples/README.md"
     ],
     "legacy_tests": [
       "tests/test_public_dogfood_acceptance.py"
     ],
-    "legacy_behavior": "Provided example configurations for staged and single-agent setups.",
-    "vnext_equivalent_files": [
-      "examples/"
+    "legacy_behavior": "Bundled workflow configuration examples.",
+    "vnext_files": [
+      "src/stagemesh/demo.py"
     ],
     "vnext_tests": [
-      "scripts/invariants.py"
+      "tests/test_canary_regression.py"
     ],
-    "classification": "PRESENT_VERIFIED",
-    "evidence": "examples/ directory contains public dogfood manifests.",
-    "parity_gap": "None",
-    "required_implementation_task": null
+    "evidence": "stagemesh demo provisions sample repository and tasks.",
+    "parity_gap": "None"
   },
   {
     "id": "RELEASE-005",
     "category": "Release/user experience",
-    "capability": "Release Packaging & Sidecar Hashes (build_release_artifact with checksum sidecar)",
+    "classification": "PRESENT_VERIFIED",
     "legacy_source_files": [
-      "scripts/audit_owner_profile.sh"
+      "pyproject.toml"
     ],
     "legacy_tests": [
       "tests/test_packaging_metadata.py"
     ],
-    "legacy_behavior": "Audited release assets and checksums.",
-    "vnext_equivalent_files": [
+    "legacy_behavior": "Builds release distribution artifacts.",
+    "vnext_files": [
       "src/stagemesh/release.py"
     ],
     "vnext_tests": [
-      "scripts/invariants.py::release_artifact_checksum_sidecar"
+      "tests/test_canary_regression.py"
     ],
-    "classification": "PRESENT_VERIFIED",
-    "evidence": "build_release_artifact creates tar.gz package and sha256 checksum sidecar.",
-    "parity_gap": "None",
-    "required_implementation_task": null
+    "evidence": "stagemesh release generates release packages.",
+    "parity_gap": "None"
   },
   {
     "id": "RELEASE-006",
     "category": "Release/user experience",
-    "capability": "Release Readiness Checklist (stagemesh release-readiness audit)",
+    "classification": "PRESENT_VERIFIED",
     "legacy_source_files": [
-      "docs/OWNER_PROFILE_CHECKLIST.md"
+      "pyproject.toml"
     ],
     "legacy_tests": [
       "tests/test_packaging_metadata.py"
     ],
-    "legacy_behavior": "Checked pre-release requirements.",
-    "vnext_equivalent_files": [
+    "legacy_behavior": "Generates release manifests with SHA256 checksums.",
+    "vnext_files": [
       "src/stagemesh/release_readiness.py"
     ],
     "vnext_tests": [
-      "scripts/invariants.py"
+      "tests/test_canary_regression.py"
     ],
-    "classification": "PRESENT_VERIFIED",
-    "evidence": "release_readiness verifies release evidence, gates, and repository status.",
-    "parity_gap": "None",
-    "required_implementation_task": null
+    "evidence": "ReleaseReadiness manifest computes SHA256 checksums.",
+    "parity_gap": "None"
   },
   {
     "id": "RELEASE-007",
     "category": "Release/user experience",
-    "capability": "Public Dogfood & Acceptance Demos (scripts/acceptance.py, scripts/live_acceptance.py)",
+    "classification": "PRESENT_VERIFIED",
     "legacy_source_files": [
-      "docs/dogfood/acceptance-suite.yaml"
+      "examples/public_dogfood/README.md"
     ],
     "legacy_tests": [
       "tests/test_public_dogfood_acceptance.py"
     ],
-    "legacy_behavior": "Executed public dogfood acceptance scenarios.",
-    "vnext_equivalent_files": [
-      "src/stagemesh/acceptance.py",
-      "src/stagemesh/e2e_acceptance.py"
+    "legacy_behavior": "End-to-end demo workflow for public evaluation.",
+    "vnext_files": [
+      "src/stagemesh/demo.py"
     ],
     "vnext_tests": [
-      "scripts/acceptance.py",
-      "scripts/invariants.py"
+      "tests/test_canary_regression.py"
     ],
-    "classification": "PRESENT_VERIFIED",
-    "evidence": "scripts/acceptance.py runs clean acceptance and invariants verification.",
-    "parity_gap": "None",
-    "required_implementation_task": null
+    "evidence": "stagemesh demo runs complete lifecycle demo.",
+    "parity_gap": "None"
   },
   {
     "id": "PLATFORM-001",
     "category": "Platform",
-    "capability": "Windows Support (Windows paths, process identity, Windows task launcher)",
+    "classification": "MISSING_PORT_REQUIRED",
+    "legacy_source_files": [
+      "build_coordinator/watcher/loop.py"
+    ],
+    "legacy_tests": [
+      "tests/test_process_tree.py"
+    ],
+    "legacy_behavior": "Cross-platform process lifecycle handling (taskkill /F /T on Win32, killpg on POSIX).",
+    "vnext_files": [],
+    "vnext_tests": [],
+    "evidence": "vNext process identity check handles PID check, but process tree recursive kill for Win32 taskkill /F /T and POSIX signal process group kill is missing.",
+    "parity_gap": "Process-tree termination implementation and tests missing in vNext."
+  },
+  {
+    "id": "PLATFORM-002",
+    "category": "Platform",
+    "classification": "MISSING_PORT_REQUIRED",
     "legacy_source_files": [
       "build_coordinator/watcher/windows_task_scheduler.py"
     ],
@@ -2132,63 +1850,10 @@
       "tests/test_watcher_windows_task_scheduler.py",
       "tests/test_windows_continue_startup_launcher.py"
     ],
-    "legacy_behavior": "Supported Windows task scheduler and Windows process spawning.",
-    "vnext_equivalent_files": [
-      "src/stagemesh/process_identity.py",
-      "src/stagemesh/cli.py"
-    ],
-    "vnext_tests": [
-      "tests/test_canary_regression.py",
-      "scripts/invariants.py"
-    ],
-    "classification": "PRESENT_VERIFIED",
-    "evidence": "Windows process spawning, path normalization, and execution verified on Windows 11.",
-    "parity_gap": "None",
-    "required_implementation_task": null
-  },
-  {
-    "id": "PLATFORM-002",
-    "category": "Platform",
-    "capability": "Linux / Unix Support (POSIX process handling, signal management)",
-    "legacy_source_files": [
-      "build_coordinator/execution/process_tree.py"
-    ],
-    "legacy_tests": [
-      "tests/test_process_tree.py"
-    ],
-    "legacy_behavior": "Supported POSIX process signals and boot_id path reading.",
-    "vnext_equivalent_files": [
-      "src/stagemesh/process_identity.py",
-      "src/stagemesh/git.py"
-    ],
-    "vnext_tests": [
-      "scripts/invariants.py"
-    ],
-    "classification": "PRESENT_VERIFIED",
-    "evidence": "boot_id reads /proc/sys/kernel/random/boot_id on Linux.",
-    "parity_gap": "None",
-    "required_implementation_task": null
-  },
-  {
-    "id": "PLATFORM-003",
-    "category": "Platform",
-    "capability": "Cross-Platform Process Lifecycle Abstraction (process_identity.py boot_id & pid matching)",
-    "legacy_source_files": [
-      "build_coordinator/runner/worker_health.py"
-    ],
-    "legacy_tests": [
-      "tests/test_worker_health.py"
-    ],
-    "legacy_behavior": "Abstracted host process identification across platforms.",
-    "vnext_equivalent_files": [
-      "src/stagemesh/process_identity.py"
-    ],
-    "vnext_tests": [
-      "tests/test_invariants.py::test_pid_reuse_cannot_impersonate_old_worker"
-    ],
-    "classification": "PRESENT_VERIFIED",
-    "evidence": "ProcessIdentity handles cross-platform process matching and boot_id check.",
-    "parity_gap": "None",
-    "required_implementation_task": null
+    "legacy_behavior": "Registers Windows Task Scheduler tasks (schtasks) and startup continue launcher scripts.",
+    "vnext_files": [],
+    "vnext_tests": [],
+    "evidence": "Windows Task Scheduler integration and startup launcher generation completely missing in vNext.",
+    "parity_gap": "Windows Task Scheduler registration and startup launcher missing in vNext."
   }
 ]

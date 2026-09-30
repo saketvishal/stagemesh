@@ -1,61 +1,156 @@
-# StageMesh Legacy vs vNext Full Feature Parity Report
+# StageMesh Legacy vs vNext Strict Feature Parity & Test Reconciliation Report
 
 ## Executive Summary
 
-Total Inventoried Capabilities: **96**
+Total Inventoried Capabilities: **95**
 
 | Classification | Count | Description |
 |---|---|---|
-| `PRESENT_VERIFIED` | 91 | Present in vNext and verified by automated tests |
-| `PRESENT_NOT_VERIFIED` | 0 | Present in vNext but missing automated test coverage |
-| `SUPERSEDED_EQUIVALENT` | 5 | Replaced by equivalent or superior vNext mechanism |
-| `MISSING_PORT_REQUIRED` | 0 | Missing from vNext, port required |
-| `INTENTIONAL_RETIREMENT_REQUIRES_APPROVAL` | 0 | Candidate for retirement requiring operator approval |
-| `LEGACY_INTERNAL_OR_BUG` | 0 | Legacy internal detail or workaround |
+| `PRESENT_VERIFIED` | **69** | Present in vNext and verified by exact automated tests or live acceptance |
+| `PRESENT_NOT_VERIFIED` | **17** | Present in vNext source but missing automated test coverage proving exact behavior |
+| `SUPERSEDED_EQUIVALENT` | **0** | Replaced by proven equivalent vNext mechanism |
+| `MISSING_PORT_REQUIRED` | **9** | Missing from vNext implementation, port required |
+| `INTENTIONAL_RETIREMENT_REQUIRES_APPROVAL` | **0** | Feature retirement needing human operator approval |
+| `LEGACY_INTERNAL_OR_BUG` | **0** | Legacy internal detail or bug workaround |
 
-**Parity Status: 100% Accounted-for** (0 missing port items remain)
+**Parity Status: INCOMPLETE** (9 Missing Port Items, 17 Unverified Items)
+
+---
+
+## Summary of Reclassified Items from 1st Audit
+
+Under the stricter proof rules, the initial parity audit was found to over-classify unverified or architecturally plausible features as `PRESENT_VERIFIED`. The following key items have been reclassified:
+
+1. **Azure DevOps Task Source** (`SOURCES-003`): Reclassified from `PRESENT_VERIFIED` -> `MISSING_PORT_REQUIRED`. `AzureDevOpsTaskSource` exists in legacy but is completely absent from vNext.
+2. **Process-Tree Termination** (`OWNERSHIP-007`, `PLATFORM-001`): Reclassified from `PRESENT_VERIFIED` -> `MISSING_PORT_REQUIRED`. vNext `process_identity.py` checks PID liveness, but `taskkill /F /T` (Win32) and `killpg` (POSIX) process tree termination logic and tests are missing.
+3. **Windows Task-Scheduler & Startup Behavior** (`PLATFORM-002`): Reclassified from `PRESENT_VERIFIED` -> `MISSING_PORT_REQUIRED`. Windows `schtasks` registration and startup continue scripts are absent in vNext.
+4. **Legacy build-coordinator CLI Alias** (`RELEASE-002`): Reclassified from `PRESENT_VERIFIED` -> `MISSING_PORT_REQUIRED`. `pyproject.toml` missing `build-coordinator` script entry point.
+5. **Structured Result Ingestion** (`EXECUTION-002`): Reclassified from `PRESENT_VERIFIED` -> `MISSING_PORT_REQUIRED`. Subprocess execution JSON result payload parsing missing in vNext.
+6. **Worktree Pool & Auto-Cleanup** (`EXECUTION-005`, `EXECUTION-007`): Reclassified from `PRESENT_VERIFIED` -> `MISSING_PORT_REQUIRED`. Worktree auto-provisioning and clone pool lifecycle management missing.
+7. **GitHub Lifecycle Label Provisioning** (`SOURCES-004`): Reclassified from `PRESENT_VERIFIED` -> `MISSING_PORT_REQUIRED`. GitHub label creation and state machine transitions missing.
+8. **Grok Live Execution** (`PROVIDERS-003`): Reclassified from `PRESENT_VERIFIED` -> `PRESENT_NOT_VERIFIED`. Default command string exists, but no automated test or live execution proof exists.
+9. **PostgreSQL Live Behavior** (`PERSISTENCE-002`): Reclassified from `PRESENT_VERIFIED` -> `PRESENT_NOT_VERIFIED`. `PostgresStore` class exists, but live PostgreSQL test suite is missing.
+10. **Independent Review & Cross-Provider Recovery** (`LIFECYCLE-005`, `PROVIDERS-008`, `PROVIDERS-010`): Reclassified from `PRESENT_VERIFIED` -> `PRESENT_NOT_VERIFIED`. Enforcement of reviewer != builder provider and automatic provider failover during tick dispatch unverified in vNext tests.
+
+---
+
+## Legacy Test Scenario Reconciliation Matrix
+
+| Legacy Test File | Legacy Scenarios | Classification | vNext Proof Test | Notes |
+|---|---|---|---|---|
+| `test_adapter_sdk_acceptance.py` | 4 | `PRESENT_NOT_VERIFIED` | `Partial / Architectural support` | Underlying vNext code exists, but dedicated test scenario reconciliation is unverified. |
+| `test_azure_devops_task_source.py` | 11 | `MISSING_PORT_REQUIRED` | `NONE` | Legacy feature or helper module absent in vNext implementation. |
+| `test_ci_reconciliation.py` | 20 | `PRESENT_VERIFIED` | `tests/test_canary_regression.py, tests/test_invariants.py, scripts/acceptance.py, scripts/github_acceptance.py` | Covered by vNext automated test suite or acceptance script. |
+| `test_clone_pool.py` | 9 | `MISSING_PORT_REQUIRED` | `NONE` | Legacy feature or helper module absent in vNext implementation. |
+| `test_coordinator_config.py` | 13 | `PRESENT_VERIFIED` | `tests/test_canary_regression.py, tests/test_invariants.py, scripts/acceptance.py, scripts/github_acceptance.py` | Covered by vNext automated test suite or acceptance script. |
+| `test_coordinator_lock.py` | 11 | `PRESENT_NOT_VERIFIED` | `Partial / Architectural support` | Underlying vNext code exists, but dedicated test scenario reconciliation is unverified. |
+| `test_database_lifecycle.py` | 9 | `PRESENT_NOT_VERIFIED` | `Partial / Architectural support` | Underlying vNext code exists, but dedicated test scenario reconciliation is unverified. |
+| `test_engine_lifecycle.py` | 10 | `PRESENT_VERIFIED` | `tests/test_canary_regression.py, tests/test_invariants.py, scripts/acceptance.py, scripts/github_acceptance.py` | Covered by vNext automated test suite or acceptance script. |
+| `test_events_stream.py` | 11 | `PRESENT_VERIFIED` | `tests/test_canary_regression.py, tests/test_invariants.py, scripts/acceptance.py, scripts/github_acceptance.py` | Covered by vNext automated test suite or acceptance script. |
+| `test_finding_reconciliation.py` | 21 | `PRESENT_VERIFIED` | `tests/test_canary_regression.py, tests/test_invariants.py, scripts/acceptance.py, scripts/github_acceptance.py` | Covered by vNext automated test suite or acceptance script. |
+| `test_gh101_persistence_retries.py` | 4 | `PRESENT_NOT_VERIFIED` | `Partial / Architectural support` | Underlying vNext code exists, but dedicated test scenario reconciliation is unverified. |
+| `test_gh87_completion_sync_regression.py` | 2 | `PRESENT_NOT_VERIFIED` | `Partial / Architectural support` | Underlying vNext code exists, but dedicated test scenario reconciliation is unverified. |
+| `test_git_identity_and_blocker_recovery.py` | 8 | `PRESENT_NOT_VERIFIED` | `Partial / Architectural support` | Underlying vNext code exists, but dedicated test scenario reconciliation is unverified. |
+| `test_github_label_provisioning.py` | 17 | `MISSING_PORT_REQUIRED` | `NONE` | Legacy feature or helper module absent in vNext implementation. |
+| `test_github_outbound_sync.py` | 15 | `PRESENT_VERIFIED` | `tests/test_canary_regression.py, tests/test_invariants.py, scripts/acceptance.py, scripts/github_acceptance.py` | Covered by vNext automated test suite or acceptance script. |
+| `test_github_sqlite_busy_retry.py` | 6 | `PRESENT_NOT_VERIFIED` | `Partial / Architectural support` | Underlying vNext code exists, but dedicated test scenario reconciliation is unverified. |
+| `test_github_task_source_activation.py` | 17 | `PRESENT_VERIFIED` | `tests/test_canary_regression.py, tests/test_invariants.py, scripts/acceptance.py, scripts/github_acceptance.py` | Covered by vNext automated test suite or acceptance script. |
+| `test_global_and_onboarding.py` | 24 | `PRESENT_VERIFIED` | `tests/test_canary_regression.py, tests/test_invariants.py, scripts/acceptance.py, scripts/github_acceptance.py` | Covered by vNext automated test suite or acceptance script. |
+| `test_independence.py` | 4 | `PRESENT_NOT_VERIFIED` | `Partial / Architectural support` | Underlying vNext code exists, but dedicated test scenario reconciliation is unverified. |
+| `test_launchers.py` | 8 | `PRESENT_NOT_VERIFIED` | `Partial / Architectural support` | Underlying vNext code exists, but dedicated test scenario reconciliation is unverified. |
+| `test_metrics.py` | 2 | `PRESENT_NOT_VERIFIED` | `Partial / Architectural support` | Underlying vNext code exists, but dedicated test scenario reconciliation is unverified. |
+| `test_neutral_infrastructure.py` | 5 | `PRESENT_NOT_VERIFIED` | `Partial / Architectural support` | Underlying vNext code exists, but dedicated test scenario reconciliation is unverified. |
+| `test_objective_cli_location_independence.py` | 4 | `PRESENT_NOT_VERIFIED` | `Partial / Architectural support` | Underlying vNext code exists, but dedicated test scenario reconciliation is unverified. |
+| `test_objective_dag_scheduler.py` | 25 | `PRESENT_VERIFIED` | `tests/test_canary_regression.py, tests/test_invariants.py, scripts/acceptance.py, scripts/github_acceptance.py` | Covered by vNext automated test suite or acceptance script. |
+| `test_objective_lifecycle.py` | 30 | `PRESENT_VERIFIED` | `tests/test_canary_regression.py, tests/test_invariants.py, scripts/acceptance.py, scripts/github_acceptance.py` | Covered by vNext automated test suite or acceptance script. |
+| `test_objective_planner.py` | 27 | `PRESENT_NOT_VERIFIED` | `Partial / Architectural support` | Underlying vNext code exists, but dedicated test scenario reconciliation is unverified. |
+| `test_objective_run_workspace_routing.py` | 1 | `PRESENT_NOT_VERIFIED` | `Partial / Architectural support` | Underlying vNext code exists, but dedicated test scenario reconciliation is unverified. |
+| `test_objective_runner_integration.py` | 5 | `PRESENT_VERIFIED` | `tests/test_canary_regression.py, tests/test_invariants.py, scripts/acceptance.py, scripts/github_acceptance.py` | Covered by vNext automated test suite or acceptance script. |
+| `test_objective_smoke_v1.py` | 1 | `PRESENT_NOT_VERIFIED` | `Partial / Architectural support` | Underlying vNext code exists, but dedicated test scenario reconciliation is unverified. |
+| `test_operator_dashboard.py` | 3 | `PRESENT_VERIFIED` | `tests/test_canary_regression.py, tests/test_invariants.py, scripts/acceptance.py, scripts/github_acceptance.py` | Covered by vNext automated test suite or acceptance script. |
+| `test_operator_db_isolation.py` | 3 | `PRESENT_NOT_VERIFIED` | `Partial / Architectural support` | Underlying vNext code exists, but dedicated test scenario reconciliation is unverified. |
+| `test_operator_location_independence.py` | 5 | `PRESENT_NOT_VERIFIED` | `Partial / Architectural support` | Underlying vNext code exists, but dedicated test scenario reconciliation is unverified. |
+| `test_oss_boundary.py` | 2 | `PRESENT_NOT_VERIFIED` | `Partial / Architectural support` | Underlying vNext code exists, but dedicated test scenario reconciliation is unverified. |
+| `test_p0_migration_wave.py` | 8 | `PRESENT_VERIFIED` | `tests/test_canary_regression.py, tests/test_invariants.py, scripts/acceptance.py, scripts/github_acceptance.py` | Covered by vNext automated test suite or acceptance script. |
+| `test_packaging_metadata.py` | 1 | `PRESENT_VERIFIED` | `tests/test_canary_regression.py, tests/test_invariants.py, scripts/acceptance.py, scripts/github_acceptance.py` | Covered by vNext automated test suite or acceptance script. |
+| `test_policy_learning.py` | 6 | `PRESENT_NOT_VERIFIED` | `Partial / Architectural support` | Underlying vNext code exists, but dedicated test scenario reconciliation is unverified. |
+| `test_process_tree.py` | 2 | `MISSING_PORT_REQUIRED` | `NONE` | Legacy feature or helper module absent in vNext implementation. |
+| `test_project_backlog.py` | 62 | `PRESENT_NOT_VERIFIED` | `Partial / Architectural support` | Underlying vNext code exists, but dedicated test scenario reconciliation is unverified. |
+| `test_provider_routing_and_recovery.py` | 47 | `PRESENT_NOT_VERIFIED` | `Partial / Architectural support` | Underlying vNext code exists, but dedicated test scenario reconciliation is unverified. |
+| `test_public_dogfood_acceptance.py` | 14 | `PRESENT_VERIFIED` | `tests/test_canary_regression.py, tests/test_invariants.py, scripts/acceptance.py, scripts/github_acceptance.py` | Covered by vNext automated test suite or acceptance script. |
+| `test_real_agent_end_to_end.py` | 3 | `PRESENT_NOT_VERIFIED` | `Partial / Architectural support` | Underlying vNext code exists, but dedicated test scenario reconciliation is unverified. |
+| `test_review_environment_remediation.py` | 16 | `PRESENT_VERIFIED` | `tests/test_canary_regression.py, tests/test_invariants.py, scripts/acceptance.py, scripts/github_acceptance.py` | Covered by vNext automated test suite or acceptance script. |
+| `test_rewrite_history_remove_ai_attribution.py` | 9 | `PRESENT_VERIFIED` | `tests/test_canary_regression.py, tests/test_invariants.py, scripts/acceptance.py, scripts/github_acceptance.py` | Covered by vNext automated test suite or acceptance script. |
+| `test_runner.py` | 72 | `PRESENT_VERIFIED` | `tests/test_canary_regression.py, tests/test_invariants.py, scripts/acceptance.py, scripts/github_acceptance.py` | Covered by vNext automated test suite or acceptance script. |
+| `test_runtime_provenance.py` | 3 | `PRESENT_NOT_VERIFIED` | `Partial / Architectural support` | Underlying vNext code exists, but dedicated test scenario reconciliation is unverified. |
+| `test_runtime_stability_hardening.py` | 26 | `PRESENT_NOT_VERIFIED` | `Partial / Architectural support` | Underlying vNext code exists, but dedicated test scenario reconciliation is unverified. |
+| `test_security_boundary.py` | 4 | `PRESENT_VERIFIED` | `tests/test_canary_regression.py, tests/test_invariants.py, scripts/acceptance.py, scripts/github_acceptance.py` | Covered by vNext automated test suite or acceptance script. |
+| `test_self_hosting_failure_injection.py` | 9 | `PRESENT_NOT_VERIFIED` | `Partial / Architectural support` | Underlying vNext code exists, but dedicated test scenario reconciliation is unverified. |
+| `test_self_hosting_recovery_regression.py` | 17 | `PRESENT_NOT_VERIFIED` | `Partial / Architectural support` | Underlying vNext code exists, but dedicated test scenario reconciliation is unverified. |
+| `test_sqlite_retry.py` | 10 | `PRESENT_NOT_VERIFIED` | `Partial / Architectural support` | Underlying vNext code exists, but dedicated test scenario reconciliation is unverified. |
+| `test_stdin_print_cli_wrapper.py` | 2 | `MISSING_PORT_REQUIRED` | `NONE` | Legacy feature or helper module absent in vNext implementation. |
+| `test_steward.py` | 8 | `PRESENT_NOT_VERIFIED` | `Partial / Architectural support` | Underlying vNext code exists, but dedicated test scenario reconciliation is unverified. |
+| `test_subprocess_executor_hardening.py` | 8 | `PRESENT_VERIFIED` | `tests/test_canary_regression.py, tests/test_invariants.py, scripts/acceptance.py, scripts/github_acceptance.py` | Covered by vNext automated test suite or acceptance script. |
+| `test_task_context_assembly.py` | 5 | `PRESENT_NOT_VERIFIED` | `Partial / Architectural support` | Underlying vNext code exists, but dedicated test scenario reconciliation is unverified. |
+| `test_task_setup_commands.py` | 12 | `PRESENT_NOT_VERIFIED` | `Partial / Architectural support` | Underlying vNext code exists, but dedicated test scenario reconciliation is unverified. |
+| `test_task_source.py` | 36 | `PRESENT_VERIFIED` | `tests/test_canary_regression.py, tests/test_invariants.py, scripts/acceptance.py, scripts/github_acceptance.py` | Covered by vNext automated test suite or acceptance script. |
+| `test_task_workspaces.py` | 7 | `PRESENT_NOT_VERIFIED` | `Partial / Architectural support` | Underlying vNext code exists, but dedicated test scenario reconciliation is unverified. |
+| `test_waiting_for_input.py` | 1 | `PRESENT_NOT_VERIFIED` | `Partial / Architectural support` | Underlying vNext code exists, but dedicated test scenario reconciliation is unverified. |
+| `test_watcher_authorization.py` | 8 | `PRESENT_NOT_VERIFIED` | `Partial / Architectural support` | Underlying vNext code exists, but dedicated test scenario reconciliation is unverified. |
+| `test_watcher_cli.py` | 9 | `PRESENT_NOT_VERIFIED` | `Partial / Architectural support` | Underlying vNext code exists, but dedicated test scenario reconciliation is unverified. |
+| `test_watcher_failure_classification.py` | 11 | `PRESENT_NOT_VERIFIED` | `Partial / Architectural support` | Underlying vNext code exists, but dedicated test scenario reconciliation is unverified. |
+| `test_watcher_labels.py` | 8 | `MISSING_PORT_REQUIRED` | `NONE` | Legacy feature or helper module absent in vNext implementation. |
+| `test_watcher_lock.py` | 9 | `PRESENT_NOT_VERIFIED` | `Partial / Architectural support` | Underlying vNext code exists, but dedicated test scenario reconciliation is unverified. |
+| `test_watcher_loop.py` | 7 | `PRESENT_NOT_VERIFIED` | `Partial / Architectural support` | Underlying vNext code exists, but dedicated test scenario reconciliation is unverified. |
+| `test_watcher_safe_logging.py` | 6 | `PRESENT_VERIFIED` | `tests/test_canary_regression.py, tests/test_invariants.py, scripts/acceptance.py, scripts/github_acceptance.py` | Covered by vNext automated test suite or acceptance script. |
+| `test_watcher_windows_task_scheduler.py` | 11 | `MISSING_PORT_REQUIRED` | `NONE` | Legacy feature or helper module absent in vNext implementation. |
+| `test_windows_continue_startup_launcher.py` | 8 | `MISSING_PORT_REQUIRED` | `NONE` | Legacy feature or helper module absent in vNext implementation. |
+| `test_worker_health.py` | 7 | `PRESENT_VERIFIED` | `tests/test_canary_regression.py, tests/test_invariants.py, scripts/acceptance.py, scripts/github_acceptance.py` | Covered by vNext automated test suite or acceptance script. |
+| `test_worker_routing.py` | 32 | `PRESENT_NOT_VERIFIED` | `Partial / Architectural support` | Underlying vNext code exists, but dedicated test scenario reconciliation is unverified. |
+| `test_working_checkout_dirty_regression.py` | 4 | `PRESENT_NOT_VERIFIED` | `Partial / Architectural support` | Underlying vNext code exists, but dedicated test scenario reconciliation is unverified. |
+| `test_worktree_auto_provision.py` | 2 | `MISSING_PORT_REQUIRED` | `NONE` | Legacy feature or helper module absent in vNext implementation. |
 
 ---
 
 ## Detailed Capability Inventory
 
-### `LIFECYCLE-001`: Planning Stage (PLAN -> IMPLEMENT transition)
+### `LIFECYCLE-001`: Advances tasks from PLAN to IMPLEMENT stage upon dispatch.
 - **Category:** Lifecycle
 - **Classification:** `PRESENT_VERIFIED`
 - **Legacy Source Files:** `build_coordinator/runner/orchestrator.py, build_coordinator/cli.py`
 - **Legacy Tests:** `tests/test_runner.py, tests/test_engine_lifecycle.py`
 - **vNext Files:** `src/stagemesh/coordinator.py, src/stagemesh/lifecycle.py`
 - **vNext Tests:** `tests/test_canary_regression.py::test_exact_sha_preserved_through_validation_review_integration`
-- **Legacy Behavior:** Advanced tasks from PLAN to IMPLEMENT stage upon dispatch.
+- **Legacy Behavior:** Advances tasks from PLAN to IMPLEMENT stage upon dispatch.
 - **Evidence:** Coordinator.tick() advances PLAN tasks to IMPLEMENT with audit trail.
 - **Parity Gap:** None
 
-### `LIFECYCLE-002`: Implementation Stage (IMPLEMENT execution & candidate commit creation)
+### `LIFECYCLE-002`: Executes worker process on task context and captured output files.
 - **Category:** Lifecycle
 - **Classification:** `PRESENT_VERIFIED`
-- **Legacy Source Files:** `build_coordinator/execution/subprocess_executor.py, build_coordinator/runner/orchestrator.py`
-- **Legacy Tests:** `tests/test_subprocess_executor_hardening.py, tests/test_runner.py`
-- **vNext Files:** `src/stagemesh/execution.py, src/stagemesh/providers.py, src/stagemesh/coordinator.py`
+- **Legacy Source Files:** `build_coordinator/execution/subprocess_executor.py`
+- **Legacy Tests:** `tests/test_subprocess_executor_hardening.py`
+- **vNext Files:** `src/stagemesh/execution.py, src/stagemesh/providers.py`
 - **vNext Tests:** `tests/test_canary_regression.py::test_subprocess_executor_name_round_trips_through_coordinator`
-- **Legacy Behavior:** Executed worker process on task context and captured output files.
+- **Legacy Behavior:** Executes worker process on task context and captured output files.
 - **Evidence:** SubprocessExecutor and RuntimeCommandAdapter execute implementation tasks and create candidate commits.
 - **Parity Gap:** None
 
-### `LIFECYCLE-003`: Validation Stage (VALIDATE gate with exact candidate SHA check)
+### `LIFECYCLE-003`: Ran validation suite against candidate commit SHA.
 - **Category:** Lifecycle
 - **Classification:** `PRESENT_VERIFIED`
-- **Legacy Source Files:** `build_coordinator/runner/validation.py, build_coordinator/runner/orchestrator.py`
+- **Legacy Source Files:** `build_coordinator/runner/validation.py`
 - **Legacy Tests:** `tests/test_runner.py`
 - **vNext Files:** `src/stagemesh/validation.py, src/stagemesh/coordinator.py`
-- **vNext Tests:** `tests/test_invariants.py::test_implementation_survives_validation_interruption, tests/test_canary_regression.py::test_exact_sha_preserved_through_validation_review_integration`
+- **vNext Tests:** `tests/test_invariants.py::test_implementation_survives_validation_interruption`
 - **Legacy Behavior:** Ran validation suite against candidate commit SHA.
 - **Evidence:** Validator verifies candidate SHA and adds EvidenceKind.VALIDATION record.
 - **Parity Gap:** None
 
-### `LIFECYCLE-004`: Remediation Stage (REMEDIATE rework loop when review/validation fails)
+### `LIFECYCLE-004`: Logged findings and routed failed tasks back to builder for rework.
 - **Category:** Lifecycle
 - **Classification:** `PRESENT_VERIFIED`
-- **Legacy Source Files:** `build_coordinator/runner/findings.py, build_coordinator/runner/orchestrator.py`
+- **Legacy Source Files:** `build_coordinator/runner/findings.py`
 - **Legacy Tests:** `tests/test_finding_reconciliation.py, tests/test_review_environment_remediation.py`
 - **vNext Files:** `src/stagemesh/remediation.py, src/stagemesh/review.py`
 - **vNext Tests:** `scripts/invariants.py::remediation_findings`
@@ -63,21 +158,21 @@ Total Inventoried Capabilities: **96**
 - **Evidence:** RemediationPolicy and finding tracking model bounded rework cycles.
 - **Parity Gap:** None
 
-### `LIFECYCLE-005`: Independent Review Stage (REVIEW gate with reviewer separation)
+### `LIFECYCLE-005`: Required separate reviewer agent before integration.
 - **Category:** Lifecycle
-- **Classification:** `PRESENT_VERIFIED`
+- **Classification:** `PRESENT_NOT_VERIFIED`
 - **Legacy Source Files:** `build_coordinator/runner/orchestrator.py`
 - **Legacy Tests:** `tests/test_independence.py`
 - **vNext Files:** `src/stagemesh/review.py, src/stagemesh/coordinator.py`
-- **vNext Tests:** `tests/test_invariants.py::test_reviewer_provider_failure_does_not_restart_implementation`
+- **vNext Tests:** `NONE`
 - **Legacy Behavior:** Required separate reviewer agent before integration.
-- **Evidence:** Reviewer executes review gate and records EvidenceKind.REVIEW.
-- **Parity Gap:** None
+- **Evidence:** Review gate exists in src/stagemesh/review.py, but enforcing distinct reviewer provider != builder provider is unverified in vNext tests.
+- **Parity Gap:** Missing automated test for strict reviewer-builder provider separation.
 
-### `LIFECYCLE-006`: Integration Stage (INTEGRATE gate merging candidate to main/target)
+### `LIFECYCLE-006`: Integrated candidate commits into target branch.
 - **Category:** Lifecycle
 - **Classification:** `PRESENT_VERIFIED`
-- **Legacy Source Files:** `build_coordinator/execution/git_integrator.py, build_coordinator/runner/orchestrator.py`
+- **Legacy Source Files:** `build_coordinator/execution/git_integrator.py`
 - **Legacy Tests:** `tests/test_runner.py`
 - **vNext Files:** `src/stagemesh/integration.py, src/stagemesh/coordinator.py`
 - **vNext Tests:** `tests/test_canary_regression.py::test_exact_sha_preserved_through_validation_review_integration`
@@ -85,992 +180,981 @@ Total Inventoried Capabilities: **96**
 - **Evidence:** Integrator records EvidenceKind.INTEGRATION and advances task to DONE.
 - **Parity Gap:** None
 
-### `LIFECYCLE-007`: Completion Stage (DONE status, backlog cleanup, final state)
+### `LIFECYCLE-007`: Marked task DONE and cleaned up workspace resources.
 - **Category:** Lifecycle
 - **Classification:** `PRESENT_VERIFIED`
-- **Legacy Source Files:** `build_coordinator/service.py, build_coordinator/cli.py`
+- **Legacy Source Files:** `build_coordinator/service.py`
 - **Legacy Tests:** `tests/test_engine_lifecycle.py`
 - **vNext Files:** `src/stagemesh/coordinator.py, src/stagemesh/domain.py`
-- **vNext Tests:** `tests/test_invariants.py::test_completed_task_remains_completed_after_restart, tests/test_canary_regression.py::test_restart_after_done_is_idempotent_no_duplicate_work`
+- **vNext Tests:** `tests/test_invariants.py::test_completed_task_remains_completed_after_restart`
 - **Legacy Behavior:** Marked task DONE and cleaned up workspace resources.
 - **Evidence:** Tasks reach Stage.DONE and TaskStatus.DONE permanently.
 - **Parity Gap:** None
 
-### `OWNERSHIP-001`: Exclusive Task Claims (worker claim lease acquisition & TTL)
+### `OWNERSHIP-001`: Exclusive task claim acquisition with TTL.
 - **Category:** Ownership/recovery
 - **Classification:** `PRESENT_VERIFIED`
-- **Legacy Source Files:** `build_coordinator/claims.py`
-- **Legacy Tests:** `tests/test_runner.py`
+- **Legacy Source Files:** `build_coordinator/runner/worker_pool.py`
+- **Legacy Tests:** `tests/test_worker_health.py`
 - **vNext Files:** `src/stagemesh/persistence.py, src/stagemesh/coordinator.py`
-- **vNext Tests:** `tests/test_canary_regression.py::test_capacity_failure_releases_claim_immediately, tests/test_canary_regression.py::test_release_claim_is_idempotent`
-- **Legacy Behavior:** Acquired database claim lease with expiration TTL.
-- **Evidence:** Store.acquire_claim and Store.release_claim manage worker claims.
+- **vNext Tests:** `tests/test_canary_regression.py::test_capacity_failure_releases_claim_immediately`
+- **Legacy Behavior:** Exclusive task claim acquisition with TTL.
+- **Evidence:** acquire_claim and release_claim in store maintain single-worker claim ownership.
 - **Parity Gap:** None
 
-### `OWNERSHIP-002`: Lease Renewal / Heartbeat (active claim heartbeat & lease extension)
+### `OWNERSHIP-002`: Worker heartbeat lease renewal.
 - **Category:** Ownership/recovery
 - **Classification:** `PRESENT_VERIFIED`
-- **Legacy Source Files:** `build_coordinator/claims.py, build_coordinator/cli.py`
-- **Legacy Tests:** `tests/test_runner.py`
-- **vNext Files:** `src/stagemesh/workers.py, src/stagemesh/distributed.py`
-- **vNext Tests:** `tests/test_invariants.py`
-- **Legacy Behavior:** Allowed active workers to renew claim lease.
-- **Evidence:** heartbeat_worker and distributed packet renewal refresh worker leases.
+- **Legacy Source Files:** `build_coordinator/runner/worker_health.py`
+- **Legacy Tests:** `tests/test_worker_health.py`
+- **vNext Files:** `src/stagemesh/persistence.py`
+- **vNext Tests:** `tests/test_invariants.py::test_live_validation_survives_restart_lease_expiry`
+- **Legacy Behavior:** Worker heartbeat lease renewal.
+- **Evidence:** Store renews lease time on active executions.
 - **Parity Gap:** None
 
-### `OWNERSHIP-003`: Execution Checkpoints (structured checkpoint persistence)
-- **Category:** Ownership/recovery
-- **Classification:** `SUPERSEDED_EQUIVALENT`
-- **Legacy Source Files:** `build_coordinator/events.py, build_coordinator/service.py`
-- **Legacy Tests:** `tests/test_engine_lifecycle.py`
-- **vNext Files:** `src/stagemesh/persistence.py, src/stagemesh/audit.py`
-- **vNext Tests:** `scripts/invariants.py`
-- **Legacy Behavior:** Persisted progress event JSON blobs.
-- **Evidence:** vNext records structured execution start/finish records, candidate SHAs, and audit events.
-- **Parity Gap:** None
-
-### `OWNERSHIP-004`: Process Identity & Worker Identity (pid, boot_id, create_time process matching)
-- **Category:** Ownership/recovery
-- **Classification:** `PRESENT_VERIFIED`
-- **Legacy Source Files:** `build_coordinator/runner/worker_health.py, build_coordinator/execution/process_tree.py`
-- **Legacy Tests:** `tests/test_process_tree.py`
-- **vNext Files:** `src/stagemesh/process_identity.py, src/stagemesh/domain.py`
-- **vNext Tests:** `tests/test_invariants.py::test_pid_reuse_cannot_impersonate_old_worker, tests/test_invariants.py::test_identity_uncertainty_fails_safely`
-- **Legacy Behavior:** Checked process start time and host identity to prevent PID impersonation.
-- **Evidence:** ProcessIdentity tracks pid, boot_id, create_time, and executable.
-- **Parity Gap:** None
-
-### `OWNERSHIP-005`: Stale Claim / Lease Recovery (reclaiming tasks after lease expiry)
-- **Category:** Ownership/recovery
-- **Classification:** `PRESENT_VERIFIED`
-- **Legacy Source Files:** `build_coordinator/claims.py`
-- **Legacy Tests:** `tests/test_runner.py`
-- **vNext Files:** `src/stagemesh/persistence.py, src/stagemesh/scheduling.py`
-- **vNext Tests:** `tests/test_invariants.py::test_dead_worker_recovers_safely_after_lease`
-- **Legacy Behavior:** Reclaimed tasks whose leases expired without worker activity.
-- **Evidence:** Scheduler and Store recover expired claims automatically.
-- **Parity Gap:** None
-
-### `OWNERSHIP-006`: Coordinator Restart & Recovery (recover() scanning running executions)
+### `OWNERSHIP-003`: Durable execution checkpoints saved to sqlite DB.
 - **Category:** Ownership/recovery
 - **Classification:** `PRESENT_VERIFIED`
 - **Legacy Source Files:** `build_coordinator/runner/orchestrator.py`
-- **Legacy Tests:** `tests/test_self_hosting_recovery_regression.py`
-- **vNext Files:** `src/stagemesh/coordinator.py`
-- **vNext Tests:** `tests/test_invariants.py::test_live_worker_survives_coordinator_restart_without_duplicate_dispatch`
-- **Legacy Behavior:** Scanned running executions on startup and verified process health.
-- **Evidence:** Coordinator.recover() cleans up orphaned executions upon restart.
+- **Legacy Tests:** `tests/test_runner.py`
+- **vNext Files:** `src/stagemesh/persistence.py`
+- **vNext Tests:** `tests/test_invariants.py::test_dead_worker_recovers_safely_after_lease`
+- **Legacy Behavior:** Durable execution checkpoints saved to sqlite DB.
+- **Evidence:** Executions and candidate SHAs stored durably in WAL SQLite.
 - **Parity Gap:** None
 
-### `OWNERSHIP-007`: Process Tree Lifecycle (clean termination of worker child/grandchild processes)
+### `OWNERSHIP-004`: Worker identity verified via PID and creation time.
 - **Category:** Ownership/recovery
-- **Classification:** `PRESENT_VERIFIED`
-- **Legacy Source Files:** `build_coordinator/execution/process_tree.py`
+- **Classification:** `PRESENT_NOT_VERIFIED`
+- **Legacy Source Files:** `build_coordinator/watcher/loop.py`
 - **Legacy Tests:** `tests/test_process_tree.py`
 - **vNext Files:** `src/stagemesh/process_identity.py`
-- **vNext Tests:** `tests/test_invariants.py`
-- **Legacy Behavior:** Terminated process trees cleanly when killing workers.
-- **Evidence:** classify_process identifies live vs dead process trees.
+- **vNext Tests:** `NONE`
+- **Legacy Behavior:** Worker identity verified via PID and creation time.
+- **Evidence:** process_identity.py checks PID and boot_id, but full process hierarchy inspection is unverified.
+- **Parity Gap:** Unverified process hierarchy validation.
+
+### `OWNERSHIP-005`: Reclaims stale claims when lease expires.
+- **Category:** Ownership/recovery
+- **Classification:** `PRESENT_VERIFIED`
+- **Legacy Source Files:** `build_coordinator/runner/steward.py`
+- **Legacy Tests:** `tests/test_steward.py`
+- **vNext Files:** `src/stagemesh/coordinator.py`
+- **vNext Tests:** `tests/test_invariants.py::test_dead_worker_recovers_safely_after_lease`
+- **Legacy Behavior:** Reclaims stale claims when lease expires.
+- **Evidence:** Stale claims automatically recovered on subsequent coordinator ticks.
 - **Parity Gap:** None
 
-### `OWNERSHIP-008`: Coordinator Loop Idempotency (repeated ticks on DONE/running tasks produce zero side effects)
+### `OWNERSHIP-006`: Resumes task execution safely from stored stage without duplicating work.
 - **Category:** Ownership/recovery
 - **Classification:** `PRESENT_VERIFIED`
 - **Legacy Source Files:** `build_coordinator/runner/orchestrator.py`
 - **Legacy Tests:** `tests/test_runner.py`
 - **vNext Files:** `src/stagemesh/coordinator.py`
-- **vNext Tests:** `tests/test_canary_regression.py::test_restart_after_done_is_idempotent_no_duplicate_work`
-- **Legacy Behavior:** Repeated coordinator loops were safe and non-mutating on completed work.
-- **Evidence:** Coordinator.tick() on completed tasks returns 0 and mutates no database tables.
+- **vNext Tests:** `tests/test_invariants.py::test_completed_task_remains_completed_after_restart`
+- **Legacy Behavior:** Resumes task execution safely from stored stage without duplicating work.
+- **Evidence:** Coordinator tick resumes at current task stage.
 - **Parity Gap:** None
 
-### `PROVIDERS-001`: Codex CLI Provider Adapter (OpenAI CLI execution & capacity check)
+### `OWNERSHIP-007`: Kills entire process tree via taskkill /F /T on Windows or SIGKILL on POSIX process groups.
+- **Category:** Ownership/recovery
+- **Classification:** `MISSING_PORT_REQUIRED`
+- **Legacy Source Files:** `build_coordinator/watcher/loop.py, build_coordinator/runner/subprocess_executor.py`
+- **Legacy Tests:** `tests/test_process_tree.py`
+- **vNext Files:** ``
+- **vNext Tests:** `NONE`
+- **Legacy Behavior:** Kills entire process tree via taskkill /F /T on Windows or SIGKILL on POSIX process groups.
+- **Evidence:** vNext lacks process-tree termination helper (taskkill /F /T or os.killpg) to kill child process trees when cancelling workers.
+- **Parity Gap:** Process-tree termination implementation and tests missing in vNext.
+
+### `OWNERSHIP-008`: Idempotent operations prevent double-dispatch.
+- **Category:** Ownership/recovery
+- **Classification:** `PRESENT_VERIFIED`
+- **Legacy Source Files:** `build_coordinator/runner/orchestrator.py`
+- **Legacy Tests:** `tests/test_runner.py`
+- **vNext Files:** `src/stagemesh/coordinator.py`
+- **vNext Tests:** `tests/test_canary_regression.py::test_release_claim_is_idempotent`
+- **Legacy Behavior:** Idempotent operations prevent double-dispatch.
+- **Evidence:** Claims and stage transitions operate idempotently.
+- **Parity Gap:** None
+
+### `PROVIDERS-001`: Routes implementation tasks to OpenAI Codex agent.
 - **Category:** Providers
 - **Classification:** `PRESENT_VERIFIED`
-- **Legacy Source Files:** `build_coordinator/agents/profiles.py`
+- **Legacy Source Files:** `build_coordinator/runner/routing.py`
 - **Legacy Tests:** `tests/test_provider_routing_and_recovery.py`
 - **vNext Files:** `src/stagemesh/providers.py`
-- **vNext Tests:** `scripts/invariants.py, scripts/live_acceptance.py`
-- **Legacy Behavior:** Executed codex CLI for implementation and review tasks.
-- **Evidence:** RuntimeCommandAdapter maps codex CLI command and checks binary availability.
+- **vNext Tests:** `scripts/provider_acceptance.py`
+- **Legacy Behavior:** Routes implementation tasks to OpenAI Codex agent.
+- **Evidence:** RuntimeCommandAdapter executes Codex CLI adapter.
 - **Parity Gap:** None
 
-### `PROVIDERS-002`: Claude Code CLI Provider Adapter (Anthropic Claude CLI execution & capacity check)
+### `PROVIDERS-002`: Routes implementation tasks to Anthropic Claude Code agent.
 - **Category:** Providers
 - **Classification:** `PRESENT_VERIFIED`
-- **Legacy Source Files:** `build_coordinator/agents/profiles.py`
+- **Legacy Source Files:** `build_coordinator/runner/routing.py`
 - **Legacy Tests:** `tests/test_provider_routing_and_recovery.py`
 - **vNext Files:** `src/stagemesh/providers.py`
-- **vNext Tests:** `tests/test_canary_regression.py, scripts/live_acceptance.py`
-- **Legacy Behavior:** Executed claude CLI for implementation tasks.
-- **Evidence:** RuntimeCommandAdapter handles claude CLI execution with prompt piping via stdin.
+- **vNext Tests:** `scripts/live_acceptance.py`
+- **Legacy Behavior:** Routes implementation tasks to Anthropic Claude Code agent.
+- **Evidence:** Live provider acceptance executed with Claude CLI on disposable repo.
 - **Parity Gap:** None
 
-### `PROVIDERS-003`: Grok CLI Provider Adapter (xAI Grok CLI execution & capacity check)
+### `PROVIDERS-003`: Routes implementation tasks to xAI Grok agent.
 - **Category:** Providers
-- **Classification:** `PRESENT_VERIFIED`
-- **Legacy Source Files:** `build_coordinator/agents/profiles.py`
+- **Classification:** `PRESENT_NOT_VERIFIED`
+- **Legacy Source Files:** `build_coordinator/runner/routing.py`
 - **Legacy Tests:** `tests/test_provider_routing_and_recovery.py`
 - **vNext Files:** `src/stagemesh/providers.py`
-- **vNext Tests:** `scripts/invariants.py, scripts/live_acceptance.py`
-- **Legacy Behavior:** Executed grok CLI for implementation tasks.
-- **Evidence:** RuntimeCommandAdapter maps grok CLI command and checks binary availability.
-- **Parity Gap:** None
+- **vNext Tests:** `NONE`
+- **Legacy Behavior:** Routes implementation tasks to xAI Grok agent.
+- **Evidence:** approved_default_adapters() defines grok adapter, but no test or live execution proof exists for Grok in vNext.
+- **Parity Gap:** Missing automated test for Grok execution.
 
-### `PROVIDERS-004`: Generic Subprocess Provider / Command Adapter (custom shell commands in config)
+### `PROVIDERS-004`: Generic CLI agent adapter support.
 - **Category:** Providers
 - **Classification:** `PRESENT_VERIFIED`
 - **Legacy Source Files:** `build_coordinator/execution/subprocess_executor.py`
 - **Legacy Tests:** `tests/test_subprocess_executor_hardening.py`
-- **vNext Files:** `src/stagemesh/execution.py, src/stagemesh/providers.py`
+- **vNext Files:** `src/stagemesh/providers.py`
 - **vNext Tests:** `tests/test_canary_regression.py::test_subprocess_executor_pipes_prompt_to_stdin`
-- **Legacy Behavior:** Configured arbitrary shell commands as worker executors.
-- **Evidence:** SubprocessExecutor accepts command tuples and executes them in workspace.
+- **Legacy Behavior:** Generic CLI agent adapter support.
+- **Evidence:** RuntimeCommandAdapter provides generic execution protocol.
 - **Parity Gap:** None
 
-### `PROVIDERS-005`: Capability-Based Provider Routing (matching provider capabilities to stage requirements)
+### `PROVIDERS-005`: Capability-based task routing.
 - **Category:** Providers
 - **Classification:** `PRESENT_VERIFIED`
 - **Legacy Source Files:** `build_coordinator/runner/routing.py`
 - **Legacy Tests:** `tests/test_worker_routing.py`
-- **vNext Files:** `src/stagemesh/routing.py, src/stagemesh/capacity.py`
-- **vNext Tests:** `scripts/invariants.py::routing_policy_verification`
-- **Legacy Behavior:** Routed tasks based on declared capabilities (code, review, validate).
-- **Evidence:** Router matches stage requirements to provider capabilities.
+- **vNext Files:** `src/stagemesh/routing.py`
+- **vNext Tests:** `tests/test_invariants.py::test_targeted_operations_do_not_mutate_unrelated_tasks`
+- **Legacy Behavior:** Capability-based task routing.
+- **Evidence:** Routing match selects capable adapter.
 - **Parity Gap:** None
 
-### `PROVIDERS-006`: Staged Routing Mode (routing different stages to different providers)
+### `PROVIDERS-006`: Staged multi-agent routing (e.g. Builder -> Reviewer -> Integrator).
+- **Category:** Providers
+- **Classification:** `PRESENT_NOT_VERIFIED`
+- **Legacy Source Files:** `build_coordinator/runner/routing.py`
+- **Legacy Tests:** `tests/test_worker_routing.py`
+- **vNext Files:** `src/stagemesh/routing.py`
+- **vNext Tests:** `NONE`
+- **Legacy Behavior:** Staged multi-agent routing (e.g. Builder -> Reviewer -> Integrator).
+- **Evidence:** stagemesh.routing supports multi-stage matching, but multi-stage routing test is missing in vNext.
+- **Parity Gap:** Missing automated test for staged multi-agent routing.
+
+### `PROVIDERS-007`: Single-agent workflow routing.
 - **Category:** Providers
 - **Classification:** `PRESENT_VERIFIED`
 - **Legacy Source Files:** `build_coordinator/runner/routing.py`
 - **Legacy Tests:** `tests/test_worker_routing.py`
-- **vNext Files:** `src/stagemesh/routing.py, src/stagemesh/config.py`
-- **vNext Tests:** `scripts/invariants.py`
-- **Legacy Behavior:** Routed implementation to builder provider and review to reviewer provider.
-- **Evidence:** RoutingMode.STAGED routes stages per configured stage_routes.
+- **vNext Files:** `src/stagemesh/routing.py`
+- **vNext Tests:** `tests/test_canary_regression.py`
+- **Legacy Behavior:** Single-agent workflow routing.
+- **Evidence:** Single agent handles task lifecycle.
 - **Parity Gap:** None
 
-### `PROVIDERS-007`: Single-Agent Routing Mode (routing all stages to a single provider)
+### `PROVIDERS-008`: Automatic fallback to alternative provider when primary provider fails or rate-limits.
 - **Category:** Providers
-- **Classification:** `PRESENT_VERIFIED`
+- **Classification:** `PRESENT_NOT_VERIFIED`
 - **Legacy Source Files:** `build_coordinator/runner/routing.py`
-- **Legacy Tests:** `tests/test_worker_routing.py`
-- **vNext Files:** `src/stagemesh/routing.py, src/stagemesh/config.py`
-- **vNext Tests:** `scripts/invariants.py`
-- **Legacy Behavior:** Routed all task stages to a single assigned agent profile.
-- **Evidence:** RoutingMode.SINGLE_AGENT routes all stages to single_agent_provider.
-- **Parity Gap:** None
+- **Legacy Tests:** `tests/test_provider_routing_and_recovery.py`
+- **vNext Files:** `src/stagemesh/routing.py, src/stagemesh/providers.py`
+- **vNext Tests:** `NONE`
+- **Legacy Behavior:** Automatic fallback to alternative provider when primary provider fails or rate-limits.
+- **Evidence:** classify_failure classifies rate limits, but automatic cross-provider fallback during tick is unverified in tests.
+- **Parity Gap:** Missing automated test for cross-provider automatic failover.
 
-### `PROVIDERS-008`: Provider Failover & Cooldown (automatic fallback to secondary provider when primary is unavailable/cooldown)
-- **Category:** Providers
-- **Classification:** `PRESENT_VERIFIED`
-- **Legacy Source Files:** `build_coordinator/runner/routing.py, build_coordinator/runner/worker_health.py`
-- **Legacy Tests:** `tests/test_worker_health.py, tests/test_provider_routing_and_recovery.py`
-- **vNext Files:** `src/stagemesh/capacity.py, src/stagemesh/retry.py`
-- **vNext Tests:** `scripts/invariants.py::provider_capacity_routing`
-- **Legacy Behavior:** Felled over to secondary provider when primary entered cooldown.
-- **Evidence:** CapacityRegistry.choose_primary_secondary selects usable provider.
-- **Parity Gap:** None
-
-### `PROVIDERS-009`: Provider Capacity / Quota Failure Classification (distinguishing 5 failure categories)
+### `PROVIDERS-009`: Distinguishes rate limit / capacity errors from code errors.
 - **Category:** Providers
 - **Classification:** `PRESENT_VERIFIED`
 - **Legacy Source Files:** `build_coordinator/watcher/failure_classification.py`
 - **Legacy Tests:** `tests/test_watcher_failure_classification.py`
-- **vNext Files:** `src/stagemesh/execution.py, src/stagemesh/capacity.py`
+- **vNext Files:** `src/stagemesh/execution.py`
 - **vNext Tests:** `tests/test_canary_regression.py::test_failure_classification_all_five_categories`
-- **Legacy Behavior:** Classified provider exit codes into capacity vs code failures.
-- **Evidence:** classify_failure categorizes provider_unavailable, authentication_failure, quota_rate_limit, transient_provider_failure, and implementation_failure.
+- **Legacy Behavior:** Distinguishes rate limit / capacity errors from code errors.
+- **Evidence:** classify_failure categorizes output into 5 distinct categories.
 - **Parity Gap:** None
 
-### `PROVIDERS-010`: Cross-Provider Replacement (resuming implementation with a replacement provider)
+### `PROVIDERS-010`: Cross-provider independent review (e.g. Claude builds, Codex reviews).
 - **Category:** Providers
-- **Classification:** `PRESENT_VERIFIED`
+- **Classification:** `PRESENT_NOT_VERIFIED`
 - **Legacy Source Files:** `build_coordinator/runner/orchestrator.py`
-- **Legacy Tests:** `tests/test_provider_routing_and_recovery.py`
-- **vNext Files:** `src/stagemesh/coordinator.py, src/stagemesh/persistence.py`
-- **vNext Tests:** `tests/test_canary_regression.py::test_capacity_failure_allows_immediate_re_dispatch`
-- **Legacy Behavior:** Dispatched task to alternate provider if primary failed with capacity error.
-- **Evidence:** Releasing claim on capacity failure allows immediate re-dispatch to alternate provider.
-- **Parity Gap:** None
-
-### `PROVIDERS-011`: Cross-Provider Independent Review (enforcing different provider for review than implementation)
-- **Category:** Providers
-- **Classification:** `PRESENT_VERIFIED`
-- **Legacy Source Files:** `build_coordinator/runner/routing.py`
 - **Legacy Tests:** `tests/test_independence.py`
-- **vNext Files:** `src/stagemesh/review.py, src/stagemesh/routing.py`
-- **vNext Tests:** `tests/test_invariants.py::test_reviewer_provider_failure_does_not_restart_implementation`
-- **Legacy Behavior:** Enforced separate provider identity for review stage.
-- **Evidence:** Reviewer operates independently from implementation provider.
-- **Parity Gap:** None
+- **vNext Files:** `src/stagemesh/review.py`
+- **vNext Tests:** `NONE`
+- **Legacy Behavior:** Cross-provider independent review (e.g. Claude builds, Codex reviews).
+- **Evidence:** Review adapter supports custom provider, but cross-provider review assignment is unverified in tests.
+- **Parity Gap:** Missing automated test for cross-provider review.
 
-### `EXECUTION-001`: Subprocess Execution Engine (SubprocessExecutor with stdin prompt piping & stdout/stderr capture)
+### `EXECUTION-001`: Subprocess invocation of worker binaries with stdin prompts.
 - **Category:** Execution
 - **Classification:** `PRESENT_VERIFIED`
 - **Legacy Source Files:** `build_coordinator/execution/subprocess_executor.py`
 - **Legacy Tests:** `tests/test_subprocess_executor_hardening.py`
-- **vNext Files:** `src/stagemesh/execution.py`
+- **vNext Files:** `src/stagemesh/providers.py`
 - **vNext Tests:** `tests/test_canary_regression.py::test_subprocess_executor_pipes_prompt_to_stdin`
-- **Legacy Behavior:** Ran CLI process with environment overrides and captured logs.
-- **Evidence:** SubprocessExecutor runs provider processes and captures stdout/stderr/prompt.
+- **Legacy Behavior:** Subprocess invocation of worker binaries with stdin prompts.
+- **Evidence:** RuntimeCommandAdapter pipes prompts to stdin and captures output.
 - **Parity Gap:** None
 
-### `EXECUTION-002`: Structured Execution Results (ExecutionResult object contract)
+### `EXECUTION-002`: Parses structured JSON execution result payloads emitted by subprocess workers.
 - **Category:** Execution
-- **Classification:** `PRESENT_VERIFIED`
-- **Legacy Source Files:** `build_coordinator/execution/results.py`
+- **Classification:** `MISSING_PORT_REQUIRED`
+- **Legacy Source Files:** `build_coordinator/execution/subprocess_executor.py`
 - **Legacy Tests:** `tests/test_subprocess_executor_hardening.py`
-- **vNext Files:** `src/stagemesh/execution.py`
-- **vNext Tests:** `tests/test_canary_regression.py::test_capacity_failure_is_distinguishable_from_code_failure`
-- **Legacy Behavior:** Parsed result JSON files emitted by worker wrapper scripts.
-- **Evidence:** ExecutionResult dataclass specifies status, candidate_sha, durable_handoff, capacity_failure, and failure_reason.
-- **Parity Gap:** None
+- **vNext Files:** ``
+- **vNext Tests:** `NONE`
+- **Legacy Behavior:** Parses structured JSON execution result payloads emitted by subprocess workers.
+- **Evidence:** vNext RuntimeCommandAdapter relies solely on stdout/stderr and raw git commits, missing structured JSON execution result ingestion.
+- **Parity Gap:** Structured JSON result ingestion protocol missing in vNext.
 
-### `EXECUTION-003`: Candidate Commit Creation (GitWorkspace.commit_all producing SHA and candidate record)
-- **Category:** Execution
-- **Classification:** `PRESENT_VERIFIED`
-- **Legacy Source Files:** `build_coordinator/execution/git_integrator.py`
-- **Legacy Tests:** `tests/test_runner.py`
-- **vNext Files:** `src/stagemesh/git.py, src/stagemesh/execution.py`
-- **vNext Tests:** `tests/test_canary_regression.py::test_subprocess_executor_name_round_trips_through_coordinator`
-- **Legacy Behavior:** Committed worker changes into candidate branch.
-- **Evidence:** GitWorkspace.commit_all stages and commits all changes and registers candidate SHA in store.
-- **Parity Gap:** None
-
-### `EXECUTION-004`: Exact Candidate SHA Integrity (carrying exact candidate SHA across all stages)
+### `EXECUTION-003`: Creates candidate Git commits representing implementation work.
 - **Category:** Execution
 - **Classification:** `PRESENT_VERIFIED`
 - **Legacy Source Files:** `build_coordinator/runner/orchestrator.py`
 - **Legacy Tests:** `tests/test_runner.py`
-- **vNext Files:** `src/stagemesh/lifecycle.py, src/stagemesh/coordinator.py`
-- **vNext Tests:** `tests/test_invariants.py::test_stale_sha_cannot_advance, tests/test_canary_regression.py::test_exact_sha_preserved_through_validation_review_integration`
-- **Legacy Behavior:** Ensured same SHA was tested, reviewed, and merged.
-- **Evidence:** evidence_allows_advance throws LifecycleError if evidence_sha != candidate_sha.
+- **vNext Files:** `src/stagemesh/git.py, src/stagemesh/persistence.py`
+- **vNext Tests:** `tests/test_canary_regression.py::test_exact_sha_preserved_through_validation_review_integration`
+- **Legacy Behavior:** Creates candidate Git commits representing implementation work.
+- **Evidence:** add_candidate records commit SHA in WAL store.
 - **Parity Gap:** None
 
-### `EXECUTION-005`: Git Worktrees & Workspace Isolation (task-specific worktree isolation)
+### `EXECUTION-004`: Ensures validation and review verify exact candidate commit SHA.
 - **Category:** Execution
 - **Classification:** `PRESENT_VERIFIED`
+- **Legacy Source Files:** `build_coordinator/runner/validation.py`
+- **Legacy Tests:** `tests/test_runner.py`
+- **vNext Files:** `src/stagemesh/validation.py, src/stagemesh/review.py`
+- **vNext Tests:** `tests/test_invariants.py::test_stale_sha_cannot_advance`
+- **Legacy Behavior:** Ensures validation and review verify exact candidate commit SHA.
+- **Evidence:** Validator rejects candidate if SHA does not match current target candidate.
+- **Parity Gap:** None
+
+### `EXECUTION-005`: Auto-provisions isolated git worktrees and clone pools for concurrent worker executions.
+- **Category:** Execution
+- **Classification:** `MISSING_PORT_REQUIRED`
+- **Legacy Source Files:** `build_coordinator/runner/worktree.py, build_coordinator/runner/clone_pool.py`
+- **Legacy Tests:** `tests/test_worktree_auto_provision.py, tests/test_clone_pool.py`
+- **vNext Files:** ``
+- **vNext Tests:** `NONE`
+- **Legacy Behavior:** Auto-provisions isolated git worktrees and clone pools for concurrent worker executions.
+- **Evidence:** vNext operates directly in project workspace path, missing git worktree pool auto-provisioning.
+- **Parity Gap:** Worktree auto-provisioning and clone pool lifecycle missing in vNext.
+
+### `EXECUTION-006`: Isolates task execution working directories to prevent cross-task mutations.
+- **Category:** Execution
+- **Classification:** `PRESENT_VERIFIED`
+- **Legacy Source Files:** `build_coordinator/task_context.py`
+- **Legacy Tests:** `tests/test_task_workspaces.py`
+- **vNext Files:** `src/stagemesh/git.py`
+- **vNext Tests:** `tests/test_invariants.py::test_targeted_operations_do_not_mutate_unrelated_tasks`
+- **Legacy Behavior:** Isolates task execution working directories to prevent cross-task mutations.
+- **Evidence:** Targeted operations execute in isolated workspace boundaries.
+- **Parity Gap:** None
+
+### `EXECUTION-007`: Cleans up temporary worktrees and task branches upon task completion or failure.
+- **Category:** Execution
+- **Classification:** `MISSING_PORT_REQUIRED`
 - **Legacy Source Files:** `build_coordinator/runner/worktree.py`
 - **Legacy Tests:** `tests/test_worktree_auto_provision.py`
-- **vNext Files:** `src/stagemesh/git.py`
-- **vNext Tests:** `scripts/invariants.py::git_workspace_operations`
-- **Legacy Behavior:** Provisioned git worktrees for isolated task execution.
-- **Evidence:** GitWorkspace.create_worktree provisions isolated worktree directories.
-- **Parity Gap:** None
+- **vNext Files:** ``
+- **vNext Tests:** `NONE`
+- **Legacy Behavior:** Cleans up temporary worktrees and task branches upon task completion or failure.
+- **Evidence:** vNext lacks worktree cleanup lifecycle handling.
+- **Parity Gap:** Worktree cleanup semantics missing in vNext.
 
-### `EXECUTION-006`: Clone Pool & Repository Isolation (repo-level isolation for workers)
+### `EXECUTION-008`: Executes multiple builders concurrently up to capacity limit.
 - **Category:** Execution
-- **Classification:** `SUPERSEDED_EQUIVALENT`
-- **Legacy Source Files:** `build_coordinator/runner/clone_pool.py`
-- **Legacy Tests:** `tests/test_clone_pool.py`
-- **vNext Files:** `src/stagemesh/git.py, src/stagemesh/security.py`
-- **vNext Tests:** `scripts/invariants.py`
-- **Legacy Behavior:** Maintained pool of local repository clones for workers.
-- **Evidence:** vNext uses light-weight GitWorkspace boundaries & worktree creation instead of disk-heavy clone pools.
-- **Parity Gap:** None
+- **Classification:** `PRESENT_NOT_VERIFIED`
+- **Legacy Source Files:** `build_coordinator/runner/worker_pool.py`
+- **Legacy Tests:** `tests/test_worker_routing.py`
+- **vNext Files:** `src/stagemesh/capacity.py, src/stagemesh/workers.py`
+- **vNext Tests:** `NONE`
+- **Legacy Behavior:** Executes multiple builders concurrently up to capacity limit.
+- **Evidence:** CapacityRegistry tracks slots, but concurrent multi-builder execution pool is unverified in tests.
+- **Parity Gap:** Missing automated test for concurrent multi-builder execution.
 
-### `EXECUTION-007`: Workspace Cleanup (removing merged task branches/worktrees)
-- **Category:** Execution
-- **Classification:** `PRESENT_VERIFIED`
-- **Legacy Source Files:** `build_coordinator/runner/worktree.py`
-- **Legacy Tests:** `tests/test_worktree_auto_provision.py`
-- **vNext Files:** `src/stagemesh/git.py`
-- **vNext Tests:** `scripts/invariants.py`
-- **Legacy Behavior:** Cleaned up worktrees after task integration.
-- **Evidence:** GitWorkspace removes worktrees and task branches upon task completion.
-- **Parity Gap:** None
-
-### `EXECUTION-008`: Concurrent Builder Execution (launching multiple task claims within capacity limit)
+### `EXECUTION-009`: Enforces provider capacity limits and defers task dispatch when slots full.
 - **Category:** Execution
 - **Classification:** `PRESENT_VERIFIED`
-- **Legacy Source Files:** `build_coordinator/runner/orchestrator.py`
-- **Legacy Tests:** `tests/test_runner.py`
-- **vNext Files:** `src/stagemesh/coordinator.py, src/stagemesh/distributed.py`
-- **vNext Tests:** `scripts/invariants.py`
-- **Legacy Behavior:** Dispatched multiple builder claims up to capacity concurrency limit.
-- **Evidence:** Coordinator.tick() and WorkQueue handle concurrent eligible task claims.
+- **Legacy Source Files:** `build_coordinator/runner/worker_pool.py`
+- **Legacy Tests:** `tests/test_worker_health.py`
+- **vNext Files:** `src/stagemesh/capacity.py`
+- **vNext Tests:** `tests/test_canary_regression.py::test_capacity_failure_releases_claim_immediately`
+- **Legacy Behavior:** Enforces provider capacity limits and defers task dispatch when slots full.
+- **Evidence:** Capacity limit check defers dispatch and immediately releases claim on capacity exhaustion.
 - **Parity Gap:** None
 
-### `EXECUTION-009`: Capacity Enforcement (throttling worker dispatch based on global/project capacity limit)
-- **Category:** Execution
-- **Classification:** `PRESENT_VERIFIED`
-- **Legacy Source Files:** `build_coordinator/runner/scheduling.py`
-- **Legacy Tests:** `tests/test_runner.py`
-- **vNext Files:** `src/stagemesh/capacity.py, src/stagemesh/scheduling.py`
-- **vNext Tests:** `scripts/invariants.py`
-- **Legacy Behavior:** Enforced maximum concurrent worker capacity.
-- **Evidence:** Scheduler.decision verifies capacity constraints before task eligibility.
-- **Parity Gap:** None
-
-### `SOURCES-001`: Local Backlog Source (backlog.json / task file discovery)
-- **Category:** Task sources
-- **Classification:** `PRESENT_VERIFIED`
-- **Legacy Source Files:** `build_coordinator/project/backlog.py`
-- **Legacy Tests:** `tests/test_project_backlog.py`
-- **vNext Files:** `src/stagemesh/task_sources.py`
-- **vNext Tests:** `scripts/invariants.py::local_backlog_discovery`
-- **Legacy Behavior:** Discovered tasks from local backlog.json file.
-- **Evidence:** LocalBacklogSource reads backlog.json and returns DiscoveredTask list.
-- **Parity Gap:** None
-
-### `SOURCES-002`: GitHub Issue Source (GitHubApiIssueSource / REST issue discovery)
-- **Category:** Task sources
-- **Classification:** `PRESENT_VERIFIED`
-- **Legacy Source Files:** `build_coordinator/task_source/github.py`
-- **Legacy Tests:** `tests/test_github_task_source_activation.py, tests/test_task_source.py`
-- **vNext Files:** `src/stagemesh/task_sources.py, src/stagemesh/github.py`
-- **vNext Tests:** `tests/test_invariants.py::test_source_sync_distinguishes_empty_unknown_and_deferred`
-- **Legacy Behavior:** Discovered open GitHub issues using GitHub API.
-- **Evidence:** GitHubIssueSource and GitHubApiIssueSource discover remote GitHub issues.
-- **Parity Gap:** None
-
-### `SOURCES-003`: Azure DevOps Task Source (Azure DevOps work item discovery)
-- **Category:** Task sources
-- **Classification:** `SUPERSEDED_EQUIVALENT`
-- **Legacy Source Files:** `build_coordinator/task_source/azure_devops.py`
-- **Legacy Tests:** `tests/test_azure_devops_task_source.py`
-- **vNext Files:** `src/stagemesh/task_sources.py`
-- **vNext Tests:** `scripts/invariants.py`
-- **Legacy Behavior:** Polled Azure DevOps work item queries for task discovery.
-- **Evidence:** vNext uses generic TaskSource protocol adapters which easily support Azure DevOps endpoints without legacy-specific SDK locks.
-- **Parity Gap:** None
-
-### `SOURCES-004`: Task Source Discovery Protocol (TaskSource protocol)
+### `SOURCES-001`: Discovers and ingests tasks from local directory backlog.
 - **Category:** Task sources
 - **Classification:** `PRESENT_VERIFIED`
 - **Legacy Source Files:** `build_coordinator/task_source/base.py`
 - **Legacy Tests:** `tests/test_task_source.py`
 - **vNext Files:** `src/stagemesh/task_sources.py`
-- **vNext Tests:** `scripts/invariants.py`
-- **Legacy Behavior:** Abstract base class defining discover() contract.
-- **Evidence:** DiscoveredTask dataclass defines generic task source items.
+- **vNext Tests:** `scripts/acceptance.py`
+- **Legacy Behavior:** Discovers and ingests tasks from local directory backlog.
+- **Evidence:** LocalTaskSource reads backlog directory and imports tasks.
 - **Parity Gap:** None
 
-### `SOURCES-005`: Lifecycle Labels & Deferred Tasks (stagemesh:deferred, stagemesh:blocked, etc.)
+### `SOURCES-002`: Discovers and ingests tasks from GitHub repo issues.
 - **Category:** Task sources
 - **Classification:** `PRESENT_VERIFIED`
+- **Legacy Source Files:** `build_coordinator/task_source/github.py`
+- **Legacy Tests:** `tests/test_github_task_source_activation.py`
+- **vNext Files:** `src/stagemesh/task_sources.py, src/stagemesh/github.py`
+- **vNext Tests:** `scripts/github_acceptance.py`
+- **Legacy Behavior:** Discovers and ingests tasks from GitHub repo issues.
+- **Evidence:** GitHubTaskSource imports issues and synchronizes state.
+- **Parity Gap:** None
+
+### `SOURCES-003`: Discovers and ingests work items from Azure DevOps boards/backlogs.
+- **Category:** Task sources
+- **Classification:** `MISSING_PORT_REQUIRED`
+- **Legacy Source Files:** `build_coordinator/task_source/azure_devops.py`
+- **Legacy Tests:** `tests/test_azure_devops_task_source.py`
+- **vNext Files:** ``
+- **vNext Tests:** `NONE`
+- **Legacy Behavior:** Discovers and ingests work items from Azure DevOps boards/backlogs.
+- **Evidence:** Azure DevOps task source is completely absent from src/stagemesh/task_sources.py.
+- **Parity Gap:** AzureDevOpsTaskSource missing in vNext.
+
+### `SOURCES-004`: Provisions GitHub lifecycle labels (stagemesh:claimed, stagemesh:validating, etc.) and transitions issue labels.
+- **Category:** Task sources
+- **Classification:** `MISSING_PORT_REQUIRED`
 - **Legacy Source Files:** `build_coordinator/watcher/labels.py`
-- **Legacy Tests:** `tests/test_watcher_labels.py`
+- **Legacy Tests:** `tests/test_github_label_provisioning.py, tests/test_watcher_labels.py`
+- **vNext Files:** ``
+- **vNext Tests:** `NONE`
+- **Legacy Behavior:** Provisions GitHub lifecycle labels (stagemesh:claimed, stagemesh:validating, etc.) and transitions issue labels.
+- **Evidence:** GitHub label setup and automated label state machine transitions missing in vNext.
+- **Parity Gap:** Lifecycle label provisioning and state machine transitions missing in vNext.
+
+### `SOURCES-005`: Synchronizes state from external task source into internal store.
+- **Category:** Task sources
+- **Classification:** `PRESENT_VERIFIED`
+- **Legacy Source Files:** `build_coordinator/task_source/base.py`
+- **Legacy Tests:** `tests/test_task_source.py`
 - **vNext Files:** `src/stagemesh/task_sources.py`
 - **vNext Tests:** `tests/test_invariants.py::test_source_sync_distinguishes_empty_unknown_and_deferred`
-- **Legacy Behavior:** Filtered tasks carrying deferred/blocked labels.
-- **Evidence:** DiscoveredTask sets eligible=False when stagemesh:deferred label is present.
+- **Legacy Behavior:** Synchronizes state from external task source into internal store.
+- **Evidence:** sync_inbound fetches external state and creates tasks.
 - **Parity Gap:** None
 
-### `SOURCES-006`: Inbound Task Synchronization (sync_source upserting discovered tasks into store)
+### `SOURCES-006`: Synchronizes task completion / candidate SHAs back to external task source.
 - **Category:** Task sources
 - **Classification:** `PRESENT_VERIFIED`
-- **Legacy Source Files:** `build_coordinator/github/ingestion.py`
-- **Legacy Tests:** `tests/test_github_task_source_activation.py`
-- **vNext Files:** `src/stagemesh/task_sources.py`
-- **vNext Tests:** `scripts/invariants.py`
-- **Legacy Behavior:** Ingested discovered tasks into local database.
-- **Evidence:** sync_source upserts discovered tasks and records source cache.
-- **Parity Gap:** None
-
-### `SOURCES-007`: Outbound Task Synchronization (GitHubOutboundSync commenting & closing resolved issues)
-- **Category:** Task sources
-- **Classification:** `PRESENT_VERIFIED`
-- **Legacy Source Files:** `build_coordinator/github/sync.py`
+- **Legacy Source Files:** `build_coordinator/task_source/github.py`
 - **Legacy Tests:** `tests/test_github_outbound_sync.py`
 - **vNext Files:** `src/stagemesh/task_sources.py`
-- **vNext Tests:** `scripts/invariants.py`
-- **Legacy Behavior:** Commented candidate SHA and closed resolved GitHub issues.
-- **Evidence:** GitHubOutboundSync.publish_done posts candidate SHA comment and closes issue (verified live against saketvishal/sm-disposable-canary issue #1).
+- **vNext Tests:** `scripts/github_acceptance.py`
+- **Legacy Behavior:** Synchronizes task completion / candidate SHAs back to external task source.
+- **Evidence:** sync_outbound comments candidate SHA and closes GitHub issue.
 - **Parity Gap:** None
 
-### `SOURCES-008`: Source Reconciliation & State Tracking (tracking state, retry backoff, and state changes)
+### `SOURCES-007`: Reconciles task state between local database and remote source.
 - **Category:** Task sources
 - **Classification:** `PRESENT_VERIFIED`
-- **Legacy Source Files:** `build_coordinator/github/controller.py`
-- **Legacy Tests:** `tests/test_gh87_completion_sync_regression.py`
-- **vNext Files:** `src/stagemesh/persistence.py, src/stagemesh/retry.py`
-- **vNext Tests:** `scripts/invariants.py`
-- **Legacy Behavior:** Reconciled local store task state with external source state.
-- **Evidence:** Store.cache_source and Store.source_events record source reconciliation state.
-- **Parity Gap:** None
-
-### `SOURCES-009`: API Rate Limit Classification & Retry Backoff (exponential backoff & rate-limit handling)
-- **Category:** Task sources
-- **Classification:** `PRESENT_VERIFIED`
-- **Legacy Source Files:** `build_coordinator/github/client.py`
-- **Legacy Tests:** `tests/test_github_sqlite_busy_retry.py`
-- **vNext Files:** `src/stagemesh/github.py, src/stagemesh/retry.py`
-- **vNext Tests:** `scripts/invariants.py`
-- **Legacy Behavior:** Parsed Retry-After headers and applied exponential backoff.
-- **Evidence:** parse_retry_after and RetryRegistry calculate backoff duration on 429/403 responses.
-- **Parity Gap:** None
-
-### `SOURCES-010`: Deferred / Stale / Closed State Handling (filtering non-eligible/closed tasks)
-- **Category:** Task sources
-- **Classification:** `PRESENT_VERIFIED`
-- **Legacy Source Files:** `build_coordinator/github/ingestion.py`
-- **Legacy Tests:** `tests/test_github_task_source_activation.py`
+- **Legacy Source Files:** `build_coordinator/runner/orchestrator.py`
+- **Legacy Tests:** `tests/test_task_source.py`
 - **vNext Files:** `src/stagemesh/task_sources.py`
 - **vNext Tests:** `tests/test_invariants.py::test_source_sync_distinguishes_empty_unknown_and_deferred`
-- **Legacy Behavior:** Skipped closed or stale issues from task discovery.
-- **Evidence:** DiscoveredTask filters out closed and deferred tasks during discovery.
+- **Legacy Behavior:** Reconciles task state between local database and remote source.
+- **Evidence:** reconcile_sources updates internal task status.
 - **Parity Gap:** None
 
-### `OBJECTIVES-001`: Objective Creation & Goal Decomposition (ObjectivePlanner decomposing high-level goal into tasks)
+### `SOURCES-008`: Handles rate limits, closed state, and deferred tasks cleanly.
+- **Category:** Task sources
+- **Classification:** `PRESENT_VERIFIED`
+- **Legacy Source Files:** `build_coordinator/task_source/github.py`
+- **Legacy Tests:** `tests/test_github_outbound_sync.py`
+- **vNext Files:** `src/stagemesh/task_sources.py`
+- **vNext Tests:** `tests/test_invariants.py::test_source_sync_distinguishes_empty_unknown_and_deferred`
+- **Legacy Behavior:** Handles rate limits, closed state, and deferred tasks cleanly.
+- **Evidence:** SourceSyncResult distinguishes deferred and unknown source tasks.
+- **Parity Gap:** None
+
+### `OBJECTIVES-001`: Creates high-level objectives from specification files or CLI.
 - **Category:** Objectives/planning
 - **Classification:** `PRESENT_VERIFIED`
-- **Legacy Source Files:** `build_coordinator/objectives.py, build_coordinator/planner.py`
-- **Legacy Tests:** `tests/test_objective_planner.py`
+- **Legacy Source Files:** `build_coordinator/cli.py`
+- **Legacy Tests:** `tests/test_objective_lifecycle.py`
 - **vNext Files:** `src/stagemesh/objectives.py`
-- **vNext Tests:** `scripts/invariants.py::objective_planner_decomposition`
-- **Legacy Behavior:** Decomposed natural language objective into structured task DAG.
-- **Evidence:** ObjectivePlanner decomposes high-level goals into DAG tasks.
+- **vNext Tests:** `scripts/acceptance.py`
+- **Legacy Behavior:** Creates high-level objectives from specification files or CLI.
+- **Evidence:** create_objective creates objective and child tasks.
 - **Parity Gap:** None
 
-### `OBJECTIVES-002`: Objective DAG & Task Dependency Management (task dependency graph scheduling)
+### `OBJECTIVES-002`: Decomposes objective into DAG of dependent tasks.
 - **Category:** Objectives/planning
 - **Classification:** `PRESENT_VERIFIED`
-- **Legacy Source Files:** `build_coordinator/objectives.py`
+- **Legacy Source Files:** `build_coordinator/prompts/builders.py`
 - **Legacy Tests:** `tests/test_objective_dag_scheduler.py`
-- **vNext Files:** `src/stagemesh/objectives.py, src/stagemesh/scheduling.py`
-- **vNext Tests:** `scripts/invariants.py`
-- **Legacy Behavior:** Scheduled task execution honoring parent dependency ordering.
-- **Evidence:** Scheduler verifies task dependencies before marking tasks eligible.
+- **vNext Files:** `src/stagemesh/objectives.py`
+- **vNext Tests:** `scripts/acceptance.py`
+- **Legacy Behavior:** Decomposes objective into DAG of dependent tasks.
+- **Evidence:** Objective DAG scheduler manages prerequisite dependencies.
 - **Parity Gap:** None
 
-### `OBJECTIVES-003`: Planner Agent Validation (validating planner outputs against safety schemas)
+### `OBJECTIVES-003`: Validates planner output against contract schema.
 - **Category:** Objectives/planning
-- **Classification:** `PRESENT_VERIFIED`
-- **Legacy Source Files:** `build_coordinator/planner.py`
+- **Classification:** `PRESENT_NOT_VERIFIED`
+- **Legacy Source Files:** `build_coordinator/prompts/builders.py`
 - **Legacy Tests:** `tests/test_objective_planner.py`
 - **vNext Files:** `src/stagemesh/objectives.py`
-- **vNext Tests:** `scripts/invariants.py`
-- **Legacy Behavior:** Validated LLM planner JSON output against schema contract.
-- **Evidence:** ObjectivePlanner validates generated task payloads prior to storage.
-- **Parity Gap:** None
+- **vNext Tests:** `NONE`
+- **Legacy Behavior:** Validates planner output against contract schema.
+- **Evidence:** Planner contract validation exists in objectives.py, but malformed planner output retry tests are missing in vNext.
+- **Parity Gap:** Missing automated test for planner contract validation and retries.
 
-### `OBJECTIVES-004`: Autonomous Objective Lifecycle Execution (running complete objective to completion)
+### `OBJECTIVES-004`: Autonomous execution of objective DAG tasks in topological order.
 - **Category:** Objectives/planning
 - **Classification:** `PRESENT_VERIFIED`
-- **Legacy Source Files:** `build_coordinator/objectives.py`
+- **Legacy Source Files:** `build_coordinator/cli.py`
 - **Legacy Tests:** `tests/test_objective_runner_integration.py`
 - **vNext Files:** `src/stagemesh/objectives.py, src/stagemesh/coordinator.py`
-- **vNext Tests:** `scripts/invariants.py`
-- **Legacy Behavior:** Executed all tasks in an objective DAG autonomously until objective completed.
-- **Evidence:** ObjectivePlanner and Coordinator execute complete objective DAGs.
+- **vNext Tests:** `scripts/acceptance.py`
+- **Legacy Behavior:** Autonomous execution of objective DAG tasks in topological order.
+- **Evidence:** Coordinator executes ready objective tasks in dependency order.
 - **Parity Gap:** None
 
-### `PROJECTS-001`: Project Initialization (stagemesh init creating .stagemesh runtime)
-- **Category:** Projects
-- **Classification:** `PRESENT_VERIFIED`
-- **Legacy Source Files:** `build_coordinator/project/onboarding.py, build_coordinator/project/definition.py`
-- **Legacy Tests:** `tests/test_global_and_onboarding.py`
+### `OBJECTIVES-005`: Planner wrapper envelope normalization and retry suppression.
+- **Category:** Objectives/planning
+- **Classification:** `PRESENT_NOT_VERIFIED`
+- **Legacy Source Files:** `build_coordinator/prompts/builders.py`
+- **Legacy Tests:** `tests/test_objective_planner.py`
+- **vNext Files:** `src/stagemesh/objectives.py`
+- **vNext Tests:** `NONE`
+- **Legacy Behavior:** Planner wrapper envelope normalization and retry suppression.
+- **Evidence:** Envelope normalization present in code, but planner retry suppression tests are unverified in vNext.
+- **Parity Gap:** Missing automated test for planner wrapper retries.
+
+### `OBJECTIVES-006`: Runs objective commands from any working directory.
+- **Category:** Objectives/planning
+- **Classification:** `PRESENT_NOT_VERIFIED`
+- **Legacy Source Files:** `build_coordinator/cli.py`
+- **Legacy Tests:** `tests/test_objective_cli_location_independence.py`
 - **vNext Files:** `src/stagemesh/cli.py`
-- **vNext Tests:** `scripts/invariants.py`
-- **Legacy Behavior:** Created .stagemesh directory and sqlite database.
-- **Evidence:** command_init initializes .stagemesh directory and migrates store schema.
-- **Parity Gap:** None
+- **vNext Tests:** `NONE`
+- **Legacy Behavior:** Runs objective commands from any working directory.
+- **Evidence:** CLI supports --project flag, but objective location independence test is missing in vNext.
+- **Parity Gap:** Missing automated test for location-independent objective execution.
 
-### `PROJECTS-002`: Project Definition & Configuration (stagemesh.config.json loading)
+### `PROJECTS-001`: Initializes new project workspace with stagemesh configuration.
 - **Category:** Projects
 - **Classification:** `PRESENT_VERIFIED`
-- **Legacy Source Files:** `build_coordinator/project/definition.py`
+- **Legacy Source Files:** `build_coordinator/project/onboarding.py`
 - **Legacy Tests:** `tests/test_global_and_onboarding.py`
-- **vNext Files:** `src/stagemesh/config.py`
-- **vNext Tests:** `scripts/invariants.py`
-- **Legacy Behavior:** Loaded project configuration from .stagemesh/config.json or project.yaml.
-- **Evidence:** load_config loads project JSON config and environment variable overrides.
+- **vNext Files:** `src/stagemesh/cli.py, src/stagemesh/config.py`
+- **vNext Tests:** `tests/test_canary_regression.py`
+- **Legacy Behavior:** Initializes new project workspace with stagemesh configuration.
+- **Evidence:** stagemesh init generates valid project.toml configuration.
 - **Parity Gap:** None
 
-### `PROJECTS-003`: Global Project Registry (GlobalRegistry tracking registered projects)
+### `PROJECTS-002`: Defines project metadata, task directory, and provider commands.
 - **Category:** Projects
 - **Classification:** `PRESENT_VERIFIED`
 - **Legacy Source Files:** `build_coordinator/project/runtime.py`
-- **Legacy Tests:** `tests/test_global_and_onboarding.py`
+- **Legacy Tests:** `tests/test_coordinator_config.py`
+- **vNext Files:** `src/stagemesh/config.py`
+- **vNext Tests:** `tests/test_canary_regression.py`
+- **Legacy Behavior:** Defines project metadata, task directory, and provider commands.
+- **Evidence:** StageMeshConfig parses project.toml schema.
+- **Parity Gap:** None
+
+### `PROJECTS-003`: Registry of configured projects.
+- **Category:** Projects
+- **Classification:** `PRESENT_VERIFIED`
+- **Legacy Source Files:** `build_coordinator/project/runtime.py`
+- **Legacy Tests:** `tests/test_coordinator_config.py`
 - **vNext Files:** `src/stagemesh/registry.py`
-- **vNext Tests:** `scripts/invariants.py::global_registry_registration`
-- **Legacy Behavior:** Registered projects in global registry database.
-- **Evidence:** GlobalRegistry stores ProjectRegistration records.
+- **vNext Tests:** `tests/test_canary_regression.py`
+- **Legacy Behavior:** Registry of configured projects.
+- **Evidence:** ProjectRegistry manages known projects.
 - **Parity Gap:** None
 
-### `PROJECTS-004`: Run-from-Project CLI Execution (stagemesh continue inside a project)
+### `PROJECTS-004`: Runs coordinator targeting specific project directory.
 - **Category:** Projects
 - **Classification:** `PRESENT_VERIFIED`
-- **Legacy Source Files:** `build_coordinator/project/commands.py`
-- **Legacy Tests:** `tests/test_project_backlog.py`
-- **vNext Files:** `src/stagemesh/cli.py`
-- **vNext Tests:** `tests/test_canary_regression.py::test_cli_continue_dry_run_uses_fake_executor`
-- **Legacy Behavior:** Executed coordinator loop for current working directory project.
-- **Evidence:** command_continue executes tick loop on local project store.
-- **Parity Gap:** None
-
-### `PROJECTS-005`: Run-from-Anywhere Location Independence (stagemesh continue outside project targeting registered backlogs)
-- **Category:** Projects
-- **Classification:** `PRESENT_VERIFIED`
-- **Legacy Source Files:** `build_coordinator/project/commands.py`
+- **Legacy Source Files:** `build_coordinator/cli.py`
 - **Legacy Tests:** `tests/test_operator_location_independence.py`
-- **vNext Files:** `src/stagemesh/cli.py, src/stagemesh/registry.py`
-- **vNext Tests:** `scripts/invariants.py`
-- **Legacy Behavior:** Coordinated all registered project backlogs when run outside any project directory.
-- **Evidence:** GlobalRegistry allows running coordinator commands from arbitrary directories.
+- **vNext Files:** `src/stagemesh/cli.py`
+- **vNext Tests:** `tests/test_canary_regression.py`
+- **Legacy Behavior:** Runs coordinator targeting specific project directory.
+- **Evidence:** --project flag specifies target project directory.
 - **Parity Gap:** None
 
-### `PROJECTS-006`: Multi-Project Coordination (coordinating backlogs across multiple projects)
+### `PROJECTS-005`: Runs coordinator from any working directory without specifying project path.
+- **Category:** Projects
+- **Classification:** `PRESENT_NOT_VERIFIED`
+- **Legacy Source Files:** `build_coordinator/cli.py`
+- **Legacy Tests:** `tests/test_operator_location_independence.py`
+- **vNext Files:** `src/stagemesh/cli.py`
+- **vNext Tests:** `NONE`
+- **Legacy Behavior:** Runs coordinator from any working directory without specifying project path.
+- **Evidence:** Auto-discovery of project root in child directories is unverified in tests.
+- **Parity Gap:** Missing automated test for run-from-anywhere auto-discovery.
+
+### `PROJECTS-006`: Coordinates execution across multiple registered projects.
+- **Category:** Projects
+- **Classification:** `PRESENT_NOT_VERIFIED`
+- **Legacy Source Files:** `build_coordinator/runner/orchestrator.py`
+- **Legacy Tests:** `tests/test_project_backlog.py`
+- **vNext Files:** `src/stagemesh/coordinator.py`
+- **vNext Tests:** `NONE`
+- **Legacy Behavior:** Coordinates execution across multiple registered projects.
+- **Evidence:** Multi-project task queue processing is unverified in tests.
+- **Parity Gap:** Missing automated test for multi-project coordination.
+
+### `PROJECTS-007`: Enforces concurrency limits across multiple projects.
 - **Category:** Projects
 - **Classification:** `PRESENT_VERIFIED`
-- **Legacy Source Files:** `build_coordinator/project/commands.py`
-- **Legacy Tests:** `tests/test_project_backlog.py`
-- **vNext Files:** `src/stagemesh/cli.py, src/stagemesh/coordinator.py`
-- **vNext Tests:** `scripts/invariants.py`
-- **Legacy Behavior:** Iterated registered projects and allocated builder concurrency across backlogs.
-- **Evidence:** GlobalRegistry and Coordinator coordinate multiple registered projects.
+- **Legacy Source Files:** `build_coordinator/runner/worker_pool.py`
+- **Legacy Tests:** `tests/test_worker_health.py`
+- **vNext Files:** `src/stagemesh/capacity.py`
+- **vNext Tests:** `tests/test_canary_regression.py::test_capacity_failure_releases_claim_immediately`
+- **Legacy Behavior:** Enforces concurrency limits across multiple projects.
+- **Evidence:** CapacityRegistry tracks cross-project slot limits.
 - **Parity Gap:** None
 
-### `PROJECTS-007`: Project Concurrency & Capacity Budgeting (fair distribution of builder capacity across projects)
-- **Category:** Projects
-- **Classification:** `PRESENT_VERIFIED`
-- **Legacy Source Files:** `build_coordinator/project/commands.py`
-- **Legacy Tests:** `tests/test_project_backlog.py`
-- **vNext Files:** `src/stagemesh/capacity.py, src/stagemesh/scheduling.py`
-- **vNext Tests:** `scripts/invariants.py`
-- **Legacy Behavior:** Batched builder capacity fairly across projects.
-- **Evidence:** CapacityRegistry and Scheduler enforce capacity limits across tasks.
-- **Parity Gap:** None
-
-### `PROJECTS-008`: Onboarding Diagnostics & Doctor (stagemesh doctor environment check)
+### `PROJECTS-008`: Diagnostics tool verifying tools, credentials, git state, and database.
 - **Category:** Projects
 - **Classification:** `PRESENT_VERIFIED`
 - **Legacy Source Files:** `build_coordinator/project/doctor.py`
 - **Legacy Tests:** `tests/test_global_and_onboarding.py`
-- **vNext Files:** `src/stagemesh/cli.py`
-- **vNext Tests:** `scripts/invariants.py`
-- **Legacy Behavior:** Checked Python interpreter, database URL, and backend health.
-- **Evidence:** command_doctor returns structured JSON health diagnostic.
+- **vNext Files:** `src/stagemesh/operator.py`
+- **vNext Tests:** `tests/test_canary_regression.py`
+- **Legacy Behavior:** Diagnostics tool verifying tools, credentials, git state, and database.
+- **Evidence:** stagemesh doctor verifies git, python, providers, and store status.
 - **Parity Gap:** None
 
-### `PERSISTENCE-001`: SQLite Store Implementation (Store with WAL mode & busy timeout)
+### `PERSISTENCE-001`: SQLite database state storage.
 - **Category:** Persistence
 - **Classification:** `PRESENT_VERIFIED`
-- **Legacy Source Files:** `build_coordinator/db.py`
+- **Legacy Source Files:** `build_coordinator/persistence.py`
 - **Legacy Tests:** `tests/test_database_lifecycle.py`
 - **vNext Files:** `src/stagemesh/persistence.py`
-- **vNext Tests:** `scripts/invariants.py`
-- **Legacy Behavior:** Persisted tasks, claims, candidates, evidence, executions in SQLite.
-- **Evidence:** Store implements SQLite schema with PRAGMA journal_mode=WAL and busy_timeout=5000.
+- **vNext Tests:** `tests/test_invariants.py`
+- **Legacy Behavior:** SQLite database state storage.
+- **Evidence:** SQLiteStore manages relational task schema.
 - **Parity Gap:** None
 
-### `PERSISTENCE-002`: PostgreSQL Store Implementation (PostgresStore backend support)
+### `PERSISTENCE-002`: PostgreSQL database state storage.
 - **Category:** Persistence
-- **Classification:** `PRESENT_VERIFIED`
-- **Legacy Source Files:** `build_coordinator/db.py`
-- **Legacy Tests:** `tests/test_database_lifecycle.py`
+- **Classification:** `PRESENT_NOT_VERIFIED`
+- **Legacy Source Files:** `build_coordinator/persistence.py`
+- **Legacy Tests:** `tests/test_database_lifecycle.py, tests/test_operator_db_isolation.py`
 - **vNext Files:** `src/stagemesh/postgres_store.py`
-- **vNext Tests:** `scripts/invariants.py::postgres_store_contract`
-- **Legacy Behavior:** Supported PostgreSQL database backend connection.
-- **Evidence:** PostgresStore validates schema contract and executes PostgreSQL statements.
-- **Parity Gap:** None
+- **vNext Tests:** `NONE`
+- **Legacy Behavior:** PostgreSQL database state storage.
+- **Evidence:** PostgresStore class implemented, but live PostgreSQL test suite is missing in vNext.
+- **Parity Gap:** Missing automated test for live PostgreSQL store.
 
-### `PERSISTENCE-003`: Database Schema & Migration Wave Engine (migrate() version tracking)
+### `PERSISTENCE-003`: Schema migration scripts for upgrading database versions.
 - **Category:** Persistence
 - **Classification:** `PRESENT_VERIFIED`
 - **Legacy Source Files:** `build_coordinator/project/state_migration.py`
 - **Legacy Tests:** `tests/test_p0_migration_wave.py`
-- **vNext Files:** `src/stagemesh/migrations.py, src/stagemesh/persistence.py`
-- **vNext Tests:** `scripts/invariants.py`
-- **Legacy Behavior:** Migrated database schema through ordered migration waves.
-- **Evidence:** Store.migrate() applies schema migrations up to current version.
+- **vNext Files:** `src/stagemesh/migrations.py`
+- **vNext Tests:** `tests/test_invariants.py`
+- **Legacy Behavior:** Schema migration scripts for upgrading database versions.
+- **Evidence:** Migrations runner updates schema version.
 - **Parity Gap:** None
 
-### `PERSISTENCE-004`: State Durability & Retry Resilience (retrying transient SQLite locks/busy states)
+### `PERSISTENCE-004`: WAL journal mode and immediate transactions for concurrency safety.
 - **Category:** Persistence
 - **Classification:** `PRESENT_VERIFIED`
-- **Legacy Source Files:** `build_coordinator/db.py`
-- **Legacy Tests:** `tests/test_sqlite_retry.py`
-- **vNext Files:** `src/stagemesh/persistence.py, src/stagemesh/retry.py`
-- **vNext Tests:** `scripts/invariants.py`
-- **Legacy Behavior:** Retried transient SQLite locked/busy exceptions.
-- **Evidence:** Store configures busy_timeout=5000 and RetryRegistry handles retries.
+- **Legacy Source Files:** `build_coordinator/persistence.py`
+- **Legacy Tests:** `tests/test_database_lifecycle.py`
+- **vNext Files:** `src/stagemesh/persistence.py`
+- **vNext Tests:** `tests/test_invariants.py`
+- **Legacy Behavior:** WAL journal mode and immediate transactions for concurrency safety.
+- **Evidence:** WAL mode enabled on SQLite database connection.
 - **Parity Gap:** None
 
-### `CI-001`: Deterministic Validation Gate (Validator executing project validation commands)
+### `PERSISTENCE-005`: Retries DB operations on SQLITE_BUSY / lock contention.
+- **Category:** Persistence
+- **Classification:** `PRESENT_NOT_VERIFIED`
+- **Legacy Source Files:** `build_coordinator/persistence.py`
+- **Legacy Tests:** `tests/test_sqlite_retry.py, tests/test_github_sqlite_busy_retry.py`
+- **vNext Files:** `src/stagemesh/persistence.py`
+- **vNext Tests:** `NONE`
+- **Legacy Behavior:** Retries DB operations on SQLITE_BUSY / lock contention.
+- **Evidence:** Busy timeout configured, but lock contention retry test is missing in vNext.
+- **Parity Gap:** Missing automated test for SQLite busy retries.
+
+### `VALIDATION-001`: Runs deterministic validation commands against candidate commit.
 - **Category:** CI/validation
 - **Classification:** `PRESENT_VERIFIED`
 - **Legacy Source Files:** `build_coordinator/runner/validation.py`
 - **Legacy Tests:** `tests/test_runner.py`
 - **vNext Files:** `src/stagemesh/validation.py`
-- **vNext Tests:** `tests/test_invariants.py::test_failed_validation_cannot_advance`
-- **Legacy Behavior:** Executed project validation command before review.
-- **Evidence:** Validator executes validation checks and records EvidenceKind.VALIDATION.
+- **vNext Tests:** `scripts/acceptance.py`
+- **Legacy Behavior:** Runs deterministic validation commands against candidate commit.
+- **Evidence:** Validator runs pytest/command suite against target branch/SHA.
 - **Parity Gap:** None
 
-### `CI-002`: Affected Test Selection (running tests targeted to modified files)
+### `VALIDATION-002`: Identifies affected tests based on modified files.
 - **Category:** CI/validation
-- **Classification:** `SUPERSEDED_EQUIVALENT`
+- **Classification:** `PRESENT_NOT_VERIFIED`
 - **Legacy Source Files:** `build_coordinator/runner/validation.py`
 - **Legacy Tests:** `tests/test_runner.py`
 - **vNext Files:** `src/stagemesh/validation.py`
-- **vNext Tests:** `scripts/invariants.py`
-- **Legacy Behavior:** Filtered tests to run based on modified file paths.
-- **Evidence:** vNext validates exact candidate SHA against explicit project acceptance gates rather than relying on heuristic test-file filtering.
-- **Parity Gap:** None
+- **vNext Tests:** `NONE`
+- **Legacy Behavior:** Identifies affected tests based on modified files.
+- **Evidence:** Validation runner accepts test filters, but affected test discovery is unverified in tests.
+- **Parity Gap:** Missing automated test for affected test discovery.
 
-### `CI-003`: CI Wait & Reconciliation Loop (ci_wait / waiting on external CI builds)
+### `VALIDATION-003`: Waits for external CI completion and reconciles CI status.
 - **Category:** CI/validation
 - **Classification:** `PRESENT_VERIFIED`
 - **Legacy Source Files:** `build_coordinator/runner/ci_reconciliation.py`
 - **Legacy Tests:** `tests/test_ci_reconciliation.py`
-- **vNext Files:** `src/stagemesh/ci_wait.py, src/stagemesh/ci.py`
-- **vNext Tests:** `scripts/invariants.py`
-- **Legacy Behavior:** Waited for external CI pipeline results.
-- **Evidence:** decide_ci_wait evaluates external CI status and wait timeouts.
+- **vNext Files:** `src/stagemesh/ci_wait.py`
+- **vNext Tests:** `tests/test_canary_regression.py`
+- **Legacy Behavior:** Waits for external CI completion and reconciles CI status.
+- **Evidence:** wait_for_ci checks external build status.
 - **Parity Gap:** None
 
-### `CI-004`: Hosted CI Evidence Recording (recording external CI check status into store)
+### `VALIDATION-004`: CI gate command enforcing strict feature and quality standards.
 - **Category:** CI/validation
 - **Classification:** `PRESENT_VERIFIED`
-- **Legacy Source Files:** `build_coordinator/runner/ci_reconciliation.py`
+- **Legacy Source Files:** `build_coordinator/cli.py`
 - **Legacy Tests:** `tests/test_ci_reconciliation.py`
-- **vNext Files:** `src/stagemesh/external_evidence.py`
-- **vNext Tests:** `scripts/invariants.py::external_evidence_recording`
-- **Legacy Behavior:** Recorded external CI evidence into database.
-- **Evidence:** record_external_evidence writes external CI evidence records to store.
+- **vNext Files:** `src/stagemesh/ci.py`
+- **vNext Tests:** `stagemesh ci --future-feature-gate`
+- **Legacy Behavior:** CI gate command enforcing strict feature and quality standards.
+- **Evidence:** stagemesh ci --future-feature-gate evaluates 8 production quality gates.
 - **Parity Gap:** None
 
-### `REVIEW-001`: Independent Reviewer Separation (Reviewer enforcing author != reviewer)
+### `REMEDIATION-001`: Enforces that reviewer cannot be the same agent identity as builder.
 - **Category:** Review/remediation
-- **Classification:** `PRESENT_VERIFIED`
-- **Legacy Source Files:** `build_coordinator/runner/routing.py`
+- **Classification:** `PRESENT_NOT_VERIFIED`
+- **Legacy Source Files:** `build_coordinator/runner/orchestrator.py`
 - **Legacy Tests:** `tests/test_independence.py`
-- **vNext Files:** `src/stagemesh/review.py, src/stagemesh/routing.py`
-- **vNext Tests:** `tests/test_invariants.py::test_reviewer_provider_failure_does_not_restart_implementation`
-- **Legacy Behavior:** Prevented implementation worker from acting as reviewer.
-- **Evidence:** Reviewer executes review gate and enforces independent review policy.
-- **Parity Gap:** None
+- **vNext Files:** `src/stagemesh/review.py`
+- **vNext Tests:** `NONE`
+- **Legacy Behavior:** Enforces that reviewer cannot be the same agent identity as builder.
+- **Evidence:** Review module accepts reviewer identity, but reviewer-builder separation enforcement is unverified in tests.
+- **Parity Gap:** Missing automated test for strict reviewer-builder separation.
 
-### `REVIEW-002`: Structured Findings Tracking (ReviewFinding / findings table persistence)
-- **Category:** Review/remediation
-- **Classification:** `PRESENT_VERIFIED`
-- **Legacy Source Files:** `build_coordinator/runner/findings.py`
-- **Legacy Tests:** `tests/test_finding_reconciliation.py`
-- **vNext Files:** `src/stagemesh/remediation.py, src/stagemesh/review.py`
-- **vNext Tests:** `scripts/invariants.py`
-- **Legacy Behavior:** Persisted review findings with severity and finding identity.
-- **Evidence:** ReviewFinding and Store.upsert_finding persist findings.
-- **Parity Gap:** None
-
-### `REVIEW-003`: Bounded Remediation Loop (retry policy for failed reviews/validations)
+### `REMEDIATION-002`: Structured review findings recording errors and required fixes.
 - **Category:** Review/remediation
 - **Classification:** `PRESENT_VERIFIED`
 - **Legacy Source Files:** `build_coordinator/runner/findings.py`
 - **Legacy Tests:** `tests/test_finding_reconciliation.py`
 - **vNext Files:** `src/stagemesh/remediation.py`
-- **vNext Tests:** `scripts/invariants.py`
-- **Legacy Behavior:** Bounded maximum remediation retries before escalating.
-- **Evidence:** RemediationPolicy calculates bounded remediation attempts.
+- **vNext Tests:** `scripts/invariants.py::remediation_findings`
+- **Legacy Behavior:** Structured review findings recording errors and required fixes.
+- **Evidence:** Findings model records file, line, and description of issues.
 - **Parity Gap:** None
 
-### `REVIEW-004`: Rework Lifecycle (routing failed candidate back to IMPLEMENT for remediation)
+### `REMEDIATION-003`: Limits maximum remediation rework attempts to prevent infinite loops.
+- **Category:** Review/remediation
+- **Classification:** `PRESENT_VERIFIED`
+- **Legacy Source Files:** `build_coordinator/runner/findings.py`
+- **Legacy Tests:** `tests/test_finding_reconciliation.py`
+- **vNext Files:** `src/stagemesh/remediation.py`
+- **vNext Tests:** `scripts/invariants.py::remediation_findings`
+- **Legacy Behavior:** Limits maximum remediation rework attempts to prevent infinite loops.
+- **Evidence:** RemediationPolicy enforces max_attempts limit.
+- **Parity Gap:** None
+
+### `REMEDIATION-004`: Transitions failed review tasks to REMEDIATE and re-dispatches to builder.
 - **Category:** Review/remediation
 - **Classification:** `PRESENT_VERIFIED`
 - **Legacy Source Files:** `build_coordinator/runner/orchestrator.py`
 - **Legacy Tests:** `tests/test_review_environment_remediation.py`
-- **vNext Files:** `src/stagemesh/coordinator.py, src/stagemesh/remediation.py`
-- **vNext Tests:** `scripts/invariants.py`
-- **Legacy Behavior:** Routed failed candidate back to IMPLEMENT stage.
-- **Evidence:** Coordinator advances task through remediation flow on failed evidence.
+- **vNext Files:** `src/stagemesh/coordinator.py`
+- **vNext Tests:** `scripts/invariants.py::remediation_findings`
+- **Legacy Behavior:** Transitions failed review tasks to REMEDIATE and re-dispatches to builder.
+- **Evidence:** Coordinator tick re-dispatches REMEDIATE tasks with finding feedback.
 - **Parity Gap:** None
 
-### `SECURITY-001`: Provider Output Trust Boundary (untrusted stdout/stderr parsing)
+### `SECURITY-001`: Sanitizes provider subprocess output against injection.
 - **Category:** Security
 - **Classification:** `PRESENT_VERIFIED`
-- **Legacy Source Files:** `build_coordinator/execution/results.py`
-- **Legacy Tests:** `tests/test_security_boundary.py`
-- **vNext Files:** `src/stagemesh/execution.py, src/stagemesh/security.py`
-- **vNext Tests:** `tests/test_canary_regression.py::test_capacity_failure_is_distinguishable_from_code_failure`
-- **Legacy Behavior:** Untrusted worker output was sanitized before storage.
-- **Evidence:** ExecutionResult and classify_failure safely parse process output.
-- **Parity Gap:** None
-
-### `SECURITY-002`: Workspace & Path Isolation (WorkspaceBoundary restricting file accesses)
-- **Category:** Security
-- **Classification:** `PRESENT_VERIFIED`
-- **Legacy Source Files:** `build_coordinator/runner/git_safety.py`
+- **Legacy Source Files:** `build_coordinator/execution/subprocess_executor.py`
 - **Legacy Tests:** `tests/test_security_boundary.py`
 - **vNext Files:** `src/stagemesh/security.py`
-- **vNext Tests:** `scripts/invariants.py`
-- **Legacy Behavior:** Restricted file system accesses to within project workspace boundary.
-- **Evidence:** WorkspaceBoundary.require_inside raises SecurityBoundaryError on path traversal.
+- **vNext Tests:** `tests/test_canary_regression.py`
+- **Legacy Behavior:** Sanitizes provider subprocess output against injection.
+- **Evidence:** sanitize_output strips control codes and validates boundaries.
 - **Parity Gap:** None
 
-### `SECURITY-003`: Secret & Credential Redaction (redact_command_secrets, redact_url_credentials)
+### `SECURITY-002`: Ensures file operations cannot escape project directory bounds.
+- **Category:** Security
+- **Classification:** `PRESENT_VERIFIED`
+- **Legacy Source Files:** `build_coordinator/task_context.py`
+- **Legacy Tests:** `tests/test_task_workspaces.py`
+- **vNext Files:** `src/stagemesh/security.py`
+- **vNext Tests:** `tests/test_invariants.py::test_targeted_operations_do_not_mutate_unrelated_tasks`
+- **Legacy Behavior:** Ensures file operations cannot escape project directory bounds.
+- **Evidence:** Path resolution validates absolute path stays within project root.
+- **Parity Gap:** None
+
+### `SECURITY-003`: Redacts API keys, tokens, and passwords from logs and CLI output.
 - **Category:** Security
 - **Classification:** `PRESENT_VERIFIED`
 - **Legacy Source Files:** `build_coordinator/watcher/safe_logging.py`
 - **Legacy Tests:** `tests/test_watcher_safe_logging.py`
 - **vNext Files:** `src/stagemesh/redaction.py`
-- **vNext Tests:** `scripts/invariants.py`
-- **Legacy Behavior:** Redacted API tokens and passwords from logs and CLI output.
-- **Evidence:** redact_command_secrets and redact_url_credentials strip secrets from output.
+- **vNext Tests:** `tests/test_canary_regression.py`
+- **Legacy Behavior:** Redacts API keys, tokens, and passwords from logs and CLI output.
+- **Evidence:** redact_secrets replaces tokens and passwords with [REDACTED].
 - **Parity Gap:** None
 
-### `SECURITY-004`: SCM & Git Safety Boundaries (preventing destructive git pushes/resets on non-task branches)
+### `SECURITY-004`: Validates SCM branch names and remote URLs before execution.
 - **Category:** Security
 - **Classification:** `PRESENT_VERIFIED`
 - **Legacy Source Files:** `build_coordinator/runner/git_safety.py`
-- **Legacy Tests:** `tests/test_git_identity_and_blocker_recovery.py`
-- **vNext Files:** `src/stagemesh/git.py`
-- **vNext Tests:** `scripts/invariants.py`
-- **Legacy Behavior:** Enforced git safe directory and branch boundaries.
-- **Evidence:** GitWorkspace validates arguments and safe directory configs.
+- **Legacy Tests:** `tests/test_security_boundary.py`
+- **vNext Files:** `src/stagemesh/security.py`
+- **vNext Tests:** `tests/test_canary_regression.py`
+- **Legacy Behavior:** Validates SCM branch names and remote URLs before execution.
+- **Evidence:** validate_git_ref rejects unsafe ref names.
 - **Parity Gap:** None
 
-### `SECURITY-005`: Worker Git Attribution (GitAttribution headers on commits)
+### `SECURITY-005`: Applies proper Git author and committer attribution to candidate commits.
 - **Category:** Security
 - **Classification:** `PRESENT_VERIFIED`
 - **Legacy Source Files:** `build_coordinator/execution/git_integrator.py`
 - **Legacy Tests:** `tests/test_rewrite_history_remove_ai_attribution.py`
 - **vNext Files:** `src/stagemesh/attribution.py`
-- **vNext Tests:** `scripts/invariants.py`
-- **Legacy Behavior:** Applied Git author and committer attribution to worker commits.
-- **Evidence:** attribution_for_worker formats author and committer headers.
+- **vNext Tests:** `tests/test_canary_regression.py`
+- **Legacy Behavior:** Applies proper Git author and committer attribution to candidate commits.
+- **Evidence:** attribution_for_worker formats git author metadata.
 - **Parity Gap:** None
 
-### `SECURITY-006`: Forged / Malformed Result Handling (failing closed on malformed result JSON)
+### `SECURITY-006`: Rejects malformed, incomplete, or forged worker result payloads.
 - **Category:** Security
 - **Classification:** `PRESENT_VERIFIED`
-- **Legacy Source Files:** `build_coordinator/execution/subprocess_executor.py`
-- **Legacy Tests:** `tests/test_subprocess_executor_hardening.py`
-- **vNext Files:** `src/stagemesh/execution.py, src/stagemesh/providers.py`
+- **Legacy Source Files:** `build_coordinator/watcher/loop.py`
+- **Legacy Tests:** `tests/test_watcher_safe_logging.py`
+- **vNext Files:** `src/stagemesh/execution.py`
+- **vNext Tests:** `tests/test_canary_regression.py::test_failure_classification_all_five_categories`
+- **Legacy Behavior:** Rejects malformed, incomplete, or forged worker result payloads.
+- **Evidence:** Result verification validates exit status and stdout.
+- **Parity Gap:** None
+
+### `OBSERVABILITY-001`: Prints task stages, active claims, and coordinator state.
+- **Category:** Observability/operator
+- **Classification:** `PRESENT_VERIFIED`
+- **Legacy Source Files:** `build_coordinator/cli.py`
+- **Legacy Tests:** `tests/test_operator_dashboard.py`
+- **vNext Files:** `src/stagemesh/operator.py`
 - **vNext Tests:** `tests/test_canary_regression.py`
-- **Legacy Behavior:** Failed closed if worker emitted invalid or tampered result payload.
-- **Evidence:** ExecutionResult and SubprocessExecutor fail closed on non-zero exit codes or unparseable output.
+- **Legacy Behavior:** Prints task stages, active claims, and coordinator state.
+- **Evidence:** stagemesh status renders summary table of tasks and workers.
 - **Parity Gap:** None
 
-### `OBSERVABILITY-001`: Operator Status Report (stagemesh status task overview)
+### `OBSERVABILITY-002`: System health check verifying environment, database, and git.
 - **Category:** Observability/operator
 - **Classification:** `PRESENT_VERIFIED`
-- **Legacy Source Files:** `build_coordinator/cli.py`
-- **Legacy Tests:** `tests/test_operator_dashboard.py`
-- **vNext Files:** `src/stagemesh/cli.py, src/stagemesh/observability.py`
-- **vNext Tests:** `scripts/invariants.py`
-- **Legacy Behavior:** Printed human-readable and JSON status reports.
-- **Evidence:** command_status outputs task counts, running executions, and health report.
+- **Legacy Source Files:** `build_coordinator/project/doctor.py`
+- **Legacy Tests:** `tests/test_global_and_onboarding.py`
+- **vNext Files:** `src/stagemesh/operator.py`
+- **vNext Tests:** `tests/test_canary_regression.py`
+- **Legacy Behavior:** System health check verifying environment, database, and git.
+- **Evidence:** stagemesh doctor evaluates health indicators.
 - **Parity Gap:** None
 
-### `OBSERVABILITY-002`: Health Diagnostics (stagemesh health health report)
+### `OBSERVABILITY-003`: Structured JSON event logging for external monitoring.
 - **Category:** Observability/operator
-- **Classification:** `PRESENT_VERIFIED`
-- **Legacy Source Files:** `build_coordinator/cli.py`
-- **Legacy Tests:** `tests/test_operator_dashboard.py`
-- **vNext Files:** `src/stagemesh/observability.py, src/stagemesh/cli.py`
-- **vNext Tests:** `scripts/invariants.py`
-- **Legacy Behavior:** Checked database health and worker execution state.
-- **Evidence:** health function checks task counts, failed execution counts, and status.
-- **Parity Gap:** None
-
-### `OBSERVABILITY-003`: Audit Event Trail (record_audit & export_audit_jsonl)
-- **Category:** Observability/operator
-- **Classification:** `PRESENT_VERIFIED`
-- **Legacy Source Files:** `build_coordinator/events.py`
-- **Legacy Tests:** `tests/test_events_stream.py`
-- **vNext Files:** `src/stagemesh/audit.py`
-- **vNext Tests:** `scripts/invariants.py`
-- **Legacy Behavior:** Recorded system audit events and exported JSONL stream.
-- **Evidence:** record_audit and export_audit_jsonl manage redacted audit trail.
-- **Parity Gap:** None
-
-### `OBSERVABILITY-004`: Execution Metrics (metrics.py tracking timings and throughput)
-- **Category:** Observability/operator
-- **Classification:** `SUPERSEDED_EQUIVALENT`
-- **Legacy Source Files:** `build_coordinator/metrics.py`
-- **Legacy Tests:** `tests/test_metrics.py`
-- **vNext Files:** `src/stagemesh/cli.py`
-- **vNext Tests:** `scripts/invariants.py`
-- **Legacy Behavior:** Tracked worker task execution times and success rates.
-- **Evidence:** vNext replaces standalone metrics collectors with structured audit logs & dashboard summaries.
-- **Parity Gap:** None
-
-### `OBSERVABILITY-005`: Operator Dashboard (stagemesh dashboard TUI/text summary)
-- **Category:** Observability/operator
-- **Classification:** `PRESENT_VERIFIED`
-- **Legacy Source Files:** `build_coordinator/operator_dashboard.py`
-- **Legacy Tests:** `tests/test_operator_dashboard.py`
-- **vNext Files:** `src/stagemesh/dashboard.py`
-- **vNext Tests:** `scripts/invariants.py`
-- **Legacy Behavior:** Rendered terminal dashboard showing active workers and task queue.
-- **Evidence:** render_dashboard and dashboard_summary display operator dashboard.
-- **Parity Gap:** None
-
-### `OBSERVABILITY-006`: Final Report Generation (stagemesh report summary)
-- **Category:** Observability/operator
-- **Classification:** `PRESENT_VERIFIED`
-- **Legacy Source Files:** `build_coordinator/cli.py`
-- **Legacy Tests:** `tests/test_operator_dashboard.py`
-- **vNext Files:** `src/stagemesh/final_report.py`
-- **vNext Tests:** `scripts/invariants.py`
-- **Legacy Behavior:** Generated final execution summary report.
-- **Evidence:** render_final_report builds final markdown report.
-- **Parity Gap:** None
-
-### `OBSERVABILITY-007`: Retry Visibility (stagemesh retries inspecting backoff states)
-- **Category:** Observability/operator
-- **Classification:** `PRESENT_VERIFIED`
-- **Legacy Source Files:** `build_coordinator/cli.py`
-- **Legacy Tests:** `tests/test_gh101_persistence_retries.py`
-- **vNext Files:** `src/stagemesh/retry.py, src/stagemesh/cli.py`
-- **vNext Tests:** `scripts/invariants.py::retry_backoff_is_durable_and_clearable`
-- **Legacy Behavior:** Inspected retry backoff states and allowed manual clearance.
-- **Evidence:** RetryRegistry records and clears retry backoffs.
-- **Parity Gap:** None
-
-### `DISTRIBUTION-001`: Distributed Work Packet Envelopes (write_packet_envelope, write_ack_envelope)
-- **Category:** Distribution
-- **Classification:** `PRESENT_VERIFIED`
-- **Legacy Source Files:** `build_coordinator/execution/results.py`
-- **Legacy Tests:** `tests/test_adapter_sdk_acceptance.py`
-- **vNext Files:** `src/stagemesh/work_transport.py`
-- **vNext Tests:** `scripts/invariants.py`
-- **Legacy Behavior:** Serialized work packet JSON envelopes for remote workers.
-- **Evidence:** write_packet_envelope and write_ack_envelope format packet envelopes.
-- **Parity Gap:** None
-
-### `DISTRIBUTION-002`: Worker Queue Polling (WorkQueue / packet queue polling)
-- **Category:** Distribution
 - **Classification:** `PRESENT_VERIFIED`
 - **Legacy Source Files:** `build_coordinator/service.py`
-- **Legacy Tests:** `tests/test_engine_lifecycle.py`
+- **Legacy Tests:** `tests/test_events_stream.py`
+- **vNext Files:** `src/stagemesh/audit.py`
+- **vNext Tests:** `tests/test_canary_regression.py`
+- **Legacy Behavior:** Structured JSON event logging for external monitoring.
+- **Evidence:** AuditEventLogger emits JSON event stream.
+- **Parity Gap:** None
+
+### `OBSERVABILITY-004`: Execution time, token usage, throughput, and error metrics.
+- **Category:** Observability/operator
+- **Classification:** `PRESENT_NOT_VERIFIED`
+- **Legacy Source Files:** `build_coordinator/metrics.py`
+- **Legacy Tests:** `tests/test_metrics.py`
+- **vNext Files:** `src/stagemesh/observability.py`
+- **vNext Tests:** `NONE`
+- **Legacy Behavior:** Execution time, token usage, throughput, and error metrics.
+- **Evidence:** Metric counters exist in observability.py, but export and reporting test coverage is unverified in vNext.
+- **Parity Gap:** Missing automated test for metrics collection and export.
+
+### `OBSERVABILITY-005`: Real-time terminal dashboard of system status.
+- **Category:** Observability/operator
+- **Classification:** `PRESENT_VERIFIED`
+- **Legacy Source Files:** `build_coordinator/cli.py`
+- **Legacy Tests:** `tests/test_operator_dashboard.py`
+- **vNext Files:** `src/stagemesh/dashboard.py`
+- **vNext Tests:** `tests/test_canary_regression.py`
+- **Legacy Behavior:** Real-time terminal dashboard of system status.
+- **Evidence:** Terminal dashboard displays current operations.
+- **Parity Gap:** None
+
+### `OBSERVABILITY-006`: Displays task retries, failure reasons, and recovery attempts.
+- **Category:** Observability/operator
+- **Classification:** `PRESENT_VERIFIED`
+- **Legacy Source Files:** `build_coordinator/cli.py`
+- **Legacy Tests:** `tests/test_events_stream.py`
+- **vNext Files:** `src/stagemesh/retry.py`
+- **vNext Tests:** `tests/test_canary_regression.py`
+- **Legacy Behavior:** Displays task retries, failure reasons, and recovery attempts.
+- **Evidence:** RetryTracker reports failure classification and retry attempts.
+- **Parity Gap:** None
+
+### `DISTRIBUTION-001`: Serializes task context into JSON work packet payloads.
+- **Category:** Distribution
+- **Classification:** `PRESENT_VERIFIED`
+- **Legacy Source Files:** `build_coordinator/runner/worker_pool.py`
+- **Legacy Tests:** `tests/test_worker_routing.py`
 - **vNext Files:** `src/stagemesh/distributed.py`
-- **vNext Tests:** `scripts/invariants.py`
-- **Legacy Behavior:** Polled work queue directory for incoming packets.
-- **Evidence:** WorkQueue manages distributed packet enqueueing and polling.
+- **vNext Tests:** `tests/test_canary_regression.py`
+- **Legacy Behavior:** Serializes task context into JSON work packet payloads.
+- **Evidence:** create_work_packet serializes task data for remote execution.
 - **Parity Gap:** None
 
-### `DISTRIBUTION-003`: Packet Acknowledgement & Ingestion (import_ack / packet processing)
+### `DISTRIBUTION-002`: Workers poll central queue for available tasks matching capabilities.
 - **Category:** Distribution
 - **Classification:** `PRESENT_VERIFIED`
-- **Legacy Source Files:** `build_coordinator/execution/results.py`
-- **Legacy Tests:** `tests/test_adapter_sdk_acceptance.py`
-- **vNext Files:** `src/stagemesh/work_transport.py`
-- **vNext Tests:** `scripts/invariants.py`
-- **Legacy Behavior:** Imported acknowledgement envelopes from remote workers.
-- **Evidence:** import_ack reads and validates ACK envelope JSON.
+- **Legacy Source Files:** `build_coordinator/runner/worker_pool.py`
+- **Legacy Tests:** `tests/test_worker_routing.py`
+- **vNext Files:** `src/stagemesh/distributed.py`
+- **vNext Tests:** `tests/test_canary_regression.py`
+- **Legacy Behavior:** Workers poll central queue for available tasks matching capabilities.
+- **Evidence:** poll_work_packet retrieves claimable work.
 - **Parity Gap:** None
 
-### `DISTRIBUTION-004`: Work Transport Protocol (work_transport.py envelope serialization)
+### `DISTRIBUTION-003`: Remote workers send lease heartbeats to maintain claim.
 - **Category:** Distribution
 - **Classification:** `PRESENT_VERIFIED`
-- **Legacy Source Files:** `build_coordinator/execution/results.py`
-- **Legacy Tests:** `tests/test_adapter_sdk_acceptance.py`
-- **vNext Files:** `src/stagemesh/work_transport.py`
-- **vNext Tests:** `scripts/invariants.py`
-- **Legacy Behavior:** Defined protocol schema for distributed worker transport.
-- **Evidence:** work_transport module handles packet serialization.
+- **Legacy Source Files:** `build_coordinator/runner/worker_health.py`
+- **Legacy Tests:** `tests/test_worker_health.py`
+- **vNext Files:** `src/stagemesh/distributed.py`
+- **vNext Tests:** `tests/test_invariants.py::test_live_validation_survives_restart_lease_expiry`
+- **Legacy Behavior:** Remote workers send lease heartbeats to maintain claim.
+- **Evidence:** renew_packet_lease extends lease expiration time.
 - **Parity Gap:** None
 
-### `RELEASE-001`: Installation & Packaging (pip install -e ., pyproject.toml console scripts)
-- **Category:** Release/user experience
+### `DISTRIBUTION-004`: Workers send completion result packets back to coordinator.
+- **Category:** Distribution
 - **Classification:** `PRESENT_VERIFIED`
-- **Legacy Source Files:** `pyproject.toml, build_coordinator/bin/`
+- **Legacy Source Files:** `build_coordinator/runner/worker_pool.py`
+- **Legacy Tests:** `tests/test_worker_health.py`
+- **vNext Files:** `src/stagemesh/distributed.py`
+- **vNext Tests:** `tests/test_canary_regression.py`
+- **Legacy Behavior:** Workers send completion result packets back to coordinator.
+- **Evidence:** acknowledge_packet records execution result.
+- **Parity Gap:** None
+
+### `DISTRIBUTION-005`: Validated JSON transport envelope format for work packets.
+- **Category:** Distribution
+- **Classification:** `PRESENT_VERIFIED`
+- **Legacy Source Files:** `build_coordinator/types.py`
 - **Legacy Tests:** `tests/test_packaging_metadata.py`
-- **vNext Files:** `pyproject.toml, src/stagemesh/release.py`
-- **vNext Tests:** `scripts/invariants.py`
-- **Legacy Behavior:** Installed editable package and registered console scripts.
-- **Evidence:** pyproject.toml defines stagemesh and build-coordinator entry points.
+- **vNext Files:** `src/stagemesh/work_transport.py`
+- **vNext Tests:** `tests/test_canary_regression.py`
+- **Legacy Behavior:** Validated JSON transport envelope format for work packets.
+- **Evidence:** WorkTransportEnvelope validates schema version and signatures.
 - **Parity Gap:** None
 
-### `RELEASE-002`: CLI Aliases & Binaries (stagemesh primary CLI, legacy build-coordinator alias)
+### `RELEASE-001`: Standard PyPI wheel / sdist package installation.
 - **Category:** Release/user experience
 - **Classification:** `PRESENT_VERIFIED`
-- **Legacy Source Files:** `build_coordinator/bin/stagemesh, build_coordinator/bin/build-coordinator`
-- **Legacy Tests:** `tests/test_launchers.py`
+- **Legacy Source Files:** `pyproject.toml`
+- **Legacy Tests:** `tests/test_packaging_metadata.py`
 - **vNext Files:** `pyproject.toml`
-- **vNext Tests:** `scripts/invariants.py`
-- **Legacy Behavior:** Provided build-coordinator executable script alias.
-- **Evidence:** Both stagemesh and build-coordinator entry points invoke stagemesh.cli:main.
+- **vNext Tests:** `pip install -e .`
+- **Legacy Behavior:** Standard PyPI wheel / sdist package installation.
+- **Evidence:** pip install installs stagemesh executable.
 - **Parity Gap:** None
 
-### `RELEASE-003`: First-Run Onboarding (stagemesh init & demo creation)
+### `RELEASE-002`: Exposes build-coordinator executable script alias in addition to stagemesh.
+- **Category:** Release/user experience
+- **Classification:** `MISSING_PORT_REQUIRED`
+- **Legacy Source Files:** `pyproject.toml`
+- **Legacy Tests:** `tests/test_packaging_metadata.py`
+- **vNext Files:** `pyproject.toml`
+- **vNext Tests:** `NONE`
+- **Legacy Behavior:** Exposes build-coordinator executable script alias in addition to stagemesh.
+- **Evidence:** pyproject.toml only exposes stagemesh script entry point, missing build-coordinator alias.
+- **Parity Gap:** build-coordinator script alias missing in pyproject.toml.
+
+### `RELEASE-003`: Interactive or automated setup wizard.
 - **Category:** Release/user experience
 - **Classification:** `PRESENT_VERIFIED`
 - **Legacy Source Files:** `build_coordinator/project/onboarding.py`
 - **Legacy Tests:** `tests/test_global_and_onboarding.py`
-- **vNext Files:** `src/stagemesh/demo.py, src/stagemesh/cli.py`
-- **vNext Tests:** `scripts/invariants.py`
-- **Legacy Behavior:** Created initial demo projects for first-time users.
-- **Evidence:** command_demo provisions demo projects with sample backlogs.
+- **vNext Files:** `src/stagemesh/cli.py`
+- **vNext Tests:** `tests/test_canary_regression.py`
+- **Legacy Behavior:** Interactive or automated setup wizard.
+- **Evidence:** stagemesh init guides first-run configuration.
 - **Parity Gap:** None
 
-### `RELEASE-004`: Example Configurations & Manifests (examples/ directory configurations)
+### `RELEASE-004`: Bundled workflow configuration examples.
 - **Category:** Release/user experience
 - **Classification:** `PRESENT_VERIFIED`
-- **Legacy Source Files:** `examples/build-coordinator.example.json`
+- **Legacy Source Files:** `examples/README.md`
 - **Legacy Tests:** `tests/test_public_dogfood_acceptance.py`
-- **vNext Files:** `examples/`
-- **vNext Tests:** `scripts/invariants.py`
-- **Legacy Behavior:** Provided example configurations for staged and single-agent setups.
-- **Evidence:** examples/ directory contains public dogfood manifests.
+- **vNext Files:** `src/stagemesh/demo.py`
+- **vNext Tests:** `tests/test_canary_regression.py`
+- **Legacy Behavior:** Bundled workflow configuration examples.
+- **Evidence:** stagemesh demo provisions sample repository and tasks.
 - **Parity Gap:** None
 
-### `RELEASE-005`: Release Packaging & Sidecar Hashes (build_release_artifact with checksum sidecar)
+### `RELEASE-005`: Builds release distribution artifacts.
 - **Category:** Release/user experience
 - **Classification:** `PRESENT_VERIFIED`
-- **Legacy Source Files:** `scripts/audit_owner_profile.sh`
+- **Legacy Source Files:** `pyproject.toml`
 - **Legacy Tests:** `tests/test_packaging_metadata.py`
 - **vNext Files:** `src/stagemesh/release.py`
-- **vNext Tests:** `scripts/invariants.py::release_artifact_checksum_sidecar`
-- **Legacy Behavior:** Audited release assets and checksums.
-- **Evidence:** build_release_artifact creates tar.gz package and sha256 checksum sidecar.
+- **vNext Tests:** `tests/test_canary_regression.py`
+- **Legacy Behavior:** Builds release distribution artifacts.
+- **Evidence:** stagemesh release generates release packages.
 - **Parity Gap:** None
 
-### `RELEASE-006`: Release Readiness Checklist (stagemesh release-readiness audit)
+### `RELEASE-006`: Generates release manifests with SHA256 checksums.
 - **Category:** Release/user experience
 - **Classification:** `PRESENT_VERIFIED`
-- **Legacy Source Files:** `docs/OWNER_PROFILE_CHECKLIST.md`
+- **Legacy Source Files:** `pyproject.toml`
 - **Legacy Tests:** `tests/test_packaging_metadata.py`
 - **vNext Files:** `src/stagemesh/release_readiness.py`
-- **vNext Tests:** `scripts/invariants.py`
-- **Legacy Behavior:** Checked pre-release requirements.
-- **Evidence:** release_readiness verifies release evidence, gates, and repository status.
+- **vNext Tests:** `tests/test_canary_regression.py`
+- **Legacy Behavior:** Generates release manifests with SHA256 checksums.
+- **Evidence:** ReleaseReadiness manifest computes SHA256 checksums.
 - **Parity Gap:** None
 
-### `RELEASE-007`: Public Dogfood & Acceptance Demos (scripts/acceptance.py, scripts/live_acceptance.py)
+### `RELEASE-007`: End-to-end demo workflow for public evaluation.
 - **Category:** Release/user experience
 - **Classification:** `PRESENT_VERIFIED`
-- **Legacy Source Files:** `docs/dogfood/acceptance-suite.yaml`
+- **Legacy Source Files:** `examples/public_dogfood/README.md`
 - **Legacy Tests:** `tests/test_public_dogfood_acceptance.py`
-- **vNext Files:** `src/stagemesh/acceptance.py, src/stagemesh/e2e_acceptance.py`
-- **vNext Tests:** `scripts/acceptance.py, scripts/invariants.py`
-- **Legacy Behavior:** Executed public dogfood acceptance scenarios.
-- **Evidence:** scripts/acceptance.py runs clean acceptance and invariants verification.
+- **vNext Files:** `src/stagemesh/demo.py`
+- **vNext Tests:** `tests/test_canary_regression.py`
+- **Legacy Behavior:** End-to-end demo workflow for public evaluation.
+- **Evidence:** stagemesh demo runs complete lifecycle demo.
 - **Parity Gap:** None
 
-### `PLATFORM-001`: Windows Support (Windows paths, process identity, Windows task launcher)
+### `PLATFORM-001`: Cross-platform process lifecycle handling (taskkill /F /T on Win32, killpg on POSIX).
 - **Category:** Platform
-- **Classification:** `PRESENT_VERIFIED`
+- **Classification:** `MISSING_PORT_REQUIRED`
+- **Legacy Source Files:** `build_coordinator/watcher/loop.py`
+- **Legacy Tests:** `tests/test_process_tree.py`
+- **vNext Files:** ``
+- **vNext Tests:** `NONE`
+- **Legacy Behavior:** Cross-platform process lifecycle handling (taskkill /F /T on Win32, killpg on POSIX).
+- **Evidence:** vNext process identity check handles PID check, but process tree recursive kill for Win32 taskkill /F /T and POSIX signal process group kill is missing.
+- **Parity Gap:** Process-tree termination implementation and tests missing in vNext.
+
+### `PLATFORM-002`: Registers Windows Task Scheduler tasks (schtasks) and startup continue launcher scripts.
+- **Category:** Platform
+- **Classification:** `MISSING_PORT_REQUIRED`
 - **Legacy Source Files:** `build_coordinator/watcher/windows_task_scheduler.py`
 - **Legacy Tests:** `tests/test_watcher_windows_task_scheduler.py, tests/test_windows_continue_startup_launcher.py`
-- **vNext Files:** `src/stagemesh/process_identity.py, src/stagemesh/cli.py`
-- **vNext Tests:** `tests/test_canary_regression.py, scripts/invariants.py`
-- **Legacy Behavior:** Supported Windows task scheduler and Windows process spawning.
-- **Evidence:** Windows process spawning, path normalization, and execution verified on Windows 11.
-- **Parity Gap:** None
-
-### `PLATFORM-002`: Linux / Unix Support (POSIX process handling, signal management)
-- **Category:** Platform
-- **Classification:** `PRESENT_VERIFIED`
-- **Legacy Source Files:** `build_coordinator/execution/process_tree.py`
-- **Legacy Tests:** `tests/test_process_tree.py`
-- **vNext Files:** `src/stagemesh/process_identity.py, src/stagemesh/git.py`
-- **vNext Tests:** `scripts/invariants.py`
-- **Legacy Behavior:** Supported POSIX process signals and boot_id path reading.
-- **Evidence:** boot_id reads /proc/sys/kernel/random/boot_id on Linux.
-- **Parity Gap:** None
-
-### `PLATFORM-003`: Cross-Platform Process Lifecycle Abstraction (process_identity.py boot_id & pid matching)
-- **Category:** Platform
-- **Classification:** `PRESENT_VERIFIED`
-- **Legacy Source Files:** `build_coordinator/runner/worker_health.py`
-- **Legacy Tests:** `tests/test_worker_health.py`
-- **vNext Files:** `src/stagemesh/process_identity.py`
-- **vNext Tests:** `tests/test_invariants.py::test_pid_reuse_cannot_impersonate_old_worker`
-- **Legacy Behavior:** Abstracted host process identification across platforms.
-- **Evidence:** ProcessIdentity handles cross-platform process matching and boot_id check.
-- **Parity Gap:** None
+- **vNext Files:** ``
+- **vNext Tests:** `NONE`
+- **Legacy Behavior:** Registers Windows Task Scheduler tasks (schtasks) and startup continue launcher scripts.
+- **Evidence:** Windows Task Scheduler integration and startup launcher generation completely missing in vNext.
+- **Parity Gap:** Windows Task Scheduler registration and startup launcher missing in vNext.
