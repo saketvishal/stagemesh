@@ -18,6 +18,7 @@ from .config import ConfigValidationError, load_config
 from .dashboard import dashboard_summary, render_dashboard
 from .coordinator import Coordinator
 from .demo import DemoValidationError, create_demo_project
+from .execution import SubprocessExecutor
 from .distributed import WorkQueue, WorkQueueError
 from .e2e_acceptance import EndToEndAcceptanceValidationError, end_to_end_acceptance
 from .final_report import FinalReportValidationError, candidate_sha, render_final_report
@@ -37,6 +38,7 @@ from .release_readiness import ReleaseReadinessValidationError, release_readines
 from .redaction import redact_command_secrets, redact_url_credentials
 from .retry import RetryRegistry, RetryValidationError
 from .security import SecurityBoundaryError, WorkspaceBoundary
+from .providers import ProviderValidationError, adapters_from_config
 from .task_sources import LocalBacklogSource, TaskSourceValidationError, sync_source, task_sources_from_config
 from .work_transport import WorkTransportError, import_ack, write_ack_envelope, write_packet_envelope
 from .workers import WorkerValidationError, heartbeat_worker, register_worker
@@ -138,18 +140,43 @@ def command_continue(args: argparse.Namespace) -> int:
     sync_source(store, LocalBacklogSource(backlog).discover())
     for source in task_sources_from_config(config):
         sync_source(store, source.discover())
-    coord = Coordinator(store, project)
+    # Wire real provider adapters unless --dry-run is requested.
+    executor = None
+    if not getattr(args, "dry_run", False):
+        try:
+            adapters = adapters_from_config(config)
+        except ProviderValidationError as exc:
+            print(f"provider config error: {exc}", file=sys.stderr)
+            store.close()
+            return 2
+        chosen_name = getattr(args, "provider", None)
+        if chosen_name:
+            matching = [a for a in adapters if a.name == chosen_name]
+            if not matching:
+                print(f"provider not found: {chosen_name}", file=sys.stderr)
+                store.close()
+                return 2
+            adapter = matching[0]
+        elif adapters:
+            adapter = adapters[0]
+        else:
+            adapter = None
+        if adapter is not None:
+            executor = SubprocessExecutor(list(adapter.command), name=adapter.name)
+    coord = Coordinator(store, project, executor=executor)
     count = 0
     while True:
         progressed = coord.tick()
         count += progressed
         if args.once or progressed == 0:
             break
+    chosen_provider = getattr(executor, "name", "fake") if executor is not None else "fake"
     if args.json:
-        print(json.dumps({"progressed": count}, indent=2, sort_keys=True))
+        print(json.dumps({"progressed": count, "provider": chosen_provider}, indent=2, sort_keys=True))
         store.close()
         return 0
     print(f"progressed: {count}")
+    print(f"provider: {chosen_provider}")
     store.close()
     return 0
 
@@ -1078,6 +1105,8 @@ def build_parser() -> argparse.ArgumentParser:
     cont = sub.add_parser("continue")
     cont.add_argument("--once", action="store_true")
     cont.add_argument("--json", action="store_true")
+    cont.add_argument("--provider", help="Provider name to use for implementation (e.g. claude, codex)")
+    cont.add_argument("--dry-run", action="store_true", help="Use FakeExecutor instead of a real provider")
     cont.set_defaults(func=command_continue)
     status = sub.add_parser("status")
     status.add_argument("--json", action="store_true")

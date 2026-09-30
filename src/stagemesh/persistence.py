@@ -389,6 +389,25 @@ class Store:
         self.conn.execute("UPDATE claims SET active=0 WHERE task_id=?", (task_id,))
         self.conn.commit()
 
+    def release_claim(self, claim_id: str) -> None:
+        """Deactivate a claim without advancing the task stage, restoring the task to OPEN.
+
+        Used when a provider capacity failure occurs during IMPLEMENT so the task can be
+        re-dispatched rather than being stranded with an active claim that will only expire
+        after the lease TTL.
+        """
+        claim_id = _validate_text(claim_id, "claim id")
+        row = self.conn.execute("SELECT task_id FROM claims WHERE id=?", (claim_id,)).fetchone()
+        if row is None:
+            return
+        task_id = str(row["task_id"])
+        with self.conn:
+            self.conn.execute("UPDATE claims SET active=0 WHERE id=?", (claim_id,))
+            self.conn.execute(
+                "UPDATE tasks SET status=?, updated_at=? WHERE id=? AND status=?",
+                (TaskStatus.OPEN, time.time(), task_id, TaskStatus.CLAIMED),
+            )
+
     def running_executions(self) -> Iterable[sqlite3.Row]:
         return self.conn.execute("SELECT * FROM executions WHERE status=?", (ExecutionStatus.RUNNING,))
 

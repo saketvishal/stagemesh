@@ -47,8 +47,10 @@ class FakeExecutor(Executor):
 class SubprocessExecutor(Executor):
     name = "subprocess"
 
-    def __init__(self, command: list[str]):
+    def __init__(self, command: list[str], name: str | None = None):
         self.command = command
+        if name is not None:
+            self.name = name
 
     def run(self, store: Store, task_id: str, claim_id: str | None, project: Path) -> ExecutionResult:
         proc = subprocess.Popen(self.command, cwd=project, text=True)

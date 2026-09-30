@@ -60,6 +60,12 @@ class Coordinator:
             if claim_id is None:
                 return 0
             result = self.executor.run(self.store, task_id, claim_id, self.project)
+            if result.capacity_failure:
+                # Provider is unavailable (not-found, rate-limit, capacity exhausted).
+                # Release the claim immediately so the task can be re-dispatched rather
+                # than being stranded until lease TTL expires.
+                self.store.release_claim(claim_id)
+                return 0
             if result.status is ExecutionStatus.SUCCEEDED and result.candidate_sha and result.durable_handoff:
                 self.store.advance_task(task_id, Stage.VALIDATE)
                 record_audit(
