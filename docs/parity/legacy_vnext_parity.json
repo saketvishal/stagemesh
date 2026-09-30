@@ -89,7 +89,7 @@
   {
     "id": "LIFECYCLE-005",
     "category": "Lifecycle",
-    "classification": "PRESENT_NOT_VERIFIED",
+    "classification": "PRESENT_VERIFIED",
     "legacy_source_files": [
       "build_coordinator/runner/orchestrator.py"
     ],
@@ -98,12 +98,13 @@
     ],
     "legacy_behavior": "Required separate reviewer agent before integration.",
     "vnext_files": [
-      "src/stagemesh/review.py",
-      "src/stagemesh/coordinator.py"
+      "src/stagemesh/review.py"
     ],
-    "vnext_tests": [],
-    "evidence": "Review gate exists in src/stagemesh/review.py, but enforcing distinct reviewer provider != builder provider is unverified in vNext tests.",
-    "parity_gap": "Missing automated test for strict reviewer-builder provider separation."
+    "vnext_tests": [
+      "tests/test_reviewer_independence.py::test_reviewer_cannot_be_implementation_worker"
+    ],
+    "evidence": "Reviewer raises SelfReviewError if implementation worker attempts to review its own candidate.",
+    "parity_gap": "None"
   },
   {
     "id": "LIFECYCLE-006",
@@ -352,7 +353,7 @@
   {
     "id": "PROVIDERS-003",
     "category": "Providers",
-    "classification": "PRESENT_NOT_VERIFIED",
+    "classification": "PRESENT_VERIFIED",
     "legacy_source_files": [
       "build_coordinator/runner/routing.py"
     ],
@@ -363,9 +364,11 @@
     "vnext_files": [
       "src/stagemesh/providers.py"
     ],
-    "vnext_tests": [],
-    "evidence": "approved_default_adapters() defines grok adapter, but no test or live execution proof exists for Grok in vNext.",
-    "parity_gap": "Missing automated test for Grok execution."
+    "vnext_tests": [
+      "tests/test_grok_provider.py::test_grok_deterministic_command_adapter_contract"
+    ],
+    "evidence": "approved_default_adapters defines grok adapter and RuntimeCommandAdapter executes Grok CLI adapter protocol.",
+    "parity_gap": "None"
   },
   {
     "id": "PROVIDERS-004",
@@ -410,7 +413,7 @@
   {
     "id": "PROVIDERS-006",
     "category": "Providers",
-    "classification": "PRESENT_NOT_VERIFIED",
+    "classification": "PRESENT_VERIFIED",
     "legacy_source_files": [
       "build_coordinator/runner/routing.py"
     ],
@@ -421,9 +424,11 @@
     "vnext_files": [
       "src/stagemesh/routing.py"
     ],
-    "vnext_tests": [],
-    "evidence": "stagemesh.routing supports multi-stage matching, but multi-stage routing test is missing in vNext.",
-    "parity_gap": "Missing automated test for staged multi-agent routing."
+    "vnext_tests": [
+      "tests/test_staged_routing.py::test_staged_routing_honors_configured_stage_providers"
+    ],
+    "evidence": "Router.choose_for_stage routes IMPLEMENT, VALIDATE, and REVIEW stages to configured providers.",
+    "parity_gap": "None"
   },
   {
     "id": "PROVIDERS-007",
@@ -448,7 +453,7 @@
   {
     "id": "PROVIDERS-008",
     "category": "Providers",
-    "classification": "PRESENT_NOT_VERIFIED",
+    "classification": "PRESENT_VERIFIED",
     "legacy_source_files": [
       "build_coordinator/runner/routing.py"
     ],
@@ -457,12 +462,14 @@
     ],
     "legacy_behavior": "Automatic fallback to alternative provider when primary provider fails or rate-limits.",
     "vnext_files": [
-      "src/stagemesh/routing.py",
-      "src/stagemesh/providers.py"
+      "src/stagemesh/coordinator.py",
+      "src/stagemesh/execution.py"
     ],
-    "vnext_tests": [],
-    "evidence": "classify_failure classifies rate limits, but automatic cross-provider fallback during tick is unverified in tests.",
-    "parity_gap": "Missing automated test for cross-provider automatic failover."
+    "vnext_tests": [
+      "tests/test_provider_failover.py::test_automatic_cross_provider_failover_recovers_task"
+    ],
+    "evidence": "Coordinator releases claims on capacity/rate-limit failure and allows immediate re-dispatch to alternate provider.",
+    "parity_gap": "None"
   },
   {
     "id": "PROVIDERS-009",
@@ -487,7 +494,7 @@
   {
     "id": "PROVIDERS-010",
     "category": "Providers",
-    "classification": "PRESENT_NOT_VERIFIED",
+    "classification": "PRESENT_VERIFIED",
     "legacy_source_files": [
       "build_coordinator/runner/orchestrator.py"
     ],
@@ -498,9 +505,11 @@
     "vnext_files": [
       "src/stagemesh/review.py"
     ],
-    "vnext_tests": [],
-    "evidence": "Review adapter supports custom provider, but cross-provider review assignment is unverified in tests.",
-    "parity_gap": "Missing automated test for cross-provider review."
+    "vnext_tests": [
+      "tests/test_cross_provider_review.py::test_cross_provider_independent_review_preserves_sha_and_records_identity"
+    ],
+    "evidence": "Reviewer records reviewer identity and provider metadata while preserving candidate SHA.",
+    "parity_gap": "None"
   },
   {
     "id": "EXECUTION-001",
@@ -656,7 +665,7 @@
   {
     "id": "EXECUTION-008",
     "category": "Execution",
-    "classification": "PRESENT_NOT_VERIFIED",
+    "classification": "PRESENT_VERIFIED",
     "legacy_source_files": [
       "build_coordinator/runner/worker_pool.py"
     ],
@@ -666,11 +675,14 @@
     "legacy_behavior": "Executes multiple builders concurrently up to capacity limit.",
     "vnext_files": [
       "src/stagemesh/capacity.py",
-      "src/stagemesh/workers.py"
+      "src/stagemesh/coordinator.py"
     ],
-    "vnext_tests": [],
-    "evidence": "CapacityRegistry tracks slots, but concurrent multi-builder execution pool is unverified in tests.",
-    "parity_gap": "Missing automated test for concurrent multi-builder execution."
+    "vnext_tests": [
+      "tests/test_concurrent_builders.py::test_concurrent_multi_builder_execution_capacity_two",
+      "tests/test_concurrent_builders.py::test_capacity_one_prevents_illegal_concurrent_claim"
+    ],
+    "evidence": "BarrierExecutor and Store verify concurrent multi-builder execution at capacity 2 and claim queuing at capacity 1.",
+    "parity_gap": "None"
   },
   {
     "id": "EXECUTION-009",
@@ -1297,7 +1309,7 @@
   {
     "id": "REMEDIATION-001",
     "category": "Review/remediation",
-    "classification": "PRESENT_NOT_VERIFIED",
+    "classification": "PRESENT_VERIFIED",
     "legacy_source_files": [
       "build_coordinator/runner/orchestrator.py"
     ],
@@ -1308,9 +1320,11 @@
     "vnext_files": [
       "src/stagemesh/review.py"
     ],
-    "vnext_tests": [],
-    "evidence": "Review module accepts reviewer identity, but reviewer-builder separation enforcement is unverified in tests.",
-    "parity_gap": "Missing automated test for strict reviewer-builder separation."
+    "vnext_tests": [
+      "tests/test_reviewer_independence.py::test_reviewer_cannot_be_implementation_worker"
+    ],
+    "evidence": "Reviewer enforces strict worker identity separation between builder and reviewer.",
+    "parity_gap": "None"
   },
   {
     "id": "REMEDIATION-002",
