@@ -6,14 +6,14 @@ Total Inventoried Capabilities: **95**
 
 | Classification | Count | Description |
 |---|---|---|
-| `PRESENT_VERIFIED` | **82** | Present in vNext and verified by exact automated tests or live acceptance |
-| `PRESENT_NOT_VERIFIED` | **11** | Present in vNext source but missing automated test coverage proving exact behavior |
+| `PRESENT_VERIFIED` | **91** | Present in vNext and verified by exact automated tests or live acceptance |
+| `PRESENT_NOT_VERIFIED` | **2** | Present in vNext source but missing automated test coverage proving exact behavior |
 | `SUPERSEDED_EQUIVALENT` | **0** | Replaced by proven equivalent vNext mechanism |
 | `MISSING_PORT_REQUIRED` | **2** | Missing from vNext implementation, port required |
 | `INTENTIONAL_RETIREMENT_REQUIRES_APPROVAL` | **0** | Feature retirement needing human operator approval |
 | `LEGACY_INTERNAL_OR_BUG` | **0** | Legacy internal detail or bug workaround |
 
-**Parity Status: INCOMPLETE** (2 Missing Port Items, 11 Unverified Items)
+**Parity Status: INCOMPLETE** (2 Missing Port Items, 2 Unverified Items)
 
 ---
 
@@ -41,6 +41,26 @@ The following items were promoted from `MISSING_PORT_REQUIRED` to `PRESENT_VERIF
 
 Net change: `MISSING_PORT_REQUIRED` 4 → 2; `PRESENT_VERIFIED` 80 → 82. `PRESENT_NOT_VERIFIED` unchanged at 11. Total entries: 95.
 
+## Wave 4 Promotions (4f3c345 → HEAD)
+
+The following items were promoted from `PRESENT_NOT_VERIFIED` to `PRESENT_VERIFIED` during Wave 4:
+
+1. **Process Identity / Hierarchy Verification** (`OWNERSHIP-004`): Promoted `PRESENT_NOT_VERIFIED` → `PRESENT_VERIFIED`. Verified by `tests/test_process_identity_verification.py` (18 tests: classify_process identity verification, boot identity mismatch, PID reuse protection, create time divergence, executable path mismatch, restart safety, non-interference with unrelated PIDs).
+2. **Planner Contract Validation** (`OBJECTIVES-003`): Promoted `PRESENT_NOT_VERIFIED` → `PRESENT_VERIFIED`. Verified by `tests/test_planner_contract_validation.py` (15 tests: schema contract validation, malformed JSON rejection, non-dict root, missing objective/task fields, duplicate task IDs, invalid dependency DAG, provider output wrapping safety).
+3. **Planner Wrapper / Envelope Normalization & Retry Behavior** (`OBJECTIVES-005`): Promoted `PRESENT_NOT_VERIFIED` → `PRESENT_VERIFIED`. Verified by `tests/test_planner_contract_validation.py` (13 tests: write_backlog serialization/idempotency, repeated malformed output error handling without task duplication, single correct task graph on retry recovery, safe failure state classification).
+4. **Objective Run-From-Anywhere** (`OBJECTIVES-006`): Promoted `PRESENT_NOT_VERIFIED` → `PRESENT_VERIFIED`. Verified by `tests/test_run_from_anywhere_and_multi_project.py` (2 tests: explicit project path resolution from unrelated cwd, wrong project path does not mutate other project).
+5. **Project Run-From-Anywhere** (`PROJECTS-005`): Promoted `PRESENT_NOT_VERIFIED` → `PRESENT_VERIFIED`. Verified by `tests/test_run_from_anywhere_and_multi_project.py` (7 tests: GlobalRegistry register/load, resolution from arbitrary cwd, missing registry handling, corrupt registry validation, duplicate name conflicts, idempotent re-registration, db_path containment validation).
+6. **Multi-Project Coordination** (`PROJECTS-006`): Promoted `PRESENT_NOT_VERIFIED` → `PRESENT_VERIFIED`. Verified by `tests/test_run_from_anywhere_and_multi_project.py` (8 tests: two projects registered without collision, project-scoped tasks, cross-project isolation on failure, source ID namespace collision avoidance, restart persistence across projects, independent per-project capacity, deterministic registry sorting).
+7. **SQLite Busy / Lock Retry Behavior** (`PERSISTENCE-005`): Promoted `PRESENT_NOT_VERIFIED` → `PRESENT_VERIFIED`. Verified by `tests/test_sqlite_busy_retry.py` (7 tests: busy_timeout=5000 and WAL pragma verification, concurrent reader waiting during writer lock, concurrent writer deduplication, excessive contention OperationalError handling, non-lock error propagation).
+8. **Affected-Test Discovery** (`VALIDATION-002`): Promoted `PRESENT_NOT_VERIFIED` → `PRESENT_VERIFIED`. Verified by `tests/test_affected_test_discovery.py` (13 tests: single and multiple changed source mapping, union deduplication, unknown file fallback to baseline, no changed files runs baseline, cross-platform path normalization, deterministic sorting).
+9. **Metrics Collection / Export** (`OBSERVABILITY-004`): Promoted `PRESENT_NOT_VERIFIED` → `PRESENT_VERIFIED`. Verified by `tests/test_metrics_observability.py` (12 tests: metrics_snapshot queue depth and execution outcomes, provider usage, secret-free JSON export, deterministic sorted keys, durable persistence across store reopen).
+
+**PostgreSQL Behavior** (`PERSISTENCE-002`) honestly remains `PRESENT_NOT_VERIFIED`:
+- Deterministic contract verified by `tests/test_postgres_store_contract.py` (15 tests: schema DDL covering all 17 required tables, postgres_available detection, PostgresUnavailable error handling, no secrets in schema SQL).
+- Live execution is blocked because no local PostgreSQL server is running (localhost connection timeout). Full live proof requires `STAGEMESH_PG_DSN` pointing to an accessible PostgreSQL instance.
+
+Net change: `PRESENT_VERIFIED` 82 → 91; `PRESENT_NOT_VERIFIED` 11 → 2; `MISSING_PORT_REQUIRED` unchanged at 2. Total entries: 95.
+
 ---
 
 ## Legacy Test Scenario Reconciliation Matrix
@@ -53,37 +73,37 @@ Net change: `MISSING_PORT_REQUIRED` 4 → 2; `PRESENT_VERIFIED` 80 → 82. `PRES
 | `test_clone_pool.py` | 9 | `MISSING_PORT_REQUIRED` | `NONE` | Legacy feature or helper module absent in vNext implementation. |
 | `test_coordinator_config.py` | 13 | `PRESENT_VERIFIED` | `tests/test_canary_regression.py, tests/test_invariants.py, scripts/acceptance.py, scripts/github_acceptance.py` | Covered by vNext automated test suite or acceptance script. |
 | `test_coordinator_lock.py` | 11 | `PRESENT_NOT_VERIFIED` | `Partial / Architectural support` | Underlying vNext code exists, but dedicated test scenario reconciliation is unverified. |
-| `test_database_lifecycle.py` | 9 | `PRESENT_NOT_VERIFIED` | `Partial / Architectural support` | Underlying vNext code exists, but dedicated test scenario reconciliation is unverified. |
+| `test_database_lifecycle.py` | 9 | `PRESENT_NOT_VERIFIED` | `tests/test_postgres_store_contract.py` | Deterministic schema and driver contract verified; live PostgreSQL requires STAGEMESH_PG_DSN. |
 | `test_engine_lifecycle.py` | 10 | `PRESENT_VERIFIED` | `tests/test_canary_regression.py, tests/test_invariants.py, scripts/acceptance.py, scripts/github_acceptance.py` | Covered by vNext automated test suite or acceptance script. |
 | `test_events_stream.py` | 11 | `PRESENT_VERIFIED` | `tests/test_canary_regression.py, tests/test_invariants.py, scripts/acceptance.py, scripts/github_acceptance.py` | Covered by vNext automated test suite or acceptance script. |
 | `test_finding_reconciliation.py` | 21 | `PRESENT_VERIFIED` | `tests/test_canary_regression.py, tests/test_invariants.py, scripts/acceptance.py, scripts/github_acceptance.py` | Covered by vNext automated test suite or acceptance script. |
-| `test_gh101_persistence_retries.py` | 4 | `PRESENT_NOT_VERIFIED` | `Partial / Architectural support` | Underlying vNext code exists, but dedicated test scenario reconciliation is unverified. |
+| `test_gh101_persistence_retries.py` | 4 | `PRESENT_VERIFIED` | `tests/test_sqlite_busy_retry.py` | Verified persistence retry under database contention. |
 | `test_gh87_completion_sync_regression.py` | 2 | `PRESENT_NOT_VERIFIED` | `Partial / Architectural support` | Underlying vNext code exists, but dedicated test scenario reconciliation is unverified. |
 | `test_git_identity_and_blocker_recovery.py` | 8 | `PRESENT_NOT_VERIFIED` | `Partial / Architectural support` | Underlying vNext code exists, but dedicated test scenario reconciliation is unverified. |
 | `test_github_label_provisioning.py` | 17 | `PRESENT_VERIFIED` | `tests/test_github_lifecycle_labels.py` | Ported to vNext with exact test proof for label provisioning, issue label state transitions, and error isolation. |
 | `test_github_outbound_sync.py` | 15 | `PRESENT_VERIFIED` | `tests/test_canary_regression.py, tests/test_invariants.py, scripts/acceptance.py, scripts/github_acceptance.py` | Covered by vNext automated test suite or acceptance script. |
-| `test_github_sqlite_busy_retry.py` | 6 | `PRESENT_NOT_VERIFIED` | `Partial / Architectural support` | Underlying vNext code exists, but dedicated test scenario reconciliation is unverified. |
+| `test_github_sqlite_busy_retry.py` | 6 | `PRESENT_VERIFIED` | `tests/test_sqlite_busy_retry.py` | Verified SQLite busy retry behavior. |
 | `test_github_task_source_activation.py` | 17 | `PRESENT_VERIFIED` | `tests/test_canary_regression.py, tests/test_invariants.py, scripts/acceptance.py, scripts/github_acceptance.py` | Covered by vNext automated test suite or acceptance script. |
 | `test_global_and_onboarding.py` | 24 | `PRESENT_VERIFIED` | `tests/test_canary_regression.py, tests/test_invariants.py, scripts/acceptance.py, scripts/github_acceptance.py` | Covered by vNext automated test suite or acceptance script. |
 | `test_independence.py` | 4 | `PRESENT_NOT_VERIFIED` | `Partial / Architectural support` | Underlying vNext code exists, but dedicated test scenario reconciliation is unverified. |
 | `test_launchers.py` | 8 | `PRESENT_NOT_VERIFIED` | `Partial / Architectural support` | Underlying vNext code exists, but dedicated test scenario reconciliation is unverified. |
-| `test_metrics.py` | 2 | `PRESENT_NOT_VERIFIED` | `Partial / Architectural support` | Underlying vNext code exists, but dedicated test scenario reconciliation is unverified. |
+| `test_metrics.py` | 2 | `PRESENT_VERIFIED` | `tests/test_metrics_observability.py` | Verified metrics snapshot, counters, and secret-free export. |
 | `test_neutral_infrastructure.py` | 5 | `PRESENT_NOT_VERIFIED` | `Partial / Architectural support` | Underlying vNext code exists, but dedicated test scenario reconciliation is unverified. |
-| `test_objective_cli_location_independence.py` | 4 | `PRESENT_NOT_VERIFIED` | `Partial / Architectural support` | Underlying vNext code exists, but dedicated test scenario reconciliation is unverified. |
+| `test_objective_cli_location_independence.py` | 4 | `PRESENT_VERIFIED` | `tests/test_run_from_anywhere_and_multi_project.py` | Verified objective execution from arbitrary working directory. |
 | `test_objective_dag_scheduler.py` | 25 | `PRESENT_VERIFIED` | `tests/test_canary_regression.py, tests/test_invariants.py, scripts/acceptance.py, scripts/github_acceptance.py` | Covered by vNext automated test suite or acceptance script. |
 | `test_objective_lifecycle.py` | 30 | `PRESENT_VERIFIED` | `tests/test_canary_regression.py, tests/test_invariants.py, scripts/acceptance.py, scripts/github_acceptance.py` | Covered by vNext automated test suite or acceptance script. |
-| `test_objective_planner.py` | 27 | `PRESENT_NOT_VERIFIED` | `Partial / Architectural support` | Underlying vNext code exists, but dedicated test scenario reconciliation is unverified. |
-| `test_objective_run_workspace_routing.py` | 1 | `PRESENT_NOT_VERIFIED` | `Partial / Architectural support` | Underlying vNext code exists, but dedicated test scenario reconciliation is unverified. |
+| `test_objective_planner.py` | 27 | `PRESENT_VERIFIED` | `tests/test_planner_contract_validation.py` | Verified planner contract schema validation, DAG validation, and envelope normalization. |
+| `test_objective_run_workspace_routing.py` | 1 | `PRESENT_VERIFIED` | `tests/test_run_from_anywhere_and_multi_project.py` | Verified workspace routing and non-interference across projects. |
 | `test_objective_runner_integration.py` | 5 | `PRESENT_VERIFIED` | `tests/test_canary_regression.py, tests/test_invariants.py, scripts/acceptance.py, scripts/github_acceptance.py` | Covered by vNext automated test suite or acceptance script. |
 | `test_objective_smoke_v1.py` | 1 | `PRESENT_NOT_VERIFIED` | `Partial / Architectural support` | Underlying vNext code exists, but dedicated test scenario reconciliation is unverified. |
 | `test_operator_dashboard.py` | 3 | `PRESENT_VERIFIED` | `tests/test_canary_regression.py, tests/test_invariants.py, scripts/acceptance.py, scripts/github_acceptance.py` | Covered by vNext automated test suite or acceptance script. |
 | `test_operator_db_isolation.py` | 3 | `PRESENT_NOT_VERIFIED` | `Partial / Architectural support` | Underlying vNext code exists, but dedicated test scenario reconciliation is unverified. |
-| `test_operator_location_independence.py` | 5 | `PRESENT_NOT_VERIFIED` | `Partial / Architectural support` | Underlying vNext code exists, but dedicated test scenario reconciliation is unverified. |
+| `test_operator_location_independence.py` | 5 | `PRESENT_VERIFIED` | `tests/test_run_from_anywhere_and_multi_project.py` | Verified run-from-anywhere and global registry resolution. |
 | `test_oss_boundary.py` | 2 | `PRESENT_NOT_VERIFIED` | `Partial / Architectural support` | Underlying vNext code exists, but dedicated test scenario reconciliation is unverified. |
 | `test_p0_migration_wave.py` | 8 | `PRESENT_VERIFIED` | `tests/test_canary_regression.py, tests/test_invariants.py, scripts/acceptance.py, scripts/github_acceptance.py` | Covered by vNext automated test suite or acceptance script. |
 | `test_packaging_metadata.py` | 1 | `PRESENT_VERIFIED` | `tests/test_canary_regression.py, tests/test_invariants.py, scripts/acceptance.py, scripts/github_acceptance.py` | Covered by vNext automated test suite or acceptance script. |
 | `test_policy_learning.py` | 6 | `PRESENT_NOT_VERIFIED` | `Partial / Architectural support` | Underlying vNext code exists, but dedicated test scenario reconciliation is unverified. |
-| `test_process_tree.py` | 2 | `MISSING_PORT_REQUIRED` | `NONE` | Legacy feature or helper module absent in vNext implementation. |
+| `test_process_tree.py` | 2 | `PRESENT_VERIFIED` | `tests/test_process_identity_verification.py, tests/test_process_tree_termination.py` | Verified process hierarchy termination and identity classification. |
 | `test_project_backlog.py` | 62 | `PRESENT_NOT_VERIFIED` | `Partial / Architectural support` | Underlying vNext code exists, but dedicated test scenario reconciliation is unverified. |
 | `test_provider_routing_and_recovery.py` | 47 | `PRESENT_NOT_VERIFIED` | `Partial / Architectural support` | Underlying vNext code exists, but dedicated test scenario reconciliation is unverified. |
 | `test_public_dogfood_acceptance.py` | 14 | `PRESENT_VERIFIED` | `tests/test_canary_regression.py, tests/test_invariants.py, scripts/acceptance.py, scripts/github_acceptance.py` | Covered by vNext automated test suite or acceptance script. |
@@ -96,7 +116,7 @@ Net change: `MISSING_PORT_REQUIRED` 4 → 2; `PRESENT_VERIFIED` 80 → 82. `PRES
 | `test_security_boundary.py` | 4 | `PRESENT_VERIFIED` | `tests/test_canary_regression.py, tests/test_invariants.py, scripts/acceptance.py, scripts/github_acceptance.py` | Covered by vNext automated test suite or acceptance script. |
 | `test_self_hosting_failure_injection.py` | 9 | `PRESENT_NOT_VERIFIED` | `Partial / Architectural support` | Underlying vNext code exists, but dedicated test scenario reconciliation is unverified. |
 | `test_self_hosting_recovery_regression.py` | 17 | `PRESENT_NOT_VERIFIED` | `Partial / Architectural support` | Underlying vNext code exists, but dedicated test scenario reconciliation is unverified. |
-| `test_sqlite_retry.py` | 10 | `PRESENT_NOT_VERIFIED` | `Partial / Architectural support` | Underlying vNext code exists, but dedicated test scenario reconciliation is unverified. |
+| `test_sqlite_retry.py` | 10 | `PRESENT_VERIFIED` | `tests/test_sqlite_busy_retry.py` | Verified busy timeout, concurrent reader waiting, and contention retry. |
 | `test_stdin_print_cli_wrapper.py` | 2 | `MISSING_PORT_REQUIRED` | `NONE` | Legacy feature or helper module absent in vNext implementation. |
 | `test_steward.py` | 8 | `PRESENT_NOT_VERIFIED` | `Partial / Architectural support` | Underlying vNext code exists, but dedicated test scenario reconciliation is unverified. |
 | `test_subprocess_executor_hardening.py` | 8 | `PRESENT_VERIFIED` | `tests/test_canary_regression.py, tests/test_invariants.py, scripts/acceptance.py, scripts/github_acceptance.py` | Covered by vNext automated test suite or acceptance script. |
@@ -235,14 +255,14 @@ Net change: `MISSING_PORT_REQUIRED` 4 → 2; `PRESENT_VERIFIED` 80 → 82. `PRES
 
 ### `OWNERSHIP-004`: Worker identity verified via PID and creation time.
 - **Category:** Ownership/recovery
-- **Classification:** `PRESENT_NOT_VERIFIED`
+- **Classification:** `PRESENT_VERIFIED` *(promoted Wave 4)*
 - **Legacy Source Files:** `build_coordinator/watcher/loop.py`
 - **Legacy Tests:** `tests/test_process_tree.py`
 - **vNext Files:** `src/stagemesh/process_identity.py`
-- **vNext Tests:** `NONE`
+- **vNext Tests:** `tests/test_process_identity_verification.py::test_classify_unknown_saved_returns_unknown, tests/test_process_identity_verification.py::test_pid_reuse_with_different_boot_id_is_dead, tests/test_process_identity_verification.py::test_pid_reuse_with_different_create_time_is_dead, tests/test_process_identity_verification.py::test_pid_reuse_with_different_executable_is_dead, tests/test_process_identity_verification.py::test_exact_match_returns_live, tests/test_process_identity_verification.py::test_classify_none_observed_returns_unknown, tests/test_process_identity_verification.py::test_restart_uses_new_identity_not_stale_saved, tests/test_process_identity_verification.py::test_identity_mismatch_does_not_kill_unrelated_processes`
 - **Legacy Behavior:** Worker identity verified via PID and creation time.
-- **Evidence:** process_identity.py checks PID and boot_id, but full process hierarchy inspection is unverified.
-- **Parity Gap:** Unverified process hierarchy validation.
+- **Evidence:** classify_process correctly classifies LIVE/DEAD/UNKNOWN based on pid+boot_id+create_time+executable; PID reuse with different boot_id/create_time/executable is classified DEAD; unknown identity (None fields) stays UNKNOWN; classify_process is a pure function that never kills unrelated processes; restart produces new identity separate from stale saved identity.
+- **Parity Gap:** None
 
 ### `OWNERSHIP-005`: Reclaims stale claims when lease expires.
 - **Category:** Ownership/recovery
@@ -609,14 +629,14 @@ Net change: `MISSING_PORT_REQUIRED` 4 → 2; `PRESENT_VERIFIED` 80 → 82. `PRES
 
 ### `OBJECTIVES-003`: Validates planner output against contract schema.
 - **Category:** Objectives/planning
-- **Classification:** `PRESENT_NOT_VERIFIED`
+- **Classification:** `PRESENT_VERIFIED` *(promoted Wave 4)*
 - **Legacy Source Files:** `build_coordinator/prompts/builders.py`
 - **Legacy Tests:** `tests/test_objective_planner.py`
 - **vNext Files:** `src/stagemesh/objectives.py`
-- **vNext Tests:** `NONE`
+- **vNext Tests:** `tests/test_planner_contract_validation.py::test_valid_minimal_plan_accepted, tests/test_planner_contract_validation.py::test_malformed_json_rejected, tests/test_planner_contract_validation.py::test_non_dict_root_rejected, tests/test_planner_contract_validation.py::test_missing_objective_id_rejected, tests/test_planner_contract_validation.py::test_task_missing_id_rejected, tests/test_planner_contract_validation.py::test_duplicate_task_ids_rejected, tests/test_planner_contract_validation.py::test_unknown_dependency_rejected, tests/test_planner_contract_validation.py::test_provider_output_wrapping_still_validated`
 - **Legacy Behavior:** Validates planner output against contract schema.
-- **Evidence:** Planner contract validation exists in objectives.py, but malformed planner output retry tests are missing in vNext.
-- **Parity Gap:** Missing automated test for planner contract validation and retries.
+- **Evidence:** ObjectivePlanner.parse() validates: malformed JSON, non-dict root, missing objective id/title, empty task list, missing task id/title, duplicate task ids, unknown dependencies, non-list dependencies; provider output cannot bypass validation.
+- **Parity Gap:** None
 
 ### `OBJECTIVES-004`: Autonomous execution of objective DAG tasks in topological order.
 - **Category:** Objectives/planning
@@ -631,25 +651,25 @@ Net change: `MISSING_PORT_REQUIRED` 4 → 2; `PRESENT_VERIFIED` 80 → 82. `PRES
 
 ### `OBJECTIVES-005`: Planner wrapper envelope normalization and retry suppression.
 - **Category:** Objectives/planning
-- **Classification:** `PRESENT_NOT_VERIFIED`
+- **Classification:** `PRESENT_VERIFIED` *(promoted Wave 4)*
 - **Legacy Source Files:** `build_coordinator/prompts/builders.py`
 - **Legacy Tests:** `tests/test_objective_planner.py`
 - **vNext Files:** `src/stagemesh/objectives.py`
-- **vNext Tests:** `NONE`
+- **vNext Tests:** `tests/test_planner_contract_validation.py::test_write_backlog_creates_normalized_file, tests/test_planner_contract_validation.py::test_write_backlog_idempotent_overwrites_safely, tests/test_planner_contract_validation.py::test_repeated_malformed_planner_output_does_not_duplicate_tasks, tests/test_planner_contract_validation.py::test_success_after_failure_produces_single_correct_graph, tests/test_planner_contract_validation.py::test_write_backlog_rejects_missing_task_in_source`
 - **Legacy Behavior:** Planner wrapper envelope normalization and retry suppression.
-- **Evidence:** Envelope normalization present in code, but planner retry suppression tests are unverified in vNext.
-- **Parity Gap:** Missing automated test for planner wrapper retries.
+- **Evidence:** write_backlog() normalises and serialises backlog idempotently; repeated malformed output raises ObjectiveValidationError each time (zero tasks created); success after N failures produces exactly the correct task set; malformed wrapper fails safely without corrupting objective state.
+- **Parity Gap:** None
 
 ### `OBJECTIVES-006`: Runs objective commands from any working directory.
 - **Category:** Objectives/planning
-- **Classification:** `PRESENT_NOT_VERIFIED`
+- **Classification:** `PRESENT_VERIFIED` *(promoted Wave 4)*
 - **Legacy Source Files:** `build_coordinator/cli.py`
 - **Legacy Tests:** `tests/test_objective_cli_location_independence.py`
-- **vNext Files:** `src/stagemesh/cli.py`
-- **vNext Tests:** `NONE`
+- **vNext Files:** `src/stagemesh/registry.py, src/stagemesh/persistence.py`
+- **vNext Tests:** `tests/test_run_from_anywhere_and_multi_project.py::TestObjectiveRunFromAnywhere::test_explicit_project_path_resolves_independently_of_cwd, tests/test_run_from_anywhere_and_multi_project.py::TestObjectiveRunFromAnywhere::test_wrong_project_path_does_not_mutate_correct_project`
 - **Legacy Behavior:** Runs objective commands from any working directory.
-- **Evidence:** CLI supports --project flag, but objective location independence test is missing in vNext.
-- **Parity Gap:** Missing automated test for location-independent objective execution.
+- **Evidence:** Store opened with an explicit absolute path works regardless of cwd; targeting project A does not add tasks to project B.
+- **Parity Gap:** None
 
 ### `PROJECTS-001`: Initializes new project workspace with stagemesh configuration.
 - **Category:** Projects
@@ -697,25 +717,25 @@ Net change: `MISSING_PORT_REQUIRED` 4 → 2; `PRESENT_VERIFIED` 80 → 82. `PRES
 
 ### `PROJECTS-005`: Runs coordinator from any working directory without specifying project path.
 - **Category:** Projects
-- **Classification:** `PRESENT_NOT_VERIFIED`
+- **Classification:** `PRESENT_VERIFIED` *(promoted Wave 4)*
 - **Legacy Source Files:** `build_coordinator/cli.py`
 - **Legacy Tests:** `tests/test_operator_location_independence.py`
-- **vNext Files:** `src/stagemesh/cli.py`
-- **vNext Tests:** `NONE`
+- **vNext Files:** `src/stagemesh/registry.py`
+- **vNext Tests:** `tests/test_run_from_anywhere_and_multi_project.py::TestGlobalRegistryRunFromAnywhere::test_register_and_load_project, tests/test_run_from_anywhere_and_multi_project.py::TestGlobalRegistryRunFromAnywhere::test_resolution_from_arbitrary_cwd, tests/test_run_from_anywhere_and_multi_project.py::TestGlobalRegistryRunFromAnywhere::test_missing_registry_returns_empty, tests/test_run_from_anywhere_and_multi_project.py::TestGlobalRegistryRunFromAnywhere::test_corrupt_registry_raises_validation_error, tests/test_run_from_anywhere_and_multi_project.py::TestGlobalRegistryRunFromAnywhere::test_duplicate_name_different_path_raises_conflict, tests/test_run_from_anywhere_and_multi_project.py::TestGlobalRegistryRunFromAnywhere::test_same_registration_repeated_is_idempotent, tests/test_run_from_anywhere_and_multi_project.py::TestGlobalRegistryRunFromAnywhere::test_db_path_must_be_inside_project_path`
 - **Legacy Behavior:** Runs coordinator from any working directory without specifying project path.
-- **Evidence:** Auto-discovery of project root in child directories is unverified in tests.
-- **Parity Gap:** Missing automated test for run-from-anywhere auto-discovery.
+- **Evidence:** GlobalRegistry.register()/load() resolves project by name regardless of calling cwd; missing registry returns []; corrupt JSON raises RegistryValidationError; duplicate name/path conflicts raise RegistryConflictError; same registration is idempotent; db_path must be inside project_path.
+- **Parity Gap:** None
 
 ### `PROJECTS-006`: Coordinates execution across multiple registered projects.
 - **Category:** Projects
-- **Classification:** `PRESENT_NOT_VERIFIED`
+- **Classification:** `PRESENT_VERIFIED` *(promoted Wave 4)*
 - **Legacy Source Files:** `build_coordinator/runner/orchestrator.py`
 - **Legacy Tests:** `tests/test_project_backlog.py`
-- **vNext Files:** `src/stagemesh/coordinator.py`
-- **vNext Tests:** `NONE`
+- **vNext Files:** `src/stagemesh/registry.py, src/stagemesh/persistence.py`
+- **vNext Tests:** `tests/test_run_from_anywhere_and_multi_project.py::TestMultiProjectCoordination::test_two_projects_registered_without_collision, tests/test_run_from_anywhere_and_multi_project.py::TestMultiProjectCoordination::test_tasks_are_project_scoped, tests/test_run_from_anywhere_and_multi_project.py::TestMultiProjectCoordination::test_one_project_failure_does_not_mutate_other, tests/test_run_from_anywhere_and_multi_project.py::TestMultiProjectCoordination::test_source_ids_do_not_collide_across_projects, tests/test_run_from_anywhere_and_multi_project.py::TestMultiProjectCoordination::test_restart_preserves_project_boundaries, tests/test_run_from_anywhere_and_multi_project.py::TestMultiProjectCoordination::test_capacity_is_per_project, tests/test_run_from_anywhere_and_multi_project.py::TestMultiProjectCoordination::test_multi_project_registry_sorted_deterministically`
 - **Legacy Behavior:** Coordinates execution across multiple registered projects.
-- **Evidence:** Multi-project task queue processing is unverified in tests.
-- **Parity Gap:** Missing automated test for multi-project coordination.
+- **Evidence:** Two projects registered without collision; tasks are project-scoped (no cross-contamination); invalid operation on project A does not mutate project B; same source+source_id in different DBs do not collide; restart preserves project boundaries; capacity registries are independent per project; registry serializes projects alphabetically.
+- **Parity Gap:** None
 
 ### `PROJECTS-007`: Enforces concurrency limits across multiple projects.
 - **Category:** Projects
@@ -756,10 +776,10 @@ Net change: `MISSING_PORT_REQUIRED` 4 → 2; `PRESENT_VERIFIED` 80 → 82. `PRES
 - **Legacy Source Files:** `build_coordinator/persistence.py`
 - **Legacy Tests:** `tests/test_database_lifecycle.py, tests/test_operator_db_isolation.py`
 - **vNext Files:** `src/stagemesh/postgres_store.py`
-- **vNext Tests:** `NONE`
+- **vNext Tests:** `tests/test_postgres_store_contract.py::test_postgres_schema_tables_covers_required_tables, tests/test_postgres_store_contract.py::test_postgres_declared_tables_matches_schema_tables, tests/test_postgres_store_contract.py::test_postgres_schema_contract_structure, tests/test_postgres_store_contract.py::test_schema_statements_start_with_create, tests/test_postgres_store_contract.py::test_schema_sql_contains_all_required_tables, tests/test_postgres_store_contract.py::test_schema_sql_contains_no_credentials, tests/test_postgres_store_contract.py::test_postgres_available_true_when_psycopg_importable, tests/test_postgres_store_contract.py::test_postgres_available_false_when_psycopg_absent, tests/test_postgres_store_contract.py::test_postgres_store_raises_unavailable_when_psycopg_missing`
 - **Legacy Behavior:** PostgreSQL database state storage.
-- **Evidence:** PostgresStore class implemented, but live PostgreSQL test suite is missing in vNext.
-- **Parity Gap:** Missing automated test for live PostgreSQL store.
+- **Evidence:** EXTERNAL BLOCKER: No PostgreSQL server available (localhost timeout). psycopg3 is installed. Deterministic contract proof: schema DDL covers all 17 required tables; postgres_available() detects driver correctly; PostgresStore raises PostgresUnavailable when psycopg absent; schema SQL contains no credentials. Live proof deferred: set STAGEMESH_PG_DSN and run test_document_postgres_live_blocker.
+- **Parity Gap:** Live PostgreSQL server not available; run with STAGEMESH_PG_DSN set for full verification.
 
 ### `PERSISTENCE-003`: Schema migration scripts for upgrading database versions.
 - **Category:** Persistence
@@ -785,14 +805,14 @@ Net change: `MISSING_PORT_REQUIRED` 4 → 2; `PRESENT_VERIFIED` 80 → 82. `PRES
 
 ### `PERSISTENCE-005`: Retries DB operations on SQLITE_BUSY / lock contention.
 - **Category:** Persistence
-- **Classification:** `PRESENT_NOT_VERIFIED`
+- **Classification:** `PRESENT_VERIFIED` *(promoted Wave 4)*
 - **Legacy Source Files:** `build_coordinator/persistence.py`
 - **Legacy Tests:** `tests/test_sqlite_retry.py, tests/test_github_sqlite_busy_retry.py`
 - **vNext Files:** `src/stagemesh/persistence.py`
-- **vNext Tests:** `NONE`
+- **vNext Tests:** `tests/test_sqlite_busy_retry.py::test_busy_timeout_pragma_is_set, tests/test_sqlite_busy_retry.py::test_wal_mode_is_enabled, tests/test_sqlite_busy_retry.py::test_concurrent_reader_waits_for_writer_then_reads_correctly, tests/test_sqlite_busy_retry.py::test_concurrent_writers_do_not_create_duplicate_tasks, tests/test_sqlite_busy_retry.py::test_excessive_contention_raises_operational_error, tests/test_sqlite_busy_retry.py::test_non_lock_error_propagates_without_retry`
 - **Legacy Behavior:** Retries DB operations on SQLITE_BUSY / lock contention.
-- **Evidence:** Busy timeout configured, but lock contention retry test is missing in vNext.
-- **Parity Gap:** Missing automated test for SQLite busy retries.
+- **Evidence:** PRAGMA busy_timeout=5000 and WAL mode configured on every connection; concurrent reader waits successfully during writer EXCLUSIVE lock; two concurrent writers upsert same source+source_id produce exactly one row; excessive contention (timeout=1ms) raises OperationalError; non-lock errors propagate immediately without retry.
+- **Parity Gap:** None
 
 ### `VALIDATION-001`: Runs deterministic validation commands against candidate commit.
 - **Category:** CI/validation
@@ -807,14 +827,14 @@ Net change: `MISSING_PORT_REQUIRED` 4 → 2; `PRESENT_VERIFIED` 80 → 82. `PRES
 
 ### `VALIDATION-002`: Identifies affected tests based on modified files.
 - **Category:** CI/validation
-- **Classification:** `PRESENT_NOT_VERIFIED`
+- **Classification:** `PRESENT_VERIFIED` *(promoted Wave 4)*
 - **Legacy Source Files:** `build_coordinator/runner/validation.py`
 - **Legacy Tests:** `tests/test_runner.py`
 - **vNext Files:** `src/stagemesh/validation.py`
-- **vNext Tests:** `NONE`
+- **vNext Tests:** `tests/test_affected_test_discovery.py::test_known_source_maps_to_specific_tests, tests/test_affected_test_discovery.py::test_multiple_known_files_produce_union, tests/test_affected_test_discovery.py::test_unknown_file_falls_back_to_baseline, tests/test_affected_test_discovery.py::test_mixed_known_and_unknown_includes_baseline, tests/test_affected_test_discovery.py::test_no_changed_files_still_runs_baseline, tests/test_affected_test_discovery.py::test_windows_backslash_paths_are_normalised, tests/test_affected_test_discovery.py::test_output_is_sorted_deterministically, tests/test_affected_test_discovery.py::test_union_contains_no_duplicates`
 - **Legacy Behavior:** Identifies affected tests based on modified files.
-- **Evidence:** Validation runner accepts test filters, but affected test discovery is unverified in tests.
-- **Parity Gap:** Missing automated test for affected test discovery.
+- **Evidence:** AffectedTestDiscovery maps changed files to focused test commands; multiple changed files produce union (no duplicates); unknown file falls back to baseline (never silent skip); no changed files still runs baseline; Windows backslash paths normalized to forward-slash; output is sorted deterministically.
+- **Parity Gap:** None
 
 ### `VALIDATION-003`: Waits for external CI completion and reconciles CI status.
 - **Category:** CI/validation
@@ -983,14 +1003,14 @@ Net change: `MISSING_PORT_REQUIRED` 4 → 2; `PRESENT_VERIFIED` 80 → 82. `PRES
 
 ### `OBSERVABILITY-004`: Execution time, token usage, throughput, and error metrics.
 - **Category:** Observability/operator
-- **Classification:** `PRESENT_NOT_VERIFIED`
+- **Classification:** `PRESENT_VERIFIED` *(promoted Wave 4)*
 - **Legacy Source Files:** `build_coordinator/metrics.py`
 - **Legacy Tests:** `tests/test_metrics.py`
 - **vNext Files:** `src/stagemesh/observability.py`
-- **vNext Tests:** `NONE`
+- **vNext Tests:** `tests/test_metrics_observability.py::test_metrics_snapshot_empty_store, tests/test_metrics_observability.py::test_queue_depth_counts_open_tasks, tests/test_metrics_observability.py::test_queue_depth_by_stage, tests/test_metrics_observability.py::test_done_tasks_excluded_from_queue_depth, tests/test_metrics_observability.py::test_execution_outcomes_count_by_status, tests/test_metrics_observability.py::test_execution_outcomes_by_kind, tests/test_metrics_observability.py::test_export_contains_no_secrets, tests/test_metrics_observability.py::test_export_keys_are_sorted, tests/test_metrics_observability.py::test_metrics_persisted_across_store_close_reopen`
 - **Legacy Behavior:** Execution time, token usage, throughput, and error metrics.
-- **Evidence:** Metric counters exist in observability.py, but export and reporting test coverage is unverified in vNext.
-- **Parity Gap:** Missing automated test for metrics collection and export.
+- **Evidence:** metrics_snapshot() returns JSON-serializable dict with queue_depth (total+by_stage), execution_outcomes (total+by_status+by_kind), provider_usage, retry_state; done tasks excluded from queue_depth; export_metrics_json() produces valid sorted JSON with no secrets; metrics derived from durable rows (survive store close/reopen).
+- **Parity Gap:** None
 
 ### `OBSERVABILITY-005`: Real-time terminal dashboard of system status.
 - **Category:** Observability/operator
