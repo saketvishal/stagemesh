@@ -65,6 +65,16 @@ class Coordinator:
                 # Release the claim immediately so the task can be re-dispatched rather
                 # than being stranded until lease TTL expires.
                 self.store.release_claim(claim_id)
+                record_audit(
+                    self.store,
+                    "task.capacity_failure",
+                    {
+                        "task_id": task_id,
+                        "claim_id": claim_id,
+                        "executor": self.executor.name,
+                        "reason": result.failure_reason or "unknown_capacity_failure",
+                    },
+                )
                 return 0
             if result.status is ExecutionStatus.SUCCEEDED and result.candidate_sha and result.durable_handoff:
                 self.store.advance_task(task_id, Stage.VALIDATE)
