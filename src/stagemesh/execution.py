@@ -134,10 +134,23 @@ class Executor:
         raise NotImplementedError
 
 
+def _capture_baseline_sha(project: Path) -> str | None:
+    try:
+        ws = GitWorkspace(project)
+        ws.init_if_needed()
+        sha = ws.run("rev-parse", "--verify", "HEAD", check=False).stdout.strip()
+        if len(sha) == 40 and all(c in "0123456789abcdefABCDEF" for c in sha):
+            return sha
+    except Exception:
+        pass
+    return None
+
+
 class FakeExecutor(Executor):
     name = "fake"
 
     def run(self, store: Store, task_id: str, claim_id: str | None, project: Path) -> ExecutionResult:
+        base_sha = _capture_baseline_sha(project)
         execution_id = store.start_execution(task_id=task_id, claim_id=claim_id, kind=ExecutionKind.IMPLEMENTATION)
         workspace = GitWorkspace(project)
         workspace.init_if_needed()
@@ -147,7 +160,7 @@ class FakeExecutor(Executor):
             f"StageMesh implementation for {task_id}",
             attribution=attribution_for_worker("local-worker", self.name),
         )
-        store.add_candidate(task_id, sha, self.name, durable_handoff=True)
+        store.add_candidate(task_id, sha, self.name, durable_handoff=True, base_sha=base_sha)
         store.finish_execution(execution_id, ExecutionStatus.SUCCEEDED, sha)
         return ExecutionResult(ExecutionStatus.SUCCEEDED, sha, durable_handoff=True)
 
@@ -176,6 +189,7 @@ class SubprocessExecutor(Executor):
 
         result_file = project / f".stagemesh-result-{task_id}.json"
         extra_env = {"STAGEMESH_RESULT_PATH": str(result_file)}
+        base_sha = _capture_baseline_sha(project)
 
         try:
             env = dict(subprocess.os.environ)
@@ -222,7 +236,7 @@ class SubprocessExecutor(Executor):
                 res_content = result_file.read_text(encoding="utf-8")
                 parsed = parse_structured_result(res_content, expected_task_id=task_id)
                 if parsed.candidate_sha:
-                    store.add_candidate(task_id, parsed.candidate_sha, self.name, durable_handoff=parsed.durable_handoff)
+                    store.add_candidate(task_id, parsed.candidate_sha, self.name, durable_handoff=parsed.durable_handoff, base_sha=base_sha)
                 store.finish_execution(execution_id, parsed.status, parsed.candidate_sha)
                 return parsed
             except StructuredResultValidationError as exc:
@@ -251,6 +265,6 @@ class SubprocessExecutor(Executor):
             attribution=attribution_for_worker("local-worker", self.name),
         )
         if sha:
-            store.add_candidate(task_id, sha, self.name, durable_handoff=True)
+            store.add_candidate(task_id, sha, self.name, durable_handoff=True, base_sha=base_sha)
         store.finish_execution(execution_id, ExecutionStatus.SUCCEEDED, sha)
         return ExecutionResult(ExecutionStatus.SUCCEEDED, sha, durable_handoff=bool(sha))

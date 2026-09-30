@@ -584,3 +584,62 @@ class TestMultiProjectCoordination:
         assert data["projects"]["iso_proj1"]["status"] == "OK"
         assert data["projects"]["iso_proj2"]["status"] == "OK"
 
+
+    def test_global_capacity_allocation_slots_never_exceed_capacity(self, tmp_path: Path):
+        """PROJECTS-006: Total allocated slots per batch never exceed requested global capacity, and capacity < 1 fails."""
+        import os
+        from stagemesh.cli import _global_capacity_batches
+
+        # 1. Direct unit test of batch allocation logic with various project sets
+        class DummyProject:
+            def __init__(self, name: str, concurrency: int = 1):
+                self.name = name
+                self.concurrency = concurrency
+
+        projects = [DummyProject(f"p{i}", concurrency=1) for i in range(5)]
+        
+        # capacity < 1 must fail
+        with pytest.raises(ValueError, match="positive integer"):
+            _global_capacity_batches(projects, capacity=0)
+        with pytest.raises(ValueError, match="positive integer"):
+            _global_capacity_batches(projects, capacity=-1)
+
+        # Capacity = 2 across 5 projects -> batches of size at most 2
+        batches = _global_capacity_batches(projects, capacity=2)
+        assert len(batches) == 3
+        for batch in batches:
+            total_slots = sum(batch.values())
+            assert total_slots <= 2, f"Batch {batch} exceeded capacity 2"
+
+        # 2. Integration with CLI continue --all
+        p1, s1 = _make_project(tmp_path, "cap_p1")
+        p2, s2 = _make_project(tmp_path, "cap_p2")
+        p3, s3 = _make_project(tmp_path, "cap_p3")
+        s1.close()
+        s2.close()
+        s3.close()
+
+        reg_path = tmp_path / "global_registry.json"
+        registry = GlobalRegistry(reg_path)
+        registry.register(ProjectRegistration("cap_p1", p1, p1 / ".stagemesh" / "stagemesh.sqlite3"))
+        registry.register(ProjectRegistration("cap_p2", p2, p2 / ".stagemesh" / "stagemesh.sqlite3"))
+        registry.register(ProjectRegistration("cap_p3", p3, p3 / ".stagemesh" / "stagemesh.sqlite3"))
+
+        unrelated = tmp_path / "outside_cap"
+        unrelated.mkdir()
+
+        # Capacity 0 fails with exit code 2
+        cmd_invalid = [sys.executable, "-m", "stagemesh.cli", "continue", "--all", "--capacity", "0"]
+        env = {**os.environ, "STAGEMESH_REGISTRY": str(reg_path)}
+        res_inv = subprocess.run(cmd_invalid, cwd=unrelated, env=env, capture_output=True, text=True)
+        assert res_inv.returncode == 2
+        assert "positive integer" in res_inv.stderr.lower()
+
+        # Capacity 2 across 3 projects
+        cmd_valid = [sys.executable, "-m", "stagemesh.cli", "continue", "--all", "--dry-run", "--once", "--capacity", "2", "--json"]
+        res_val = subprocess.run(cmd_valid, cwd=unrelated, env=env, capture_output=True, text=True)
+        assert res_val.returncode == 0
+        data = json.loads(res_val.stdout)
+        assert "capacity_batches" in data
+        for batch in data["capacity_batches"]:
+            assert sum(batch.values()) <= 2

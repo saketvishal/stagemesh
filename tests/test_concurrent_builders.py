@@ -26,10 +26,7 @@ class BarrierExecutor(Executor):
             first = len(self.started_events) == 1
         # Wait at barrier on first run to prove true concurrent overlap across threads
         if first:
-            try:
-                self.barrier.wait(timeout=15.0)
-            except threading.BrokenBarrierError:
-                pass
+            self.barrier.wait(timeout=15.0)
 
         execution_id = store.start_execution(task_id=task_id, claim_id=claim_id, kind="IMPLEMENTATION")
         sha = f"55555555555555555555555555555555555555{task_id[-2:]}"
@@ -50,17 +47,24 @@ def test_concurrent_multi_builder_execution_capacity_two(tmp_path: Path):
     exec_1 = BarrierExecutor("builder-1", barrier)
     exec_2 = BarrierExecutor("builder-2", barrier)
 
+    worker_errors: list[Exception] = []
+
     def _worker_thread(task_id: str, executor: Executor):
-        coord = Coordinator(store=store, project=tmp_path / task_id, executor=executor)
-        coord.tick()
+        try:
+            coord = Coordinator(store=store, project=tmp_path / task_id, executor=executor)
+            coord.tick()
+        except Exception as exc:
+            worker_errors.append(exc)
 
     th1 = threading.Thread(target=_worker_thread, args=(t1, exec_1))
     th2 = threading.Thread(target=_worker_thread, args=(t2, exec_2))
 
     th1.start()
     th2.start()
-    th1.join(timeout=10.0)
-    th2.join(timeout=10.0)
+    th1.join(timeout=20.0)
+    th2.join(timeout=20.0)
+
+    assert not worker_errors, f"Unexpected errors in worker thread: {worker_errors}"
 
     # Prove both tasks ran concurrently and succeeded
     task1 = store.get_task(t1)
@@ -92,12 +96,13 @@ def test_two_concurrent_tasks_full_lifecycle_isolation(tmp_path: Path):
         reviewer = Reviewer(worker_id=f"reviewer-{task_id}", provider="reviewer-provider")
         coord = Coordinator(store=store, project=proj, executor=executor, reviewer=reviewer)
         # Advance through IMPLEMENT -> VALIDATE -> REVIEW -> INTEGRATE -> DONE
-        deadline = time.time() + 10.0
+        deadline = time.time() + 15.0
         while time.time() < deadline:
             try:
                 coord.tick()
             except Exception as exc:
                 errors.append(exc)
+                break
             t = store.get_task(task_id)
             if t["stage"] == Stage.DONE:
                 break
@@ -110,6 +115,8 @@ def test_two_concurrent_tasks_full_lifecycle_isolation(tmp_path: Path):
     th2.start()
     th1.join(timeout=20.0)
     th2.join(timeout=20.0)
+
+    assert not errors, f"Unexpected errors in lifecycle thread: {errors}"
 
     task1 = store.get_task(t1)
     task2 = store.get_task(t2)

@@ -6,8 +6,8 @@ Total Inventoried Capabilities: **95**
 
 | Classification | Count | Description |
 |---|---|---|
-| `PRESENT_VERIFIED` | **91** | Present in vNext and verified by exact automated tests or live acceptance |
-| `PRESENT_NOT_VERIFIED` | **2** | Present in vNext source but missing automated test coverage proving exact behavior |
+| `PRESENT_VERIFIED` | **90** | Present in vNext and verified by exact automated tests or live acceptance |
+| `PRESENT_NOT_VERIFIED` | **3** | Present in vNext source but missing automated test coverage proving exact behavior |
 | `SUPERSEDED_EQUIVALENT` | **0** | Replaced by proven equivalent vNext mechanism |
 | `MISSING_PORT_REQUIRED` | **2** | Missing from vNext implementation, port required |
 | `INTENTIONAL_RETIREMENT_REQUIRES_APPROVAL` | **0** | Feature retirement needing human operator approval |
@@ -47,13 +47,17 @@ The following 9 items were promoted from `PRESENT_NOT_VERIFIED` to `PRESENT_VERI
 
 1. **Process Identity / Hierarchy Verification** (`OWNERSHIP-004`): Promoted `PRESENT_NOT_VERIFIED` → `PRESENT_VERIFIED`. `current_process_identity()` and `popen_identity()` capture real `create_time` via psutil/ctypes, `boot_id()` captures real OS boot time across platforms (including Windows tick count / boot timestamp), and `Coordinator.recover()` verifies live identity and cleans stale claims without killing unrelated processes (`tests/test_process_identity_verification.py`, 20 tests).
 2. **Planner Contract / DAG Validation** (`OBJECTIVES-003`): Promoted `PRESENT_NOT_VERIFIED` → `PRESENT_VERIFIED`. `ObjectivePlanner.validate()` strictly rejects self-dependencies, 2-node cycles, and multi-node cycles via topological DFS detection while accepting valid acyclic graphs (`tests/test_planner_contract_validation.py`, 35 tests).
-3. **Planner Wrapper / Envelope Normalization & Retry Behavior** (`OBJECTIVES-005`): Promoted `PRESENT_NOT_VERIFIED` → `PRESENT_VERIFIED`. `normalize_planner_payload()` strips markdown code fences and provider envelope wrappers (including `thinking`/`chain_of_thought` blocks), fails closed without creating partial task/backlog state, and implements bounded retry suppression (`tests/test_planner_contract_validation.py`).
+3. **Planner Contract / Normalization & Retry Helpers** (`OBJECTIVES-005`): Remains `PRESENT_NOT_VERIFIED`. Normalization, markdown fence stripping, envelope validation, and retry suppression helpers are implemented, but full provider-planner lifecycle integration and atomic DB+filesystem transactions are not yet wired.
 4. **Objective Run-From-Anywhere** (`OBJECTIVES-006`): Promoted `PRESENT_NOT_VERIFIED` → `PRESENT_VERIFIED`. CLI `stagemesh plan` resolves target project from arbitrary CWD, enforces workspace security boundaries, and writes only to the target project backlog and database while leaving other projects untouched (`tests/test_run_from_anywhere_and_multi_project.py`, 20 tests).
 5. **Project Run-From-Anywhere** (`PROJECTS-005`): Promoted `PRESENT_NOT_VERIFIED` → `PRESENT_VERIFIED`. CLI resolves target project from arbitrary CWD without `--project` flag via `GlobalRegistry` when a single project is registered, handles project ancestor discovery, and fails safely with `ProjectError` (exit code 2) on missing or ambiguous multi-project resolution (`tests/test_run_from_anywhere_and_multi_project.py`).
 6. **Multi-Project Coordination** (`PROJECTS-006`): Promoted `PRESENT_NOT_VERIFIED` → `PRESENT_VERIFIED`. `stagemesh continue --all` coordinates execution across all registered projects in `GlobalRegistry` with process-level isolation, ensuring project A failures never block project B, task IDs remain isolated, and restart preserves registry boundaries (`tests/test_run_from_anywhere_and_multi_project.py`).
 7. **SQLite Busy / Lock Retry Behavior** (`PERSISTENCE-005`): Promoted `PRESENT_NOT_VERIFIED` → `PRESENT_VERIFIED`. Store configures WAL mode, 5000ms `busy_timeout`, and application-level retry with exponential backoff via `with_sqlite_retry(attempts=5, base_delay=0.05, max_delay=0.5)` raising `DatabaseBusyError` under persistent contention, verified under real multi-threaded database concurrency (`tests/test_sqlite_busy_retry.py`, 10 tests).
 8. **Affected-Test Discovery** (`VALIDATION-002`): Promoted `PRESENT_NOT_VERIFIED` → `PRESENT_VERIFIED`. `AffectedTestDiscovery` uses path-component boundary matching (`_match_path`) to prevent false substring matches, ships `DEFAULT_SOURCE_TEST_MAPPING`, extracts changed files from `git diff`, safely falls back to baseline validation, and is wired into `Validator.validate` (`tests/test_affected_test_discovery.py`, 18 tests).
 9. **Metrics Collection / Export** (`OBSERVABILITY-004`): Promoted `PRESENT_NOT_VERIFIED` → `PRESENT_VERIFIED`. `metrics_snapshot()` calculates real execution duration stats, claim latency by stage, provider usage counting actual provider executions (not registered workers), throughput, and token usage; `export_metrics_json()` applies pattern-based secret redaction; exposed via CLI `stagemesh metrics [--json]` (`tests/test_metrics_observability.py`, 16 tests).
+
+**Planner Integration** (`OBJECTIVES-005`) honestly remains `PRESENT_NOT_VERIFIED`:
+- `parse_provider_plan()` has unit/method-level coverage for markdown stripping, payload sanitization, and envelope verification, but is not yet wired into an active provider-planner coordinator execution lifecycle.
+- `command_plan()` coordinates backlog filesystem writes with Store persistence, but does not provide a single unified atomic DB+filesystem transaction boundary because nested Store mutations commit independently.
 
 **PostgreSQL Behavior** (`PERSISTENCE-002`) honestly remains `PRESENT_NOT_VERIFIED`:
 - Lack of a live PostgreSQL server is NOT currently the only blocker.
@@ -658,14 +662,14 @@ Net change: `PRESENT_VERIFIED` 82 → 91; `PRESENT_NOT_VERIFIED` 11 → 2; `MISS
 
 ### `OBJECTIVES-005`: Planner wrapper envelope normalization and retry suppression.
 - **Category:** Objectives/planning
-- **Classification:** `PRESENT_VERIFIED` *(promoted Wave 4)*
+- **Classification:** `PRESENT_NOT_VERIFIED`
 - **Legacy Source Files:** `build_coordinator/prompts/builders.py`
 - **Legacy Tests:** `tests/test_objective_planner.py`
 - **vNext Files:** `src/stagemesh/objectives.py`
 - **vNext Tests:** tests/test_planner_contract_validation.py::test_wrapper_normalization_markdown_fences, tests/test_planner_contract_validation.py::test_wrapper_normalization_envelope_with_thinking_stripped, tests/test_planner_contract_validation.py::test_retry_suppression_and_no_partial_store_corruption, tests/test_planner_contract_validation.py::test_provider_output_requires_full_envelope_and_rejects_bare_plan, tests/test_planner_contract_validation.py::test_planner_sanitization_drops_thinking_and_lifecycle_identity_from_cli_plan, tests/test_planner_contract_validation.py::test_command_plan_atomic_all_or_nothing_on_failure, tests/test_planner_contract_validation.py::test_durable_retry_suppression_and_contract_revision_recovery_production_path
 - **Legacy Behavior:** Planner wrapper envelope normalization and retry suppression.
-- **Evidence:** ObjectivePlanner requires full executor envelope for provider output (rejecting bare plans), strips thinking/chain-of-thought blocks, validates DAG without partial persistent state, applies atomic objective and backlog mutations, and durably suppresses unchanged malformed contract retries across coordinator cycles until contract revision.
-- **Parity Gap:** None
+- **Evidence:** ObjectivePlanner provides wrapper normalization for markdown fences, strips thinking/chain-of-thought blocks, enforces envelope requirements on provider plans (rejecting bare plans), and implements durable retry suppression helpers.
+- **Parity Gap:** parse_provider_plan() has unit/method-level coverage but is not wired through an end-to-end provider-planner coordinator execution lifecycle; command_plan() coordinates backlog filesystem writes with Store persistence but does not provide a single unified atomic DB+filesystem transaction boundary.
 
 ### `OBJECTIVES-006`: Runs objective commands from any working directory.
 - **Category:** Objectives/planning
@@ -739,7 +743,7 @@ Net change: `PRESENT_VERIFIED` 82 → 91; `PRESENT_NOT_VERIFIED` 11 → 2; `MISS
 - **Legacy Source Files:** `build_coordinator/runner/orchestrator.py`
 - **Legacy Tests:** `tests/test_project_backlog.py`
 - **vNext Files:** `src/stagemesh/registry.py, src/stagemesh/persistence.py`
-- **vNext Tests:** tests/test_run_from_anywhere_and_multi_project.py::TestMultiProjectCoordination::test_continue_all_coordinates_multiple_registered_projects, tests/test_run_from_anywhere_and_multi_project.py::TestMultiProjectCoordination::test_continue_all_failure_in_project_a_does_not_block_project_b, tests/test_run_from_anywhere_and_multi_project.py::TestMultiProjectCoordination::test_continue_all_without_dry_run_cannot_silently_use_fake_executor, tests/test_run_from_anywhere_and_multi_project.py::TestMultiProjectCoordination::test_continue_all_process_isolation_and_capacity_allocation, tests/test_run_from_anywhere_and_multi_project.py::TestMultiProjectCoordination::test_tasks_are_project_scoped, tests/test_run_from_anywhere_and_multi_project.py::TestMultiProjectCoordination::test_source_ids_do_not_collide_across_projects, tests/test_run_from_anywhere_and_multi_project.py::TestMultiProjectCoordination::test_restart_preserves_project_boundaries
+- **vNext Tests:** tests/test_run_from_anywhere_and_multi_project.py::TestMultiProjectCoordination::test_continue_all_coordinates_multiple_registered_projects, tests/test_run_from_anywhere_and_multi_project.py::TestMultiProjectCoordination::test_continue_all_failure_in_project_a_does_not_block_project_b, tests/test_run_from_anywhere_and_multi_project.py::TestMultiProjectCoordination::test_continue_all_without_dry_run_cannot_silently_use_fake_executor, tests/test_run_from_anywhere_and_multi_project.py::TestMultiProjectCoordination::test_continue_all_process_isolation_and_capacity_allocation, tests/test_run_from_anywhere_and_multi_project.py::TestMultiProjectCoordination::test_tasks_are_project_scoped, tests/test_run_from_anywhere_and_multi_project.py::TestMultiProjectCoordination::test_source_ids_do_not_collide_across_projects, tests/test_run_from_anywhere_and_multi_project.py::TestMultiProjectCoordination::test_restart_preserves_project_boundaries, tests/test_run_from_anywhere_and_multi_project.py::TestMultiProjectCoordination::test_global_capacity_allocation_slots_never_exceed_capacity
 - **Legacy Behavior:** Coordinates execution across multiple registered projects.
 - **Evidence:** Global continue (stagemesh continue --all) discovers registered projects, executes isolated child processes per project with flag and capacity propagation, uses configured providers (rejecting unconfigured providers without --dry-run), preserves task and source ID boundaries, continues remaining projects after failures, and exits nonzero on any child failure.
 - **Parity Gap:** None
@@ -838,7 +842,7 @@ Net change: `PRESENT_VERIFIED` 82 → 91; `PRESENT_NOT_VERIFIED` 11 → 2; `MISS
 - **Legacy Source Files:** `build_coordinator/runner/validation.py`
 - **Legacy Tests:** `tests/test_runner.py`
 - **vNext Files:** `src/stagemesh/validation.py`
-- **vNext Tests:** tests/test_affected_test_discovery.py::test_safe_path_boundary_matching_prevents_false_substring_matches, tests/test_affected_test_discovery.py::test_default_source_test_mapping_present, tests/test_affected_test_discovery.py::test_validator_validate_wires_affected_tests_integration, tests/test_affected_test_discovery.py::test_split_command_and_build_executable_argv_safety, tests/test_affected_test_discovery.py::test_real_subprocess_validation_executes_pytest, tests/test_affected_test_discovery.py::test_multi_commit_candidate_range_discovers_all_changed_files
+- **vNext Tests:** tests/test_affected_test_discovery.py::test_safe_path_boundary_matching_prevents_false_substring_matches, tests/test_affected_test_discovery.py::test_default_source_test_mapping_present, tests/test_affected_test_discovery.py::test_validator_validate_wires_affected_tests_integration, tests/test_affected_test_discovery.py::test_split_command_and_build_executable_argv_safety, tests/test_affected_test_discovery.py::test_real_subprocess_validation_executes_pytest, tests/test_affected_test_discovery.py::test_multi_commit_candidate_range_discovers_all_changed_files, tests/test_affected_test_discovery.py::test_production_path_multi_commit_candidate_retains_baseline_without_manual_base_sha, tests/test_affected_test_discovery.py::test_fake_executor_captures_git_baseline_sha
 - **Legacy Behavior:** Identifies affected tests based on modified files.
 - **Evidence:** AffectedTestDiscovery uses path component boundary matching and DEFAULT_SOURCE_TEST_MAPPING with complete executable test commands. Validator.validate splits commands safely, normalizes test paths to pytest invocations, executes real subprocesses, and computes changed file ranges across multi-commit candidates back to baseline.
 - **Parity Gap:** None

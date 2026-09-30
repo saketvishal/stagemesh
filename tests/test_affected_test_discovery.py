@@ -381,3 +381,94 @@ def from_str_kind(name: str):
     return EvidenceKind[name]
 
 
+
+
+def test_production_path_multi_commit_candidate_retains_baseline_without_manual_base_sha(tmp_path: Path):
+    import subprocess
+    from stagemesh.persistence import Store
+    from stagemesh.validation import AffectedTestDiscovery, Validator
+    from stagemesh.domain import EvidenceStatus
+    # Initialize a real git repo
+    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
+
+    src_dir = tmp_path / "src"
+    src_dir.mkdir(parents=True)
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir(parents=True)
+
+    file_a = src_dir / "mod_a.py"
+    file_a.write_text("x = 1\n", encoding="utf-8")
+    file_b = src_dir / "mod_b.py"
+    file_b.write_text("y = 2\n", encoding="utf-8")
+
+    test_a = tests_dir / "test_a.py"
+    test_a.write_text("def test_a(): pass\n", encoding="utf-8")
+    test_b = tests_dir / "test_b.py"
+    test_b.write_text("def test_b(): pass\n", encoding="utf-8")
+
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "initial baseline"], cwd=tmp_path, check=True, capture_output=True)
+    expected_base_sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=tmp_path, check=True, capture_output=True, text=True).stdout.strip()
+
+    # Multi-commit candidate:
+    # Commit 1: modifies mod_a.py
+    file_a.write_text("x = 10\n", encoding="utf-8")
+    subprocess.run(["git", "add", "src/mod_a.py"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "commit 1: mod_a"], cwd=tmp_path, check=True, capture_output=True)
+
+    # Commit 2: modifies mod_b.py (this is candidate_sha)
+    file_b.write_text("y = 20\n", encoding="utf-8")
+    subprocess.run(["git", "add", "src/mod_b.py"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "commit 2: mod_b"], cwd=tmp_path, check=True, capture_output=True)
+    candidate_sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=tmp_path, check=True, capture_output=True, text=True).stdout.strip()
+
+    executed_commands = []
+    def recording_runner(cmd, cwd):
+        executed_commands.append(cmd)
+        return True, "ok"
+
+    discovery = AffectedTestDiscovery({
+        "src/mod_a.py": ["pytest tests/test_a.py -q"],
+        "src/mod_b.py": ["pytest tests/test_b.py -q"],
+    })
+    validator = Validator(discovery=discovery, command_runner=recording_runner)
+
+    db = tmp_path / "stagemesh.sqlite3"
+    store = Store(db)
+    store.migrate()
+    task_id = store.upsert_task("Production multi-commit task", source="local")
+
+    # Candidate was recorded in Store with base_sha captured by executor
+    store.add_candidate(task_id, candidate_sha, "builder-worker", durable_handoff=True, base_sha=expected_base_sha)
+
+    # Call validate WITHOUT passing base_sha; proves validator loads base_sha from Store candidate row
+    status = validator.validate(store, task_id, candidate_sha, tmp_path)
+    assert status == EvidenceStatus.PASSED
+    # Both commits must be discovered: mod_a from commit 1 and mod_b from commit 2
+    assert "pytest tests/test_a.py -q" in executed_commands
+    assert "pytest tests/test_b.py -q" in executed_commands
+
+
+def test_fake_executor_captures_git_baseline_sha(tmp_path: Path):
+    from stagemesh.persistence import Store
+    from stagemesh.domain import ExecutionStatus
+    from stagemesh.execution import FakeExecutor
+    from stagemesh.git import GitWorkspace
+    ws = GitWorkspace(tmp_path)
+    ws.init_if_needed()
+    f = tmp_path / "baseline.txt"
+    f.write_text("base\n", encoding="utf-8")
+    expected_base = ws.commit_all("baseline commit")
+
+    store = Store(tmp_path / "test.db")
+    store.migrate()
+    task_id = store.upsert_task("Test task", source="local")
+    executor = FakeExecutor()
+    res = executor.run(store, task_id, None, tmp_path)
+    assert res.status == ExecutionStatus.SUCCEEDED
+
+    cand = store.latest_candidate(task_id)
+    assert cand is not None
+    assert cand["base_sha"] == expected_base
