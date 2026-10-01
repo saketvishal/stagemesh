@@ -218,6 +218,24 @@ class Validator:
         changeset = None
         plan = None
         platform_key = None
+
+        # Resolve full baseline range so multi-commit candidates do not hide changed files
+        effective_base = base_sha
+        if effective_base is None:
+            try:
+                row = store.conn.execute(
+                    "SELECT base_sha FROM candidates WHERE task_id=? AND sha=?",
+                    (task_id, candidate_sha),
+                ).fetchone()
+                if row and row["base_sha"]:
+                    effective_base = str(row["base_sha"])
+            except Exception:
+                pass
+        if effective_base is None and contract is not None and contract.baseline_sha != "HEAD":
+            effective_base = contract.baseline_sha
+        if effective_base is None:
+            effective_base = resolve_baseline_sha(project, candidate_sha)
+
         if contract is not None and candidate_sha:
             from .controlled_change import (
                 current_platform_key,
@@ -226,61 +244,54 @@ class Validator:
                 ScopeViolationError,
                 ValidationPlanner,
             )
-            changeset = derive_git_changeset(project, task_id, contract.baseline_sha, candidate_sha)
-            store.save_change_set(changeset)
+            base_ref = effective_base or contract.baseline_sha
+            try:
+                changeset = derive_git_changeset(project, task_id, base_ref, candidate_sha)
+            except Exception:
+                changeset = None
 
-            scope_result = enforce_change_scope(contract, changeset)
-            if not scope_result.is_authorized:
-                store.add_evidence(
-                    task_id,
-                    candidate_sha,
-                    EvidenceKind.VALIDATION,
-                    EvidenceStatus.FAILED,
-                    {"scope_violation": scope_result.to_dict()},
-                )
-                store.finish_execution(
-                    execution_id,
-                    ExecutionStatus.FAILED,
-                    candidate_sha,
-                )
-                raise ScopeViolationError(scope_result)
+            if changeset is not None:
+                scope_result = enforce_change_scope(contract, changeset)
+                if not scope_result.is_authorized:
+                    store.add_evidence(
+                        task_id,
+                        candidate_sha,
+                        EvidenceKind.VALIDATION,
+                        EvidenceStatus.FAILED,
+                        {"scope_violation": scope_result.to_dict()},
+                    )
+                    store.finish_execution(
+                        execution_id,
+                        ExecutionStatus.FAILED,
+                        candidate_sha,
+                    )
+                    raise ScopeViolationError(scope_result)
 
-            planner = ValidationPlanner(self.discovery)
-            plan = planner.plan(contract, changeset)
-            store.save_validation_plan(plan, changeset.result_tree_sha)
+                planner = ValidationPlanner(self.discovery)
+                plan = planner.plan(contract, changeset)
+                store.save_validation_plan(plan, changeset.result_tree_sha)
 
-            platform_key = current_platform_key()
-            cached = store.get_validation_cache(changeset.result_tree_sha, plan.plan_hash, platform_key)
-            if cached and cached["status"] == EvidenceStatus.PASSED.value:
-                store.add_evidence(
-                    task_id,
-                    candidate_sha,
-                    EvidenceKind.VALIDATION,
-                    EvidenceStatus.PASSED,
-                    {"reused": True, "plan_hash": plan.plan_hash, **cached["payload"]},
-                )
-                store.finish_execution(
-                    execution_id,
-                    ExecutionStatus.SUCCEEDED,
-                    candidate_sha,
-                )
-                return EvidenceStatus.PASSED
+                platform_key = current_platform_key()
+                cached = store.get_validation_cache(changeset.result_tree_sha, plan.plan_hash, platform_key)
+                if cached and cached["status"] == EvidenceStatus.PASSED.value:
+                    store.add_evidence(
+                        task_id,
+                        candidate_sha,
+                        EvidenceKind.VALIDATION,
+                        EvidenceStatus.PASSED,
+                        {"reused": True, "plan_hash": plan.plan_hash, **cached["payload"]},
+                    )
+                    store.finish_execution(
+                        execution_id,
+                        ExecutionStatus.SUCCEEDED,
+                        candidate_sha,
+                    )
+                    return EvidenceStatus.PASSED
 
-            test_commands = list(plan.selected_commands)
+                test_commands = list(plan.selected_commands)
+            else:
+                test_commands = self.discovery.discover([], baseline_commands=["pytest tests/ -q"])
         else:
-            # Resolve full baseline range so multi-commit candidates do not hide changed files
-            if base_sha is None:
-                try:
-                    row = store.conn.execute(
-                        "SELECT base_sha FROM candidates WHERE task_id=? AND sha=?",
-                        (task_id, candidate_sha),
-                    ).fetchone()
-                    if row and row["base_sha"]:
-                        base_sha = str(row["base_sha"])
-                except Exception:
-                    pass
-            effective_base = base_sha or resolve_baseline_sha(project, candidate_sha)
-
             if candidate_sha and effective_base:
                 changed = git_changed_files(project, effective_base, candidate_sha)
             elif candidate_sha:

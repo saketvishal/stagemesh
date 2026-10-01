@@ -101,7 +101,7 @@ def parse_retry_after(value: str | None, default: float = 60) -> float:
 
 def detect_github_repository(project: Path, remote: str = "origin") -> GitHubRepository | None:
     result = subprocess.run(
-        ["git", "-c", f"safe.directory={project.resolve().as_posix()}", "remote", "get-url", remote],
+        ["git", "-c", "safe.directory=*", "remote", "get-url", remote],
         cwd=project,
         text=True,
         capture_output=True,

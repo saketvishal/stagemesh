@@ -107,22 +107,23 @@ def run_ci(
     return results
 
 
-def format_gate_diagnostics(output: str, max_chars: int = 2000) -> str:
+def format_gate_diagnostics(output: str, max_chars: int | None = None) -> str:
     cleaned = output.strip()
     if not cleaned:
         return ""
-    if len(cleaned) <= max_chars:
-        return cleaned
-    return f"... [truncated {len(cleaned) - max_chars} chars] ...\n" + cleaned[-max_chars:]
+    if max_chars is not None and len(cleaned) > max_chars:
+        return f"... [truncated {len(cleaned) - max_chars} chars] ...\n" + cleaned[-max_chars:]
+    return cleaned
 
 
 def format_gate_plain(result: GateResult, include_diagnostics: bool = True) -> str:
     status_str = "PASS" if result.passed else "FAIL"
     line = f"{result.name}: {status_str} ({result.elapsed_seconds:.1f}s)"
     if not result.passed and include_diagnostics:
-        diag = format_gate_diagnostics(result.output, max_chars=2000)
+        diag = format_gate_diagnostics(result.output)
         if diag:
             return f"{line}\n--- diagnostics for {result.name} ---\n{diag}\n--- end diagnostics ({result.name}) ---"
+        return f"{line}\n--- diagnostics for {result.name} ---\n(no output captured)\n--- end diagnostics ({result.name}) ---"
     return line
 
 
@@ -138,7 +139,7 @@ def format_ci_json(results: list[GateResult]) -> str:
                 "duration_seconds": round(r.elapsed_seconds, 2),
                 "elapsed_seconds": round(r.elapsed_seconds, 2),
                 "name": r.name,
-                "output": r.output[-4000:],
+                "output": r.output,
                 "passed": r.passed,
             }
             for r in results

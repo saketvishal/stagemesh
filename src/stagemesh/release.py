@@ -96,7 +96,7 @@ def release_files(root: Path) -> list[Path]:
 
 def git_tracked_files(root: Path) -> list[Path]:
     result = subprocess.run(
-        ["git", "-c", f"safe.directory={root.as_posix()}", "ls-files", "-z"],
+        ["git", "-c", "safe.directory=*", "ls-files", "-z"],
         cwd=root,
         capture_output=True,
         check=False,

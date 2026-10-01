@@ -1806,7 +1806,7 @@ def main() -> int:
         repo_report_json_data = json.loads(repo_report_json)
         if (
             repo_report_json_data["candidate_sha"]
-            != run(["git", "-c", "safe.directory=C:/stagemesh-vnext", "rev-parse", "HEAD"], ROOT).strip()
+            != run(["git", "-c", "safe.directory=*", "rev-parse", "HEAD"], ROOT).strip()
             or repo_report_json_data["output"] != str(repo_report.resolve())
             or repo_report_json_data["bytes"] <= 0
             or repo_report_json_data["external_evidence_records_for_candidate"] != 0

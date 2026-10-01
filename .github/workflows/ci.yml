@@ -11,11 +11,14 @@ jobs:
       PYTHONPATH: src
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: python -m pip install . --target .tmp-install --no-cache-dir
-      - run: python -m stagemesh.cli --project . ci --future-feature-gate
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -e ".[dev]"
+      - run: python -m stagemesh.cli --project . ci --future-feature-gate --json
 
   linux:
     runs-on: ubuntu-latest
@@ -23,8 +26,11 @@ jobs:
       PYTHONPATH: src
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: python -m pip install . --target .tmp-install --no-cache-dir
-      - run: python -m stagemesh.cli --project . ci --future-feature-gate
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -e ".[dev]"
+      - run: python -m stagemesh.cli --project . ci --future-feature-gate --json
