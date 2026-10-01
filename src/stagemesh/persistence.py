@@ -230,6 +230,55 @@ class Store:
                 created_at REAL NOT NULL,
                 PRIMARY KEY (task_id, execution_id)
             );
+            CREATE TABLE IF NOT EXISTS change_contracts (
+                task_id TEXT PRIMARY KEY REFERENCES tasks(id),
+                baseline_sha TEXT NOT NULL,
+                allowed_paths TEXT NOT NULL,
+                expected_paths TEXT NOT NULL,
+                forbidden_paths TEXT NOT NULL,
+                validation_level TEXT NOT NULL,
+                required_tests TEXT NOT NULL,
+                risk_level TEXT NOT NULL,
+                expanded INTEGER NOT NULL,
+                expansion_reason TEXT,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS change_sets (
+                id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL REFERENCES tasks(id),
+                baseline_sha TEXT NOT NULL,
+                result_tree_sha TEXT NOT NULL,
+                added_paths TEXT NOT NULL,
+                modified_paths TEXT NOT NULL,
+                deleted_paths TEXT NOT NULL,
+                renamed_paths TEXT NOT NULL,
+                created_at REAL NOT NULL,
+                UNIQUE(task_id, baseline_sha, result_tree_sha)
+            );
+            CREATE TABLE IF NOT EXISTS validation_plans (
+                id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL REFERENCES tasks(id),
+                result_tree_sha TEXT NOT NULL,
+                plan_hash TEXT NOT NULL,
+                validation_level TEXT NOT NULL,
+                selected_commands TEXT NOT NULL,
+                reasons TEXT NOT NULL,
+                requires_full INTEGER NOT NULL,
+                escalation_reason TEXT,
+                created_at REAL NOT NULL,
+                UNIQUE(task_id, result_tree_sha, plan_hash)
+            );
+            CREATE TABLE IF NOT EXISTS validation_evidence_cache (
+                id TEXT PRIMARY KEY,
+                result_tree_sha TEXT NOT NULL,
+                plan_hash TEXT NOT NULL,
+                platform TEXT NOT NULL,
+                status TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                created_at REAL NOT NULL,
+                UNIQUE(result_tree_sha, plan_hash, platform)
+            );
             CREATE TABLE IF NOT EXISTS workers (
                 id TEXT PRIMARY KEY,
                 provider TEXT NOT NULL,
@@ -602,6 +651,31 @@ class Store:
             ).fetchone()
             is not None
         )
+
+    def latest_evidence(self, task_id: str, kind: EvidenceKind | None = None) -> dict[str, Any] | None:
+        task_id = _validate_text(task_id, "task id")
+        if kind is not None:
+            kind_val = _validate_enum(kind, EvidenceKind, "evidence kind").value
+            row = self.conn.execute(
+                "SELECT * FROM evidence WHERE task_id=? AND kind=? ORDER BY created_at DESC LIMIT 1",
+                (task_id, kind_val),
+            ).fetchone()
+        else:
+            row = self.conn.execute(
+                "SELECT * FROM evidence WHERE task_id=? ORDER BY created_at DESC LIMIT 1",
+                (task_id,),
+            ).fetchone()
+        if not row:
+            return None
+        return {
+            "id": row["id"],
+            "task_id": row["task_id"],
+            "candidate_sha": row["candidate_sha"],
+            "kind": row["kind"],
+            "status": row["status"],
+            "payload": json.loads(row["payload"]),
+            "created_at": row["created_at"],
+        }
 
     def advance_task(self, task_id: str, stage: Stage) -> None:
         task_id = _validate_text(task_id, "task id")
@@ -1064,6 +1138,214 @@ class Store:
 
     def external_evidence(self) -> list[sqlite3.Row]:
         return list(self.conn.execute("SELECT * FROM external_evidence ORDER BY created_at DESC"))
+
+    def save_change_contract(self, contract: Any) -> None:
+        now = time.time()
+        self._mutate(
+            lambda: self.conn.execute(
+                """
+                INSERT INTO change_contracts (
+                    task_id, baseline_sha, allowed_paths, expected_paths, forbidden_paths,
+                    validation_level, required_tests, risk_level, expanded, expansion_reason,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(task_id) DO UPDATE SET
+                    baseline_sha=excluded.baseline_sha,
+                    allowed_paths=excluded.allowed_paths,
+                    expected_paths=excluded.expected_paths,
+                    forbidden_paths=excluded.forbidden_paths,
+                    validation_level=excluded.validation_level,
+                    required_tests=excluded.required_tests,
+                    risk_level=excluded.risk_level,
+                    expanded=excluded.expanded,
+                    expansion_reason=excluded.expansion_reason,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    contract.task_id,
+                    contract.baseline_sha,
+                    json.dumps(list(contract.allowed_paths)),
+                    json.dumps(list(contract.expected_paths)),
+                    json.dumps(list(contract.forbidden_paths)),
+                    contract.validation_level,
+                    json.dumps(list(contract.required_tests)),
+                    contract.risk_level,
+                    1 if contract.expanded else 0,
+                    contract.expansion_reason,
+                    now,
+                    now,
+                ),
+            )
+        )
+
+    def get_change_contract(self, task_id: str) -> Any | None:
+        row = self.conn.execute(
+            "SELECT * FROM change_contracts WHERE task_id=?",
+            (task_id,),
+        ).fetchone()
+        if not row:
+            return None
+        from .controlled_change import ChangeContract
+        return ChangeContract(
+            task_id=row["task_id"],
+            baseline_sha=row["baseline_sha"],
+            allowed_paths=tuple(json.loads(row["allowed_paths"])),
+            expected_paths=tuple(json.loads(row["expected_paths"])),
+            forbidden_paths=tuple(json.loads(row["forbidden_paths"])),
+            validation_level=row["validation_level"],
+            required_tests=tuple(json.loads(row["required_tests"])),
+            risk_level=row["risk_level"],
+            expanded=bool(row["expanded"]),
+            expansion_reason=row["expansion_reason"],
+        )
+
+    def save_change_set(self, changeset: Any) -> None:
+        now = time.time()
+        record_id = str(uuid.uuid4())
+        self._mutate(
+            lambda: self.conn.execute(
+                """
+                INSERT INTO change_sets (
+                    id, task_id, baseline_sha, result_tree_sha, added_paths,
+                    modified_paths, deleted_paths, renamed_paths, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(task_id, baseline_sha, result_tree_sha) DO UPDATE SET
+                    added_paths=excluded.added_paths,
+                    modified_paths=excluded.modified_paths,
+                    deleted_paths=excluded.deleted_paths,
+                    renamed_paths=excluded.renamed_paths
+                """,
+                (
+                    record_id,
+                    changeset.task_id,
+                    changeset.baseline_sha,
+                    changeset.result_tree_sha,
+                    json.dumps(list(changeset.added_paths)),
+                    json.dumps(list(changeset.modified_paths)),
+                    json.dumps(list(changeset.deleted_paths)),
+                    json.dumps([list(p) for p in changeset.renamed_paths]),
+                    now,
+                ),
+            )
+        )
+
+    def get_change_set(self, task_id: str, baseline_sha: str, result_tree_sha: str) -> Any | None:
+        row = self.conn.execute(
+            "SELECT * FROM change_sets WHERE task_id=? AND baseline_sha=? AND result_tree_sha=?",
+            (task_id, baseline_sha, result_tree_sha),
+        ).fetchone()
+        if not row:
+            return None
+        from .controlled_change import ChangeSet
+        return ChangeSet(
+            task_id=row["task_id"],
+            baseline_sha=row["baseline_sha"],
+            result_tree_sha=row["result_tree_sha"],
+            added_paths=tuple(json.loads(row["added_paths"])),
+            modified_paths=tuple(json.loads(row["modified_paths"])),
+            deleted_paths=tuple(json.loads(row["deleted_paths"])),
+            renamed_paths=tuple(tuple(p) for p in json.loads(row["renamed_paths"])),
+        )
+
+    def save_validation_plan(self, plan: Any, result_tree_sha: str) -> None:
+        now = time.time()
+        record_id = str(uuid.uuid4())
+        self._mutate(
+            lambda: self.conn.execute(
+                """
+                INSERT INTO validation_plans (
+                    id, task_id, result_tree_sha, plan_hash, validation_level,
+                    selected_commands, reasons, requires_full, escalation_reason, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(task_id, result_tree_sha, plan_hash) DO UPDATE SET
+                    validation_level=excluded.validation_level,
+                    selected_commands=excluded.selected_commands,
+                    reasons=excluded.reasons,
+                    requires_full=excluded.requires_full,
+                    escalation_reason=excluded.escalation_reason
+                """,
+                (
+                    record_id,
+                    plan.task_id,
+                    result_tree_sha,
+                    plan.plan_hash,
+                    plan.validation_level,
+                    json.dumps(list(plan.selected_commands)),
+                    json.dumps(plan.reasons),
+                    1 if plan.requires_full else 0,
+                    plan.escalation_reason,
+                    now,
+                ),
+            )
+        )
+
+    def get_validation_plan(self, task_id: str, result_tree_sha: str, plan_hash: str) -> Any | None:
+        row = self.conn.execute(
+            "SELECT * FROM validation_plans WHERE task_id=? AND result_tree_sha=? AND plan_hash=?",
+            (task_id, result_tree_sha, plan_hash),
+        ).fetchone()
+        if not row:
+            return None
+        from .controlled_change import ValidationPlan
+        return ValidationPlan(
+            task_id=row["task_id"],
+            validation_level=row["validation_level"],
+            selected_commands=tuple(json.loads(row["selected_commands"])),
+            reasons=dict(json.loads(row["reasons"])),
+            requires_full=bool(row["requires_full"]),
+            escalation_reason=row["escalation_reason"],
+            plan_hash=row["plan_hash"],
+        )
+
+    def record_validation_cache(
+        self,
+        result_tree_sha: str,
+        plan_hash: str,
+        platform: str,
+        status: str,
+        payload: dict[str, Any],
+    ) -> None:
+        now = time.time()
+        record_id = str(uuid.uuid4())
+        self._mutate(
+            lambda: self.conn.execute(
+                """
+                INSERT INTO validation_evidence_cache (
+                    id, result_tree_sha, plan_hash, platform, status, payload, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(result_tree_sha, plan_hash, platform) DO UPDATE SET
+                    status=excluded.status,
+                    payload=excluded.payload
+                """,
+                (
+                    record_id,
+                    result_tree_sha,
+                    plan_hash,
+                    platform,
+                    status,
+                    json.dumps(payload),
+                    now,
+                ),
+            )
+        )
+
+    def get_validation_cache(
+        self,
+        result_tree_sha: str,
+        plan_hash: str,
+        platform: str,
+    ) -> dict[str, Any] | None:
+        row = self.conn.execute(
+            "SELECT * FROM validation_evidence_cache WHERE result_tree_sha=? AND plan_hash=? AND platform=?",
+            (result_tree_sha, plan_hash, platform),
+        ).fetchone()
+        if not row:
+            return None
+        return {
+            "status": row["status"],
+            "payload": json.loads(row["payload"]),
+            "created_at": row["created_at"],
+        }
 
 
 def _validate_text(value: str, field: str, max_length: int = 200) -> str:

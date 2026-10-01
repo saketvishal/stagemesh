@@ -21,6 +21,8 @@ DEFAULT_SOURCE_TEST_MAPPING: dict[str, list[str]] = {
     "src/stagemesh/objectives.py": ["pytest tests/test_planner_contract_validation.py -q"],
     "src/stagemesh/persistence.py": ["pytest tests/test_sqlite_busy_retry.py -q"],
     "src/stagemesh/validation.py": ["pytest tests/test_affected_test_discovery.py -q"],
+    "src/stagemesh/controlled_change.py": ["pytest tests/test_controlled_change.py -q"],
+    "src/stagemesh/governance.py": ["pytest tests/test_git_governance.py -q"],
     "src/stagemesh/observability.py": ["pytest tests/test_metrics_observability.py -q"],
     "src/stagemesh/worktree.py": ["pytest tests/test_worktree_provisioning.py -q", "pytest tests/test_worktree_cleanup.py -q"],
     "src/stagemesh/providers.py": ["pytest tests/test_provider_failover.py -q", "pytest tests/test_reviewer_independence.py -q"],
@@ -211,27 +213,82 @@ class Validator:
             )
             return status
 
-        # Resolve full baseline range so multi-commit candidates do not hide changed files
-        if base_sha is None:
-            try:
-                row = store.conn.execute(
-                    "SELECT base_sha FROM candidates WHERE task_id=? AND sha=?",
-                    (task_id, candidate_sha),
-                ).fetchone()
-                if row and row["base_sha"]:
-                    base_sha = str(row["base_sha"])
-            except Exception:
-                pass
-        effective_base = base_sha or resolve_baseline_sha(project, candidate_sha)
+        # Check if a ChangeContract exists for this task
+        contract = store.get_change_contract(task_id)
+        changeset = None
+        plan = None
+        platform_key = None
+        if contract is not None and candidate_sha:
+            from .controlled_change import (
+                current_platform_key,
+                derive_git_changeset,
+                enforce_change_scope,
+                ScopeViolationError,
+                ValidationPlanner,
+            )
+            changeset = derive_git_changeset(project, task_id, contract.baseline_sha, candidate_sha)
+            store.save_change_set(changeset)
 
-        if candidate_sha and effective_base:
-            changed = git_changed_files(project, effective_base, candidate_sha)
-        elif candidate_sha:
-            changed = git_changed_files(project, head_ref=candidate_sha)
+            scope_result = enforce_change_scope(contract, changeset)
+            if not scope_result.is_authorized:
+                store.add_evidence(
+                    task_id,
+                    candidate_sha,
+                    EvidenceKind.VALIDATION,
+                    EvidenceStatus.FAILED,
+                    {"scope_violation": scope_result.to_dict()},
+                )
+                store.finish_execution(
+                    execution_id,
+                    ExecutionStatus.FAILED,
+                    candidate_sha,
+                )
+                raise ScopeViolationError(scope_result)
+
+            planner = ValidationPlanner(self.discovery)
+            plan = planner.plan(contract, changeset)
+            store.save_validation_plan(plan, changeset.result_tree_sha)
+
+            platform_key = current_platform_key()
+            cached = store.get_validation_cache(changeset.result_tree_sha, plan.plan_hash, platform_key)
+            if cached and cached["status"] == EvidenceStatus.PASSED.value:
+                store.add_evidence(
+                    task_id,
+                    candidate_sha,
+                    EvidenceKind.VALIDATION,
+                    EvidenceStatus.PASSED,
+                    {"reused": True, "plan_hash": plan.plan_hash, **cached["payload"]},
+                )
+                store.finish_execution(
+                    execution_id,
+                    ExecutionStatus.SUCCEEDED,
+                    candidate_sha,
+                )
+                return EvidenceStatus.PASSED
+
+            test_commands = list(plan.selected_commands)
         else:
-            changed = []
+            # Resolve full baseline range so multi-commit candidates do not hide changed files
+            if base_sha is None:
+                try:
+                    row = store.conn.execute(
+                        "SELECT base_sha FROM candidates WHERE task_id=? AND sha=?",
+                        (task_id, candidate_sha),
+                    ).fetchone()
+                    if row and row["base_sha"]:
+                        base_sha = str(row["base_sha"])
+                except Exception:
+                    pass
+            effective_base = base_sha or resolve_baseline_sha(project, candidate_sha)
 
-        test_commands = self.discovery.discover(changed, baseline_commands=["pytest tests/ -q"])
+            if candidate_sha and effective_base:
+                changed = git_changed_files(project, effective_base, candidate_sha)
+            elif candidate_sha:
+                changed = git_changed_files(project, head_ref=candidate_sha)
+            else:
+                changed = []
+
+            test_commands = self.discovery.discover(changed, baseline_commands=["pytest tests/ -q"])
 
         passed = bool(candidate_sha)
         results = []
@@ -254,7 +311,20 @@ class Validator:
                 passed = False
 
         status = EvidenceStatus.PASSED if passed else EvidenceStatus.FAILED
-        store.add_evidence(task_id, candidate_sha, EvidenceKind.VALIDATION, status, {"results": results})
+        payload = {"results": results}
+        if plan is not None:
+            payload["plan_hash"] = plan.plan_hash
+            payload["validation_level"] = plan.validation_level
+            if passed and changeset is not None and platform_key is not None:
+                store.record_validation_cache(
+                    changeset.result_tree_sha,
+                    plan.plan_hash,
+                    platform_key,
+                    status.value,
+                    {"results": results},
+                )
+
+        store.add_evidence(task_id, candidate_sha, EvidenceKind.VALIDATION, status, payload)
         store.finish_execution(
             execution_id,
             ExecutionStatus.SUCCEEDED if status is EvidenceStatus.PASSED else ExecutionStatus.FAILED,
