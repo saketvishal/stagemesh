@@ -150,17 +150,25 @@ class FakeExecutor(Executor):
     name = "fake"
 
     def run(self, store: Store, task_id: str, claim_id: str | None, project: Path) -> ExecutionResult:
-        base_sha = _capture_baseline_sha(project)
-        execution_id = store.start_execution(task_id=task_id, claim_id=claim_id, kind=ExecutionKind.IMPLEMENTATION)
         workspace = GitWorkspace(project)
         workspace.init_if_needed()
+        from .governance import capture_baseline, capture_agent_result_tree, canonicalize_and_record_candidate
+        baseline = capture_baseline(workspace, task_id)
+        execution_id = store.start_execution(task_id=task_id, claim_id=claim_id, kind=ExecutionKind.IMPLEMENTATION)
         task_file = project / f"stagemesh-task-{task_id}.txt"
         task_file.write_text(f"implemented {task_id}\n", encoding="utf-8")
-        sha = workspace.commit_all(
-            f"StageMesh implementation for {task_id}",
-            attribution=attribution_for_worker("local-worker", self.name),
+        agent_tree = capture_agent_result_tree(workspace)
+        sha = canonicalize_and_record_candidate(
+            store=store,
+            workspace=workspace,
+            task_id=task_id,
+            execution_id=execution_id,
+            claim_id=claim_id,
+            provider=self.name,
+            baseline=baseline,
+            agent_result_tree=agent_tree,
+            durable_handoff=True,
         )
-        store.add_candidate(task_id, sha, self.name, durable_handoff=True, base_sha=base_sha)
         store.finish_execution(execution_id, ExecutionStatus.SUCCEEDED, sha)
         return ExecutionResult(ExecutionStatus.SUCCEEDED, sha, durable_handoff=True)
 
@@ -183,13 +191,17 @@ class SubprocessExecutor(Executor):
                 failure_reason="provider_unavailable",
             )
 
+        workspace = GitWorkspace(project)
+        workspace.init_if_needed()
+        from .governance import capture_baseline, capture_agent_result_tree, canonicalize_and_record_candidate
+        baseline = capture_baseline(workspace, task_id)
+
         task = store.get_task(task_id)
         from .providers import _build_task_prompt
         task_prompt = _build_task_prompt(task_id, task)
 
         result_file = project / f".stagemesh-result-{task_id}.json"
         extra_env = {"STAGEMESH_RESULT_PATH": str(result_file)}
-        base_sha = _capture_baseline_sha(project)
 
         try:
             env = dict(subprocess.os.environ)
@@ -235,16 +247,36 @@ class SubprocessExecutor(Executor):
             try:
                 res_content = result_file.read_text(encoding="utf-8")
                 parsed = parse_structured_result(res_content, expected_task_id=task_id)
-                if parsed.candidate_sha:
-                    store.add_candidate(task_id, parsed.candidate_sha, self.name, durable_handoff=parsed.durable_handoff, base_sha=base_sha)
-                store.finish_execution(execution_id, parsed.status, parsed.candidate_sha)
-                return parsed
+                canonical_sha = None
+                if parsed.status is ExecutionStatus.SUCCEEDED:
+                    agent_tree = capture_agent_result_tree(workspace, agent_candidate_sha=parsed.candidate_sha)
+                    canonical_sha = canonicalize_and_record_candidate(
+                        store=store,
+                        workspace=workspace,
+                        task_id=task_id,
+                        execution_id=execution_id,
+                        claim_id=claim_id,
+                        provider=self.name,
+                        baseline=baseline,
+                        agent_result_tree=agent_tree,
+                        durable_handoff=parsed.durable_handoff,
+                        agent_candidate_sha=parsed.candidate_sha,
+                    )
+                store.finish_execution(execution_id, parsed.status, canonical_sha)
+                return ExecutionResult(parsed.status, canonical_sha, durable_handoff=parsed.durable_handoff)
             except StructuredResultValidationError as exc:
                 store.finish_execution(execution_id, ExecutionStatus.FAILED)
                 return ExecutionResult(
                     ExecutionStatus.FAILED,
                     capacity_failure=False,
                     failure_reason=f"structured_result_invalid: {exc}",
+                )
+            except Exception as exc:
+                store.finish_execution(execution_id, ExecutionStatus.FAILED)
+                return ExecutionResult(
+                    ExecutionStatus.FAILED,
+                    capacity_failure=False,
+                    failure_reason=f"governance_canonicalization_failed: {exc}",
                 )
             finally:
                 result_file.unlink(missing_ok=True)
@@ -258,13 +290,25 @@ class SubprocessExecutor(Executor):
                 failure_reason=reason,
             )
 
-        workspace = GitWorkspace(project)
-        workspace.init_if_needed()
-        sha = workspace.commit_all(
-            f"StageMesh implementation for {task_id}",
-            attribution=attribution_for_worker("local-worker", self.name),
-        )
-        if sha:
-            store.add_candidate(task_id, sha, self.name, durable_handoff=True, base_sha=base_sha)
-        store.finish_execution(execution_id, ExecutionStatus.SUCCEEDED, sha)
-        return ExecutionResult(ExecutionStatus.SUCCEEDED, sha, durable_handoff=bool(sha))
+        try:
+            agent_tree = capture_agent_result_tree(workspace)
+            sha = canonicalize_and_record_candidate(
+                store=store,
+                workspace=workspace,
+                task_id=task_id,
+                execution_id=execution_id,
+                claim_id=claim_id,
+                provider=self.name,
+                baseline=baseline,
+                agent_result_tree=agent_tree,
+                durable_handoff=True,
+            )
+            store.finish_execution(execution_id, ExecutionStatus.SUCCEEDED, sha)
+            return ExecutionResult(ExecutionStatus.SUCCEEDED, sha, durable_handoff=bool(sha))
+        except Exception as exc:
+            store.finish_execution(execution_id, ExecutionStatus.FAILED)
+            return ExecutionResult(
+                ExecutionStatus.FAILED,
+                capacity_failure=False,
+                failure_reason=f"governance_canonicalization_failed: {exc}",
+            )
