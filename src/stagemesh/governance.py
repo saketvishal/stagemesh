@@ -579,12 +579,15 @@ def recover_pending_canonical_candidate(
             return None
 
     # 4. Metadata validation: author, committer, trailers, tree, parent
-    val_result = validator.validate(
-        workspace=workspace,
-        commit_sha=head_sha,
-        expected_tree_sha=tree_sha,
-        expected_parent_sha=baseline.commit_sha,
-    )
+    try:
+        val_result = validator.validate(
+            workspace=workspace,
+            commit_sha=head_sha,
+            expected_tree_sha=tree_sha,
+            expected_parent_sha=baseline.commit_sha,
+        )
+    except GovernanceValidationError:
+        return None
     if not val_result.is_valid:
         return None
 

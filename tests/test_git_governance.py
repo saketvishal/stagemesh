@@ -1208,4 +1208,184 @@ def test_pre_provider_recovery_rejects_agent_temporary_commit_and_runs_provider(
     fresh_store.close()
 
 
+def test_pre_provider_recovery_rejects_non_stagemesh_author_and_runs_provider(
+    store: Store,
+    repo: tuple[Path, GitWorkspace],
+) -> None:
+    """1. Task-worktree HEAD is a temporary commit with a deliberately non-StageMesh author/committer.
+    Assert:
+    - recovery rejects the HEAD without raising;
+    - provider actually runs;
+    - StageMesh subsequently produces the canonical candidate;
+    - canonical candidate parent remains the persisted baseline;
+    - canonical candidate has StageMesh author/committer;
+    - unwanted provider attribution does not survive.
+    """
+    import sys
+    repo_dir, ws = repo
+    task_id = store.upsert_task("task-reject-non-stagemesh-author")
+    store.advance_task(task_id, Stage.IMPLEMENT)
+
+    from stagemesh.governance import (
+        prepare_task_worktree,
+        resolve_or_capture_baseline,
+    )
+
+    baseline_A = resolve_or_capture_baseline(store, ws, task_id)
+    task_wt = prepare_task_worktree(repo_dir, task_id, base_sha=baseline_A.commit_sha)
+    wt_ws = GitWorkspace(task_wt)
+
+    # Commit with non-StageMesh author/committer and canonical-looking message
+    (task_wt / "non_stagemesh.py").write_text("agent code\n", encoding="utf-8")
+    wt_ws.run("add", "-A")
+    env = {
+        "GIT_AUTHOR_NAME": "Adversarial Developer",
+        "GIT_AUTHOR_EMAIL": "dev@adversarial.invalid",
+        "GIT_COMMITTER_NAME": "Adversarial Committer",
+        "GIT_COMMITTER_EMAIL": "committer@adversarial.invalid",
+    }
+    wt_ws.run("commit", "-m", f"feat({task_id}): canonical implementation for {task_id}", env=env)
+    agent_head = wt_ws.run("rev-parse", "HEAD").stdout.strip()
+    assert agent_head != baseline_A.commit_sha
+
+    # Pre-condition: candidate does not exist
+    assert store.latest_candidate(task_id) is None
+
+    # Restart with Coordinator + SubprocessExecutor
+    fresh_store = Store(store.db_path)
+    provider_ran_file = repo_dir / "provider_ran_author.txt"
+    script = (
+        "import os, json, subprocess\n"
+        "from pathlib import Path\n"
+        "Path(r'" + str(provider_ran_file).replace("\\", "/") + "').write_text('ran\\n')\n"
+        "(Path.cwd() / 'final_work.py').write_text('done\\n')\n"
+        "subprocess.run(['git', 'add', '-A'], check=True)\n"
+        "subprocess.run(['git', 'commit', '-m', 'agent final commit'], check=True)\n"
+        "temp_sha = subprocess.check_output(['git', 'rev-parse', 'HEAD']).decode().strip()\n"
+        "res_path = Path(os.environ['STAGEMESH_RESULT_PATH'])\n"
+        "res_path.write_text(json.dumps({'status': 'SUCCEEDED', 'candidate_sha': temp_sha, 'durable_handoff': True}))\n"
+    )
+
+    executor = SubprocessExecutor(command=[sys.executable, "-c", script], name="test-provider")
+    coord = Coordinator(fresh_store, repo_dir, executor=executor)
+
+    # 1. Recovery rejects HEAD without raising, and Coordinator tick succeeds
+    progressed = coord.tick()
+    assert progressed == 1
+
+    # 2. Provider actually runs
+    assert provider_ran_file.exists()
+
+    # 3. StageMesh subsequently produces the canonical candidate
+    candidate = fresh_store.latest_candidate(task_id)
+    assert candidate is not None
+    canonical_sha = candidate["sha"]
+    assert canonical_sha != agent_head
+
+    # 4. Canonical candidate parent remains the persisted baseline
+    parents = wt_ws.run("rev-parse", f"{canonical_sha}^@").stdout.splitlines()
+    assert parents == [baseline_A.commit_sha]
+
+    # 5. Canonical candidate has StageMesh author/committer
+    log_text = wt_ws.run("log", "-1", canonical_sha).stdout
+    assert "Author: StageMesh <stagemesh@example.invalid>" in log_text
+
+    # 6. Unwanted attribution does not survive
+    assert "Adversarial" not in log_text
+    assert "dev@adversarial.invalid" not in log_text
+
+    fresh_store.close()
+
+
+def test_pre_provider_recovery_rejects_claude_coauthor_trailer_and_runs_provider(
+    store: Store,
+    repo: tuple[Path, GitWorkspace],
+) -> None:
+    """2. Task-worktree HEAD contains Co-Authored-By: Claude ...
+    Assert:
+    - recovery rejects the HEAD without raising;
+    - provider actually runs;
+    - StageMesh subsequently produces the canonical candidate;
+    - canonical candidate parent remains the persisted baseline;
+    - canonical candidate has StageMesh author/committer;
+    - unwanted provider attribution does not survive.
+    """
+    import sys
+    repo_dir, ws = repo
+    task_id = store.upsert_task("task-reject-claude-trailer")
+    store.advance_task(task_id, Stage.IMPLEMENT)
+
+    from stagemesh.governance import (
+        prepare_task_worktree,
+        resolve_or_capture_baseline,
+    )
+
+    baseline_A = resolve_or_capture_baseline(store, ws, task_id)
+    task_wt = prepare_task_worktree(repo_dir, task_id, base_sha=baseline_A.commit_sha)
+    wt_ws = GitWorkspace(task_wt)
+
+    # Commit with StageMesh author/committer BUT containing unwanted Claude co-author trailer
+    (task_wt / "claude_contaminated.py").write_text("agent code\n", encoding="utf-8")
+    wt_ws.run("add", "-A")
+    msg = f"feat({task_id}): canonical implementation for {task_id}\n\nCo-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
+    env = {
+        "GIT_AUTHOR_NAME": "StageMesh",
+        "GIT_AUTHOR_EMAIL": "stagemesh@example.invalid",
+        "GIT_COMMITTER_NAME": "StageMesh",
+        "GIT_COMMITTER_EMAIL": "stagemesh@example.invalid",
+    }
+    wt_ws.run("commit", "-m", msg, env=env)
+    contaminated_head = wt_ws.run("rev-parse", "HEAD").stdout.strip()
+    assert contaminated_head != baseline_A.commit_sha
+
+    # Pre-condition: candidate does not exist
+    assert store.latest_candidate(task_id) is None
+
+    # Restart with Coordinator + SubprocessExecutor
+    fresh_store = Store(store.db_path)
+    provider_ran_file = repo_dir / "provider_ran_claude.txt"
+    script = (
+        "import os, json, subprocess\n"
+        "from pathlib import Path\n"
+        "Path(r'" + str(provider_ran_file).replace("\\", "/") + "').write_text('ran\\n')\n"
+        "(Path.cwd() / 'final_clean_work.py').write_text('clean\\n')\n"
+        "subprocess.run(['git', 'add', '-A'], check=True)\n"
+        "subprocess.run(['git', 'commit', '-m', 'agent commit'], check=True)\n"
+        "temp_sha = subprocess.check_output(['git', 'rev-parse', 'HEAD']).decode().strip()\n"
+        "res_path = Path(os.environ['STAGEMESH_RESULT_PATH'])\n"
+        "res_path.write_text(json.dumps({'status': 'SUCCEEDED', 'candidate_sha': temp_sha, 'durable_handoff': True}))\n"
+    )
+
+    executor = SubprocessExecutor(command=[sys.executable, "-c", script], name="test-claude-provider")
+    coord = Coordinator(fresh_store, repo_dir, executor=executor)
+
+    # 1. Recovery rejects HEAD without raising (GovernanceAttributionError caught), Coordinator tick succeeds
+    progressed = coord.tick()
+    assert progressed == 1
+
+    # 2. Provider actually runs
+    assert provider_ran_file.exists()
+
+    # 3. StageMesh subsequently produces the canonical candidate
+    candidate = fresh_store.latest_candidate(task_id)
+    assert candidate is not None
+    canonical_sha = candidate["sha"]
+    assert canonical_sha != contaminated_head
+
+    # 4. Canonical candidate parent remains the persisted baseline
+    parents = wt_ws.run("rev-parse", f"{canonical_sha}^@").stdout.splitlines()
+    assert parents == [baseline_A.commit_sha]
+
+    # 5. Canonical candidate has StageMesh author/committer
+    log_text = wt_ws.run("log", "-1", canonical_sha).stdout
+    assert "Author: StageMesh <stagemesh@example.invalid>" in log_text
+
+    # 6. Unwanted provider attribution does NOT survive
+    assert "Claude" not in log_text
+    assert "noreply@anthropic.com" not in log_text
+
+    fresh_store.close()
+
+
+
 
