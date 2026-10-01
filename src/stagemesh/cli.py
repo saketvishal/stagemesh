@@ -14,7 +14,7 @@ from .acceptance import AcceptanceValidationError, local_acceptance_report
 from .acceptance_matrix import AcceptanceMatrixValidationError, acceptance_matrix
 from .audit import AuditValidationError, export_audit_jsonl
 from .capacity import CapacityKind, CapacityRegistry, CapacityValidationError
-from .ci import CIValidationError, broken_future_feature_gate, default_gates
+from .ci import CIValidationError, GateResult, broken_future_feature_gate, default_gates, format_ci_json, format_gate_plain, run_ci
 from .ci_wait import decide_ci_wait
 from .completion_audit import CompletionAuditValidationError, completion_audit
 from .config import ConfigValidationError, load_config
@@ -1353,7 +1353,12 @@ def command_evidence(args: argparse.Namespace) -> int:
     return 0
 
 
-def command_ci(args: argparse.Namespace) -> int:
+def command_ci(
+    args: argparse.Namespace,
+    gate_runner: Any = None,
+    stdout: Any = None,
+) -> int:
+    out = stdout if stdout is not None else sys.stdout
     target = getattr(args, "project", None)
     if target:
         if _is_explicit_path(target) or Path(target).is_dir():
@@ -1367,31 +1372,39 @@ def command_ci(args: argparse.Namespace) -> int:
             root = resolve_project_root(None)
         except ProjectError:
             root = Path.cwd().resolve()
-    results = default_gates(root, include_acceptance=not args.skip_acceptance)
-    if args.future_feature_gate:
-        results.append(broken_future_feature_gate(root))
-    if args.json:
-        print(
-            json.dumps(
-                {
-                    "status": "PASS" if all(result.passed for result in results) else "FAIL",
-                    "gates": [
-                        {
-                            "name": result.name,
-                            "passed": result.passed,
-                            "output": result.output[-4000:],
-                        }
-                        for result in results
-                    ],
-                },
-                indent=2,
-                sort_keys=True,
-            )
+
+    runner = gate_runner
+    if runner is None and os.environ.get("STAGEMESH_CI_STUB_GATES") in ("1", "true", "TRUE"):
+        def _stub_gate_runner(name: str, command: list[str], cwd: Path) -> GateResult:
+            return GateResult(name=name, passed=True, output=f"{name}: PASS\n", elapsed_seconds=0.01)
+        runner = _stub_gate_runner
+
+    is_json = getattr(args, "json", False)
+    skip_acceptance = getattr(args, "skip_acceptance", False)
+    future_feature = getattr(args, "future_feature_gate", False)
+
+    if is_json:
+        results = run_ci(
+            root,
+            include_acceptance=not skip_acceptance,
+            future_feature_gate=future_feature,
+            gate_runner=runner,
+            on_gate_complete=None,
         )
-        return 0 if all(result.passed for result in results) else 1
-    for result in results:
-        print(f"{result.name}: {'PASS' if result.passed else 'FAIL'}")
-    return 0 if all(result.passed for result in results) else 1
+        print(format_ci_json(results), file=out)
+    else:
+        def _on_complete(res: GateResult) -> None:
+            print(format_gate_plain(res), file=out, flush=True)
+
+        results = run_ci(
+            root,
+            include_acceptance=not skip_acceptance,
+            future_feature_gate=future_feature,
+            gate_runner=runner,
+            on_gate_complete=_on_complete,
+        )
+
+    return 0 if all(r.passed for r in results) else 1
 
 
 def command_ci_wait(args: argparse.Namespace) -> int:

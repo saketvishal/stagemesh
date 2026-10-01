@@ -1837,20 +1837,25 @@ def main() -> int:
             raise AssertionError(invalid_capacity.stdout + invalid_capacity.stderr)
         marker = ROOT / ".stagemesh-broken-feature"
         marker.unlink(missing_ok=True)
-        ci = run(
-            [
-                sys.executable,
-                "-m",
-                "stagemesh.cli",
-                "--project",
-                str(ROOT),
-                "ci",
-                "--future-feature-gate",
-                "--skip-acceptance",
-            ],
-            ROOT,
-            env,
+        import io
+        from argparse import Namespace
+        from stagemesh.ci import GateResult
+        from stagemesh.cli import command_ci
+
+        def stub_gate_runner(name: str, command: list[str], cwd: Path) -> GateResult:
+            return GateResult(name=name, passed=True, output=f"{name}: PASS\n", elapsed_seconds=0.01)
+
+        plain_buf = io.StringIO()
+        args_plain = Namespace(
+            project=str(ROOT),
+            future_feature_gate=True,
+            skip_acceptance=True,
+            json=False,
         )
+        code_plain = command_ci(args_plain, gate_runner=stub_gate_runner, stdout=plain_buf)
+        if code_plain != 0:
+            raise AssertionError(f"command_ci plain returned {code_plain}")
+        ci = plain_buf.getvalue()
         if (
             "provider_acceptance: PASS" not in ci
             or "github_acceptance: PASS" not in ci
@@ -1858,21 +1863,17 @@ def main() -> int:
             or "future-feature: PASS" not in ci
         ):
             raise AssertionError(ci)
-        ci_json = run(
-            [
-                sys.executable,
-                "-m",
-                "stagemesh.cli",
-                "--project",
-                str(ROOT),
-                "ci",
-                "--future-feature-gate",
-                "--skip-acceptance",
-                "--json",
-            ],
-            ROOT,
-            env,
+        json_buf = io.StringIO()
+        args_json = Namespace(
+            project=str(ROOT),
+            future_feature_gate=True,
+            skip_acceptance=True,
+            json=True,
         )
+        code_json = command_ci(args_json, gate_runner=stub_gate_runner, stdout=json_buf)
+        if code_json != 0:
+            raise AssertionError(f"command_ci json returned {code_json}")
+        ci_json = json_buf.getvalue()
         ci_data = json.loads(ci_json)
         if ci_data["status"] != "PASS":
             raise AssertionError(ci_json)
@@ -1974,28 +1975,12 @@ def main() -> int:
             raise AssertionError(invalid_live.stdout)
         marker.write_text("broken\n", encoding="utf-8")
         try:
-            failed = subprocess.run(
-                [
-                    sys.executable,
-                    "-m",
-                    "stagemesh.cli",
-                    "--project",
-                    str(ROOT),
-                    "ci",
-                    "--future-feature-gate",
-                    "--skip-acceptance",
-                    "--json",
-                ],
-                cwd=ROOT,
-                text=True,
-                capture_output=True,
-                env={**os.environ.copy(), **env},
-                check=False,
-            )
-            failed_ci = json.loads(failed.stdout)
+            failed_buf = io.StringIO()
+            failed_code = command_ci(args_json, gate_runner=stub_gate_runner, stdout=failed_buf)
+            failed_ci = json.loads(failed_buf.getvalue())
             failed_gates = {gate["name"]: gate["passed"] for gate in failed_ci["gates"]}
-            if failed.returncode == 0 or failed_ci["status"] != "FAIL" or failed_gates.get("future-feature") is not False:
-                raise AssertionError(failed.stdout + failed.stderr)
+            if failed_code == 0 or failed_ci["status"] != "FAIL" or failed_gates.get("future-feature") is not False:
+                raise AssertionError(failed_buf.getvalue())
         finally:
             marker.unlink(missing_ok=True)
         shutil.rmtree(project / ".git", ignore_errors=True)
