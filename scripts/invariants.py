@@ -129,11 +129,11 @@ class HandoffExecutor(FakeExecutor):
 
 def with_store(fn) -> None:
     with tempfile.TemporaryDirectory(prefix="stagemesh-invariant-") as raw:
-        tmp = Path(raw)
+        tmp = Path(raw).resolve()
         store = Store(tmp / "state.sqlite3")
         store.migrate()
         try:
-            fn(store, tmp / "project")
+            fn(store, (tmp / "project").resolve())
         finally:
             store.close()
             shutil.rmtree(tmp / "project" / ".git", ignore_errors=True)

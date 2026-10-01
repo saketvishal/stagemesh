@@ -20,7 +20,7 @@ class FinalReportValidationError(ValueError):
 def candidate_sha(root: Path) -> str:
     root = _validate_root(root)
     result = subprocess.run(
-        ["git", "-c", f"safe.directory={root.as_posix()}", "rev-parse", "HEAD"],
+        ["git", "-c", "safe.directory=*", "rev-parse", "HEAD"],
         cwd=root,
         text=True,
         capture_output=True,

@@ -22,7 +22,7 @@ def run(command: list[str], cwd: Path, env: dict[str, str] | None = None) -> str
 
 def tracked_files(root: Path) -> list[Path]:
     result = subprocess.run(
-        ["git", "-c", f"safe.directory={root.as_posix()}", "ls-files", "-z"],
+        ["git", "-c", "safe.directory=*", "ls-files", "-z"],
         cwd=root,
         capture_output=True,
         check=False,
@@ -41,10 +41,10 @@ def copy_clean_tree(source: Path, destination: Path) -> None:
 
 def main() -> int:
     with tempfile.TemporaryDirectory(prefix="stagemesh-clean-acceptance-") as raw:
-        tmp = Path(raw)
+        tmp = Path(raw).resolve()
         clean_root = tmp / "checkout"
         install_target = tmp / "install"
-        project = tmp / "synthetic-project"
+        project = (tmp / "synthetic-project").resolve()
         clean_root.mkdir()
         project.mkdir()
         copy_clean_tree(ROOT, clean_root)
@@ -71,7 +71,7 @@ def main() -> int:
             "version:",
             "executable path:",
             "imported package path:",
-            f"project: {project}",
+            f"project: {project.resolve()}",
             "schema version: 2",
             "backend: sqlite",
         ]
