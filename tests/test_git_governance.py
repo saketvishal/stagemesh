@@ -18,6 +18,7 @@ from stagemesh.governance import (
     GovernanceExactTreeMismatchError,
     GovernanceValidationError,
     TaskBaseline,
+    TaskWorktreeIsolationError,
     capture_agent_result_tree,
     capture_baseline,
     canonicalize_and_record_candidate,
@@ -781,4 +782,237 @@ def test_runtime_command_adapter_production_governance(store: Store, repo: tuple
     log_text = ws.run("log", "-1", canonical_sha).stdout
     assert "Author: StageMesh <stagemesh@example.invalid>" in log_text
     assert "adapter_output.txt" in ws.run("ls-tree", "-r", "--name-only", canonical_sha).stdout
+
+
+def test_adversarial_task_worktree_isolation_fails_closed(
+    store: Store,
+    repo: tuple[Path, GitWorkspace],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """1. Task worktree isolation MUST fail closed:
+    Deliberately make worktree creation fail, invoke normal Coordinator implementation path,
+    assert provider was never launched, primary checkout unchanged, no candidate exists,
+    and failure is surfaced rather than falling back.
+    """
+    repo_dir, ws = repo
+    task_id = store.upsert_task("fail-closed-task")
+    store.advance_task(task_id, Stage.IMPLEMENT)
+
+    provider_launched = False
+
+    class TrackingExecutor(Executor):
+        name = "tracking"
+
+        def run(self, store: Store, task_id: str, claim_id: str | None, project: Path) -> ExecutionResult:
+            nonlocal provider_launched
+            provider_launched = True
+            return ExecutionResult(ExecutionStatus.SUCCEEDED, "dummy", durable_handoff=True)
+
+    from stagemesh.worktree import WorktreeValidationError
+    import stagemesh.worktree
+
+    def failing_ensure_worktree(*args: object, **kwargs: object) -> None:
+        raise WorktreeValidationError("simulated worktree isolation failure")
+
+    monkeypatch.setattr(stagemesh.worktree, "ensure_worktree", failing_ensure_worktree)
+
+    primary_status_before = ws.run("status", "--porcelain").stdout
+    primary_head_before = ws.run("rev-parse", "HEAD").stdout.strip()
+
+    coord = Coordinator(store, repo_dir, executor=TrackingExecutor())
+
+    with pytest.raises(TaskWorktreeIsolationError, match="failed to provision isolated task worktree"):
+        coord.tick()
+
+    assert provider_launched is False
+
+    primary_status_after = ws.run("status", "--porcelain").stdout
+    primary_head_after = ws.run("rev-parse", "HEAD").stdout.strip()
+    assert primary_status_after == primary_status_before
+    assert primary_head_after == primary_head_before
+
+    assert store.latest_candidate(task_id) is None
+
+
+def test_real_production_restart_durable_baseline_and_new_execution_id(
+    store: Store,
+    repo: tuple[Path, GitWorkspace],
+) -> None:
+    """2. Make baseline durable and task-stable BEFORE provider launch.
+    A new execution_id after restart/retry must reuse the already-persisted baseline
+    for that task rather than recapturing current task-worktree HEAD.
+    Real production restart test:
+    1. first execution persists baseline A;
+    2. provider starts and moves task-worktree HEAD;
+    3. execution dies;
+    4. new Coordinator/runtime objects are created;
+    5. a NEW execution_id is generated;
+    6. real executor path resumes;
+    7. it still uses baseline A;
+    8. canonical candidate parent is A.
+    """
+    import sys
+    repo_dir, ws = repo
+    task_id = store.upsert_task("task-restart-stable-baseline")
+    store.advance_task(task_id, Stage.IMPLEMENT)
+
+    primary_head = ws.run("rev-parse", "HEAD").stdout.strip()
+
+    state_file = repo_dir / "simulated_attempt.txt"
+    state_file.write_text("1\n", encoding="utf-8")
+
+    script = (
+        "import os, sys, subprocess, json\n"
+        "from pathlib import Path\n"
+        "state_f = Path(r'" + str(state_file).replace("\\", "/") + "')\n"
+        "attempt = int(state_f.read_text().strip())\n"
+        "(Path.cwd() / 'feature_run.py').write_text(f'# attempt {attempt}\\n')\n"
+        "subprocess.run(['git', 'add', '-A'], check=True)\n"
+        "subprocess.run(['git', 'commit', '-m', f'agent commit attempt {attempt}'], check=True)\n"
+        "if attempt == 1:\n"
+        "    state_f.write_text('2\\n')\n"
+        "    sys.exit(1)\n"
+        "temp_sha = subprocess.check_output(['git', 'rev-parse', 'HEAD']).decode().strip()\n"
+        "res_path = Path(os.environ['STAGEMESH_RESULT_PATH'])\n"
+        "res_path.write_text(json.dumps({'status': 'SUCCEEDED', 'candidate_sha': temp_sha, 'durable_handoff': True}))\n"
+    )
+
+    executor1 = SubprocessExecutor(command=[sys.executable, "-c", script])
+    coord1 = Coordinator(store, repo_dir, executor=executor1)
+
+    coord1.tick()
+
+    persisted_base = store.get_baseline(task_id)
+    assert persisted_base is not None
+    assert persisted_base["commit_sha"] == primary_head
+    first_exec_id = persisted_base["execution_id"]
+
+    from stagemesh.governance import prepare_task_worktree
+    task_wt = prepare_task_worktree(repo_dir, task_id)
+    wt_ws = GitWorkspace(task_wt)
+    wt_head_after_crash = wt_ws.run("rev-parse", "HEAD").stdout.strip()
+    assert wt_head_after_crash != primary_head
+
+    assert store.latest_candidate(task_id) is None
+
+    fresh_store = Store(store.db_path)
+    executor2 = SubprocessExecutor(command=[sys.executable, "-c", script])
+    coord2 = Coordinator(fresh_store, repo_dir, executor=executor2)
+
+    fresh_store.advance_task(task_id, Stage.IMPLEMENT)
+    progressed = coord2.tick()
+    assert progressed == 1
+
+    candidate = fresh_store.latest_candidate(task_id)
+    assert candidate is not None
+    canonical_sha = candidate["sha"]
+    parents = wt_ws.run("rev-parse", f"{canonical_sha}^@").stdout.splitlines()
+    assert parents == [primary_head]
+
+    exec_rows = list(
+        fresh_store.conn.execute("SELECT * FROM executions WHERE task_id=? ORDER BY started_at ASC", (task_id,))
+    )
+    assert len(exec_rows) >= 2
+    second_exec_id = exec_rows[-1]["id"]
+    assert second_exec_id != first_exec_id
+    second_base = fresh_store.get_baseline(task_id, second_exec_id)
+    assert second_base is not None
+    assert second_base["commit_sha"] == primary_head
+
+    fresh_store.close()
+
+
+def test_crash_recovery_after_canonical_commit_before_candidate_persistence(
+    store: Store,
+    repo: tuple[Path, GitWorkspace],
+) -> None:
+    """3. Cover the exact remaining crash window:
+    1. baseline A persisted;
+    2. agent result tree T exists;
+    3. StageMesh canonical commit C is created and task-worktree HEAD points to C;
+    4. simulate crash BEFORE Store.add_candidate();
+    5. recreate Store/Coordinator/governance objects;
+    6. resume;
+    7. detect that HEAD C is already a valid StageMesh canonical candidate for:
+       - baseline A;
+       - tree T;
+       - canonical metadata;
+    8. reuse C;
+    9. persist one candidate row;
+    10. create one governance provenance record;
+    11. do not create a second canonical commit.
+    """
+    repo_dir, ws = repo
+    task_id = store.upsert_task("task-crash-after-canonical-commit")
+    from stagemesh.governance import (
+        CandidateCanonicalizer,
+        canonicalize_and_record_candidate,
+        get_governance_evidence,
+        prepare_task_worktree,
+        resolve_or_capture_baseline,
+    )
+
+    baseline_A = resolve_or_capture_baseline(store, ws, task_id)
+    task_wt = prepare_task_worktree(repo_dir, task_id, base_sha=baseline_A.commit_sha)
+    wt_ws = GitWorkspace(task_wt)
+
+    (task_wt / "agent_code.py").write_text("def work(): return 100\n", encoding="utf-8")
+    wt_ws.run("add", "-A")
+    agent_tree_T = wt_ws.run("write-tree").stdout.strip()
+
+    canonicalizer = CandidateCanonicalizer()
+    canonical_commit_C = canonicalizer.canonicalize(
+        workspace=wt_ws,
+        baseline=baseline_A,
+        agent_result_tree=agent_tree_T,
+        task_id=task_id,
+    )
+    assert wt_ws.run("rev-parse", "HEAD").stdout.strip() == canonical_commit_C
+
+    # Simulate crash before candidate persistence
+    assert store.latest_candidate(task_id) is None
+    assert get_governance_evidence(store, task_id, candidate_sha=canonical_commit_C) is None
+
+    fresh_store = Store(store.db_path)
+    fresh_wt_ws = GitWorkspace(task_wt)
+    exec_id_resume = fresh_store.start_execution(task_id=task_id, claim_id=None, kind=ExecutionKind.IMPLEMENTATION)
+
+    resumed_sha = canonicalize_and_record_candidate(
+        store=fresh_store,
+        workspace=fresh_wt_ws,
+        task_id=task_id,
+        execution_id=exec_id_resume,
+        claim_id=None,
+        provider="agent",
+        baseline=baseline_A,
+        agent_result_tree=agent_tree_T,
+    )
+
+    # 7 & 8: Reuses C
+    assert resumed_sha == canonical_commit_C
+
+    # 9: Persist one candidate row
+    candidate = fresh_store.latest_candidate(task_id)
+    assert candidate is not None
+    assert candidate["sha"] == canonical_commit_C
+    all_candidates = list(fresh_store.conn.execute("SELECT * FROM candidates WHERE task_id=?", (task_id,)))
+    assert len(all_candidates) == 1
+
+    # 10: Exactly one governance provenance record
+    gov_evidence = get_governance_evidence(fresh_store, task_id, candidate_sha=canonical_commit_C)
+    assert gov_evidence is not None
+    assert gov_evidence["canonical_candidate_sha"] == canonical_commit_C
+    all_audit = [
+        e for e in fresh_store.audit_events(limit=500) if e["event_type"] == "governance.candidate_canonicalized"
+    ]
+    matching_audit = [
+        e for e in all_audit if json.loads(e["payload"]).get("canonical_candidate_sha") == canonical_commit_C
+    ]
+    assert len(matching_audit) == 1
+
+    # 11: Do not create a second canonical commit
+    assert fresh_wt_ws.run("rev-parse", "HEAD").stdout.strip() == canonical_commit_C
+
+    fresh_store.close()
+
 

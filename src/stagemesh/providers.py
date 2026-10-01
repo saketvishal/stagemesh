@@ -61,9 +61,27 @@ class RuntimeCommandAdapter:
             prepare_task_worktree,
             resolve_or_capture_baseline,
         )
-        task_project = prepare_task_worktree(project, task_id)
+        baseline = resolve_or_capture_baseline(store, project, task_id)
+        task_project = prepare_task_worktree(project, task_id, base_sha=baseline.commit_sha)
         workspace = GitWorkspace(task_project)
         workspace.init_if_needed()
+
+        executable = self.command[0] if self.command else None
+        execution_id = store.start_execution(
+            task_id=task_id,
+            claim_id=claim_id,
+            kind=ExecutionKind.IMPLEMENTATION,
+            executable=executable,
+        )
+        store.record_baseline(
+            task_id=task_id,
+            execution_id=execution_id,
+            commit_sha=baseline.commit_sha,
+            tree_sha=baseline.tree_sha,
+            branch=baseline.branch,
+            repo_path=baseline.repo_path,
+        )
+
         try:
             proc = subprocess.Popen(
                 list(self.command),
@@ -75,18 +93,16 @@ class RuntimeCommandAdapter:
             )
         except FileNotFoundError as exc:
             is_cap, reason = classify_failure(1, exc=exc)
+            store.finish_execution(execution_id, ExecutionStatus.FAILED)
             return ExecutionResult(ExecutionStatus.FAILED, capacity_failure=is_cap, failure_reason=reason)
         identity = popen_identity(proc)
-        execution_id = store.start_execution(
-            task_id=task_id,
-            claim_id=claim_id,
-            kind=ExecutionKind.IMPLEMENTATION,
+        store.attach_execution_process(
+            execution_id=execution_id,
             pid=identity.pid,
             process_create_time=identity.create_time,
             boot_id=identity.boot_id,
             executable=identity.executable,
         )
-        baseline = resolve_or_capture_baseline(store, workspace, task_id, execution_id=execution_id)
         stdout, stderr = proc.communicate(input=task_prompt)
         if proc.returncode != 0:
             is_cap, reason = classify_failure(proc.returncode, stdout, stderr)

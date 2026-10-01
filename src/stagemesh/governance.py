@@ -16,6 +16,10 @@ class GovernanceError(RuntimeError):
     """Base error for StageMesh Git governance failures."""
 
 
+class TaskWorktreeIsolationError(GovernanceError):
+    """Raised when dedicated task worktree cannot be isolated or validated."""
+
+
 class GovernanceValidationError(GovernanceError, ValueError):
     """Raised when governance validation bounds or contracts fail."""
 
@@ -90,6 +94,10 @@ def capture_baseline(project: Path | GitWorkspace, task_id: str) -> TaskBaseline
     ws.init_if_needed()
 
     probe = ws.run("rev-parse", "--verify", "--quiet", "HEAD", check=False)
+    if probe.returncode != 0 or not probe.stdout.strip():
+        ws.run("commit", "--allow-empty", "-m", "chore: initialize repository baseline", check=False)
+        probe = ws.run("rev-parse", "--verify", "--quiet", "HEAD", check=False)
+
     if probe.returncode == 0 and probe.stdout.strip():
         commit_sha = probe.stdout.strip()
         tree_sha = ws.run("rev-parse", "--verify", "HEAD^{tree}").stdout.strip()
@@ -118,48 +126,123 @@ def resolve_or_capture_baseline(
     execution_id: str | None = None,
 ) -> TaskBaseline:
     """Recover previously persisted baseline on restart, or capture and persist new baseline."""
-    persisted = store.get_baseline(task_id, execution_id=execution_id)
+    persisted = store.get_baseline(task_id)
     if persisted:
-        return TaskBaseline(
+        baseline = TaskBaseline(
             task_id=task_id,
             commit_sha=persisted["commit_sha"],
             tree_sha=persisted["tree_sha"],
             branch=persisted["branch"],
             repo_path=persisted["repo_path"],
         )
+        if execution_id and persisted["execution_id"] != execution_id:
+            store.record_baseline(
+                task_id=task_id,
+                execution_id=execution_id,
+                commit_sha=baseline.commit_sha,
+                tree_sha=baseline.tree_sha,
+                branch=baseline.branch,
+                repo_path=baseline.repo_path,
+            )
+        return baseline
+
     baseline = capture_baseline(project, task_id)
-    if execution_id:
-        store.record_baseline(
-            task_id=task_id,
-            execution_id=execution_id,
-            commit_sha=baseline.commit_sha,
-            tree_sha=baseline.tree_sha,
-            branch=baseline.branch,
-            repo_path=baseline.repo_path,
-        )
+    store.record_baseline(
+        task_id=task_id,
+        execution_id=execution_id or "initial",
+        commit_sha=baseline.commit_sha,
+        tree_sha=baseline.tree_sha,
+        branch=baseline.branch,
+        repo_path=baseline.repo_path,
+    )
     return baseline
 
 
+def _is_path_under(child: Path, parent: Path) -> bool:
+    try:
+        child.resolve().relative_to(parent.resolve())
+        return True
+    except ValueError:
+        child_str = str(child.resolve()).lower().replace("/", "\\")
+        parent_str = str(parent.resolve()).lower().replace("/", "\\")
+        return child_str.startswith(parent_str.rstrip("\\") + "\\")
+
+
+def is_verified_task_worktree(path: Path, task_id: str | None = None) -> bool:
+    """Deterministically verify whether path is an isolated git worktree for the task."""
+    try:
+        resolved = Path(path).resolve()
+        git_entry = resolved / ".git"
+        if not git_entry.exists() or not git_entry.is_file():
+            return False
+        content = git_entry.read_text(encoding="utf-8", errors="replace").strip()
+        if not content.lower().startswith("gitdir:"):
+            return False
+
+        ws = GitWorkspace(resolved)
+        inside = ws.run("rev-parse", "--is-inside-work-tree", check=False)
+        if inside.returncode != 0 or inside.stdout.strip() != "true":
+            return False
+
+        common_dir_res = ws.run("rev-parse", "--git-common-dir", check=False)
+        git_dir_res = ws.run("rev-parse", "--git-dir", check=False)
+        if common_dir_res.returncode != 0 or git_dir_res.returncode != 0:
+            return False
+
+        common_dir = Path(common_dir_res.stdout.strip()).resolve()
+        git_dir = Path(git_dir_res.stdout.strip()).resolve()
+        if str(common_dir).lower() == str(git_dir).lower():
+            return False
+
+        expected_worktrees_dir = common_dir / "worktrees"
+        if not _is_path_under(git_dir, expected_worktrees_dir):
+            return False
+
+        if task_id is not None:
+            from .worktree import task_branch_name
+            safe_name = re.sub(r"[^A-Za-z0-9._-]", "-", task_id).strip("./-") or "task"
+            branch_res = ws.run("rev-parse", "--abbrev-ref", "HEAD", check=False)
+            branch = branch_res.stdout.strip() if branch_res.returncode == 0 else ""
+            if resolved.name != safe_name and branch != task_branch_name(task_id):
+                return False
+
+        return True
+    except Exception:
+        return False
+
+
 def prepare_task_worktree(project: Path, task_id: str, base_sha: str | None = None) -> Path:
-    """Prepare a dedicated StageMesh task worktree isolated from the primary project checkout."""
-    from .worktree import ensure_worktree, task_branch_name, is_git_worktree
+    """Prepare a dedicated StageMesh task worktree isolated from the primary project checkout.
+
+    Fails closed: never falls back to the primary project checkout.
+    """
+    from .worktree import ensure_worktree, task_branch_name
     ws_path = Path(project).resolve()
-    if is_git_worktree(ws_path) and ".stagemesh" in str(ws_path):
+    if is_verified_task_worktree(ws_path, task_id):
         return ws_path
 
+    ws = GitWorkspace(ws_path)
+    ws.init_if_needed()
     git_dir = ws_path / ".git"
     if not git_dir.exists():
-        return ws_path
+        raise TaskWorktreeIsolationError(f"project path is not a git repository: {ws_path}")
+    if git_dir.is_file():
+        raise TaskWorktreeIsolationError(f"path is a linked worktree not matched to task {task_id}: {ws_path}")
+
+    # Ensure repository has at least an initial commit if empty
+    head_probe = ws.run("rev-parse", "--verify", "--quiet", "HEAD", check=False)
+    if head_probe.returncode != 0:
+        ws.run("commit", "--allow-empty", "-m", "chore: initialize repository baseline", check=False)
 
     # Ensure .stagemesh/ is in .git/info/exclude of primary repo
     try:
-        exclude = (git_dir if git_dir.is_dir() else ws_path) / "info" / "exclude"
+        exclude = git_dir / "info" / "exclude"
         if exclude.parent.exists():
             content = exclude.read_text(encoding="utf-8") if exclude.exists() else ""
             if ".stagemesh/" not in content:
                 exclude.write_text(content + "\n.stagemesh/\n", encoding="utf-8")
-    except Exception:
-        pass
+    except Exception as exc:
+        raise TaskWorktreeIsolationError(f"failed to configure exclusion in {ws_path}: {exc}") from exc
 
     safe_name = re.sub(r"[^A-Za-z0-9._-]", "-", task_id).strip("./-") or "task"
     worktree_path = ws_path / ".stagemesh" / "worktrees" / safe_name
@@ -170,9 +253,17 @@ def prepare_task_worktree(project: Path, task_id: str, base_sha: str | None = No
             branch_name=task_branch_name(task_id),
             base_sha=base_sha,
         )
-        return wt or ws_path
-    except Exception:
-        return ws_path
+    except Exception as exc:
+        raise TaskWorktreeIsolationError(
+            f"failed to provision isolated task worktree at {worktree_path}: {exc}"
+        ) from exc
+
+    if not wt or not is_verified_task_worktree(wt, task_id):
+        raise TaskWorktreeIsolationError(
+            f"provisioned worktree failed validation bounds at {worktree_path}"
+        )
+
+    return wt
 
 
 def capture_agent_result_tree(workspace: GitWorkspace, agent_candidate_sha: str | None = None) -> str:
@@ -459,7 +550,7 @@ def canonicalize_and_record_candidate(
                     workspace.run("update-ref", "HEAD", existing_sha)
                     workspace.run("reset", "--mixed", existing_sha, check=False)
                     # Provenance repair: if governance audit evidence was missing due to crash, recreate it idempotently
-                    if not get_governance_evidence(store, task_id):
+                    if not get_governance_evidence(store, task_id, candidate_sha=existing_sha):
                         record_audit(
                             store,
                             "governance.candidate_canonicalized",
@@ -482,7 +573,58 @@ def canonicalize_and_record_candidate(
                 except GovernanceValidationError:
                     pass
 
-    # 2. Canonicalize fresh candidate
+    # 2. Crash-recovery check: crash after canonical commit created and HEAD moved to C,
+    # but BEFORE Store.add_candidate() was called!
+    head_probe = workspace.run("rev-parse", "--verify", "--quiet", "HEAD", check=False)
+    if head_probe.returncode == 0:
+        head_sha = head_probe.stdout.strip()
+        if _is_valid_sha(head_sha):
+            head_tree_probe = workspace.run("rev-parse", "--verify", "--quiet", f"{head_sha}^{{tree}}", check=False)
+            if head_tree_probe.returncode == 0 and head_tree_probe.stdout.strip() == agent_result_tree:
+                try:
+                    val_result = validator.validate(
+                        workspace=workspace,
+                        commit_sha=head_sha,
+                        expected_tree_sha=agent_result_tree,
+                        expected_parent_sha=baseline.commit_sha,
+                    )
+                    canonical_sha = head_sha
+                    workspace.run("reset", "--mixed", canonical_sha, check=False)
+
+                    # Persist candidate row in Store
+                    store.add_candidate(
+                        task_id=task_id,
+                        sha=canonical_sha,
+                        produced_by=provider,
+                        durable_handoff=durable_handoff,
+                        base_sha=baseline.commit_sha,
+                    )
+
+                    # Persist governance audit record idempotently
+                    if not get_governance_evidence(store, task_id, candidate_sha=canonical_sha):
+                        record_audit(
+                            store,
+                            "governance.candidate_canonicalized",
+                            {
+                                "task_id": task_id,
+                                "execution_id": execution_id,
+                                "provider": provider,
+                                "agent_candidate_sha": agent_candidate_sha,
+                                "baseline_sha": baseline.commit_sha,
+                                "baseline_tree_sha": baseline.tree_sha,
+                                "agent_result_tree_sha": agent_result_tree,
+                                "canonical_candidate_sha": canonical_sha,
+                                "canonical_candidate_tree_sha": agent_result_tree,
+                                "tree_match": True,
+                                "metadata_validation": val_result.to_dict(),
+                                "timestamp": time.time(),
+                            },
+                        )
+                    return canonical_sha
+                except GovernanceValidationError:
+                    pass
+
+    # 3. Canonicalize fresh candidate
     canonicalizer = CandidateCanonicalizer(policy)
     canonical_sha = canonicalizer.canonicalize(
         workspace=workspace,
@@ -491,7 +633,7 @@ def canonicalize_and_record_candidate(
         task_id=task_id,
     )
 
-    # 3. Store candidate (public publishable candidate is StageMesh-controlled)
+    # 4. Store candidate (public publishable candidate is StageMesh-controlled)
     store.add_candidate(
         task_id=task_id,
         sha=canonical_sha,
@@ -500,7 +642,7 @@ def canonicalize_and_record_candidate(
         base_sha=baseline.commit_sha,
     )
 
-    # 4. Record internal provenance audit (agent identity stays internal)
+    # 5. Record internal provenance audit (agent identity stays internal)
     val_result = validator.validate(
         workspace=workspace,
         commit_sha=canonical_sha,
@@ -508,36 +650,38 @@ def canonicalize_and_record_candidate(
         expected_parent_sha=baseline.commit_sha,
     )
 
-    record_audit(
-        store,
-        "governance.candidate_canonicalized",
-        {
-            "task_id": task_id,
-            "execution_id": execution_id,
-            "provider": provider,
-            "agent_candidate_sha": agent_candidate_sha,
-            "baseline_sha": baseline.commit_sha,
-            "baseline_tree_sha": baseline.tree_sha,
-            "agent_result_tree_sha": agent_result_tree,
-            "canonical_candidate_sha": canonical_sha,
-            "canonical_candidate_tree_sha": agent_result_tree,
-            "tree_match": True,
-            "metadata_validation": val_result.to_dict(),
-            "timestamp": time.time(),
-        },
-    )
+    if not get_governance_evidence(store, task_id, candidate_sha=canonical_sha):
+        record_audit(
+            store,
+            "governance.candidate_canonicalized",
+            {
+                "task_id": task_id,
+                "execution_id": execution_id,
+                "provider": provider,
+                "agent_candidate_sha": agent_candidate_sha,
+                "baseline_sha": baseline.commit_sha,
+                "baseline_tree_sha": baseline.tree_sha,
+                "agent_result_tree_sha": agent_result_tree,
+                "canonical_candidate_sha": canonical_sha,
+                "canonical_candidate_tree_sha": agent_result_tree,
+                "tree_match": True,
+                "metadata_validation": val_result.to_dict(),
+                "timestamp": time.time(),
+            },
+        )
 
     return canonical_sha
 
 
-def get_governance_evidence(store: Store, task_id: str) -> dict[str, Any] | None:
-    """Retrieve structured Git Governance evidence record for a task."""
+def get_governance_evidence(store: Store, task_id: str, candidate_sha: str | None = None) -> dict[str, Any] | None:
+    """Retrieve structured Git Governance evidence record for a task and optional candidate SHA."""
     for event in store.audit_events(limit=500):
         if event["event_type"] == "governance.candidate_canonicalized":
             try:
                 payload = json.loads(event["payload"])
                 if payload.get("task_id") == task_id:
-                    return payload
+                    if candidate_sha is None or payload.get("canonical_candidate_sha") == candidate_sha:
+                        return payload
             except (json.JSONDecodeError, TypeError):
                 continue
     return None

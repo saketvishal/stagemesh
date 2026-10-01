@@ -86,9 +86,13 @@ class Coordinator:
             claim_id = self.store.acquire_claim(task_id, "local-worker")
             if claim_id is None:
                 return 0
-            from .governance import prepare_task_worktree, capture_baseline
-            baseline = capture_baseline(self.project, task_id)
-            task_project = prepare_task_worktree(self.project, task_id, base_sha=baseline.commit_sha)
+            from .governance import prepare_task_worktree, resolve_or_capture_baseline
+            baseline = resolve_or_capture_baseline(self.store, self.project, task_id)
+            try:
+                task_project = prepare_task_worktree(self.project, task_id, base_sha=baseline.commit_sha)
+            except Exception:
+                self.store.release_claim(claim_id)
+                raise
             result = self.executor.run(self.store, task_id, claim_id, task_project)
             if result.capacity_failure:
                 # Provider is unavailable (not-found, rate-limit, capacity exhausted).
