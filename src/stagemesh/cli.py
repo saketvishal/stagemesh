@@ -1377,7 +1377,8 @@ def command_ci(
 
     runner = gate_runner
     is_json = getattr(args, "json", False)
-    skip_acceptance = getattr(args, "skip_acceptance", False)
+    is_full = getattr(args, "full", False)
+    skip_acceptance = getattr(args, "skip_acceptance", False) and not is_full
     future_feature = getattr(args, "future_feature_gate", False)
 
     if is_json:
@@ -1700,6 +1701,7 @@ def build_parser() -> argparse.ArgumentParser:
     ci.add_argument("--project", default=argparse.SUPPRESS, help="Target project root directory")
     ci.add_argument("--future-feature-gate", action="store_true")
     ci.add_argument("--skip-acceptance", action="store_true")
+    ci.add_argument("--full", action="store_true", help="Run full CI suite including all gates")
     ci.add_argument("--json", action="store_true")
     ci.set_defaults(func=command_ci)
     ci_wait = sub.add_parser("ci-wait")
