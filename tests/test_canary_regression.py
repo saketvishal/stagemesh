@@ -282,6 +282,9 @@ def test_subprocess_executor_pipes_prompt_to_stdin(store: Store, tmp_path: Path)
     assert coord.tick() == 1
 
     captured_file = tmp_path / "captured_prompt.txt"
+    if not captured_file.exists():
+        from stagemesh.governance import prepare_task_worktree
+        captured_file = prepare_task_worktree(tmp_path, task_id) / "captured_prompt.txt"
     assert captured_file.exists()
     content = captured_file.read_text(encoding="utf-8")
     assert "write a helper function" in content

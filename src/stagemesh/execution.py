@@ -156,11 +156,19 @@ class FakeExecutor(Executor):
             prepare_task_worktree,
             resolve_or_capture_baseline,
         )
-        task_project = prepare_task_worktree(project, task_id)
+        baseline = resolve_or_capture_baseline(store, project, task_id)
+        task_project = prepare_task_worktree(project, task_id, base_sha=baseline.commit_sha)
         workspace = GitWorkspace(task_project)
         workspace.init_if_needed()
         execution_id = store.start_execution(task_id=task_id, claim_id=claim_id, kind=ExecutionKind.IMPLEMENTATION)
-        baseline = resolve_or_capture_baseline(store, workspace, task_id, execution_id=execution_id)
+        store.record_baseline(
+            task_id=task_id,
+            execution_id=execution_id,
+            commit_sha=baseline.commit_sha,
+            tree_sha=baseline.tree_sha,
+            branch=baseline.branch,
+            repo_path=baseline.repo_path,
+        )
         task_file = task_project / f"stagemesh-task-{task_id}.txt"
         task_file.write_text(f"implemented {task_id}\n", encoding="utf-8")
         agent_tree = capture_agent_result_tree(workspace)
@@ -203,7 +211,10 @@ class SubprocessExecutor(Executor):
             prepare_task_worktree,
             resolve_or_capture_baseline,
         )
-        task_project = prepare_task_worktree(project, task_id)
+
+        # Baseline is durably persisted BEFORE any provider process starts
+        baseline = resolve_or_capture_baseline(store, project, task_id)
+        task_project = prepare_task_worktree(project, task_id, base_sha=baseline.commit_sha)
         workspace = GitWorkspace(task_project)
         workspace.init_if_needed()
 
@@ -213,6 +224,21 @@ class SubprocessExecutor(Executor):
 
         result_file = task_project / f".stagemesh-result-{task_id}.json"
         extra_env = {"STAGEMESH_RESULT_PATH": str(result_file)}
+
+        execution_id = store.start_execution(
+            task_id=task_id,
+            claim_id=claim_id,
+            kind=ExecutionKind.IMPLEMENTATION,
+            executable=executable,
+        )
+        store.record_baseline(
+            task_id=task_id,
+            execution_id=execution_id,
+            commit_sha=baseline.commit_sha,
+            tree_sha=baseline.tree_sha,
+            branch=baseline.branch,
+            repo_path=baseline.repo_path,
+        )
 
         try:
             env = dict(subprocess.os.environ)
@@ -228,6 +254,7 @@ class SubprocessExecutor(Executor):
             )
         except FileNotFoundError as exc:
             is_cap, reason = classify_failure(1, exc=exc)
+            store.finish_execution(execution_id, ExecutionStatus.FAILED)
             return ExecutionResult(
                 ExecutionStatus.FAILED,
                 capacity_failure=is_cap,
@@ -235,16 +262,13 @@ class SubprocessExecutor(Executor):
             )
 
         ident = popen_identity(proc)
-        execution_id = store.start_execution(
-            task_id=task_id,
-            claim_id=claim_id,
-            kind=ExecutionKind.IMPLEMENTATION,
+        store.attach_execution_process(
+            execution_id=execution_id,
             pid=ident.pid,
             process_create_time=ident.create_time,
             boot_id=ident.boot_id,
             executable=ident.executable,
         )
-        baseline = resolve_or_capture_baseline(store, workspace, task_id, execution_id=execution_id)
 
         try:
             stdout, stderr = proc.communicate(input=task_prompt)

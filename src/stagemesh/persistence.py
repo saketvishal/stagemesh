@@ -539,9 +539,26 @@ class Store:
                 (task_id, execution_id),
             ).fetchone()
         return self.conn.execute(
-            "SELECT * FROM task_baselines WHERE task_id=? ORDER BY created_at DESC LIMIT 1",
+            "SELECT * FROM task_baselines WHERE task_id=? ORDER BY created_at ASC LIMIT 1",
             (task_id,),
         ).fetchone()
+
+    def attach_execution_process(
+        self,
+        execution_id: str,
+        pid: int,
+        process_create_time: float | None = None,
+        boot_id: str | None = None,
+        executable: str | None = None,
+    ) -> None:
+        execution_id = _validate_text(execution_id, "execution id")
+        now = time.time()
+        self._mutate(
+            lambda: self.conn.execute(
+                "UPDATE executions SET pid=?, process_create_time=?, boot_id=?, executable=?, updated_at=? WHERE id=?",
+                (pid, process_create_time, boot_id, executable, now, execution_id),
+            )
+        )
 
     def add_evidence(
         self,
