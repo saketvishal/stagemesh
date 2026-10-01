@@ -526,3 +526,259 @@ def test_ordinary_commit_text_mentioning_ai_is_not_rejected() -> None:
     # Ensure ordinary text extract has no trailers
     from stagemesh.governance import _extract_attribution_trailers
     assert _extract_attribution_trailers(message) == []
+
+
+def test_real_production_path_worktree_isolation(store: Store, repo: tuple[Path, GitWorkspace]) -> None:
+    """1. Production worktree isolation: Primary project contains unrelated dirty and untracked files.
+    Execution through normal Coordinator path must not leak either unrelated file into canonical candidate,
+    and primary checkout must remain unchanged.
+    """
+    repo_dir, ws = repo
+    task_id = store.upsert_task("worktree-isolation-task")
+    store.advance_task(task_id, Stage.IMPLEMENT)
+
+    # Dirty primary checkout with an unrelated modification and an untracked file
+    unrelated_mod = repo_dir / "README.md"
+    unrelated_mod.write_text("# UNRELATED MODIFIED IN PRIMARY CHECKOUT\n", encoding="utf-8")
+    unrelated_untracked = repo_dir / "unrelated_untracked.txt"
+    unrelated_untracked.write_text("unrelated untracked file in primary\n", encoding="utf-8")
+
+    # Primary checkout is dirty
+    primary_status_before = ws.run("status", "--porcelain").stdout
+    assert "M README.md" in primary_status_before
+    assert "?? unrelated_untracked.txt" in primary_status_before
+
+    # Run through normal Coordinator tick
+    coord = Coordinator(store, repo_dir, executor=FakeExecutor())
+    assert coord.tick() == 1
+    assert store.get_task(task_id)["stage"] == Stage.VALIDATE
+
+    candidate = store.latest_candidate(task_id)
+    assert candidate is not None
+    canonical_sha = candidate["sha"]
+
+    # Verify canonical candidate files: neither unrelated file must be present or contaminated
+    candidate_files = ws.run("ls-tree", "-r", "--name-only", canonical_sha).stdout.splitlines()
+    assert "unrelated_untracked.txt" not in candidate_files
+    assert f"stagemesh-task-{task_id}.txt" in candidate_files
+
+    # README in candidate must remain at baseline, NOT primary dirty modification
+    readme_in_candidate = ws.run("show", f"{canonical_sha}:README.md").stdout
+    assert "UNRELATED MODIFIED" not in readme_in_candidate
+    assert "Initial baseline" in readme_in_candidate
+
+    # Primary checkout must remain dirty and unchanged
+    primary_status_after = ws.run("status", "--porcelain").stdout
+    assert "M README.md" in primary_status_after
+    assert "?? unrelated_untracked.txt" in primary_status_after
+
+
+def test_subprocess_executor_structured_result_artifact_exclusion(store: Store, repo: tuple[Path, GitWorkspace]) -> None:
+    """2. Fix structured-result artifact contamination: .stagemesh-result-<task_id>.json
+    must NEVER become part of the agent result tree.
+    """
+    import sys
+    repo_dir, ws = repo
+    task_id = store.upsert_task("structured-result-task")
+    store.advance_task(task_id, Stage.IMPLEMENT)
+    claim_id = store.acquire_claim(task_id, "worker-sub")
+
+    # Python script executed by SubprocessExecutor
+    script = (
+        "import os, json, subprocess\n"
+        "from pathlib import Path\n"
+        "result_path = Path(os.environ['STAGEMESH_RESULT_PATH'])\n"
+        "(Path.cwd() / 'feature.py').write_text('def run(): return 42\\n')\n"
+        "subprocess.run(['git', 'add', '-A'], check=True)\n"
+        "subprocess.run(['git', 'commit', '-m', 'agent temporary commit\\n\\nCo-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>'], check=True)\n"
+        "temp_sha = subprocess.check_output(['git', 'rev-parse', 'HEAD']).decode().strip()\n"
+        "result_path.write_text(json.dumps({'status': 'SUCCEEDED', 'candidate_sha': temp_sha, 'durable_handoff': True}))\n"
+    )
+
+    executor = SubprocessExecutor(command=[sys.executable, "-c", script])
+    result = executor.run(store, task_id, claim_id, repo_dir)
+
+    assert result.status is ExecutionStatus.SUCCEEDED
+    assert result.candidate_sha is not None
+
+    canonical_sha = result.candidate_sha
+    candidate = store.latest_candidate(task_id)
+    assert candidate is not None
+    assert candidate["sha"] == canonical_sha
+
+    # PROOF 1: .stagemesh-result file is NOT in canonical candidate tree
+    candidate_files = ws.run("ls-tree", "-r", "--name-only", canonical_sha).stdout
+    assert ".stagemesh-result" not in candidate_files
+    assert "feature.py" in candidate_files
+
+    # PROOF 2: Unwanted Claude trailer is absent
+    log_text = ws.run("log", "-1", canonical_sha).stdout
+    assert "Co-Authored-By" not in log_text
+    assert "noreply@anthropic.com" not in log_text
+
+    # PROOF 3: Worktree is clean
+    from stagemesh.governance import prepare_task_worktree
+    task_wt = prepare_task_worktree(repo_dir, task_id)
+    assert GitWorkspace(task_wt).run("status", "--porcelain").stdout.strip() == ""
+
+
+def test_true_crash_restart_baseline_recovery(store: Store, repo: tuple[Path, GitWorkspace]) -> None:
+    """3. True crash/restart test: Persist baseline BEFORE provider execution.
+    On restart after crash before candidate persistence, recover original baseline A,
+    do not recapture baseline from moved worktree HEAD, and candidate parent remains A.
+    """
+    repo_dir, ws = repo
+    task_id = store.upsert_task("task-crash-recovery")
+    from stagemesh.governance import prepare_task_worktree, resolve_or_capture_baseline
+
+    task_wt = prepare_task_worktree(repo_dir, task_id)
+    wt_ws = GitWorkspace(task_wt)
+
+    # A. Persist baseline A before provider starts
+    exec_id_1 = store.start_execution(task_id=task_id, claim_id=None, kind=ExecutionKind.IMPLEMENTATION)
+    baseline_A = resolve_or_capture_baseline(store, wt_ws, task_id, execution_id=exec_id_1)
+    assert baseline_A.commit_sha is not None
+    assert store.get_baseline(task_id, exec_id_1) is not None
+
+    # B. Provider modifies files and creates 2 temporary commits in task worktree
+    (task_wt / "agent_step1.py").write_text("step 1\n", encoding="utf-8")
+    wt_ws.run("add", "-A")
+    wt_ws.run("commit", "-m", "agent commit 1")
+    (task_wt / "agent_step2.py").write_text("step 2\n", encoding="utf-8")
+    wt_ws.run("add", "-A")
+    wt_ws.run("commit", "-m", "agent commit 2")
+
+    # Worktree HEAD has now moved away from baseline A
+    current_wt_head = wt_ws.run("rev-parse", "HEAD").stdout.strip()
+    assert current_wt_head != baseline_A.commit_sha
+
+    # C. Produce agent result tree
+    agent_tree = capture_agent_result_tree(wt_ws)
+
+    # D. SIMULATE CRASH: Process dies before Candidate persistence (store.add_candidate never called)
+    assert store.latest_candidate(task_id) is None
+
+    # E. RECREATE all runtime objects from store (fresh instances, no in-memory baseline)
+    fresh_store = Store(store.db_path)
+    fresh_wt_ws = GitWorkspace(task_wt)
+
+    # F. RESUME: Recover baseline from persistence
+    recovered_baseline = resolve_or_capture_baseline(fresh_store, fresh_wt_ws, task_id)
+
+    # G. PROOF: Original baseline A is recovered, NOT recaptured from current_wt_head
+    assert recovered_baseline.commit_sha == baseline_A.commit_sha
+    assert recovered_baseline.commit_sha != current_wt_head
+
+    # H. Canonical candidate parent remains baseline A
+    exec_id_2 = fresh_store.start_execution(task_id=task_id, claim_id=None, kind=ExecutionKind.IMPLEMENTATION)
+    canonical_sha = canonicalize_and_record_candidate(
+        store=fresh_store,
+        workspace=fresh_wt_ws,
+        task_id=task_id,
+        execution_id=exec_id_2,
+        claim_id=None,
+        provider="agent",
+        baseline=recovered_baseline,
+        agent_result_tree=agent_tree,
+    )
+
+    parents = fresh_wt_ws.run("rev-parse", f"{canonical_sha}^@").stdout.splitlines()
+    assert parents == [baseline_A.commit_sha]
+
+    # I. No extra parent chain created
+    ancestors = fresh_wt_ws.run("rev-list", canonical_sha).stdout.splitlines()
+    assert ancestors == [canonical_sha, baseline_A.commit_sha]
+    assert current_wt_head not in ancestors
+    fresh_store.close()
+
+
+def test_idempotent_governance_provenance_repair(store: Store, repo: tuple[Path, GitWorkspace]) -> None:
+    """4. Make governance provenance repairable/idempotent:
+    Candidate persisted -> crash before governance audit -> restart ->
+    same candidate reused -> exactly one governance evidence record exists.
+    """
+    repo_dir, ws = repo
+    task_id = store.upsert_task("task-repair-provenance")
+    baseline = capture_baseline(ws, task_id)
+    exec_id = store.start_execution(task_id=task_id, claim_id=None, kind=ExecutionKind.IMPLEMENTATION)
+
+    (repo_dir / "code.txt").write_text("production code\n", encoding="utf-8")
+    agent_tree = capture_agent_result_tree(ws)
+
+    # Create canonical candidate commit manually to simulate: candidate created and persisted,
+    # but crash occurred before record_audit("governance.candidate_canonicalized")
+    canonicalizer = CandidateCanonicalizer()
+    canonical_sha = canonicalizer.canonicalize(ws, baseline, agent_tree, task_id)
+    store.add_candidate(task_id, canonical_sha, "agent", durable_handoff=True, base_sha=baseline.commit_sha)
+
+    # Pre-condition: candidate exists, but governance evidence is missing
+    assert store.latest_candidate(task_id) is not None
+    assert get_governance_evidence(store, task_id) is None
+
+    # Restart / Resume: canonicalize_and_record_candidate is invoked
+    reused_sha = canonicalize_and_record_candidate(
+        store=store,
+        workspace=ws,
+        task_id=task_id,
+        execution_id=exec_id,
+        claim_id=None,
+        provider="agent",
+        baseline=baseline,
+        agent_result_tree=agent_tree,
+    )
+
+    # Candidate reused
+    assert reused_sha == canonical_sha
+
+    # Evidence repaired idempotently
+    evidence = get_governance_evidence(store, task_id)
+    assert evidence is not None
+    assert evidence["canonical_candidate_sha"] == canonical_sha
+
+    # Call again to verify absolute idempotency: exactly ONE audit record exists
+    canonicalize_and_record_candidate(
+        store=store,
+        workspace=ws,
+        task_id=task_id,
+        execution_id=exec_id,
+        claim_id=None,
+        provider="agent",
+        baseline=baseline,
+        agent_result_tree=agent_tree,
+    )
+
+    audit_events = [e for e in store.audit_events(limit=500) if e["event_type"] == "governance.candidate_canonicalized"]
+    matching = [e for e in audit_events if json.loads(e["payload"]).get("task_id") == task_id]
+    assert len(matching) == 1
+
+
+def test_runtime_command_adapter_production_governance(store: Store, repo: tuple[Path, GitWorkspace]) -> None:
+    """5. Real built-in executor path: RuntimeCommandAdapter must enforce Git Governance."""
+    import sys
+    from stagemesh.providers import RuntimeCommandAdapter
+
+    repo_dir, ws = repo
+    task_id = store.upsert_task("runtime-adapter-task")
+    store.advance_task(task_id, Stage.IMPLEMENT)
+    claim_id = store.acquire_claim(task_id, "worker-adapter")
+
+    script = (
+        "from pathlib import Path\n"
+        "(Path.cwd() / 'adapter_output.txt').write_text('adapter code\\n')\n"
+    )
+    adapter = RuntimeCommandAdapter(name="grok", command=(sys.executable, "-c", script))
+
+    result = adapter.execute(store, task_id, claim_id, repo_dir)
+    assert result.status is ExecutionStatus.SUCCEEDED
+    assert result.candidate_sha is not None
+
+    canonical_sha = result.candidate_sha
+    candidate = store.latest_candidate(task_id)
+    assert candidate is not None
+    assert candidate["sha"] == canonical_sha
+
+    # Verify StageMesh author identity on canonical candidate
+    log_text = ws.run("log", "-1", canonical_sha).stdout
+    assert "Author: StageMesh <stagemesh@example.invalid>" in log_text
+    assert "adapter_output.txt" in ws.run("ls-tree", "-r", "--name-only", canonical_sha).stdout
+

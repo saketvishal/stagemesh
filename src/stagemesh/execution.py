@@ -150,12 +150,18 @@ class FakeExecutor(Executor):
     name = "fake"
 
     def run(self, store: Store, task_id: str, claim_id: str | None, project: Path) -> ExecutionResult:
-        workspace = GitWorkspace(project)
+        from .governance import (
+            capture_agent_result_tree,
+            canonicalize_and_record_candidate,
+            prepare_task_worktree,
+            resolve_or_capture_baseline,
+        )
+        task_project = prepare_task_worktree(project, task_id)
+        workspace = GitWorkspace(task_project)
         workspace.init_if_needed()
-        from .governance import capture_baseline, capture_agent_result_tree, canonicalize_and_record_candidate
-        baseline = capture_baseline(workspace, task_id)
         execution_id = store.start_execution(task_id=task_id, claim_id=claim_id, kind=ExecutionKind.IMPLEMENTATION)
-        task_file = project / f"stagemesh-task-{task_id}.txt"
+        baseline = resolve_or_capture_baseline(store, workspace, task_id, execution_id=execution_id)
+        task_file = task_project / f"stagemesh-task-{task_id}.txt"
         task_file.write_text(f"implemented {task_id}\n", encoding="utf-8")
         agent_tree = capture_agent_result_tree(workspace)
         sha = canonicalize_and_record_candidate(
@@ -191,16 +197,21 @@ class SubprocessExecutor(Executor):
                 failure_reason="provider_unavailable",
             )
 
-        workspace = GitWorkspace(project)
+        from .governance import (
+            capture_agent_result_tree,
+            canonicalize_and_record_candidate,
+            prepare_task_worktree,
+            resolve_or_capture_baseline,
+        )
+        task_project = prepare_task_worktree(project, task_id)
+        workspace = GitWorkspace(task_project)
         workspace.init_if_needed()
-        from .governance import capture_baseline, capture_agent_result_tree, canonicalize_and_record_candidate
-        baseline = capture_baseline(workspace, task_id)
 
         task = store.get_task(task_id)
         from .providers import _build_task_prompt
         task_prompt = _build_task_prompt(task_id, task)
 
-        result_file = project / f".stagemesh-result-{task_id}.json"
+        result_file = task_project / f".stagemesh-result-{task_id}.json"
         extra_env = {"STAGEMESH_RESULT_PATH": str(result_file)}
 
         try:
@@ -208,7 +219,7 @@ class SubprocessExecutor(Executor):
             env.update(extra_env)
             proc = subprocess.Popen(
                 self.command,
-                cwd=project,
+                cwd=task_project,
                 text=True,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
@@ -233,6 +244,7 @@ class SubprocessExecutor(Executor):
             boot_id=ident.boot_id,
             executable=ident.executable,
         )
+        baseline = resolve_or_capture_baseline(store, workspace, task_id, execution_id=execution_id)
 
         try:
             stdout, stderr = proc.communicate(input=task_prompt)
@@ -246,6 +258,9 @@ class SubprocessExecutor(Executor):
         if result_file.exists():
             try:
                 res_content = result_file.read_text(encoding="utf-8")
+                # Explicitly remove control artifact BEFORE tree capture to prevent contamination
+                result_file.unlink(missing_ok=True)
+                workspace.run("rm", "--cached", "--ignore-unmatch", str(result_file.name), check=False)
                 parsed = parse_structured_result(res_content, expected_task_id=task_id)
                 canonical_sha = None
                 if parsed.status is ExecutionStatus.SUCCEEDED:
