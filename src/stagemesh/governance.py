@@ -111,9 +111,78 @@ def capture_baseline(project: Path | GitWorkspace, task_id: str) -> TaskBaseline
     )
 
 
+def resolve_or_capture_baseline(
+    store: Store,
+    project: Path | GitWorkspace,
+    task_id: str,
+    execution_id: str | None = None,
+) -> TaskBaseline:
+    """Recover previously persisted baseline on restart, or capture and persist new baseline."""
+    persisted = store.get_baseline(task_id, execution_id=execution_id)
+    if persisted:
+        return TaskBaseline(
+            task_id=task_id,
+            commit_sha=persisted["commit_sha"],
+            tree_sha=persisted["tree_sha"],
+            branch=persisted["branch"],
+            repo_path=persisted["repo_path"],
+        )
+    baseline = capture_baseline(project, task_id)
+    if execution_id:
+        store.record_baseline(
+            task_id=task_id,
+            execution_id=execution_id,
+            commit_sha=baseline.commit_sha,
+            tree_sha=baseline.tree_sha,
+            branch=baseline.branch,
+            repo_path=baseline.repo_path,
+        )
+    return baseline
+
+
+def prepare_task_worktree(project: Path, task_id: str, base_sha: str | None = None) -> Path:
+    """Prepare a dedicated StageMesh task worktree isolated from the primary project checkout."""
+    from .worktree import ensure_worktree, task_branch_name, is_git_worktree
+    ws_path = Path(project).resolve()
+    if is_git_worktree(ws_path) and ".stagemesh" in str(ws_path):
+        return ws_path
+
+    git_dir = ws_path / ".git"
+    if not git_dir.exists():
+        return ws_path
+
+    # Ensure .stagemesh/ is in .git/info/exclude of primary repo
+    try:
+        exclude = (git_dir if git_dir.is_dir() else ws_path) / "info" / "exclude"
+        if exclude.parent.exists():
+            content = exclude.read_text(encoding="utf-8") if exclude.exists() else ""
+            if ".stagemesh/" not in content:
+                exclude.write_text(content + "\n.stagemesh/\n", encoding="utf-8")
+    except Exception:
+        pass
+
+    safe_name = re.sub(r"[^A-Za-z0-9._-]", "-", task_id).strip("./-") or "task"
+    worktree_path = ws_path / ".stagemesh" / "worktrees" / safe_name
+    try:
+        wt = ensure_worktree(
+            worktree_path,
+            repo_root=ws_path,
+            branch_name=task_branch_name(task_id),
+            base_sha=base_sha,
+        )
+        return wt or ws_path
+    except Exception:
+        return ws_path
+
+
 def capture_agent_result_tree(workspace: GitWorkspace, agent_candidate_sha: str | None = None) -> str:
     """Determine the actual final repository tree resulting from the agent's work."""
     workspace.init_if_needed()
+
+    # Explicitly remove StageMesh control artifacts before staging
+    for ctrl in list(workspace.path.glob(".stagemesh-result-*.json")):
+        ctrl.unlink(missing_ok=True)
+    workspace.run("rm", "--cached", "--ignore-unmatch", ".stagemesh-result-*.json", check=False)
 
     # Stage any worktree changes made by the agent
     workspace.run("add", "-A")
@@ -348,8 +417,9 @@ class CandidateCanonicalizer:
             expected_parent_sha=baseline.commit_sha,
         )
 
-        # Align worktree HEAD to the canonical candidate commit
+        # Align worktree HEAD to the canonical candidate commit and ensure clean index
         workspace.run("update-ref", "HEAD", canonical_sha)
+        workspace.run("reset", "--mixed", canonical_sha, check=False)
 
         return canonical_sha
 
@@ -380,13 +450,34 @@ def canonicalize_and_record_candidate(
             tree_probe = workspace.run("rev-parse", "--verify", "--quiet", f"{existing_sha}^{{tree}}", check=False)
             if tree_probe.returncode == 0 and tree_probe.stdout.strip() == agent_result_tree:
                 try:
-                    validator.validate(
+                    val_result = validator.validate(
                         workspace=workspace,
                         commit_sha=existing_sha,
                         expected_tree_sha=agent_result_tree,
                         expected_parent_sha=baseline.commit_sha,
                     )
                     workspace.run("update-ref", "HEAD", existing_sha)
+                    workspace.run("reset", "--mixed", existing_sha, check=False)
+                    # Provenance repair: if governance audit evidence was missing due to crash, recreate it idempotently
+                    if not get_governance_evidence(store, task_id):
+                        record_audit(
+                            store,
+                            "governance.candidate_canonicalized",
+                            {
+                                "task_id": task_id,
+                                "execution_id": execution_id,
+                                "provider": provider,
+                                "agent_candidate_sha": agent_candidate_sha,
+                                "baseline_sha": baseline.commit_sha,
+                                "baseline_tree_sha": baseline.tree_sha,
+                                "agent_result_tree_sha": agent_result_tree,
+                                "canonical_candidate_sha": existing_sha,
+                                "canonical_candidate_tree_sha": agent_result_tree,
+                                "tree_match": True,
+                                "metadata_validation": val_result.to_dict(),
+                                "timestamp": time.time(),
+                            },
+                        )
                     return existing_sha
                 except GovernanceValidationError:
                     pass

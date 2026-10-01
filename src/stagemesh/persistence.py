@@ -220,6 +220,16 @@ class Store:
                 created_at REAL NOT NULL,
                 updated_at REAL NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS task_baselines (
+                task_id TEXT NOT NULL REFERENCES tasks(id),
+                execution_id TEXT NOT NULL,
+                commit_sha TEXT,
+                tree_sha TEXT,
+                branch TEXT,
+                repo_path TEXT,
+                created_at REAL NOT NULL,
+                PRIMARY KEY (task_id, execution_id)
+            );
             CREATE TABLE IF NOT EXISTS workers (
                 id TEXT PRIMARY KEY,
                 provider TEXT NOT NULL,
@@ -490,6 +500,47 @@ class Store:
     def latest_candidate(self, task_id: str) -> sqlite3.Row | None:
         return self.conn.execute(
             "SELECT * FROM candidates WHERE task_id=? ORDER BY created_at DESC LIMIT 1", (task_id,)
+        ).fetchone()
+
+    def record_baseline(
+        self,
+        task_id: str,
+        execution_id: str,
+        commit_sha: str | None,
+        tree_sha: str | None,
+        branch: str | None = None,
+        repo_path: str | None = None,
+    ) -> None:
+        task_id = _validate_text(task_id, "task id")
+        execution_id = _validate_text(execution_id, "execution id")
+        if commit_sha is not None:
+            commit_sha = _validate_text(commit_sha, "commit sha")
+        if tree_sha is not None:
+            tree_sha = _validate_text(tree_sha, "tree sha")
+        if branch is not None:
+            branch = _validate_text(branch, "branch")
+        if repo_path is not None:
+            repo_path = _validate_text(repo_path, "repo path")
+        now = time.time()
+        self._mutate(
+            lambda: self.conn.execute(
+                "INSERT OR REPLACE INTO task_baselines (task_id, execution_id, commit_sha, tree_sha, branch, repo_path, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (task_id, execution_id, commit_sha, tree_sha, branch, repo_path, now),
+            )
+        )
+
+    def get_baseline(self, task_id: str, execution_id: str | None = None) -> sqlite3.Row | None:
+        task_id = _validate_text(task_id, "task id")
+        if execution_id:
+            execution_id = _validate_text(execution_id, "execution id")
+            return self.conn.execute(
+                "SELECT * FROM task_baselines WHERE task_id=? AND execution_id=?",
+                (task_id, execution_id),
+            ).fetchone()
+        return self.conn.execute(
+            "SELECT * FROM task_baselines WHERE task_id=? ORDER BY created_at DESC LIMIT 1",
+            (task_id,),
         ).fetchone()
 
     def add_evidence(

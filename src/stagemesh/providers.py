@@ -55,14 +55,19 @@ class RuntimeCommandAdapter:
             return ExecutionResult(ExecutionStatus.FAILED, capacity_failure=True, failure_reason="provider_unavailable")
         task = store.get_task(task_id)
         task_prompt = _build_task_prompt(task_id, task)
-        workspace = GitWorkspace(project)
+        from .governance import (
+            capture_agent_result_tree,
+            canonicalize_and_record_candidate,
+            prepare_task_worktree,
+            resolve_or_capture_baseline,
+        )
+        task_project = prepare_task_worktree(project, task_id)
+        workspace = GitWorkspace(task_project)
         workspace.init_if_needed()
-        from .governance import capture_baseline, capture_agent_result_tree, canonicalize_and_record_candidate
-        baseline = capture_baseline(workspace, task_id)
         try:
             proc = subprocess.Popen(
                 list(self.command),
-                cwd=project,
+                cwd=task_project,
                 text=True,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
@@ -81,6 +86,7 @@ class RuntimeCommandAdapter:
             boot_id=identity.boot_id,
             executable=identity.executable,
         )
+        baseline = resolve_or_capture_baseline(store, workspace, task_id, execution_id=execution_id)
         stdout, stderr = proc.communicate(input=task_prompt)
         if proc.returncode != 0:
             is_cap, reason = classify_failure(proc.returncode, stdout, stderr)
