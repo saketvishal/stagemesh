@@ -55,7 +55,10 @@ class RuntimeCommandAdapter:
             return ExecutionResult(ExecutionStatus.FAILED, capacity_failure=True, failure_reason="provider_unavailable")
         task = store.get_task(task_id)
         task_prompt = _build_task_prompt(task_id, task)
-        base_sha = _capture_baseline_sha(project)
+        workspace = GitWorkspace(project)
+        workspace.init_if_needed()
+        from .governance import capture_baseline, capture_agent_result_tree, canonicalize_and_record_candidate
+        baseline = capture_baseline(workspace, task_id)
         try:
             proc = subprocess.Popen(
                 list(self.command),
@@ -83,15 +86,28 @@ class RuntimeCommandAdapter:
             is_cap, reason = classify_failure(proc.returncode, stdout, stderr)
             store.finish_execution(execution_id, ExecutionStatus.FAILED)
             return ExecutionResult(ExecutionStatus.FAILED, capacity_failure=is_cap, failure_reason=reason)
-        workspace = GitWorkspace(project)
-        workspace.init_if_needed()
-        sha = workspace.commit_all(
-            f"StageMesh implementation for {task_id}",
-            attribution=attribution_for_worker("local-worker", self.name),
-        )
-        store.add_candidate(task_id, sha, self.name, durable_handoff=True, base_sha=base_sha)
-        store.finish_execution(execution_id, ExecutionStatus.SUCCEEDED, sha)
-        return ExecutionResult(ExecutionStatus.SUCCEEDED, sha, durable_handoff=True)
+        try:
+            agent_tree = capture_agent_result_tree(workspace)
+            sha = canonicalize_and_record_candidate(
+                store=store,
+                workspace=workspace,
+                task_id=task_id,
+                execution_id=execution_id,
+                claim_id=claim_id,
+                provider=self.name,
+                baseline=baseline,
+                agent_result_tree=agent_tree,
+                durable_handoff=True,
+            )
+            store.finish_execution(execution_id, ExecutionStatus.SUCCEEDED, sha)
+            return ExecutionResult(ExecutionStatus.SUCCEEDED, sha, durable_handoff=True)
+        except Exception as exc:
+            store.finish_execution(execution_id, ExecutionStatus.FAILED)
+            return ExecutionResult(
+                ExecutionStatus.FAILED,
+                capacity_failure=False,
+                failure_reason=f"governance_canonicalization_failed: {exc}",
+            )
 
     def run(self, store: Store, task_id: str, claim_id: str | None, project: Path) -> ExecutionResult:
         return self.execute(store, task_id, claim_id, project)
