@@ -679,6 +679,15 @@ def canonicalize_and_record_candidate(
     policy = policy or GitGovernancePolicy()
     validator = CommitMetadataValidator(policy)
 
+    # Defensive scope enforcement: only authorized result trees may enter CandidateCanonicalizer
+    contract = store.get_change_contract(task_id)
+    if contract is not None:
+        from .controlled_change import derive_git_changeset, enforce_change_scope, ScopeViolationError
+        changeset = derive_git_changeset(workspace.path, task_id, baseline.commit_sha, agent_result_tree)
+        scope_result = enforce_change_scope(contract, changeset)
+        if not scope_result.is_authorized:
+            raise ScopeViolationError(scope_result)
+
     # 1. Idempotency check: see if a valid canonical candidate for this task & baseline already exists
     existing = store.latest_candidate(task_id)
     if existing and existing["base_sha"] == baseline.commit_sha:

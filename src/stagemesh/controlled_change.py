@@ -147,6 +147,11 @@ class ScopeValidationResult:
         }
 
 
+class MissingChangeContractError(RuntimeError):
+    """Raised when an execution or transition requires a ChangeContract that does not exist."""
+    pass
+
+
 class ScopeViolationError(ValueError):
     def __init__(self, result: ScopeValidationResult):
         super().__init__(result.error_message or "Change scope violation")
@@ -508,3 +513,96 @@ def format_validation_plan_explain(
     lines.append("")
     lines.append(f"Validation:\n  {plan.validation_level}")
     return "\n".join(lines)
+
+
+def format_provider_contract_prompt(contract: ChangeContract) -> str:
+    """Bounded, machine-generated instructions added to the coding provider prompt."""
+    allowed_lines = "\n".join(f"- {p}" for p in contract.allowed_paths) if contract.allowed_paths else "  (none specified)"
+    expected_lines = "\n".join(f"- {p}" for p in contract.expected_paths) if contract.expected_paths else "  (none specified)"
+    forbidden_lines = "\n".join(f"- {p}" for p in contract.forbidden_paths) if contract.forbidden_paths else "  (none)"
+    req_tests = "\n".join(f"- {t}" for t in contract.required_tests) if contract.required_tests else "  (none specified)"
+
+    return (
+        "AUTHORIZED CHANGE SCOPE:\n"
+        f"{allowed_lines}\n\n"
+        "EXPECTED PATHS:\n"
+        f"{expected_lines}\n\n"
+        "FORBIDDEN PATHS:\n"
+        f"{forbidden_lines}\n\n"
+        "VALIDATION AUTHORITY:\n"
+        f"  {contract.validation_level}\n\n"
+        "REQUIRED TARGETED TESTS:\n"
+        f"{req_tests}\n\n"
+        "Do not modify files outside the authorized scope.\n"
+        "Do not run repository-wide validation unless StageMesh explicitly assigns FULL.\n"
+        "StageMesh performs authoritative lifecycle validation after your implementation.\n"
+    )
+
+
+def check_scope_and_canonicalize(
+    store: Any,
+    workspace: Any,
+    task_id: str,
+    execution_id: str,
+    claim_id: str | None,
+    provider: str,
+    baseline: Any,
+    agent_result_tree: str,
+    *,
+    contract: ChangeContract,
+    policy: Any | None = None,
+    durable_handoff: bool = True,
+    agent_candidate_sha: str | None = None,
+) -> tuple[str | None, ScopeValidationResult]:
+    """
+    Enforces scope before canonical candidate creation.
+    If scope fails:
+    - does NOT create canonical commit
+    - does NOT add candidate
+    - records structured scope-violation evidence and audit
+    - returns (None, scope_result)
+    Only authorized result trees enter CandidateCanonicalizer.
+    """
+    from .domain import EvidenceKind, EvidenceStatus
+    from .audit import record_audit
+    from .governance import canonicalize_and_record_candidate
+
+    changeset = derive_git_changeset(workspace.path, task_id, baseline.commit_sha, agent_result_tree)
+    store.save_change_set(changeset)
+    scope_result = enforce_change_scope(contract, changeset)
+
+    if not scope_result.is_authorized:
+        store.add_evidence(
+            task_id,
+            baseline.commit_sha,
+            EvidenceKind.VALIDATION,
+            EvidenceStatus.FAILED,
+            {"scope_violation": scope_result.to_dict()},
+        )
+        record_audit(
+            store,
+            "scope.violation",
+            {
+                "task_id": task_id,
+                "execution_id": execution_id,
+                "provider": provider,
+                "scope_violation": scope_result.to_dict(),
+            },
+        )
+        return None, scope_result
+
+    canonical_sha = canonicalize_and_record_candidate(
+        store=store,
+        workspace=workspace,
+        task_id=task_id,
+        execution_id=execution_id,
+        claim_id=claim_id,
+        provider=provider,
+        baseline=baseline,
+        agent_result_tree=agent_result_tree,
+        policy=policy,
+        durable_handoff=durable_handoff,
+        agent_candidate_sha=agent_candidate_sha,
+    )
+    return canonical_sha, scope_result
+

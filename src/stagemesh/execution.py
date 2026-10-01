@@ -157,6 +157,11 @@ class FakeExecutor(Executor):
             recover_pending_canonical_candidate,
             resolve_or_capture_baseline,
         )
+        from .controlled_change import MissingChangeContractError, check_scope_and_canonicalize
+        contract = store.get_change_contract(task_id)
+        if contract is None:
+            raise MissingChangeContractError(f"Task {task_id} cannot execute without a ChangeContract")
+
         baseline = resolve_or_capture_baseline(store, project, task_id)
         task_project = prepare_task_worktree(project, task_id, base_sha=baseline.commit_sha)
         workspace = GitWorkspace(task_project)
@@ -185,7 +190,7 @@ class FakeExecutor(Executor):
         task_file = task_project / f"stagemesh-task-{task_id}.txt"
         task_file.write_text(f"implemented {task_id}\n", encoding="utf-8")
         agent_tree = capture_agent_result_tree(workspace)
-        sha = canonicalize_and_record_candidate(
+        sha, scope_result = check_scope_and_canonicalize(
             store=store,
             workspace=workspace,
             task_id=task_id,
@@ -194,8 +199,16 @@ class FakeExecutor(Executor):
             provider=self.name,
             baseline=baseline,
             agent_result_tree=agent_tree,
+            contract=contract,
             durable_handoff=True,
         )
+        if not scope_result.is_authorized or not sha:
+            store.finish_execution(execution_id, ExecutionStatus.FAILED)
+            return ExecutionResult(
+                ExecutionStatus.FAILED,
+                failure_reason=f"scope_violation: {scope_result.error_message}",
+                metadata={"scope_violation": scope_result.to_dict()},
+            )
         store.finish_execution(execution_id, ExecutionStatus.SUCCEEDED, sha)
         return ExecutionResult(ExecutionStatus.SUCCEEDED, sha, durable_handoff=True)
 
@@ -226,6 +239,11 @@ class SubprocessExecutor(Executor):
             resolve_or_capture_baseline,
         )
 
+        from .controlled_change import MissingChangeContractError, check_scope_and_canonicalize
+        contract = store.get_change_contract(task_id)
+        if contract is None:
+            raise MissingChangeContractError(f"Task {task_id} cannot execute without a ChangeContract")
+
         # Baseline is durably persisted BEFORE any provider process starts
         baseline = resolve_or_capture_baseline(store, project, task_id)
         task_project = prepare_task_worktree(project, task_id, base_sha=baseline.commit_sha)
@@ -245,7 +263,7 @@ class SubprocessExecutor(Executor):
 
         task = store.get_task(task_id)
         from .providers import _build_task_prompt
-        task_prompt = _build_task_prompt(task_id, task)
+        task_prompt = _build_task_prompt(task_id, task, contract=contract)
 
         result_file = task_project / f".stagemesh-result-{task_id}.json"
         extra_env = {"STAGEMESH_RESULT_PATH": str(result_file)}
@@ -314,7 +332,7 @@ class SubprocessExecutor(Executor):
                 canonical_sha = None
                 if parsed.status is ExecutionStatus.SUCCEEDED:
                     agent_tree = capture_agent_result_tree(workspace, agent_candidate_sha=parsed.candidate_sha)
-                    canonical_sha = canonicalize_and_record_candidate(
+                    canonical_sha, scope_result = check_scope_and_canonicalize(
                         store=store,
                         workspace=workspace,
                         task_id=task_id,
@@ -323,9 +341,17 @@ class SubprocessExecutor(Executor):
                         provider=self.name,
                         baseline=baseline,
                         agent_result_tree=agent_tree,
+                        contract=contract,
                         durable_handoff=parsed.durable_handoff,
                         agent_candidate_sha=parsed.candidate_sha,
                     )
+                    if not scope_result.is_authorized or not canonical_sha:
+                        store.finish_execution(execution_id, ExecutionStatus.FAILED)
+                        return ExecutionResult(
+                            ExecutionStatus.FAILED,
+                            failure_reason=f"scope_violation: {scope_result.error_message}",
+                            metadata={"scope_violation": scope_result.to_dict()},
+                        )
                 store.finish_execution(execution_id, parsed.status, canonical_sha)
                 return ExecutionResult(parsed.status, canonical_sha, durable_handoff=parsed.durable_handoff)
             except StructuredResultValidationError as exc:
@@ -356,7 +382,7 @@ class SubprocessExecutor(Executor):
 
         try:
             agent_tree = capture_agent_result_tree(workspace)
-            sha = canonicalize_and_record_candidate(
+            sha, scope_result = check_scope_and_canonicalize(
                 store=store,
                 workspace=workspace,
                 task_id=task_id,
@@ -365,8 +391,16 @@ class SubprocessExecutor(Executor):
                 provider=self.name,
                 baseline=baseline,
                 agent_result_tree=agent_tree,
+                contract=contract,
                 durable_handoff=True,
             )
+            if not scope_result.is_authorized or not sha:
+                store.finish_execution(execution_id, ExecutionStatus.FAILED)
+                return ExecutionResult(
+                    ExecutionStatus.FAILED,
+                    failure_reason=f"scope_violation: {scope_result.error_message}",
+                    metadata={"scope_violation": scope_result.to_dict()},
+                )
             store.finish_execution(execution_id, ExecutionStatus.SUCCEEDED, sha)
             return ExecutionResult(ExecutionStatus.SUCCEEDED, sha, durable_handoff=bool(sha))
         except Exception as exc:

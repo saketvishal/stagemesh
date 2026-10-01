@@ -53,8 +53,12 @@ class RuntimeCommandAdapter:
     def execute(self, store: Store, task_id: str, claim_id: str | None, project: Path) -> ExecutionResult:
         if self.check_capacity() != CapacityKind.AVAILABLE:
             return ExecutionResult(ExecutionStatus.FAILED, capacity_failure=True, failure_reason="provider_unavailable")
+        from .controlled_change import MissingChangeContractError, check_scope_and_canonicalize
+        contract = store.get_change_contract(task_id)
+        if contract is None:
+            raise MissingChangeContractError(f"Task {task_id} cannot execute without a ChangeContract")
         task = store.get_task(task_id)
-        task_prompt = _build_task_prompt(task_id, task)
+        task_prompt = _build_task_prompt(task_id, task, contract=contract)
         from .governance import (
             capture_agent_result_tree,
             canonicalize_and_record_candidate,
@@ -122,7 +126,7 @@ class RuntimeCommandAdapter:
             return ExecutionResult(ExecutionStatus.FAILED, capacity_failure=is_cap, failure_reason=reason)
         try:
             agent_tree = capture_agent_result_tree(workspace)
-            sha = canonicalize_and_record_candidate(
+            sha, scope_result = check_scope_and_canonicalize(
                 store=store,
                 workspace=workspace,
                 task_id=task_id,
@@ -131,8 +135,16 @@ class RuntimeCommandAdapter:
                 provider=self.name,
                 baseline=baseline,
                 agent_result_tree=agent_tree,
+                contract=contract,
                 durable_handoff=True,
             )
+            if not scope_result.is_authorized or not sha:
+                store.finish_execution(execution_id, ExecutionStatus.FAILED)
+                return ExecutionResult(
+                    ExecutionStatus.FAILED,
+                    failure_reason=f"scope_violation: {scope_result.error_message}",
+                    metadata={"scope_violation": scope_result.to_dict()},
+                )
             store.finish_execution(execution_id, ExecutionStatus.SUCCEEDED, sha)
             return ExecutionResult(ExecutionStatus.SUCCEEDED, sha, durable_handoff=True)
         except Exception as exc:
@@ -217,18 +229,21 @@ def _validate_capabilities(capabilities: frozenset[str]) -> frozenset[str]:
     return normalized
 
 
-def _build_task_prompt(task_id: str, task: object) -> str:
+def _build_task_prompt(task_id: str, task: object, contract: Any | None = None) -> str:
     """Build the prompt string sent via stdin to a provider CLI.
 
-    The prompt gives the agent its task title and a reminder to commit any
-    changes via git so StageMesh can capture the resulting SHA for evidence.
+    The prompt gives the agent its task title, change contract constraints, and instructions.
     """
     import sqlite3 as _sqlite3
+    from .controlled_change import format_provider_contract_prompt
 
     title = task["title"] if isinstance(task, _sqlite3.Row) and "title" in task.keys() else str(task_id)
-    return (
-        f"StageMesh task: {title}\n\n"
+    sections = [
+        f"StageMesh task: {title}\n",
         "Please implement the changes described above. "
         "When you are done, commit all changes to git with a descriptive commit message "
-        "so StageMesh can record the resulting commit SHA as the implementation candidate.\n"
-    )
+        "so StageMesh can record the resulting commit SHA as the implementation candidate.\n",
+    ]
+    if contract is not None:
+        sections.append(format_provider_contract_prompt(contract))
+    return "\n".join(sections)
