@@ -75,22 +75,35 @@ def run_ci(
     include_acceptance: bool = True,
     future_feature_gate: bool = False,
     gate_runner: GateRunner | None = None,
-    on_gate_complete: Callable[[GateResult], None] | None = None,
+    on_gate_start: Callable[[int, int, str], None] | None = None,
+    on_gate_complete: Callable[..., None] | None = None,
 ) -> list[GateResult]:
     root = _validate_root(root)
     runner = gate_runner or run_gate
     commands = default_gate_commands(include_acceptance=include_acceptance, root=root)
+    total_gates = len(commands) + (1 if future_feature_gate else 0)
     results: list[GateResult] = []
-    for name, command in commands:
+    for idx, (name, command) in enumerate(commands, 1):
+        if on_gate_start:
+            on_gate_start(idx, total_gates, name)
         res = runner(name, command, root)
         results.append(res)
         if on_gate_complete:
-            on_gate_complete(res)
+            try:
+                on_gate_complete(idx, total_gates, res)
+            except TypeError:
+                on_gate_complete(res)
     if future_feature_gate:
+        idx = total_gates
+        if on_gate_start:
+            on_gate_start(idx, total_gates, "future-feature")
         res = broken_future_feature_gate(root)
         results.append(res)
         if on_gate_complete:
-            on_gate_complete(res)
+            try:
+                on_gate_complete(idx, total_gates, res)
+            except TypeError:
+                on_gate_complete(res)
     return results
 
 

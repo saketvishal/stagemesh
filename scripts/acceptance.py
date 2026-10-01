@@ -36,6 +36,89 @@ def run_failure(command: list[str], cwd: Path, expected: str, env: dict[str, str
         raise AssertionError(output)
 
 
+def check_ci_acceptance(root: Path, gate_runner: Any = None) -> None:
+    import io
+    from argparse import Namespace
+    from stagemesh.ci import GateResult
+    from stagemesh.cli import command_ci
+
+    runner = gate_runner
+    if runner is None:
+        def stub_runner(name: str, command: list[str], cwd: Path) -> GateResult:
+            return GateResult(name=name, passed=True, output=f"{name}: PASS\n", elapsed_seconds=0.01)
+        runner = stub_runner
+
+    marker = root / ".stagemesh-broken-feature"
+    marker.unlink(missing_ok=True)
+
+    # 1. Plain CI semantics: check expected gate pass lines
+    plain_buf = io.StringIO()
+    args_plain = Namespace(
+        project=str(root),
+        future_feature_gate=True,
+        skip_acceptance=True,
+        json=False,
+    )
+    code_plain = command_ci(args_plain, gate_runner=runner, stdout=plain_buf)
+    if code_plain != 0:
+        raise AssertionError(f"command_ci plain returned {code_plain}")
+    ci = plain_buf.getvalue()
+    if (
+        "provider_acceptance: PASS" not in ci
+        or "github_acceptance: PASS" not in ci
+        or "live_acceptance: PASS" not in ci
+        or "future-feature: PASS" not in ci
+    ):
+        raise AssertionError(ci)
+
+    # 2. JSON CI semantics: check status, gates, and stderr progress
+    json_buf = io.StringIO()
+    err_buf = io.StringIO()
+    args_json = Namespace(
+        project=str(root),
+        future_feature_gate=True,
+        skip_acceptance=True,
+        json=True,
+    )
+    code_json = command_ci(args_json, gate_runner=runner, stdout=json_buf, stderr=err_buf)
+    if code_json != 0:
+        raise AssertionError(f"command_ci json returned {code_json}")
+    ci_json = json_buf.getvalue()
+    ci_data = json.loads(ci_json)
+    if ci_data["status"] != "PASS":
+        raise AssertionError(ci_json)
+    gate_statuses = {gate["name"]: gate["passed"] for gate in ci_data["gates"]}
+    if gate_statuses.get("future-feature") is not True or gate_statuses.get("live_acceptance") is not True:
+        raise AssertionError(ci_json)
+    err_output = err_buf.getvalue()
+    if "running..." not in err_output or "PASS" not in err_output:
+        raise AssertionError(f"Expected progress in stderr, got: {err_output}")
+
+    # 3. Failure semantics: synthetic failing gate causes CI failure
+    fail_buf = io.StringIO()
+    def failing_runner(name: str, command: list[str], cwd: Path) -> GateResult:
+        if name == "live_acceptance":
+            return GateResult(name=name, passed=False, output="mock failure\n", elapsed_seconds=0.01)
+        return runner(name, command, cwd)
+
+    code_fail = command_ci(args_json, gate_runner=failing_runner, stdout=fail_buf)
+    fail_data = json.loads(fail_buf.getvalue())
+    if code_fail != 1 or fail_data["status"] != "FAIL":
+        raise AssertionError(f"Expected failure status from failing gate: {fail_data}")
+
+    # 4. Future-feature failure when marker file is present
+    marker.write_text("broken\n", encoding="utf-8")
+    try:
+        broken_buf = io.StringIO()
+        broken_code = command_ci(args_json, gate_runner=runner, stdout=broken_buf)
+        broken_data = json.loads(broken_buf.getvalue())
+        broken_gates = {gate["name"]: gate["passed"] for gate in broken_data["gates"]}
+        if broken_code == 0 or broken_data["status"] != "FAIL" or broken_gates.get("future-feature") is not False:
+            raise AssertionError(broken_buf.getvalue())
+    finally:
+        marker.unlink(missing_ok=True)
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory(prefix="stagemesh-acceptance-") as raw:
         project = Path(raw) / "project"
@@ -1835,51 +1918,7 @@ def main() -> int:
         )
         if invalid_capacity.returncode != 2 or "capacity error:" not in (invalid_capacity.stdout + invalid_capacity.stderr):
             raise AssertionError(invalid_capacity.stdout + invalid_capacity.stderr)
-        marker = ROOT / ".stagemesh-broken-feature"
-        marker.unlink(missing_ok=True)
-        import io
-        from argparse import Namespace
-        from stagemesh.ci import GateResult
-        from stagemesh.cli import command_ci
-
-        def stub_gate_runner(name: str, command: list[str], cwd: Path) -> GateResult:
-            return GateResult(name=name, passed=True, output=f"{name}: PASS\n", elapsed_seconds=0.01)
-
-        plain_buf = io.StringIO()
-        args_plain = Namespace(
-            project=str(ROOT),
-            future_feature_gate=True,
-            skip_acceptance=True,
-            json=False,
-        )
-        code_plain = command_ci(args_plain, gate_runner=stub_gate_runner, stdout=plain_buf)
-        if code_plain != 0:
-            raise AssertionError(f"command_ci plain returned {code_plain}")
-        ci = plain_buf.getvalue()
-        if (
-            "provider_acceptance: PASS" not in ci
-            or "github_acceptance: PASS" not in ci
-            or "live_acceptance: PASS" not in ci
-            or "future-feature: PASS" not in ci
-        ):
-            raise AssertionError(ci)
-        json_buf = io.StringIO()
-        args_json = Namespace(
-            project=str(ROOT),
-            future_feature_gate=True,
-            skip_acceptance=True,
-            json=True,
-        )
-        code_json = command_ci(args_json, gate_runner=stub_gate_runner, stdout=json_buf)
-        if code_json != 0:
-            raise AssertionError(f"command_ci json returned {code_json}")
-        ci_json = json_buf.getvalue()
-        ci_data = json.loads(ci_json)
-        if ci_data["status"] != "PASS":
-            raise AssertionError(ci_json)
-        gate_statuses = {gate["name"]: gate["passed"] for gate in ci_data["gates"]}
-        if gate_statuses.get("future-feature") is not True or gate_statuses.get("live_acceptance") is not True:
-            raise AssertionError(ci_json)
+        check_ci_acceptance(ROOT)
         ci_wait = run(
             [
                 sys.executable,
@@ -1973,16 +2012,7 @@ def main() -> int:
         invalid_live_checks = {check["name"]: check["status"] for check in invalid_live_data["checks"]}
         if invalid_live_data["status"] != "FAIL" or invalid_live_checks.get("provider:config") != "INVALID":
             raise AssertionError(invalid_live.stdout)
-        marker.write_text("broken\n", encoding="utf-8")
-        try:
-            failed_buf = io.StringIO()
-            failed_code = command_ci(args_json, gate_runner=stub_gate_runner, stdout=failed_buf)
-            failed_ci = json.loads(failed_buf.getvalue())
-            failed_gates = {gate["name"]: gate["passed"] for gate in failed_ci["gates"]}
-            if failed_code == 0 or failed_ci["status"] != "FAIL" or failed_gates.get("future-feature") is not False:
-                raise AssertionError(failed_buf.getvalue())
-        finally:
-            marker.unlink(missing_ok=True)
+
         shutil.rmtree(project / ".git", ignore_errors=True)
     print("acceptance: passed")
     return 0

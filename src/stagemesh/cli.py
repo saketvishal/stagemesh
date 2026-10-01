@@ -1357,8 +1357,10 @@ def command_ci(
     args: argparse.Namespace,
     gate_runner: Any = None,
     stdout: Any = None,
+    stderr: Any = None,
 ) -> int:
     out = stdout if stdout is not None else sys.stdout
+    err = stderr if stderr is not None else sys.stderr
     target = getattr(args, "project", None)
     if target:
         if _is_explicit_path(target) or Path(target).is_dir():
@@ -1374,26 +1376,29 @@ def command_ci(
             root = Path.cwd().resolve()
 
     runner = gate_runner
-    if runner is None and os.environ.get("STAGEMESH_CI_STUB_GATES") in ("1", "true", "TRUE"):
-        def _stub_gate_runner(name: str, command: list[str], cwd: Path) -> GateResult:
-            return GateResult(name=name, passed=True, output=f"{name}: PASS\n", elapsed_seconds=0.01)
-        runner = _stub_gate_runner
-
     is_json = getattr(args, "json", False)
     skip_acceptance = getattr(args, "skip_acceptance", False)
     future_feature = getattr(args, "future_feature_gate", False)
 
     if is_json:
+        def _on_start(idx: int, total: int, name: str) -> None:
+            print(f"[{idx}/{total}] {name} running...", file=err, flush=True)
+
+        def _on_complete(idx: int, total: int, res: GateResult) -> None:
+            status_str = "PASS" if res.passed else "FAIL"
+            print(f"[{idx}/{total}] {res.name} {status_str} ({res.elapsed_seconds:.1f}s)", file=err, flush=True)
+
         results = run_ci(
             root,
             include_acceptance=not skip_acceptance,
             future_feature_gate=future_feature,
             gate_runner=runner,
-            on_gate_complete=None,
+            on_gate_start=_on_start,
+            on_gate_complete=_on_complete,
         )
         print(format_ci_json(results), file=out)
     else:
-        def _on_complete(res: GateResult) -> None:
+        def _on_complete(idx: int, total: int, res: GateResult) -> None:
             print(format_gate_plain(res), file=out, flush=True)
 
         results = run_ci(
