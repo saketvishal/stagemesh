@@ -119,7 +119,12 @@ def check_ci_acceptance(root: Path, gate_runner: Any = None) -> None:
         marker.unlink(missing_ok=True)
 
 
+ACCEPTANCE_MAIN_INVOCATION_COUNT = 0
+
+
 def main() -> int:
+    global ACCEPTANCE_MAIN_INVOCATION_COUNT
+    ACCEPTANCE_MAIN_INVOCATION_COUNT += 1
     with tempfile.TemporaryDirectory(prefix="stagemesh-acceptance-") as raw:
         project = Path(raw) / "project"
         project.mkdir()
