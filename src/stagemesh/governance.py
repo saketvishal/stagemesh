@@ -423,6 +423,21 @@ class CommitMetadataValidator:
         )
 
 
+def build_canonical_commit_message(
+    task_id: str,
+    policy: GitGovernancePolicy | None = None,
+    message: str | None = None,
+) -> str:
+    """Build the deterministic canonical commit message for a StageMesh task."""
+    task_id = _validate_non_empty_str(task_id, "task id")
+    policy = policy or GitGovernancePolicy()
+    canonical_message = message or f"feat({task_id}): canonical implementation for {task_id}"
+    if policy.allow_human_coauthors and policy.allowed_human_coauthors:
+        for author in policy.allowed_human_coauthors:
+            canonical_message += f"\n\nCo-Authored-By: {author}"
+    return canonical_message
+
+
 class CandidateCanonicalizer:
     """Creates StageMesh-controlled canonical candidate commits from agent-produced trees."""
 
@@ -460,10 +475,7 @@ class CandidateCanonicalizer:
                 )
 
         # Build StageMesh deterministic message
-        canonical_message = message or f"feat({task_id}): canonical implementation for {task_id}"
-        if self.policy.allow_human_coauthors and self.policy.allowed_human_coauthors:
-            for author in self.policy.allowed_human_coauthors:
-                canonical_message += f"\n\nCo-Authored-By: {author}"
+        canonical_message = build_canonical_commit_message(task_id, self.policy, message)
 
         # Create the canonical commit object using git commit-tree
         args = ["commit-tree", agent_result_tree]
@@ -513,6 +525,137 @@ class CandidateCanonicalizer:
         workspace.run("reset", "--mixed", canonical_sha, check=False)
 
         return canonical_sha
+
+
+def recover_pending_canonical_candidate(
+    store: Store,
+    workspace: GitWorkspace,
+    task_id: str,
+    baseline: TaskBaseline,
+    provider: str,
+    claim_id: str | None = None,
+    *,
+    policy: GitGovernancePolicy | None = None,
+) -> Any | None:
+    """Recover an existing valid StageMesh canonical candidate at task-worktree HEAD before provider launch.
+
+    Returns ExecutionResult if a valid canonical candidate already exists at HEAD, or None to proceed with provider.
+    """
+    from .execution import ExecutionResult
+    from .domain import ExecutionStatus, ExecutionKind
+
+    policy = policy or GitGovernancePolicy()
+    validator = CommitMetadataValidator(policy)
+
+    # 1. Commit exists
+    head_probe = workspace.run("rev-parse", "--verify", "--quiet", "HEAD^{commit}", check=False)
+    if head_probe.returncode != 0:
+        return None
+    head_sha = head_probe.stdout.strip()
+    if not _is_valid_sha(head_sha):
+        return None
+
+    # 2. Tree exists and is a valid git tree object
+    tree_probe = workspace.run("rev-parse", "--verify", "--quiet", f"{head_sha}^{{tree}}", check=False)
+    if tree_probe.returncode != 0:
+        return None
+    tree_sha = tree_probe.stdout.strip()
+    if not _is_valid_sha(tree_sha):
+        return None
+    cat_tree = workspace.run("cat-file", "-t", tree_sha, check=False)
+    if cat_tree.returncode != 0 or cat_tree.stdout.strip() != "tree":
+        return None
+
+    # 3. Parent is exactly the persisted original task baseline
+    parents_res = workspace.run("rev-parse", f"{head_sha}^@", check=False)
+    if parents_res.returncode != 0:
+        return None
+    parents = [p.strip() for p in parents_res.stdout.splitlines() if p.strip()]
+    if baseline.commit_sha:
+        if parents != [baseline.commit_sha]:
+            return None
+    else:
+        if parents != []:
+            return None
+
+    # 4. Metadata validation: author, committer, trailers, tree, parent
+    val_result = validator.validate(
+        workspace=workspace,
+        commit_sha=head_sha,
+        expected_tree_sha=tree_sha,
+        expected_parent_sha=baseline.commit_sha,
+    )
+    if not val_result.is_valid:
+        return None
+
+    # 5. Commit message matches StageMesh's deterministic canonical message
+    msg_probe = workspace.run("log", "-1", "--format=%B", head_sha, check=False)
+    if msg_probe.returncode != 0:
+        return None
+    commit_msg = msg_probe.stdout.strip()
+    expected_msg = build_canonical_commit_message(task_id, policy).strip()
+    if commit_msg != expected_msg:
+        return None
+
+    # 6. No conflicting persisted candidate exists
+    existing = store.latest_candidate(task_id)
+    if existing is not None:
+        if str(existing["sha"]) != head_sha:
+            return None
+
+    # Valid canonical HEAD C detected! DO NOT launch provider.
+    # Persist candidate row idempotently
+    store.add_candidate(
+        task_id=task_id,
+        sha=head_sha,
+        produced_by=provider,
+        durable_handoff=True,
+        base_sha=baseline.commit_sha,
+    )
+
+    # Record/finish execution record
+    execution_id = store.start_execution(
+        task_id=task_id,
+        claim_id=claim_id,
+        kind=ExecutionKind.IMPLEMENTATION,
+        executable="recovery",
+        candidate_sha=head_sha,
+    )
+    store.record_baseline(
+        task_id=task_id,
+        execution_id=execution_id,
+        commit_sha=baseline.commit_sha,
+        tree_sha=baseline.tree_sha,
+        branch=baseline.branch,
+        repo_path=baseline.repo_path,
+    )
+    store.finish_execution(execution_id, ExecutionStatus.SUCCEEDED, candidate_sha=head_sha)
+
+    # Create/repair governance provenance record
+    if not get_governance_evidence(store, task_id, candidate_sha=head_sha):
+        record_audit(
+            store,
+            "governance.candidate_canonicalized",
+            {
+                "task_id": task_id,
+                "execution_id": execution_id,
+                "provider": provider,
+                "agent_candidate_sha": None,
+                "baseline_sha": baseline.commit_sha,
+                "baseline_tree_sha": baseline.tree_sha,
+                "agent_result_tree_sha": tree_sha,
+                "canonical_candidate_sha": head_sha,
+                "canonical_candidate_tree_sha": tree_sha,
+                "tree_match": True,
+                "metadata_validation": val_result.to_dict(),
+                "timestamp": time.time(),
+            },
+        )
+
+    # Align worktree index
+    workspace.run("reset", "--mixed", head_sha, check=False)
+
+    return ExecutionResult(ExecutionStatus.SUCCEEDED, head_sha, durable_handoff=True)
 
 
 def canonicalize_and_record_candidate(
