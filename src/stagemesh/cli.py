@@ -1436,6 +1436,74 @@ def command_ci_wait(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_validation_plan(args: argparse.Namespace) -> int:
+    target = getattr(args, "project", None)
+    if target:
+        if _is_explicit_path(target) or Path(target).is_dir():
+            root = Path(target).resolve()
+            if not root.is_dir():
+                raise ProjectError(f"project directory {target!r} does not exist")
+        else:
+            root = resolve_project_root(target)
+    else:
+        try:
+            root = resolve_project_root(None)
+        except ProjectError:
+            root = Path.cwd().resolve()
+
+    store = Store(db_path(root))
+    store.migrate()
+    task_id = args.task_id
+    contract = store.get_change_contract(task_id)
+
+    candidate = store.latest_candidate(task_id)
+    candidate_sha = candidate["sha"] if candidate else None
+
+    from .controlled_change import (
+        ChangeContract,
+        ChangeSet,
+        ValidationPlanner,
+        derive_git_changeset,
+        enforce_change_scope,
+        format_validation_plan_explain,
+    )
+
+    if contract is not None and candidate_sha:
+        changeset = derive_git_changeset(root, task_id, contract.baseline_sha, candidate_sha)
+        scope_result = enforce_change_scope(contract, changeset)
+        planner = ValidationPlanner()
+        plan = planner.plan(contract, changeset)
+    elif contract is not None:
+        changeset = ChangeSet(task_id, contract.baseline_sha, contract.baseline_sha)
+        scope_result = enforce_change_scope(contract, changeset)
+        planner = ValidationPlanner()
+        plan = planner.plan(contract, changeset)
+    else:
+        baseline = "HEAD"
+        changeset = ChangeSet(task_id, baseline, candidate_sha or baseline)
+        scope_result = None
+        planner = ValidationPlanner()
+        c = ChangeContract(task_id, baseline)
+        plan = planner.plan(c, changeset)
+
+    store.close()
+
+    if getattr(args, "json", False):
+        data = {
+            "task_id": task_id,
+            "contract": contract.to_dict() if contract else None,
+            "changeset": changeset.to_dict(),
+            "scope": scope_result.to_dict() if scope_result else None,
+            "plan": plan.to_dict(),
+        }
+        print(json.dumps(data, indent=2, sort_keys=True))
+    else:
+        text = format_validation_plan_explain(plan, changeset, scope_result)
+        print(text)
+
+    return 0
+
+
 def command_daemon(args: argparse.Namespace) -> int:
     project = Path(args.project).resolve()
     store = Store(db_path(project))
@@ -1710,6 +1778,11 @@ def build_parser() -> argparse.ArgumentParser:
     ci_wait.add_argument("--max-seconds", type=float, default=1800)
     ci_wait.add_argument("--json", action="store_true")
     ci_wait.set_defaults(func=command_ci_wait)
+    vplan = sub.add_parser("validation-plan")
+    vplan.add_argument("task_id", help="Target task ID")
+    vplan.add_argument("--project", default=argparse.SUPPRESS, help="Target project root directory")
+    vplan.add_argument("--json", action="store_true")
+    vplan.set_defaults(func=command_validation_plan)
     return parser
 
 
