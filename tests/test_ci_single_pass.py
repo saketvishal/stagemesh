@@ -2,20 +2,20 @@
 Tests for StageMesh CI Performance / Single-Pass Validation v1.
 
 Verifies:
-A. Full CI gate list contains each expected gate once.
-B. --skip-acceptance excludes only the main acceptance gate and does not cause recursion.
-C. Plain and JSON formatting can be tested without running expensive real gates.
-D. A failed synthetic gate:
-   - returns CI failure;
-   - contains useful diagnostic output.
-E. Gate duration is reported.
-F. scripts/acceptance.py does not spawn stagemesh ci recursively (behavioral proof).
+1. No production stub bypass (STAGEMESH_CI_STUB_GATES in environ does not bypass real gate execution).
+2. Acceptance CI helper (check_ci_acceptance) tested with injected stub gate runner without running acceptance.main().
+3. Single-pass execution: full CI gate list contains each expected gate once; acceptance.py does not execute during unit_tests.
+4. JSON progress: stdout is valid JSON, stderr receives incremental start and completion progress lines.
+5. Plain and JSON formatting operate purely on GateResult objects without executing expensive gates.
+6. Gate duration is measured and reported.
+7. Diagnostics truncation bounds failure output.
 """
 
 from __future__ import annotations
 
 import io
 import json
+import os
 import sys
 import time
 from argparse import Namespace
@@ -23,6 +23,7 @@ from pathlib import Path
 
 import pytest
 
+from scripts.acceptance import check_ci_acceptance
 from stagemesh.ci import (
     GateResult,
     broken_future_feature_gate,
@@ -39,7 +40,7 @@ from stagemesh.cli import command_ci
 
 
 def test_full_ci_gate_list_contains_expected_gates_once(tmp_path: Path):
-    """A. Full CI gate list contains each expected gate once."""
+    """A. Full CI gate list contains each expected gate once without duplicates."""
     (tmp_path / "tests").mkdir()
     commands = default_gate_commands(include_acceptance=True, root=tmp_path)
     gate_names = [name for name, _ in commands]
@@ -57,7 +58,7 @@ def test_full_ci_gate_list_contains_expected_gates_once(tmp_path: Path):
     assert gate_names == expected
     assert len(gate_names) == len(set(gate_names))
 
-    # With future-feature gate in run_ci:
+    # Recording runner proves each gate runs at most once
     invocations: list[str] = []
 
     def stub_runner(name: str, cmd: list[str], cwd: Path) -> GateResult:
@@ -77,7 +78,7 @@ def test_full_ci_gate_list_contains_expected_gates_once(tmp_path: Path):
 
 
 def test_skip_acceptance_excludes_only_acceptance_and_no_recursion(tmp_path: Path):
-    """B. --skip-acceptance excludes only the main acceptance gate and does not cause recursion."""
+    """B. --skip-acceptance excludes only the main acceptance gate."""
     (tmp_path / "tests").mkdir()
     commands = default_gate_commands(include_acceptance=False, root=tmp_path)
     gate_names = [name for name, _ in commands]
@@ -216,33 +217,114 @@ def test_gate_duration_is_measured_and_reported(tmp_path: Path):
     assert f"sleep_gate: PASS ({res.elapsed_seconds:.1f}s)" in plain_str
 
 
-def test_acceptance_script_does_not_spawn_stagemesh_ci_recursively(monkeypatch):
-    """F. scripts/acceptance.py does not spawn stagemesh ci recursively (behavioral proof)."""
+def test_no_production_stub_bypass(tmp_path: Path, monkeypatch):
+    """1. Setting STAGEMESH_CI_STUB_GATES in os.environ must NOT bypass real gate execution."""
+    monkeypatch.setenv("STAGEMESH_CI_STUB_GATES", "1")
+
+    # Create a project with a test that deliberately fails
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "test_fail.py").write_text("def test_broken(): assert False, 'intentional real failure'\n")
+
+    # Run command_ci without an explicit gate_runner.
+    # If the stub bypass were active, it would silently return 0 (PASS).
+    # Since the stub bypass is eliminated, it must run real pytest and return 1 (FAIL).
+    buf = io.StringIO()
+    args = Namespace(
+        project=str(tmp_path),
+        future_feature_gate=False,
+        skip_acceptance=True,
+        json=False,
+    )
+    exit_code = command_ci(args, gate_runner=None, stdout=buf)
+    assert exit_code == 1, "Real execution must run and fail; STAGEMESH_CI_STUB_GATES must have no effect"
+    assert "FAIL" in buf.getvalue()
+
+
+def test_json_progress_emitted_to_stderr(tmp_path: Path):
+    """4. JSON CI emits start/completion progress to stderr while keeping stdout valid JSON."""
+    synthetic_gates = [
+        GateResult("compile", True, "ok\n", 0.12),
+        GateResult("unit_tests", True, "ok\n", 141.2),
+    ]
+    gate_iter = iter(synthetic_gates)
+
+    def stub_runner(name: str, cmd: list[str], cwd: Path) -> GateResult:
+        return next(gate_iter)
+
+    stdout_buf = io.StringIO()
+    stderr_buf = io.StringIO()
+    args = Namespace(
+        project=str(tmp_path),
+        future_feature_gate=False,
+        skip_acceptance=True,
+        json=True,
+    )
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(
+            "stagemesh.ci.default_gate_commands",
+            lambda include_acceptance, root: [("compile", []), ("unit_tests", [])],
+        )
+        code = command_ci(args, gate_runner=stub_runner, stdout=stdout_buf, stderr=stderr_buf)
+
+    assert code == 0
+
+    # Verify stdout is 100% valid JSON with no plain-text lines
+    data = json.loads(stdout_buf.getvalue())
+    assert data["status"] == "PASS"
+    assert len(data["gates"]) == 2
+
+    # Verify stderr received incremental progress lines
+    stderr_lines = stderr_buf.getvalue().splitlines()
+    assert "[1/2] compile running..." in stderr_lines
+    assert "[1/2] compile PASS (0.1s)" in stderr_lines
+    assert "[2/2] unit_tests running..." in stderr_lines
+    assert "[2/2] unit_tests PASS (141.2s)" in stderr_lines
+
+
+def test_check_ci_acceptance_semantics_and_zero_ci_spawns(tmp_path: Path, monkeypatch):
+    """2. check_ci_acceptance verifies plain, JSON, failure, and future-feature semantics with zero ci subprocesses."""
     import subprocess
-    import scripts.acceptance as acceptance_module
 
-    acceptance_src = Path(acceptance_module.__file__).read_text(encoding="utf-8")
-    assert 'stagemesh.cli",\n                "--project",\n                str(ROOT),\n                "ci"' not in acceptance_src
-    assert '"ci",\n                "--future-feature-gate"' not in acceptance_src
-
-    recorded_commands: list[list[str]] = []
+    recorded_subprocesses: list[list[str]] = []
     real_run = subprocess.run
 
-    def intercepting_run(cmd, *args, **kwargs):
-        if isinstance(cmd, (list, tuple)):
-            cmd_list = [str(c) for c in cmd]
-        else:
-            cmd_list = [str(cmd)]
-        recorded_commands.append(cmd_list)
+    def intercept_run(cmd, *args, **kwargs):
+        cmd_list = [str(c) for c in cmd] if isinstance(cmd, (list, tuple)) else [str(cmd)]
+        recorded_subprocesses.append(cmd_list)
         return real_run(cmd, *args, **kwargs)
 
-    monkeypatch.setattr(subprocess, "run", intercepting_run)
+    monkeypatch.setattr(subprocess, "run", intercept_run)
 
-    exit_code = acceptance_module.main()
-    assert exit_code == 0, "acceptance.main() must pass successfully"
+    # Injected stub runner to keep test fast and isolated
+    def stub_runner(name: str, command: list[str], cwd: Path) -> GateResult:
+        return GateResult(name=name, passed=True, output=f"{name}: PASS\n", elapsed_seconds=0.01)
 
+    # Run the focused acceptance helper directly
+    check_ci_acceptance(tmp_path, gate_runner=stub_runner)
+
+    # Behaviorally assert NO subprocess was spawned targeting "ci"
     ci_spawns = [
-        cmd for cmd in recorded_commands
+        cmd for cmd in recorded_subprocesses
         if any("stagemesh.cli" in arg for arg in cmd) and "ci" in cmd
     ]
-    assert ci_spawns == [], f"acceptance.py spawned recursive stagemesh ci commands: {ci_spawns}"
+    assert ci_spawns == [], f"check_ci_acceptance spawned recursive stagemesh ci: {ci_spawns}"
+
+
+def test_acceptance_script_does_not_execute_during_unit_tests():
+    """3. Prove acceptance.py does not execute as part of unit_tests."""
+    # The unit_tests gate command runs pytest on tests/
+    commands = default_gate_commands(include_acceptance=True)
+    unit_test_cmd = next(cmd for name, cmd in commands if name == "unit_tests")
+    acceptance_cmd = next(cmd for name, cmd in commands if name == "acceptance")
+
+    assert unit_test_cmd == [sys.executable, "-m", "pytest", "tests/", "-q"]
+    assert acceptance_cmd == [sys.executable, "scripts/acceptance.py"]
+
+    # Verify no test in tests/ calls acceptance.main()
+    tests_dir = Path(__file__).resolve().parent
+    for test_file in tests_dir.glob("test_*.py"):
+        if test_file.name == "test_ci_single_pass.py":
+            continue
+        content = test_file.read_text(encoding="utf-8")
+        assert "acceptance.main()" not in content, f"{test_file} calls acceptance.main()"
