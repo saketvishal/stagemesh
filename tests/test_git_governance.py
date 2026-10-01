@@ -1016,3 +1016,196 @@ def test_crash_recovery_after_canonical_commit_before_candidate_persistence(
     fresh_store.close()
 
 
+def test_coordinator_subprocess_executor_pre_provider_canonical_candidate_recovery(
+    store: Store,
+    repo: tuple[Path, GitWorkspace],
+) -> None:
+    """Pre-provider crash recovery hook:
+    Scenario:
+    1. baseline A is persisted;
+    2. task worktree exists;
+    3. agent-result tree T exists;
+    4. StageMesh canonical commit C is created;
+    5. worktree HEAD points to C;
+    6. candidate row does NOT exist;
+    7. governance audit does NOT exist;
+    8. simulate restart with new Store + Coordinator + SubprocessExecutor;
+    9. configure provider command so that if it launches it creates a marker file or fails;
+    10. run normal Coordinator.tick().
+
+    Assert:
+    - provider was NOT launched;
+    - candidate SHA persisted == C;
+    - candidate parent == A;
+    - exactly one candidate row;
+    - exactly one governance provenance record for C;
+    - task advances to VALIDATE;
+    - worktree HEAD remains C;
+    - no second canonical commit is created.
+    """
+    import sys
+    repo_dir, ws = repo
+    task_id = store.upsert_task("task-pre-provider-recovery")
+    store.advance_task(task_id, Stage.IMPLEMENT)
+
+    from stagemesh.governance import (
+        CandidateCanonicalizer,
+        get_governance_evidence,
+        prepare_task_worktree,
+        resolve_or_capture_baseline,
+    )
+
+    # 1. Baseline A is persisted
+    baseline_A = resolve_or_capture_baseline(store, ws, task_id)
+    # 2. Task worktree exists
+    task_wt = prepare_task_worktree(repo_dir, task_id, base_sha=baseline_A.commit_sha)
+    wt_ws = GitWorkspace(task_wt)
+
+    # 3. Agent-result tree T exists
+    (task_wt / "feature_recovery.py").write_text("def recovered(): return 1\n", encoding="utf-8")
+    wt_ws.run("add", "-A")
+    agent_tree_T = wt_ws.run("write-tree").stdout.strip()
+
+    # 4. StageMesh canonical commit C is created
+    canonicalizer = CandidateCanonicalizer()
+    canonical_commit_C = canonicalizer.canonicalize(
+        workspace=wt_ws,
+        baseline=baseline_A,
+        agent_result_tree=agent_tree_T,
+        task_id=task_id,
+    )
+    # 5. Worktree HEAD points to C
+    assert wt_ws.run("rev-parse", "HEAD").stdout.strip() == canonical_commit_C
+
+    # 6. Candidate row does NOT exist
+    assert store.latest_candidate(task_id) is None
+    # 7. Governance audit does NOT exist
+    assert get_governance_evidence(store, task_id, candidate_sha=canonical_commit_C) is None
+
+    # 8. Simulate restart with new Store + Coordinator + SubprocessExecutor
+    fresh_store = Store(store.db_path)
+
+    # 9. Configure provider command so that if it launches it creates a marker file or fails
+    marker_file = repo_dir / "provider_should_not_run.marker"
+    script = (
+        "import sys\n"
+        "from pathlib import Path\n"
+        "Path(r'" + str(marker_file).replace("\\", "/") + "').write_text('provider executed!\\n')\n"
+        "sys.exit(99)\n"
+    )
+    executor = SubprocessExecutor(command=[sys.executable, "-c", script], name="test-fail-if-run")
+    coord = Coordinator(fresh_store, repo_dir, executor=executor)
+
+    # 10. Run normal Coordinator.tick()
+    progressed = coord.tick()
+    assert progressed == 1
+
+    # Assert provider was NOT launched (marker file does not exist)
+    assert not marker_file.exists()
+
+    # Assert candidate SHA persisted == C
+    candidate = fresh_store.latest_candidate(task_id)
+    assert candidate is not None
+    assert candidate["sha"] == canonical_commit_C
+
+    # Assert candidate parent == A
+    parents = wt_ws.run("rev-parse", f"{canonical_commit_C}^@").stdout.splitlines()
+    assert parents == [baseline_A.commit_sha]
+
+    # Assert exactly one candidate row
+    all_candidates = list(fresh_store.conn.execute("SELECT * FROM candidates WHERE task_id=?", (task_id,)))
+    assert len(all_candidates) == 1
+
+    # Assert exactly one governance provenance record for C
+    gov_evidence = get_governance_evidence(fresh_store, task_id, candidate_sha=canonical_commit_C)
+    assert gov_evidence is not None
+    assert gov_evidence["canonical_candidate_sha"] == canonical_commit_C
+    all_audit = [
+        e for e in fresh_store.audit_events(limit=500) if e["event_type"] == "governance.candidate_canonicalized"
+    ]
+    matching_audit = [
+        e for e in all_audit if json.loads(e["payload"]).get("canonical_candidate_sha") == canonical_commit_C
+    ]
+    assert len(matching_audit) == 1
+
+    # Assert task advances to VALIDATE
+    assert fresh_store.get_task(task_id)["stage"] == Stage.VALIDATE
+
+    # Assert worktree HEAD remains C and no second canonical commit is created
+    assert wt_ws.run("rev-parse", "HEAD").stdout.strip() == canonical_commit_C
+
+    fresh_store.close()
+
+
+def test_pre_provider_recovery_rejects_agent_temporary_commit_and_runs_provider(
+    store: Store,
+    repo: tuple[Path, GitWorkspace],
+) -> None:
+    """Negative case: worktree HEAD is merely an agent temporary commit;
+    recovery check rejects it; provider execution proceeds normally.
+    """
+    import sys
+    repo_dir, ws = repo
+    task_id = store.upsert_task("task-reject-agent-temp-head")
+    store.advance_task(task_id, Stage.IMPLEMENT)
+
+    from stagemesh.governance import (
+        get_governance_evidence,
+        prepare_task_worktree,
+        resolve_or_capture_baseline,
+    )
+
+    baseline_A = resolve_or_capture_baseline(store, ws, task_id)
+    task_wt = prepare_task_worktree(repo_dir, task_id, base_sha=baseline_A.commit_sha)
+    wt_ws = GitWorkspace(task_wt)
+
+    # Provider crashed previously, leaving an agent temporary commit at HEAD
+    (task_wt / "temp_file.py").write_text("temp agent code\n", encoding="utf-8")
+    wt_ws.run("add", "-A")
+    wt_ws.run("commit", "-m", "agent temporary WIP commit")
+    agent_temp_head = wt_ws.run("rev-parse", "HEAD").stdout.strip()
+    assert agent_temp_head != baseline_A.commit_sha
+
+    # Pre-condition: Candidate does not exist
+    assert store.latest_candidate(task_id) is None
+
+    # Restart with Coordinator + SubprocessExecutor
+    fresh_store = Store(store.db_path)
+
+    provider_ran_file = repo_dir / "provider_ran.txt"
+    script = (
+        "import os, json, subprocess\n"
+        "from pathlib import Path\n"
+        "Path(r'" + str(provider_ran_file).replace("\\", "/") + "').write_text('ran\\n')\n"
+        "(Path.cwd() / 'final_work.py').write_text('done\\n')\n"
+        "subprocess.run(['git', 'add', '-A'], check=True)\n"
+        "subprocess.run(['git', 'commit', '-m', 'agent final commit'], check=True)\n"
+        "temp_sha = subprocess.check_output(['git', 'rev-parse', 'HEAD']).decode().strip()\n"
+        "res_path = Path(os.environ['STAGEMESH_RESULT_PATH'])\n"
+        "res_path.write_text(json.dumps({'status': 'SUCCEEDED', 'candidate_sha': temp_sha, 'durable_handoff': True}))\n"
+    )
+
+    executor = SubprocessExecutor(command=[sys.executable, "-c", script], name="test-agent-provider")
+    coord = Coordinator(fresh_store, repo_dir, executor=executor)
+
+    # Recovery check should reject agent_temp_head and proceed with provider execution
+    progressed = coord.tick()
+    assert progressed == 1
+
+    # Provider ran successfully
+    assert provider_ran_file.exists()
+
+    # Candidate was produced and is a valid StageMesh canonical commit
+    candidate = fresh_store.latest_candidate(task_id)
+    assert candidate is not None
+    canonical_sha = candidate["sha"]
+    assert canonical_sha != agent_temp_head
+
+    # Candidate parent is still baseline A
+    parents = wt_ws.run("rev-parse", f"{canonical_sha}^@").stdout.splitlines()
+    assert parents == [baseline_A.commit_sha]
+
+    fresh_store.close()
+
+
+

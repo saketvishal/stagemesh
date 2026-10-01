@@ -154,12 +154,25 @@ class FakeExecutor(Executor):
             capture_agent_result_tree,
             canonicalize_and_record_candidate,
             prepare_task_worktree,
+            recover_pending_canonical_candidate,
             resolve_or_capture_baseline,
         )
         baseline = resolve_or_capture_baseline(store, project, task_id)
         task_project = prepare_task_worktree(project, task_id, base_sha=baseline.commit_sha)
         workspace = GitWorkspace(task_project)
         workspace.init_if_needed()
+
+        recovery_result = recover_pending_canonical_candidate(
+            store=store,
+            workspace=workspace,
+            task_id=task_id,
+            baseline=baseline,
+            provider=self.name,
+            claim_id=claim_id,
+        )
+        if recovery_result is not None:
+            return recovery_result
+
         execution_id = store.start_execution(task_id=task_id, claim_id=claim_id, kind=ExecutionKind.IMPLEMENTATION)
         store.record_baseline(
             task_id=task_id,
@@ -209,6 +222,7 @@ class SubprocessExecutor(Executor):
             capture_agent_result_tree,
             canonicalize_and_record_candidate,
             prepare_task_worktree,
+            recover_pending_canonical_candidate,
             resolve_or_capture_baseline,
         )
 
@@ -217,6 +231,17 @@ class SubprocessExecutor(Executor):
         task_project = prepare_task_worktree(project, task_id, base_sha=baseline.commit_sha)
         workspace = GitWorkspace(task_project)
         workspace.init_if_needed()
+
+        recovery_result = recover_pending_canonical_candidate(
+            store=store,
+            workspace=workspace,
+            task_id=task_id,
+            baseline=baseline,
+            provider=self.name,
+            claim_id=claim_id,
+        )
+        if recovery_result is not None:
+            return recovery_result
 
         task = store.get_task(task_id)
         from .providers import _build_task_prompt
