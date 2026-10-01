@@ -83,6 +83,11 @@ class Coordinator:
             record_audit(self.store, "task.advance", {"task_id": task_id, "stage": Stage.IMPLEMENT})
             return 1
         if stage is Stage.IMPLEMENT:
+            from .controlled_change import MissingChangeContractError
+            contract = self.store.get_change_contract(task_id)
+            if contract is None:
+                record_audit(self.store, "task.error", {"task_id": task_id, "reason": "missing_change_contract"})
+                raise MissingChangeContractError(f"Task {task_id} cannot execute IMPLEMENT without a ChangeContract")
             claim_id = self.store.acquire_claim(task_id, "local-worker")
             if claim_id is None:
                 return 0

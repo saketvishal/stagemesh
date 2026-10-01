@@ -373,6 +373,8 @@ class Store:
         source_id: str | None = None,
         project: str | None = None,
         task_id: str | None = None,
+        contract: Any | None = None,
+        create_default_contract: bool = True,
     ) -> str:
         title = _validate_text(title, "task title")
         source = _validate_text(source, "task source")
@@ -394,7 +396,19 @@ class Store:
                 (task_id, title, Stage.PLAN, TaskStatus.OPEN, source, source_id, project, now, now),
             )
             return task_id
-        return self._mutate(_do_upsert)
+        tid = self._mutate(_do_upsert)
+        if contract is not None:
+            self.save_change_contract(contract)
+        elif create_default_contract and not self.get_change_contract(tid):
+            from .controlled_change import ChangeContract
+            default_contract = ChangeContract(
+                task_id=tid,
+                baseline_sha="HEAD",
+                allowed_paths=("*",),
+                validation_level="TASK",
+            )
+            self.save_change_contract(default_contract)
+        return tid
 
     def add_dependency(self, task_id: str, depends_on_task_id: str) -> None:
         task_id = _validate_text(task_id, "task id")
