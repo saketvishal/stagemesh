@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -98,20 +99,49 @@ class Reviewer:
                 for item in evaluation.findings
             )
             if self.adapter is not None and not findings:
-                response = self.adapter.review(
+                prompt = (
                     f"Review candidate {candidate_sha} for task {task_id} under contract {bound.digest}.\n"
                     f"Objective: {contract.objective}\n"
-                    "Return PASS only if the candidate is acceptable."
+                    "Return JSON only: {\"decision\":\"PASS\"} or "
+                    "{\"decision\":\"FAIL\",\"findings\":[{\"severity\":\"error\",\"message\":\"...\"}]}."
                 )
+                candidate_review = getattr(self.adapter, "review_candidate", None)
+                if callable(candidate_review):
+                    response = candidate_review(prompt, project, candidate_sha)
+                else:
+                    response = self.adapter.review(prompt)
                 review_payload["review_response"] = response
-                if "FAIL" in response.upper():
+                try:
+                    parsed = json.loads(response)
+                except json.JSONDecodeError:
+                    parsed = None
+                if not isinstance(parsed, dict) or parsed.get("decision") not in {"PASS", "FAIL"}:
                     findings.append(
                         ReviewFinding(
-                            finding_identity(candidate_sha, response),
+                            finding_identity(candidate_sha, "malformed independent review output"),
                             "error",
-                            response.strip() or "independent review failed",
+                            "independent review output must be JSON with decision PASS or FAIL",
                         )
                     )
+                elif parsed["decision"] == "FAIL":
+                    raw_findings = parsed.get("findings")
+                    if isinstance(raw_findings, list) and raw_findings:
+                        for item in raw_findings:
+                            if isinstance(item, dict):
+                                message = str(item.get("message") or "independent review failed")
+                                severity = str(item.get("severity") or "error")
+                            else:
+                                message = str(item)
+                                severity = "error"
+                            findings.append(ReviewFinding(finding_identity(candidate_sha, message), severity, message))
+                    else:
+                        findings.append(
+                            ReviewFinding(
+                                finding_identity(candidate_sha, "independent review failed"),
+                                "error",
+                                "independent review failed",
+                            )
+                        )
         except ContractError as exc:
             findings.append(
                 ReviewFinding(
