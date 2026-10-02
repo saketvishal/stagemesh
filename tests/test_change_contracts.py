@@ -76,6 +76,34 @@ def test_contract_runs_required_gates_and_blocks_failures(tmp_path: Path) -> Non
     assert any(finding["code"] == "gate_failed" for finding in result.findings)
 
 
+def test_contract_gates_run_from_exact_candidate_workspace(tmp_path: Path) -> None:
+    workspace = _repo(tmp_path / "repo")
+    project = workspace.path
+    (project / "src" / "app.py").write_text("VALUE = 'candidate'\n", encoding="utf-8")
+    sha = workspace.commit_all("candidate")
+    (project / "src" / "app.py").write_text("VALUE = 'shared checkout only'\n", encoding="utf-8")
+
+    contract = ChangeContract(
+        objective="Validate candidate contents",
+        allowed_files=("src/**",),
+        required_tests=(
+            GateCommand(
+                "candidate-workspace",
+                [
+                    sys.executable,
+                    "-c",
+                    "import pathlib, sys; sys.exit(0 if 'candidate' in pathlib.Path('src/app.py').read_text() else 9)",
+                ],
+            ),
+        ),
+    )
+
+    result = evaluate_contract(project, sha, contract, run_gates=True)
+
+    assert result.status == "PASSED"
+    assert result.gates[0].status == "PASSED"
+
+
 def test_validator_records_failed_contract_evidence_for_canary_violation(tmp_path: Path) -> None:
     workspace = _repo(tmp_path / "repo")
     project = workspace.path
@@ -158,6 +186,48 @@ def test_dependency_manifest_change_requires_dependency_gate(tmp_path: Path) -> 
 
     assert result.status == "FAILED"
     assert any(finding["code"] == "dependency_manifest_changed_without_gate" for finding in result.findings)
+
+
+def test_dependency_manifest_detection_is_case_insensitive(tmp_path: Path) -> None:
+    workspace = _repo(tmp_path / "repo")
+    project = workspace.path
+    (project / "PyProject.TOML").write_text("[project]\nname = 'changed'\n", encoding="utf-8")
+    sha = workspace.commit_all("case variant manifest")
+
+    result = evaluate_contract(
+        project,
+        sha,
+        ChangeContract(objective="Catch Windows manifest variants", allowed_files=("**",)),
+        run_gates=False,
+    )
+
+    assert result.status == "FAILED"
+    assert any(finding["code"] == "dependency_manifest_changed_without_gate" for finding in result.findings)
+
+
+def test_rename_source_and_target_are_checked_against_scope(tmp_path: Path) -> None:
+    workspace = _repo(tmp_path / "repo")
+    project = workspace.path
+    (project / "secrets.txt").write_text("secret\n", encoding="utf-8")
+    workspace.commit_all("add protected file")
+    workspace.run("mv", "secrets.txt", "src/secrets.py")
+    sha = workspace.commit_all("rename protected file into scope")
+
+    result = evaluate_contract(
+        project,
+        sha,
+        ChangeContract(
+            objective="Do not touch secrets",
+            allowed_files=("src/**",),
+            forbidden_files=("secrets.txt",),
+        ),
+        run_gates=False,
+    )
+
+    assert "secrets.txt" in result.changed_files
+    assert "src/secrets.py" in result.changed_files
+    assert result.status == "FAILED"
+    assert any(finding["code"] == "forbidden_file_changed" for finding in result.findings)
 
 
 def test_change_size_limits_reject_unrelated_refactor(tmp_path: Path) -> None:
