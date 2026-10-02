@@ -5,6 +5,7 @@ from pathlib import Path
 from .domain import EvidenceKind, EvidenceStatus, ExecutionKind, ExecutionStatus
 from .git import GitError, GitWorkspace
 from .persistence import Store
+from .remediation import finding_identity
 
 
 class Integrator:
@@ -177,6 +178,15 @@ class Integrator:
         status: EvidenceStatus,
         payload: dict[str, object],
     ) -> EvidenceStatus:
+        if status is EvidenceStatus.FAILED:
+            message = str(payload.get("reason") or "integration failed")
+            store.upsert_finding(
+                finding_identity(candidate_sha, message),
+                task_id,
+                candidate_sha,
+                "ERROR",
+                message,
+            )
         store.add_evidence(
             task_id,
             candidate_sha,
