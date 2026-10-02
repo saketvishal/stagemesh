@@ -261,7 +261,12 @@ def command_continue(args: argparse.Namespace) -> int:
 def _filter_targeted_tasks(tasks, targeted_task_id: str | None):
     if targeted_task_id is None:
         return tasks
-    return [task for task in tasks if task.source_id == targeted_task_id]
+    parent_task_id = targeted_task_id.removesuffix("-PLANNER")
+    return [
+        task
+        for task in tasks
+        if task.source_id == targeted_task_id or task.source_id == parent_task_id
+    ]
 
 
 def command_status(args: argparse.Namespace) -> int:
