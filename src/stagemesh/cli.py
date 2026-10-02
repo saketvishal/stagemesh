@@ -282,6 +282,7 @@ def command_status(args: argparse.Namespace) -> int:
                     "failed_execution_count": report.failed_execution_count,
                     "unknown_execution_count": report.unknown_execution_count,
                     "backlog_state": report.backlog_state,
+                    "latest_implementation_failure": report.latest_implementation_failure,
                     "tasks": [
                         {
                             "id": row["id"],
@@ -356,6 +357,7 @@ def command_health(args: argparse.Namespace) -> int:
                     "failed_execution_count": report.failed_execution_count,
                     "unknown_execution_count": report.unknown_execution_count,
                     "backlog_state": report.backlog_state,
+                    "latest_implementation_failure": report.latest_implementation_failure,
                 },
                 indent=2,
                 sort_keys=True,
@@ -370,6 +372,8 @@ def command_health(args: argparse.Namespace) -> int:
     print(f"done: {report.done_count}")
     print(f"failed_executions: {report.failed_execution_count}")
     print(f"unknown_executions: {report.unknown_execution_count}")
+    if report.latest_implementation_failure:
+        print(f"latest_implementation_failure: {report.latest_implementation_failure.get('reason')}")
     print(f"backlog: {report.backlog_state}")
     store.close()
     return 0

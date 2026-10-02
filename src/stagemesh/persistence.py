@@ -490,6 +490,13 @@ class Store:
                 (TaskStatus.OPEN, time.time(), task_id, TaskStatus.CLAIMED),
             )
 
+    def latest_execution_for_claim(self, claim_id: str) -> sqlite3.Row | None:
+        claim_id = _validate_text(claim_id, "claim id")
+        return self.conn.execute(
+            "SELECT * FROM executions WHERE claim_id=? ORDER BY updated_at DESC, rowid DESC LIMIT 1",
+            (claim_id,),
+        ).fetchone()
+
     def block_task(self, task_id: str) -> None:
         task_id = _validate_text(task_id, "task id")
         self.conn.execute(

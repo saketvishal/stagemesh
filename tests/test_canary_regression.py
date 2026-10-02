@@ -669,11 +669,44 @@ class CodeFailExecutor(FakeExecutor):
     name = "code-fail"
 
     def run(self, store: Store, task_id: str, claim_id: str | None, project: Path) -> ExecutionResult:
-        return ExecutionResult(ExecutionStatus.FAILED, capacity_failure=False)
+        execution_id = store.start_execution(task_id=task_id, claim_id=claim_id, kind=ExecutionKind.IMPLEMENTATION)
+        store.finish_execution(execution_id, ExecutionStatus.FAILED)
+        return ExecutionResult(
+            ExecutionStatus.FAILED,
+            capacity_failure=False,
+            failure_reason="tests_failed",
+        )
+
+
+class SuccessWithoutCandidateExecutor(FakeExecutor):
+    name = "success-without-candidate"
+
+    def run(self, store: Store, task_id: str, claim_id: str | None, project: Path) -> ExecutionResult:
+        execution_id = store.start_execution(task_id=task_id, claim_id=claim_id, kind=ExecutionKind.IMPLEMENTATION)
+        store.finish_execution(execution_id, ExecutionStatus.SUCCEEDED)
+        return ExecutionResult(ExecutionStatus.SUCCEEDED)
+
+
+class ExceptionExecutor(FakeExecutor):
+    name = "exception-executor"
+
+    def run(self, store: Store, task_id: str, claim_id: str | None, project: Path) -> ExecutionResult:
+        raise RuntimeError("agent crashed")
+
+
+def _active_claims(store: Store, task_id: str):
+    return list(store.conn.execute("SELECT * FROM claims WHERE task_id=? AND active=1", (task_id,)))
+
+
+def _latest_implementation_unsuccessful_event(store: Store) -> dict[str, object]:
+    for event in store.audit_events():
+        if event["event_type"] == "task.implementation_unsuccessful":
+            return json.loads(event["payload"])
+    raise AssertionError("expected task.implementation_unsuccessful audit event")
 
 
 def test_code_failure_does_not_advance_stage(store: Store, tmp_path: Path) -> None:
-    """A code failure (capacity_failure=False) must not advance the task stage."""
+    """A code failure (capacity_failure=False) must reopen IMPLEMENT for retry."""
     task_id = store.upsert_task("code-fail-task")
     store.advance_task(task_id, Stage.IMPLEMENT)
 
@@ -682,6 +715,87 @@ def test_code_failure_does_not_advance_stage(store: Store, tmp_path: Path) -> No
 
     task = store.get_task(task_id)
     assert task["stage"] == Stage.IMPLEMENT
+    assert task["status"] == TaskStatus.OPEN
+    assert _active_claims(store, task_id) == []
+
+    payload = _latest_implementation_unsuccessful_event(store)
+    assert payload["task_id"] == task_id
+    assert payload["executor"] == "code-fail"
+    assert payload["reason"] == "tests_failed"
+    assert payload["result_status"] == ExecutionStatus.FAILED
+    assert payload["execution_status"] == ExecutionStatus.FAILED
+    assert payload["candidate_sha"] is None
+    assert payload["durable_handoff"] is False
+
+
+def test_success_without_candidate_reopens_implementation(store: Store, tmp_path: Path) -> None:
+    task_id = store.upsert_task("missing-candidate-task")
+    store.advance_task(task_id, Stage.IMPLEMENT)
+
+    assert Coordinator(store, tmp_path, executor=SuccessWithoutCandidateExecutor()).tick() == 0
+
+    task = store.get_task(task_id)
+    assert task["stage"] == Stage.IMPLEMENT
+    assert task["status"] == TaskStatus.OPEN
+    assert _active_claims(store, task_id) == []
+
+    payload = _latest_implementation_unsuccessful_event(store)
+    assert payload["reason"] == "implementation_succeeded_without_durable_candidate"
+    assert payload["result_status"] == ExecutionStatus.SUCCEEDED
+    assert payload["execution_status"] == ExecutionStatus.SUCCEEDED
+    assert payload["candidate_sha"] is None
+    assert payload["durable_handoff"] is False
+
+
+def test_executor_exception_reopens_implementation(store: Store, tmp_path: Path) -> None:
+    task_id = store.upsert_task("exception-task")
+    store.advance_task(task_id, Stage.IMPLEMENT)
+
+    assert Coordinator(store, tmp_path, executor=ExceptionExecutor()).tick() == 0
+
+    task = store.get_task(task_id)
+    assert task["stage"] == Stage.IMPLEMENT
+    assert task["status"] == TaskStatus.OPEN
+    assert _active_claims(store, task_id) == []
+
+    payload = _latest_implementation_unsuccessful_event(store)
+    assert payload["executor"] == "exception-executor"
+    assert payload["result_status"] == "EXCEPTION"
+    assert payload["reason"] == "RuntimeError: agent crashed"
+    assert payload["execution_id"] is None
+
+
+def test_capacity_failure_keeps_separate_audit_semantics(store: Store, tmp_path: Path) -> None:
+    task_id = store.upsert_task("capacity-audit-task")
+    store.advance_task(task_id, Stage.IMPLEMENT)
+
+    assert Coordinator(store, tmp_path, executor=CapacityFailExecutor()).tick() == 0
+
+    event_types = [event["event_type"] for event in store.audit_events()]
+    assert "task.capacity_failure" in event_types
+    assert "task.implementation_unsuccessful" not in event_types
+
+
+def test_targeted_mode_releases_only_target_failed_claim(store: Store, tmp_path: Path) -> None:
+    target_id = store.upsert_task("target-task")
+    other_id = store.upsert_task("other-task")
+    store.advance_task(target_id, Stage.IMPLEMENT)
+    store.advance_task(other_id, Stage.IMPLEMENT)
+    other_claim_id = store.acquire_claim(other_id, "worker-a")
+    assert other_claim_id is not None
+
+    assert Coordinator(
+        store,
+        tmp_path,
+        executor=CodeFailExecutor(),
+        target=TargetSelection(target_id),
+    ).tick() == 0
+
+    assert store.get_task(target_id)["status"] == TaskStatus.OPEN
+    assert _active_claims(store, target_id) == []
+    assert store.get_task(other_id)["status"] == TaskStatus.CLAIMED
+    other_claim = store.conn.execute("SELECT * FROM claims WHERE id=?", (other_claim_id,)).fetchone()
+    assert other_claim["active"] == 1
 
 
 def test_capacity_failure_is_distinguishable_from_code_failure() -> None:
