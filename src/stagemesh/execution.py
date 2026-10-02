@@ -115,6 +115,42 @@ class Executor:
         raise NotImplementedError
 
 
+class FailoverExecutor(Executor):
+    """Try providers in order only when the failure is provider/capacity related."""
+
+    def __init__(self, executors: list[Executor]):
+        if not executors:
+            raise ValueError("failover executor requires at least one executor")
+        self.executors = tuple(executors)
+        self.name = "failover[" + ",".join(executor.name for executor in executors) + "]"
+
+    def run(
+        self,
+        store: Store,
+        task_id: str,
+        claim_id: str | None,
+        project: Path,
+    ) -> ExecutionResult:
+        last: ExecutionResult | None = None
+        for executor in self.executors:
+            result = executor.run(
+                store,
+                task_id,
+                claim_id,
+                project,
+            )
+            last = result
+            if result.status is ExecutionStatus.SUCCEEDED:
+                return result
+            if not result.capacity_failure:
+                return result
+        return last or ExecutionResult(
+            ExecutionStatus.FAILED,
+            capacity_failure=True,
+            failure_reason="no_provider_attempted",
+        )
+
+
 class FakeExecutor(Executor):
     name = "fake"
 
