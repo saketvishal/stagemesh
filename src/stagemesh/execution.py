@@ -195,11 +195,28 @@ class SubprocessExecutor(Executor):
         if self.isolate:
             root_workspace.init_if_needed()
             try:
-                baseline_sha = root_workspace.head()
+                target_head = root_workspace.head()
             except GitError:
                 return ExecutionResult(
                     ExecutionStatus.FAILED,
                     failure_reason="isolation_requires_existing_commit",
+                )
+            previous_candidate = store.latest_candidate(task_id)
+            baseline_sha = (
+                str(previous_candidate["sha"])
+                if previous_candidate is not None
+                else target_head
+            )
+            candidate_exists = root_workspace.run(
+                "cat-file",
+                "-e",
+                f"{baseline_sha}^{{commit}}",
+                check=False,
+            )
+            if candidate_exists.returncode != 0:
+                return ExecutionResult(
+                    ExecutionStatus.FAILED,
+                    failure_reason="remediation_baseline_missing",
                 )
             isolated_worktree = _create_isolated_worktree(
                 root_workspace,
