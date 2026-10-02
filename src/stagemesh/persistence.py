@@ -11,7 +11,7 @@ from typing import Any
 from .domain import EvidenceKind, EvidenceStatus, ExecutionKind, ExecutionStatus, Stage, TaskStatus
 from .migrations import apply_migrations, current_schema_version
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 class StoreValidationError(ValueError):
@@ -107,8 +107,7 @@ class Store:
                 kind TEXT NOT NULL,
                 status TEXT NOT NULL,
                 payload TEXT NOT NULL,
-                created_at REAL NOT NULL,
-                UNIQUE(task_id, candidate_sha, kind, status)
+                created_at REAL NOT NULL
             );
             CREATE TABLE IF NOT EXISTS source_cache (
                 source TEXT NOT NULL,
@@ -406,15 +405,11 @@ class Store:
         payload = _validate_payload(payload)
         eid = str(uuid.uuid4())
         self.conn.execute(
-            "INSERT OR IGNORE INTO evidence VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO evidence VALUES (?, ?, ?, ?, ?, ?, ?)",
             (eid, task_id, candidate_sha, kind, status, json.dumps(payload or {}, sort_keys=True), time.time()),
         )
         self.conn.commit()
-        row = self.conn.execute(
-            "SELECT id FROM evidence WHERE task_id=? AND candidate_sha=? AND kind=? AND status=?",
-            (task_id, candidate_sha, kind, status),
-        ).fetchone()
-        return str(row["id"])
+        return eid
 
     def has_evidence(self, task_id: str, sha: str, kind: EvidenceKind, status: EvidenceStatus = EvidenceStatus.PASSED) -> bool:
         task_id = _validate_text(task_id, "task id")

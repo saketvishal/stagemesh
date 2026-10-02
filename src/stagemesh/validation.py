@@ -6,6 +6,7 @@ from .contract_binding import contract_for_candidate
 from .contracts import ContractError, evaluate_contract
 from .domain import EvidenceKind, EvidenceStatus, ExecutionKind, ExecutionStatus
 from .persistence import Store
+from .remediation import finding_identity
 
 
 class Validator:
@@ -46,6 +47,16 @@ class Validator:
         except ContractError as exc:
             status = EvidenceStatus.FAILED
             payload = {"validator": "contract", "findings": [{"code": "invalid_contract", "message": str(exc)}]}
+        if status is EvidenceStatus.FAILED:
+            for item in payload.get("findings", []):
+                message = str(item.get("message", "validation failed"))
+                store.upsert_finding(
+                    finding_identity(candidate_sha, message, item.get("path")),
+                    task_id,
+                    candidate_sha,
+                    str(item.get("severity", "error")),
+                    message,
+                )
         store.add_evidence(task_id, candidate_sha, EvidenceKind.VALIDATION, status, payload)
         store.finish_execution(
             execution_id,

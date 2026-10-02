@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol
 
 from .contract_binding import contract_for_candidate
 from .contracts import ContractError, evaluate_contract
@@ -17,16 +18,25 @@ class ReviewFinding:
     message: str
 
 
+class ReviewAdapter(Protocol):
+    name: str
+
+    def review(self, prompt: str) -> str:
+        ...
+
+
 class Reviewer:
     def __init__(
         self,
         fail_capacity: bool = False,
         findings: list[ReviewFinding] | None = None,
         provider_name: str = "builtin-deterministic-fallback",
+        adapter: ReviewAdapter | None = None,
     ):
         self.fail_capacity = fail_capacity
         self.findings = findings or []
         self.provider_name = provider_name
+        self.adapter = adapter
 
     def review(self, store: Store, task_id: str, candidate_sha: str, project: Path) -> EvidenceStatus:
         execution_id = store.start_execution(
@@ -41,16 +51,19 @@ class Reviewer:
             return EvidenceStatus.CAPACITY
         candidate = store.latest_candidate(task_id)
         implementer = str(candidate["produced_by"]) if candidate is not None and candidate["sha"] == candidate_sha else None
-        deterministic_fallback = self.provider_name == "builtin-deterministic-fallback"
-        independent = bool(self.provider_name and self.provider_name != implementer and not deterministic_fallback)
+        adapter_name = getattr(self.adapter, "name", None)
+        reviewer_provider = adapter_name or self.provider_name
+        independent = bool(self.adapter is not None and reviewer_provider and reviewer_provider != implementer)
         findings = list(self.findings)
         review_payload: dict[str, object] = {
-            "review_provider": self.provider_name,
+            "review_provider": reviewer_provider,
             "implementer_provider": implementer,
             "independent_reviewer": independent,
-            "deterministic_contract_gate": deterministic_fallback,
+            "deterministic_contract_gate": True,
+            "review_execution_provider": adapter_name,
+            "review_execution_invoked": self.adapter is not None,
         }
-        if implementer and self.provider_name == implementer:
+        if implementer and reviewer_provider == implementer:
             findings.append(
                 ReviewFinding(
                     finding_identity(candidate_sha, "review provider must differ from implementer"),
@@ -58,42 +71,56 @@ class Reviewer:
                     "review provider must differ from implementer",
                 )
             )
-        if not findings:
-            try:
-                bound = contract_for_candidate(store, task_id, candidate_sha, project)
-                contract = bound.contract
-                evaluation = evaluate_contract(
-                    project,
-                    candidate_sha,
-                    contract,
-                    baseline_sha=bound.baseline_sha,
-                    run_gates=False,
+        try:
+            bound = contract_for_candidate(store, task_id, candidate_sha, project)
+            contract = bound.contract
+            evaluation = evaluate_contract(
+                project,
+                candidate_sha,
+                contract,
+                baseline_sha=bound.baseline_sha,
+                run_gates=False,
+            )
+            review_payload.update(
+                {
+                    **bound.evidence_payload(),
+                    "objective": contract.objective,
+                    "changed_files": list(evaluation.changed_files),
+                    "findings": list(evaluation.findings),
+                }
+            )
+            findings.extend(
+                ReviewFinding(
+                    identity=finding_identity(candidate_sha, item["message"], item.get("path")),
+                    severity=str(item.get("severity", "error")),
+                    message=str(item["message"]),
                 )
-                review_payload.update(
-                    {
-                        **bound.evidence_payload(),
-                        "objective": contract.objective,
-                        "changed_files": list(evaluation.changed_files),
-                        "findings": list(evaluation.findings),
-                    }
+                for item in evaluation.findings
+            )
+            if self.adapter is not None and not findings:
+                response = self.adapter.review(
+                    f"Review candidate {candidate_sha} for task {task_id} under contract {bound.digest}.\n"
+                    f"Objective: {contract.objective}\n"
+                    "Return PASS only if the candidate is acceptable."
                 )
-                findings.extend(
-                    ReviewFinding(
-                        identity=finding_identity(candidate_sha, item["message"], item.get("path")),
-                        severity=str(item.get("severity", "error")),
-                        message=str(item["message"]),
+                review_payload["review_response"] = response
+                if "FAIL" in response.upper():
+                    findings.append(
+                        ReviewFinding(
+                            finding_identity(candidate_sha, response),
+                            "error",
+                            response.strip() or "independent review failed",
+                        )
                     )
-                    for item in evaluation.findings
+        except ContractError as exc:
+            findings.append(
+                ReviewFinding(
+                    finding_identity(candidate_sha, str(exc)),
+                    "error",
+                    f"invalid change contract: {exc}",
                 )
-            except ContractError as exc:
-                findings.append(
-                    ReviewFinding(
-                        finding_identity(candidate_sha, str(exc)),
-                        "error",
-                        f"invalid change contract: {exc}",
-                    )
-                )
-                review_payload["findings"] = [{"code": "invalid_contract", "message": str(exc)}]
+            )
+            review_payload["findings"] = [{"code": "invalid_contract", "message": str(exc)}]
         if findings:
             for finding in findings:
                 identity = finding.identity or finding_identity(candidate_sha, finding.message)
