@@ -4,6 +4,7 @@ import os
 import shlex
 import shutil
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -96,6 +97,66 @@ class RuntimeCommandAdapter:
 
     def run(self, store: Store, task_id: str, claim_id: str | None, project: Path) -> ExecutionResult:
         return self.execute(store, task_id, claim_id, project)
+
+    def review_candidate(self, prompt: str, project: Path, candidate_sha: str) -> str:
+        if self.check_capacity() != CapacityKind.AVAILABLE:
+            return _review_failure("provider_unavailable")
+        with tempfile.TemporaryDirectory(prefix="stagemesh-review-") as temp_dir:
+            review_path = Path(temp_dir) / "candidate"
+            clone = subprocess.run(
+                ["git", "clone", "--quiet", "--no-checkout", str(Path(project).resolve()), str(review_path)],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            if clone.returncode != 0:
+                return _review_failure("review workspace clone failed")
+            checkout = subprocess.run(
+                ["git", "checkout", "--quiet", "--detach", candidate_sha],
+                cwd=review_path,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            if checkout.returncode != 0:
+                return _review_failure("review candidate checkout failed")
+            before_head = _git_output(review_path, "rev-parse", "HEAD")
+            if before_head != candidate_sha:
+                return _review_failure("review workspace did not checkout exact candidate")
+            try:
+                proc = subprocess.Popen(
+                    list(self.command),
+                    cwd=review_path,
+                    text=True,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+            except FileNotFoundError:
+                return _review_failure("provider_unavailable")
+            stdout, stderr = proc.communicate(input=prompt)
+            after_head = _git_output(review_path, "rev-parse", "HEAD")
+            tracked_dirty = _tracked_content_changed(review_path)
+            if after_head != before_head or tracked_dirty:
+                return _review_failure("review execution mutated candidate workspace")
+            if proc.returncode != 0:
+                _, reason = classify_failure(proc.returncode, stdout, stderr)
+                return _review_failure(reason)
+            return stdout.strip()
+
+
+@dataclass(frozen=True)
+class RuntimeReviewAdapter:
+    runtime: RuntimeCommandAdapter
+    project: Path
+    candidate_sha: str
+
+    @property
+    def name(self) -> str:
+        return self.runtime.name
+
+    def review(self, prompt: str) -> str:
+        return self.runtime.review_candidate(prompt, self.project, self.candidate_sha)
 
 
 def approved_default_adapters() -> list[RuntimeCommandAdapter]:
@@ -193,3 +254,20 @@ def _build_task_prompt(task_id: str, task: object, project: Path | None = None) 
         "When you are done, commit all changes to git with a descriptive commit message "
         "so StageMesh can record the resulting commit SHA as the implementation candidate.\n"
     )
+
+
+def _git_output(path: Path, *args: str) -> str:
+    result = subprocess.run(["git", *args], cwd=path, text=True, capture_output=True, check=False)
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def _tracked_content_changed(path: Path) -> bool:
+    unstaged = subprocess.run(["git", "diff", "--quiet"], cwd=path, check=False)
+    staged = subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=path, check=False)
+    return unstaged.returncode != 0 or staged.returncode != 0
+
+
+def _review_failure(message: str) -> str:
+    import json
+
+    return json.dumps({"decision": "FAIL", "findings": [{"severity": "error", "message": message}]})

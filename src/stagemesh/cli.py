@@ -15,32 +15,53 @@ from .ci import CIValidationError, broken_future_feature_gate, default_gates
 from .ci_wait import decide_ci_wait
 from .completion_audit import CompletionAuditValidationError, completion_audit
 from .config import ConfigValidationError, load_config
-from .dashboard import dashboard_summary, render_dashboard
 from .coordinator import Coordinator
+from .dashboard import dashboard_summary, render_dashboard
 from .demo import DemoValidationError, create_demo_project
-from .execution import SubprocessExecutor
 from .distributed import WorkQueue, WorkQueueError
 from .e2e_acceptance import EndToEndAcceptanceValidationError, end_to_end_acceptance
+from .execution import SubprocessExecutor
+from .external_evidence import (
+    ExternalEvidenceValidationError,
+    external_evidence_records,
+    record_external_evidence,
+)
 from .final_report import FinalReportValidationError, candidate_sha, render_final_report
-from .external_evidence import ExternalEvidenceValidationError, external_evidence_records, record_external_evidence
 from .github_acceptance import run_github_acceptance
+from .objectives import ObjectivePlanner, ObjectiveValidationError
 from .observability import health
 from .operator import operator_report
-from .objectives import ObjectivePlanner, ObjectiveValidationError
 from .persistence import Store, StoreValidationError
 from .persistence_backends import probe_backend
 from .postgres_store import PostgresStore, PostgresUnavailable, postgres_schema_contract
-from .provider_acceptance import run_provider_acceptance
 from .process_identity import current_process_identity
-from .registry import GlobalRegistry, ProjectRegistration, RegistryConflictError, RegistryValidationError
+from .provider_acceptance import run_provider_acceptance
+from .providers import ProviderValidationError, adapters_from_config
+from .redaction import redact_command_secrets, redact_url_credentials
+from .registry import (
+    GlobalRegistry,
+    ProjectRegistration,
+    RegistryConflictError,
+    RegistryValidationError,
+)
 from .release import ReleaseValidationError, build_release_artifact
 from .release_readiness import ReleaseReadinessValidationError, release_readiness
-from .redaction import redact_command_secrets, redact_url_credentials
 from .retry import RetryRegistry, RetryValidationError
+from .review import Reviewer
+from .routing import Provider, Router, RoutingMode
 from .security import SecurityBoundaryError, WorkspaceBoundary
-from .providers import ProviderValidationError, adapters_from_config
-from .task_sources import LocalBacklogSource, TaskSourceValidationError, sync_source, task_sources_from_config
-from .work_transport import WorkTransportError, import_ack, write_ack_envelope, write_packet_envelope
+from .task_sources import (
+    LocalBacklogSource,
+    TaskSourceValidationError,
+    sync_source,
+    task_sources_from_config,
+)
+from .work_transport import (
+    WorkTransportError,
+    import_ack,
+    write_ack_envelope,
+    write_packet_envelope,
+)
 from .workers import WorkerValidationError, heartbeat_worker, register_worker
 
 
@@ -142,6 +163,10 @@ def command_continue(args: argparse.Namespace) -> int:
         sync_source(store, source.discover())
     # Wire real provider adapters unless --dry-run is requested.
     executor = None
+    reviewer = None
+    chosen_provider = "fake"
+    chosen_review_provider = "builtin-deterministic-fallback"
+    independent_review_configured = False
     if not getattr(args, "dry_run", False):
         try:
             adapters = adapters_from_config(config)
@@ -149,34 +174,71 @@ def command_continue(args: argparse.Namespace) -> int:
             print(f"provider config error: {exc}", file=sys.stderr)
             store.close()
             return 2
+        adapter_by_name = {adapter.name: adapter for adapter in adapters}
+        router = Router(
+            [
+                Provider(
+                    adapter.name,
+                    adapter.capabilities,
+                    adapter.check_capacity() == CapacityKind.AVAILABLE,
+                )
+                for adapter in adapters
+            ],
+            mode=config.routing_mode,
+            stage_routes=config.stage_routes,
+            single_agent_provider=config.single_agent_provider,
+        )
         chosen_name = getattr(args, "provider", None)
         if chosen_name:
-            matching = [a for a in adapters if a.name == chosen_name]
-            if not matching:
+            adapter = adapter_by_name.get(chosen_name)
+            if adapter is None:
                 print(f"provider not found: {chosen_name}", file=sys.stderr)
                 store.close()
                 return 2
-            adapter = matching[0]
-        elif adapters:
-            adapter = adapters[0]
         else:
-            adapter = None
+            routed = router.choose_for_stage("IMPLEMENT", "code")
+            adapter = adapter_by_name.get(routed.name) if routed else (adapters[0] if adapters else None)
         if adapter is not None:
+            chosen_provider = adapter.name
             executor = SubprocessExecutor(list(adapter.command), name=adapter.name)
-    coord = Coordinator(store, project, executor=executor)
+        if config.routing_mode == RoutingMode.STAGED:
+            routed_review = router.choose_for_stage("REVIEW", "review")
+            review_adapter = adapter_by_name.get(routed_review.name) if routed_review else None
+            if review_adapter is not None and review_adapter.name != chosen_provider:
+                reviewer = Reviewer(adapter=review_adapter)
+                chosen_review_provider = review_adapter.name
+                independent_review_configured = True
+            elif review_adapter is not None:
+                chosen_review_provider = "builtin-deterministic-fallback"
+        else:
+            reviewer = Reviewer(provider_name="single-agent-deterministic-fallback")
+            chosen_review_provider = "single-agent-deterministic-fallback"
+    coord = Coordinator(store, project, executor=executor, reviewer=reviewer)
     count = 0
     while True:
         progressed = coord.tick()
         count += progressed
         if args.once or progressed == 0:
             break
-    chosen_provider = getattr(executor, "name", "fake") if executor is not None else "fake"
     if args.json:
-        print(json.dumps({"progressed": count, "provider": chosen_provider}, indent=2, sort_keys=True))
+        print(
+            json.dumps(
+                {
+                    "progressed": count,
+                    "provider": chosen_provider,
+                    "review_provider": chosen_review_provider,
+                    "independent_review_configured": independent_review_configured,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
         store.close()
         return 0
     print(f"progressed: {count}")
     print(f"provider: {chosen_provider}")
+    print(f"review_provider: {chosen_review_provider}")
+    print(f"independent_review_configured: {independent_review_configured}")
     store.close()
     return 0
 
