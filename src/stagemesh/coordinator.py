@@ -3,7 +3,11 @@ from __future__ import annotations
 from pathlib import Path
 
 from .audit import record_audit
-from .change_control import ChangeContract, ChangeControlError
+from .change_control import (
+    ChangeContract,
+    ChangeControlError,
+    contract_definition_violations,
+)
 from .domain import EvidenceKind, EvidenceStatus, ExecutionStatus, Stage
 from .execution import Executor, FakeExecutor
 from .integration import Integrator
@@ -79,6 +83,18 @@ class Coordinator:
                         self.store,
                         "task.contract_missing",
                         {"task_id": task_id},
+                    )
+                    return 0
+                definition_violations = contract_definition_violations(contract)
+                if definition_violations:
+                    self.store.block_task(task_id)
+                    record_audit(
+                        self.store,
+                        "task.contract_incomplete",
+                        {
+                            "task_id": task_id,
+                            "violations": definition_violations,
+                        },
                     )
                     return 0
             self.store.advance_task(task_id, Stage.IMPLEMENT)
