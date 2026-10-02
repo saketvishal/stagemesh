@@ -14,7 +14,13 @@ import pytest
 
 from stagemesh.coordinator import Coordinator
 from stagemesh.domain import ExecutionStatus, Stage, TaskStatus
-from stagemesh.execution import ExecutionResult, FakeExecutor, SubprocessExecutor, classify_failure
+from stagemesh.execution import (
+    ExecutionResult,
+    FailoverExecutor,
+    FakeExecutor,
+    SubprocessExecutor,
+    classify_failure,
+)
 from stagemesh.persistence import Store
 
 
@@ -199,6 +205,100 @@ def test_capacity_failure_is_distinguishable_from_code_failure() -> None:
     assert code_fail.capacity_failure is False
     assert cap_fail.status is ExecutionStatus.FAILED
     assert code_fail.status is ExecutionStatus.FAILED
+
+
+# ---------------------------------------------------------------------------
+# Provider failover: capacity failures fall through, code failures do not
+# ---------------------------------------------------------------------------
+
+
+class CountingResultExecutor(FakeExecutor):
+    def __init__(
+        self,
+        name: str,
+        result: ExecutionResult,
+        counter: dict[str, int],
+    ):
+        self.name = name
+        self.result = result
+        self.counter = counter
+
+    def run(
+        self,
+        store: Store,
+        task_id: str,
+        claim_id: str | None,
+        project: Path,
+    ) -> ExecutionResult:
+        self.counter[self.name] = self.counter.get(self.name, 0) + 1
+        return self.result
+
+
+def test_failover_tries_next_provider_only_for_capacity_failures(
+    store: Store,
+    tmp_path: Path,
+) -> None:
+    counter: dict[str, int] = {}
+    first = CountingResultExecutor(
+        "primary",
+        ExecutionResult(
+            ExecutionStatus.FAILED,
+            capacity_failure=True,
+            failure_reason="quota_rate_limit",
+        ),
+        counter,
+    )
+    second = CountingResultExecutor(
+        "secondary",
+        ExecutionResult(
+            ExecutionStatus.SUCCEEDED,
+            candidate_sha="abc123",
+            durable_handoff=True,
+        ),
+        counter,
+    )
+    result = FailoverExecutor([first, second]).run(
+        store,
+        "unused",
+        None,
+        tmp_path,
+    )
+    assert result.status is ExecutionStatus.SUCCEEDED
+    assert counter == {"primary": 1, "secondary": 1}
+
+
+def test_failover_does_not_mask_implementation_failure(
+    store: Store,
+    tmp_path: Path,
+) -> None:
+    counter: dict[str, int] = {}
+    first = CountingResultExecutor(
+        "primary",
+        ExecutionResult(
+            ExecutionStatus.FAILED,
+            capacity_failure=False,
+            failure_reason="implementation_failure",
+        ),
+        counter,
+    )
+    second = CountingResultExecutor(
+        "secondary",
+        ExecutionResult(
+            ExecutionStatus.SUCCEEDED,
+            candidate_sha="abc123",
+            durable_handoff=True,
+        ),
+        counter,
+    )
+    result = FailoverExecutor([first, second]).run(
+        store,
+        "unused",
+        None,
+        tmp_path,
+    )
+    assert result.status is ExecutionStatus.FAILED
+    assert result.failure_reason == "implementation_failure"
+    assert counter == {"primary": 1}
 
 
 # ---------------------------------------------------------------------------
