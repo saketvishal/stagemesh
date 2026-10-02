@@ -3,7 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from .contracts import ContractError, evaluate_contract, load_contract
+from .contract_binding import contract_for_candidate
+from .contracts import ContractError, evaluate_contract
 from .domain import EvidenceKind, EvidenceStatus, ExecutionKind, ExecutionStatus
 from .persistence import Store
 from .remediation import finding_identity
@@ -17,9 +18,15 @@ class ReviewFinding:
 
 
 class Reviewer:
-    def __init__(self, fail_capacity: bool = False, findings: list[ReviewFinding] | None = None):
+    def __init__(
+        self,
+        fail_capacity: bool = False,
+        findings: list[ReviewFinding] | None = None,
+        provider_name: str = "builtin-deterministic-fallback",
+    ):
         self.fail_capacity = fail_capacity
         self.findings = findings or []
+        self.provider_name = provider_name
 
     def review(self, store: Store, task_id: str, candidate_sha: str, project: Path) -> EvidenceStatus:
         execution_id = store.start_execution(
@@ -32,14 +39,39 @@ class Reviewer:
             store.add_evidence(task_id, candidate_sha, EvidenceKind.REVIEW, EvidenceStatus.CAPACITY, {"provider": "fake"})
             store.finish_execution(execution_id, ExecutionStatus.FAILED, candidate_sha)
             return EvidenceStatus.CAPACITY
+        candidate = store.latest_candidate(task_id)
+        implementer = str(candidate["produced_by"]) if candidate is not None and candidate["sha"] == candidate_sha else None
+        deterministic_fallback = self.provider_name == "builtin-deterministic-fallback"
+        independent = bool(self.provider_name and self.provider_name != implementer and not deterministic_fallback)
         findings = list(self.findings)
-        review_payload: dict[str, object] = {"reviewer": "deterministic-contract"}
+        review_payload: dict[str, object] = {
+            "review_provider": self.provider_name,
+            "implementer_provider": implementer,
+            "independent_reviewer": independent,
+            "deterministic_contract_gate": deterministic_fallback,
+        }
+        if implementer and self.provider_name == implementer:
+            findings.append(
+                ReviewFinding(
+                    finding_identity(candidate_sha, "review provider must differ from implementer"),
+                    "error",
+                    "review provider must differ from implementer",
+                )
+            )
         if not findings:
             try:
-                contract = load_contract(project, task_id)
-                evaluation = evaluate_contract(project, candidate_sha, contract, run_gates=False)
+                bound = contract_for_candidate(store, task_id, candidate_sha, project)
+                contract = bound.contract
+                evaluation = evaluate_contract(
+                    project,
+                    candidate_sha,
+                    contract,
+                    baseline_sha=bound.baseline_sha,
+                    run_gates=False,
+                )
                 review_payload.update(
                     {
+                        **bound.evidence_payload(),
                         "objective": contract.objective,
                         "changed_files": list(evaluation.changed_files),
                         "findings": list(evaluation.findings),
