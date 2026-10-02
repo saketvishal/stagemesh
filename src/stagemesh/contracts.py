@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import fnmatch
+import hashlib
 import json
 import shutil
 import subprocess
@@ -64,6 +65,27 @@ class ChangeContract:
 
 
 @dataclass(frozen=True)
+class BoundChangeContract:
+    contract: ChangeContract
+    version: int
+    digest: str
+    canonical_json: str
+    baseline_sha: str | None = None
+    candidate_sha: str | None = None
+
+    def evidence_payload(self) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "contract_version": self.version,
+            "contract_hash": self.digest,
+        }
+        if self.baseline_sha:
+            payload["baseline_sha"] = self.baseline_sha
+        if self.candidate_sha:
+            payload["candidate_sha"] = self.candidate_sha
+        return payload
+
+
+@dataclass(frozen=True)
 class GateResult:
     name: str
     status: str
@@ -101,13 +123,55 @@ def load_contract(project: Path, task_id: str | None = None) -> ChangeContract:
     return ChangeContract(objective="No explicit change contract supplied")
 
 
+def bind_contract(
+    project: Path,
+    task_id: str | None = None,
+    *,
+    baseline_sha: str | None = None,
+    candidate_sha: str | None = None,
+) -> BoundChangeContract:
+    contract = load_contract(project, task_id)
+    canonical_json = canonical_contract_json(contract)
+    digest = hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
+    return BoundChangeContract(contract, 1, digest, canonical_json, baseline_sha, candidate_sha)
+
+
+def bound_contract_from_record(record: dict[str, Any]) -> BoundChangeContract:
+    version = record.get("version")
+    digest = record.get("digest")
+    canonical_json = record.get("canonical_json")
+    if version != 1:
+        raise ContractError(f"unsupported bound contract version: {version}")
+    if not isinstance(digest, str) or not digest:
+        raise ContractError("bound contract hash is missing")
+    if not isinstance(canonical_json, str) or not canonical_json:
+        raise ContractError("bound contract payload is missing")
+    actual = hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
+    if actual != digest:
+        raise ContractError("bound contract hash does not match payload")
+    payload = json.loads(canonical_json)
+    contract = parse_contract(payload)
+    return BoundChangeContract(
+        contract=contract,
+        version=version,
+        digest=digest,
+        canonical_json=canonical_json,
+        baseline_sha=record.get("baseline_sha"),
+        candidate_sha=record.get("candidate_sha"),
+    )
+
+
+def canonical_contract_json(contract: ChangeContract) -> str:
+    return json.dumps(_contract_payload(contract), sort_keys=True, separators=(",", ":"))
+
+
 def parse_contract(payload: dict[str, Any]) -> ChangeContract:
     if not isinstance(payload, dict):
         raise ContractError("change contract must be a JSON object")
     objective = _required_text(payload.get("objective"), "objective")
     return ChangeContract(
         objective=objective,
-        explicit=True,
+        explicit=bool(payload.get("explicit", True)),
         acceptance_criteria=_texts(payload.get("acceptance_criteria", ()), "acceptance_criteria"),
         allowed_files=_texts(payload.get("allowed_files", ("**",)), "allowed_files") or ("**",),
         forbidden_files=_texts(payload.get("forbidden_files", ()), "forbidden_files"),
@@ -129,10 +193,11 @@ def evaluate_contract(
     candidate_sha: str,
     contract: ChangeContract,
     *,
+    baseline_sha: str | None = None,
     run_gates: bool = True,
 ) -> ContractEvaluation:
     try:
-        changed = tuple(changed_files(project, candidate_sha))
+        changed = tuple(changed_files(project, candidate_sha, baseline_sha))
     except (GitError, OSError) as exc:
         if not contract.explicit:
             return ContractEvaluation(
@@ -168,7 +233,7 @@ def evaluate_contract(
             }
         )
 
-    diff_lines = changed_line_count(project, candidate_sha) if changed else 0
+    diff_lines = changed_line_count(project, candidate_sha, baseline_sha) if changed else 0
     if contract.max_diff_lines is not None and diff_lines > contract.max_diff_lines:
         findings.append(
             {
@@ -272,26 +337,34 @@ def evaluate_contract(
     )
 
 
-def changed_files(project: Path, candidate_sha: str) -> list[str]:
+def changed_files(project: Path, candidate_sha: str, baseline_sha: str | None = None) -> list[str]:
     workspace = GitWorkspace(project)
     workspace.run("cat-file", "-e", f"{candidate_sha}^{{commit}}")
-    parent = workspace.run("rev-list", "--parents", "-n", "1", candidate_sha).stdout.strip().split()
-    if len(parent) > 1:
-        base = parent[1]
-        output = workspace.run("diff", "--name-status", "-M", base, candidate_sha).stdout
+    if baseline_sha:
+        workspace.run("cat-file", "-e", f"{baseline_sha}^{{commit}}")
+        output = workspace.run("diff", "--name-status", "-M", baseline_sha, candidate_sha).stdout
     else:
-        output = workspace.run("show", "--pretty=", "--name-status", "-M", candidate_sha).stdout
+        parent = workspace.run("rev-list", "--parents", "-n", "1", candidate_sha).stdout.strip().split()
+        if len(parent) > 1:
+            base = parent[1]
+            output = workspace.run("diff", "--name-status", "-M", base, candidate_sha).stdout
+        else:
+            output = workspace.run("show", "--pretty=", "--name-status", "-M", candidate_sha).stdout
     return sorted(_paths_from_name_status(output))
 
 
-def changed_line_count(project: Path, candidate_sha: str) -> int:
+def changed_line_count(project: Path, candidate_sha: str, baseline_sha: str | None = None) -> int:
     workspace = GitWorkspace(project)
-    parent = workspace.run("rev-list", "--parents", "-n", "1", candidate_sha).stdout.strip().split()
-    if len(parent) > 1:
-        base = parent[1]
-        output = workspace.run("diff", "--numstat", base, candidate_sha).stdout
+    if baseline_sha:
+        workspace.run("cat-file", "-e", f"{baseline_sha}^{{commit}}")
+        output = workspace.run("diff", "--numstat", baseline_sha, candidate_sha).stdout
     else:
-        output = workspace.run("show", "--pretty=", "--numstat", candidate_sha).stdout
+        parent = workspace.run("rev-list", "--parents", "-n", "1", candidate_sha).stdout.strip().split()
+        if len(parent) > 1:
+            base = parent[1]
+            output = workspace.run("diff", "--numstat", base, candidate_sha).stdout
+        else:
+            output = workspace.run("show", "--pretty=", "--numstat", candidate_sha).stdout
     total = 0
     for line in output.splitlines():
         parts = line.split("\t")
@@ -449,3 +522,34 @@ def _split_command(command: str) -> list[str]:
     import shlex
 
     return shlex.split(_required_text(command, "command"), posix=False)
+
+
+def _contract_payload(contract: ChangeContract) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "objective": contract.objective,
+        "explicit": contract.explicit,
+        "acceptance_criteria": list(contract.acceptance_criteria),
+        "allowed_files": list(contract.allowed_files),
+        "forbidden_files": list(contract.forbidden_files),
+        "exclusions": list(contract.exclusions),
+        "invariants": list(contract.invariants),
+        "required_tests": [_gate_payload(gate) for gate in contract.required_tests],
+        "lint": [_gate_payload(gate) for gate in contract.lint],
+        "typecheck": [_gate_payload(gate) for gate in contract.typecheck],
+        "dependency_checks": [_gate_payload(gate) for gate in contract.dependency_checks],
+        "public_api": list(contract.public_api),
+        "protected_files": list(contract.protected_files),
+    }
+    if contract.max_changed_files is not None:
+        payload["max_changed_files"] = contract.max_changed_files
+    if contract.max_diff_lines is not None:
+        payload["max_diff_lines"] = contract.max_diff_lines
+    return payload
+
+
+def _gate_payload(gate: GateCommand) -> dict[str, Any]:
+    return {
+        "name": gate.name,
+        "command": list(gate.command),
+        "timeout_seconds": gate.timeout_seconds,
+    }

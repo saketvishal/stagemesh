@@ -2,14 +2,16 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from .audit import record_audit
+from .contract_binding import contract_for_candidate
 from .domain import EvidenceKind, EvidenceStatus, ExecutionStatus, Stage
 from .execution import Executor, FakeExecutor
 from .integration import Integrator
 from .lifecycle import evidence_allows_advance
 from .persistence import Store
+from .remediation import RemediationPolicy
 from .review import Reviewer
 from .scheduling import Scheduler
-from .audit import record_audit
 from .validation import Validator
 
 
@@ -22,6 +24,7 @@ class Coordinator:
         validator: Validator | None = None,
         reviewer: Reviewer | None = None,
         integrator: Integrator | None = None,
+        remediation_policy: RemediationPolicy | None = None,
     ):
         self.store = store
         self.project = Path(project)
@@ -29,6 +32,7 @@ class Coordinator:
         self.validator = validator or Validator()
         self.reviewer = reviewer or Reviewer()
         self.integrator = integrator or Integrator()
+        self.remediation_policy = remediation_policy or RemediationPolicy()
 
     def recover(self) -> None:
         for execution in self.store.running_executions():
@@ -90,21 +94,30 @@ class Coordinator:
             return 0
         sha = str(candidate["sha"])
         if stage is Stage.VALIDATE:
-            if not self.store.has_evidence(task_id, sha, EvidenceKind.VALIDATION):
+            bound = contract_for_candidate(self.store, task_id, sha, self.project)
+            if not self.store.has_bound_evidence(task_id, sha, EvidenceKind.VALIDATION, bound.digest):
                 self.validator.validate(self.store, task_id, sha, self.project)
-            return self._advance_with_evidence(task_id, stage, sha, EvidenceKind.VALIDATION)
+            if self.store.has_bound_evidence(task_id, sha, EvidenceKind.VALIDATION, bound.digest, EvidenceStatus.FAILED):
+                return self._remediate_or_block(task_id, sha, Stage.VALIDATE)
+            return self._advance_with_evidence(task_id, stage, sha, EvidenceKind.VALIDATION, bound.digest)
         if stage is Stage.REVIEW:
-            if not self.store.has_evidence(task_id, sha, EvidenceKind.REVIEW):
+            bound = contract_for_candidate(self.store, task_id, sha, self.project)
+            if not self.store.has_bound_evidence(task_id, sha, EvidenceKind.REVIEW, bound.digest):
                 self.reviewer.review(self.store, task_id, sha, self.project)
-            return self._advance_with_evidence(task_id, stage, sha, EvidenceKind.REVIEW)
+            if self.store.has_bound_evidence(task_id, sha, EvidenceKind.REVIEW, bound.digest, EvidenceStatus.FAILED):
+                return self._remediate_or_block(task_id, sha, Stage.REVIEW)
+            return self._advance_with_evidence(task_id, stage, sha, EvidenceKind.REVIEW, bound.digest)
         if stage is Stage.INTEGRATE:
-            if not self.store.has_evidence(task_id, sha, EvidenceKind.INTEGRATION):
+            bound = contract_for_candidate(self.store, task_id, sha, self.project)
+            if not self.store.has_bound_evidence(task_id, sha, EvidenceKind.INTEGRATION, bound.digest):
                 self.integrator.integrate(self.store, task_id, sha, self.project)
-            return self._advance_with_evidence(task_id, stage, sha, EvidenceKind.INTEGRATION)
+            if self.store.has_bound_evidence(task_id, sha, EvidenceKind.INTEGRATION, bound.digest, EvidenceStatus.FAILED):
+                return self._remediate_or_block(task_id, sha, Stage.INTEGRATE)
+            return self._advance_with_evidence(task_id, stage, sha, EvidenceKind.INTEGRATION, bound.digest)
         return 0
 
-    def _advance_with_evidence(self, task_id: str, stage: Stage, sha: str, kind: EvidenceKind) -> int:
-        if not self.store.has_evidence(task_id, sha, kind, EvidenceStatus.PASSED):
+    def _advance_with_evidence(self, task_id: str, stage: Stage, sha: str, kind: EvidenceKind, contract_hash: str) -> int:
+        if not self.store.has_bound_evidence(task_id, sha, kind, contract_hash, EvidenceStatus.PASSED):
             return 0
         decision = evidence_allows_advance(
             current=stage,
@@ -118,5 +131,42 @@ class Coordinator:
             self.store,
             "task.advance",
             {"task_id": task_id, "stage": decision.target, "candidate_sha": sha, "reason": decision.reason},
+        )
+        return 1
+
+    def _remediate_or_block(self, task_id: str, sha: str, failed_stage: Stage) -> int:
+        findings = self.store.open_findings_for_candidate(task_id, sha)
+        if not findings:
+            return 0
+        eligible = [finding for finding in findings if self.remediation_policy.should_remediate(self.store, str(finding["id"]))]
+        if not eligible:
+            self.store.block_task(task_id)
+            record_audit(
+                self.store,
+                "task.remediation_exhausted",
+                {"task_id": task_id, "candidate_sha": sha, "stage": failed_stage},
+            )
+            return 1
+        for finding in eligible:
+            self.remediation_policy.record_attempt(
+                self.store,
+                str(finding["id"]),
+                "QUEUED",
+                {
+                    "candidate_sha": sha,
+                    "failed_stage": failed_stage,
+                    "next_stage": Stage.IMPLEMENT,
+                },
+            )
+        self.store.advance_task(task_id, Stage.IMPLEMENT)
+        record_audit(
+            self.store,
+            "task.remediation_queued",
+            {
+                "task_id": task_id,
+                "candidate_sha": sha,
+                "stage": failed_stage,
+                "finding_count": len(eligible),
+            },
         )
         return 1
