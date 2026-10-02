@@ -348,7 +348,10 @@ class Store:
             raise StoreValidationError("durable_handoff must be a boolean")
         cid = str(uuid.uuid4())
         self.conn.execute(
-            "INSERT OR IGNORE INTO candidates VALUES (?, ?, ?, ?, ?, ?)",
+            """
+            INSERT OR IGNORE INTO candidates(id, task_id, sha, produced_by, durable_handoff, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
             (cid, task_id, sha, produced_by, int(durable_handoff), time.time()),
         )
         self.conn.commit()
