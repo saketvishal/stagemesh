@@ -1063,6 +1063,8 @@ def command_ci(args: argparse.Namespace) -> int:
         return 0 if all(result.passed for result in results) else 1
     for result in results:
         print(f"{result.name}: {'PASS' if result.passed else 'FAIL'}")
+        if not result.passed and result.output:
+            print(result.output[-4000:])
     return 0 if all(result.passed for result in results) else 1
 
 
