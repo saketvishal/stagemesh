@@ -114,6 +114,16 @@ def test_reviewer_provider_failure_does_not_restart_implementation(store: Store,
     assert len(list(store.conn.execute("SELECT * FROM candidates WHERE task_id=?", (task_id,)))) == 1
 
 
+def test_candidate_insert_survives_nullable_schema_extensions(store: Store) -> None:
+    store.conn.execute("ALTER TABLE candidates ADD COLUMN base_sha TEXT")
+    task_id = store.upsert_task("candidate extension")
+    store.add_candidate(task_id, "abc123", "fake", True)
+    row = store.latest_candidate(task_id)
+    assert row is not None
+    assert row["sha"] == "abc123"
+    assert row["base_sha"] is None
+
+
 def test_stale_sha_cannot_advance() -> None:
     with pytest.raises(LifecycleError):
         evidence_allows_advance(
