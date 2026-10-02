@@ -3,8 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from .github import GitHubClient
-from .github import parse_github_remote
+from .github import GitHubClient, parse_github_remote
 from .persistence import Store
 from .task_sources import GitHubIssueSource, GitHubOutboundSync, sync_source
 

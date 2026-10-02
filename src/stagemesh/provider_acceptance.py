@@ -7,7 +7,7 @@ from .capacity import CapacityKind, CapacityRegistry
 from .domain import ExecutionStatus, Stage
 from .execution import ExecutionResult
 from .persistence import Store
-from .providers import ProviderAdapter, record_provider_capacity
+from .providers import record_provider_capacity
 from .routing import Provider, Router
 
 
