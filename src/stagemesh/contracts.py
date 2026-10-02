@@ -14,6 +14,21 @@ class ContractError(ValueError):
     pass
 
 
+DEPENDENCY_MANIFESTS = (
+    "pyproject.toml",
+    "poetry.lock",
+    "requirements*.txt",
+    "package.json",
+    "package-lock.json",
+    "pnpm-lock.yaml",
+    "yarn.lock",
+    "Cargo.toml",
+    "Cargo.lock",
+    "go.mod",
+    "go.sum",
+)
+
+
 @dataclass(frozen=True)
 class GateCommand:
     name: str
@@ -35,6 +50,9 @@ class ChangeContract:
     typecheck: tuple[GateCommand, ...] = ()
     dependency_checks: tuple[GateCommand, ...] = ()
     public_api: tuple[str, ...] = ()
+    protected_files: tuple[str, ...] = ()
+    max_changed_files: int | None = None
+    max_diff_lines: int | None = None
 
     @property
     def gates(self) -> tuple[GateCommand, ...]:
@@ -96,6 +114,9 @@ def parse_contract(payload: dict[str, Any]) -> ChangeContract:
         typecheck=_commands(payload.get("typecheck", ()), "typecheck"),
         dependency_checks=_commands(payload.get("dependency_checks", ()), "dependency_checks"),
         public_api=_texts(payload.get("public_api", ()), "public_api"),
+        protected_files=_texts(payload.get("protected_files", ()), "protected_files"),
+        max_changed_files=_optional_positive_int(payload.get("max_changed_files"), "max_changed_files"),
+        max_diff_lines=_optional_positive_int(payload.get("max_diff_lines"), "max_diff_lines"),
     )
 
 
@@ -134,6 +155,25 @@ def evaluate_contract(
     if contract.explicit and not changed:
         findings.append({"severity": "error", "code": "empty_diff", "message": "candidate has no changed files"})
 
+    if contract.max_changed_files is not None and len(changed) > contract.max_changed_files:
+        findings.append(
+            {
+                "severity": "error",
+                "code": "change_size_files_exceeded",
+                "message": f"candidate changes {len(changed)} files; limit is {contract.max_changed_files}",
+            }
+        )
+
+    diff_lines = changed_line_count(project, candidate_sha) if changed else 0
+    if contract.max_diff_lines is not None and diff_lines > contract.max_diff_lines:
+        findings.append(
+            {
+                "severity": "error",
+                "code": "change_size_lines_exceeded",
+                "message": f"candidate changes {diff_lines} diff lines; limit is {contract.max_diff_lines}",
+            }
+        )
+
     for path in changed:
         if _matches(path, contract.exclusions):
             findings.append(
@@ -160,6 +200,24 @@ def evaluate_contract(
                     "code": "forbidden_file_changed",
                     "path": path,
                     "message": f"{path} is forbidden by the change contract",
+                }
+            )
+        if _matches(path, contract.protected_files):
+            findings.append(
+                {
+                    "severity": "error",
+                    "code": "protected_file_changed",
+                    "path": path,
+                    "message": f"{path} is protected by the change contract",
+                }
+            )
+        if _matches(path, DEPENDENCY_MANIFESTS) and not contract.dependency_checks:
+            findings.append(
+                {
+                    "severity": "error",
+                    "code": "dependency_manifest_changed_without_gate",
+                    "path": path,
+                    "message": f"{path} changes dependencies without a dependency validation gate",
                 }
             )
         if _matches(path, contract.public_api) and not _matches(path, contract.allowed_files):
@@ -212,6 +270,23 @@ def changed_files(project: Path, candidate_sha: str) -> list[str]:
     return sorted({line.strip().replace("\\", "/") for line in output.splitlines() if line.strip()})
 
 
+def changed_line_count(project: Path, candidate_sha: str) -> int:
+    workspace = GitWorkspace(project)
+    parent = workspace.run("rev-list", "--parents", "-n", "1", candidate_sha).stdout.strip().split()
+    if len(parent) > 1:
+        base = parent[1]
+        output = workspace.run("diff", "--numstat", base, candidate_sha).stdout
+    else:
+        output = workspace.run("show", "--pretty=", "--numstat", candidate_sha).stdout
+    total = 0
+    for line in output.splitlines():
+        parts = line.split("\t")
+        for value in parts[:2]:
+            if value.isdigit():
+                total += int(value)
+    return total
+
+
 def run_gate(project: Path, gate: GateCommand) -> GateResult:
     try:
         result = subprocess.run(
@@ -246,6 +321,29 @@ def run_gate(project: Path, gate: GateCommand) -> GateResult:
 def _matches(path: str, patterns: tuple[str, ...]) -> bool:
     normalized = path.replace("\\", "/")
     return any(fnmatch.fnmatchcase(normalized, pattern) for pattern in patterns)
+
+
+def contract_prompt(contract: ChangeContract) -> str:
+    lines = [
+        "Change contract:",
+        f"- Objective: {contract.objective}",
+        f"- Allowed files: {', '.join(contract.allowed_files)}",
+    ]
+    if contract.forbidden_files:
+        lines.append(f"- Forbidden files: {', '.join(contract.forbidden_files)}")
+    if contract.exclusions:
+        lines.append(f"- Exclusions: {', '.join(contract.exclusions)}")
+    if contract.protected_files:
+        lines.append(f"- Protected files: {', '.join(contract.protected_files)}")
+    if contract.acceptance_criteria:
+        lines.append("- Acceptance criteria:")
+        lines.extend(f"  - {item}" for item in contract.acceptance_criteria)
+    if contract.max_changed_files is not None:
+        lines.append(f"- Max changed files: {contract.max_changed_files}")
+    if contract.max_diff_lines is not None:
+        lines.append(f"- Max diff lines: {contract.max_diff_lines}")
+    lines.append("Stay strictly inside this contract; unrelated edits will be rejected.")
+    return "\n".join(lines)
 
 
 def _required_text(value: Any, field: str) -> str:
@@ -287,6 +385,14 @@ def _command(value: Any, field: str) -> GateCommand:
     if not isinstance(timeout, int) or timeout < 1:
         raise ContractError(f"{field} timeout_seconds must be a positive integer")
     return GateCommand(name, command, timeout)
+
+
+def _optional_positive_int(value: Any, field: str) -> int | None:
+    if value is None:
+        return None
+    if not isinstance(value, int) or value < 1:
+        raise ContractError(f"{field} must be a positive integer")
+    return value
 
 
 def _split_command(command: str) -> list[str]:

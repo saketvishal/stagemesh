@@ -4,11 +4,12 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from .attribution import attribution_for_worker
 from .domain import ExecutionKind, ExecutionStatus
 from .git import GitWorkspace
 from .persistence import Store
 from .process_identity import popen_identity
-from .attribution import attribution_for_worker
+from .workspaces import prepare_task_workspace
 
 
 @dataclass(frozen=True)
@@ -73,9 +74,10 @@ class FakeExecutor(Executor):
 
     def run(self, store: Store, task_id: str, claim_id: str | None, project: Path) -> ExecutionResult:
         execution_id = store.start_execution(task_id=task_id, claim_id=claim_id, kind=ExecutionKind.IMPLEMENTATION)
-        workspace = GitWorkspace(project)
+        run_path = prepare_task_workspace(project, task_id)
+        workspace = GitWorkspace(run_path)
         workspace.init_if_needed()
-        task_file = project / f"stagemesh-task-{task_id}.txt"
+        task_file = run_path / f"stagemesh-task-{task_id}.txt"
         task_file.write_text(f"implemented {task_id}\n", encoding="utf-8")
         sha = workspace.commit_all(
             f"StageMesh implementation for {task_id}",
@@ -106,12 +108,13 @@ class SubprocessExecutor(Executor):
 
         task = store.get_task(task_id)
         from .providers import _build_task_prompt
-        task_prompt = _build_task_prompt(task_id, task)
+        run_path = prepare_task_workspace(project, task_id)
+        task_prompt = _build_task_prompt(task_id, task, run_path)
 
         try:
             proc = subprocess.Popen(
                 self.command,
-                cwd=project,
+                cwd=run_path,
                 text=True,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
@@ -147,7 +150,7 @@ class SubprocessExecutor(Executor):
                 failure_reason=reason,
             )
 
-        workspace = GitWorkspace(project)
+        workspace = GitWorkspace(run_path)
         workspace.init_if_needed()
         sha = workspace.commit_all(
             f"StageMesh implementation for {task_id}",

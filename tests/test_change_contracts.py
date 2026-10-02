@@ -5,11 +5,15 @@ import sys
 from pathlib import Path
 
 from stagemesh.contracts import ChangeContract, GateCommand, evaluate_contract, parse_contract
+from stagemesh.coordinator import Coordinator
 from stagemesh.domain import EvidenceKind, EvidenceStatus
+from stagemesh.execution import SubprocessExecutor
 from stagemesh.git import GitWorkspace
+from stagemesh.integration import Integrator
 from stagemesh.persistence import Store
 from stagemesh.review import Reviewer
 from stagemesh.validation import Validator
+from stagemesh.workspaces import task_workspace
 
 
 def _repo(path: Path) -> GitWorkspace:
@@ -137,3 +141,108 @@ def test_contract_parser_accepts_named_command_objects() -> None:
     assert contract.objective == "Ship safely"
     assert contract.acceptance_criteria == ("tests pass",)
     assert contract.required_tests[0].name == "unit"
+
+
+def test_dependency_manifest_change_requires_dependency_gate(tmp_path: Path) -> None:
+    workspace = _repo(tmp_path / "repo")
+    project = workspace.path
+    (project / "pyproject.toml").write_text("[project]\nname = 'changed'\n", encoding="utf-8")
+    sha = workspace.commit_all("change manifest")
+
+    result = evaluate_contract(
+        project,
+        sha,
+        ChangeContract(objective="Do not smuggle dependency changes", allowed_files=("**",)),
+        run_gates=False,
+    )
+
+    assert result.status == "FAILED"
+    assert any(finding["code"] == "dependency_manifest_changed_without_gate" for finding in result.findings)
+
+
+def test_change_size_limits_reject_unrelated_refactor(tmp_path: Path) -> None:
+    workspace = _repo(tmp_path / "repo")
+    project = workspace.path
+    (project / "src" / "app.py").write_text("VALUE = 2\nOTHER = 3\n", encoding="utf-8")
+    (project / "src" / "extra.py").write_text("EXTRA = 1\n", encoding="utf-8")
+    sha = workspace.commit_all("too broad")
+
+    result = evaluate_contract(
+        project,
+        sha,
+        ChangeContract(
+            objective="One small edit",
+            allowed_files=("src/**",),
+            max_changed_files=1,
+            max_diff_lines=1,
+        ),
+        run_gates=False,
+    )
+
+    codes = {finding["code"] for finding in result.findings}
+    assert {"change_size_files_exceeded", "change_size_lines_exceeded"} <= codes
+
+
+def test_integration_requires_validation_and_review_for_exact_sha(tmp_path: Path) -> None:
+    workspace = _repo(tmp_path / "repo")
+    project = workspace.path
+    (project / "src" / "app.py").write_text("VALUE = 42\n", encoding="utf-8")
+    sha = workspace.commit_all("candidate")
+
+    store = _store(tmp_path)
+    task_id = store.upsert_task("integration task")
+    store.add_candidate(task_id, sha, "test", True)
+
+    assert Integrator().integrate(store, task_id, sha, project) is EvidenceStatus.FAILED
+    assert not store.has_evidence(task_id, sha, EvidenceKind.INTEGRATION, EvidenceStatus.PASSED)
+
+    store.add_evidence(task_id, sha, EvidenceKind.VALIDATION, EvidenceStatus.PASSED)
+    store.add_evidence(task_id, sha, EvidenceKind.REVIEW, EvidenceStatus.PASSED)
+    assert Integrator().integrate(store, task_id, sha, project) is EvidenceStatus.PASSED
+    store.close()
+
+
+def test_provider_prompt_includes_change_contract(tmp_path: Path) -> None:
+    project = tmp_path / "repo"
+    project.mkdir()
+    (project / "stagemesh.contract.json").write_text(
+        json.dumps(
+            {
+                "objective": "Only touch source",
+                "allowed_files": ["src/**"],
+                "forbidden_files": ["README.md"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    store = _store(tmp_path)
+    task_id = store.upsert_task("prompt task")
+    store.advance_task(task_id, "IMPLEMENT")
+    script = (
+        "import pathlib, sys\n"
+        "pathlib.Path('captured_prompt.txt').write_text(sys.stdin.read(), encoding='utf-8')\n"
+    )
+
+    Coordinator(store, project, executor=SubprocessExecutor([sys.executable, "-c", script], name="prompt-capture")).tick()
+
+    prompt = (task_workspace(project, task_id) / "captured_prompt.txt").read_text(encoding="utf-8")
+    assert "Change contract:" in prompt
+    assert "Only touch source" in prompt
+    assert "Forbidden files: README.md" in prompt
+    assert not (project / "captured_prompt.txt").exists()
+    store.close()
+
+
+def test_implementation_runs_in_isolated_worktree_not_shared_project(tmp_path: Path) -> None:
+    project = tmp_path / "repo"
+    project.mkdir()
+    store = _store(tmp_path)
+    task_id = store.upsert_task("isolated task")
+    coord = Coordinator(store, project)
+    assert coord.tick() == 1
+    assert coord.tick() == 1
+
+    assert not (project / f"stagemesh-task-{task_id}.txt").exists()
+    assert (task_workspace(project, task_id) / f"stagemesh-task-{task_id}.txt").exists()
+    assert store.latest_candidate(task_id) is not None
+    store.close()
