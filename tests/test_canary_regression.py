@@ -466,6 +466,53 @@ def test_cli_continue_targeted_advances_only_selected_canary(tmp_path: Path) -> 
         store.close()
 
 
+def test_cli_continue_targeted_planner_refreshes_parent_source_but_runs_only_planner(
+    tmp_path: Path,
+) -> None:
+    project = _cli_project(
+        tmp_path,
+        routing={"mode": "SINGLE_AGENT", "single_agent_provider": "fake"},
+    )
+    backlog = project / ".stagemesh" / "backlog.json"
+    backlog.write_text(
+        json.dumps(
+            {
+                "tasks": [
+                    {"id": "GH-46", "title": "github issue parent"},
+                    {"id": "OTHER", "title": "unrelated backlog task"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+    store.migrate()
+    planner_id = store.upsert_task(
+        "planner for issue 46",
+        source="github",
+        source_id="GH-46-PLANNER",
+    )
+    unrelated_id = store.upsert_task(
+        "unrelated implementation",
+        source="local-backlog",
+        source_id="OTHER",
+    )
+    store.advance_task(unrelated_id, Stage.IMPLEMENT)
+    store.close()
+
+    assert _continue_targeted(project, "GH-46-PLANNER") == 0
+
+    store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+    try:
+        assert store.get_task(planner_id)["stage"] == Stage.IMPLEMENT
+        assert store.get_task(unrelated_id)["stage"] == Stage.IMPLEMENT
+        assert store.conn.execute("SELECT 1 FROM claims WHERE task_id='OTHER'").fetchone() is None
+        assert store.conn.execute("SELECT 1 FROM tasks WHERE id='GH-46'").fetchone() is not None
+        assert store.conn.execute("SELECT 1 FROM tasks WHERE id='OTHER'").fetchone() is not None
+    finally:
+        store.close()
+
+
 def test_cli_continue_invalid_target_mutates_nothing(tmp_path: Path) -> None:
     project = _cli_project(
         tmp_path,
@@ -498,6 +545,30 @@ def test_cli_continue_invalid_target_mutates_nothing(tmp_path: Path) -> None:
             "source_cache": store.conn.execute("SELECT COUNT(*) FROM source_cache").fetchone()[0],
         }
         assert after == before
+    finally:
+        store.close()
+
+
+def test_cli_continue_targeted_ordinary_implement_unchanged(tmp_path: Path) -> None:
+    project = _cli_project(
+        tmp_path,
+        routing={"mode": "SINGLE_AGENT", "single_agent_provider": "fake"},
+    )
+    store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+    store.migrate()
+    target_id = store.upsert_task("ordinary implementation", source="local-backlog", source_id="TASK-1")
+    other_id = store.upsert_task("other implementation", source="local-backlog", source_id="TASK-2")
+    store.advance_task(target_id, Stage.IMPLEMENT)
+    store.advance_task(other_id, Stage.IMPLEMENT)
+    store.close()
+
+    assert _continue_targeted(project, "TASK-1") == 0
+
+    store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+    try:
+        assert store.get_task(target_id)["stage"] == Stage.VALIDATE
+        assert store.get_task(other_id)["stage"] == Stage.IMPLEMENT
+        assert store.conn.execute("SELECT 1 FROM claims WHERE task_id='TASK-2'").fetchone() is None
     finally:
         store.close()
 
