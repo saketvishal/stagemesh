@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
+from typing import Any
 
 from .domain import ExecutionStatus, Stage, TaskStatus
 from .persistence import Store
@@ -16,6 +18,7 @@ class HealthReport:
     failed_execution_count: int
     unknown_execution_count: int
     backlog_state: str
+    latest_implementation_failure: dict[str, Any] | None
 
 
 def health(store: Store) -> HealthReport:
@@ -45,4 +48,27 @@ def health(store: Store) -> HealthReport:
         failed_execution_count=failed_execution_count,
         unknown_execution_count=unknown_execution_count,
         backlog_state=backlog_state,
+        latest_implementation_failure=_latest_implementation_failure(store),
     )
+
+
+def _latest_implementation_failure(store: Store) -> dict[str, Any] | None:
+    row = store.conn.execute(
+        """
+        SELECT event_type, payload, created_at
+        FROM audit_events
+        WHERE event_type IN (?, ?)
+        ORDER BY created_at DESC, rowid DESC
+        LIMIT 1
+        """,
+        ("task.implementation_unsuccessful", "recovery.failed_implementation_claim_released"),
+    ).fetchone()
+    if row is None:
+        return None
+    try:
+        payload = json.loads(row["payload"])
+    except (TypeError, json.JSONDecodeError):
+        return {"created_at": row["created_at"], "reason": "unparseable_audit_payload"}
+    payload["created_at"] = row["created_at"]
+    payload["event_type"] = row["event_type"]
+    return payload
