@@ -7,6 +7,9 @@
 - Deterministic lifecycle state machine for `PLAN -> IMPLEMENT -> VALIDATE -> REVIEW -> INTEGRATE -> DONE`.
 - One-active-claim enforcement per task.
 - Durable candidate and exact-SHA evidence model.
+- Machine-enforced change contracts with allowed, forbidden, excluded, protected, dependency-manifest, invariant, gate-command, and change-size enforcement.
+- Provider prompts include the task change contract so implementation agents receive the same scope that validators and reviewers enforce.
+- Per-task implementation runs in isolated Git worktrees outside the shared project checkout; candidates are committed from the task workspace and bound to exact SHA evidence.
 - Fake and subprocess executors.
 - Provider adapter SDK surface for Codex, Claude, Grok, and additional runtime commands with bounded command validation and durable execution records.
 - Configured provider commands are converted into runtime adapters for plain/JSON live acceptance.
@@ -14,7 +17,8 @@
 - Configurable provider routing with SINGLE_AGENT and STAGED modes plus per-stage provider routes.
 - Local backlog, configured JSON and Google AX export task-source adapters, and GitHub issue-source models, including zero-config remote detection, deferred, unknown, stale, auth, and rate-limit semantics.
 - Structured objective planner validation, including duplicate task and unknown dependency rejection.
-- Built-in validation, independent review, and integration evidence.
+- Built-in deterministic validation, independent contract review, and integration evidence.
+- Integration refuses `DONE` unless exact-SHA validation and review evidence already passed and the candidate still satisfies the contract.
 - Recovery behavior that preserves uncertain process identity and does not treat PID alone as proof of liveness or death.
 - CLI for plain/JSON init, doctor, planning, continue, status, config, and health with blocked-task and degraded execution counts, capacity, and plain/JSON CI gates.
 - Security boundary helper for workspace path checks, generated outputs, configured sources, demos, and objective input files.
@@ -27,6 +31,7 @@
 - CI wait decision helper and plain/JSON CLI command that release worker capacity while checks are pending.
 - Static HTML dashboard rendering with health metrics, stage/status breakdowns, attention rows, task, worker, source-event, retry, and external-evidence tables plus structured artifact summary output.
 - Persistent review findings and bounded remediation attempts.
+- Bounded remediation state supports terminal rework semantics instead of unbounded repair loops.
 - Release archive, manifest, and SHA256SUMS generation for public/demo packaging with structured JSON summary output.
 - Contributor demo project scaffold command with local objective, run instructions, and structured artifact summary output.
 - Release manifests include tracked source files, sizes, and SHA-256 hashes while excluding runtime state and symlink escapes.
@@ -62,6 +67,7 @@
 - Stdlib invariant and acceptance runners for dependency-free verification.
 - Clean-tree acceptance copies only tracked files, installs StageMesh into an isolated target, and runs CLI smoke checks from the installed package.
 - Local `stagemesh ci` covers compile, invariants, provider acceptance, GitHub acceptance, structured live acceptance, clean acceptance, and optional full acceptance.
+- Canary regression tests cover forbidden/out-of-scope edits, dependency-manifest changes without gates, unrelated change-size expansion, exact-SHA evidence mismatch prevention, reviewer and validator false-positive prevention, integration evidence prerequisites, provider prompt contract injection, and isolated task workspaces.
 
 ## Verified Locally
 
@@ -69,6 +75,8 @@
 - `python scripts/invariants.py`
 - `python scripts/acceptance.py`
 - `python scripts/clean_acceptance.py`
+- `.venv\Scripts\python.exe -m pytest -q --basetemp work\pytest-root -o cache_dir=work\pytest-cache` (`37 passed`)
+- `.venv\Scripts\python.exe -m ruff check src\stagemesh\contracts.py src\stagemesh\execution.py src\stagemesh\providers.py src\stagemesh\integration.py src\stagemesh\workspaces.py tests\test_change_contracts.py tests\test_canary_regression.py`
 - `python -m stagemesh.cli --project . ci --future-feature-gate`
 - `python -m pip install . --target .tmp-install --no-cache-dir --upgrade`
 

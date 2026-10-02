@@ -9,7 +9,6 @@ import tempfile
 import zipfile
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
@@ -21,7 +20,7 @@ from stagemesh.providers import RuntimeCommandAdapter
 def run(command: list[str], cwd: Path, env: dict[str, str] | None = None) -> str:
     merged = os.environ.copy()
     merged.update(env or {})
-    result = subprocess.run(command, cwd=cwd, text=True, capture_output=True, env=merged)
+    result = subprocess.run(command, cwd=cwd, text=True, capture_output=True, env=merged, check=False)
     if result.returncode != 0:
         raise AssertionError(f"{command} failed\nSTDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}")
     return result.stdout
@@ -48,7 +47,7 @@ def main() -> int:
             init_data["project"] != str(project.resolve())
             or init_data["runtime"] != str((project / ".stagemesh").resolve())
             or init_data["db"] != str((project / ".stagemesh" / "stagemesh.sqlite3").resolve())
-            or init_data["schema_version"] != 2
+            or init_data["schema_version"] != 3
             or init_data["registered"] is not False
         ):
             raise AssertionError(init_json)
@@ -598,7 +597,7 @@ def main() -> int:
             "python interpreter:",
             "imported package path:",
             "db:",
-            "schema version: 2",
+            "schema version: 3",
             "backend: sqlite",
         ]
         missing = [item for item in required if item not in doctor]
@@ -607,7 +606,7 @@ def main() -> int:
         doctor_json = run([sys.executable, "-m", "stagemesh.cli", "--project", str(project), "doctor", "--json"], ROOT, env)
         doctor_data = json.loads(doctor_json)
         if (
-            doctor_data["schema_version"] != 2
+            doctor_data["schema_version"] != 3
             or doctor_data["backend"] != "sqlite"
             or doctor_data["backend_available"] is not True
             or doctor_data["github_configured"] is not False
@@ -1718,7 +1717,7 @@ def main() -> int:
         repo_report_json_data = json.loads(repo_report_json)
         if (
             repo_report_json_data["candidate_sha"]
-            != run(["git", "-c", "safe.directory=C:/stagemesh-vnext", "rev-parse", "HEAD"], ROOT).strip()
+            != run(["git", "-c", f"safe.directory={ROOT.as_posix()}", "rev-parse", "HEAD"], ROOT).strip()
             or repo_report_json_data["output"] != str(repo_report.resolve())
             or repo_report_json_data["bytes"] <= 0
             or repo_report_json_data["external_evidence_records_for_candidate"] != 0

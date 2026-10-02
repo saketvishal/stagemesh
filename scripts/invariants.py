@@ -12,35 +12,76 @@ import tempfile
 import urllib.request
 import zipfile
 from pathlib import Path
+from typing import ClassVar, Self
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from stagemesh.coordinator import Coordinator
-from stagemesh.domain import EvidenceKind, EvidenceStatus, ExecutionKind, ExecutionStatus, ProcessIdentity, Stage, TaskStatus
-from stagemesh.execution import ExecutionResult, FakeExecutor
-from stagemesh.lifecycle import LifecycleError, evidence_allows_advance
-from stagemesh.persistence import Store, StoreValidationError
-from stagemesh.process_identity import classify_process
-from stagemesh.review import Reviewer
-from stagemesh.task_sources import DiscoveredTask, GitHubApiIssueSource, GitHubIssueSource, GoogleAxTaskSource, LocalBacklogSource, OutboundSync, TaskSourceValidationError, sync_source, task_sources_from_config
-from stagemesh.workers import WorkerValidationError, heartbeat_worker, register_worker
-from stagemesh.work_transport import WorkTransportError, import_ack, read_ack_envelope, write_ack_envelope, write_packet_envelope
-from stagemesh.scheduling import Scheduler
-from stagemesh.remediation import RemediationPolicy, RemediationValidationError, finding_identity
-from stagemesh.distributed import WorkQueue, WorkQueueError
-from stagemesh.github import GitHubClient, parse_retry_after
-from stagemesh.git import GitValidationError, GitWorkspace
-from stagemesh.task_sources import GitHubOutboundSync
+import stagemesh.cli as cli_module
+from stagemesh.acceptance import (
+    AcceptanceCheck,
+    AcceptanceValidationError,
+    local_acceptance_report,
+    proof_gaps,
+    run_check,
+    write_acceptance_report,
+)
+from stagemesh.acceptance_matrix import (
+    AcceptanceMatrixValidationError,
+    acceptance_matrix,
+    write_acceptance_matrix,
+)
 from stagemesh.attribution import AttributionValidationError, attribution_for_worker
-from stagemesh.redaction import redact_command_secrets, redact_mapping, redact_text, redact_url_credentials
+from stagemesh.audit import AuditValidationError, export_audit_jsonl, record_audit
+from stagemesh.capacity import CapacityKind, CapacityRegistry, CapacityValidationError
+from stagemesh.ci import (
+    CIValidationError,
+    broken_future_feature_gate,
+    default_gate_commands,
+    default_gates,
+    run_gate,
+)
+from stagemesh.ci_wait import decide_ci_wait
+from stagemesh.completion_audit import (
+    CompletionAuditValidationError,
+    completion_audit,
+    write_completion_audit,
+)
 from stagemesh.config import ConfigValidationError, load_config
-from stagemesh.release import ReleaseValidationError, build_release_artifact, release_files
-from stagemesh.security import SecurityBoundaryError
+from stagemesh.coordinator import Coordinator
+from stagemesh.dashboard import dashboard_summary, render_dashboard
+from stagemesh.demo import DemoValidationError, create_demo_project
+from stagemesh.distributed import WorkQueue, WorkQueueError
+from stagemesh.domain import (
+    EvidenceKind,
+    EvidenceStatus,
+    ExecutionKind,
+    ExecutionStatus,
+    ProcessIdentity,
+    Stage,
+    TaskStatus,
+)
+from stagemesh.e2e_acceptance import (
+    EndToEndAcceptanceValidationError,
+    end_to_end_acceptance,
+    write_end_to_end_acceptance,
+)
+from stagemesh.execution import ExecutionResult, FakeExecutor
+from stagemesh.external_evidence import (
+    ExternalEvidenceValidationError,
+    external_evidence_records,
+    record_external_evidence,
+)
+from stagemesh.final_report import FinalReportValidationError, render_final_report
+from stagemesh.git import GitValidationError, GitWorkspace
+from stagemesh.github import GitHubClient, parse_github_remote, parse_retry_after
+from stagemesh.github_acceptance import run_github_acceptance
+from stagemesh.lifecycle import LifecycleError, evidence_allows_advance
+from stagemesh.objectives import ObjectivePlanner, ObjectiveValidationError
+from stagemesh.observability import health
+from stagemesh.operator import operator_report
+from stagemesh.persistence import Store, StoreValidationError
 from stagemesh.persistence_backends import probe_backend
-from stagemesh.completion_audit import CompletionAuditValidationError, completion_audit, write_completion_audit
-from stagemesh.audit import AuditValidationError, record_audit, export_audit_jsonl
-from stagemesh.retry import RetryRegistry, RetryValidationError, backoff_seconds
 from stagemesh.postgres_store import (
     POSTGRES_SCHEMA_TABLES,
     PostgresStore,
@@ -50,27 +91,60 @@ from stagemesh.postgres_store import (
     postgres_schema_contract,
     postgres_schema_statements,
 )
-from stagemesh.final_report import FinalReportValidationError, render_final_report
+from stagemesh.process_identity import classify_process
 from stagemesh.provider_acceptance import run_provider_acceptance
-from stagemesh.github_acceptance import run_github_acceptance
-from stagemesh.release_readiness import ReleaseReadinessValidationError, release_readiness, run_command_check, write_release_readiness
-from stagemesh.external_evidence import ExternalEvidenceValidationError, record_external_evidence, external_evidence_records
-from stagemesh.acceptance_matrix import AcceptanceMatrixValidationError, acceptance_matrix, write_acceptance_matrix
+from stagemesh.providers import (
+    ProviderValidationError,
+    RuntimeCommandAdapter,
+    adapters_from_commands,
+    adapters_from_config,
+    approved_default_adapters,
+)
+from stagemesh.redaction import (
+    redact_command_secrets,
+    redact_mapping,
+    redact_text,
+    redact_url_credentials,
+)
+from stagemesh.registry import (
+    GlobalRegistry,
+    ProjectRegistration,
+    RegistryConflictError,
+    RegistryValidationError,
+)
+from stagemesh.release import ReleaseValidationError, build_release_artifact, release_files
+from stagemesh.release_readiness import (
+    ReleaseReadinessValidationError,
+    release_readiness,
+    run_command_check,
+    write_release_readiness,
+)
+from stagemesh.remediation import RemediationPolicy, RemediationValidationError, finding_identity
+from stagemesh.retry import RetryRegistry, RetryValidationError, backoff_seconds
+from stagemesh.review import Reviewer
 from stagemesh.routing import Provider, Router, RoutingMode, RoutingValidationError
-from stagemesh.github import parse_github_remote
-from stagemesh.operator import operator_report
-from stagemesh.dashboard import dashboard_summary, render_dashboard
-from stagemesh.observability import health
-from stagemesh.demo import DemoValidationError, create_demo_project
-from stagemesh.acceptance import AcceptanceCheck, AcceptanceValidationError, local_acceptance_report, proof_gaps, run_check, write_acceptance_report
-from stagemesh.ci import CIValidationError, broken_future_feature_gate, default_gate_commands, default_gates, run_gate
-from stagemesh.ci_wait import decide_ci_wait
-from stagemesh.e2e_acceptance import EndToEndAcceptanceValidationError, end_to_end_acceptance, write_end_to_end_acceptance
-from stagemesh.objectives import ObjectivePlanner, ObjectiveValidationError
-from stagemesh.registry import GlobalRegistry, ProjectRegistration, RegistryConflictError, RegistryValidationError
-from stagemesh.capacity import CapacityKind, CapacityRegistry, CapacityValidationError
-from stagemesh.providers import ProviderValidationError, RuntimeCommandAdapter, adapters_from_commands, adapters_from_config, approved_default_adapters
-import stagemesh.cli as cli_module
+from stagemesh.scheduling import Scheduler
+from stagemesh.security import SecurityBoundaryError
+from stagemesh.task_sources import (
+    DiscoveredTask,
+    GitHubApiIssueSource,
+    GitHubIssueSource,
+    GitHubOutboundSync,
+    GoogleAxTaskSource,
+    LocalBacklogSource,
+    OutboundSync,
+    TaskSourceValidationError,
+    sync_source,
+    task_sources_from_config,
+)
+from stagemesh.work_transport import (
+    WorkTransportError,
+    import_ack,
+    read_ack_envelope,
+    write_ack_envelope,
+    write_packet_envelope,
+)
+from stagemesh.workers import WorkerValidationError, heartbeat_worker, register_worker
 
 
 def assert_raises(exc_type, fn, *args, **kwargs) -> None:
@@ -92,7 +166,7 @@ class FakePostgresCursor:
     def __init__(self) -> None:
         self.statements: list[tuple[str, tuple[object, ...] | None]] = []
 
-    def __enter__(self) -> "FakePostgresCursor":
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
@@ -430,7 +504,7 @@ def main() -> int:
             "Retries",
             "External Evidence",
         }.issubset(section_names)
-        stage_rows = [section.rows for section in report.sections if section.name == "Stage Summary"][0]
+        stage_rows = next(section.rows for section in report.sections if section.name == "Stage Summary")
         assert stage_rows == ({"stage": "PLAN", "count": 1},)
         summary = dashboard_summary(store)
         assert summary["tasks"] == "1"
@@ -819,7 +893,7 @@ def main() -> int:
 
         class InvalidJsonResponse:
             status = 200
-            headers: dict[str, str] = {}
+            headers: ClassVar[dict[str, str]] = {}
 
             def __enter__(self):
                 return self
@@ -1083,6 +1157,8 @@ def main() -> int:
         assert any(line.endswith("  stagemesh-release-manifest.json") for line in checksums)
 
     def release_files_reject_symlink_escape(store: Store, project: Path) -> None:
+        if os.name == "nt":
+            return
         project.mkdir(parents=True, exist_ok=True)
         outside = project.parent / "outside-secret.txt"
         outside.write_text("secret", encoding="utf-8")
@@ -1094,7 +1170,10 @@ def main() -> int:
         except (OSError, NotImplementedError):
             return
         subprocess.run(["git", "init"], cwd=project, text=True, capture_output=True, check=True)
+        subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=project, text=True, capture_output=True, check=True)
+        subprocess.run(["git", "config", "user.name", "StageMesh Test"], cwd=project, text=True, capture_output=True, check=True)
         subprocess.run(["git", "add", "-A"], cwd=project, text=True, capture_output=True, check=True)
+        subprocess.run(["git", "commit", "-m", "release files"], cwd=project, text=True, capture_output=True, check=True)
         files = {path.name for path in release_files(project)}
         assert "inside.txt" in files
         assert "linked-secret.txt" not in files
@@ -1103,7 +1182,7 @@ def main() -> int:
         first = store.schema_version()
         store.migrate()
         second = store.schema_version()
-        assert first == second == 2
+        assert first == second == 3
 
     def backend_probe_reports_postgres_dependency(store: Store, project: Path) -> None:
         sqlite_probe = probe_backend(None, project / ".stagemesh" / "stagemesh.sqlite3")
@@ -1123,7 +1202,7 @@ def main() -> int:
         config_file.write_text('{"database_url":"postgresql://user:secret@example/db"}', encoding="utf-8")
 
         class FakeCommandPostgresStore:
-            instances: list["FakeCommandPostgresStore"] = []
+            instances: ClassVar[list[FakeCommandPostgresStore]] = []
 
             def __init__(self, dsn: str) -> None:
                 self.dsn = dsn
@@ -1212,7 +1291,7 @@ def main() -> int:
         export_audit_jsonl(store, output)
         text = output.read_text(encoding="utf-8")
         exported = [json.loads(line) for line in text.strip().splitlines()]
-        secret = [event for event in exported if event["event_type"] == "secret.test"][0]
+        secret = next(event for event in exported if event["event_type"] == "secret.test")
         assert secret["payload"]["token"] == "***REDACTED***"
         assert secret["payload"]["events"] == [{"password": "***REDACTED***"}]
         assert secret["payload"]["safe"] == "ok"
@@ -1307,7 +1386,7 @@ def main() -> int:
         old = os.environ.get("STAGEMESH_CODEX_CMD")
         os.environ["STAGEMESH_CODEX_CMD"] = '"python" "-m" "stagemesh.cli"'
         try:
-            codex = [adapter for adapter in approved_default_adapters() if adapter.name == "codex"][0]
+            codex = next(adapter for adapter in approved_default_adapters() if adapter.name == "codex")
             assert codex.command == ("python", "-m", "stagemesh.cli")
         finally:
             if old is None:
@@ -1469,13 +1548,13 @@ def main() -> int:
     def external_evidence_updates_audit_rows(store: Store, project: Path) -> None:
         record_external_evidence(store, "hosted-ci", "PASS", "https://example.invalid/linux", "abc1234")
         stale_audit = completion_audit(store, candidate_sha="def5678")
-        stale_linux = [item for item in stale_audit["items"] if item["requirement"] == "Linux acceptance"][0]
+        stale_linux = next(item for item in stale_audit["items"] if item["requirement"] == "Linux acceptance")
         assert stale_linux["status"] == "MISSING_EXTERNAL_EVIDENCE"
         audit = completion_audit(store, candidate_sha="abc1234")
-        linux = [item for item in audit["items"] if item["requirement"] == "Linux acceptance"][0]
+        linux = next(item for item in audit["items"] if item["requirement"] == "Linux acceptance")
         assert linux["status"] == "PROVEN"
         matrix = acceptance_matrix(store, candidate_sha="abc1234")
-        linux_row = [row for row in matrix["rows"] if row["area"] == "Linux acceptance"][0]
+        linux_row = next(row for row in matrix["rows"] if row["area"] == "Linux acceptance")
         assert linux_row["status"] == "PROVEN"
         readiness = release_readiness(ROOT, include_acceptance=False, run_checks=False, store=store, candidate_sha="abc1234")
         gaps = {item["requirement"] for item in readiness["external_gaps"]}
