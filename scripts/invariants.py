@@ -1094,7 +1094,10 @@ def main() -> int:
         except (OSError, NotImplementedError):
             return
         subprocess.run(["git", "init"], cwd=project, text=True, capture_output=True, check=True)
+        subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=project, text=True, capture_output=True, check=True)
+        subprocess.run(["git", "config", "user.name", "StageMesh Test"], cwd=project, text=True, capture_output=True, check=True)
         subprocess.run(["git", "add", "-A"], cwd=project, text=True, capture_output=True, check=True)
+        subprocess.run(["git", "commit", "-m", "release files"], cwd=project, text=True, capture_output=True, check=True)
         files = {path.name for path in release_files(project)}
         assert "inside.txt" in files
         assert "linked-secret.txt" not in files

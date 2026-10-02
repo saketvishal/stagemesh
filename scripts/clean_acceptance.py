@@ -71,7 +71,7 @@ def main() -> int:
             "version:",
             "executable path:",
             "imported package path:",
-            f"project: {project}",
+            f"project: {project.resolve()}",
             "schema version: 2",
             "backend: sqlite",
         ]
