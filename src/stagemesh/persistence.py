@@ -511,6 +511,19 @@ class Store:
             executable=row["executable"],
         )
 
+    def has_active_claim_for_execution(self, execution_id: str) -> bool:
+        execution_id = _validate_text(execution_id, "execution id")
+        execution = self.conn.execute("SELECT * FROM executions WHERE id=?", (execution_id,)).fetchone()
+        if execution is None or execution["claim_id"] is None:
+            return False
+        return (
+            self.conn.execute(
+                "SELECT 1 FROM claims WHERE id=? AND task_id=? AND active=1",
+                (execution["claim_id"], execution["task_id"]),
+            ).fetchone()
+            is not None
+        )
+
     def recover_stale_execution_claim(self, execution_id: str, reason: str) -> bool:
         execution_id = _validate_text(execution_id, "execution id")
         reason = _validate_text(reason, "recovery reason")
@@ -552,6 +565,48 @@ class Store:
                             "execution_id": execution_id,
                             "stage": task["stage"],
                             "reason": reason,
+                        },
+                        sort_keys=True,
+                    ),
+                    now,
+                ),
+            )
+            return True
+
+    def mark_orphan_running_execution_failed(self, execution_id: str, reason: str) -> bool:
+        execution_id = _validate_text(execution_id, "execution id")
+        reason = _validate_text(reason, "recovery reason")
+        now = time.time()
+        with self.conn:
+            execution = self.conn.execute(
+                "SELECT * FROM executions WHERE id=? AND status=?",
+                (execution_id, ExecutionStatus.RUNNING),
+            ).fetchone()
+            if execution is None:
+                return False
+            task = self.conn.execute("SELECT * FROM tasks WHERE id=?", (execution["task_id"],)).fetchone()
+            if task is None:
+                return False
+            updated = self.conn.execute(
+                "UPDATE executions SET status=?, updated_at=? WHERE id=? AND status=?",
+                (ExecutionStatus.FAILED, now, execution_id, ExecutionStatus.RUNNING),
+            ).rowcount
+            if updated != 1:
+                return False
+            self.conn.execute(
+                "INSERT INTO audit_events VALUES (?, ?, ?, ?)",
+                (
+                    str(uuid.uuid4()),
+                    "recovery.orphan_execution_failed",
+                    json.dumps(
+                        {
+                            "task_id": task["id"],
+                            "claim_id": execution["claim_id"],
+                            "execution_id": execution_id,
+                            "execution_kind": execution["kind"],
+                            "reason": reason,
+                            "task_stage": task["stage"],
+                            "task_status": task["status"],
                         },
                         sort_keys=True,
                     ),

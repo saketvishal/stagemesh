@@ -7,7 +7,6 @@ import io
 import zipfile
 from pathlib import Path
 
-
 NAME = "stagemesh"
 VERSION = "0.1.0"
 DIST_INFO = f"{NAME}-{VERSION}.dist-info"
@@ -31,14 +30,11 @@ def _metadata() -> str:
 
 
 def _wheel() -> str:
-    return "\n".join(
-        [
-            "Wheel-Version: 1.0",
-            "Generator: stagemesh-local-backend",
-            "Root-Is-Purelib: true",
-            "Tag: py3-none-any",
-            "",
-        ]
+    return (
+        "Wheel-Version: 1.0\n"
+        "Generator: stagemesh-local-backend\n"
+        "Root-Is-Purelib: true\n"
+        "Tag: py3-none-any\n"
     )
 
 

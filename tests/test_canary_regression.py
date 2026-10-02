@@ -524,6 +524,109 @@ def test_targeted_recovery_does_not_mutate_unrelated_claims(
     assert canary_execution_row["status"] == ExecutionStatus.FAILED
 
 
+def test_recovery_marks_done_task_orphan_running_execution_failed(
+    store: Store,
+    tmp_path: Path,
+) -> None:
+    task_id = store.upsert_task("completed canary")
+    store.advance_task(task_id, Stage.DONE)
+    execution_id = store.start_execution(
+        task_id=task_id,
+        claim_id=None,
+        kind=ExecutionKind.INTEGRATION,
+        pid=None,
+        process_create_time=None,
+        boot_id=None,
+    )
+
+    Coordinator(store, tmp_path, executor=FakeExecutor(), target=TargetSelection(task_id)).recover()
+    Coordinator(store, tmp_path, executor=FakeExecutor(), target=TargetSelection(task_id)).recover()
+
+    task = store.get_task(task_id)
+    execution = store.conn.execute("SELECT * FROM executions WHERE id=?", (execution_id,)).fetchone()
+    events = store.audit_events()
+    assert task["stage"] == Stage.DONE
+    assert task["status"] == TaskStatus.DONE
+    assert execution["status"] == ExecutionStatus.FAILED
+    orphan_events = [event for event in events if event["event_type"] == "recovery.orphan_execution_failed"]
+    assert len(orphan_events) == 1
+    payload = json.loads(orphan_events[0]["payload"])
+    assert payload["execution_id"] == execution_id
+    assert payload["reason"] == "TASK_ALREADY_DONE"
+
+
+@pytest.mark.parametrize("claim_mode", ["none", "inactive"])
+def test_recovery_marks_missing_or_inactive_claim_dead_process_execution_failed(
+    store: Store,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    claim_mode: str,
+) -> None:
+    task_id = store.upsert_task("orphaned implementation")
+    store.advance_task(task_id, Stage.IMPLEMENT)
+    if claim_mode == "inactive":
+        claim_id = store.acquire_claim(task_id, "local-worker")
+        store.release_claim(claim_id)
+    else:
+        claim_id = None
+    execution_id = store.start_execution(
+        task_id=task_id,
+        claim_id=claim_id,
+        kind=ExecutionKind.IMPLEMENTATION,
+        pid=1001,
+        process_create_time=1.0,
+        boot_id="boot-a",
+        executable="worker",
+    )
+    monkeypatch.setattr(coordinator_module, "process_identity", lambda pid: None)
+
+    Coordinator(store, tmp_path, executor=FakeExecutor(), target=TargetSelection(task_id)).recover()
+
+    task = store.get_task(task_id)
+    execution = store.conn.execute("SELECT * FROM executions WHERE id=?", (execution_id,)).fetchone()
+    event = next(event for event in store.audit_events() if event["event_type"] == "recovery.orphan_execution_failed")
+    payload = json.loads(event["payload"])
+    assert task["stage"] == Stage.IMPLEMENT
+    assert task["status"] == TaskStatus.OPEN
+    assert execution["status"] == ExecutionStatus.FAILED
+    assert payload["execution_id"] == execution_id
+    assert payload["reason"] == "INACTIVE_CLAIM_DEAD_PROCESS"
+
+
+@pytest.mark.parametrize(
+    ("observed", "expected_state"),
+    [
+        (ProcessIdentity(pid=1001, create_time=1.0, boot_id="boot-a", executable="worker"), "LIVE"),
+        (ProcessIdentity(pid=1001, create_time=None, boot_id="boot-a", executable="worker"), "UNKNOWN"),
+    ],
+)
+def test_recovery_preserves_uncertain_or_live_orphan_running_execution(
+    store: Store,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    observed: ProcessIdentity,
+    expected_state: str,
+) -> None:
+    task_id = store.upsert_task(f"{expected_state.lower()} orphaned implementation")
+    store.advance_task(task_id, Stage.IMPLEMENT)
+    execution_id = store.start_execution(
+        task_id=task_id,
+        claim_id=None,
+        kind=ExecutionKind.IMPLEMENTATION,
+        pid=1001,
+        process_create_time=1.0,
+        boot_id="boot-a",
+        executable="worker",
+    )
+    monkeypatch.setattr(coordinator_module, "process_identity", lambda pid: observed)
+
+    Coordinator(store, tmp_path, executor=FakeExecutor(), target=TargetSelection(task_id)).recover()
+
+    execution = store.conn.execute("SELECT * FROM executions WHERE id=?", (execution_id,)).fetchone()
+    assert execution["status"] == ExecutionStatus.RUNNING
+    assert not [event for event in store.audit_events() if event["event_type"] == "recovery.orphan_execution_failed"]
+
+
 def test_targeted_blocked_task_fails_before_recovery(
     store: Store,
     tmp_path: Path,
