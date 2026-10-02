@@ -57,7 +57,7 @@ class SequencedExecutor(Executor):
 
 
 class RecordingReviewAdapter:
-    def __init__(self, name: str = "reviewer", response: str = "PASS") -> None:
+    def __init__(self, name: str = "reviewer", response: str = '{"decision":"PASS"}') -> None:
         self.name = name
         self.response = response
         self.calls = 0
@@ -307,6 +307,56 @@ def test_reviewer_adapter_matching_implementer_is_rejected(tmp_path: Path) -> No
     assert Reviewer(adapter=adapter).review(store, task_id, sha, project) is EvidenceStatus.FAILED
     assert adapter.calls == 0
     assert store.open_findings_for_candidate(task_id, sha)
+    store.close()
+
+
+def test_malformed_independent_review_output_fails_closed(tmp_path: Path) -> None:
+    workspace = _repo(tmp_path / "repo")
+    project = workspace.path
+    (project / "src" / "app.py").write_text("VALUE = 12\n", encoding="utf-8")
+    sha = workspace.commit_all("candidate")
+
+    store = _store(tmp_path)
+    task_id = store.upsert_task("malformed review")
+    store.add_candidate(task_id, sha, "implementer", True)
+    adapter = RecordingReviewAdapter(name="reviewer", response="PASS")
+
+    assert Reviewer(adapter=adapter).review(store, task_id, sha, project) is EvidenceStatus.FAILED
+    findings = store.open_findings_for_candidate(task_id, sha)
+    assert any("JSON with decision PASS or FAIL" in row["message"] for row in findings)
+    store.close()
+
+
+def test_command_review_adapter_rejects_workspace_mutation(tmp_path: Path) -> None:
+    from stagemesh.providers import RuntimeCommandAdapter
+
+    workspace = _repo(tmp_path / "repo")
+    project = workspace.path
+    (project / "src" / "app.py").write_text("VALUE = 13\n", encoding="utf-8")
+    sha = workspace.commit_all("candidate")
+    script = tmp_path / "mutating_review.py"
+    script.write_text(
+        "from pathlib import Path\n"
+        "Path('src/app.py').write_text('VALUE = 99\\n', encoding='utf-8')\n"
+        "print('{\"decision\":\"PASS\"}')\n",
+        encoding="utf-8",
+    )
+
+    store = _store(tmp_path)
+    task_id = store.upsert_task("mutating review")
+    store.add_candidate(task_id, sha, "implementer", True)
+    adapter = RuntimeCommandAdapter(name="reviewer", command=(sys.executable, str(script)))
+
+    assert Reviewer(adapter=adapter).review(store, task_id, sha, project) is EvidenceStatus.FAILED
+    payload = json.loads(
+        store.conn.execute(
+            "SELECT payload FROM evidence WHERE task_id=? AND candidate_sha=? AND kind=? AND status=?",
+            (task_id, sha, EvidenceKind.REVIEW, EvidenceStatus.FAILED),
+        ).fetchone()["payload"]
+    )
+    assert "mutated candidate workspace" in payload["review_response"]
+    assert workspace.head() == sha
+    assert not (project / "src" / "app.py").read_text(encoding="utf-8").endswith("99\n")
     store.close()
 
 
