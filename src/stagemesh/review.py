@@ -6,6 +6,7 @@ from pathlib import Path
 from .change_control import (
     ChangeContract,
     ChangeControlError,
+    contract_definition_violations,
     contract_violations,
     diff_summary,
     git_diff_check,
@@ -88,6 +89,11 @@ class Reviewer:
             if contract is None and self.require_contract:
                 findings.append(
                     ReviewFinding("", "ERROR", "missing mandatory change contract")
+                )
+            if contract is not None and self.require_contract:
+                findings.extend(
+                    ReviewFinding("", "ERROR", message)
+                    for message in contract_definition_violations(contract)
                 )
             if contract is not None:
                 summary = diff_summary(project, candidate_sha)
