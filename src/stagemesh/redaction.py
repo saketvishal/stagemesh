@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from urllib.parse import urlsplit, urlunsplit
 
-
 SECRET_MARKERS = ("token", "secret", "password", "authorization", "apikey", "api_key", "api-key")
 
 

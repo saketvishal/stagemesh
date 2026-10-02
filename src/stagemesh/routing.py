@@ -58,7 +58,7 @@ class Router:
             for provider in self.providers
             if capability in provider.capabilities and provider.capacity_available
         ]
-        return sorted(candidates, key=lambda item: item.priority)[0] if candidates else None
+        return min(candidates, key=lambda item: item.priority) if candidates else None
 
     def _provider_by_name(self, name: str, capability: str) -> Provider | None:
         for provider in self.providers:

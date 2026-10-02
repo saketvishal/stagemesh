@@ -3,8 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from .redaction import redact_mapping
 from .persistence import Store
+from .redaction import redact_mapping
 from .security import WorkspaceBoundary
 
 

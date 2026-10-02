@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 
 class ObjectiveValidationError(ValueError):
@@ -20,7 +20,7 @@ class Objective:
 class ObjectivePlanner:
     """Validates structured planner output before it can affect lifecycle state."""
 
-    REQUIRED_TASK_FIELDS = {"id", "title"}
+    REQUIRED_TASK_FIELDS: ClassVar[set[str]] = {"id", "title"}
 
     def parse(self, payload: str | dict[str, Any]) -> Objective:
         if isinstance(payload, str):
