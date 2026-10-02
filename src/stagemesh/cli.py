@@ -18,7 +18,7 @@ from .config import ConfigValidationError, load_config
 from .dashboard import dashboard_summary, render_dashboard
 from .coordinator import Coordinator
 from .demo import DemoValidationError, create_demo_project
-from .execution import SubprocessExecutor
+from .execution import FailoverExecutor, SubprocessExecutor
 from .integration import Integrator
 from .distributed import WorkQueue, WorkQueueError
 from .e2e_acceptance import EndToEndAcceptanceValidationError, end_to_end_acceptance
@@ -155,27 +155,50 @@ def command_continue(args: argparse.Namespace) -> int:
             store.close()
             return 2
 
-        chosen_name = getattr(args, "provider", None)
-        if chosen_name is None:
-            chosen_name = config.stage_routes.get("IMPLEMENT")
+        explicit_provider = getattr(args, "provider", None)
+        routed_provider = config.stage_routes.get("IMPLEMENT")
+        single_provider = (
+            config.single_agent_provider
+            if config.routing_mode == "SINGLE_AGENT"
+            else None
+        )
+        chosen_name = explicit_provider or single_provider or routed_provider
+
+        ordered_adapters = list(adapters)
         if chosen_name:
-            matching = [adapter for adapter in adapters if adapter.name == chosen_name]
+            matching = [
+                adapter for adapter in ordered_adapters
+                if adapter.name == chosen_name
+            ]
             if not matching:
                 print(f"provider not found: {chosen_name}", file=sys.stderr)
                 store.close()
                 return 2
-            adapter = matching[0]
-        elif adapters:
-            adapter = adapters[0]
-        else:
-            adapter = None
+            primary = matching[0]
+            if explicit_provider or single_provider:
+                ordered_adapters = [primary]
+            else:
+                ordered_adapters = [
+                    primary,
+                    *[
+                        adapter
+                        for adapter in ordered_adapters
+                        if adapter.name != primary.name
+                    ],
+                ]
 
-        if adapter is not None:
-            executor = SubprocessExecutor(
+        provider_executors = [
+            SubprocessExecutor(
                 list(adapter.command),
                 name=adapter.name,
                 isolate=True,
             )
+            for adapter in ordered_adapters
+        ]
+        if len(provider_executors) == 1:
+            executor = provider_executors[0]
+        elif provider_executors:
+            executor = FailoverExecutor(provider_executors)
 
     strict = executor is not None and not dry_run
     coord = Coordinator(
