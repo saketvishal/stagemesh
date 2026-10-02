@@ -35,6 +35,20 @@ def test_contract_rejects_out_of_scope_and_dependency_changes() -> None:
     assert "dependency manifest changed without permission: pyproject.toml" in violations
 
 
+def test_single_star_does_not_cross_repository_directories() -> None:
+    contract = ChangeContract.from_mapping(
+        {
+            "objective": "change only direct python children",
+            "allowed_paths": ["src/*.py"],
+        }
+    )
+    violations = contract_violations(
+        contract,
+        DiffSummary(("src/nested/file.py",), 1),
+    )
+    assert violations == ["out-of-scope path changed: src/nested/file.py"]
+
+
 def test_contract_requires_expected_changed_path() -> None:
     contract = ChangeContract.from_mapping(
         {
