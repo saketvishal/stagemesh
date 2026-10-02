@@ -51,13 +51,26 @@ class Coordinator:
         for execution in self.store.running_executions():
             if not self._target_allows(str(execution["task_id"])):
                 continue
-            if execution["claim_id"] is None or execution["kind"] != "IMPLEMENTATION":
+            task = self.store.get_task(str(execution["task_id"]))
+            if task is not None and (task["status"] == TaskStatus.DONE or task["stage"] == Stage.DONE):
+                self.store.mark_orphan_running_execution_failed(execution["id"], "TASK_ALREADY_DONE")
+                continue
+            if self._execution_claim_is_missing_or_inactive(execution):
+                saved = self.store.execution_process_identity(execution["id"])
+                state = classify_process(saved, process_identity(saved.pid))
+                if state == "DEAD":
+                    self.store.mark_orphan_running_execution_failed(execution["id"], "INACTIVE_CLAIM_DEAD_PROCESS")
+                continue
+            if execution["kind"] != "IMPLEMENTATION":
                 continue
             saved = self.store.execution_process_identity(execution["id"])
             state = classify_process(saved, process_identity(saved.pid))
             if state != "DEAD":
                 continue
             self.store.recover_stale_execution_claim(execution["id"], "DEAD_PROCESS_IDENTITY")
+
+    def _execution_claim_is_missing_or_inactive(self, execution) -> bool:
+        return not self.store.has_active_claim_for_execution(execution["id"])
 
     def validate_target(self) -> None:
         if self.target is None:
