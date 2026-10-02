@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-import fnmatch
 import json
 import shlex
 import subprocess
 import tempfile
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Iterable
 
 from .git import GitError, GitWorkspace
@@ -226,7 +225,7 @@ def contract_violations(contract: ChangeContract, summary: DiffSummary) -> list[
         if _matches_any(path, contract.forbidden_paths):
             violations.append(f"forbidden path changed: {path}")
     for pattern in contract.required_changed_paths:
-        if not any(fnmatch.fnmatchcase(path, pattern) for path in files):
+        if not any(_matches_pattern(path, pattern) for path in files):
             violations.append(f"required path was not changed: {pattern}")
     if not contract.allow_dependency_changes:
         for path in files:
@@ -343,7 +342,14 @@ def _candidate_baseline(
 
 
 def _matches_any(path: str, patterns: tuple[str, ...]) -> bool:
-    return any(fnmatch.fnmatchcase(path, pattern) for pattern in patterns)
+    return any(_matches_pattern(path, pattern) for pattern in patterns)
+
+
+def _matches_pattern(path: str, pattern: str) -> bool:
+    """Match repository-relative POSIX paths without letting * cross directories."""
+    normalized_path = PurePosixPath(path.replace("\\", "/"))
+    normalized_pattern = pattern.replace("\\", "/")
+    return normalized_path.match(normalized_pattern)
 
 
 def _safe_task_id(task_id: str) -> str:
