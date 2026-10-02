@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 
 import stagemesh.coordinator as coordinator_module
-from stagemesh.coordinator import Coordinator
+from stagemesh.coordinator import Coordinator, TargetSelection, TargetSelectionError
 from stagemesh.domain import ExecutionKind, ExecutionStatus, ProcessIdentity, Stage, TaskStatus
 from stagemesh.execution import ExecutionResult, FakeExecutor, SubprocessExecutor, classify_failure
 from stagemesh.git import GitWorkspace
@@ -292,7 +292,15 @@ def _continue(project: Path, *, provider: str | None = None) -> int:
     import stagemesh.cli as cli_module
 
     return cli_module.command_continue(
-        argparse.Namespace(project=str(project), once=False, json=True, provider=provider, dry_run=False)
+        argparse.Namespace(project=str(project), once=False, json=True, provider=provider, dry_run=False, task=None)
+    )
+
+
+def _continue_targeted(project: Path, task_id: str) -> int:
+    import stagemesh.cli as cli_module
+
+    return cli_module.command_continue(
+        argparse.Namespace(project=str(project), once=True, json=True, provider=None, dry_run=True, task=task_id)
     )
 
 
@@ -387,6 +395,164 @@ def test_cli_continue_single_agent_review_is_deterministic_non_independent(tmp_p
     assert payload["review_provider"] == "single-agent-deterministic-fallback"
     assert payload["review_execution_invoked"] is False
     assert payload["independent_reviewer"] is False
+
+
+def test_cli_continue_targeted_advances_only_selected_canary(tmp_path: Path) -> None:
+    project = _cli_project(
+        tmp_path,
+        routing={"mode": "SINGLE_AGENT", "single_agent_provider": "fake"},
+    )
+    store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+    store.migrate()
+    issue_id = store.upsert_task("github issue equivalent", source="github", source_id="46")
+    canary_id = store.upsert_task("local canary", source="local-backlog", source_id="local-canary")
+    store.advance_task(issue_id, Stage.IMPLEMENT)
+    store.advance_task(canary_id, Stage.IMPLEMENT)
+    store.close()
+
+    assert _continue_targeted(project, "local-canary") == 0
+
+    store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+    try:
+        issue = store.get_task("46")
+        canary = store.get_task("local-canary")
+        assert issue["stage"] == Stage.IMPLEMENT
+        assert issue["status"] == TaskStatus.OPEN
+        assert canary["stage"] == Stage.VALIDATE
+        assert canary["status"] == TaskStatus.OPEN
+        assert store.conn.execute("SELECT 1 FROM claims WHERE task_id='46'").fetchone() is None
+        assert store.conn.execute("SELECT 1 FROM executions WHERE task_id='46'").fetchone() is None
+        assert store.conn.execute("SELECT 1 FROM evidence WHERE task_id='46'").fetchone() is None
+    finally:
+        store.close()
+
+
+def test_cli_continue_invalid_target_mutates_nothing(tmp_path: Path) -> None:
+    project = _cli_project(
+        tmp_path,
+        routing={"mode": "SINGLE_AGENT", "single_agent_provider": "fake"},
+    )
+    store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+    store.migrate()
+    issue_id = store.upsert_task("github issue equivalent", source="github", source_id="46")
+    canary_id = store.upsert_task("local canary", source="local-backlog", source_id="local-canary")
+    store.advance_task(issue_id, Stage.IMPLEMENT)
+    store.advance_task(canary_id, Stage.IMPLEMENT)
+    before = {
+        "tasks": [dict(row) for row in store.conn.execute("SELECT * FROM tasks ORDER BY id")],
+        "claims": store.conn.execute("SELECT COUNT(*) FROM claims").fetchone()[0],
+        "executions": store.conn.execute("SELECT COUNT(*) FROM executions").fetchone()[0],
+        "evidence": store.conn.execute("SELECT COUNT(*) FROM evidence").fetchone()[0],
+        "source_cache": store.conn.execute("SELECT COUNT(*) FROM source_cache").fetchone()[0],
+    }
+    store.close()
+
+    assert _continue_targeted(project, "missing-task") == 2
+
+    store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+    try:
+        after = {
+            "tasks": [dict(row) for row in store.conn.execute("SELECT * FROM tasks ORDER BY id")],
+            "claims": store.conn.execute("SELECT COUNT(*) FROM claims").fetchone()[0],
+            "executions": store.conn.execute("SELECT COUNT(*) FROM executions").fetchone()[0],
+            "evidence": store.conn.execute("SELECT COUNT(*) FROM evidence").fetchone()[0],
+            "source_cache": store.conn.execute("SELECT COUNT(*) FROM source_cache").fetchone()[0],
+        }
+        assert after == before
+    finally:
+        store.close()
+
+
+def test_non_targeted_continue_retains_current_behavior(store: Store, tmp_path: Path) -> None:
+    issue = store.upsert_task("github issue equivalent", source="github", source_id="46")
+    canary = store.upsert_task("local canary", source="local-backlog", source_id="local-canary")
+
+    assert Coordinator(store, tmp_path, executor=FakeExecutor()).tick() == 2
+
+    assert store.get_task(issue)["stage"] == Stage.IMPLEMENT
+    assert store.get_task(canary)["stage"] == Stage.IMPLEMENT
+
+
+def test_targeted_recovery_does_not_mutate_unrelated_claims(
+    store: Store,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    issue = store.upsert_task("github issue equivalent", source="github", source_id="46")
+    canary = store.upsert_task("local canary", source="local-backlog", source_id="local-canary")
+    store.advance_task(issue, Stage.IMPLEMENT)
+    store.advance_task(canary, Stage.IMPLEMENT)
+    issue_claim = store.acquire_claim(issue, "local-worker")
+    canary_claim = store.acquire_claim(canary, "local-worker")
+    issue_execution = store.start_execution(
+        task_id=issue,
+        claim_id=issue_claim,
+        kind=ExecutionKind.IMPLEMENTATION,
+        pid=1001,
+        process_create_time=1.0,
+        boot_id="boot-a",
+        executable="worker",
+    )
+    canary_execution = store.start_execution(
+        task_id=canary,
+        claim_id=canary_claim,
+        kind=ExecutionKind.IMPLEMENTATION,
+        pid=1002,
+        process_create_time=1.0,
+        boot_id="boot-a",
+        executable="worker",
+    )
+    monkeypatch.setattr(
+        coordinator_module,
+        "process_identity",
+        lambda pid: None,
+    )
+
+    Coordinator(store, tmp_path, executor=FakeExecutor(), target=TargetSelection(canary)).recover()
+
+    issue_row = store.get_task(issue)
+    canary_row = store.get_task(canary)
+    issue_claim_row = store.conn.execute("SELECT * FROM claims WHERE id=?", (issue_claim,)).fetchone()
+    canary_claim_row = store.conn.execute("SELECT * FROM claims WHERE id=?", (canary_claim,)).fetchone()
+    issue_execution_row = store.conn.execute("SELECT * FROM executions WHERE id=?", (issue_execution,)).fetchone()
+    canary_execution_row = store.conn.execute("SELECT * FROM executions WHERE id=?", (canary_execution,)).fetchone()
+    assert issue_row["status"] == TaskStatus.CLAIMED
+    assert issue_claim_row["active"] == 1
+    assert issue_execution_row["status"] == ExecutionStatus.RUNNING
+    assert canary_row["status"] == TaskStatus.OPEN
+    assert canary_claim_row["active"] == 0
+    assert canary_execution_row["status"] == ExecutionStatus.FAILED
+
+
+def test_targeted_blocked_task_fails_before_recovery(
+    store: Store,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task_id = store.upsert_task("blocked")
+    store.advance_task(task_id, Stage.IMPLEMENT)
+    claim_id = store.acquire_claim(task_id, "local-worker")
+    execution_id = store.start_execution(
+        task_id=task_id,
+        claim_id=claim_id,
+        kind=ExecutionKind.IMPLEMENTATION,
+        pid=1001,
+        process_create_time=1.0,
+        boot_id="boot-a",
+        executable="worker",
+    )
+    store.block_task(task_id)
+    monkeypatch.setattr(
+        coordinator_module,
+        "process_identity",
+        lambda pid: None,
+    )
+
+    with pytest.raises(TargetSelectionError):
+        Coordinator(store, tmp_path, executor=FakeExecutor(), target=TargetSelection(task_id)).tick()
+
+    execution = store.conn.execute("SELECT * FROM executions WHERE id=?", (execution_id,)).fetchone()
+    assert execution["status"] == ExecutionStatus.RUNNING
 
 
 # ---------------------------------------------------------------------------

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 
 from .audit import record_audit
 from .contract_binding import contract_for_candidate
-from .domain import EvidenceKind, EvidenceStatus, ExecutionStatus, Stage
+from .domain import EvidenceKind, EvidenceStatus, ExecutionStatus, Stage, TaskStatus
 from .execution import Executor, FakeExecutor
 from .integration import Integrator
 from .lifecycle import evidence_allows_advance
@@ -14,6 +15,15 @@ from .remediation import RemediationPolicy
 from .review import Reviewer
 from .scheduling import Scheduler
 from .validation import Validator
+
+
+@dataclass(frozen=True)
+class TargetSelection:
+    task_id: str
+
+
+class TargetSelectionError(ValueError):
+    pass
 
 
 class Coordinator:
@@ -26,6 +36,7 @@ class Coordinator:
         reviewer: Reviewer | None = None,
         integrator: Integrator | None = None,
         remediation_policy: RemediationPolicy | None = None,
+        target: TargetSelection | None = None,
     ):
         self.store = store
         self.project = Path(project)
@@ -34,9 +45,12 @@ class Coordinator:
         self.reviewer = reviewer or Reviewer()
         self.integrator = integrator or Integrator()
         self.remediation_policy = remediation_policy or RemediationPolicy()
+        self.target = target
 
     def recover(self) -> None:
         for execution in self.store.running_executions():
+            if not self._target_allows(str(execution["task_id"])):
+                continue
             if execution["claim_id"] is None or execution["kind"] != "IMPLEMENTATION":
                 continue
             saved = self.store.execution_process_identity(execution["id"])
@@ -45,16 +59,41 @@ class Coordinator:
                 continue
             self.store.recover_stale_execution_claim(execution["id"], "DEAD_PROCESS_IDENTITY")
 
+    def validate_target(self) -> None:
+        if self.target is None:
+            return
+        task_id = self.target.task_id
+        task = self.store.get_task(task_id)
+        if task is None:
+            raise TargetSelectionError(f"target task does not exist: {task_id}")
+        if task["status"] == TaskStatus.BLOCKED:
+            raise TargetSelectionError(f"target task is blocked: {task_id}")
+        if task["status"] == TaskStatus.DONE or task["stage"] == Stage.DONE:
+            raise TargetSelectionError(f"target task is done: {task_id}")
+        decision = Scheduler(self.store).decision(task_id)
+        if not decision.eligible:
+            raise TargetSelectionError(f"target task is not eligible: {task_id} ({decision.reason})")
+
     def tick(self) -> int:
+        self.validate_target()
         self.recover()
         progressed = 0
-        for task in self.store.tasks():
+        for task in self._selected_tasks():
             if task["status"] == "DONE" or task["stage"] == Stage.DONE:
                 continue
             if not Scheduler(self.store).decision(task["id"]).eligible:
                 continue
             progressed += self._advance_task(task["id"])
         return progressed
+
+    def _selected_tasks(self):
+        if self.target is None:
+            return self.store.tasks()
+        task = self.store.get_task(self.target.task_id)
+        return [task] if task is not None else []
+
+    def _target_allows(self, task_id: str) -> bool:
+        return self.target is None or self.target.task_id == task_id
 
     def _advance_task(self, task_id: str) -> int:
         task = self.store.get_task(task_id)
