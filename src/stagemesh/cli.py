@@ -19,6 +19,7 @@ from .dashboard import dashboard_summary, render_dashboard
 from .coordinator import Coordinator
 from .demo import DemoValidationError, create_demo_project
 from .execution import SubprocessExecutor
+from .integration import Integrator
 from .distributed import WorkQueue, WorkQueueError
 from .e2e_acceptance import EndToEndAcceptanceValidationError, end_to_end_acceptance
 from .final_report import FinalReportValidationError, candidate_sha, render_final_report
@@ -35,11 +36,14 @@ from .process_identity import current_process_identity
 from .registry import GlobalRegistry, ProjectRegistration, RegistryConflictError, RegistryValidationError
 from .release import ReleaseValidationError, build_release_artifact
 from .release_readiness import ReleaseReadinessValidationError, release_readiness
+from .remediation import RemediationPolicy
+from .review import Reviewer
 from .redaction import redact_command_secrets, redact_url_credentials
 from .retry import RetryRegistry, RetryValidationError
 from .security import SecurityBoundaryError, WorkspaceBoundary
 from .providers import ProviderValidationError, adapters_from_config
 from .task_sources import LocalBacklogSource, TaskSourceValidationError, sync_source, task_sources_from_config
+from .validation import Validator
 from .work_transport import WorkTransportError, import_ack, write_ack_envelope, write_packet_envelope
 from .workers import WorkerValidationError, heartbeat_worker, register_worker
 
@@ -140,18 +144,22 @@ def command_continue(args: argparse.Namespace) -> int:
     sync_source(store, LocalBacklogSource(backlog).discover())
     for source in task_sources_from_config(config):
         sync_source(store, source.discover())
-    # Wire real provider adapters unless --dry-run is requested.
+
+    dry_run = bool(getattr(args, "dry_run", False))
     executor = None
-    if not getattr(args, "dry_run", False):
+    if not dry_run:
         try:
             adapters = adapters_from_config(config)
         except ProviderValidationError as exc:
             print(f"provider config error: {exc}", file=sys.stderr)
             store.close()
             return 2
+
         chosen_name = getattr(args, "provider", None)
+        if chosen_name is None:
+            chosen_name = config.stage_routes.get("IMPLEMENT")
         if chosen_name:
-            matching = [a for a in adapters if a.name == chosen_name]
+            matching = [adapter for adapter in adapters if adapter.name == chosen_name]
             if not matching:
                 print(f"provider not found: {chosen_name}", file=sys.stderr)
                 store.close()
@@ -161,25 +169,55 @@ def command_continue(args: argparse.Namespace) -> int:
             adapter = adapters[0]
         else:
             adapter = None
+
         if adapter is not None:
-            executor = SubprocessExecutor(list(adapter.command), name=adapter.name)
-    coord = Coordinator(store, project, executor=executor)
+            executor = SubprocessExecutor(
+                list(adapter.command),
+                name=adapter.name,
+                isolate=True,
+            )
+
+    strict = executor is not None and not dry_run
+    coord = Coordinator(
+        store,
+        project,
+        executor=executor,
+        validator=Validator(require_contract=strict),
+        reviewer=Reviewer(require_contract=strict),
+        integrator=Integrator(apply=strict),
+        remediation_policy=RemediationPolicy(max_attempts=3) if strict else None,
+    )
     count = 0
     while True:
         progressed = coord.tick()
         count += progressed
         if args.once or progressed == 0:
             break
-    chosen_provider = getattr(executor, "name", "fake") if executor is not None else "fake"
+
+    chosen_provider = (
+        getattr(executor, "name", "fake")
+        if executor is not None
+        else "fake"
+    )
     if args.json:
-        print(json.dumps({"progressed": count, "provider": chosen_provider}, indent=2, sort_keys=True))
+        print(
+            json.dumps(
+                {
+                    "progressed": count,
+                    "provider": chosen_provider,
+                    "strict_change_control": strict,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
         store.close()
         return 0
     print(f"progressed: {count}")
     print(f"provider: {chosen_provider}")
+    print(f"strict_change_control: {strict}")
     store.close()
     return 0
-
 
 def command_status(args: argparse.Namespace) -> int:
     project = Path(args.project).resolve()
