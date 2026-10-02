@@ -232,6 +232,19 @@ class Coordinator:
                     sha,
                     self.project,
                 )
+            if self.store.has_evidence(
+                task_id,
+                sha,
+                EvidenceKind.INTEGRATION,
+                EvidenceStatus.FAILED,
+            ):
+                self.store.block_task(task_id)
+                record_audit(
+                    self.store,
+                    "task.integration_blocked",
+                    {"task_id": task_id, "candidate_sha": sha},
+                )
+                return 0
             return self._advance_with_evidence(
                 task_id,
                 stage,
