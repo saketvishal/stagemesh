@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
 from stagemesh.change_control import ChangeContract, write_contract
 from stagemesh.coordinator import Coordinator
 from stagemesh.domain import EvidenceKind, EvidenceStatus, Stage, TaskStatus
-from stagemesh.execution import FakeExecutor
+from stagemesh.execution import FakeExecutor, SubprocessExecutor
 from stagemesh.integration import Integrator
 from stagemesh.persistence import Store
 from stagemesh.remediation import RemediationPolicy
@@ -137,6 +138,57 @@ def test_failed_validation_schedules_bounded_repair() -> None:
         store.close()
 
 
+def test_isolated_executor_does_not_mutate_target_until_integration() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        init_repo(root)
+        store = Store(root / ".stagemesh" / "state.sqlite3")
+        store.migrate()
+        task_id = store.upsert_task("isolated", source_id="CC-ISO")
+        write_contract(
+            root,
+            task_id,
+            ChangeContract.from_mapping(
+                {
+                    "objective": "create isolated.txt only",
+                    "allowed_paths": ["isolated.txt"],
+                }
+            ),
+        )
+        store.advance_task(task_id, Stage.IMPLEMENT)
+        claim_id = store.acquire_claim(task_id, "acceptance-worker")
+        assert claim_id is not None
+        script = (
+            "from pathlib import Path; "
+            "Path('isolated.txt').write_text('isolated\\n', encoding='utf-8')"
+        )
+        result = SubprocessExecutor(
+            [sys.executable, "-c", script],
+            name="acceptance-provider",
+            isolate=True,
+        ).run(store, task_id, claim_id, root)
+        assert result.status.value == "SUCCEEDED"
+        assert result.candidate_sha
+        assert not (root / "isolated.txt").exists()
+
+        validation = Validator(require_contract=True).validate(
+            store,
+            task_id,
+            result.candidate_sha,
+            root,
+        )
+        assert validation is EvidenceStatus.PASSED
+        integrated = Integrator(apply=True).integrate(
+            store,
+            task_id,
+            result.candidate_sha,
+            root,
+        )
+        assert integrated is EvidenceStatus.PASSED
+        assert (root / "isolated.txt").read_text(encoding="utf-8") == "isolated\n"
+        store.close()
+
+
 def test_git_integrator_incorporates_exact_candidate() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
@@ -173,6 +225,7 @@ def main() -> int:
     test_out_of_contract_candidate_is_rejected()
     test_missing_contract_blocks_before_executor()
     test_failed_validation_schedules_bounded_repair()
+    test_isolated_executor_does_not_mutate_target_until_integration()
     test_git_integrator_incorporates_exact_candidate()
     print("change-control acceptance: PASS")
     return 0
