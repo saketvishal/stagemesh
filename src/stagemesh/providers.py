@@ -63,6 +63,8 @@ class RuntimeCommandAdapter:
                 list(self.command),
                 cwd=run_path,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -128,6 +130,8 @@ class RuntimeCommandAdapter:
                     list(self.command),
                     cwd=review_path,
                     text=True,
+                    encoding="utf-8",
+                    errors="replace",
                     stdin=subprocess.PIPE,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
@@ -162,8 +166,8 @@ class RuntimeReviewAdapter:
 def approved_default_adapters() -> list[RuntimeCommandAdapter]:
     commands: dict[str, str] = {}
     for name, env_name, fallback in [
-        ("codex", "STAGEMESH_CODEX_CMD", "codex"),
-        ("claude", "STAGEMESH_CLAUDE_CMD", "claude"),
+        ("codex", "STAGEMESH_CODEX_CMD", "codex exec"),
+        ("claude", "STAGEMESH_CLAUDE_CMD", "claude -p"),
         ("grok", "STAGEMESH_GROK_CMD", "grok"),
     ]:
         commands[name] = os.environ.get(env_name) or fallback
