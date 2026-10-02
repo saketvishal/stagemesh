@@ -18,7 +18,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from stagemesh.coordinator import Coordinator
 from stagemesh.domain import EvidenceKind, EvidenceStatus, ExecutionKind, ExecutionStatus, ProcessIdentity, Stage, TaskStatus
-from stagemesh.execution import ExecutionResult, FakeExecutor
+from stagemesh.execution import ExecutionResult, FailoverExecutor, FakeExecutor
 from stagemesh.lifecycle import LifecycleError, evidence_allows_advance
 from stagemesh.persistence import Store, StoreValidationError
 from stagemesh.process_identity import classify_process
@@ -1284,6 +1284,68 @@ def main() -> int:
         report_with_gaps = render_final_report(project)
         assert "acceptance report status: PASS proof=BLOCKED_ON_EXTERNAL_EVIDENCE (1/1 checks passing, 1 proof gaps)" in report_with_gaps
 
+    def provider_failover_is_capacity_only(store: Store, project: Path) -> None:
+        calls: list[str] = []
+
+        class ResultExecutor(FakeExecutor):
+            def __init__(self, name: str, result: ExecutionResult):
+                self.name = name
+                self.result = result
+
+            def run(
+                self,
+                store: Store,
+                task_id: str,
+                claim_id: str | None,
+                project: Path,
+            ) -> ExecutionResult:
+                calls.append(self.name)
+                return self.result
+
+        capacity = ResultExecutor(
+            "primary",
+            ExecutionResult(
+                ExecutionStatus.FAILED,
+                capacity_failure=True,
+                failure_reason="quota_rate_limit",
+            ),
+        )
+        success = ResultExecutor(
+            "secondary",
+            ExecutionResult(
+                ExecutionStatus.SUCCEEDED,
+                candidate_sha="abc123",
+                durable_handoff=True,
+            ),
+        )
+        result = FailoverExecutor([capacity, success]).run(
+            store,
+            "unused",
+            None,
+            project,
+        )
+        assert result.status is ExecutionStatus.SUCCEEDED
+        assert calls == ["primary", "secondary"]
+
+        calls.clear()
+        code_failure = ResultExecutor(
+            "primary",
+            ExecutionResult(
+                ExecutionStatus.FAILED,
+                capacity_failure=False,
+                failure_reason="implementation_failure",
+            ),
+        )
+        result = FailoverExecutor([code_failure, success]).run(
+            store,
+            "unused",
+            None,
+            project,
+        )
+        assert result.status is ExecutionStatus.FAILED
+        assert result.failure_reason == "implementation_failure"
+        assert calls == ["primary"]
+
     def provider_acceptance_isolates_capacity_failure(store: Store, project: Path) -> None:
         result = run_provider_acceptance(store, project)
         assert result.status == "PASS"
@@ -1535,6 +1597,7 @@ def main() -> int:
         retry_backoff_is_durable_and_clearable,
         workspace_boundary_rejects_outside_outputs,
         final_report_mentions_missing_evidence,
+        provider_failover_is_capacity_only,
         provider_acceptance_isolates_capacity_failure,
         runtime_provider_adapter_validates_definition,
         runtime_provider_execution_is_durable,
