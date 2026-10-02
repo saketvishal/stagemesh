@@ -5,6 +5,7 @@ from pathlib import Path
 from .change_control import (
     ChangeContract,
     ChangeControlError,
+    contract_definition_violations,
     contract_violations,
     diff_summary,
     git_diff_check,
@@ -40,6 +41,8 @@ class Validator:
             contract = ChangeContract.load(project, task_id)
             if contract is None and self.require_contract:
                 violations.append("missing mandatory change contract")
+            if contract is not None and self.require_contract:
+                violations.extend(contract_definition_violations(contract))
             if contract is not None:
                 summary = diff_summary(project, candidate_sha)
                 summary_payload = {
