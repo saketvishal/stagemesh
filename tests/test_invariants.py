@@ -5,7 +5,14 @@ from pathlib import Path
 import pytest
 
 from stagemesh.coordinator import Coordinator
-from stagemesh.domain import EvidenceKind, EvidenceStatus, ExecutionKind, ExecutionStatus, ProcessIdentity, Stage
+from stagemesh.domain import (
+    EvidenceKind,
+    EvidenceStatus,
+    ExecutionKind,
+    ExecutionStatus,
+    ProcessIdentity,
+    Stage,
+)
 from stagemesh.execution import ExecutionResult, FakeExecutor
 from stagemesh.lifecycle import LifecycleError, evidence_allows_advance
 from stagemesh.persistence import Store
@@ -50,6 +57,12 @@ def test_pid_reuse_cannot_impersonate_old_worker() -> None:
     old = ProcessIdentity(pid=100, create_time=1.0, boot_id="a", executable="worker")
     reused = ProcessIdentity(pid=100, create_time=2.0, boot_id="a", executable="worker")
     assert classify_process(old, reused) == "DEAD"
+
+
+def test_process_identity_accepts_matching_executable_basename() -> None:
+    saved = ProcessIdentity(pid=100, create_time=1.0, boot_id="a", executable="claude")
+    observed = ProcessIdentity(pid=100, create_time=1.0, boot_id="a", executable=r"C:\tools\claude")
+    assert classify_process(saved, observed) == "LIVE"
 
 
 def test_identity_uncertainty_fails_safely() -> None:

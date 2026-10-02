@@ -239,7 +239,7 @@ def _build_task_prompt(task_id: str, task: object, project: Path | None = None) 
 
     from .contracts import ContractError, contract_prompt, load_contract
 
-    row_keys = task.keys() if isinstance(task, _sqlite3.Row) else ()
+    row_keys = set(task.keys()) if isinstance(task, _sqlite3.Row) else set()
     title = task["title"] if "title" in row_keys else str(task_id)
     contract_text = ""
     if project is not None:

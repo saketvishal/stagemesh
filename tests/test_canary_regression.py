@@ -14,8 +14,9 @@ from pathlib import Path
 
 import pytest
 
+import stagemesh.coordinator as coordinator_module
 from stagemesh.coordinator import Coordinator
-from stagemesh.domain import ExecutionStatus, Stage, TaskStatus
+from stagemesh.domain import ExecutionKind, ExecutionStatus, ProcessIdentity, Stage, TaskStatus
 from stagemesh.execution import ExecutionResult, FakeExecutor, SubprocessExecutor, classify_failure
 from stagemesh.git import GitWorkspace
 from stagemesh.persistence import Store
@@ -120,6 +121,101 @@ def test_release_claim_is_idempotent(store: Store, tmp_path: Path) -> None:
 def test_release_claim_on_missing_claim_is_safe(store: Store, tmp_path: Path) -> None:
     """DEF-4 (safety): release_claim with a non-existent ID must not raise."""
     store.release_claim("00000000-0000-0000-0000-000000000000")  # should be silent
+
+
+# ---------------------------------------------------------------------------
+# DEF-5: stale running implementation execution must not strand an active claim
+# ---------------------------------------------------------------------------
+
+
+def _claimed_implementation_with_execution(
+    store: Store,
+    *,
+    process_create_time: float | None = 100.0,
+    boot_id: str | None = "boot-a",
+    executable: str | None = "worker",
+) -> tuple[str, str, str]:
+    task_id = store.upsert_task("stale-claim-task")
+    store.advance_task(task_id, Stage.IMPLEMENT)
+    claim_id = store.acquire_claim(task_id, "worker-a", lease_seconds=300)
+    assert claim_id is not None
+    execution_id = store.start_execution(
+        task_id=task_id,
+        claim_id=claim_id,
+        kind=ExecutionKind.IMPLEMENTATION,
+        pid=4242,
+        process_create_time=process_create_time,
+        boot_id=boot_id,
+        executable=executable,
+    )
+    return task_id, claim_id, execution_id
+
+
+def test_dead_running_implementation_claim_recovers_and_redispatches(
+    store: Store,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task_id, old_claim_id, old_execution_id = _claimed_implementation_with_execution(store)
+    monkeypatch.setattr(coordinator_module, "process_identity", lambda pid: None)
+
+    assert Coordinator(store, tmp_path, executor=FakeExecutor()).tick() == 1
+
+    task = store.get_task(task_id)
+    assert task["stage"] == Stage.VALIDATE
+    assert task["status"] == TaskStatus.OPEN
+    old_claim = store.conn.execute("SELECT * FROM claims WHERE id=?", (old_claim_id,)).fetchone()
+    old_execution = store.conn.execute("SELECT * FROM executions WHERE id=?", (old_execution_id,)).fetchone()
+    assert old_claim["active"] == 0
+    assert old_execution["status"] == ExecutionStatus.FAILED
+    assert store.latest_candidate(task_id) is not None
+
+
+def test_uncertain_running_implementation_identity_remains_claimed(
+    store: Store,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task_id, claim_id, execution_id = _claimed_implementation_with_execution(
+        store,
+        process_create_time=None,
+        boot_id="boot-a",
+        executable="worker",
+    )
+    monkeypatch.setattr(coordinator_module, "process_identity", lambda pid: None)
+
+    assert Coordinator(store, tmp_path, executor=FakeExecutor()).tick() == 0
+
+    task = store.get_task(task_id)
+    claim = store.conn.execute("SELECT * FROM claims WHERE id=?", (claim_id,)).fetchone()
+    execution = store.conn.execute("SELECT * FROM executions WHERE id=?", (execution_id,)).fetchone()
+    assert task["stage"] == Stage.IMPLEMENT
+    assert task["status"] == TaskStatus.CLAIMED
+    assert claim["active"] == 1
+    assert execution["status"] == ExecutionStatus.RUNNING
+
+
+def test_live_matching_running_implementation_identity_remains_claimed(
+    store: Store,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task_id, claim_id, execution_id = _claimed_implementation_with_execution(store)
+    monkeypatch.setattr(
+        coordinator_module,
+        "process_identity",
+        lambda pid: ProcessIdentity(pid=pid, create_time=100.0, boot_id="boot-a", executable="worker"),
+    )
+
+    assert Coordinator(store, tmp_path, executor=FakeExecutor()).tick() == 0
+
+    task = store.get_task(task_id)
+    claim = store.conn.execute("SELECT * FROM claims WHERE id=?", (claim_id,)).fetchone()
+    execution = store.conn.execute("SELECT * FROM executions WHERE id=?", (execution_id,)).fetchone()
+    assert task["stage"] == Stage.IMPLEMENT
+    assert task["status"] == TaskStatus.CLAIMED
+    assert claim["active"] == 1
+    assert execution["status"] == ExecutionStatus.RUNNING
 
 
 # ---------------------------------------------------------------------------
