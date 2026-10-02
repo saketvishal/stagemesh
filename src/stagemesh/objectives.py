@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .change_control import ChangeContract, ChangeControlError, write_contract
+
 
 class ObjectiveValidationError(ValueError):
     pass
@@ -97,7 +99,23 @@ class ObjectivePlanner:
                 }
             )
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({"objective": objective.id, "tasks": tasks}, indent=2), encoding="utf-8")
+        path.write_text(
+            json.dumps({"objective": objective.id, "tasks": tasks}, indent=2),
+            encoding="utf-8",
+        )
+        project = path.parent.parent
+        for task_id in objective.tasks:
+            item = by_id[task_id]
+            contract_payload = item.get("contract")
+            if contract_payload is None:
+                continue
+            try:
+                contract = ChangeContract.from_mapping(contract_payload)
+            except ChangeControlError as exc:
+                raise ObjectiveValidationError(
+                    f"invalid change contract for task {task_id}: {exc}"
+                ) from exc
+            write_contract(project, task_id, contract)
 
 
 def _validate_text(value: object, field: str) -> str:

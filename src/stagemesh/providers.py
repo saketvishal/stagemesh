@@ -54,7 +54,7 @@ class RuntimeCommandAdapter:
         if self.check_capacity() != CapacityKind.AVAILABLE:
             return ExecutionResult(ExecutionStatus.FAILED, capacity_failure=True, failure_reason="provider_unavailable")
         task = store.get_task(task_id)
-        task_prompt = _build_task_prompt(task_id, task)
+        task_prompt = _build_task_prompt(task_id, task, store=store, project=project)
         try:
             proc = subprocess.Popen(
                 list(self.command),
@@ -166,18 +166,71 @@ def _validate_capabilities(capabilities: frozenset[str]) -> frozenset[str]:
     return normalized
 
 
-def _build_task_prompt(task_id: str, task: object) -> str:
-    """Build the prompt string sent via stdin to a provider CLI.
-
-    The prompt gives the agent its task title and a reminder to commit any
-    changes via git so StageMesh can capture the resulting SHA for evidence.
-    """
+def _build_task_prompt(
+    task_id: str,
+    task: object,
+    *,
+    store: Store | None = None,
+    project: Path | None = None,
+) -> str:
+    """Build the bounded work packet sent to a coding-agent CLI."""
     import sqlite3 as _sqlite3
 
-    title = task["title"] if isinstance(task, _sqlite3.Row) and "title" in task.keys() else str(task_id)
-    return (
-        f"StageMesh task: {title}\n\n"
-        "Please implement the changes described above. "
-        "When you are done, commit all changes to git with a descriptive commit message "
-        "so StageMesh can record the resulting commit SHA as the implementation candidate.\n"
+    from .change_control import ChangeContract, ChangeControlError
+
+    title = (
+        task["title"]
+        if isinstance(task, _sqlite3.Row) and "title" in task.keys()
+        else str(task_id)
     )
+    sections = [
+        f"StageMesh task: {title}",
+        (
+            "You are an implementation worker, not the acceptance authority. "
+            "Make only the minimum changes required by the contract. "
+            "Do not broaden scope, perform unrelated refactors, alter the contract, "
+            "weaken tests, or change dependencies unless explicitly allowed. "
+            "StageMesh will independently validate the exact candidate SHA after you finish."
+        ),
+    ]
+
+    if project is not None:
+        try:
+            contract = ChangeContract.load(project, task_id)
+        except ChangeControlError as exc:
+            sections.append(f"CHANGE CONTRACT ERROR\n{exc}")
+        else:
+            if contract is None:
+                sections.append(
+                    "CHANGE CONTRACT\nMISSING. Do not invent scope. "
+                    "A strict StageMesh run will reject this candidate."
+                )
+            else:
+                sections.append("CHANGE CONTRACT\n" + contract.render_prompt())
+
+    if store is not None:
+        candidate = store.latest_candidate(task_id)
+        if candidate is not None:
+            findings = store.open_findings_for_candidate(
+                task_id,
+                str(candidate["sha"]),
+            )
+            if findings:
+                sections.append(
+                    "REMEDIATION FINDINGS\n"
+                    + "\n".join(
+                        f"- [{row['severity']}] {row['message']}"
+                        for row in findings
+                    )
+                )
+                sections.append(
+                    "This is a repair attempt. Fix the findings without expanding the original contract."
+                )
+
+    sections.append(
+        "When implementation is complete, leave the working tree containing only "
+        "the contract-required changes. You may commit them with a descriptive message; "
+        "if you do not, StageMesh will create the candidate commit. "
+        "If the contract cannot be satisfied safely, exit non-zero instead of guessing."
+    )
+    return "\n\n".join(sections) + "\n"

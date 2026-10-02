@@ -14,6 +14,14 @@
 - Configurable provider routing with SINGLE_AGENT and STAGED modes plus per-stage provider routes.
 - Local backlog, configured JSON and Google AX export task-source adapters, and GitHub issue-source models, including zero-config remote detection, deferred, unknown, stale, auth, and rate-limit semantics.
 - Structured objective planner validation, including duplicate task and unknown dependency rejection.
+- Contract-first AI-native change control for real-provider runs, with mandatory acceptance criteria, explicit path allowlists, deterministic validation commands, change-size bounds, dependency controls, and excluded-work/invariant guidance.
+- Coding-agent implementation isolation in detached Git worktrees; target checkout mutation is deferred until the integration gate.
+- Full candidate-lineage scope validation, including multi-commit changes and both source/destination sides of Git renames and copies.
+- Real validation executes contract commands against the exact candidate SHA in a fresh detached worktree and records structured evidence/findings.
+- Independent deterministic review recomputes contract compliance and requires exact-SHA validation evidence rather than trusting the implementation worker.
+- Bounded remediation returns failed tasks to implementation for at most three attempts and bases each repair on the latest failed candidate.
+- Production integration performs a real Git fast-forward or merge; failed integration blocks the task with durable findings.
+- Real-provider execution can fail over across configured coding agents only for provider/capacity failures; implementation failures do not trigger provider shopping.
 - Built-in validation, independent review, and integration evidence.
 - Recovery behavior that preserves uncertain process identity and does not treat PID alone as proof of liveness or death.
 - CLI for plain/JSON init, doctor, planning, continue, status, config, and health with blocked-task and degraded execution counts, capacity, and plain/JSON CI gates.
@@ -61,7 +69,7 @@
 - GitHub Actions CI for Windows and Linux.
 - Stdlib invariant and acceptance runners for dependency-free verification.
 - Clean-tree acceptance copies only tracked files, installs StageMesh into an isolated target, and runs CLI smoke checks from the installed package.
-- Local `stagemesh ci` covers compile, invariants, provider acceptance, GitHub acceptance, structured live acceptance, clean acceptance, and optional full acceptance.
+- Local `stagemesh ci` covers compile, invariants, provider acceptance, GitHub acceptance, structured live acceptance, clean acceptance, adversarial AI change-control acceptance, and optional full acceptance.
 
 ## Verified Locally
 
@@ -69,6 +77,7 @@
 - `python scripts/invariants.py`
 - `python scripts/acceptance.py`
 - `python scripts/clean_acceptance.py`
+- `python scripts/change_control_acceptance.py`
 - `python -m stagemesh.cli --project . ci --future-feature-gate`
 - `python -m pip install . --target .tmp-install --no-cache-dir --upgrade`
 
@@ -82,10 +91,10 @@ Current generated reports show local checks passing while proof remains blocked 
 ## Still Required For Full Product Acceptance
 
 - Live GitHub API acceptance with credentials, outbound issue synchronization, and permission/auth matrix.
-- Full production provider adapters for Codex, Claude, Grok, and other approved workers.
+- Live end-to-end acceptance with installed and authenticated Codex/Claude/Grok (or other approved) provider CLIs on the operator machine.
 - Networked distributed worker transport beyond local durable queue plus file-envelope handoff.
 - Networked/live operator dashboard UI beyond the generated static HTML status dashboard.
 - Live PostgreSQL acceptance against a real service behind the persistence interface.
-- Real CI execution results from GitHub-hosted Windows and Linux runners.
+- Candidate-scoped hosted CI evidence recorded for the release candidate.
 - Public release publishing destination and hosted artifact URLs.
 - Deeper security hardening for sandbox, secrets, git attribution, and multi-project registry operation.

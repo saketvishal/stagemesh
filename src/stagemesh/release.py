@@ -84,6 +84,7 @@ def validate_release_token(value: str, field: str) -> str:
 
 
 def release_files(root: Path) -> list[Path]:
+    root = Path(root).resolve()
     tracked = git_tracked_files(root)
     if tracked:
         return sorted(tracked)

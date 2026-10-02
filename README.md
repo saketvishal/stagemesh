@@ -24,3 +24,13 @@ python scripts/acceptance.py
 ```
 
 Runtime state lives in `.stagemesh/stagemesh.sqlite3` by default.
+
+
+## AI-native change control
+
+Real-provider runs use contract-first autonomous development: isolated
+implementation worktrees, exact-SHA validation, independent review, bounded
+repair, and real Git integration. Missing contracts block before execution.
+
+See [docs/change-control.md](docs/change-control.md) for the task-contract schema
+and enforcement model.

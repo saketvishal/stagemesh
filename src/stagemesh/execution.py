@@ -1,14 +1,16 @@
 from __future__ import annotations
 
+import shutil
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+from .attribution import attribution_for_worker
 from .domain import ExecutionKind, ExecutionStatus
-from .git import GitWorkspace
+from .git import GitError, GitWorkspace
 from .persistence import Store
 from .process_identity import popen_identity
-from .attribution import attribution_for_worker
 
 
 @dataclass(frozen=True)
@@ -26,36 +28,75 @@ def classify_failure(
     stderr: str = "",
     exc: Exception | None = None,
 ) -> tuple[bool, str]:
-    """Classify execution failure into capacity/provider failure vs code defect.
-
-    Returns (is_capacity_failure: bool, reason: str).
-    """
+    """Classify execution failure into provider/capacity failure vs code defect."""
     if exc is not None and isinstance(exc, FileNotFoundError):
         return True, "provider_unavailable"
 
     combined = f"{stdout}\n{stderr}".lower()
 
-    if any(m in combined for m in ["not found", "no such file or directory", "command not found", "cannot find"]):
+    if any(
+        marker in combined
+        for marker in [
+            "not found",
+            "no such file or directory",
+            "command not found",
+            "cannot find",
+        ]
+    ):
         return True, "provider_unavailable"
 
-    if any(m in combined for m in [
-        "unauthorized", "authentication", "not logged in", "login required",
-        "invalid api key", "auth failure", "missing credentials", "authenticate",
-        "invalid_api_key", "authentication_error", "forbidden", "401", "403"
-    ]):
+    if any(
+        marker in combined
+        for marker in [
+            "unauthorized",
+            "authentication",
+            "not logged in",
+            "login required",
+            "invalid api key",
+            "auth failure",
+            "missing credentials",
+            "authenticate",
+            "invalid_api_key",
+            "authentication_error",
+            "forbidden",
+            "401",
+            "403",
+        ]
+    ):
         return True, "authentication_failure"
 
-    if any(m in combined for m in [
-        "rate limit", "rate_limit", "quota", "too many requests", "429",
-        "exceeded your current quota", "capacity exhausted", "overloaded_error",
-        "rate_limit_error", "insufficient_quota"
-    ]):
+    if any(
+        marker in combined
+        for marker in [
+            "rate limit",
+            "rate_limit",
+            "quota",
+            "too many requests",
+            "429",
+            "exceeded your current quota",
+            "capacity exhausted",
+            "overloaded_error",
+            "rate_limit_error",
+            "insufficient_quota",
+        ]
+    ):
         return True, "quota_rate_limit"
 
-    if any(m in combined for m in [
-        "503", "502", "service unavailable", "bad gateway", "connection refused",
-        "connection reset", "overloaded", "server_error", "timed out", "timeout"
-    ]):
+    if any(
+        marker in combined
+        for marker in [
+            "503",
+            "502",
+            "service unavailable",
+            "bad gateway",
+            "connection refused",
+            "connection reset",
+            "overloaded",
+            "server_error",
+            "timed out",
+            "timeout",
+        ]
+    ):
         return True, "transient_provider_failure"
 
     return False, "implementation_failure"
@@ -64,15 +105,67 @@ def classify_failure(
 class Executor:
     name = "executor"
 
-    def run(self, store: Store, task_id: str, claim_id: str | None, project: Path) -> ExecutionResult:
+    def run(
+        self,
+        store: Store,
+        task_id: str,
+        claim_id: str | None,
+        project: Path,
+    ) -> ExecutionResult:
         raise NotImplementedError
+
+
+class FailoverExecutor(Executor):
+    """Try providers in order only when the failure is provider/capacity related."""
+
+    def __init__(self, executors: list[Executor]):
+        if not executors:
+            raise ValueError("failover executor requires at least one executor")
+        self.executors = tuple(executors)
+        self.name = "failover[" + ",".join(executor.name for executor in executors) + "]"
+
+    def run(
+        self,
+        store: Store,
+        task_id: str,
+        claim_id: str | None,
+        project: Path,
+    ) -> ExecutionResult:
+        last: ExecutionResult | None = None
+        for executor in self.executors:
+            result = executor.run(
+                store,
+                task_id,
+                claim_id,
+                project,
+            )
+            last = result
+            if result.status is ExecutionStatus.SUCCEEDED:
+                return result
+            if not result.capacity_failure:
+                return result
+        return last or ExecutionResult(
+            ExecutionStatus.FAILED,
+            capacity_failure=True,
+            failure_reason="no_provider_attempted",
+        )
 
 
 class FakeExecutor(Executor):
     name = "fake"
 
-    def run(self, store: Store, task_id: str, claim_id: str | None, project: Path) -> ExecutionResult:
-        execution_id = store.start_execution(task_id=task_id, claim_id=claim_id, kind=ExecutionKind.IMPLEMENTATION)
+    def run(
+        self,
+        store: Store,
+        task_id: str,
+        claim_id: str | None,
+        project: Path,
+    ) -> ExecutionResult:
+        execution_id = store.start_execution(
+            task_id=task_id,
+            claim_id=claim_id,
+            kind=ExecutionKind.IMPLEMENTATION,
+        )
         workspace = GitWorkspace(project)
         workspace.init_if_needed()
         task_file = project / f"stagemesh-task-{task_id}.txt"
@@ -81,21 +174,46 @@ class FakeExecutor(Executor):
             f"StageMesh implementation for {task_id}",
             attribution=attribution_for_worker("local-worker", self.name),
         )
-        store.add_candidate(task_id, sha, self.name, durable_handoff=True)
-        store.finish_execution(execution_id, ExecutionStatus.SUCCEEDED, sha)
-        return ExecutionResult(ExecutionStatus.SUCCEEDED, sha, durable_handoff=True)
+        store.add_candidate(
+            task_id,
+            sha,
+            self.name,
+            durable_handoff=True,
+        )
+        store.finish_execution(
+            execution_id,
+            ExecutionStatus.SUCCEEDED,
+            sha,
+        )
+        return ExecutionResult(
+            ExecutionStatus.SUCCEEDED,
+            sha,
+            durable_handoff=True,
+        )
 
 
 class SubprocessExecutor(Executor):
     name = "subprocess"
 
-    def __init__(self, command: list[str], name: str | None = None):
+    def __init__(
+        self,
+        command: list[str],
+        name: str | None = None,
+        *,
+        isolate: bool = False,
+    ):
         self.command = command
+        self.isolate = isolate
         if name is not None:
             self.name = name
 
-    def run(self, store: Store, task_id: str, claim_id: str | None, project: Path) -> ExecutionResult:
-        import shutil
+    def run(
+        self,
+        store: Store,
+        task_id: str,
+        claim_id: str | None,
+        project: Path,
+    ) -> ExecutionResult:
         executable = self.command[0] if self.command else ""
         if not executable or not shutil.which(executable):
             return ExecutionResult(
@@ -104,56 +222,188 @@ class SubprocessExecutor(Executor):
                 failure_reason="provider_unavailable",
             )
 
+        project = Path(project).resolve()
+        root_workspace = GitWorkspace(project)
+        run_project = project
+        isolated_worktree: Path | None = None
+        baseline_sha: str | None = None
+
+        if self.isolate:
+            root_workspace.init_if_needed()
+            try:
+                target_head = root_workspace.head()
+            except GitError:
+                return ExecutionResult(
+                    ExecutionStatus.FAILED,
+                    failure_reason="isolation_requires_existing_commit",
+                )
+            previous_candidate = store.latest_candidate(task_id)
+            baseline_sha = (
+                str(previous_candidate["sha"])
+                if previous_candidate is not None
+                else target_head
+            )
+            candidate_exists = root_workspace.run(
+                "cat-file",
+                "-e",
+                f"{baseline_sha}^{{commit}}",
+                check=False,
+            )
+            if candidate_exists.returncode != 0:
+                return ExecutionResult(
+                    ExecutionStatus.FAILED,
+                    failure_reason="remediation_baseline_missing",
+                )
+            isolated_worktree = _create_isolated_worktree(
+                root_workspace,
+                project,
+                task_id,
+                baseline_sha,
+            )
+            run_project = isolated_worktree
+
         task = store.get_task(task_id)
         from .providers import _build_task_prompt
-        task_prompt = _build_task_prompt(task_id, task)
 
+        task_prompt = _build_task_prompt(
+            task_id,
+            task,
+            store=store,
+            project=project,
+        )
+        execution_id: str | None = None
         try:
-            proc = subprocess.Popen(
-                self.command,
-                cwd=project,
-                text=True,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+            try:
+                proc = subprocess.Popen(
+                    self.command,
+                    cwd=run_project,
+                    text=True,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+            except FileNotFoundError as exc:
+                is_cap, reason = classify_failure(1, exc=exc)
+                return ExecutionResult(
+                    ExecutionStatus.FAILED,
+                    capacity_failure=is_cap,
+                    failure_reason=reason,
+                )
+
+            ident = popen_identity(proc)
+            execution_id = store.start_execution(
+                task_id=task_id,
+                claim_id=claim_id,
+                kind=ExecutionKind.IMPLEMENTATION,
+                pid=ident.pid,
+                process_create_time=ident.create_time,
+                boot_id=ident.boot_id,
+                executable=ident.executable,
             )
-        except FileNotFoundError as exc:
-            is_cap, reason = classify_failure(1, exc=exc)
+            stdout, stderr = proc.communicate(input=task_prompt)
+            code = proc.returncode
+
+            if code != 0:
+                is_cap, reason = classify_failure(
+                    code,
+                    stdout,
+                    stderr,
+                )
+                store.finish_execution(
+                    execution_id,
+                    ExecutionStatus.FAILED,
+                )
+                return ExecutionResult(
+                    ExecutionStatus.FAILED,
+                    capacity_failure=is_cap,
+                    failure_reason=reason,
+                )
+
+            workspace = GitWorkspace(run_project)
+            workspace.init_if_needed()
+            sha = workspace.commit_all(
+                f"StageMesh implementation for {task_id}",
+                attribution=attribution_for_worker(
+                    "local-worker",
+                    self.name,
+                ),
+            )
+            if self.isolate and baseline_sha == sha:
+                store.finish_execution(
+                    execution_id,
+                    ExecutionStatus.FAILED,
+                )
+                return ExecutionResult(
+                    ExecutionStatus.FAILED,
+                    failure_reason="no_candidate_changes",
+                )
+
+            store.add_candidate(
+                task_id,
+                sha,
+                self.name,
+                durable_handoff=True,
+            )
+            store.finish_execution(
+                execution_id,
+                ExecutionStatus.SUCCEEDED,
+                sha,
+            )
             return ExecutionResult(
-                ExecutionStatus.FAILED,
-                capacity_failure=is_cap,
-                failure_reason=reason,
+                ExecutionStatus.SUCCEEDED,
+                sha,
+                durable_handoff=True,
             )
+        finally:
+            if isolated_worktree is not None:
+                root_workspace.run(
+                    "worktree",
+                    "remove",
+                    "--force",
+                    str(isolated_worktree),
+                    check=False,
+                )
+                root_workspace.run(
+                    "worktree",
+                    "prune",
+                    check=False,
+                )
+                if isolated_worktree.exists():
+                    shutil.rmtree(
+                        isolated_worktree,
+                        ignore_errors=True,
+                    )
 
-        ident = popen_identity(proc)
-        execution_id = store.start_execution(
-            task_id=task_id,
-            claim_id=claim_id,
-            kind=ExecutionKind.IMPLEMENTATION,
-            pid=ident.pid,
-            process_create_time=ident.create_time,
-            boot_id=ident.boot_id,
-            executable=ident.executable,
+
+def _create_isolated_worktree(
+    workspace: GitWorkspace,
+    project: Path,
+    task_id: str,
+    baseline_sha: str,
+) -> Path:
+    safe = "".join(
+        char if char.isalnum() or char in "._-" else "_"
+        for char in task_id
+    )[:80]
+    created = Path(
+        tempfile.mkdtemp(
+            prefix=f".stagemesh-{safe}-",
+            dir=project.parent,
         )
-        stdout, stderr = proc.communicate(input=task_prompt)
-        code = proc.returncode
-
-        if code != 0:
-            is_cap, reason = classify_failure(code, stdout, stderr)
-            store.finish_execution(execution_id, ExecutionStatus.FAILED)
-            return ExecutionResult(
-                ExecutionStatus.FAILED,
-                capacity_failure=is_cap,
-                failure_reason=reason,
-            )
-
-        workspace = GitWorkspace(project)
-        workspace.init_if_needed()
-        sha = workspace.commit_all(
-            f"StageMesh implementation for {task_id}",
-            attribution=attribution_for_worker("local-worker", self.name),
+    )
+    created.rmdir()
+    result = workspace.run(
+        "worktree",
+        "add",
+        "--detach",
+        str(created),
+        baseline_sha,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise GitError(
+            result.stderr.strip()
+            or result.stdout.strip()
+            or "unable to create isolated worktree"
         )
-        if sha:
-            store.add_candidate(task_id, sha, self.name, durable_handoff=True)
-        store.finish_execution(execution_id, ExecutionStatus.SUCCEEDED, sha)
-        return ExecutionResult(ExecutionStatus.SUCCEEDED, sha, durable_handoff=bool(sha))
+    return created
