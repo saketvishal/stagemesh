@@ -187,6 +187,26 @@ def diff_summary(project: Path, candidate_sha: str) -> DiffSummary:
         changed_lines,
     )
 
+def contract_definition_violations(
+    contract: ChangeContract,
+) -> list[str]:
+    """Return omissions that make a contract unsafe for autonomous execution."""
+    violations: list[str] = []
+    if not contract.acceptance_criteria:
+        violations.append(
+            "strict contract requires at least one acceptance criterion"
+        )
+    if not contract.allowed_paths:
+        violations.append(
+            "strict contract requires explicit allowed_paths"
+        )
+    if not contract.validation_commands:
+        violations.append(
+            "strict contract requires at least one deterministic validation command"
+        )
+    return violations
+
+
 def contract_violations(contract: ChangeContract, summary: DiffSummary) -> list[str]:
     violations: list[str] = []
     files = summary.changed_files
