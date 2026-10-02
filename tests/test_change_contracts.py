@@ -56,6 +56,19 @@ class SequencedExecutor(Executor):
         return ExecutionResult(ExecutionStatus.SUCCEEDED, sha, durable_handoff=True)
 
 
+class RecordingReviewAdapter:
+    def __init__(self, name: str = "reviewer", response: str = "PASS") -> None:
+        self.name = name
+        self.response = response
+        self.calls = 0
+        self.prompts: list[str] = []
+
+    def review(self, prompt: str) -> str:
+        self.calls += 1
+        self.prompts.append(prompt)
+        return self.response
+
+
 def test_contract_rejects_forbidden_and_out_of_scope_files(tmp_path: Path) -> None:
     workspace = _repo(tmp_path / "repo")
     project = workspace.path
@@ -158,7 +171,13 @@ def test_reviewer_independently_creates_structured_findings(tmp_path: Path) -> N
     workspace = _repo(tmp_path / "repo")
     project = workspace.path
     (project / "stagemesh.contract.json").write_text(
-        json.dumps({"objective": "Source only", "allowed_files": ["src/**"], "forbidden_files": ["README.md"]}),
+        json.dumps(
+            {
+                "objective": "Source only",
+                "allowed_files": ["src/**"],
+                "forbidden_files": ["README.md"],
+            }
+        ),
         encoding="utf-8",
     )
     (project / "README.md").write_text("review canary\n", encoding="utf-8")
@@ -216,6 +235,8 @@ def test_bound_contract_survives_filesystem_mutation_after_validation(tmp_path: 
     payload = json.loads(row["payload"])
     assert payload["contract_hash"] == bound_hash
     assert payload["objective"] == "Source only"
+    assert payload["independent_reviewer"] is False
+    assert payload["review_execution_invoked"] is False
     store.close()
 
 
@@ -240,8 +261,52 @@ def test_reviewer_provider_identity_must_be_distinct_from_implementer(tmp_path: 
     payload = json.loads(row["payload"])
     assert payload["review_provider"] == "reviewer"
     assert payload["implementer_provider"] == "implementer"
+    assert payload["independent_reviewer"] is False
+    assert payload["review_execution_invoked"] is False
+    assert payload["deterministic_contract_gate"] is True
+    store.close()
+
+
+def test_distinct_reviewer_adapter_executes_independent_review(tmp_path: Path) -> None:
+    workspace = _repo(tmp_path / "repo")
+    project = workspace.path
+    (project / "src" / "app.py").write_text("VALUE = 10\n", encoding="utf-8")
+    sha = workspace.commit_all("candidate")
+
+    store = _store(tmp_path)
+    task_id = store.upsert_task("review execution")
+    store.add_candidate(task_id, sha, "implementer", True)
+    adapter = RecordingReviewAdapter(name="reviewer")
+
+    assert Reviewer(adapter=adapter).review(store, task_id, sha, project) is EvidenceStatus.PASSED
+    row = store.conn.execute(
+        "SELECT payload FROM evidence WHERE task_id=? AND candidate_sha=? AND kind=? AND status=?",
+        (task_id, sha, EvidenceKind.REVIEW, EvidenceStatus.PASSED),
+    ).fetchone()
+    payload = json.loads(row["payload"])
+    assert adapter.calls == 1
+    assert payload["review_provider"] == "reviewer"
+    assert payload["review_execution_provider"] == "reviewer"
     assert payload["independent_reviewer"] is True
-    assert payload["deterministic_contract_gate"] is False
+    assert payload["review_execution_invoked"] is True
+    assert payload["deterministic_contract_gate"] is True
+    store.close()
+
+
+def test_reviewer_adapter_matching_implementer_is_rejected(tmp_path: Path) -> None:
+    workspace = _repo(tmp_path / "repo")
+    project = workspace.path
+    (project / "src" / "app.py").write_text("VALUE = 11\n", encoding="utf-8")
+    sha = workspace.commit_all("candidate")
+
+    store = _store(tmp_path)
+    task_id = store.upsert_task("review same provider")
+    store.add_candidate(task_id, sha, "implementer", True)
+    adapter = RecordingReviewAdapter(name="implementer")
+
+    assert Reviewer(adapter=adapter).review(store, task_id, sha, project) is EvidenceStatus.FAILED
+    assert adapter.calls == 0
+    assert store.open_findings_for_candidate(task_id, sha)
     store.close()
 
 
@@ -357,7 +422,29 @@ def test_integration_requires_validation_and_review_for_exact_sha(tmp_path: Path
 
     store.add_evidence(task_id, sha, EvidenceKind.VALIDATION, EvidenceStatus.PASSED)
     store.add_evidence(task_id, sha, EvidenceKind.REVIEW, EvidenceStatus.PASSED)
+    assert Integrator().integrate(store, task_id, sha, project) is EvidenceStatus.FAILED
+
+    assert Validator().validate(store, task_id, sha, project) is EvidenceStatus.PASSED
+    assert Reviewer(adapter=RecordingReviewAdapter()).review(store, task_id, sha, project) is EvidenceStatus.PASSED
     assert Integrator().integrate(store, task_id, sha, project) is EvidenceStatus.PASSED
+    store.close()
+
+
+def test_integration_rejects_contract_hash_mismatch(tmp_path: Path) -> None:
+    workspace = _repo(tmp_path / "repo")
+    project = workspace.path
+    (project / "src" / "app.py").write_text("VALUE = 43\n", encoding="utf-8")
+    sha = workspace.commit_all("candidate")
+
+    store = _store(tmp_path)
+    task_id = store.upsert_task("integration mismatch")
+    store.add_candidate(task_id, sha, "test", True)
+    bound = contract_for_candidate(store, task_id, sha, project)
+    mismatched = {**bound.evidence_payload(), "contract_hash": "0" * 64}
+    store.add_evidence(task_id, sha, EvidenceKind.VALIDATION, EvidenceStatus.PASSED, mismatched)
+    store.add_evidence(task_id, sha, EvidenceKind.REVIEW, EvidenceStatus.PASSED, bound.evidence_payload())
+
+    assert Integrator().integrate(store, task_id, sha, project) is EvidenceStatus.FAILED
     store.close()
 
 
@@ -411,7 +498,22 @@ def test_remediation_produces_new_candidate_and_does_not_reuse_stale_evidence(tm
     workspace = _repo(tmp_path / "repo")
     project = workspace.path
     (project / "stagemesh.contract.json").write_text(
-        json.dumps({"objective": "Source only", "allowed_files": ["src/**"], "forbidden_files": ["README.md"]}),
+        json.dumps(
+            {
+                "objective": "Source value must be remediated",
+                "allowed_files": ["src/**"],
+                "required_tests": [
+                    {
+                        "name": "value-remediated",
+                        "command": [
+                            sys.executable,
+                            "-c",
+                            "from pathlib import Path; assert 'VALUE = 11' in Path('src/app.py').read_text()",
+                        ],
+                    }
+                ],
+            }
+        ),
         encoding="utf-8",
     )
     store = _store(tmp_path)
@@ -420,16 +522,12 @@ def test_remediation_produces_new_candidate_and_does_not_reuse_stale_evidence(tm
         store,
         project,
         executor=SequencedExecutor(project, ["VALUE = 10\n", "VALUE = 11\n"]),
-        reviewer=Reviewer(provider_name="reviewer"),
+        reviewer=Reviewer(adapter=RecordingReviewAdapter()),
     )
 
     assert coord.tick() == 1  # PLAN -> IMPLEMENT
     assert coord.tick() == 1  # candidate 1
     first_sha = store.latest_candidate(task_id)["sha"]
-    bound = contract_for_candidate(store, task_id, first_sha, project)
-    store.add_evidence(task_id, first_sha, EvidenceKind.VALIDATION, EvidenceStatus.FAILED, bound.evidence_payload())
-    store.upsert_finding("needs-rework", task_id, first_sha, "error", "force remediation")
-
     assert coord.tick() == 1
     assert store.get_task(task_id)["stage"] == Stage.IMPLEMENT
     assert coord.tick() == 1
@@ -437,6 +535,7 @@ def test_remediation_produces_new_candidate_and_does_not_reuse_stale_evidence(tm
 
     assert second_sha != first_sha
     assert store.has_evidence(task_id, first_sha, EvidenceKind.VALIDATION, EvidenceStatus.FAILED)
+    assert store.open_findings_for_candidate(task_id, first_sha)
     assert not store.has_evidence(task_id, second_sha, EvidenceKind.VALIDATION, EvidenceStatus.PASSED)
     assert coord.tick() == 1
     assert store.has_evidence(task_id, second_sha, EvidenceKind.VALIDATION, EvidenceStatus.PASSED)
@@ -448,14 +547,17 @@ def test_remediation_exhaustion_blocks_task(tmp_path: Path) -> None:
     project = workspace.path
     store = _store(tmp_path)
     task_id = store.upsert_task("exhaust task")
-    (project / "src" / "app.py").write_text("VALUE = 12\n", encoding="utf-8")
-    sha = workspace.commit_all("candidate")
+    (project / "stagemesh.contract.json").write_text(
+        json.dumps({"objective": "Source only", "allowed_files": ["src/**"], "forbidden_files": ["README.md"]}),
+        encoding="utf-8",
+    )
+    (project / "README.md").write_text("break contract\n", encoding="utf-8")
+    sha = workspace.commit_all("failing candidate")
     store.add_candidate(task_id, sha, "implementer", True)
     store.advance_task(task_id, Stage.VALIDATE)
-    bound = contract_for_candidate(store, task_id, sha, project)
-    store.add_evidence(task_id, sha, EvidenceKind.VALIDATION, EvidenceStatus.FAILED, bound.evidence_payload())
-    store.upsert_finding("still-broken", task_id, sha, "error", "cannot repair")
-    store.add_remediation_attempt("still-broken", "QUEUED")
+    assert Validator().validate(store, task_id, sha, project) is EvidenceStatus.FAILED
+    for finding in store.open_findings_for_candidate(task_id, sha):
+        store.add_remediation_attempt(finding["id"], "QUEUED")
 
     coord = Coordinator(store, project, remediation_policy=RemediationPolicy(max_attempts=1))
     assert coord.tick() == 1

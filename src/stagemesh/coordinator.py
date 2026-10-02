@@ -137,7 +137,14 @@ class Coordinator:
     def _remediate_or_block(self, task_id: str, sha: str, failed_stage: Stage) -> int:
         findings = self.store.open_findings_for_candidate(task_id, sha)
         if not findings:
-            return 0
+            self.store.upsert_finding(
+                f"{sha}:failed-{failed_stage}",
+                task_id,
+                sha,
+                "error",
+                f"{failed_stage} failed without structured findings",
+            )
+            findings = self.store.open_findings_for_candidate(task_id, sha)
         eligible = [finding for finding in findings if self.remediation_policy.should_remediate(self.store, str(finding["id"]))]
         if not eligible:
             self.store.block_task(task_id)
