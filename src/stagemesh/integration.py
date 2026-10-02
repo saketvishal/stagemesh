@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .contracts import ContractError, evaluate_contract, load_contract
+from .contract_binding import contract_for_candidate
+from .contracts import ContractError, evaluate_contract
 from .domain import EvidenceKind, EvidenceStatus, ExecutionKind, ExecutionStatus
 from .persistence import Store
 
@@ -21,6 +22,7 @@ class Integrator:
             if not store.has_evidence(task_id, candidate_sha, kind, EvidenceStatus.PASSED)
         ]
         findings: list[dict[str, object]] = []
+        payload: dict[str, object] = {"integrator": "builtin"}
         if missing:
             findings.append(
                 {
@@ -30,8 +32,16 @@ class Integrator:
                 }
             )
         try:
-            contract = load_contract(project, task_id)
-            evaluation = evaluate_contract(project, candidate_sha, contract, run_gates=False)
+            bound = contract_for_candidate(store, task_id, candidate_sha, project)
+            contract = bound.contract
+            evaluation = evaluate_contract(
+                project,
+                candidate_sha,
+                contract,
+                baseline_sha=bound.baseline_sha,
+                run_gates=False,
+            )
+            payload.update(bound.evidence_payload())
             findings.extend(evaluation.findings)
         except ContractError as exc:
             findings.append({"severity": "error", "code": "invalid_contract", "message": str(exc)})
@@ -42,7 +52,7 @@ class Integrator:
             candidate_sha,
             EvidenceKind.INTEGRATION,
             status,
-            {"integrator": "builtin", "findings": findings},
+            {**payload, "findings": findings},
         )
         store.finish_execution(
             execution_id,
