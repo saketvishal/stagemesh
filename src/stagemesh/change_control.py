@@ -307,14 +307,8 @@ def _candidate_baseline(
         )
         if parent.returncode == 0 and parent.stdout.strip():
             return parent.stdout.strip()
-        # A root candidate has no parent. The empty tree is a valid diff base.
-        return workspace.run(
-            "hash-object",
-            "-t",
-            "tree",
-            "/dev/null",
-            check=False,
-        ).stdout.strip()
+        # A root candidate has no parent. This is Git's canonical empty-tree SHA.
+        return "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
     merge_base = workspace.run(
         "merge-base",
         head,
