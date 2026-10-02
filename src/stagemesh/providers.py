@@ -16,6 +16,7 @@ from .execution import ExecutionResult, classify_failure
 from .git import GitWorkspace
 from .persistence import Store
 from .process_identity import popen_identity
+from .workspaces import prepare_task_workspace
 
 
 class ProviderValidationError(ValueError):
@@ -53,12 +54,13 @@ class RuntimeCommandAdapter:
     def execute(self, store: Store, task_id: str, claim_id: str | None, project: Path) -> ExecutionResult:
         if self.check_capacity() != CapacityKind.AVAILABLE:
             return ExecutionResult(ExecutionStatus.FAILED, capacity_failure=True, failure_reason="provider_unavailable")
+        run_path = prepare_task_workspace(project, task_id)
         task = store.get_task(task_id)
-        task_prompt = _build_task_prompt(task_id, task)
+        task_prompt = _build_task_prompt(task_id, task, run_path)
         try:
             proc = subprocess.Popen(
                 list(self.command),
-                cwd=project,
+                cwd=run_path,
                 text=True,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
@@ -82,7 +84,7 @@ class RuntimeCommandAdapter:
             is_cap, reason = classify_failure(proc.returncode, stdout, stderr)
             store.finish_execution(execution_id, ExecutionStatus.FAILED)
             return ExecutionResult(ExecutionStatus.FAILED, capacity_failure=is_cap, failure_reason=reason)
-        workspace = GitWorkspace(project)
+        workspace = GitWorkspace(run_path)
         workspace.init_if_needed()
         sha = workspace.commit_all(
             f"StageMesh implementation for {task_id}",
@@ -166,7 +168,7 @@ def _validate_capabilities(capabilities: frozenset[str]) -> frozenset[str]:
     return normalized
 
 
-def _build_task_prompt(task_id: str, task: object) -> str:
+def _build_task_prompt(task_id: str, task: object, project: Path | None = None) -> str:
     """Build the prompt string sent via stdin to a provider CLI.
 
     The prompt gives the agent its task title and a reminder to commit any
@@ -174,9 +176,19 @@ def _build_task_prompt(task_id: str, task: object) -> str:
     """
     import sqlite3 as _sqlite3
 
-    title = task["title"] if isinstance(task, _sqlite3.Row) and "title" in task.keys() else str(task_id)
+    from .contracts import ContractError, contract_prompt, load_contract
+
+    row_keys = task.keys() if isinstance(task, _sqlite3.Row) else ()
+    title = task["title"] if "title" in row_keys else str(task_id)
+    contract_text = ""
+    if project is not None:
+        try:
+            contract_text = "\n\n" + contract_prompt(load_contract(project, task_id)) + "\n"
+        except ContractError as exc:
+            contract_text = f"\n\nChange contract is invalid and must be fixed before coding: {exc}\n"
     return (
         f"StageMesh task: {title}\n\n"
+        f"{contract_text}"
         "Please implement the changes described above. "
         "When you are done, commit all changes to git with a descriptive commit message "
         "so StageMesh can record the resulting commit SHA as the implementation candidate.\n"
