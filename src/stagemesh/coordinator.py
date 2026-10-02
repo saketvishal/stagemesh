@@ -9,6 +9,7 @@ from .execution import Executor, FakeExecutor
 from .integration import Integrator
 from .lifecycle import evidence_allows_advance
 from .persistence import Store
+from .process_identity import classify_process, process_identity
 from .remediation import RemediationPolicy
 from .review import Reviewer
 from .scheduling import Scheduler
@@ -36,8 +37,13 @@ class Coordinator:
 
     def recover(self) -> None:
         for execution in self.store.running_executions():
-            if execution["pid"] is None or execution["process_create_time"] is None or execution["boot_id"] is None:
+            if execution["claim_id"] is None or execution["kind"] != "IMPLEMENTATION":
                 continue
+            saved = self.store.execution_process_identity(execution["id"])
+            state = classify_process(saved, process_identity(saved.pid))
+            if state != "DEAD":
+                continue
+            self.store.recover_stale_execution_claim(execution["id"], "DEAD_PROCESS_IDENTITY")
 
     def tick(self) -> int:
         self.recover()

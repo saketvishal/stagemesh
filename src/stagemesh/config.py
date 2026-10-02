@@ -31,7 +31,7 @@ class StageMeshConfig:
     project: Path
     github: GitHubConfig
     provider_commands: dict[str, str]
-    task_sources: tuple["TaskSourceConfig", ...]
+    task_sources: tuple[TaskSourceConfig, ...]
     routing_mode: str
     stage_routes: dict[str, str]
     single_agent_provider: str | None
