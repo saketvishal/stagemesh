@@ -52,6 +52,11 @@ def release_readiness(
             run_command_check("github_acceptance", [sys.executable, "scripts/github_acceptance.py"], root),
             run_command_check("live_acceptance", [sys.executable, "scripts/live_acceptance.py", "--json"], root),
             run_command_check(
+                "change_control_acceptance",
+                [sys.executable, "scripts/change_control_acceptance.py"],
+                root,
+            ),
+            run_command_check(
                 "install",
                 [sys.executable, "-m", "pip", "install", ".", "--target", ".tmp-install", "--no-cache-dir", "--upgrade"],
                 root,
