@@ -15,7 +15,7 @@ from .ci import CIValidationError, broken_future_feature_gate, default_gates
 from .ci_wait import decide_ci_wait
 from .completion_audit import CompletionAuditValidationError, completion_audit
 from .config import ConfigValidationError, load_config
-from .coordinator import Coordinator
+from .coordinator import Coordinator, TargetSelection, TargetSelectionError
 from .dashboard import dashboard_summary, render_dashboard
 from .demo import DemoValidationError, create_demo_project
 from .distributed import WorkQueue, WorkQueueError
@@ -154,13 +154,19 @@ def command_doctor(args: argparse.Namespace) -> int:
 
 def command_continue(args: argparse.Namespace) -> int:
     project = Path(args.project).resolve()
+    targeted_task_id = getattr(args, "task", None) or getattr(args, "task_id", None)
+    targeted_mode = targeted_task_id is not None
+    if targeted_task_id is not None and not str(targeted_task_id).strip():
+        print("target task id must not be empty", file=sys.stderr)
+        return 2
+    target = TargetSelection(str(targeted_task_id)) if targeted_task_id is not None else None
     config = load_config(project)
     store = Store(db_path(project))
     store.migrate()
     backlog = project / ".stagemesh" / "backlog.json"
-    sync_source(store, LocalBacklogSource(backlog).discover())
+    sync_source(store, _filter_targeted_tasks(LocalBacklogSource(backlog).discover(), targeted_task_id))
     for source in task_sources_from_config(config):
-        sync_source(store, source.discover())
+        sync_source(store, _filter_targeted_tasks(source.discover(), targeted_task_id))
     # Wire real provider adapters unless --dry-run is requested.
     executor = None
     reviewer = None
@@ -213,10 +219,15 @@ def command_continue(args: argparse.Namespace) -> int:
         else:
             reviewer = Reviewer(provider_name="single-agent-deterministic-fallback")
             chosen_review_provider = "single-agent-deterministic-fallback"
-    coord = Coordinator(store, project, executor=executor, reviewer=reviewer)
+    coord = Coordinator(store, project, executor=executor, reviewer=reviewer, target=target)
     count = 0
     while True:
-        progressed = coord.tick()
+        try:
+            progressed = coord.tick()
+        except TargetSelectionError as exc:
+            print(f"target selection error: {exc}", file=sys.stderr)
+            store.close()
+            return 2
         count += progressed
         if args.once or progressed == 0:
             break
@@ -228,6 +239,8 @@ def command_continue(args: argparse.Namespace) -> int:
                     "provider": chosen_provider,
                     "review_provider": chosen_review_provider,
                     "independent_review_configured": independent_review_configured,
+                    "targeted_mode": targeted_mode,
+                    "targeted_task_id": str(targeted_task_id) if targeted_task_id is not None else None,
                 },
                 indent=2,
                 sort_keys=True,
@@ -239,8 +252,16 @@ def command_continue(args: argparse.Namespace) -> int:
     print(f"provider: {chosen_provider}")
     print(f"review_provider: {chosen_review_provider}")
     print(f"independent_review_configured: {independent_review_configured}")
+    print(f"targeted_mode: {targeted_mode}")
+    print(f"targeted_task_id: {targeted_task_id}")
     store.close()
     return 0
+
+
+def _filter_targeted_tasks(tasks, targeted_task_id: str | None):
+    if targeted_task_id is None:
+        return tasks
+    return [task for task in tasks if task.source_id == targeted_task_id]
 
 
 def command_status(args: argparse.Namespace) -> int:
@@ -1171,6 +1192,8 @@ def build_parser() -> argparse.ArgumentParser:
     cont.add_argument("--json", action="store_true")
     cont.add_argument("--provider", help="Provider name to use for implementation (e.g. claude, codex)")
     cont.add_argument("--dry-run", action="store_true", help="Use FakeExecutor instead of a real provider")
+    cont.add_argument("--task", dest="task", help="Run exactly one selected task id")
+    cont.add_argument("--task-id", dest="task", help=argparse.SUPPRESS)
     cont.set_defaults(func=command_continue)
     status = sub.add_parser("status")
     status.add_argument("--json", action="store_true")
