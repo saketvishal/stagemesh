@@ -81,6 +81,50 @@ def test_out_of_contract_candidate_is_rejected() -> None:
         store.close()
 
 
+def test_multi_commit_scope_escape_is_rejected() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        init_repo(root)
+        store = Store(root / ".stagemesh" / "state.sqlite3")
+        store.migrate()
+        task_id = store.upsert_task("multi-commit", source_id="CC-MULTI")
+        write_contract(
+            root,
+            task_id,
+            ChangeContract.from_mapping(
+                {
+                    "objective": "change only allowed.py",
+                    "allowed_paths": ["allowed.py"],
+                }
+            ),
+        )
+
+        git(root, "checkout", "-b", "candidate")
+        (root / "forbidden.txt").write_text("hidden earlier commit\n", encoding="utf-8")
+        git(root, "add", "forbidden.txt")
+        git(root, "commit", "-m", "out of scope first commit")
+        (root / "allowed.py").write_text("VALUE = 1\n", encoding="utf-8")
+        git(root, "add", "allowed.py")
+        git(root, "commit", "-m", "allowed final commit")
+        candidate_sha = git(root, "rev-parse", "HEAD")
+        git(root, "checkout", "main")
+
+        store.add_candidate(task_id, candidate_sha, "acceptance", True)
+        status = Validator(require_contract=True).validate(
+            store,
+            task_id,
+            candidate_sha,
+            root,
+        )
+        assert status is EvidenceStatus.FAILED
+        findings = store.open_findings_for_candidate(task_id, candidate_sha)
+        assert any(
+            "out-of-scope path changed: forbidden.txt" in row["message"]
+            for row in findings
+        )
+        store.close()
+
+
 def test_missing_contract_blocks_before_executor() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
@@ -223,6 +267,7 @@ def test_git_integrator_incorporates_exact_candidate() -> None:
 
 def main() -> int:
     test_out_of_contract_candidate_is_rejected()
+    test_multi_commit_scope_escape_is_rejected()
     test_missing_contract_blocks_before_executor()
     test_failed_validation_schedules_bounded_repair()
     test_isolated_executor_does_not_mutate_target_until_integration()
