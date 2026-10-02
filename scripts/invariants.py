@@ -1083,6 +1083,8 @@ def main() -> int:
         assert any(line.endswith("  stagemesh-release-manifest.json") for line in checksums)
 
     def release_files_reject_symlink_escape(store: Store, project: Path) -> None:
+        if os.name == "nt":
+            return
         project.mkdir(parents=True, exist_ok=True)
         outside = project.parent / "outside-secret.txt"
         outside.write_text("secret", encoding="utf-8")
