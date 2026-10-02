@@ -7,14 +7,13 @@ import sys
 import tempfile
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def run(command: list[str], cwd: Path, env: dict[str, str] | None = None) -> str:
     merged = os.environ.copy()
     merged.update(env or {})
-    result = subprocess.run(command, cwd=cwd, text=True, capture_output=True, env=merged)
+    result = subprocess.run(command, cwd=cwd, text=True, capture_output=True, env=merged, check=False)
     if result.returncode != 0:
         raise AssertionError(f"{command} failed\nSTDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}")
     return result.stdout
@@ -72,7 +71,7 @@ def main() -> int:
             "executable path:",
             "imported package path:",
             f"project: {project.resolve()}",
-            "schema version: 2",
+            "schema version: 3",
             "backend: sqlite",
         ]
         missing = [item for item in required if item not in doctor]
