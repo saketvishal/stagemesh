@@ -16,6 +16,7 @@ from stagemesh.coordinator import Coordinator
 from stagemesh.domain import ExecutionStatus, Stage, TaskStatus
 from stagemesh.execution import ExecutionResult, FakeExecutor, SubprocessExecutor, classify_failure
 from stagemesh.persistence import Store
+from stagemesh.workspaces import task_workspace
 
 
 @pytest.fixture
@@ -131,7 +132,6 @@ def test_subprocess_executor_name_round_trips_through_coordinator(store: Store, 
     coord = Coordinator(store, tmp_path, executor=executor)
     coord.tick()  # advances PLAN -> IMPLEMENT
     coord.tick()  # IMPLEMENT: runs python --version, produces candidate
-    task = store.get_task(task_id)
     candidate = store.latest_candidate(task_id)
     if candidate:
         assert candidate["produced_by"] == "claude", (
@@ -148,6 +148,7 @@ def test_cli_continue_dry_run_uses_fake_executor(tmp_path: Path) -> None:
     """DEF-1/DEF-2: The --dry-run flag must cause command_continue to fall back to FakeExecutor
     so scripted tests can run without a live provider."""
     import argparse
+
     import stagemesh.cli as cli_module
 
     project = tmp_path / "proj"
@@ -280,7 +281,7 @@ def test_subprocess_executor_pipes_prompt_to_stdin(store: Store, tmp_path: Path)
     coord = Coordinator(store, tmp_path, executor=executor)
     assert coord.tick() == 1
 
-    captured_file = tmp_path / "captured_prompt.txt"
+    captured_file = task_workspace(tmp_path, task_id) / "captured_prompt.txt"
     assert captured_file.exists()
     content = captured_file.read_text(encoding="utf-8")
     assert "write a helper function" in content
