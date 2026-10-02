@@ -20,6 +20,7 @@ from stagemesh.domain import ExecutionKind, ExecutionStatus, ProcessIdentity, St
 from stagemesh.execution import ExecutionResult, FakeExecutor, SubprocessExecutor, classify_failure
 from stagemesh.git import GitWorkspace
 from stagemesh.persistence import Store
+from stagemesh.providers import approved_default_adapters
 from stagemesh.workspaces import task_workspace
 
 
@@ -286,6 +287,44 @@ def _cli_project(tmp_path: Path, *, routing: dict[str, object]) -> Path:
 def _provider_script(path: Path, body: str) -> str:
     path.write_text(body, encoding="utf-8")
     return f'"{sys.executable}" "{path}"'
+
+
+def test_default_runtime_provider_commands_are_non_interactive(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("STAGEMESH_CODEX_CMD", raising=False)
+    monkeypatch.delenv("STAGEMESH_CLAUDE_CMD", raising=False)
+
+    adapters = {adapter.name: adapter.command for adapter in approved_default_adapters()}
+
+    assert adapters["codex"] == ("codex", "exec")
+    assert adapters["claude"] == ("claude", "-p")
+
+
+def test_subprocess_executor_decodes_provider_output_as_utf8_with_replacement(
+    store: Store,
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "proj"
+    project.mkdir()
+    workspace = GitWorkspace(project)
+    workspace.init_if_needed()
+    (project / "src.txt").write_text("unchanged\n", encoding="utf-8")
+    workspace.commit_all("initial")
+    task_id = store.upsert_task("decode provider stderr")
+    store.advance_task(task_id, Stage.IMPLEMENT)
+    claim_id = store.acquire_claim(task_id, "worker")
+    script = tmp_path / "provider.py"
+    script.write_text(
+        "import sys\n"
+        "sys.stderr.buffer.write(b'provider failed: \\x90\\n')\n"
+        "sys.stderr.flush()\n"
+        "raise SystemExit(1)\n",
+        encoding="utf-8",
+    )
+
+    result = SubprocessExecutor([sys.executable, str(script)], name="codex").run(store, task_id, claim_id, project)
+
+    assert result.status == ExecutionStatus.FAILED
+    assert result.failure_reason == "implementation_failure"
 
 
 def _continue(project: Path, *, provider: str | None = None) -> int:
