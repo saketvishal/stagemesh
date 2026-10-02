@@ -116,9 +116,9 @@ class Integrator:
                     "merge",
                     "--no-ff",
                     "--no-edit",
-                    candidate_sha,
                     "-m",
                     f"StageMesh integrate {task_id}",
+                    candidate_sha,
                     check=False,
                 )
                 mode = "merge"
