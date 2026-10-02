@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from .audit import record_audit
+from .change_control import ChangeContract, ChangeControlError
 from .domain import EvidenceKind, EvidenceStatus, ExecutionStatus, Stage
 from .execution import Executor, FakeExecutor
 from .integration import Integrator
@@ -61,6 +62,25 @@ class Coordinator:
             return 0
         stage = Stage(task["stage"])
         if stage is Stage.PLAN:
+            if getattr(self.validator, "require_contract", False):
+                try:
+                    contract = ChangeContract.load(self.project, task_id)
+                except ChangeControlError as exc:
+                    self.store.block_task(task_id)
+                    record_audit(
+                        self.store,
+                        "task.contract_invalid",
+                        {"task_id": task_id, "reason": str(exc)},
+                    )
+                    return 0
+                if contract is None:
+                    self.store.block_task(task_id)
+                    record_audit(
+                        self.store,
+                        "task.contract_missing",
+                        {"task_id": task_id},
+                    )
+                    return 0
             self.store.advance_task(task_id, Stage.IMPLEMENT)
             record_audit(
                 self.store,
