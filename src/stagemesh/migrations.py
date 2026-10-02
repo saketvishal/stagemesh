@@ -23,7 +23,26 @@ MIGRATIONS = [
             applied_at REAL NOT NULL
         );
         """,
-    )
+    ),
+    Migration(
+        3,
+        "append-only evidence records",
+        """
+        CREATE TABLE IF NOT EXISTS evidence_new (
+            id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL REFERENCES tasks(id),
+            candidate_sha TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            status TEXT NOT NULL,
+            payload TEXT NOT NULL,
+            created_at REAL NOT NULL
+        );
+        INSERT OR IGNORE INTO evidence_new(id, task_id, candidate_sha, kind, status, payload, created_at)
+            SELECT id, task_id, candidate_sha, kind, status, payload, created_at FROM evidence;
+        DROP TABLE evidence;
+        ALTER TABLE evidence_new RENAME TO evidence;
+        """,
+    ),
 ]
 
 

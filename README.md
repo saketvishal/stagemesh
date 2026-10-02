@@ -8,7 +8,9 @@ Initial lifecycle:
 PLAN -> IMPLEMENT -> VALIDATE -> REVIEW -> INTEGRATE -> DONE
 ```
 
-This repository is a clean vNext implementation with SQLite persistence, deterministic recovery, exact-SHA candidates and evidence, provider-aware routing, task-source synchronization, and an invariant test suite.
+This repository is a clean vNext implementation with SQLite persistence, deterministic recovery, exact-SHA candidates and evidence, provider-aware routing, task-source synchronization, machine-enforced change contracts, isolated task worktrees, and an invariant test suite.
+
+Implementation agents run in per-task Git worktrees, not the shared checkout. Validation, review, and integration all bind their evidence to the exact candidate SHA; a task cannot reach `DONE` unless the candidate passes its contract, validation gates, independent review, and integration prerequisites.
 
 ## Quick Start
 

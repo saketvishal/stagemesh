@@ -94,8 +94,7 @@ CREATE TABLE IF NOT EXISTS evidence (
     kind TEXT NOT NULL,
     status TEXT NOT NULL,
     payload JSONB NOT NULL,
-    created_at DOUBLE PRECISION NOT NULL,
-    UNIQUE(task_id, candidate_sha, kind, status)
+    created_at DOUBLE PRECISION NOT NULL
 );
 CREATE TABLE IF NOT EXISTS source_cache (
     source TEXT NOT NULL,

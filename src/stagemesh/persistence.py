@@ -4,13 +4,14 @@ import json
 import sqlite3
 import time
 import uuid
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from .domain import EvidenceKind, EvidenceStatus, ExecutionKind, ExecutionStatus, Stage, TaskStatus
 from .migrations import apply_migrations, current_schema_version
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 class StoreValidationError(ValueError):
@@ -88,6 +89,17 @@ class Store:
                 created_at REAL NOT NULL,
                 UNIQUE(task_id, sha)
             );
+            CREATE TABLE IF NOT EXISTS contract_bindings (
+                id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL REFERENCES tasks(id),
+                candidate_sha TEXT NOT NULL,
+                baseline_sha TEXT,
+                version INTEGER NOT NULL,
+                digest TEXT NOT NULL,
+                canonical_json TEXT NOT NULL,
+                created_at REAL NOT NULL,
+                UNIQUE(task_id, candidate_sha)
+            );
             CREATE TABLE IF NOT EXISTS evidence (
                 id TEXT PRIMARY KEY,
                 task_id TEXT NOT NULL REFERENCES tasks(id),
@@ -95,8 +107,7 @@ class Store:
                 kind TEXT NOT NULL,
                 status TEXT NOT NULL,
                 payload TEXT NOT NULL,
-                created_at REAL NOT NULL,
-                UNIQUE(task_id, candidate_sha, kind, status)
+                created_at REAL NOT NULL
             );
             CREATE TABLE IF NOT EXISTS source_cache (
                 source TEXT NOT NULL,
@@ -341,6 +352,44 @@ class Store:
             "SELECT * FROM candidates WHERE task_id=? ORDER BY created_at DESC LIMIT 1", (task_id,)
         ).fetchone()
 
+    def bind_contract(
+        self,
+        task_id: str,
+        candidate_sha: str,
+        baseline_sha: str | None,
+        version: int,
+        digest: str,
+        canonical_json: str,
+    ) -> str:
+        task_id = _validate_text(task_id, "task id")
+        candidate_sha = _validate_text(candidate_sha, "candidate sha")
+        baseline_sha = _validate_optional_text(baseline_sha, "baseline sha")
+        if not isinstance(version, int) or version < 1:
+            raise StoreValidationError("contract version must be a positive integer")
+        digest = _validate_text(digest, "contract hash", 128)
+        canonical_json = _validate_text(canonical_json, "canonical contract", 10000)
+        binding_id = str(uuid.uuid4())
+        self.conn.execute(
+            """
+            INSERT OR IGNORE INTO contract_bindings
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (binding_id, task_id, candidate_sha, baseline_sha, version, digest, canonical_json, time.time()),
+        )
+        self.conn.commit()
+        row = self.contract_binding(task_id, candidate_sha)
+        if row is None:
+            raise StoreValidationError("contract binding was not persisted")
+        return str(row["id"])
+
+    def contract_binding(self, task_id: str, candidate_sha: str) -> sqlite3.Row | None:
+        task_id = _validate_text(task_id, "task id")
+        candidate_sha = _validate_text(candidate_sha, "candidate sha")
+        return self.conn.execute(
+            "SELECT * FROM contract_bindings WHERE task_id=? AND candidate_sha=?",
+            (task_id, candidate_sha),
+        ).fetchone()
+
     def add_evidence(
         self,
         task_id: str,
@@ -356,15 +405,11 @@ class Store:
         payload = _validate_payload(payload)
         eid = str(uuid.uuid4())
         self.conn.execute(
-            "INSERT OR IGNORE INTO evidence VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO evidence VALUES (?, ?, ?, ?, ?, ?, ?)",
             (eid, task_id, candidate_sha, kind, status, json.dumps(payload or {}, sort_keys=True), time.time()),
         )
         self.conn.commit()
-        row = self.conn.execute(
-            "SELECT id FROM evidence WHERE task_id=? AND candidate_sha=? AND kind=? AND status=?",
-            (task_id, candidate_sha, kind, status),
-        ).fetchone()
-        return str(row["id"])
+        return eid
 
     def has_evidence(self, task_id: str, sha: str, kind: EvidenceKind, status: EvidenceStatus = EvidenceStatus.PASSED) -> bool:
         task_id = _validate_text(task_id, "task id")
@@ -378,6 +423,32 @@ class Store:
             ).fetchone()
             is not None
         )
+
+    def has_bound_evidence(
+        self,
+        task_id: str,
+        sha: str,
+        kind: EvidenceKind,
+        contract_hash: str,
+        status: EvidenceStatus = EvidenceStatus.PASSED,
+    ) -> bool:
+        task_id = _validate_text(task_id, "task id")
+        sha = _validate_text(sha, "candidate sha")
+        kind = _validate_enum(kind, EvidenceKind, "evidence kind")
+        status = _validate_enum(status, EvidenceStatus, "evidence status")
+        contract_hash = _validate_text(contract_hash, "contract hash", 128)
+        rows = self.conn.execute(
+            "SELECT payload FROM evidence WHERE task_id=? AND candidate_sha=? AND kind=? AND status=?",
+            (task_id, sha, kind, status),
+        )
+        for row in rows:
+            try:
+                payload = json.loads(row["payload"])
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if payload.get("contract_hash") == contract_hash:
+                return True
+        return False
 
     def advance_task(self, task_id: str, stage: Stage) -> None:
         task_id = _validate_text(task_id, "task id")
@@ -407,6 +478,15 @@ class Store:
                 "UPDATE tasks SET status=?, updated_at=? WHERE id=? AND status=?",
                 (TaskStatus.OPEN, time.time(), task_id, TaskStatus.CLAIMED),
             )
+
+    def block_task(self, task_id: str) -> None:
+        task_id = _validate_text(task_id, "task id")
+        self.conn.execute(
+            "UPDATE tasks SET status=?, updated_at=? WHERE id=?",
+            (TaskStatus.BLOCKED, time.time(), task_id),
+        )
+        self.conn.execute("UPDATE claims SET active=0 WHERE task_id=?", (task_id,))
+        self.conn.commit()
 
     def running_executions(self) -> Iterable[sqlite3.Row]:
         return self.conn.execute("SELECT * FROM executions WHERE status=?", (ExecutionStatus.RUNNING,))
@@ -736,7 +816,7 @@ class Store:
         limit = _validate_limit(limit, "audit event limit", 10000)
         return list(
             self.conn.execute(
-                "SELECT * FROM audit_events ORDER BY created_at DESC LIMIT ?",
+                "SELECT * FROM audit_events ORDER BY created_at DESC, rowid DESC LIMIT ?",
                 (limit,),
             )
         )
