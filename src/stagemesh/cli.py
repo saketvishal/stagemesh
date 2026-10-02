@@ -56,6 +56,7 @@ from .task_sources import (
     sync_source,
     task_sources_from_config,
 )
+from .validation_plan import derive_validation_plan
 from .work_transport import (
     WorkTransportError,
     import_ack,
@@ -951,6 +952,53 @@ def command_release_readiness(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_validation_plan(args: argparse.Namespace) -> int:
+    project = Path(args.project).resolve()
+    store = Store(db_path(project))
+    store.migrate()
+    try:
+        task = store.get_task(args.task)
+        if task is None:
+            print(f"task not found: {args.task}", file=sys.stderr)
+            return 2
+        candidate = store.latest_candidate(args.task)
+        changed: tuple[str, ...] = ()
+        if candidate is not None:
+            from .contract_binding import contract_for_candidate
+            from .contracts import changed_files
+            from .git import GitError
+
+            bound = contract_for_candidate(store, args.task, candidate["sha"], project)
+            contract = bound.contract
+            try:
+                changed = tuple(changed_files(project, candidate["sha"], bound.baseline_sha))
+            except (GitError, OSError):
+                changed = ()
+        else:
+            from .contracts import load_contract
+
+            contract = load_contract(project, args.task)
+        plan = derive_validation_plan(contract, changed)
+        data = {
+            "task_id": args.task,
+            "task_title": task["title"],
+            "candidate_sha": candidate["sha"] if candidate is not None else None,
+            "changed_files": list(changed),
+            "validation_plan": plan.to_dict(),
+        }
+        if args.json:
+            print(json.dumps(data, indent=2, sort_keys=True))
+            return 0
+    finally:
+        store.close()
+    print(f"{args.task}: {plan.classification} {plan.risk_level}")
+    for check in plan.planned_checks:
+        print(f"- {check}")
+    for reason in plan.escalation_reasons:
+        print(f"escalation: {reason}")
+    return 0
+
+
 def command_completion_audit(args: argparse.Namespace) -> int:
     project = Path(args.project).resolve()
     output = WorkspaceBoundary(project).require_inside(Path(args.output).resolve())
@@ -1243,6 +1291,10 @@ def build_parser() -> argparse.ArgumentParser:
     readiness.add_argument("--skip-checks", action="store_true")
     readiness.add_argument("--json", action="store_true")
     readiness.set_defaults(func=command_release_readiness)
+    validation_plan = sub.add_parser("validation-plan")
+    validation_plan.add_argument("--task", required=True)
+    validation_plan.add_argument("--json", action="store_true")
+    validation_plan.set_defaults(func=command_validation_plan)
     worker = sub.add_parser("worker")
     worker.add_argument("worker_id")
     worker.add_argument("--provider", default="local")

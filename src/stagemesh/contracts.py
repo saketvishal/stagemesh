@@ -45,6 +45,9 @@ class GateCommand:
 class ChangeContract:
     objective: str
     explicit: bool = False
+    validation_classification: str | None = None
+    validation_risk: str | None = None
+    validation_escalation_reasons: tuple[str, ...] = ()
     acceptance_criteria: tuple[str, ...] = ()
     allowed_files: tuple[str, ...] = ("**",)
     forbidden_files: tuple[str, ...] = ()
@@ -172,6 +175,11 @@ def parse_contract(payload: dict[str, Any]) -> ChangeContract:
     return ChangeContract(
         objective=objective,
         explicit=bool(payload.get("explicit", True)),
+        validation_classification=_optional_text(payload.get("validation_classification"), "validation_classification"),
+        validation_risk=_optional_text(payload.get("validation_risk"), "validation_risk"),
+        validation_escalation_reasons=_texts(
+            payload.get("validation_escalation_reasons", ()), "validation_escalation_reasons"
+        ),
         acceptance_criteria=_texts(payload.get("acceptance_criteria", ()), "acceptance_criteria"),
         allowed_files=_texts(payload.get("allowed_files", ("**",)), "allowed_files") or ("**",),
         forbidden_files=_texts(payload.get("forbidden_files", ()), "forbidden_files"),
@@ -483,6 +491,12 @@ def _texts(value: Any, field: str) -> tuple[str, ...]:
     return tuple(_required_text(item, field) for item in value)
 
 
+def _optional_text(value: Any, field: str) -> str | None:
+    if value is None:
+        return None
+    return _required_text(value, field)
+
+
 def _commands(value: Any, field: str) -> tuple[GateCommand, ...]:
     if value is None:
         return ()
@@ -528,6 +542,9 @@ def _contract_payload(contract: ChangeContract) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "objective": contract.objective,
         "explicit": contract.explicit,
+        "validation_classification": contract.validation_classification,
+        "validation_risk": contract.validation_risk,
+        "validation_escalation_reasons": list(contract.validation_escalation_reasons),
         "acceptance_criteria": list(contract.acceptance_criteria),
         "allowed_files": list(contract.allowed_files),
         "forbidden_files": list(contract.forbidden_files),
