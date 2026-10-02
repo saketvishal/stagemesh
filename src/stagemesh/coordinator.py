@@ -121,7 +121,18 @@ class Coordinator:
             claim_id = self.store.acquire_claim(task_id, "local-worker")
             if claim_id is None:
                 return 0
-            result = self.executor.run(self.store, task_id, claim_id, self.project)
+            try:
+                result = self.executor.run(self.store, task_id, claim_id, self.project)
+            except Exception as exc:  # noqa: BLE001 - provider crashes must release implementation claims.
+                self._release_unsuccessful_implementation(
+                    task_id,
+                    claim_id,
+                    status="EXCEPTION",
+                    reason=f"{type(exc).__name__}: {exc}",
+                    candidate_sha=None,
+                    durable_handoff=False,
+                )
+                return 0
             if result.capacity_failure:
                 # Provider is unavailable (not-found, rate-limit, capacity exhausted).
                 # Release the claim immediately so the task can be re-dispatched rather
@@ -146,6 +157,19 @@ class Coordinator:
                     {"task_id": task_id, "candidate_sha": result.candidate_sha, "executor": self.executor.name},
                 )
                 return 1
+            reason = result.failure_reason
+            if result.status is ExecutionStatus.SUCCEEDED:
+                reason = reason or "implementation_succeeded_without_durable_candidate"
+            else:
+                reason = reason or "implementation_failed"
+            self._release_unsuccessful_implementation(
+                task_id,
+                claim_id,
+                status=str(result.status),
+                reason=reason,
+                candidate_sha=result.candidate_sha,
+                durable_handoff=result.durable_handoff,
+            )
             return 0
         candidate = self.store.latest_candidate(task_id)
         if candidate is None or not candidate["durable_handoff"]:
@@ -173,6 +197,34 @@ class Coordinator:
                 return self._remediate_or_block(task_id, sha, Stage.INTEGRATE)
             return self._advance_with_evidence(task_id, stage, sha, EvidenceKind.INTEGRATION, bound.digest)
         return 0
+
+    def _release_unsuccessful_implementation(
+        self,
+        task_id: str,
+        claim_id: str,
+        *,
+        status: str,
+        reason: str,
+        candidate_sha: str | None,
+        durable_handoff: bool,
+    ) -> None:
+        execution = self.store.latest_execution_for_claim(claim_id)
+        self.store.release_claim(claim_id)
+        record_audit(
+            self.store,
+            "task.implementation_unsuccessful",
+            {
+                "task_id": task_id,
+                "claim_id": claim_id,
+                "execution_id": execution["id"] if execution is not None else None,
+                "execution_status": execution["status"] if execution is not None else None,
+                "result_status": status,
+                "executor": self.executor.name,
+                "reason": reason,
+                "candidate_sha": candidate_sha,
+                "durable_handoff": durable_handoff,
+            },
+        )
 
     def _advance_with_evidence(self, task_id: str, stage: Stage, sha: str, kind: EvidenceKind, contract_hash: str) -> int:
         if not self.store.has_bound_evidence(task_id, sha, kind, contract_hash, EvidenceStatus.PASSED):
