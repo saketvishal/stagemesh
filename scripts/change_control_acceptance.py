@@ -128,6 +128,53 @@ def test_multi_commit_scope_escape_is_rejected() -> None:
         store.close()
 
 
+def test_rename_cannot_hide_forbidden_source_path() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        init_repo(root)
+        (root / "forbidden.txt").write_text("protected\n", encoding="utf-8")
+        git(root, "add", "forbidden.txt")
+        git(root, "commit", "-m", "protected baseline")
+
+        store = Store(root / ".stagemesh" / "state.sqlite3")
+        store.migrate()
+        task_id = store.upsert_task("rename-escape", source_id="CC-RENAME")
+        write_contract(
+            root,
+            task_id,
+            ChangeContract.from_mapping(
+                {
+                    "objective": "change only allowed.txt",
+                    "acceptance_criteria": ["only allowed.txt may change"],
+                    "allowed_paths": ["allowed.txt"],
+                    "validation_commands": ["python -c \"print('ok')\""],
+                }
+            ),
+        )
+
+        git(root, "checkout", "-b", "candidate")
+        (root / "forbidden.txt").rename(root / "allowed.txt")
+        git(root, "add", "-A")
+        git(root, "commit", "-m", "rename protected file")
+        candidate_sha = git(root, "rev-parse", "HEAD")
+        git(root, "checkout", "main")
+
+        store.add_candidate(task_id, candidate_sha, "acceptance", True)
+        status = Validator(require_contract=True).validate(
+            store,
+            task_id,
+            candidate_sha,
+            root,
+        )
+        assert status is EvidenceStatus.FAILED
+        findings = store.open_findings_for_candidate(task_id, candidate_sha)
+        assert any(
+            "out-of-scope path changed: forbidden.txt" in row["message"]
+            for row in findings
+        )
+        store.close()
+
+
 def test_missing_contract_blocks_before_executor() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
@@ -352,6 +399,7 @@ def test_git_integrator_incorporates_exact_candidate() -> None:
 def main() -> int:
     test_out_of_contract_candidate_is_rejected()
     test_multi_commit_scope_escape_is_rejected()
+    test_rename_cannot_hide_forbidden_source_path()
     test_missing_contract_blocks_before_executor()
     test_failed_validation_schedules_bounded_repair()
     test_isolated_executor_does_not_mutate_target_until_integration()
