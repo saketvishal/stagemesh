@@ -379,6 +379,27 @@ class Store:
             is not None
         )
 
+    def has_any_evidence(self, task_id: str, sha: str, kind: EvidenceKind) -> bool:
+        task_id = _validate_text(task_id, "task id")
+        sha = _validate_text(sha, "candidate sha")
+        kind = _validate_enum(kind, EvidenceKind, "evidence kind")
+        return (
+            self.conn.execute(
+                "SELECT 1 FROM evidence WHERE task_id=? AND candidate_sha=? AND kind=? LIMIT 1",
+                (task_id, sha, kind),
+            ).fetchone()
+            is not None
+        )
+
+    def block_task(self, task_id: str) -> None:
+        task_id = _validate_text(task_id, "task id")
+        self.conn.execute(
+            "UPDATE tasks SET status=?, updated_at=? WHERE id=?",
+            (TaskStatus.BLOCKED, time.time(), task_id),
+        )
+        self.conn.execute("UPDATE claims SET active=0 WHERE task_id=?", (task_id,))
+        self.conn.commit()
+
     def advance_task(self, task_id: str, stage: Stage) -> None:
         task_id = _validate_text(task_id, "task id")
         stage = _validate_enum(stage, Stage, "task stage")
@@ -617,6 +638,19 @@ class Store:
         row = self.conn.execute(
             "SELECT COUNT(*) AS count FROM remediation_attempts WHERE finding_id=?",
             (finding_id,),
+        ).fetchone()
+        return int(row["count"])
+
+    def remediation_attempt_count_for_task(self, task_id: str) -> int:
+        task_id = _validate_text(task_id, "task id")
+        row = self.conn.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM remediation_attempts ra
+            JOIN findings f ON f.id = ra.finding_id
+            WHERE f.task_id=?
+            """,
+            (task_id,),
         ).fetchone()
         return int(row["count"])
 
