@@ -60,8 +60,23 @@ class ProcessIdentity:
     def is_known(self) -> bool:
         return self.pid is not None and self.create_time is not None and self.boot_id is not None
 
-    def matches(self, other: "ProcessIdentity") -> bool:
-        return self.is_known and other.is_known and self == other
+    def matches(self, other: ProcessIdentity) -> bool:
+        return (
+            self.is_known
+            and other.is_known
+            and self.pid == other.pid
+            and self.create_time == other.create_time
+            and self.boot_id == other.boot_id
+            and _same_executable(self.executable, other.executable)
+        )
+
+
+def _same_executable(left: str | None, right: str | None) -> bool:
+    if not left or not right:
+        return True
+    left_norm = left.replace("\\", "/").rstrip("/").split("/")[-1].lower()
+    right_norm = right.replace("\\", "/").rstrip("/").split("/")[-1].lower()
+    return left_norm == right_norm
 
 
 @dataclass(frozen=True)

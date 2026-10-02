@@ -8,7 +8,15 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
-from .domain import EvidenceKind, EvidenceStatus, ExecutionKind, ExecutionStatus, Stage, TaskStatus
+from .domain import (
+    EvidenceKind,
+    EvidenceStatus,
+    ExecutionKind,
+    ExecutionStatus,
+    ProcessIdentity,
+    Stage,
+    TaskStatus,
+)
 from .migrations import apply_migrations, current_schema_version
 
 SCHEMA_VERSION = 3
@@ -487,6 +495,67 @@ class Store:
         )
         self.conn.execute("UPDATE claims SET active=0 WHERE task_id=?", (task_id,))
         self.conn.commit()
+
+    def execution_process_identity(self, execution_id: str) -> ProcessIdentity:
+        execution_id = _validate_text(execution_id, "execution id")
+        row = self.conn.execute("SELECT * FROM executions WHERE id=?", (execution_id,)).fetchone()
+        if row is None:
+            return ProcessIdentity(pid=None, create_time=None, boot_id=None, executable=None)
+        return ProcessIdentity(
+            pid=row["pid"],
+            create_time=row["process_create_time"],
+            boot_id=row["boot_id"],
+            executable=row["executable"],
+        )
+
+    def recover_stale_execution_claim(self, execution_id: str, reason: str) -> bool:
+        execution_id = _validate_text(execution_id, "execution id")
+        reason = _validate_text(reason, "recovery reason")
+        now = time.time()
+        with self.conn:
+            execution = self.conn.execute(
+                "SELECT * FROM executions WHERE id=? AND status=?",
+                (execution_id, ExecutionStatus.RUNNING),
+            ).fetchone()
+            if execution is None or execution["claim_id"] is None:
+                return False
+            claim = self.conn.execute(
+                "SELECT * FROM claims WHERE id=? AND task_id=? AND active=1",
+                (execution["claim_id"], execution["task_id"]),
+            ).fetchone()
+            if claim is None:
+                return False
+            task = self.conn.execute("SELECT * FROM tasks WHERE id=?", (execution["task_id"],)).fetchone()
+            if task is None or task["status"] != TaskStatus.CLAIMED or task["stage"] != claim["stage"]:
+                return False
+            self.conn.execute(
+                "UPDATE executions SET status=?, updated_at=? WHERE id=? AND status=?",
+                (ExecutionStatus.FAILED, now, execution_id, ExecutionStatus.RUNNING),
+            )
+            self.conn.execute("UPDATE claims SET active=0 WHERE id=? AND active=1", (claim["id"],))
+            self.conn.execute(
+                "UPDATE tasks SET status=?, updated_at=? WHERE id=? AND status=?",
+                (TaskStatus.OPEN, now, task["id"], TaskStatus.CLAIMED),
+            )
+            self.conn.execute(
+                "INSERT INTO audit_events VALUES (?, ?, ?, ?)",
+                (
+                    str(uuid.uuid4()),
+                    "recovery.stale_claim_released",
+                    json.dumps(
+                        {
+                            "task_id": task["id"],
+                            "claim_id": claim["id"],
+                            "execution_id": execution_id,
+                            "stage": task["stage"],
+                            "reason": reason,
+                        },
+                        sort_keys=True,
+                    ),
+                    now,
+                ),
+            )
+            return True
 
     def running_executions(self) -> Iterable[sqlite3.Row]:
         return self.conn.execute("SELECT * FROM executions WHERE status=?", (ExecutionStatus.RUNNING,))
