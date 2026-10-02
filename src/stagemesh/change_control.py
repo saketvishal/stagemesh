@@ -149,14 +149,30 @@ def write_contract(project: Path, task_id: str, contract: ChangeContract) -> Pat
 
 def diff_summary(project: Path, candidate_sha: str) -> DiffSummary:
     workspace = GitWorkspace(project)
-    exists = workspace.run("cat-file", "-e", f"{candidate_sha}^{{commit}}", check=False)
+    exists = workspace.run(
+        "cat-file",
+        "-e",
+        f"{candidate_sha}^{{commit}}",
+        check=False,
+    )
     if exists.returncode != 0:
-        raise ChangeControlError(f"candidate commit does not exist: {candidate_sha}")
+        raise ChangeControlError(
+            f"candidate commit does not exist: {candidate_sha}"
+        )
+    baseline = _candidate_baseline(workspace, candidate_sha)
     names = workspace.run(
-        "diff-tree", "--root", "--no-commit-id", "--name-only", "-r", candidate_sha
+        "diff",
+        "--name-only",
+        baseline,
+        candidate_sha,
+        "--",
     ).stdout.splitlines()
     numstat = workspace.run(
-        "diff-tree", "--root", "--no-commit-id", "--numstat", "-r", candidate_sha
+        "diff",
+        "--numstat",
+        baseline,
+        candidate_sha,
+        "--",
     ).stdout.splitlines()
     changed_lines = 0
     for line in numstat:
@@ -166,8 +182,10 @@ def diff_summary(project: Path, candidate_sha: str) -> DiffSummary:
         for value in parts[:2]:
             if value.isdigit():
                 changed_lines += int(value)
-    return DiffSummary(tuple(sorted({name.strip() for name in names if name.strip()})), changed_lines)
-
+    return DiffSummary(
+        tuple(sorted({name.strip() for name in names if name.strip()})),
+        changed_lines,
+    )
 
 def contract_violations(contract: ChangeContract, summary: DiffSummary) -> list[str]:
     violations: list[str] = []
@@ -254,13 +272,60 @@ def run_validation_commands(
 
 def git_diff_check(project: Path, candidate_sha: str) -> CommandResult:
     workspace = GitWorkspace(project)
-    proc = workspace.run("diff-tree", "--check", "--root", candidate_sha, check=False)
+    baseline = _candidate_baseline(workspace, candidate_sha)
+    proc = workspace.run(
+        "diff",
+        "--check",
+        baseline,
+        candidate_sha,
+        "--",
+        check=False,
+    )
     return CommandResult(
-        command=f"git diff-tree --check --root {candidate_sha}",
+        command=f"git diff --check {baseline} {candidate_sha} --",
         returncode=proc.returncode,
         stdout=proc.stdout,
         stderr=proc.stderr,
     )
+
+
+def _candidate_baseline(
+    workspace: GitWorkspace,
+    candidate_sha: str,
+) -> str:
+    try:
+        head = workspace.head()
+    except GitError as exc:
+        raise ChangeControlError(
+            "target checkout must have a committed HEAD"
+        ) from exc
+    if head == candidate_sha:
+        parent = workspace.run(
+            "rev-parse",
+            f"{candidate_sha}^",
+            check=False,
+        )
+        if parent.returncode == 0 and parent.stdout.strip():
+            return parent.stdout.strip()
+        # A root candidate has no parent. The empty tree is a valid diff base.
+        return workspace.run(
+            "hash-object",
+            "-t",
+            "tree",
+            "/dev/null",
+            check=False,
+        ).stdout.strip()
+    merge_base = workspace.run(
+        "merge-base",
+        head,
+        candidate_sha,
+        check=False,
+    )
+    if merge_base.returncode != 0 or not merge_base.stdout.strip():
+        raise ChangeControlError(
+            "candidate does not share history with target checkout"
+        )
+    return merge_base.stdout.strip()
 
 
 def _matches_any(path: str, patterns: tuple[str, ...]) -> bool:
