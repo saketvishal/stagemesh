@@ -51,6 +51,7 @@ def test_out_of_contract_candidate_is_rejected() -> None:
             ChangeContract.from_mapping(
                 {
                     "objective": "add only the allowed implementation file",
+                    "acceptance_criteria": ["allowed implementation compiles"],
                     "allowed_paths": ["src/allowed.py"],
                     "validation_commands": [
                         "python -m compileall -q src"
@@ -94,7 +95,9 @@ def test_multi_commit_scope_escape_is_rejected() -> None:
             ChangeContract.from_mapping(
                 {
                     "objective": "change only allowed.py",
+                    "acceptance_criteria": ["allowed.py is the only changed path"],
                     "allowed_paths": ["allowed.py"],
+                    "validation_commands": ["python -c \"print('ok')\""],
                 }
             ),
         )
@@ -159,7 +162,9 @@ def test_failed_validation_schedules_bounded_repair() -> None:
             ChangeContract.from_mapping(
                 {
                     "objective": "touch only src/allowed.py",
+                    "acceptance_criteria": ["candidate stays within the allowlist"],
                     "allowed_paths": ["src/allowed.py"],
+                    "validation_commands": ["python -c \"print('ok')\""],
                 }
             ),
         )
@@ -195,7 +200,11 @@ def test_isolated_executor_does_not_mutate_target_until_integration() -> None:
             ChangeContract.from_mapping(
                 {
                     "objective": "create isolated.txt only",
+                    "acceptance_criteria": ["isolated.txt contains isolated"],
                     "allowed_paths": ["isolated.txt"],
+                    "validation_commands": [
+                        "python -c \"from pathlib import Path; assert Path('isolated.txt').read_text().strip() == 'isolated'\""
+                    ],
                 }
             ),
         )
