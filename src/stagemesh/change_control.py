@@ -159,16 +159,31 @@ def diff_summary(project: Path, candidate_sha: str) -> DiffSummary:
             f"candidate commit does not exist: {candidate_sha}"
         )
     baseline = _candidate_baseline(workspace, candidate_sha)
-    names = workspace.run(
+    name_status = workspace.run(
         "diff",
-        "--name-only",
+        "--name-status",
+        "-M",
+        "-C",
         baseline,
         candidate_sha,
         "--",
     ).stdout.splitlines()
+    changed_paths: set[str] = set()
+    for line in name_status:
+        parts = line.split("\t")
+        if len(parts) < 2:
+            continue
+        status = parts[0]
+        if status.startswith(("R", "C")) and len(parts) >= 3:
+            changed_paths.add(parts[1])
+            changed_paths.add(parts[2])
+        else:
+            changed_paths.add(parts[1])
     numstat = workspace.run(
         "diff",
         "--numstat",
+        "-M",
+        "-C",
         baseline,
         candidate_sha,
         "--",
@@ -182,7 +197,7 @@ def diff_summary(project: Path, candidate_sha: str) -> DiffSummary:
             if value.isdigit():
                 changed_lines += int(value)
     return DiffSummary(
-        tuple(sorted({name.strip() for name in names if name.strip()})),
+        tuple(sorted(path.strip() for path in changed_paths if path.strip())),
         changed_lines,
     )
 
