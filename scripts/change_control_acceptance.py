@@ -242,6 +242,81 @@ def test_isolated_executor_does_not_mutate_target_until_integration() -> None:
         store.close()
 
 
+def test_remediation_worktree_starts_from_failed_candidate() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        init_repo(root)
+        store = Store(root / ".stagemesh" / "state.sqlite3")
+        store.migrate()
+        task_id = store.upsert_task("repair-lineage", source_id="CC-REPAIR")
+        write_contract(
+            root,
+            task_id,
+            ChangeContract.from_mapping(
+                {
+                    "objective": "make repair.txt contain good",
+                    "acceptance_criteria": ["repair.txt contains good"],
+                    "allowed_paths": ["repair.txt"],
+                    "validation_commands": [
+                        "python -c \"from pathlib import Path; assert Path('repair.txt').read_text().strip() == 'good'\""
+                    ],
+                }
+            ),
+        )
+
+        store.advance_task(task_id, Stage.IMPLEMENT)
+        first_claim = store.acquire_claim(task_id, "first-worker")
+        assert first_claim is not None
+        first = SubprocessExecutor(
+            [
+                sys.executable,
+                "-c",
+                "from pathlib import Path; Path('repair.txt').write_text('bad\\n', encoding='utf-8')",
+            ],
+            name="first-provider",
+            isolate=True,
+        ).run(store, task_id, first_claim, root)
+        assert first.status.value == "SUCCEEDED"
+        assert first.candidate_sha
+        store.advance_task(task_id, Stage.VALIDATE)
+
+        coord = Coordinator(
+            store,
+            root,
+            validator=Validator(require_contract=True),
+            remediation_policy=RemediationPolicy(3),
+        )
+        assert coord.tick() == 1
+        assert store.get_task(task_id)["stage"] == Stage.IMPLEMENT
+
+        second_claim = store.acquire_claim(task_id, "repair-worker")
+        assert second_claim is not None
+        repair_script = (
+            "from pathlib import Path; "
+            "p=Path('repair.txt'); "
+            "assert p.read_text().strip() == 'bad'; "
+            "p.write_text('good\\n', encoding='utf-8')"
+        )
+        second = SubprocessExecutor(
+            [sys.executable, "-c", repair_script],
+            name="repair-provider",
+            isolate=True,
+        ).run(store, task_id, second_claim, root)
+        assert second.status.value == "SUCCEEDED"
+        assert second.candidate_sha
+        assert second.candidate_sha != first.candidate_sha
+        assert not (root / "repair.txt").exists()
+
+        status = Validator(require_contract=True).validate(
+            store,
+            task_id,
+            second.candidate_sha,
+            root,
+        )
+        assert status is EvidenceStatus.PASSED
+        store.close()
+
+
 def test_git_integrator_incorporates_exact_candidate() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
@@ -280,6 +355,7 @@ def main() -> int:
     test_missing_contract_blocks_before_executor()
     test_failed_validation_schedules_bounded_repair()
     test_isolated_executor_does_not_mutate_target_until_integration()
+    test_remediation_worktree_starts_from_failed_candidate()
     test_git_integrator_incorporates_exact_candidate()
     print("change-control acceptance: PASS")
     return 0
