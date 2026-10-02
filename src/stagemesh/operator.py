@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 from collections import Counter
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Mapping
 
 from .external_evidence import external_evidence_records
 from .observability import health

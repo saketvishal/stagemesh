@@ -7,11 +7,11 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
+from .audit import record_audit
 from .config import StageMeshConfig
 from .domain import TaskStatus
-from .persistence import Store
 from .github import GitHubClient, parse_retry_after
-from .audit import record_audit
+from .persistence import Store
 from .retry import RetryRegistry
 
 

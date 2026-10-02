@@ -24,7 +24,7 @@ def finding_identity(candidate_sha: str, message: str, path: str | None = None) 
     candidate_sha = _validate_text(candidate_sha, "candidate sha")
     message = _validate_text(message, "finding message", 2000)
     path = _validate_optional_text(path, "finding path", 1000)
-    raw = f"{candidate_sha}\0{path or ''}\0{message}".encode("utf-8")
+    raw = f"{candidate_sha}\0{path or ''}\0{message}".encode()
     return hashlib.sha256(raw).hexdigest()[:16]
 
 
