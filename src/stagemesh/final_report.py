@@ -10,7 +10,7 @@ from .completion_audit import completion_audit
 from .e2e_acceptance import end_to_end_acceptance
 from .external_evidence import external_evidence_records
 from .persistence import Store
-from .release import validate_candidate_sha, ReleaseValidationError
+from .release import ReleaseValidationError, validate_candidate_sha
 
 
 class FinalReportValidationError(ValueError):
@@ -62,6 +62,8 @@ def render_final_report(root: Path, store: Store | None = None) -> str:
         "- SQLite persistence with migrations is authoritative local state",
         "- PostgreSQL backend contract mirrors the authoritative schema and remains optional behind the persistence interface with structured probe, redacted database URL and provider command output, ping, and migration output",
         "- execution, process identity, recovery, validation, review, remediation, and integration are separate components",
+        "- implementation agents run in per-task Git worktrees while validators, reviewers, and integrators bind evidence to the exact candidate SHA",
+        "- change contracts are machine-enforced across prompt generation, validation, independent review, and integration",
         "- provider routing, capacity classification, task sources, objective planning, registry, workers, dashboard, release packaging, and CLI remain narrow modules",
         "",
         "## Reused Components",
@@ -77,7 +79,9 @@ def render_final_report(root: Path, store: Store | None = None) -> str:
         "",
         "- task, stage, claim, execution, candidate, evidence, worker, provider, task-source, and objective models",
         "- deterministic `PLAN -> IMPLEMENT -> VALIDATE -> REVIEW -> INTEGRATE -> DONE` lifecycle",
+        "- machine-enforced change contracts with allowed/forbidden/protected/excluded paths, dependency-manifest gates, invariant/gate commands, and change-size limits",
         "- claims, leases, durable executions, process identity, recovery, exact-SHA evidence, and durable handoff",
+        "- per-task isolated Git worktrees for implementation execution so workers do not mutate the shared checkout",
         "- local backlog, configured JSON and Google AX export task-source adapters, and GitHub task-source contracts with deferred, stale, unknown, auth, and rate-limit states",
         "- provider SDK with bounded command validation, durable runtime execution records, capacity-aware routing, failover, structured capacity visibility and dry-run acceptance, configurable stage routing, single-agent mode, and staged execution mode",
         "- validated initialization, diagnostics, objective planning, and dependency-aware continue flow with structured visibility, review findings, remediation attempts, and retry/backoff mutation and inspection with structured visibility",
@@ -93,6 +97,7 @@ def render_final_report(root: Path, store: Store | None = None) -> str:
         "- GitHub/task-source acceptance: deterministic structured dry-run proves zero-config remote detection, discovery, deferred labels, outbound sync, and rate-limit classification; live GitHub requires credentials/network",
         "- restart/recovery acceptance: covered by invariant suite",
         "- exact-SHA validation/review acceptance: covered by invariant suite and review model",
+        "- change-contract acceptance: `tests/test_change_contracts.py` covers scope, dependency, size, prompt, integration, and worktree canaries",
         "- durable Git handoff acceptance: covered by invariant suite",
         "- clean-install acceptance: `python scripts/clean_acceptance.py` plus `python -m pip install . --target .tmp-install --no-cache-dir --upgrade`",
         "- CI result: local `stagemesh ci --future-feature-gate` passes; hosted CI result pending external runner",

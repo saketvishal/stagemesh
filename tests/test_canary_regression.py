@@ -7,6 +7,8 @@ DEF-4: Capacity failures left an active claim on the task, blocking re-dispatch 
 """
 from __future__ import annotations
 
+import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -15,7 +17,9 @@ import pytest
 from stagemesh.coordinator import Coordinator
 from stagemesh.domain import ExecutionStatus, Stage, TaskStatus
 from stagemesh.execution import ExecutionResult, FakeExecutor, SubprocessExecutor, classify_failure
+from stagemesh.git import GitWorkspace
 from stagemesh.persistence import Store
+from stagemesh.workspaces import task_workspace
 
 
 @pytest.fixture
@@ -131,7 +135,6 @@ def test_subprocess_executor_name_round_trips_through_coordinator(store: Store, 
     coord = Coordinator(store, tmp_path, executor=executor)
     coord.tick()  # advances PLAN -> IMPLEMENT
     coord.tick()  # IMPLEMENT: runs python --version, produces candidate
-    task = store.get_task(task_id)
     candidate = store.latest_candidate(task_id)
     if candidate:
         assert candidate["produced_by"] == "claude", (
@@ -148,6 +151,7 @@ def test_cli_continue_dry_run_uses_fake_executor(tmp_path: Path) -> None:
     """DEF-1/DEF-2: The --dry-run flag must cause command_continue to fall back to FakeExecutor
     so scripted tests can run without a live provider."""
     import argparse
+
     import stagemesh.cli as cli_module
 
     project = tmp_path / "proj"
@@ -162,6 +166,131 @@ def test_cli_continue_dry_run_uses_fake_executor(tmp_path: Path) -> None:
     )
     result = cli_module.command_continue(args)
     assert result == 0
+
+
+def _cli_project(tmp_path: Path, *, routing: dict[str, object]) -> Path:
+    project = tmp_path / "proj"
+    project.mkdir()
+    workspace = GitWorkspace(project)
+    workspace.init_if_needed()
+    (project / "src").mkdir()
+    (project / "src" / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+    workspace.commit_all("initial")
+    runtime = project / ".stagemesh"
+    runtime.mkdir()
+    (runtime / "backlog.json").write_text(
+        json.dumps({"tasks": [{"id": "task-1", "title": "change app"}]}),
+        encoding="utf-8",
+    )
+    config = {"routing": routing, "providers": {}}
+    (runtime / "config.json").write_text(json.dumps(config), encoding="utf-8")
+    return project
+
+
+def _provider_script(path: Path, body: str) -> str:
+    path.write_text(body, encoding="utf-8")
+    return f'"{sys.executable}" "{path}"'
+
+
+def _continue(project: Path, *, provider: str | None = None) -> int:
+    import stagemesh.cli as cli_module
+
+    return cli_module.command_continue(
+        argparse.Namespace(project=str(project), once=False, json=True, provider=provider, dry_run=False)
+    )
+
+
+def _review_payload(project: Path) -> dict[str, object]:
+    store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+    try:
+        row = store.conn.execute(
+            "SELECT payload FROM evidence WHERE kind='REVIEW' ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()
+        assert row is not None
+        return json.loads(row["payload"])
+    finally:
+        store.close()
+
+
+def test_cli_continue_staged_routes_invoke_distinct_review_provider(tmp_path: Path) -> None:
+    log = tmp_path / "calls.log"
+    impl = _provider_script(
+        tmp_path / "impl.py",
+        f"from pathlib import Path\n"
+        f"Path({str(log)!r}).write_text('codex\\n', encoding='utf-8')\n"
+        "Path('src/app.py').write_text('VALUE = 2\\n', encoding='utf-8')\n",
+    )
+    review = _provider_script(
+        tmp_path / "review.py",
+        f"from pathlib import Path\n"
+        f"Path({str(log)!r}).write_text(Path({str(log)!r}).read_text(encoding='utf-8') + 'claude\\n', encoding='utf-8')\n"
+        "print('{\"decision\":\"PASS\"}')\n",
+    )
+    project = _cli_project(
+        tmp_path,
+        routing={"mode": "STAGED", "stage_routes": {"IMPLEMENT": "codex", "REVIEW": "claude"}},
+    )
+    config_path = project / ".stagemesh" / "config.json"
+    data = json.loads(config_path.read_text(encoding="utf-8"))
+    data["providers"] = {"codex": impl, "claude": review}
+    config_path.write_text(json.dumps(data), encoding="utf-8")
+
+    assert _continue(project) == 0
+
+    payload = _review_payload(project)
+    assert log.read_text(encoding="utf-8").splitlines() == ["codex", "claude"]
+    assert payload["implementer_provider"] == "codex"
+    assert payload["review_provider"] == "claude"
+    assert payload["review_execution_provider"] == "claude"
+    assert payload["review_execution_invoked"] is True
+    assert payload["independent_reviewer"] is True
+
+
+def test_cli_continue_same_review_provider_falls_back_non_independent(tmp_path: Path) -> None:
+    calls = tmp_path / "calls.log"
+    impl = _provider_script(
+        tmp_path / "impl.py",
+        f"from pathlib import Path\nPath('src/app.py').write_text('VALUE = 3\\n', encoding='utf-8')\n"
+        f"Path({str(calls)!r}).write_text('codex\\n', encoding='utf-8')\n",
+    )
+    project = _cli_project(
+        tmp_path,
+        routing={"mode": "STAGED", "stage_routes": {"IMPLEMENT": "codex", "REVIEW": "codex"}},
+    )
+    config_path = project / ".stagemesh" / "config.json"
+    data = json.loads(config_path.read_text(encoding="utf-8"))
+    data["providers"] = {"codex": impl}
+    config_path.write_text(json.dumps(data), encoding="utf-8")
+
+    assert _continue(project) == 0
+
+    payload = _review_payload(project)
+    assert calls.read_text(encoding="utf-8").splitlines() == ["codex"]
+    assert payload["implementer_provider"] == "codex"
+    assert payload["review_execution_invoked"] is False
+    assert payload["independent_reviewer"] is False
+
+
+def test_cli_continue_single_agent_review_is_deterministic_non_independent(tmp_path: Path) -> None:
+    impl = _provider_script(
+        tmp_path / "impl.py",
+        "from pathlib import Path\nPath('src/app.py').write_text('VALUE = 4\\n', encoding='utf-8')\n",
+    )
+    project = _cli_project(
+        tmp_path,
+        routing={"mode": "SINGLE_AGENT", "single_agent_provider": "codex", "stage_routes": {"REVIEW": "claude"}},
+    )
+    config_path = project / ".stagemesh" / "config.json"
+    data = json.loads(config_path.read_text(encoding="utf-8"))
+    data["providers"] = {"codex": impl, "claude": f'"{sys.executable}" -c "print(\'should-not-run\')"'}
+    config_path.write_text(json.dumps(data), encoding="utf-8")
+
+    assert _continue(project) == 0
+
+    payload = _review_payload(project)
+    assert payload["review_provider"] == "single-agent-deterministic-fallback"
+    assert payload["review_execution_invoked"] is False
+    assert payload["independent_reviewer"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -280,7 +409,7 @@ def test_subprocess_executor_pipes_prompt_to_stdin(store: Store, tmp_path: Path)
     coord = Coordinator(store, tmp_path, executor=executor)
     assert coord.tick() == 1
 
-    captured_file = tmp_path / "captured_prompt.txt"
+    captured_file = task_workspace(tmp_path, task_id) / "captured_prompt.txt"
     assert captured_file.exists()
     content = captured_file.read_text(encoding="utf-8")
     assert "write a helper function" in content
