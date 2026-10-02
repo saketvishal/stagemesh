@@ -27,6 +27,11 @@ CORE_AUDIT_ITEMS = (
     AuditItem("discover and execute dependent tasks", "PROVEN", "scripts/acceptance.py"),
     AuditItem("restart/recovery invariants", "PROVEN", "scripts/invariants.py"),
     AuditItem("exact-SHA validation and review model", "PROVEN", "scripts/invariants.py"),
+    AuditItem(
+        "contract-first isolated AI change control",
+        "PROVEN",
+        "scripts/change_control_acceptance.py",
+    ),
     AuditItem("durable Git handoff", "PROVEN", "scripts/invariants.py"),
     AuditItem("provider capacity does not become implementation defect", "PROVEN", "scripts/invariants.py"),
     AuditItem("GitHub rate-limit separation", "PROVEN", "scripts/invariants.py and live harness"),
