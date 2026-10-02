@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import fnmatch
 import json
+import shutil
 import subprocess
+import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -231,10 +235,20 @@ def evaluate_contract(
             )
 
     if run_gates:
-        for gate in contract.gates:
-            gates.append(run_gate(project, gate))
-        for invariant in contract.invariants:
-            gates.append(run_gate(project, GateCommand(f"invariant:{invariant}", _split_command(invariant))))
+        try:
+            with candidate_workspace(project, candidate_sha) as gate_project:
+                for gate in contract.gates:
+                    gates.append(run_gate(gate_project, gate))
+                for invariant in contract.invariants:
+                    gates.append(run_gate(gate_project, GateCommand(f"invariant:{invariant}", _split_command(invariant))))
+        except (GitError, OSError) as exc:
+            findings.append(
+                {
+                    "severity": "error",
+                    "code": "candidate_workspace_unavailable",
+                    "message": f"candidate {candidate_sha} cannot be checked out for gates: {exc}",
+                }
+            )
 
     for gate in gates:
         if gate.status != "PASSED":
@@ -264,10 +278,10 @@ def changed_files(project: Path, candidate_sha: str) -> list[str]:
     parent = workspace.run("rev-list", "--parents", "-n", "1", candidate_sha).stdout.strip().split()
     if len(parent) > 1:
         base = parent[1]
-        output = workspace.run("diff", "--name-only", base, candidate_sha).stdout
+        output = workspace.run("diff", "--name-status", "-M", base, candidate_sha).stdout
     else:
-        output = workspace.run("show", "--pretty=", "--name-only", candidate_sha).stdout
-    return sorted({line.strip().replace("\\", "/") for line in output.splitlines() if line.strip()})
+        output = workspace.run("show", "--pretty=", "--name-status", "-M", candidate_sha).stdout
+    return sorted(_paths_from_name_status(output))
 
 
 def changed_line_count(project: Path, candidate_sha: str) -> int:
@@ -285,6 +299,22 @@ def changed_line_count(project: Path, candidate_sha: str) -> int:
             if value.isdigit():
                 total += int(value)
     return total
+
+
+@contextmanager
+def candidate_workspace(project: Path, candidate_sha: str) -> Iterator[Path]:
+    workspace = GitWorkspace(project)
+    workspace.run("cat-file", "-e", f"{candidate_sha}^{{commit}}")
+    temp_root = Path(tempfile.mkdtemp(prefix="stagemesh-candidate-"))
+    target = temp_root / "checkout"
+    try:
+        workspace.run("worktree", "add", "--detach", str(target), candidate_sha)
+        yield target
+    finally:
+        try:
+            workspace.run("worktree", "remove", "--force", str(target), check=False)
+        finally:
+            shutil.rmtree(temp_root, ignore_errors=True)
 
 
 def run_gate(project: Path, gate: GateCommand) -> GateResult:
@@ -320,7 +350,27 @@ def run_gate(project: Path, gate: GateCommand) -> GateResult:
 
 def _matches(path: str, patterns: tuple[str, ...]) -> bool:
     normalized = path.replace("\\", "/")
-    return any(fnmatch.fnmatchcase(normalized, pattern) for pattern in patterns)
+    folded = normalized.casefold()
+    return any(
+        fnmatch.fnmatchcase(normalized, pattern.replace("\\", "/"))
+        or fnmatch.fnmatchcase(folded, pattern.replace("\\", "/").casefold())
+        for pattern in patterns
+    )
+
+
+def _paths_from_name_status(output: str) -> set[str]:
+    paths: set[str] = set()
+    for raw in output.splitlines():
+        parts = raw.strip().split("\t")
+        if len(parts) < 2:
+            continue
+        status = parts[0]
+        changed_paths = parts[1:]
+        if status.startswith(("R", "C")):
+            paths.update(path.replace("\\", "/") for path in changed_paths[:2] if path)
+        else:
+            paths.add(changed_paths[-1].replace("\\", "/"))
+    return paths
 
 
 def contract_prompt(contract: ChangeContract) -> str:
