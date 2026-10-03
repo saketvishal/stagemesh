@@ -24,6 +24,21 @@ from stagemesh.providers import approved_default_adapters
 from stagemesh.workspaces import task_workspace
 
 
+def _write_contract(project: Path, task_id: str) -> None:
+    contracts = project / ".stagemesh" / "contracts"
+    contracts.mkdir(parents=True, exist_ok=True)
+    (contracts / f"{task_id}.json").write_text(
+        json.dumps(
+            {
+                "objective": "test task",
+                "allowed_files": ["**"],
+                "required_tests": [{"name": "smoke", "command": [sys.executable, "-c", "pass"]}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
 @pytest.fixture
 def store(tmp_path: Path) -> Store:
     db = Store(tmp_path / "state.sqlite3")
@@ -281,6 +296,7 @@ def _cli_project(tmp_path: Path, *, routing: dict[str, object]) -> Path:
     )
     config = {"routing": routing, "providers": {}}
     (runtime / "config.json").write_text(json.dumps(config), encoding="utf-8")
+    _write_contract(project, "task-1")
     return project
 
 
@@ -310,6 +326,7 @@ def test_subprocess_executor_decodes_provider_output_as_utf8_with_replacement(
     (project / "src.txt").write_text("unchanged\n", encoding="utf-8")
     workspace.commit_all("initial")
     task_id = store.upsert_task("decode provider stderr")
+    _write_contract(project, task_id)
     store.advance_task(task_id, Stage.IMPLEMENT)
     claim_id = store.acquire_claim(task_id, "worker")
     script = tmp_path / "provider.py"
@@ -986,6 +1003,7 @@ def test_failure_classification_all_five_categories() -> None:
 def test_subprocess_executor_pipes_prompt_to_stdin(store: Store, tmp_path: Path) -> None:
     """SubprocessExecutor must pipe task prompt to stdin of the provider process."""
     task_id = store.upsert_task("write a helper function")
+    _write_contract(tmp_path, task_id)
     # Python script that reads stdin and writes it to a file
     script = (
         "import sys\n"
