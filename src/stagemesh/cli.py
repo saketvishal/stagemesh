@@ -27,7 +27,9 @@ from .external_evidence import (
     record_external_evidence,
 )
 from .final_report import FinalReportValidationError, candidate_sha, render_final_report
+from .git import GitWorkspace
 from .github_acceptance import run_github_acceptance
+from .integration import Integrator
 from .objectives import ObjectivePlanner, ObjectiveValidationError
 from .observability import health
 from .operator import operator_report
@@ -174,7 +176,11 @@ def command_continue(args: argparse.Namespace) -> int:
     chosen_provider = "fake"
     chosen_review_provider = "builtin-deterministic-fallback"
     independent_review_configured = False
+    require_independent_review = False
+    integrator = None
+    integration_ref = None
     if not getattr(args, "dry_run", False):
+        require_independent_review = config.require_independent_review
         try:
             adapters = adapters_from_config(config)
         except ProviderValidationError as exc:
@@ -208,19 +214,49 @@ def command_continue(args: argparse.Namespace) -> int:
         if adapter is not None:
             chosen_provider = adapter.name
             executor = SubprocessExecutor(list(adapter.command), name=adapter.name)
+        review_adapter = None
         if config.routing_mode == RoutingMode.STAGED:
             routed_review = router.choose_for_stage("REVIEW", "review")
             review_adapter = adapter_by_name.get(routed_review.name) if routed_review else None
-            if review_adapter is not None and review_adapter.name != chosen_provider:
-                reviewer = Reviewer(adapter=review_adapter)
+            if (
+                review_adapter is not None
+                and review_adapter.name != chosen_provider
+                and (adapter is None or review_adapter.command != adapter.command)
+            ):
+                reviewer = Reviewer(adapter=review_adapter, require_independent=require_independent_review)
                 chosen_review_provider = review_adapter.name
                 independent_review_configured = True
             elif review_adapter is not None:
                 chosen_review_provider = "builtin-deterministic-fallback"
         else:
-            reviewer = Reviewer(provider_name="single-agent-deterministic-fallback")
             chosen_review_provider = "single-agent-deterministic-fallback"
-    coord = Coordinator(store, project, executor=executor, reviewer=reviewer, target=target)
+        if reviewer is None:
+            reviewer = Reviewer(provider_name=chosen_review_provider, require_independent=require_independent_review)
+        if require_independent_review and not independent_review_configured:
+            print(
+                "independent review is required but cannot be satisfied: "
+                f"implement={chosen_provider} review={review_adapter.name if review_adapter else None} "
+                f"routing={config.routing_mode}. Route IMPLEMENT and REVIEW to distinct available providers "
+                "(routing.stage_routes) or set routing.require_independent_review to false for diagnostics.",
+                file=sys.stderr,
+            )
+            store.close()
+            return 2
+        integration_ref = config.integration_ref or _current_branch_ref(project)
+        if integration_ref is None:
+            print("no integration_ref configured and the project has no current branch", file=sys.stderr)
+            store.close()
+            return 2
+        integrator = Integrator(integration_ref=integration_ref, require_independent_review=require_independent_review)
+    coord = Coordinator(
+        store,
+        project,
+        executor=executor,
+        reviewer=reviewer,
+        integrator=integrator,
+        target=target,
+        require_independent_review=require_independent_review,
+    )
     count = 0
     while True:
         try:
@@ -240,6 +276,8 @@ def command_continue(args: argparse.Namespace) -> int:
                     "provider": chosen_provider,
                     "review_provider": chosen_review_provider,
                     "independent_review_configured": independent_review_configured,
+                    "require_independent_review": require_independent_review,
+                    "integration_ref": integration_ref,
                     "targeted_mode": targeted_mode,
                     "targeted_task_id": str(targeted_task_id) if targeted_task_id is not None else None,
                 },
@@ -253,10 +291,18 @@ def command_continue(args: argparse.Namespace) -> int:
     print(f"provider: {chosen_provider}")
     print(f"review_provider: {chosen_review_provider}")
     print(f"independent_review_configured: {independent_review_configured}")
+    print(f"require_independent_review: {require_independent_review}")
+    print(f"integration_ref: {integration_ref}")
     print(f"targeted_mode: {targeted_mode}")
     print(f"targeted_task_id: {targeted_task_id}")
     store.close()
     return 0
+
+
+def _current_branch_ref(project: Path) -> str | None:
+    result = GitWorkspace(project).run("symbolic-ref", "-q", "HEAD", check=False)
+    ref = result.stdout.strip()
+    return ref if result.returncode == 0 and ref else None
 
 
 def _filter_targeted_tasks(tasks, targeted_task_id: str | None):

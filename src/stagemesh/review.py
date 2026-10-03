@@ -19,6 +19,28 @@ class ReviewFinding:
     message: str
 
 
+INFRASTRUCTURE_FAILURE = "INFRASTRUCTURE_FAILURE"
+
+
+def _same_provider(left: str, right: str) -> bool:
+    return left.strip().casefold() == right.strip().casefold()
+
+
+def independent_review_verified(payload: dict[str, object]) -> bool:
+    """True only when a distinct provider's review was actually executed (not a label or a fallback)."""
+    implementer = payload.get("implementer_provider")
+    reviewer = payload.get("review_provider")
+    return bool(
+        payload.get("independent_reviewer") is True
+        and payload.get("review_execution_invoked") is True
+        and isinstance(implementer, str)
+        and isinstance(reviewer, str)
+        and implementer
+        and reviewer
+        and not _same_provider(implementer, reviewer)
+    )
+
+
 class ReviewAdapter(Protocol):
     name: str
 
@@ -33,7 +55,9 @@ class Reviewer:
         findings: list[ReviewFinding] | None = None,
         provider_name: str = "builtin-deterministic-fallback",
         adapter: ReviewAdapter | None = None,
+        require_independent: bool = False,
     ):
+        self.require_independent = require_independent
         self.fail_capacity = fail_capacity
         self.findings = findings or []
         self.provider_name = provider_name
@@ -50,21 +74,26 @@ class Reviewer:
             store.add_evidence(task_id, candidate_sha, EvidenceKind.REVIEW, EvidenceStatus.CAPACITY, {"provider": "fake"})
             store.finish_execution(execution_id, ExecutionStatus.FAILED, candidate_sha)
             return EvidenceStatus.CAPACITY
-        candidate = store.latest_candidate(task_id)
-        implementer = str(candidate["produced_by"]) if candidate is not None and candidate["sha"] == candidate_sha else None
+        produced = store.conn.execute(
+            "SELECT produced_by FROM candidates WHERE task_id=? AND sha=?", (task_id, candidate_sha)
+        ).fetchone()
+        implementer = str(produced["produced_by"]) if produced is not None else None
         adapter_name = getattr(self.adapter, "name", None)
         reviewer_provider = adapter_name or self.provider_name
-        independent = bool(self.adapter is not None and reviewer_provider and reviewer_provider != implementer)
+        same_provider = bool(implementer and _same_provider(reviewer_provider, implementer))
+        independent = bool(self.adapter is not None and reviewer_provider and implementer and not same_provider)
         findings = list(self.findings)
+        infrastructure_failure: str | None = None
         review_payload: dict[str, object] = {
             "review_provider": reviewer_provider,
             "implementer_provider": implementer,
             "independent_reviewer": independent,
             "deterministic_contract_gate": True,
             "review_execution_provider": adapter_name,
-            "review_execution_invoked": self.adapter is not None,
+            "review_execution_invoked": False,
+            "independent_review_required": self.require_independent,
         }
-        if implementer and reviewer_provider == implementer:
+        if same_provider and not self.require_independent:
             findings.append(
                 ReviewFinding(
                     finding_identity(candidate_sha, "review provider must differ from implementer"),
@@ -98,7 +127,8 @@ class Reviewer:
                 )
                 for item in evaluation.findings
             )
-            if self.adapter is not None and not findings:
+            if self.adapter is not None and not findings and not (same_provider and self.require_independent):
+                review_payload["review_execution_invoked"] = True
                 prompt = (
                     f"Review candidate {candidate_sha} for task {task_id} under contract {bound.digest}.\n"
                     f"Objective: {contract.objective}\n"
@@ -115,7 +145,9 @@ class Reviewer:
                     parsed = json.loads(response)
                 except json.JSONDecodeError:
                     parsed = None
-                if not isinstance(parsed, dict) or parsed.get("decision") not in {"PASS", "FAIL"}:
+                if isinstance(parsed, dict) and parsed.get("decision") == INFRASTRUCTURE_FAILURE:
+                    infrastructure_failure = str(parsed.get("reason") or "review_provider_failure")
+                elif not isinstance(parsed, dict) or parsed.get("decision") not in {"PASS", "FAIL"}:
                     findings.append(
                         ReviewFinding(
                             finding_identity(candidate_sha, "malformed independent review output"),
@@ -151,6 +183,24 @@ class Reviewer:
                 )
             )
             review_payload["findings"] = [{"code": "invalid_contract", "message": str(exc)}]
+        if not findings and infrastructure_failure is None and self.require_independent and not independent:
+            infrastructure_failure = (
+                "review_provider_same_as_implementer"
+                if same_provider
+                else "implementer_unknown"
+                if not implementer
+                else "independent_review_unavailable"
+            )
+        if infrastructure_failure is not None and not findings:
+            # Not a code defect: no findings, so no implementation remediation; the task stays in REVIEW.
+            review_payload["review_infrastructure_failure"] = infrastructure_failure
+            store.add_evidence(task_id, candidate_sha, EvidenceKind.REVIEW, EvidenceStatus.CAPACITY, review_payload)
+            store.add_audit_event(
+                "review.infrastructure_failure",
+                {"task_id": task_id, "candidate_sha": candidate_sha, "reason": infrastructure_failure},
+            )
+            store.finish_execution(execution_id, ExecutionStatus.FAILED, candidate_sha)
+            return EvidenceStatus.CAPACITY
         if findings:
             for finding in findings:
                 identity = finding.identity or finding_identity(candidate_sha, finding.message)
