@@ -266,6 +266,8 @@ def _build_coordinator(args, project: Path, config, store: Store, target: Target
 
 
 def command_continue(args: argparse.Namespace) -> int:
+    if not getattr(args, "once", False):
+        return command_run_ready(args)  # default: supervise one task to completion; --once keeps the single tick
     project = Path(args.project).resolve()
     targeted_task_id = getattr(args, "task", None) or getattr(args, "task_id", None)
     targeted_mode = targeted_task_id is not None
@@ -479,7 +481,7 @@ def command_run_ready(args: argparse.Namespace) -> int:
 
     try:
         summary = run_ready(
-            store, project, make_coordinator, task_id=requested, max_steps=args.max_steps, on_step=on_step
+            store, project, make_coordinator, task_id=requested, max_steps=getattr(args, "max_steps", 50), on_step=on_step
         )
     except _SetupError as exc:
         store.close()
@@ -1456,7 +1458,12 @@ def build_parser() -> argparse.ArgumentParser:
     doctor.add_argument("--json", action="store_true")
     doctor.set_defaults(func=command_doctor)
     cont = sub.add_parser("continue")
-    cont.add_argument("--once", action="store_true")
+    cont.add_argument(
+        "--once",
+        action="store_true",
+        help="Run a single coordinator pass (legacy behavior) instead of supervising one task to completion",
+    )
+    cont.add_argument("--max-steps", type=int, default=50, help="Step budget for the supervised default mode")
     cont.add_argument("--json", action="store_true")
     cont.add_argument("--provider", help="Provider name to use for implementation (e.g. claude, codex)")
     cont.add_argument("--dry-run", action="store_true", help="Use FakeExecutor instead of a real provider")
