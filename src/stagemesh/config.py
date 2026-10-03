@@ -44,6 +44,15 @@ class ProviderSpec:
     capabilities: frozenset[str] = frozenset(PROVIDER_STAGES)
     priority: int | None = None
     weight: int | None = None
+    max_concurrency: int | None = None  # simultaneous provider runs allowed under parallel execution
+
+
+@dataclass(frozen=True)
+class ParallelConfig:
+    """Limits for `continue --parallel N`."""
+
+    provider_max_concurrency: int = 2  # per provider, unless the provider sets its own max_concurrency
+    integration_rebase_attempts: int = 2  # automatic rebases onto an advanced integration ref before leaving a typed state
 
 
 @dataclass(frozen=True)
@@ -76,6 +85,7 @@ class StageMeshConfig:
     provider_selection_policy: str = "priority"
     provider_weights: dict[str, int] = field(default_factory=dict)
     task_selection: TaskSelectionConfig = field(default_factory=TaskSelectionConfig)
+    parallel: ParallelConfig = field(default_factory=ParallelConfig)
 
 
 @dataclass(frozen=True)
@@ -163,6 +173,7 @@ def load_config(project: Path, config_path: Path | None = None) -> StageMeshConf
         provider_selection_policy=str(policy),
         provider_weights=provider_weights,
         task_selection=_task_selection(_optional_mapping(data, "task_selection") or _profile_task_selection(project)),
+        parallel=_parallel(_optional_mapping(data, "parallel")),
     )
 
 
@@ -188,7 +199,7 @@ def _parse_providers(data: dict[str, object]) -> tuple[dict[str, str], dict[str,
         if not name or any(char.isspace() for char in name):
             raise ConfigValidationError("provider names must be non-empty strings without whitespace")
         if isinstance(value, dict):
-            unknown = set(value) - {"command", "capabilities", "priority", "weight"}
+            unknown = set(value) - {"command", "capabilities", "priority", "weight", "max_concurrency"}
             if unknown:
                 raise ConfigValidationError(f"provider {name} has unsupported keys: {', '.join(sorted(unknown))}")
             command = _string(value.get("command"))
@@ -196,6 +207,7 @@ def _parse_providers(data: dict[str, object]) -> tuple[dict[str, str], dict[str,
                 capabilities=_provider_capabilities(name, value.get("capabilities")),
                 priority=_provider_int(name, "priority", value.get("priority"), minimum=0),
                 weight=_provider_int(name, "weight", value.get("weight"), minimum=1),
+                max_concurrency=_provider_int(name, "max_concurrency", value.get("max_concurrency"), minimum=1),
             )
         else:
             command = _string(value)
@@ -217,6 +229,20 @@ def _provider_capabilities(name: str, value: object) -> frozenset[str]:
             f"provider {name} has unsupported capabilities: {', '.join(sorted(invalid))} (use {', '.join(PROVIDER_STAGES)})"
         )
     return frozenset(stages)
+
+
+def _parallel(data: dict[str, object]) -> ParallelConfig:
+    unknown = set(data) - {"provider_max_concurrency", "integration_rebase_attempts"}
+    if unknown:
+        raise ConfigValidationError(f"parallel has unsupported keys: {', '.join(sorted(unknown))}")
+    defaults = ParallelConfig()
+    values: dict[str, int] = {}
+    for key, minimum in (("provider_max_concurrency", 1), ("integration_rebase_attempts", 0)):
+        value = data.get(key, getattr(defaults, key))
+        if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+            raise ConfigValidationError(f"parallel.{key} must be an integer >= {minimum}")
+        values[key] = value
+    return ParallelConfig(**values)
 
 
 def _provider_int(name: str, field_name: str, value: object, *, minimum: int) -> int | None:

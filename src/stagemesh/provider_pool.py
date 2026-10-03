@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from .capacity import CapacityKind
+from .concurrency import ProviderLimiter
 from .config import BUILTIN_PROVIDERS, SELECTION_POLICIES
 from .execution import PROVIDER_TIMEOUT, ExecutionResult, Executor
 from .domain import ExecutionStatus
@@ -108,6 +109,7 @@ class ProviderPool:
         policy: str = "priority",
         weights: dict[str, int] | None = None,
         priorities: dict[str, int] | None = None,
+        limiter: ProviderLimiter | None = None,
     ):
         if policy not in SELECTION_POLICIES:
             raise ValueError(f"unknown provider selection policy: {policy}")
@@ -120,6 +122,7 @@ class ProviderPool:
         self.require_independent = require_independent
         self.cooldown_seconds = cooldown_seconds
         self.log = log or ProviderLog()
+        self.limiter = limiter  # set under parallel execution: per-provider slots and provider-wide cooldown
 
     def pool(self, stage: str) -> tuple[str, ...]:
         return self.pools.get(stage, ())
@@ -139,6 +142,8 @@ class ProviderPool:
                 verdicts.append(Verdict(name, False, f"missing_capability: does not support '{capability}'"))
             elif adapter.check_capacity() != CapacityKind.AVAILABLE:
                 verdicts.append(Verdict(name, False, f"cli_not_installed: '{adapter.command[0]}' is not callable on PATH"))
+            elif self.limiter is not None and self.limiter.cooling(name) is not None:
+                verdicts.append(Verdict(name, False, str(self.limiter.cooling(name))))
             else:
                 recent = self._recent_failure(store, stage, task_id, name)
                 if recent is not None:
@@ -357,7 +362,18 @@ class FallbackReviewAdapter:
 
     def review_candidate(self, prompt: str, project: Path, candidate_sha: str) -> str:
         previous: str | None = None
+        limiter = self.pool.limiter
+        response = json.dumps({"decision": INFRASTRUCTURE_FAILURE, "reason": "no_review_provider_available"})
         for adapter in self.adapters:
+            held: str | None = None
+            if limiter is not None:
+                held = limiter.acquire([adapter.name])  # waits for a free slot; None means the provider is cooling down
+                if held is None:
+                    reason = limiter.cooling(adapter.name) or "provider_cooldown"
+                    self.pool.log(f"  skipped review provider {adapter.name}: {reason}")
+                    self.attempts.append({"provider": adapter.name, "reason": reason})
+                    previous = adapter.name
+                    continue
             if previous is not None:
                 self.pool.log(f"  fallback: {previous} failed ({self.attempts[-1]['reason']}) -> trying {adapter.name}")
             self.pool.log(
@@ -365,7 +381,11 @@ class FallbackReviewAdapter:
                 f"{self.pool.why(REVIEW, adapter.name, previous is None)}"
             )
             self.name = adapter.name
-            response = adapter.review_candidate(prompt, project, candidate_sha)
+            try:
+                response = adapter.review_candidate(prompt, project, candidate_sha)
+            finally:
+                if held is not None and limiter is not None:
+                    limiter.release(held)
             reason = _infrastructure_reason(response)
             if reason is None:
                 self.pool.log(f"  final review provider: {adapter.name} ({self.pool.kind(adapter.name)})")
@@ -373,6 +393,8 @@ class FallbackReviewAdapter:
                 return response
             self.attempts.append({"provider": adapter.name, "reason": reason})
             self.pool.record_failure(self.store, REVIEW, self.task_id, adapter.name, reason)
+            if limiter is not None:  # an unavailable reviewer is unavailable for every task, not just this one
+                limiter.cool_down(adapter.name, self.pool.cooldown_seconds, reason)
             previous = adapter.name
         self.pool.log("  all eligible review providers failed: " + "; ".join(f"{a['provider']}: {a['reason']}" for a in self.attempts))
         return response
@@ -412,23 +434,49 @@ class PooledExecutor(Executor):
             )
         failures: list[str] = []
         reasons: list[str] = []
-        for index, adapter in enumerate(eligible):
+        limiter = self.pool.limiter
+        remaining = list(eligible)
+        index = 0
+        previous_name = ""
+        while remaining:
+            adapter = remaining[0]
+            held: str | None = None
+            if limiter is not None:
+                # Wait for a free slot on any not-yet-tried provider, still honouring the policy order; a saturated preferred
+                # provider hands the task to the next one instead of being overloaded.
+                if not any(limiter.has_room(a.name) for a in remaining):
+                    log(f"  every provider is at capacity; waiting for a slot ({', '.join(a.name for a in remaining)})")
+                held = limiter.acquire([a.name for a in remaining])
+                if held is None:
+                    break  # every remaining provider went into cooldown while waiting
+                adapter = next(a for a in remaining if a.name == held)
+                if adapter is not remaining[0]:
+                    log(f"  provider {remaining[0].name} is at capacity -> using {adapter.name}")
+            remaining.remove(adapter)
             if index:
-                log(f"  fallback: {eligible[index - 1].name} failed ({reasons[-1]}) -> trying {adapter.name}")
+                log(f"  fallback: {previous_name} failed ({reasons[-1]}) -> trying {adapter.name}")
             log(
                 f"  selected implementation provider {adapter.name} ({self.pool.kind(adapter.name)}): "
                 f"{self.pool.why(IMPLEMENT, adapter.name, index == 0)}"
             )
             self.name = adapter.name
             try:
-                result = adapter.execute(store, task_id, claim_id, project)
-            except Exception as exc:  # noqa: BLE001 - one provider crashing must not stop the fallback chain
-                result = ExecutionResult(ExecutionStatus.FAILED, capacity_failure=True, failure_reason=f"{type(exc).__name__}: {exc}")
+                try:
+                    result = adapter.execute(store, task_id, claim_id, project)
+                except Exception as exc:  # noqa: BLE001 - one provider crashing must not stop the fallback chain
+                    result = ExecutionResult(ExecutionStatus.FAILED, capacity_failure=True, failure_reason=f"{type(exc).__name__}: {exc}")
+            finally:
+                if held is not None and limiter is not None:
+                    limiter.release(held)
+            previous_name = adapter.name
+            index += 1
             if result.capacity_failure or result.failure_reason == PROVIDER_TIMEOUT:
                 reason = result.failure_reason or "provider_failure"
                 reasons.append(reason)
                 failures.append(f"{adapter.name}: {reason}")
                 self.pool.record_failure(store, IMPLEMENT, task_id, adapter.name, reason)
+                if limiter is not None and result.capacity_failure:
+                    limiter.cool_down(adapter.name, self.pool.cooldown_seconds, reason)
                 _reset_worktree(project, task_id)
                 continue
             self.pool.record_use(store, IMPLEMENT, task_id, adapter.name, str(result.status))

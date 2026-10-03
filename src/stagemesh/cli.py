@@ -4,6 +4,9 @@ import argparse
 import json
 import platform
 import sys
+import threading
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 from . import __version__
@@ -46,7 +49,11 @@ from .registry import (
     RegistryConflictError,
     RegistryValidationError,
 )
+from .concurrency import IntegrationLock, ProviderLimiter
+from .parallel import ParallelRunner, ParallelSummary, SetupRefused, worker_id_for
+from .queue_run import QueueRunner
 from .run_ready import RunSummary, format_step_update, format_stop, run_ready
+from .serialized_integration import SerializedIntegrator
 from .provider_pool import IMPLEMENT, REVIEW, PooledExecutor, ProviderLog, ProviderPool, default_pools, describe_verdicts
 from .release import ReleaseValidationError, build_release_artifact
 from .release_readiness import ReleaseReadinessValidationError, release_readiness
@@ -171,7 +178,14 @@ def _sync_all_sources(store: Store, project: Path, config, targeted_task_id: str
 
 
 def _build_coordinator(
-    args, project: Path, config, store: Store, target: TargetSelection | None, provider_log: ProviderLog | None = None
+    args,
+    project: Path,
+    config,
+    store: Store,
+    target: TargetSelection | None,
+    provider_log: ProviderLog | None = None,
+    *,
+    parallel: ParallelWiring | None = None,
 ):
     """Wire provider adapters, router, reviewer and integrator; raises _SetupError after printing why."""
     # Wire real provider adapters unless --dry-run is requested.
@@ -223,6 +237,7 @@ def _build_coordinator(
             policy=config.provider_selection_policy,
             weights=weights,
             priorities=priorities,
+            limiter=parallel.limiter if parallel else None,
         )
         staged = config.routing_mode == RoutingMode.STAGED
         ok, diagnostic, impl_verdicts, review_verdicts = pool.preflight(store, target.task_id if target else None)
@@ -252,7 +267,19 @@ def _build_coordinator(
         if integration_ref is None:
             print("no integration_ref configured and the project has no current branch", file=sys.stderr)
             raise _SetupError(2)
-        integrator = Integrator(integration_ref=integration_ref, require_independent_review=require_independent_review)
+        integrator = (
+            SerializedIntegrator(
+                integration_ref,
+                require_independent_review,
+                parallel.lock,
+                max_rebases=config.parallel.integration_rebase_attempts,
+                on_event=parallel.on_integration_event,
+            )
+            if parallel
+            else Integrator(integration_ref=integration_ref, require_independent_review=require_independent_review)
+        )
+    elif parallel:  # --dry-run: evidence-only integration, still behind the lock
+        integrator = SerializedIntegrator(None, False, parallel.lock)
     coord = Coordinator(
         store,
         project,
@@ -261,6 +288,7 @@ def _build_coordinator(
         integrator=integrator,
         target=target,
         require_independent_review=require_independent_review,
+        **({"worker_id": worker_id_for(target.task_id)} if parallel and target else {}),
     )
     info = {
         "provider": chosen_provider,
@@ -273,7 +301,27 @@ def _build_coordinator(
     return coord, info
 
 
+@dataclass
+class ParallelWiring:
+    """What every task of a parallel run shares: provider slots, the integration lock and the lifecycle sink."""
+
+    limiter: ProviderLimiter
+    lock: IntegrationLock
+    on_integration_event: Callable[[str, str, dict[str, object]], None] | None = None
+
+
 def command_continue(args: argparse.Namespace) -> int:
+    parallel = getattr(args, "parallel", None)
+    if parallel is not None:
+        if parallel < 1:
+            print("--parallel must be at least 1", file=sys.stderr)
+            return 2
+        if parallel > 1:
+            conflicts = [flag for flag, on in (("--task", getattr(args, "task", None)), ("--choose", getattr(args, "choose", False)), ("--once", getattr(args, "once", False))) if on]
+            if conflicts:
+                print(f"--parallel selects tasks automatically and cannot be combined with {', '.join(conflicts)}", file=sys.stderr)
+                return 2
+            return command_run_parallel(args)
     if not getattr(args, "once", False):
         return command_run_ready(args)  # default: supervise one task to completion; --once keeps the single tick
     project = Path(args.project).resolve()
@@ -513,6 +561,110 @@ def command_run_ready(args: argparse.Namespace) -> int:
     return _report_run_ready(summary, info, as_json=args.json)
 
 
+def command_queue_run(args: argparse.Namespace) -> int:
+    if args.concurrency < 1:
+        print("--concurrency must be at least 1", file=sys.stderr)
+        return 2
+    args.parallel = args.concurrency
+    return command_run_parallel(args, queue=True)
+
+
+def command_run_parallel(args: argparse.Namespace, *, queue: bool = False) -> int:
+    project = Path(args.project).resolve()
+    config = load_config(project)
+    store = Store(db_path(project))
+    store.migrate()
+    _sync_all_sources(store, project, config, None)
+    gate: dict[str, object] | None = None
+    if queue:
+        from .queue_run import preflight
+
+        gate = preflight(project, config, require_ref=not getattr(args, "dry_run", False))
+        if not gate["ok"]:
+            store.close()
+            return _report_queue_refusal(gate, as_json=args.json)
+    limiter = ProviderLimiter(
+        config.parallel.provider_max_concurrency,
+        {name: spec.max_concurrency for name, spec in config.provider_specs.items() if spec.max_concurrency is not None},
+    )
+    wiring = ParallelWiring(limiter, IntegrationLock(runtime_dir(project) / "integration.lock"))
+    print_lock = threading.Lock()
+    info: dict[str, object] = {}
+
+    def emit(task_id: str, text: str) -> None:
+        if args.json:
+            return
+        prefix = f"[{task_id}] " if task_id != "run" else "[run] "
+        with print_lock:  # whole blocks at a time, so one task's lines never interleave with another's
+            print("\n".join(prefix + line if line.strip() else prefix.rstrip() for line in text.splitlines()), flush=True)
+
+    runner: ParallelRunner
+
+    def make_coordinator(target: TargetSelection, task_store: Store, task_id: str) -> Coordinator:
+        try:
+            coord, details = _build_coordinator(args, project, config, task_store, target, runner.provider_log(task_id), parallel=wiring)
+        except _SetupError as exc:
+            raise SetupRefused(f"provider setup failed for task {task_id} (see stderr; exit {exc.code})") from exc
+        info.update(details)
+        return coord
+
+    runner_class = QueueRunner if queue else ParallelRunner
+    runner = runner_class(
+        store,
+        project,
+        make_coordinator,
+        concurrency=args.parallel,
+        policy=config.task_selection,
+        auto_plan=not getattr(args, "no_auto_plan", False),
+        max_steps=getattr(args, "max_steps", 50),
+        limiter=limiter,
+        emit=emit,
+    )
+    wiring.on_integration_event = lambda task_id, event, detail: runner.note(task_id, event, **detail)
+    emit("run", f"StageMesh {'queue-run' if queue else 'continue'}: up to {args.parallel} tasks in parallel, one worktree per task")
+    summary = runner.run()
+    store.close()
+    return _report_parallel(summary, info, as_json=args.json, preflight=gate)
+
+
+def _report_queue_refusal(gate: dict[str, object], *, as_json: bool) -> int:
+    if as_json:
+        print(json.dumps({"mode": "queue", "stop_reason": "REFUSED:preflight_failed", "succeeded": False, "preflight": gate, "tasks": []}, indent=2, sort_keys=True))
+    else:
+        print("queue-run refused: project preflight failed", file=sys.stderr)
+        smoke = gate["smoke"]  # type: ignore[index]
+        for check in smoke.get("checks", []):  # type: ignore[union-attr]
+            if check["status"] == "fail":
+                print(f"  [FAIL] {check['name']}: {check['detail']}", file=sys.stderr)
+                for item in check.get("items", []):
+                    print(f"         - {item}", file=sys.stderr)
+        if smoke.get("detail") and not smoke.get("ok"):  # type: ignore[union-attr]
+            print(f"  {smoke['detail']}", file=sys.stderr)  # type: ignore[index]
+        for check in gate["checks"]:  # type: ignore[union-attr]
+            if not check["ok"]:
+                print(f"  [FAIL] {check['name']}: {check.get('detail', '')}", file=sys.stderr)
+    return 2
+
+
+def _report_parallel(summary: ParallelSummary, info: dict[str, object], *, as_json: bool, preflight: dict[str, object] | None = None) -> int:
+    if as_json:
+        extra: dict[str, object] = {}
+        if preflight is not None:
+            refused = [t.task_id for t in summary.tasks if t.summary and t.summary.stop_reason.startswith("REFUSED:")]
+            extra = {"mode": "queue", "preflight": preflight, "refused": refused}
+        print(json.dumps({**summary.to_dict(), **extra, "provider_config": info}, indent=2, sort_keys=True, default=str))
+    else:
+        for task in summary.tasks:
+            outcome = task.summary.stop_reason if task.summary else "UNSET"
+            print(f"[{task.task_id}] result: {outcome}" + (f" - {task.summary.message}" if task.summary and task.summary.message else ""))
+        print(f"Parallel run stopped: {summary.stop_reason.replace('_', ' ').lower()}" + (f" ({summary.message})" if summary.message else ""))
+    if summary.interrupted:
+        return 130
+    if summary.succeeded:
+        return 0
+    return 2 if summary.stop_reason.startswith("REFUSED:") else 1
+
+
 def _interactive_chooser(candidates) -> str | None:
     """Prompt on the terminal; returns None (a refusal) when stdin is not interactive or the answer is not a listed number."""
     if not sys.stdin or not sys.stdin.isatty():
@@ -534,6 +686,40 @@ def _report_run_ready(summary: RunSummary, info: dict[str, object], *, as_json: 
     if summary.succeeded:
         return 0
     return 2 if summary.stop_reason.startswith("REFUSED:") else 1
+
+
+def command_project_smoke(args: argparse.Namespace) -> int:
+    """Generic compatibility smoke: profile, generated contracts, gate safety, forbidden patterns, selection (no implementation)."""
+    from .profile_smoke import run_smoke
+
+    project = Path(args.project).resolve()
+    config = load_config(project)
+    report = run_smoke(
+        project,
+        config,
+        task_ids=args.task,
+        dry_run_selection=args.dry_run_selection,
+        sync=lambda store, targeted: _sync_all_sources(store, project, config, targeted),
+    )
+    if args.json:
+        print(json.dumps(report.to_dict(), indent=2, sort_keys=True))
+        return 0 if report.ok else 1
+    marks = {"pass": "PASS", "fail": "FAIL", "warn": "WARN", "skip": "SKIP"}
+    print(f"StageMesh project smoke: {project}" + (f" (profile {report.profile})" if report.profile else ""))
+    for check in report.checks:
+        print(f"  [{marks[check.status]}] {check.name}: {check.detail}")
+        for item in check.items:
+            print(f"         - {item}")
+    for probe in report.probes:
+        print(f"  probe {probe['title']!r}: expected {probe['expected']}, selected {probe['selected']} ({'ok' if probe['ok'] else 'MISMATCH'})")
+    for task in report.tasks:
+        if "task_type" in task:
+            print(f"  task {task['task_id']}: type {task['task_type']} ({task['selection']['source']}); gates {', '.join(task['gates'])}")
+    if report.selection:
+        nxt = report.selection["next"]
+        print("  next task: " + (f"{nxt['task_id']} - {nxt['reason']}" if "task_id" in nxt else str(nxt.get("message"))))
+    print("Smoke " + ("passed" if report.ok else "FAILED"))
+    return 0 if report.ok else 1
 
 
 def command_profile(args: argparse.Namespace) -> int:
@@ -1557,6 +1743,15 @@ def build_parser() -> argparse.ArgumentParser:
     doctor = sub.add_parser("doctor")
     doctor.add_argument("--json", action="store_true")
     doctor.set_defaults(func=command_doctor)
+    queue_cmd = sub.add_parser(
+        "queue-run", help="Run several ready tasks at once when their contracts do not conflict (strict admission, serial integration)"
+    )
+    queue_cmd.add_argument("--concurrency", type=int, required=True, metavar="N", help="Maximum tasks running at once")
+    queue_cmd.add_argument("--max-steps", type=int, default=50, help="Step budget for each task")
+    queue_cmd.add_argument("--json", action="store_true")
+    queue_cmd.add_argument("--provider", help="Provider name to use for implementation (e.g. claude, codex)")
+    queue_cmd.add_argument("--dry-run", action="store_true", help="Use FakeExecutor instead of a real provider")
+    queue_cmd.set_defaults(func=command_queue_run)
     cont = sub.add_parser("continue")
     cont.add_argument(
         "--once",
@@ -1566,6 +1761,12 @@ def build_parser() -> argparse.ArgumentParser:
     cont.add_argument("--choose", "--interactive", dest="choose", action="store_true", help="Pick among eligible tasks interactively")
     cont.add_argument("--no-auto-plan", action="store_true", help="Refuse instead of generating a missing change contract")
     cont.add_argument("--max-steps", type=int, default=50, help="Step budget for the supervised default mode")
+    cont.add_argument(
+        "--parallel",
+        type=int,
+        metavar="N",
+        help="Run up to N independent eligible tasks at once, each in its own worktree, with serialized integration",
+    )
     cont.add_argument("--json", action="store_true")
     cont.add_argument("--provider", help="Provider name to use for implementation (e.g. claude, codex)")
     cont.add_argument("--dry-run", action="store_true", help="Use FakeExecutor instead of a real provider")
@@ -1594,6 +1795,15 @@ def build_parser() -> argparse.ArgumentParser:
     run_ready_cmd.add_argument("--no-auto-plan", action="store_true", help="Refuse instead of generating a missing change contract")
     run_ready_cmd.add_argument("--json", action="store_true")
     run_ready_cmd.set_defaults(func=command_run_ready)
+    smoke_cmd = sub.add_parser(
+        "project-smoke", help="Check this project's profile is safe and usable by this StageMesh version (no implementation runs)"
+    )
+    smoke_cmd.add_argument("--task", action="append", help="Show the type, contract and gates this task would get (repeatable)")
+    smoke_cmd.add_argument(
+        "--dry-run-selection", action="store_true", help="Also dry-run task selection and auto-planning against discovered tasks"
+    )
+    smoke_cmd.add_argument("--json", action="store_true")
+    smoke_cmd.set_defaults(func=command_project_smoke)
     profile_cmd = sub.add_parser("profile", help="Validate the project profile; --task shows the contract it would generate")
     profile_cmd.add_argument("--task", help="Task id to explain (read-only)")
     profile_cmd.add_argument("--json", action="store_true")
