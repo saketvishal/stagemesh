@@ -132,7 +132,7 @@ class RuntimeCommandAdapter:
 
     def review_candidate(self, prompt: str, project: Path, candidate_sha: str) -> str:
         if self.check_capacity() != CapacityKind.AVAILABLE:
-            return _review_failure("provider_unavailable")
+            return _review_infrastructure_failure("provider_unavailable")
         with tempfile.TemporaryDirectory(prefix="stagemesh-review-") as temp_dir:
             review_path = Path(temp_dir) / "candidate"
             clone = subprocess.run(
@@ -142,7 +142,7 @@ class RuntimeCommandAdapter:
                 check=False,
             )
             if clone.returncode != 0:
-                return _review_failure("review workspace clone failed")
+                return _review_infrastructure_failure("review workspace clone failed")
             checkout = subprocess.run(
                 ["git", "checkout", "--quiet", "--detach", candidate_sha],
                 cwd=review_path,
@@ -151,10 +151,10 @@ class RuntimeCommandAdapter:
                 check=False,
             )
             if checkout.returncode != 0:
-                return _review_failure("review candidate checkout failed")
+                return _review_infrastructure_failure("review candidate checkout failed")
             before_head = _git_output(review_path, "rev-parse", "HEAD")
             if before_head != candidate_sha:
-                return _review_failure("review workspace did not checkout exact candidate")
+                return _review_infrastructure_failure("review workspace did not checkout exact candidate")
             try:
                 proc = subprocess.Popen(
                     list(self.command),
@@ -168,17 +168,17 @@ class RuntimeCommandAdapter:
                     **popen_session_kwargs(),
                 )
             except FileNotFoundError:
-                return _review_failure("provider_unavailable")
+                return _review_infrastructure_failure("provider_unavailable")
             stdout, stderr, timed_out = communicate_bounded(proc, prompt, provider_timeout_seconds(self.timeout_seconds))
             if timed_out:
-                return _review_failure(PROVIDER_TIMEOUT)
+                return _review_infrastructure_failure(PROVIDER_TIMEOUT)
             after_head = _git_output(review_path, "rev-parse", "HEAD")
             tracked_dirty = _tracked_content_changed(review_path)
             if after_head != before_head or tracked_dirty:
                 return _review_failure("review execution mutated candidate workspace")
             if proc.returncode != 0:
                 _, reason = classify_failure(proc.returncode, stdout, stderr)
-                return _review_failure(reason)
+                return _review_infrastructure_failure(reason)
             return stdout.strip()
 
 
@@ -335,6 +335,12 @@ def _tracked_content_changed(path: Path) -> bool:
     unstaged = subprocess.run(["git", "diff", "--quiet"], cwd=path, check=False)
     staged = subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=path, check=False)
     return unstaged.returncode != 0 or staged.returncode != 0
+
+
+def _review_infrastructure_failure(reason: str) -> str:
+    import json
+
+    return json.dumps({"decision": "INFRASTRUCTURE_FAILURE", "reason": reason})
 
 
 def _review_failure(message: str) -> str:

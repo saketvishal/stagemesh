@@ -518,6 +518,34 @@ class Store:
                 return True
         return False
 
+    def bound_evidence_payloads(
+        self,
+        task_id: str,
+        sha: str,
+        kind: EvidenceKind,
+        contract_hash: str,
+        status: EvidenceStatus = EvidenceStatus.PASSED,
+    ) -> list[dict[str, Any]]:
+        """Payloads of evidence rows bound to this exact task, candidate SHA, kind, status and contract hash."""
+        rows = self.conn.execute(
+            "SELECT payload FROM evidence WHERE task_id=? AND candidate_sha=? AND kind=? AND status=?",
+            (
+                _validate_text(task_id, "task id"),
+                _validate_text(sha, "candidate sha"),
+                _validate_enum(kind, EvidenceKind, "evidence kind"),
+                _validate_enum(status, EvidenceStatus, "evidence status"),
+            ),
+        )
+        payloads: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                payload = json.loads(row["payload"])
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if isinstance(payload, dict) and payload.get("contract_hash") == contract_hash:
+                payloads.append(payload)
+        return payloads
+
     def advance_task(self, task_id: str, stage: Stage) -> None:
         task_id = _validate_text(task_id, "task id")
         stage = _validate_enum(stage, Stage, "task stage")
