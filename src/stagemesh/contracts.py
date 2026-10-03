@@ -269,6 +269,8 @@ def evaluate_contract(
             }
         )
 
+    findings.extend(candidate_hygiene_findings(project, candidate_sha, list(changed)))
+
     for path in changed:
         if _matches(path, contract.exclusions):
             findings.append(
@@ -361,6 +363,44 @@ def evaluate_contract(
         findings=tuple(findings),
         gates=tuple(gates),
     )
+
+
+NOISE_SEGMENTS = frozenset(
+    {".npm-cache", ".npm", "node_modules", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".cache", ".parcel-cache"}
+)
+NOISE_FILENAMES = frozenset({".DS_Store", "Thumbs.db", "_update-notifier-last-checked"})
+NOISE_SUFFIXES = (".pyc", ".pyo")
+
+
+def is_noise_path(path: str) -> bool:
+    """True for tool cache/noise files that must never be part of a product candidate."""
+    parts = path.replace("\\", "/").split("/")
+    return (
+        any(part in NOISE_SEGMENTS for part in parts[:-1])
+        or parts[-1] in NOISE_FILENAMES
+        or parts[-1].endswith(NOISE_SUFFIXES)
+    )
+
+
+def candidate_hygiene_findings(project: Path, candidate_sha: str, changed: list[str]) -> list[dict[str, object]]:
+    """Findings for cache/noise paths the candidate adds or modifies (pure deletions are allowed)."""
+    noisy = [path for path in changed if is_noise_path(path)]
+    if not noisy:
+        return []
+    try:
+        present = set(GitWorkspace(project).run("ls-tree", "-r", "--name-only", candidate_sha).stdout.splitlines())
+    except GitError:
+        present = set(noisy)
+    return [
+        {
+            "severity": "error",
+            "code": "candidate_noise_file",
+            "path": path,
+            "message": f"{path} is a cache/noise file and must not be part of a candidate",
+        }
+        for path in noisy
+        if path in present
+    ]
 
 
 def changed_files(project: Path, candidate_sha: str, baseline_sha: str | None = None) -> list[str]:

@@ -6,6 +6,7 @@ from typing import Any
 
 from .domain import ExecutionStatus, Stage, TaskStatus
 from .persistence import Store
+from .process_identity import classify_process, process_identity
 
 
 @dataclass(frozen=True)
@@ -19,6 +20,10 @@ class HealthReport:
     unknown_execution_count: int
     backlog_state: str
     latest_implementation_failure: dict[str, Any] | None
+    historical_failed_execution_count: int = 0
+    current_failed_execution_count: int = 0
+    stale_execution_count: int = 0
+    current_problems: tuple[str, ...] = ()
 
 
 def health(store: Store) -> HealthReport:
@@ -39,8 +44,25 @@ def health(store: Store) -> HealthReport:
         ).fetchone()[0]
     )
     backlog_state = "EMPTY" if not tasks else "ACTIVE"
+    current_failed = _current_failed_execution_count(store)
+    stale = sum(
+        1
+        for execution in running
+        if classify_process(store.execution_process_identity(execution["id"]), process_identity(execution["pid"])) == "DEAD"
+    )
+    problems = tuple(
+        label
+        for label, present in (
+            ("blocked_tasks", bool(blocked)),
+            ("current_failed_executions", current_failed > 0),
+            ("unknown_executions", unknown_execution_count > 0),
+            ("stale_running_executions", stale > 0),
+        )
+        if present
+    )
     return HealthReport(
-        ok=not blocked and failed_execution_count == 0 and unknown_execution_count == 0,
+        # `ok` reflects current state only; failed_execution_count is a historical total kept for compatibility.
+        ok=not problems,
         task_count=len(tasks),
         blocked_task_count=len(blocked),
         running_count=len(running),
@@ -49,7 +71,26 @@ def health(store: Store) -> HealthReport:
         unknown_execution_count=unknown_execution_count,
         backlog_state=backlog_state,
         latest_implementation_failure=_latest_implementation_failure(store),
+        historical_failed_execution_count=failed_execution_count,
+        current_failed_execution_count=current_failed,
+        stale_execution_count=stale,
+        current_problems=problems,
     )
+
+
+def _current_failed_execution_count(store: Store) -> int:
+    """Tasks not yet done whose most recent execution failed; superseded failures are history, not current."""
+    count = 0
+    for task in store.tasks():
+        if task["stage"] == Stage.DONE or task["status"] == TaskStatus.DONE:
+            continue
+        latest = store.conn.execute(
+            "SELECT status FROM executions WHERE task_id=? ORDER BY updated_at DESC, rowid DESC LIMIT 1",
+            (task["id"],),
+        ).fetchone()
+        if latest is not None and latest["status"] == ExecutionStatus.FAILED:
+            count += 1
+    return count
 
 
 def _latest_implementation_failure(store: Store) -> dict[str, Any] | None:
