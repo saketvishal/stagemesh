@@ -46,7 +46,7 @@ from .registry import (
     RegistryConflictError,
     RegistryValidationError,
 )
-from .run_ready import RunSummary, format_step, run_ready
+from .run_ready import RunSummary, format_step_update, format_stop, run_ready
 from .provider_pool import IMPLEMENT, REVIEW, PooledExecutor, ProviderLog, ProviderPool, default_pools, describe_verdicts
 from .release import ReleaseValidationError, build_release_artifact
 from .release_readiness import ReleaseReadinessValidationError, release_readiness
@@ -464,7 +464,7 @@ def command_run_ready(args: argparse.Namespace) -> int:
     store.migrate()
     _sync_all_sources(store, project, config, requested)
     info: dict[str, object] = {}
-    provider_log = ProviderLog()
+    provider_log = ProviderLog(echo=False)
 
     def make_coordinator(target: TargetSelection) -> Coordinator:
         coord, details = _build_coordinator(args, project, config, store, target, provider_log)
@@ -473,10 +473,17 @@ def command_run_ready(args: argparse.Namespace) -> int:
 
     def on_step(step: dict[str, object]) -> None:
         if not args.json:
-            print(format_step(step), flush=True)
+            nonlocal provider_notice_index
+            notices = provider_log.lines[provider_notice_index:]
+            provider_notice_index = len(provider_log.lines)
+            print(format_step_update(step, notices=notices), flush=True)
+            print(flush=True)
 
     def on_start(message: str) -> None:
-        print(f"[stagemesh] {message}", file=sys.stderr, flush=True)
+        if not args.json:
+            print(message, flush=True)
+
+    provider_notice_index = 0
 
     try:
         summary = run_ready(
@@ -496,11 +503,7 @@ def _report_run_ready(summary: RunSummary, info: dict[str, object], *, as_json: 
     else:
         for item in summary.recovered:
             print(f"recovered stale execution {item['execution_id']} (pid {item['pid']} dead)")
-        print(f"stop_reason: {summary.stop_reason}")
-        if summary.message:
-            print(f"message: {summary.message}")
-        if summary.final:
-            print(f"final: {summary.final['stage']}/{summary.final['status']} task {summary.task_id}")
+        print(format_stop(summary))
     if summary.succeeded:
         return 0
     return 2 if summary.stop_reason.startswith("REFUSED:") else 1
