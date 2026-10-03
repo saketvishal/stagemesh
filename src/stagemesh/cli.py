@@ -47,6 +47,7 @@ from .registry import (
     RegistryConflictError,
     RegistryValidationError,
 )
+from .run_ready import RunSummary, format_step, run_ready
 from .release import ReleaseValidationError, build_release_artifact
 from .release_readiness import ReleaseReadinessValidationError, release_readiness
 from .retry import RetryRegistry, RetryValidationError
@@ -156,21 +157,21 @@ def command_doctor(args: argparse.Namespace) -> int:
     return 0
 
 
-def command_continue(args: argparse.Namespace) -> int:
-    project = Path(args.project).resolve()
-    targeted_task_id = getattr(args, "task", None) or getattr(args, "task_id", None)
-    targeted_mode = targeted_task_id is not None
-    if targeted_task_id is not None and not str(targeted_task_id).strip():
-        print("target task id must not be empty", file=sys.stderr)
-        return 2
-    target = TargetSelection(str(targeted_task_id)) if targeted_task_id is not None else None
-    config = load_config(project)
-    store = Store(db_path(project))
-    store.migrate()
+class _SetupError(Exception):
+    def __init__(self, code: int):
+        super().__init__(code)
+        self.code = code
+
+
+def _sync_all_sources(store: Store, project: Path, config, targeted_task_id: str | None) -> None:
     backlog = project / ".stagemesh" / "backlog.json"
     sync_source(store, _filter_targeted_tasks(LocalBacklogSource(backlog).discover(), targeted_task_id))
     for source in task_sources_from_config(config):
         sync_source(store, _filter_targeted_tasks(source.discover(), targeted_task_id))
+
+
+def _build_coordinator(args, project: Path, config, store: Store, target: TargetSelection | None):
+    """Wire provider adapters, router, reviewer and integrator; raises _SetupError after printing why."""
     # Wire real provider adapters unless --dry-run is requested.
     executor = None
     reviewer = None
@@ -186,8 +187,7 @@ def command_continue(args: argparse.Namespace) -> int:
             adapters = adapters_from_config(config)
         except ProviderValidationError as exc:
             print(f"provider config error: {exc}", file=sys.stderr)
-            store.close()
-            return 2
+            raise _SetupError(2)
         adapter_by_name = {adapter.name: adapter for adapter in adapters}
         router = Router(
             [
@@ -207,8 +207,7 @@ def command_continue(args: argparse.Namespace) -> int:
             adapter = adapter_by_name.get(chosen_name)
             if adapter is None:
                 print(f"provider not found: {chosen_name}", file=sys.stderr)
-                store.close()
-                return 2
+                raise _SetupError(2)
         else:
             routed = router.choose_for_stage("IMPLEMENT", "code")
             adapter = adapter_by_name.get(routed.name) if routed else (adapters[0] if adapters else None)
@@ -241,13 +240,11 @@ def command_continue(args: argparse.Namespace) -> int:
                 "(routing.stage_routes) or set routing.require_independent_review to false for diagnostics.",
                 file=sys.stderr,
             )
-            store.close()
-            return 2
+            raise _SetupError(2)
         integration_ref = config.integration_ref or _current_branch_ref(project)
         if integration_ref is None:
             print("no integration_ref configured and the project has no current branch", file=sys.stderr)
-            store.close()
-            return 2
+            raise _SetupError(2)
         integrator = Integrator(integration_ref=integration_ref, require_independent_review=require_independent_review)
     coord = Coordinator(
         store,
@@ -258,6 +255,38 @@ def command_continue(args: argparse.Namespace) -> int:
         target=target,
         require_independent_review=require_independent_review,
     )
+    info = {
+        "provider": chosen_provider,
+        "review_provider": chosen_review_provider,
+        "independent_review_configured": independent_review_configured,
+        "require_independent_review": require_independent_review,
+        "integration_ref": integration_ref,
+    }
+    return coord, info
+
+
+def command_continue(args: argparse.Namespace) -> int:
+    project = Path(args.project).resolve()
+    targeted_task_id = getattr(args, "task", None) or getattr(args, "task_id", None)
+    targeted_mode = targeted_task_id is not None
+    if targeted_task_id is not None and not str(targeted_task_id).strip():
+        print("target task id must not be empty", file=sys.stderr)
+        return 2
+    target = TargetSelection(str(targeted_task_id)) if targeted_task_id is not None else None
+    config = load_config(project)
+    store = Store(db_path(project))
+    store.migrate()
+    _sync_all_sources(store, project, config, targeted_task_id)
+    try:
+        coord, info = _build_coordinator(args, project, config, store, target)
+    except _SetupError as exc:
+        store.close()
+        return exc.code
+    chosen_provider = info["provider"]
+    chosen_review_provider = info["review_provider"]
+    independent_review_configured = info["independent_review_configured"]
+    require_independent_review = info["require_independent_review"]
+    integration_ref = info["integration_ref"]
     count = 0
     while True:
         try:
@@ -425,6 +454,54 @@ def _health_scope_fields(report) -> dict[str, object]:
         "current_failed_execution_count": report.current_failed_execution_count,
         "stale_execution_count": report.stale_execution_count,
     }
+
+
+def command_run_ready(args: argparse.Namespace) -> int:
+    project = Path(args.project).resolve()
+    requested = str(args.task).strip() if args.task is not None else None
+    if requested is not None and not requested:
+        print("target task id must not be empty", file=sys.stderr)
+        return 2
+    config = load_config(project)
+    store = Store(db_path(project))
+    store.migrate()
+    _sync_all_sources(store, project, config, requested)
+    info: dict[str, object] = {}
+
+    def make_coordinator(target: TargetSelection) -> Coordinator:
+        coord, details = _build_coordinator(args, project, config, store, target)
+        info.update(details)
+        return coord
+
+    def on_step(step: dict[str, object]) -> None:
+        if not args.json:
+            print(format_step(step), flush=True)
+
+    try:
+        summary = run_ready(
+            store, project, make_coordinator, task_id=requested, max_steps=args.max_steps, on_step=on_step
+        )
+    except _SetupError as exc:
+        store.close()
+        return exc.code
+    store.close()
+    return _report_run_ready(summary, info, as_json=args.json)
+
+
+def _report_run_ready(summary: RunSummary, info: dict[str, object], *, as_json: bool) -> int:
+    if as_json:
+        print(json.dumps({**summary.to_dict(), "providers": info}, indent=2, sort_keys=True))
+    else:
+        for item in summary.recovered:
+            print(f"recovered stale execution {item['execution_id']} (pid {item['pid']} dead)")
+        print(f"stop_reason: {summary.stop_reason}")
+        if summary.message:
+            print(f"message: {summary.message}")
+        if summary.final:
+            print(f"final: {summary.final['stage']}/{summary.final['status']} task {summary.task_id}")
+    if summary.succeeded:
+        return 0
+    return 2 if summary.stop_reason.startswith("REFUSED:") else 1
 
 
 def command_recover_stale(args: argparse.Namespace) -> int:
@@ -1397,6 +1474,15 @@ def build_parser() -> argparse.ArgumentParser:
     retry_task.add_argument("--task", required=True)
     retry_task.add_argument("--json", action="store_true")
     retry_task.set_defaults(func=command_retry_task)
+    run_ready_cmd = sub.add_parser(
+        "run-ready", help="Run one ready task to completion under supervision (sync, select, tick, recover dead claims)"
+    )
+    run_ready_cmd.add_argument("--task", help="Run this task id instead of the single eligible OPEN task")
+    run_ready_cmd.add_argument("--max-steps", type=int, default=50)
+    run_ready_cmd.add_argument("--provider", help="Provider name to use for implementation")
+    run_ready_cmd.add_argument("--dry-run", action="store_true", help="Use FakeExecutor instead of a real provider")
+    run_ready_cmd.add_argument("--json", action="store_true")
+    run_ready_cmd.set_defaults(func=command_run_ready)
     recover = sub.add_parser("recover-stale", help="Release stale claims/executions whose process is provably dead")
     recover.add_argument("--task", required=True)
     recover.add_argument("--json", action="store_true")
