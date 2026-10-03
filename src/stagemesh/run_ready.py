@@ -9,7 +9,7 @@ from typing import Any
 
 from .contracts import ContractError, canonical_contract_json, parse_contract, task_contract_path
 from .coordinator import Coordinator, TargetSelection, TargetSelectionError
-from .domain import Stage, TaskStatus
+from .domain import EvidenceKind, Stage, TaskStatus
 from .observability import health
 from .operator_actions import recover_stale, task_details
 from .git import GitWorkspace
@@ -139,6 +139,21 @@ def _latest_failure(store: Store, task_id: str, since: float) -> dict[str, Any] 
     return None
 
 
+def _latest_evidence(store: Store, task_id: str, candidate_sha: str, kind: EvidenceKind) -> dict[str, Any] | None:
+    row = store.conn.execute(
+        "SELECT status, payload FROM evidence WHERE task_id=? AND candidate_sha=? AND kind=? "
+        "ORDER BY created_at DESC, rowid DESC LIMIT 1",
+        (task_id, candidate_sha, kind),
+    ).fetchone()
+    if row is None:
+        return None
+    try:
+        payload = json.loads(row["payload"])
+    except (TypeError, ValueError):
+        payload = {}
+    return {"status": str(row["status"]), "payload": payload}
+
+
 def workspace_info(project: Path, task_id: str) -> dict[str, str]:
     head = GitWorkspace(project).run("symbolic-ref", "--short", "-q", "HEAD", check=False)
     branch = head.stdout.strip()
@@ -153,14 +168,24 @@ def _snapshot(store: Store, task_id: str) -> dict[str, Any]:
     details = task_details(store, task_id)
     claim = details["active_claim"]
     candidate = details["latest_candidate"] or {}
+    candidate_sha = candidate.get("sha")
+    evidence = {}
+    if candidate_sha:
+        evidence = {
+            "validation": _latest_evidence(store, task_id, str(candidate_sha), EvidenceKind.VALIDATION),
+            "review": _latest_evidence(store, task_id, str(candidate_sha), EvidenceKind.REVIEW),
+            "integration": _latest_evidence(store, task_id, str(candidate_sha), EvidenceKind.INTEGRATION),
+        }
     return {
         "stage": str(task["stage"]),
         "status": str(task["status"]),
-        "latest_candidate": candidate.get("sha"),
+        "latest_candidate": candidate_sha,
+        "latest_candidate_provider": candidate.get("producer"),
         "latest_agent": candidate.get("producer") or _latest_claimed_agent(store, task_id),
         "latest_validation": (details["latest_validation"] or {}).get("status"),
         "latest_review": (details["latest_review"] or {}).get("status"),
         "latest_integration": (details["latest_integration"] or {}).get("status"),
+        "latest_evidence": evidence,
         "active_claim": (
             {
                 "id": claim["id"],
@@ -195,20 +220,151 @@ def _latest_claimed_agent(store: Store, task_id: str) -> str | None:
     return None
 
 
-def format_step(step: dict[str, Any]) -> str:
+def format_running(step_number: int, task_id: str, snapshot: dict[str, Any]) -> str:
+    stage = _stage_label(snapshot["stage"])
+    return "\n".join([f"{stage} #{step_number}", f"  task: {task_id}", "  status: running"])
+
+
+def format_start(summary: RunSummary) -> str:
+    workspace = summary.detail.get("workspace", {})
+    lines = [f"StageMesh continue: task {summary.task_id}"]
+    if workspace.get("worktree"):
+        lines.append(f"  worktree: {workspace['worktree']}")
+    if workspace.get("checkout"):
+        lines.append(f"  project checkout: {workspace['checkout']}")
+    return "\n".join(lines)
+
+
+def format_stop(summary: RunSummary) -> str:
+    reason = _human_stop_reason(summary.stop_reason)
+    lines = [f"Run stopped: {reason}"]
+    if summary.message:
+        lines.append(f"  reason: {summary.message}")
+    if summary.final:
+        lines.append(f"  final: {summary.final['stage']}/{summary.final['status']}")
+    return "\n".join(lines)
+
+
+def format_step(step: dict[str, Any], notices: list[str] | None = None) -> str:
+    notices = _operator_notices(notices or [])
+    previous = step["previous"]
     new = step["new"]
-    active = "none"
-    if new["active_executions"]:
-        active = ",".join(f"{e['kind']}:{e['process_state']}" for e in new["active_executions"])
-    elif new["active_claim"]:
-        active = f"claim:{new['active_claim']['stage']}"
-    agent = new.get("latest_agent") or (new["active_claim"] or {}).get("agent") or "-"
-    candidate = (new["latest_candidate"] or "-")[:10]
-    return (
-        f"step {step['step']} task {step['task_id']}: {step['previous']['stage']}/{step['previous']['status']} -> "
-        f"{new['stage']}/{new['status']} candidate={candidate} validation={new['latest_validation'] or '-'} "
-        f"review={new['latest_review'] or '-'} agent={agent} active={active}"
-    )
+    stage = str(previous["stage"])
+    lines = [_stage_label(stage) + f" #{step['step']}", f"  task: {step['task_id']}"]
+    status = _stage_status(stage, new, step.get("progressed", 0))
+    lines.append(f"  status: {status}")
+    actor = _stage_actor(stage, new)
+    if actor:
+        lines.append(f"  actor: {actor}")
+    for detail in _stage_details(stage, previous, new):
+        lines.append(f"  {detail}")
+    for notice in notices:
+        lines.append(f"  note: {notice}")
+    return "\n".join(lines)
+
+
+def format_step_update(step: dict[str, Any], notices: list[str] | None = None) -> str:
+    lines = format_step(step, notices).splitlines()
+    update = lines[2:]
+    if update and update[0].startswith("  status: "):
+        update[0] = "  result: " + update[0].split(": ", 1)[1]
+    return "\n".join(update)
+
+
+def _stage_label(stage: str) -> str:
+    return {
+        "PLAN": "Plan",
+        "IMPLEMENT": "Implementation",
+        "VALIDATE": "Validation",
+        "REVIEW": "Review",
+        "INTEGRATE": "Integration",
+        "DONE": "Done",
+    }.get(stage, stage.title())
+
+
+def _stage_status(stage: str, new: dict[str, Any], progressed: int) -> str:
+    if stage == "PLAN":
+        return "advanced" if progressed else "waiting"
+    evidence = _evidence_for_stage(stage, new)
+    if evidence:
+        return str(evidence["status"]).lower()
+    if new.get("status") == TaskStatus.BLOCKED:
+        return "blocked"
+    if progressed:
+        return "advanced"
+    return "no progress"
+
+
+def _stage_actor(stage: str, new: dict[str, Any]) -> str | None:
+    evidence = _evidence_for_stage(stage, new)
+    payload = evidence.get("payload", {}) if evidence else {}
+    if stage == "IMPLEMENT":
+        return new.get("latest_candidate_provider") or new.get("latest_agent")
+    if stage == "VALIDATE":
+        return str(payload.get("validator") or "contract validator")
+    if stage == "REVIEW":
+        actor = payload.get("review_execution_provider") or payload.get("review_provider")
+        return str(actor) if actor else "review provider"
+    if stage == "INTEGRATE":
+        return str(payload.get("integrator") or "builtin integrator")
+    return None
+
+
+def _stage_details(stage: str, previous: dict[str, Any], new: dict[str, Any]) -> list[str]:
+    details: list[str] = []
+    candidate = new.get("latest_candidate")
+    if stage == "IMPLEMENT" and candidate:
+        details.append(f"candidate: {str(candidate)[:12]}")
+    if stage in {"VALIDATE", "REVIEW", "INTEGRATE"} and candidate:
+        details.append(f"candidate: {str(candidate)[:12]}")
+    if stage == "VALIDATE":
+        evidence = _evidence_for_stage(stage, new)
+        checks = ((evidence or {}).get("payload") or {}).get("validation_checks") or {}
+        executed = checks.get("executed") or []
+        if executed:
+            details.append("checks: " + ", ".join(str(item) for item in executed))
+    if stage == "REVIEW":
+        evidence = _evidence_for_stage(stage, new)
+        payload = ((evidence or {}).get("payload") or {})
+        if payload.get("independent_review_required") is not None:
+            verified = payload.get("independent_reviewer") or payload.get("independent_review_verified")
+            details.append(f"independent: {bool(verified)}")
+    if stage == "INTEGRATE":
+        evidence = _evidence_for_stage(stage, new)
+        payload = ((evidence or {}).get("payload") or {})
+        if payload.get("integration_ref"):
+            details.append(f"ref: {payload['integration_ref']}")
+        if payload.get("integration_method"):
+            details.append(f"method: {payload['integration_method']}")
+    if previous["stage"] != new["stage"]:
+        details.append(f"next: {new['stage']}")
+    return details
+
+
+def _evidence_for_stage(stage: str, snapshot: dict[str, Any]) -> dict[str, Any] | None:
+    key = {"VALIDATE": "validation", "REVIEW": "review", "INTEGRATE": "integration"}.get(stage)
+    if key is None:
+        return None
+    return (snapshot.get("latest_evidence") or {}).get(key)
+
+
+def _operator_notices(lines: list[str]) -> list[str]:
+    interesting = ("fallback:", "skipped ", "REFUSED", "no review provider eligible", "all eligible")
+    return [line.strip() for line in lines if any(marker in line for marker in interesting)]
+
+
+def _human_stop_reason(reason: str) -> str:
+    if reason == "DONE":
+        return "done"
+    if reason == "NO_PROGRESS":
+        return "no progress"
+    if reason == "MAX_STEPS":
+        return "step budget reached"
+    if reason == "BLOCKED":
+        return "blocked"
+    if reason.startswith("REFUSED:"):
+        return "refused (" + reason.split(":", 1)[1].replace("_", " ") + ")"
+    return reason.replace("_", " ").lower()
 
 
 def run_ready(
@@ -254,16 +410,12 @@ def run_ready(
 
     summary.detail["workspace"] = workspace_info(project, selected)
     if on_start is not None:
-        on_start(
-            f"task {selected}: isolated worktree {summary.detail['workspace']['worktree']}; project checkout is on "
-            f"{summary.detail['workspace']['checkout']} and is not edited (the integration ref only advances after "
-            "validation, independent review and integration pass)"
-        )
+        on_start(format_start(summary))
     for number in range(1, max_steps + 1):
         summary.recovered.extend(_recover_dead(store, selected))
         previous = _snapshot(store, selected)
         if on_start is not None:
-            on_start(f"step {number}: {previous['stage']} starting for task {selected}")
+            on_start(format_running(number, selected, previous))
         tick_started = time.time()
         try:
             progressed = coordinator.tick()
