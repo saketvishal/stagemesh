@@ -62,9 +62,29 @@ def apply_migrations(conn: sqlite3.Connection) -> int:
             (migration.version, migration.name, now),
         )
         current = migration.version
+    _repair_legacy_task_baselines(conn)
     return current_schema_version(conn)
 
 
 def current_schema_version(conn: sqlite3.Connection) -> int:
     row = conn.execute("SELECT MAX(version) AS version FROM schema_migrations").fetchone()
     return int(row["version"] or 0)
+
+
+def _repair_legacy_task_baselines(conn: sqlite3.Connection) -> None:
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(task_baselines)")}
+    if "baseline_sha" in columns or "commit_sha" not in columns:
+        return
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS task_baselines_new (
+            task_id TEXT PRIMARY KEY REFERENCES tasks(id),
+            baseline_sha TEXT NOT NULL,
+            created_at REAL NOT NULL
+        );
+        INSERT OR IGNORE INTO task_baselines_new(task_id, baseline_sha, created_at)
+            SELECT task_id, commit_sha, created_at FROM task_baselines WHERE commit_sha IS NOT NULL;
+        DROP TABLE task_baselines;
+        ALTER TABLE task_baselines_new RENAME TO task_baselines;
+        """
+    )
