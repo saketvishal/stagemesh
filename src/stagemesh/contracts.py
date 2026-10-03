@@ -98,6 +98,14 @@ class GateResult:
     stderr: str = ""
 
 
+def _gate_output_text(value: str | bytes | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value
+
+
 @dataclass(frozen=True)
 class ContractEvaluation:
     status: str
@@ -414,6 +422,8 @@ def run_gate(project: Path, gate: GateCommand) -> GateResult:
             gate.command,
             cwd=project,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             capture_output=True,
             check=False,
             timeout=gate.timeout_seconds,
@@ -426,16 +436,16 @@ def run_gate(project: Path, gate: GateCommand) -> GateResult:
             "FAILED",
             tuple(gate.command),
             None,
-            exc.stdout or "",
-            f"timed out after {gate.timeout_seconds}s\n{exc.stderr or ''}",
+            _gate_output_text(exc.stdout),
+            f"timed out after {gate.timeout_seconds}s\n{_gate_output_text(exc.stderr)}",
         )
     return GateResult(
         gate.name,
         "PASSED" if result.returncode == 0 else "FAILED",
         tuple(gate.command),
         result.returncode,
-        result.stdout,
-        result.stderr,
+        _gate_output_text(result.stdout),
+        _gate_output_text(result.stderr),
     )
 
 
