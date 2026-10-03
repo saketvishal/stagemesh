@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -107,6 +108,99 @@ def test_contract_runs_required_gates_and_blocks_failures(tmp_path: Path) -> Non
     assert result.status == "FAILED"
     assert result.gates[0].name == "failing-test"
     assert result.gates[0].returncode == 7
+    assert any(finding["code"] == "gate_failed" for finding in result.findings)
+
+
+def test_contract_gate_decodes_utf8_output_on_failing_gate(tmp_path: Path) -> None:
+    workspace = _repo(tmp_path / "repo")
+    project = workspace.path
+    (project / "src" / "app.py").write_text("VALUE = 4\n", encoding="utf-8")
+    sha = workspace.commit_all("candidate")
+
+    contract = ChangeContract(
+        objective="Decode gate output",
+        allowed_files=("src/**",),
+        required_tests=(
+            GateCommand(
+                "utf8-failure",
+                [
+                    sys.executable,
+                    "-c",
+                    "import sys; sys.stdout.buffer.write(b'vitest says \\xe2\\x9c\\x93\\n'); sys.exit(7)",
+                ],
+            ),
+        ),
+    )
+
+    result = evaluate_contract(project, sha, contract, run_gates=True)
+
+    assert result.status == "FAILED"
+    assert result.gates[0].status == "FAILED"
+    assert result.gates[0].stdout == "vitest says ✓\n"
+    assert any(finding["code"] == "gate_failed" for finding in result.findings)
+
+
+def test_contract_gate_none_output_records_failure_without_type_error(tmp_path: Path, monkeypatch) -> None:
+    workspace = _repo(tmp_path / "repo")
+    project = workspace.path
+    (project / "src" / "app.py").write_text("VALUE = 5\n", encoding="utf-8")
+    sha = workspace.commit_all("candidate")
+
+    real_run = subprocess.run
+
+    def fake_run(*args, **kwargs):
+        if args[0][0] == "git":
+            return real_run(*args, **kwargs)
+        return subprocess.CompletedProcess(args=args[0], returncode=9, stdout=None, stderr=None)
+
+    monkeypatch.setattr("stagemesh.contracts.subprocess.run", fake_run)
+
+    result = evaluate_contract(
+        project,
+        sha,
+        ChangeContract(
+            objective="Handle missing gate output",
+            allowed_files=("src/**",),
+            required_tests=(GateCommand("none-output", [sys.executable, "-c", "pass"]),),
+        ),
+        run_gates=True,
+    )
+
+    assert result.status == "FAILED"
+    assert result.gates[0].stdout == ""
+    assert result.gates[0].stderr == ""
+    assert any(finding["code"] == "gate_failed" for finding in result.findings)
+
+
+def test_contract_gate_timeout_output_is_normalized_to_strings(tmp_path: Path, monkeypatch) -> None:
+    workspace = _repo(tmp_path / "repo")
+    project = workspace.path
+    (project / "src" / "app.py").write_text("VALUE = 6\n", encoding="utf-8")
+    sha = workspace.commit_all("candidate")
+
+    real_run = subprocess.run
+
+    def fake_run(*args, **kwargs):
+        if args[0][0] == "git":
+            return real_run(*args, **kwargs)
+        raise subprocess.TimeoutExpired(args[0], timeout=1, output=b"partial \xe2\x9c\x93", stderr=None)
+
+    monkeypatch.setattr("stagemesh.contracts.subprocess.run", fake_run)
+
+    result = evaluate_contract(
+        project,
+        sha,
+        ChangeContract(
+            objective="Handle timeout gate output",
+            allowed_files=("src/**",),
+            required_tests=(GateCommand("timeout-output", [sys.executable, "-c", "pass"], timeout_seconds=1),),
+        ),
+        run_gates=True,
+    )
+
+    assert result.status == "FAILED"
+    assert result.gates[0].stdout == "partial ✓"
+    assert isinstance(result.gates[0].stderr, str)
     assert any(finding["code"] == "gate_failed" for finding in result.findings)
 
 
