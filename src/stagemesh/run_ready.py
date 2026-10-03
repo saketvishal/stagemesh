@@ -15,7 +15,9 @@ from .observability import health
 from .operator_actions import recover_stale, task_details
 from .git import GitWorkspace
 from .persistence import MAX_CANONICAL_CONTRACT_CHARS, Store
+from .config import TaskSelectionConfig
 from .scheduling import Scheduler
+from .task_selection import Candidate, Selection, SelectionRefusal, select_next_task
 from .workspaces import task_workspace
 
 # A task whose latest execution failed is a normal remediation state, not a reason to stop supervising.
@@ -39,6 +41,7 @@ class RunSummary:
     steps: list[dict[str, Any]] = field(default_factory=list)
     recovered: list[dict[str, Any]] = field(default_factory=list)
     final: dict[str, Any] | None = None
+    selection: dict[str, Any] = field(default_factory=dict)
     auto_plan: dict[str, Any] = field(default_factory=lambda: {"occurred": False, "reused_existing": False, "events": []})
     detail: dict[str, Any] = field(default_factory=dict)
 
@@ -57,6 +60,7 @@ class RunSummary:
             "steps": self.steps,
             "recovered": self.recovered,
             "final": self.final,
+            "selection": self.selection,
             "auto_plan": self.auto_plan,
             **({"detail": self.detail} if self.detail else {}),
         }
@@ -72,6 +76,35 @@ def _recover_dead(store: Store, task_id: str) -> list[dict[str, Any]]:
         for action in recover_stale(store, task_id)
         if action.action == "RELEASED"
     ]
+
+
+def choose_task(
+    store: Store,
+    project: Path,
+    requested: str | None,
+    policy: TaskSelectionConfig,
+    auto_plan: bool,
+    chooser: Callable[[list[Candidate]], str | None] | None,
+) -> Selection:
+    """--task bypasses the policy; otherwise rank the eligible tasks (see task_selection) and pick or refuse."""
+    if requested is not None:
+        select_task(store, requested)  # existence check
+        return Selection("explicit", requested, "explicit --task (selection policy bypassed)")
+    try:
+        return select_next_task(store, project, policy, auto_plan=auto_plan, chooser=chooser)
+    except SelectionRefusal as refusal:
+        raise RunReadyRefusal(refusal.reason, refusal.message, **refusal.detail) from refusal
+
+
+def _log_selection(selection: Selection, log: Callable[[str], None] | None) -> None:
+    if log is None:
+        return
+    log(f"task selection ({selection.mode}): task {selection.task_id} - {selection.reason}")
+    if selection.mode in {"auto", "chosen"}:
+        for rank, candidate in enumerate(selection.candidates[:5], start=1):
+            log(f"  candidate {rank}: task {candidate['task_id']} ({candidate['priority'] or 'no priority'}, contract {candidate['contract']})")
+    for skip in selection.skipped:
+        log(f"  skipped task {skip['task_id']}: {skip['reason']}")
 
 
 def select_task(store: Store, requested: str | None) -> str:
@@ -407,11 +440,14 @@ def run_ready(
     on_step: Callable[[dict[str, Any]], None] | None = None,
     on_start: Callable[[str], None] | None = None,
     auto_plan: bool = True,
+    policy: TaskSelectionConfig | None = None,
+    chooser: Callable[[list[Candidate]], str | None] | None = None,
 ) -> RunSummary:
     """Drive exactly one task through the existing coordinator until DONE, BLOCKED or a safe stop."""
     if max_steps < 1:
         return RunSummary(False, "REFUSED:invalid_max_steps", message="--max-steps must be at least 1")
     recovered: list[dict[str, Any]] = []
+    selection_info: dict[str, Any] = {}
     plan_info: dict[str, Any] = {"occurred": False, "reused_existing": False, "events": []}
 
     def note(message: str) -> None:
@@ -422,7 +458,10 @@ def run_ready(
     try:
         for row in store.tasks():  # provably dead claims/executions only; live/unknown are never touched
             recovered.extend(_recover_dead(store, str(row["id"])))
-        selected = select_task(store, task_id)
+        selection = choose_task(store, project, task_id, policy or TaskSelectionConfig(), auto_plan, chooser)
+        selection_info.update(selection.to_dict())
+        _log_selection(selection, on_start)
+        selected = selection.task_id
         _ensure_contract(store, project, selected, auto_plan, plan_info, note)
         if any(row["task_id"] == selected for row in store.running_executions()):
             raise RunReadyRefusal(
@@ -441,9 +480,10 @@ def run_ready(
             recovered=recovered,
             detail=refusal.detail,
             auto_plan=plan_info,
+            selection=selection_info,
         )
 
-    summary = RunSummary(True, "UNSET", task_id=selected, recovered=recovered, auto_plan=plan_info)
+    summary = RunSummary(True, "UNSET", task_id=selected, recovered=recovered, auto_plan=plan_info, selection=selection_info)
     try:
         coordinator = make_coordinator(TargetSelection(selected))
         coordinator.validate_target()
