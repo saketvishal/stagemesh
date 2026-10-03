@@ -19,6 +19,7 @@ python -m pip install -e ".[dev]"
 stagemesh init --project .
 stagemesh doctor
 stagemesh continue --once   # one coordinator pass; plain `continue` supervises one task to completion
+stagemesh continue --parallel 3   # up to three independent tasks at once, one worktree each
 stagemesh status
 pytest
 python scripts/invariants.py
@@ -75,6 +76,60 @@ Tune it with:
                     "priority_labels": ["priority:p0", "priority:p1", "priority:p2", "priority:p3"],
                     "preferred_labels": ["stagemesh:prep"], "excluded_labels": ["stagemesh:blocked"] } }
 ```
+
+## Parallel execution
+
+`stagemesh continue --parallel N` runs up to N independent tasks at once instead of one. It cannot be combined with `--task`,
+`--choose` or `--once`; tasks are picked by the same ranking as above (best first), so blocked, excluded-label, stale-failed,
+dependency-blocked and unplannable tasks are never started. A task whose dependency is still running waits; it starts the moment
+the dependency is DONE.
+
+* **Isolation.** Every running task has its own worktree and its own database connection; a task that crashes or fails stops
+  only itself (the run ends `PARTIAL`). A DONE task's worktree is removed.
+* **Conflicts.** A candidate task is deferred while a running task conflicts with it: a shared `exclusive_resources` entry in the
+  contracts (for example `"exclusive_resources": ["test-db"]`), or a `protected_files` pattern that overlaps the other task's
+  allowed or protected files. Deferrals are listed under `deferred` in `--json`.
+* **Providers.** Each provider runs at most `parallel.provider_max_concurrency` (default 2) things at once, or its own
+  `providers.<name>.max_concurrency`; a saturated preferred provider hands work to the next one, otherwise the task waits for a
+  slot. A provider failure that is not about the code (rate limit, outage, auth) puts the provider in cooldown for every task.
+  Validation and review run concurrently per task.
+* **Integration.** Moving the integration ref is serialized by a lock (`.stagemesh/integration.lock`; thread and process safe, and
+  released by the OS if the holder dies). If the ref advanced past a candidate, it is rebased in its own worktree under the lock,
+  then re-validated and re-reviewed before landing (up to `parallel.integration_rebase_attempts`, default 2). A conflicting or
+  over-budget rebase leaves INTEGRATION evidence FAILED with the typed finding `integration_rebase_conflict` or
+  `integration_stale_base`; the ref is never touched.
+* **Output.** Human output prefixes every line with `[task-id]`. `--json` reports each task separately under `tasks` (timestamped
+  `lifecycle` events, `steps`, `final`, provider events) plus `task_outcomes`, `deferred`, `skipped` and `recovered`.
+* **Ctrl+C and restart.** Ctrl+C stops every task, kills the provider processes it started, fails their running executions,
+  releases their claims and discards uncommitted partial edits; worktrees with committed work are kept and the next run resumes
+  them (exit code 130). After a hard kill the next run releases claims whose owning process is provably dead and removes
+  worktrees that belong to finished or unknown tasks.
+
+```json
+{ "parallel": { "provider_max_concurrency": 2, "integration_rebase_attempts": 2 },
+  "providers": { "codex": { "command": "codex exec", "max_concurrency": 3 } } }
+```
+
+### `stagemesh queue-run`
+
+`stagemesh queue-run --concurrency N [--max-steps N] [--json]` is the strict, supervised form of `continue --parallel`, for a shared
+queue. It syncs the task sources, runs the project preflight, then starts up to N tasks whose contracts do not conflict.
+
+* **Preflight.** A project with `.stagemesh/profile.json` must pass `stagemesh project-smoke`, otherwise the whole run is refused
+  (`REFUSED:preflight_failed`, exit 2, nothing started). A project without a profile has no smoke to run and relies on per-task
+  contracts; the git repository and the integration target must still resolve.
+* **Admission, per task (a refusal never stops the others).** No contract: refused (`missing_contract`; nothing is auto-planned).
+  Uncommitted changes in the checkout at any path the task may write (its `allowed_files` minus `forbidden_files`; `.stagemesh/`
+  and `.git/` excluded): refused (`dirty_working_tree`, with the paths).
+* **Conflicts.** Tasks never run together when their allowed write scopes overlap (patterns are compared, so it can serialize
+  tasks that would not really collide, never the reverse), or they share an `exclusive_resources` entry, or one's
+  `protected_files` overlap the other's scope. Deferred tasks run after the conflicting one finishes and are listed under `deferred`.
+* **Isolation and integration.** Each task works in its own worktree; validation and review run per candidate; integration to the
+  target branch is one at a time under the integration lock, with rebase-and-revalidate or a typed failure when the branch moved.
+* **Recovery.** Only claims whose owner process is provably dead are released; live or unknown owners are never touched.
+* **Stopping.** The run ends when every selected task is DONE, BLOCKED, refused or out of steps (`--max-steps` is per task), after
+  Ctrl+C, or on a global safety failure (for example the integration lock cannot be taken), which halts every task and releases
+  its claims (`GLOBAL_SAFETY_FAILURE`). `--json` adds `preflight` and `refused` to the per-task lifecycle report of `--parallel`.
 
 ## Project profiles
 

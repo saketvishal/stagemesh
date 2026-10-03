@@ -491,10 +491,35 @@ def run_ready(
         summary.started, summary.stop_reason, summary.message = False, "REFUSED:target_not_runnable", str(exc)
         return summary
 
+    drive_task(store, project, coordinator, selected, summary, max_steps=max_steps, on_step=on_step, on_start=on_start)
+    return summary
+
+
+def drive_task(
+    store: Store,
+    project: Path,
+    coordinator: Coordinator,
+    selected: str,
+    summary: RunSummary,
+    *,
+    max_steps: int,
+    on_step: Callable[[dict[str, Any]], None] | None = None,
+    on_start: Callable[[str], None] | None = None,
+    global_health: bool = True,
+    should_stop: Callable[[], bool] | None = None,
+) -> None:
+    """Tick one task until DONE, BLOCKED or a safe stop, filling `summary`.
+
+    `global_health=False` is for parallel runs: another task's failure or a blocked task elsewhere says nothing about this
+    one, so only this task's own progress decides when it stops.
+    """
     summary.detail["workspace"] = workspace_info(project, selected)
     if on_start is not None:
         on_start(format_start(summary))
     for number in range(1, max_steps + 1):
+        if should_stop is not None and should_stop():
+            summary.stop_reason, summary.message = "INTERRUPTED", "the run was interrupted; claims were released and the worktree kept"
+            break
         summary.recovered.extend(_recover_dead(store, selected))
         previous = _snapshot(store, selected)
         if on_start is not None:
@@ -516,12 +541,14 @@ def run_ready(
         if new["status"] == TaskStatus.BLOCKED:
             summary.stop_reason, summary.message = "BLOCKED", "task exhausted its remediation budget; use retry-task after review"
             break
-        problems = current_problems(store)
-        if problems:
-            summary.stop_reason, summary.message = "CURRENT_PROBLEM", ", ".join(problems)
-            summary.detail["problems"] = list(problems)
-            break
-        if progressed == 0:
+        if global_health:
+            problems = current_problems(store)
+            if problems:
+                summary.stop_reason, summary.message = "CURRENT_PROBLEM", ", ".join(problems)
+                summary.detail["problems"] = list(problems)
+                break
+        moved = progressed or new["stage"] != previous["stage"] or new["latest_candidate"] != previous["latest_candidate"]
+        if not moved:
             failure = _latest_failure(store, selected, tick_started)
             summary.stop_reason = "NO_PROGRESS"
             if failure is not None:
@@ -534,5 +561,7 @@ def run_ready(
             break
     else:
         summary.stop_reason, summary.message = "MAX_STEPS", f"stopped after {max_steps} steps"
+    if should_stop is not None and should_stop() and summary.stop_reason != "DONE":
+        # A provider killed by the interrupt reports a failure; that is the interrupt, not a verdict on the task.
+        summary.stop_reason, summary.message = "INTERRUPTED", "the run was interrupted; claims were released and the worktree kept"
     summary.final = _snapshot(store, selected)
-    return summary

@@ -62,6 +62,7 @@ class ChangeContract:
     dependency_checks: tuple[GateCommand, ...] = ()
     public_api: tuple[str, ...] = ()
     protected_files: tuple[str, ...] = ()
+    exclusive_resources: tuple[str, ...] = ()  # named resources (a database, a port) two tasks must never use at once
     max_changed_files: int | None = None
     max_diff_lines: int | None = None
 
@@ -212,6 +213,7 @@ def parse_contract(payload: dict[str, Any]) -> ChangeContract:
         dependency_checks=_commands(payload.get("dependency_checks", ()), "dependency_checks"),
         public_api=_texts(payload.get("public_api", ()), "public_api"),
         protected_files=_texts(payload.get("protected_files", ()), "protected_files"),
+        exclusive_resources=_texts(payload.get("exclusive_resources", ()), "exclusive_resources"),
         max_changed_files=_optional_positive_int(payload.get("max_changed_files"), "max_changed_files"),
         max_diff_lines=_optional_positive_int(payload.get("max_diff_lines"), "max_diff_lines"),
     )
@@ -645,6 +647,8 @@ def _contract_payload(contract: ChangeContract) -> dict[str, Any]:
         "public_api": list(contract.public_api),
         "protected_files": list(contract.protected_files),
     }
+    if contract.exclusive_resources:  # only when set, so existing contracts keep their digests
+        payload["exclusive_resources"] = list(contract.exclusive_resources)
     if contract.max_changed_files is not None:
         payload["max_changed_files"] = contract.max_changed_files
     if contract.max_diff_lines is not None:

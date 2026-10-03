@@ -60,6 +60,17 @@ class Profile:
     escalation_type: str
     escalate_at: int
     task_selection: dict[str, Any] = field(default_factory=dict)
+    smoke: tuple[SmokeProbe, ...] = ()
+
+
+@dataclass(frozen=True)
+class SmokeProbe:
+    """A synthetic task a project declares so `stagemesh project-smoke` can prove its type selection without a real issue."""
+
+    title: str
+    expect_type: str
+    labels: tuple[str, ...] = ()
+    body: str = ""
 
 
 @dataclass(frozen=True)
@@ -93,7 +104,7 @@ def parse_profile(raw: Any) -> Profile:
         raise ProfileError("profile must be an object with schema_version 1")
     unknown = set(raw) - {
         "schema_version", "name", "variables", "env_sets", "gates", "forbidden_files", "defaults",
-        "task_types", "type_selection", "task_selection",
+        "task_types", "type_selection", "task_selection", "smoke",
     }
     if unknown:
         raise ProfileError(f"profile has unsupported keys: {', '.join(sorted(unknown))}")
@@ -130,9 +141,28 @@ def parse_profile(raw: Any) -> Profile:
         escalation_type=escalation_type,
         escalate_at=escalate_at,
         task_selection=dict(raw.get("task_selection") or {}),
+        smoke=_smoke_probes(raw.get("smoke"), set(types)),
     )
     validate_profile(profile)
     return profile
+
+
+def _smoke_probes(raw: Any, type_ids: set[str]) -> tuple[SmokeProbe, ...]:
+    if raw is None:
+        return ()
+    if not isinstance(raw, dict) or set(raw) - {"tasks"} or not isinstance(raw.get("tasks"), list):
+        raise ProfileError("smoke must be an object with a 'tasks' list")
+    probes: list[SmokeProbe] = []
+    for index, item in enumerate(raw["tasks"], start=1):
+        if not isinstance(item, dict) or set(item) - {"title", "labels", "body", "expect_type"}:
+            raise ProfileError(f"smoke task {index} may only use title/labels/body/expect_type")
+        expect = item.get("expect_type")
+        if expect not in type_ids:
+            raise ProfileError(f"smoke task {index} expect_type must name a task type (got {expect!r})")
+        probes.append(
+            SmokeProbe(_text(item.get("title"), f"smoke task {index} title"), expect, _texts(item.get("labels"), f"smoke task {index} labels"), str(item.get("body") or ""))
+        )
+    return tuple(probes)
 
 
 def _task_type(type_id: str, spec: Any, defaults: dict[str, Any], gate_ids: set[str]) -> TaskType:

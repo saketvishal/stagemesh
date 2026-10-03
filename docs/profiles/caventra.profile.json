@@ -550,5 +550,39 @@
       "stagemesh:deferred"
     ],
     "tie_breaker": "issue_number"
+  },
+  "smoke": {
+    "tasks": [
+      {
+        "title": "Update the readiness runbook",
+        "labels": [
+          "stagemesh:smoke"
+        ],
+        "expect_type": "prep"
+      },
+      {
+        "title": "Fix spacing in the web-v2 theme",
+        "labels": [
+          "area:frontend"
+        ],
+        "expect_type": "frontend"
+      },
+      {
+        "title": "Add an API endpoint for exports",
+        "expect_type": "backend"
+      },
+      {
+        "title": "Add an Alembic migration for a new column",
+        "expect_type": "schema"
+      },
+      {
+        "title": "Rework the web-v2 layout and the API router",
+        "expect_type": "full"
+      },
+      {
+        "title": "Something nobody has classified",
+        "expect_type": "full"
+      }
+    ]
   }
 }

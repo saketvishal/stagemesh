@@ -4,6 +4,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -106,8 +107,35 @@ def kill_process_tree(proc: subprocess.Popen[str]) -> None:
         pass
 
 
+_ACTIVE_PROVIDER_PROCESSES: set[subprocess.Popen[str]] = set()
+_ACTIVE_LOCK = threading.Lock()
+
+
+def kill_active_provider_processes() -> int:
+    """Kill every provider process (implementation or review) this process is currently waiting on; returns how many."""
+    with _ACTIVE_LOCK:
+        running = [proc for proc in _ACTIVE_PROVIDER_PROCESSES if proc.poll() is None]
+    for proc in running:
+        kill_process_tree(proc)
+    return len(running)
+
+
 def communicate_bounded(proc: subprocess.Popen[str], input_text: str, timeout: float) -> tuple[str, str, bool]:
-    """Run proc to completion, killing its process tree if it exceeds `timeout`. Returns (stdout, stderr, timed_out)."""
+    """Run proc to completion, killing its process tree if it exceeds `timeout`. Returns (stdout, stderr, timed_out).
+
+    Every provider subprocess goes through here, so an interrupted run can find and kill all of them
+    (see kill_active_provider_processes), not just the implementation ones that have a recorded pid.
+    """
+    with _ACTIVE_LOCK:
+        _ACTIVE_PROVIDER_PROCESSES.add(proc)
+    try:
+        return _communicate_bounded(proc, input_text, timeout)
+    finally:
+        with _ACTIVE_LOCK:
+            _ACTIVE_PROVIDER_PROCESSES.discard(proc)
+
+
+def _communicate_bounded(proc: subprocess.Popen[str], input_text: str, timeout: float) -> tuple[str, str, bool]:
     try:
         stdout, stderr = proc.communicate(input=input_text, timeout=timeout)
         return stdout, stderr, False
