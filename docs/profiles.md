@@ -64,3 +64,25 @@ The profile's global `forbidden_files` and each type's `allowed_files`, `forbidd
 gates become the contract. Forbid secrets, env files, local databases and WAL/SHM files, private or uploaded user data, caches,
 StageMesh runtime state and user/tool state globally; a path matching a forbidden pattern fails validation even if it is also
 allowed. Remember that `**/x` does not match a root-level `x`, so list both forms.
+
+## Compatibility smoke (`stagemesh project-smoke`)
+
+Any project with a profile can prove the installed StageMesh can operate on it safely, without running an implementation:
+
+```
+stagemesh --project <repo> project-smoke [--task <id> ...] [--dry-run-selection] [--json]
+```
+
+It checks that the profile loads; that every task type generates a contract that parses within the size limit; that every
+validation gate is an argv list (no shell interpreters, no metacharacters in the program, relative `cwd`, bounded timeout, no
+unexpanded variables; a program missing from `PATH` is only a warning); that forbidden-file patterns exist and are well formed;
+that declared smoke probes select their expected type; and that every task type is reachable by its labels or keywords.
+`--task` shows the type (with evidence), gates, scope and limits a real task would get and parses any hand-written contract.
+`--dry-run-selection` ranks the discovered tasks and previews auto-planning. Tasks are synced into a throwaway database, so
+nothing in the project is written. Exit code 0 means no check failed (warnings allowed); 1 means a check failed.
+
+A profile may declare its own probes, which need no real issue:
+
+```json
+"smoke": { "tasks": [ { "title": "Update the runbook", "labels": ["docs"], "expect_type": "prep" } ] }
+```

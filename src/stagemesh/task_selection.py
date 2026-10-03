@@ -148,14 +148,10 @@ def _tie_value(store: Store, task: Any, how: str) -> tuple[Any, ...]:
     return (0, int(source_id), "") if source_id.isdigit() else (1, 0, source_id)
 
 
-def select_next_task(
-    store: Store,
-    project: Path,
-    policy: TaskSelectionConfig,
-    *,
-    auto_plan: bool = True,
-    chooser: Callable[[list[Candidate]], str | None] | None = None,
-) -> Selection:
+def _collect(
+    store: Store, project: Path, policy: TaskSelectionConfig, auto_plan: bool
+) -> tuple[list[Candidate], list[Candidate], list[dict[str, str]]]:
+    """Every OPEN task as a viable candidate, an unplannable one, or a skip with its reason."""
     scheduler = Scheduler(store)
     skipped: list[dict[str, str]] = []
     candidates: list[Candidate] = []
@@ -191,17 +187,33 @@ def select_next_task(
             tie_value=_tie_value(store, task, policy.tie_breaker),
         )
         (unplannable if candidate.contract.startswith("unplannable:") else candidates).append(candidate)
-    # Unplannable tasks are passed over while any other task is viable; if nothing else is, the single best one falls through
-    # so the run reports its precise contract refusal (missing_contract / auto_plan_failed) instead of "no eligible task".
-    pool = candidates or unplannable
-    if candidates:
-        skipped.extend({"task_id": c.task_id, "reason": c.contract.split(":", 1)[1]} for c in unplannable)
-    policy_info = {
+    return candidates, unplannable, skipped
+
+
+def _policy_info(policy: TaskSelectionConfig) -> dict[str, Any]:
+    return {
         "auto_select": policy.auto_select,
         "order": ["priority_label", "preferred_label", "valid_contract", policy.tie_breaker],
         "priority_labels": list(policy.priority_labels),
         "tie_breaker": policy.tie_breaker,
     }
+
+
+def select_next_task(
+    store: Store,
+    project: Path,
+    policy: TaskSelectionConfig,
+    *,
+    auto_plan: bool = True,
+    chooser: Callable[[list[Candidate]], str | None] | None = None,
+) -> Selection:
+    candidates, unplannable, skipped = _collect(store, project, policy, auto_plan)
+    # Unplannable tasks are passed over while any other task is viable; if nothing else is, the single best one falls through
+    # so the run reports its precise contract refusal (missing_contract / auto_plan_failed) instead of "no eligible task".
+    pool = candidates or unplannable
+    if candidates:
+        skipped.extend({"task_id": c.task_id, "reason": c.contract.split(":", 1)[1]} for c in unplannable)
+    policy_info = _policy_info(policy)
     if not pool:
         raise SelectionRefusal(
             "no_eligible_task", "no eligible OPEN task" + _skipped_text(skipped), skipped=skipped, policy=policy_info
@@ -239,6 +251,17 @@ def select_next_task(
         f"runner-up {runner_up.task_id} ({runner_up.describe()}); {_why_better(best, runner_up, policy)}"
     )
     return Selection("auto", best.task_id, reason, listing, skipped, policy_info)
+
+
+def rank_batch_candidates(
+    store: Store, project: Path, policy: TaskSelectionConfig, *, auto_plan: bool = True
+) -> tuple[list[Candidate], list[dict[str, str]], dict[str, Any]]:
+    """Every task that may be started concurrently, best first. Blocked, excluded, stale-failed, dependency-blocked and
+    unplannable tasks are returned as skips and are never candidates, even when nothing else is runnable."""
+    candidates, unplannable, skipped = _collect(store, project, policy, auto_plan)
+    skipped.extend({"task_id": c.task_id, "reason": c.contract.split(":", 1)[1], "kind": "unplannable"} for c in unplannable)
+    skipped.extend({"task_id": str(t["id"]), "reason": "blocked"} for t in store.tasks() if t["status"] == TaskStatus.BLOCKED)
+    return sorted(candidates, key=lambda c: (c.key, c.task_id)), skipped, _policy_info(policy)
 
 
 def _why_better(best: Candidate, other: Candidate, policy: TaskSelectionConfig) -> str:

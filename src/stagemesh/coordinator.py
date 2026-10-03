@@ -38,7 +38,9 @@ class Coordinator:
         remediation_policy: RemediationPolicy | None = None,
         target: TargetSelection | None = None,
         require_independent_review: bool = False,
+        worker_id: str = "local-worker",
     ):
+        self.worker_id = worker_id
         self.store = store
         self.project = Path(project)
         self.executor = executor or FakeExecutor()
@@ -122,7 +124,7 @@ class Coordinator:
         if stage is Stage.IMPLEMENT:
             if self._implementation_may_still_run(task_id):
                 return 0
-            worker_id = "local-worker"
+            worker_id = self.worker_id
             claim_id = self.store.acquire_claim(task_id, worker_id)
             if claim_id is None:
                 return 0

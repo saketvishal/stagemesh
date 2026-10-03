@@ -127,6 +127,10 @@ class Integrator:
             return
         if before == candidate_sha:
             payload["integration_method"] = "already_integrated"
+        elif git.run("merge-base", "--is-ancestor", candidate_sha, before, check=False).returncode == 0:
+            # A previous run moved the ref to the candidate and the ref has advanced since (restart, or other tasks landed).
+            payload["integration_method"] = "already_integrated"
+            return
         else:
             if git.run("merge-base", "--is-ancestor", before, candidate_sha, check=False).returncode != 0:
                 fail(
