@@ -123,10 +123,34 @@ def planned_contract(contract: ChangeContract, plan: ValidationPlan) -> ChangeCo
     )
 
 
-def _classification(contract: ChangeContract, changed_files: tuple[str, ...]) -> str:
+_RISK_RANK = {
+    DOCS_ONLY: 0,
+    CONFIG_OR_PROVIDER_COMMAND: 1,
+    LOCALIZED_CODE: 2,
+    CORE_LIFECYCLE_OR_SCHEMA_SECURITY: 3,
+}
+
+
+def _declared_classification(contract: ChangeContract) -> str | None:
     configured = contract.validation_classification
     if configured and configured.upper() in _CLASSIFICATIONS:
         return configured.upper()
+    return None
+
+
+def _classification(contract: ChangeContract, changed_files: tuple[str, ...]) -> str:
+    derived = _derived_classification(contract, changed_files)
+    declared = _declared_classification(contract)
+    if declared is None:
+        return derived
+    # A declaration may raise risk but never lower what the changed files imply. The config/provider
+    # patterns are repo-specific, so a plain source file gives no basis to override a CONFIG declaration.
+    if declared == CONFIG_OR_PROVIDER_COMMAND and derived == LOCALIZED_CODE:
+        return declared
+    return max(declared, derived, key=_RISK_RANK.__getitem__)
+
+
+def _derived_classification(contract: ChangeContract, changed_files: tuple[str, ...]) -> str:
     scope = changed_files or contract.allowed_files
     if scope and all(_matches(path, _DOC_PATTERNS) for path in scope):
         return DOCS_ONLY
@@ -146,6 +170,9 @@ def _escalation_reasons(contract: ChangeContract, changed_files: tuple[str, ...]
         reasons.append("public API/contract")
     if any(_matches(path, _DEPENDENCY_PATTERNS) for path in scope) and not reasons:
         reasons.append("dependency manifest")
+    declared = _declared_classification(contract)
+    if declared is not None and declared != classification:
+        reasons.append(f"declared {declared} raised to {classification} by changed files")
     return tuple(dict.fromkeys(reasons))
 
 

@@ -34,14 +34,45 @@ class Validator:
                 baseline_sha=bound.baseline_sha,
                 run_gates=True,
             )
-            status = EvidenceStatus.PASSED if evaluation.passed else EvidenceStatus.FAILED
+            findings = list(evaluation.findings)
+            executed = tuple(gate.name for gate in evaluation.gates)
+            missing: tuple[str, ...] = ()
+            if contract.explicit:
+                # Plan labels are not evidence: every planned check must have actually executed.
+                missing = tuple(dict.fromkeys(name for name in plan.planned_checks if name not in executed))
+                findings.extend(
+                    {
+                        "severity": "error",
+                        "code": "planned_check_missing_command",
+                        "message": f"planned check '{name}' has no executable gate and did not run",
+                    }
+                    for name in missing
+                )
+                if contract.acceptance_criteria and not executed:
+                    findings.append(
+                        {
+                            "severity": "error",
+                            "code": "acceptance_criteria_without_executable_gate",
+                            "message": "acceptance criteria require at least one executed validation gate",
+                        }
+                    )
+            status = (
+                EvidenceStatus.PASSED
+                if evaluation.passed and len(findings) == len(evaluation.findings)
+                else EvidenceStatus.FAILED
+            )
             payload = {
                 "validator": "contract",
                 **bound.evidence_payload(),
                 "validation_plan": plan.to_dict(),
                 "objective": contract.objective,
                 "changed_files": list(evaluation.changed_files),
-                "findings": list(evaluation.findings),
+                "findings": findings,
+                "validation_checks": {
+                    "planned": list(plan.planned_checks),
+                    "executed": list(executed),
+                    "missing": list(missing),
+                },
                 "gates": [
                     {
                         "name": gate.name,

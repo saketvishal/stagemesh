@@ -200,6 +200,14 @@ class Store:
                 baseline_sha TEXT NOT NULL,
                 created_at REAL NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS task_contracts (
+                task_id TEXT PRIMARY KEY REFERENCES tasks(id),
+                baseline_sha TEXT NOT NULL,
+                version INTEGER NOT NULL,
+                digest TEXT NOT NULL,
+                canonical_json TEXT NOT NULL,
+                created_at REAL NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS external_evidence (
                 id TEXT PRIMARY KEY,
                 kind TEXT NOT NULL,
@@ -413,6 +421,26 @@ class Store:
         task_id = _validate_text(task_id, "task id")
         row = self.conn.execute("SELECT baseline_sha FROM task_baselines WHERE task_id=?", (task_id,)).fetchone()
         return str(row["baseline_sha"]) if row is not None else None
+
+    def bind_task_contract(
+        self, task_id: str, baseline_sha: str, version: int, digest: str, canonical_json: str
+    ) -> None:
+        """Freeze the contract the provider is instructed with; the first binding wins."""
+        task_id = _validate_text(task_id, "task id")
+        baseline_sha = _validate_text(baseline_sha, "baseline sha")
+        digest = _validate_text(digest, "contract hash", 128)
+        canonical_json = _validate_text(canonical_json, "canonical contract", 10000)
+        if not isinstance(version, int) or version < 1:
+            raise StoreValidationError("contract version must be a positive integer")
+        self.conn.execute(
+            "INSERT OR IGNORE INTO task_contracts VALUES (?, ?, ?, ?, ?, ?)",
+            (task_id, baseline_sha, version, digest, canonical_json, time.time()),
+        )
+        self.conn.commit()
+
+    def task_contract(self, task_id: str) -> sqlite3.Row | None:
+        task_id = _validate_text(task_id, "task id")
+        return self.conn.execute("SELECT * FROM task_contracts WHERE task_id=?", (task_id,)).fetchone()
 
     def contract_binding(self, task_id: str, candidate_sha: str) -> sqlite3.Row | None:
         task_id = _validate_text(task_id, "task id")
