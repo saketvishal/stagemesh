@@ -8,10 +8,12 @@ import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
 from .capacity import CapacityKind
+from .config import BUILTIN_PROVIDERS, SELECTION_POLICIES
 from .execution import PROVIDER_TIMEOUT, ExecutionResult, Executor
 from .domain import ExecutionStatus
 from .persistence import Store
@@ -23,10 +25,12 @@ from .workspaces import prepare_task_workspace, task_workspace
 IMPLEMENT = "IMPLEMENT"
 REVIEW = "REVIEW"
 STAGE_CAPABILITY = {IMPLEMENT: "code", REVIEW: "review"}
-DEFAULT_PROVIDER_ORDER = ("codex", "claude", "grok")
+DEFAULT_PROVIDER_ORDER = BUILTIN_PROVIDERS  # built-ins sort ahead of custom providers when no priority says otherwise
+DEFAULT_PRIORITY = 100
 DEFAULT_FAILURE_COOLDOWN_SECONDS = 900.0
 PROVIDER_FAILURE_EVENT = "provider.failure"
 PROVIDER_SELECTION_EVENT = "provider.selection"
+PROVIDER_USED_EVENT = "provider.used"
 
 
 @dataclass(frozen=True)
@@ -63,9 +67,21 @@ def default_pools(
     explicit: dict[str, tuple[str, ...]],
     single_agent_provider: str | None = None,
     routing_mode: str = RoutingMode.STAGED,
+    *,
+    capable: dict[str, set[str]] | None = None,
+    priorities: dict[str, int] | None = None,
 ) -> dict[str, tuple[str, ...]]:
-    """Explicit pools win. Otherwise a routed provider is merely tried first and every other provider is a fallback."""
-    ordered = [n for n in DEFAULT_PROVIDER_ORDER if n in names] + sorted(n for n in names if n not in DEFAULT_PROVIDER_ORDER)
+    """Explicit pools win. Otherwise a routed provider is merely tried first and every other provider is a fallback.
+
+    Default order is (priority, built-in rank, name), so with no priorities it is codex, claude, grok, then custom providers
+    alphabetically. `capable` (stage -> provider names) keeps providers out of stages they do not serve.
+    """
+    priorities = priorities or {}
+
+    def rank(name: str) -> tuple[int, int, str]:
+        builtin = DEFAULT_PROVIDER_ORDER.index(name) if name in DEFAULT_PROVIDER_ORDER else len(DEFAULT_PROVIDER_ORDER)
+        return (priorities.get(name, DEFAULT_PRIORITY), builtin, name)
+
     pools: dict[str, tuple[str, ...]] = {}
     for stage in (IMPLEMENT, REVIEW):
         if stage in explicit:
@@ -74,6 +90,8 @@ def default_pools(
             pools[stage] = (single_agent_provider,)
         else:
             routed = stage_routes.get(stage)
+            eligible_names = [n for n in names if capable is None or n in capable.get(stage, set(names))]
+            ordered = sorted(eligible_names, key=rank)
             pools[stage] = tuple(([routed] if routed else []) + [n for n in ordered if n != routed])
     return pools
 
@@ -87,7 +105,16 @@ class ProviderPool:
         require_independent: bool = True,
         cooldown_seconds: float = DEFAULT_FAILURE_COOLDOWN_SECONDS,
         log: ProviderLog | None = None,
+        policy: str = "priority",
+        weights: dict[str, int] | None = None,
+        priorities: dict[str, int] | None = None,
     ):
+        if policy not in SELECTION_POLICIES:
+            raise ValueError(f"unknown provider selection policy: {policy}")
+        self.policy = policy
+        self.weights = weights or {}
+        self.priorities = priorities or {}
+        self._reasons: dict[tuple[str, str], str] = {}
         self.adapters = {adapter.name: adapter for adapter in adapters}
         self.pools = pools
         self.require_independent = require_independent
@@ -146,19 +173,127 @@ class ProviderPool:
             PROVIDER_FAILURE_EVENT, {"task_id": task_id, "stage": stage, "provider": provider, "reason": reason[:300]}
         )
 
+    def kind(self, name: str) -> str:
+        return "built-in default provider" if name in BUILTIN_PROVIDERS else "custom provider"
+
+    def registry_line(self) -> str:
+        stage_of = {"code": "IMPLEMENT", "review": "REVIEW"}
+        entries = []
+        for name, adapter in self.adapters.items():
+            stages = "+".join(sorted(stage_of[c] for c in adapter.capabilities if c in stage_of)) or "none"
+            entries.append(
+                f"{name} ({'built-in' if name in BUILTIN_PROVIDERS else 'custom'}; {stages}; "
+                f"priority {self.priorities.get(name, DEFAULT_PRIORITY)}; weight {self.weights.get(name, 1)})"
+            )
+        return ", ".join(entries) or "(empty)"
+
     def announce(self, store: Store, stage: str, task_id: str | None, verdicts: list[Verdict], note: str = "") -> list[RuntimeCommandAdapter]:
         eligible = [self.adapters[v.provider] for v in verdicts if v.eligible]
         self.log(f"stage {stage} starting{f' for task {task_id}' if task_id else ''}{note}")
+        self.log(f"  provider registry: {self.registry_line()}")
+        self.log(f"  selection policy: {self.policy}")
         self.log(f"  provider pool considered: {', '.join(self.pool(stage)) or '(empty)'}")
         for verdict in verdicts:
             if not verdict.eligible:
                 self.log(f"  skipped {verdict.provider}: {verdict.reason}")
-        self.log(f"  eligible in order: {', '.join(a.name for a in eligible) or '(none)'}")
+        self.log(f"  eligible providers: {', '.join(a.name for a in eligible) or '(none)'}")
+        ordered, reasons = self.order(store, stage, eligible)
+        self._reasons = {key: value for key, value in self._reasons.items() if key[0] != stage}
+        for name, why in reasons.items():
+            self._reasons[(stage, name)] = why
+        if ordered:
+            self.log(f"  selection order ({self.policy}): {' > '.join(a.name for a in ordered)}")
+            self.log(f"  preferred provider: {ordered[0].name} ({self.kind(ordered[0].name)}) because {reasons[ordered[0].name]}")
         store.add_audit_event(
             PROVIDER_SELECTION_EVENT,
-            {"task_id": task_id, "stage": stage, "verdicts": [v.to_dict() for v in verdicts]},
+            {
+                "task_id": task_id,
+                "stage": stage,
+                "policy": self.policy,
+                "order": [a.name for a in ordered],
+                "verdicts": [v.to_dict() for v in verdicts],
+            },
         )
-        return eligible
+        return ordered
+
+    def why(self, stage: str, name: str, first: bool) -> str:
+        if not first:
+            return "fallback after the preferred provider failed"
+        return self._reasons.get((stage, name), self.policy)
+
+    def uses(self, store: Store, stage: str) -> list[tuple[str, float]]:
+        """Chronological (provider, time) records of providers that actually answered for this stage."""
+        rows = store.conn.execute(
+            "SELECT payload, created_at FROM audit_events WHERE event_type=? ORDER BY created_at, rowid",
+            (PROVIDER_USED_EVENT,),
+        ).fetchall()
+        used: list[tuple[str, float]] = []
+        for row in rows:
+            try:
+                payload = json.loads(row["payload"])
+            except (TypeError, ValueError):
+                continue
+            if payload.get("stage") == stage and isinstance(payload.get("provider"), str):
+                used.append((payload["provider"], row["created_at"]))
+        return used
+
+    def record_use(self, store: Store, stage: str, task_id: str, provider: str, outcome: str) -> None:
+        store.add_audit_event(
+            PROVIDER_USED_EVENT, {"task_id": task_id, "stage": stage, "provider": provider, "outcome": str(outcome)}
+        )
+
+    def order(
+        self, store: Store, stage: str, eligible: list[RuntimeCommandAdapter]
+    ) -> tuple[list[RuntimeCommandAdapter], dict[str, str]]:
+        """Rank eligible providers by the selection policy; the first is tried first and the rest are the fallback chain."""
+        pool = list(self.pool(stage))
+        index = {name: i for i, name in enumerate(pool)}
+        base = sorted(eligible, key=lambda a: (self.priorities.get(a.name, DEFAULT_PRIORITY), index.get(a.name, len(pool))))
+        reasons: dict[str, str] = {}
+        if not base:
+            return [], reasons
+        if self.policy == "priority":
+            ordered = base
+            for a in ordered:
+                reasons[a.name] = f"priority: priority {self.priorities.get(a.name, DEFAULT_PRIORITY)}, pool position {index.get(a.name, -1) + 1}"
+            return ordered, reasons
+        uses = self.uses(store, stage)
+        if self.policy == "round_robin":
+            last = uses[-1][0] if uses else None
+            start = pool.index(last) + 1 if last in pool else 0
+            cycle = pool[start:] + pool[:start]
+            by_name = {a.name: a for a in base}
+            ordered = [by_name[n] for n in cycle if n in by_name]
+            for a in ordered:
+                reasons[a.name] = (
+                    f"round_robin: previous {stage} provider was {last}, next eligible in pool order"
+                    if last
+                    else "round_robin: first selection for this stage, pool order"
+                )
+            return ordered, reasons
+        if self.policy == "least_recently_used":
+            last_use: dict[str, float] = {}
+            for name, when in uses:
+                last_use[name] = when
+            ordered = sorted(base, key=lambda a: last_use.get(a.name, float("-inf")))
+            for a in ordered:
+                reasons[a.name] = (
+                    "least_recently_used: never used for this stage"
+                    if a.name not in last_use
+                    else f"least_recently_used: last used {int(time.time() - last_use[a.name])}s ago"
+                )
+            return ordered, reasons
+        counts: dict[str, int] = {}
+        for name, _ in uses:
+            counts[name] = counts.get(name, 0) + 1
+        weight = lambda a: max(1, self.weights.get(a.name, 1))  # noqa: E731
+        score = lambda a: Fraction(counts.get(a.name, 0) + 1, weight(a))  # noqa: E731
+        ordered = sorted(base, key=score)  # stable: ties keep priority/pool order
+        for a in ordered:
+            reasons[a.name] = (
+                f"weighted: weight {weight(a)}, {counts.get(a.name, 0)} prior use(s), score {score(a)} (lowest score first)"
+            )
+        return ordered, reasons
 
     def preflight(self, store: Store, task_id: str | None = None) -> tuple[bool, str, list[Verdict], list[Verdict]]:
         """Can this configuration possibly implement AND independently review? Returns (ok, diagnostic, impl, review)."""
@@ -225,12 +360,16 @@ class FallbackReviewAdapter:
         for adapter in self.adapters:
             if previous is not None:
                 self.pool.log(f"  fallback: {previous} failed ({self.attempts[-1]['reason']}) -> trying {adapter.name}")
-            self.pool.log(f"  selected review provider {adapter.name}")
+            self.pool.log(
+                f"  selected review provider {adapter.name} ({self.pool.kind(adapter.name)}): "
+                f"{self.pool.why(REVIEW, adapter.name, previous is None)}"
+            )
             self.name = adapter.name
             response = adapter.review_candidate(prompt, project, candidate_sha)
             reason = _infrastructure_reason(response)
             if reason is None:
-                self.pool.log(f"  final review provider: {adapter.name}")
+                self.pool.log(f"  final review provider: {adapter.name} ({self.pool.kind(adapter.name)})")
+                self.pool.record_use(self.store, REVIEW, self.task_id, adapter.name, "ANSWERED")
                 return response
             self.attempts.append({"provider": adapter.name, "reason": reason})
             self.pool.record_failure(self.store, REVIEW, self.task_id, adapter.name, reason)
@@ -276,7 +415,10 @@ class PooledExecutor(Executor):
         for index, adapter in enumerate(eligible):
             if index:
                 log(f"  fallback: {eligible[index - 1].name} failed ({reasons[-1]}) -> trying {adapter.name}")
-            log(f"  selected implementation provider {adapter.name}")
+            log(
+                f"  selected implementation provider {adapter.name} ({self.pool.kind(adapter.name)}): "
+                f"{self.pool.why(IMPLEMENT, adapter.name, index == 0)}"
+            )
             self.name = adapter.name
             try:
                 result = adapter.execute(store, task_id, claim_id, project)
@@ -289,7 +431,8 @@ class PooledExecutor(Executor):
                 self.pool.record_failure(store, IMPLEMENT, task_id, adapter.name, reason)
                 _reset_worktree(project, task_id)
                 continue
-            log(f"  final implementation provider: {adapter.name}; candidate {result.candidate_sha or '-'}; result {result.status}")
+            self.pool.record_use(store, IMPLEMENT, task_id, adapter.name, str(result.status))
+            log(f"  final implementation provider: {adapter.name} ({self.pool.kind(adapter.name)}); candidate {result.candidate_sha or '-'}; result {result.status}")
             return result
         log("  REFUSED: every eligible implementation provider failed: " + "; ".join(failures))
         return ExecutionResult(

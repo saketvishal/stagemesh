@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -13,6 +14,22 @@ from .security import SecurityBoundaryError, WorkspaceBoundary
 
 class ConfigValidationError(ValueError):
     pass
+
+
+# Default registry entries (their commands live in providers.approved_default_adapters). They are not the only providers allowed.
+BUILTIN_PROVIDERS = ("codex", "claude", "grok")
+PROVIDER_STAGES = ("IMPLEMENT", "REVIEW")
+SELECTION_POLICIES = ("priority", "round_robin", "least_recently_used", "weighted")
+_LEGACY_CAPABILITIES = {"code": "IMPLEMENT", "review": "REVIEW"}
+
+
+@dataclass(frozen=True)
+class ProviderSpec:
+    """Optional per-provider metadata from the object form of a `providers` entry."""
+
+    capabilities: frozenset[str] = frozenset(PROVIDER_STAGES)
+    priority: int | None = None
+    weight: int | None = None
 
 
 @dataclass(frozen=True)
@@ -41,6 +58,9 @@ class StageMeshConfig:
     integration_ref: str | None = None
     provider_pools: dict[str, tuple[str, ...]] = field(default_factory=dict)
     provider_failure_cooldown_seconds: float = 900.0
+    provider_specs: dict[str, ProviderSpec] = field(default_factory=dict)
+    provider_selection_policy: str = "priority"
+    provider_weights: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -76,9 +96,9 @@ def load_config(project: Path, config_path: Path | None = None) -> StageMeshConf
         repo=os.environ.get("STAGEMESH_GITHUB_REPO") or _string(github_data.get("repo")) or (detected_github.repo if detected_github else None),
         token=os.environ.get("STAGEMESH_GITHUB_TOKEN") or _string(github_data.get("token")),
     )
-    provider_commands = _provider_commands(providers)
-    for name in ("codex", "claude", "grok"):
-        env_value = os.environ.get(f"STAGEMESH_{name.upper()}_CMD")
+    provider_commands, provider_specs = _parse_providers(providers)
+    for name in sorted(set(BUILTIN_PROVIDERS) | set(provider_commands)):
+        env_value = os.environ.get("STAGEMESH_" + re.sub("[^A-Za-z0-9]", "_", name).upper() + "_CMD")
         if env_value:
             provider_commands[name] = env_value
     database_url = os.environ.get("STAGEMESH_DATABASE_URL") or _string(data.get("database_url"))
@@ -91,6 +111,21 @@ def load_config(project: Path, config_path: Path | None = None) -> StageMeshConf
     cooldown = routing_data.get("provider_failure_cooldown_seconds", 900.0)
     if isinstance(cooldown, bool) or not isinstance(cooldown, (int, float)) or cooldown < 0:
         raise ConfigValidationError("routing.provider_failure_cooldown_seconds must be a non-negative number")
+    policy = os.environ.get("STAGEMESH_PROVIDER_SELECTION_POLICY") or routing_data.get("provider_selection_policy", "priority")
+    if policy not in SELECTION_POLICIES:
+        raise ConfigValidationError(
+            f"routing.provider_selection_policy must be one of: {', '.join(SELECTION_POLICIES)}"
+        )
+    provider_pools = _provider_pools(_optional_mapping(routing_data, "pools"))
+    provider_weights = _provider_weights(_optional_mapping(routing_data, "provider_weights"))
+    known = set(BUILTIN_PROVIDERS) | set(provider_commands)
+    for stage, names in provider_pools.items():
+        unknown = [n for n in names if n not in known]
+        if unknown:
+            raise ConfigValidationError(f"routing.pools.{stage} references unknown provider: {', '.join(unknown)}")
+    unknown_weights = [n for n in provider_weights if n not in known]
+    if unknown_weights:
+        raise ConfigValidationError(f"routing.provider_weights references unknown provider: {', '.join(unknown_weights)}")
     integration_ref = _string(data.get("integration_ref"))
     if integration_ref and not integration_ref.startswith("refs/"):
         integration_ref = f"refs/heads/{integration_ref}"
@@ -107,8 +142,11 @@ def load_config(project: Path, config_path: Path | None = None) -> StageMeshConf
         source=source,
         require_independent_review=require_review,
         integration_ref=integration_ref,
-        provider_pools=_provider_pools(_optional_mapping(routing_data, "pools")),
+        provider_pools=provider_pools,
         provider_failure_cooldown_seconds=float(cooldown),
+        provider_specs=provider_specs,
+        provider_selection_policy=str(policy),
+        provider_weights=provider_weights,
     )
 
 
@@ -125,17 +163,61 @@ def _optional_mapping(data: dict[str, object], key: str) -> dict[str, object]:
     return value
 
 
-def _provider_commands(data: dict[str, object]) -> dict[str, str]:
+def _parse_providers(data: dict[str, object]) -> tuple[dict[str, str], dict[str, ProviderSpec]]:
+    """A provider is `name: "command"` (legacy) or `name: {command, capabilities?, priority?, weight?}`."""
     commands: dict[str, str] = {}
+    specs: dict[str, ProviderSpec] = {}
     for key, value in data.items():
         name = _string(key)
-        command = _string(value)
-        if not name:
-            raise ConfigValidationError("provider names must be non-empty strings")
+        if not name or any(char.isspace() for char in name):
+            raise ConfigValidationError("provider names must be non-empty strings without whitespace")
+        if isinstance(value, dict):
+            unknown = set(value) - {"command", "capabilities", "priority", "weight"}
+            if unknown:
+                raise ConfigValidationError(f"provider {name} has unsupported keys: {', '.join(sorted(unknown))}")
+            command = _string(value.get("command"))
+            specs[name] = ProviderSpec(
+                capabilities=_provider_capabilities(name, value.get("capabilities")),
+                priority=_provider_int(name, "priority", value.get("priority"), minimum=0),
+                weight=_provider_int(name, "weight", value.get("weight"), minimum=1),
+            )
+        else:
+            command = _string(value)
         if not command:
             raise ConfigValidationError(f"provider command for {name} must be a non-empty string")
         commands[name] = command
-    return commands
+    return commands, specs
+
+
+def _provider_capabilities(name: str, value: object) -> frozenset[str]:
+    if value is None:
+        return frozenset(PROVIDER_STAGES)
+    if not isinstance(value, list) or not value or not all(isinstance(item, str) for item in value):
+        raise ConfigValidationError(f"provider {name} capabilities must be a non-empty list of stage names")
+    stages = {_LEGACY_CAPABILITIES.get(item.strip().lower(), item.strip().upper()) for item in value}
+    invalid = stages - set(PROVIDER_STAGES)
+    if invalid:
+        raise ConfigValidationError(
+            f"provider {name} has unsupported capabilities: {', '.join(sorted(invalid))} (use {', '.join(PROVIDER_STAGES)})"
+        )
+    return frozenset(stages)
+
+
+def _provider_int(name: str, field_name: str, value: object, *, minimum: int) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+        raise ConfigValidationError(f"provider {name} {field_name} must be an integer >= {minimum}")
+    return value
+
+
+def _provider_weights(data: dict[str, object]) -> dict[str, int]:
+    weights: dict[str, int] = {}
+    for name, value in data.items():
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ConfigValidationError(f"routing.provider_weights.{name} must be an integer >= 1")
+        weights[name] = value
+    return weights
 
 
 def _stage_routes(data: dict[str, object]) -> dict[str, str]:

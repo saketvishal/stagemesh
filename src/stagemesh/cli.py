@@ -196,12 +196,21 @@ def _build_coordinator(
         if chosen_name and chosen_name not in adapter_by_name:
             print(f"provider not found: {chosen_name}", file=sys.stderr)
             raise _SetupError(2)
+        stage_caps = {"IMPLEMENT": "code", "REVIEW": "review"}
+        capable = {
+            stage: {a.name for a in adapters if capability in a.capabilities} for stage, capability in stage_caps.items()
+        }
+        priorities = {n: spec.priority for n, spec in config.provider_specs.items() if spec.priority is not None}
+        weights = {n: spec.weight for n, spec in config.provider_specs.items() if spec.weight is not None}
+        weights.update(config.provider_weights)  # routing.provider_weights wins over a provider's own weight
         pools = default_pools(
             sorted(adapter_by_name),
             config.stage_routes,
             config.provider_pools,
             config.single_agent_provider,
             config.routing_mode,
+            capable=capable,
+            priorities=priorities,
         )
         if chosen_name:  # an explicit --provider pins implementation to that one provider (no fallback)
             pools[IMPLEMENT] = (chosen_name,)
@@ -211,6 +220,9 @@ def _build_coordinator(
             require_independent=require_independent_review,
             cooldown_seconds=config.provider_failure_cooldown_seconds,
             log=provider_log,
+            policy=config.provider_selection_policy,
+            weights=weights,
+            priorities=priorities,
         )
         staged = config.routing_mode == RoutingMode.STAGED
         ok, diagnostic, impl_verdicts, review_verdicts = pool.preflight(store, target.task_id if target else None)
@@ -230,6 +242,7 @@ def _build_coordinator(
             chosen_review_provider = "single-agent-deterministic-fallback"
             reviewer = Reviewer(provider_name=chosen_review_provider, require_independent=require_independent_review)
         info_extra.update(
+            selection_policy=config.provider_selection_policy,
             implementation_pool=list(pools[IMPLEMENT]),
             review_pool=list(pools[REVIEW]),
             implementation_skipped=[v.to_dict() for v in impl_verdicts if not v.eligible],
