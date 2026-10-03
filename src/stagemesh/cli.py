@@ -536,6 +536,76 @@ def _report_run_ready(summary: RunSummary, info: dict[str, object], *, as_json: 
     return 2 if summary.stop_reason.startswith("REFUSED:") else 1
 
 
+def command_profile(args: argparse.Namespace) -> int:
+    """Validate the project profile; with --task, show the task type, contract scope and gates it would generate (no writes)."""
+    from .auto_plan import AutoPlanError, profile_payload, validate_generated
+    from .profile import ProfileError, expand_gate, load_profile
+
+    project = Path(args.project).resolve()
+    try:
+        profile = load_profile(project)
+    except ProfileError as exc:
+        print(f"profile invalid: {exc}", file=sys.stderr)
+        return 2
+    if profile is None:
+        print("no project profile (.stagemesh/profile.json); auto-planning falls back to root-level gate detection", file=sys.stderr)
+        return 1
+    report: dict[str, object] = {
+        "name": profile.name,
+        "task_types": {
+            t.id: {"level": t.level, "gates": [expand_gate(profile, g)["name"] for g in t.gates], "allowed_files": list(t.allowed_files)}
+            for t in profile.types.values()
+        },
+        "forbidden_files": list(profile.forbidden_files),
+        "default_type": profile.default_type,
+        "escalation_type": profile.escalation_type,
+    }
+    if args.task:
+        import tempfile
+
+        scratch = tempfile.TemporaryDirectory(prefix="stagemesh-profile-")
+        store = Store(db_path(project))
+        store.migrate()
+        try:
+            if store.get_task(args.task) is None:  # not synced yet: sync into a throwaway store so this stays read-only
+                store.close()
+                store = Store(Path(scratch.name) / "scratch.sqlite3")
+                store.migrate()
+                _sync_all_sources(store, project, load_config(project), args.task)
+            planned = profile_payload(store, project, args.task)
+            payload, info = planned  # type: ignore[misc]
+            selection = info["selection"]
+            validate_generated(payload)
+        except (AutoPlanError, TypeError) as exc:
+            print(f"cannot plan task {args.task}: {getattr(exc, 'message', exc)}", file=sys.stderr)
+            store.close()
+            scratch.cleanup()
+            return 2
+        store.close()
+        scratch.cleanup()
+        report["task"] = {
+            "task_id": args.task,
+            "selection": selection,
+            "allowed_files": payload["allowed_files"],
+            "forbidden_files": payload["forbidden_files"],
+            "gates": [g["name"] for g in payload["required_tests"]],
+            "max_changed_files": payload["max_changed_files"],
+            "max_diff_lines": payload["max_diff_lines"],
+            "validation_classification": payload["validation_classification"],
+        }
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        print(f"profile {profile.name}: {len(profile.types)} task types")
+        for type_id, info in report["task_types"].items():  # type: ignore[union-attr]
+            print(f"  {type_id} ({info['level']}): {', '.join(info['gates'])}")
+        if "task" in report:
+            task = report["task"]  # type: ignore[assignment]
+            print(f"task {task['task_id']}: type {task['selection']['type']} via {task['selection']['source']} "  # type: ignore[index]
+                  f"({'; '.join(task['selection']['evidence'])}) -> gates {', '.join(task['gates'])}")  # type: ignore[index]
+    return 0
+
+
 def command_recover_stale(args: argparse.Namespace) -> int:
     project = Path(args.project).resolve()
     store = Store(db_path(project))
@@ -1524,6 +1594,10 @@ def build_parser() -> argparse.ArgumentParser:
     run_ready_cmd.add_argument("--no-auto-plan", action="store_true", help="Refuse instead of generating a missing change contract")
     run_ready_cmd.add_argument("--json", action="store_true")
     run_ready_cmd.set_defaults(func=command_run_ready)
+    profile_cmd = sub.add_parser("profile", help="Validate the project profile; --task shows the contract it would generate")
+    profile_cmd.add_argument("--task", help="Task id to explain (read-only)")
+    profile_cmd.add_argument("--json", action="store_true")
+    profile_cmd.set_defaults(func=command_profile)
     recover = sub.add_parser("recover-stale", help="Release stale claims/executions whose process is provably dead")
     recover.add_argument("--task", required=True)
     recover.add_argument("--json", action="store_true")
