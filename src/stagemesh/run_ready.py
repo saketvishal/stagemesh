@@ -136,18 +136,46 @@ def _snapshot(store: Store, task_id: str) -> dict[str, Any]:
     task = store.get_task(task_id)
     details = task_details(store, task_id)
     claim = details["active_claim"]
+    candidate = details["latest_candidate"] or {}
     return {
         "stage": str(task["stage"]),
         "status": str(task["status"]),
-        "latest_candidate": (details["latest_candidate"] or {}).get("sha"),
+        "latest_candidate": candidate.get("sha"),
+        "latest_agent": candidate.get("producer") or _latest_claimed_agent(store, task_id),
         "latest_validation": (details["latest_validation"] or {}).get("status"),
         "latest_review": (details["latest_review"] or {}).get("status"),
-        "active_claim": {"id": claim["id"], "stage": claim["stage"], "age_seconds": claim["age_seconds"]} if claim else None,
+        "active_claim": (
+            {
+                "id": claim["id"],
+                "stage": claim["stage"],
+                "worker_id": claim["worker_id"],
+                "agent": _latest_claimed_agent(store, task_id) or claim["worker_id"],
+                "age_seconds": claim["age_seconds"],
+            }
+            if claim
+            else None
+        ),
         "active_executions": [
             {"id": e["id"], "kind": e["kind"], "pid": e["pid"], "process_state": e["process_state"]}
             for e in details["active_executions"]
         ],
     }
+
+
+def _latest_claimed_agent(store: Store, task_id: str) -> str | None:
+    rows = store.conn.execute(
+        "SELECT payload FROM audit_events WHERE event_type=? ORDER BY created_at DESC, rowid DESC LIMIT 50",
+        ("task.claimed",),
+    ).fetchall()
+    for row in rows:
+        try:
+            payload = json.loads(row["payload"])
+        except (TypeError, ValueError):
+            continue
+        if payload.get("task_id") == task_id:
+            agent = payload.get("executor") or payload.get("provider") or payload.get("worker_id")
+            return str(agent) if agent else None
+    return None
 
 
 def format_step(step: dict[str, Any]) -> str:
@@ -157,11 +185,12 @@ def format_step(step: dict[str, Any]) -> str:
         active = ",".join(f"{e['kind']}:{e['process_state']}" for e in new["active_executions"])
     elif new["active_claim"]:
         active = f"claim:{new['active_claim']['stage']}"
+    agent = new.get("latest_agent") or (new["active_claim"] or {}).get("agent") or "-"
     candidate = (new["latest_candidate"] or "-")[:10]
     return (
         f"step {step['step']} task {step['task_id']}: {step['previous']['stage']}/{step['previous']['status']} -> "
         f"{new['stage']}/{new['status']} candidate={candidate} validation={new['latest_validation'] or '-'} "
-        f"review={new['latest_review'] or '-'} active={active}"
+        f"review={new['latest_review'] or '-'} agent={agent} active={active}"
     )
 
 
