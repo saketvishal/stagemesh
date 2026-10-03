@@ -33,6 +33,7 @@ from .integration import Integrator
 from .objectives import ObjectivePlanner, ObjectiveValidationError
 from .observability import health
 from .operator import operator_report
+from .operator_actions import OperatorActionError, adopt_candidate, recover_stale, task_details
 from .persistence import Store, StoreValidationError
 from .persistence_backends import probe_backend
 from .postgres_store import PostgresStore, PostgresUnavailable, postgres_schema_contract
@@ -335,6 +336,7 @@ def command_status(args: argparse.Namespace) -> int:
                     "unknown_execution_count": report.unknown_execution_count,
                     "backlog_state": report.backlog_state,
                     "latest_implementation_failure": report.latest_implementation_failure,
+                    **_health_scope_fields(report),
                     "tasks": [
                         {
                             "id": row["id"],
@@ -343,6 +345,7 @@ def command_status(args: argparse.Namespace) -> int:
                             "title": row["title"],
                             "source": row["source"],
                             "source_id": row["source_id"],
+                            **task_details(store, row["id"]),
                         }
                         for row in rows
                     ],
@@ -414,6 +417,64 @@ def command_retry_task(args: argparse.Namespace) -> int:
     return 0
 
 
+def _health_scope_fields(report) -> dict[str, object]:
+    return {
+        "ok_scope": "current",
+        "current_problems": list(report.current_problems),
+        "historical_failed_execution_count": report.historical_failed_execution_count,
+        "current_failed_execution_count": report.current_failed_execution_count,
+        "stale_execution_count": report.stale_execution_count,
+    }
+
+
+def command_recover_stale(args: argparse.Namespace) -> int:
+    project = Path(args.project).resolve()
+    store = Store(db_path(project))
+    store.migrate()
+    try:
+        actions = recover_stale(store, args.task)
+    except OperatorActionError as exc:
+        print(str(exc), file=sys.stderr)
+        store.close()
+        return 2
+    task = store.get_task(args.task)
+    payload = {
+        "task_id": args.task,
+        "stage": task["stage"],
+        "status": task["status"],
+        "actions": [action.to_dict() for action in actions],
+        "released": sum(1 for action in actions if action.action == "RELEASED"),
+    }
+    store.close()
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        for action in actions:
+            print(f"{action.execution_id} pid={action.pid} {action.process_state} -> {action.action}")
+        print(f"released: {payload['released']} task {args.task} {payload['stage']} {payload['status']}")
+    return 0
+
+
+def command_adopt_candidate(args: argparse.Namespace) -> int:
+    project = Path(args.project).resolve()
+    store = Store(db_path(project))
+    store.migrate()
+    try:
+        report = adopt_candidate(store, project, args.task, args.sha, args.producer, validate=args.validate)
+    except (OperatorActionError, StoreValidationError) as exc:
+        print(f"adopt-candidate rejected: {exc}", file=sys.stderr)
+        store.close()
+        return 2
+    store.close()
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        print(f"adopted {report['candidate_sha']} for task {args.task}: {report['stage']} {report['status']}")
+        if report["validation"]:
+            print(f"validation: {report['validation']}")
+    return 0
+
+
 def command_health(args: argparse.Namespace) -> int:
     project = Path(args.project).resolve()
     store = Store(db_path(project))
@@ -432,6 +493,7 @@ def command_health(args: argparse.Namespace) -> int:
                     "unknown_execution_count": report.unknown_execution_count,
                     "backlog_state": report.backlog_state,
                     "latest_implementation_failure": report.latest_implementation_failure,
+                    **_health_scope_fields(report),
                 },
                 indent=2,
                 sort_keys=True,
@@ -439,12 +501,16 @@ def command_health(args: argparse.Namespace) -> int:
         )
         store.close()
         return 0
-    print(f"ok: {report.ok}")
+    print(f"ok: {report.ok} (current state only)")
+    if report.current_problems:
+        print(f"current_problems: {', '.join(report.current_problems)}")
     print(f"tasks: {report.task_count}")
     print(f"blocked_tasks: {report.blocked_task_count}")
     print(f"running: {report.running_count}")
     print(f"done: {report.done_count}")
-    print(f"failed_executions: {report.failed_execution_count}")
+    print(f"failed_executions_historical: {report.historical_failed_execution_count}")
+    print(f"failed_executions_current: {report.current_failed_execution_count}")
+    print(f"stale_running_executions: {report.stale_execution_count}")
     print(f"unknown_executions: {report.unknown_execution_count}")
     if report.latest_implementation_failure:
         print(f"latest_implementation_failure: {report.latest_implementation_failure.get('reason')}")
@@ -1331,6 +1397,17 @@ def build_parser() -> argparse.ArgumentParser:
     retry_task.add_argument("--task", required=True)
     retry_task.add_argument("--json", action="store_true")
     retry_task.set_defaults(func=command_retry_task)
+    recover = sub.add_parser("recover-stale", help="Release stale claims/executions whose process is provably dead")
+    recover.add_argument("--task", required=True)
+    recover.add_argument("--json", action="store_true")
+    recover.set_defaults(func=command_recover_stale)
+    adopt = sub.add_parser("adopt-candidate", help="Register an existing commit as the task's latest candidate")
+    adopt.add_argument("--task", required=True)
+    adopt.add_argument("--sha", required=True)
+    adopt.add_argument("--producer", default="manual-reconciliation")
+    adopt.add_argument("--validate", action="store_true", help="Run validation and advance to REVIEW on pass")
+    adopt.add_argument("--json", action="store_true")
+    adopt.set_defaults(func=command_adopt_candidate)
     health_cmd = sub.add_parser("health")
     health_cmd.add_argument("--json", action="store_true")
     health_cmd.set_defaults(func=command_health)
