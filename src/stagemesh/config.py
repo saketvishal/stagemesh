@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from .domain import Stage
@@ -39,6 +39,8 @@ class StageMeshConfig:
     source: str
     require_independent_review: bool = True
     integration_ref: str | None = None
+    provider_pools: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    provider_failure_cooldown_seconds: float = 900.0
 
 
 @dataclass(frozen=True)
@@ -86,6 +88,9 @@ def load_config(project: Path, config_path: Path | None = None) -> StageMeshConf
     require_review = routing_data.get("require_independent_review", True)
     if not isinstance(require_review, bool):
         raise ConfigValidationError("routing.require_independent_review must be a boolean")
+    cooldown = routing_data.get("provider_failure_cooldown_seconds", 900.0)
+    if isinstance(cooldown, bool) or not isinstance(cooldown, (int, float)) or cooldown < 0:
+        raise ConfigValidationError("routing.provider_failure_cooldown_seconds must be a non-negative number")
     integration_ref = _string(data.get("integration_ref"))
     if integration_ref and not integration_ref.startswith("refs/"):
         integration_ref = f"refs/heads/{integration_ref}"
@@ -102,6 +107,8 @@ def load_config(project: Path, config_path: Path | None = None) -> StageMeshConf
         source=source,
         require_independent_review=require_review,
         integration_ref=integration_ref,
+        provider_pools=_provider_pools(_optional_mapping(routing_data, "pools")),
+        provider_failure_cooldown_seconds=float(cooldown),
     )
 
 
@@ -143,6 +150,20 @@ def _stage_routes(data: dict[str, object]) -> dict[str, str]:
             raise ConfigValidationError(f"stage route for {stage} must name a provider")
         routes[stage] = provider
     return routes
+
+
+def _provider_pools(data: dict[str, object]) -> dict[str, tuple[str, ...]]:
+    pools: dict[str, tuple[str, ...]] = {}
+    for key, value in data.items():
+        if key not in {"IMPLEMENT", "REVIEW"}:
+            raise ConfigValidationError(f"routing.pools supports only IMPLEMENT and REVIEW, got: {key}")
+        if not isinstance(value, list) or not value or not all(isinstance(item, str) and item.strip() for item in value):
+            raise ConfigValidationError(f"routing.pools.{key} must be a non-empty list of provider names")
+        names = tuple(item.strip() for item in value)
+        if len(set(names)) != len(names):
+            raise ConfigValidationError(f"routing.pools.{key} must not contain duplicate providers")
+        pools[key] = names
+    return pools
 
 
 def _task_sources(project: Path, value: object) -> tuple[TaskSourceConfig, ...]:
