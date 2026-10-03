@@ -67,7 +67,170 @@ def test_formatted_step_reports_selected_coding_agent(tmp_path: Path) -> None:
     code, result = _run(project)
     assert code == 0, result
     lines = [format_step(step) for step in result["steps"]]
-    assert any("agent=fake" in line for line in lines)
+    assert any("actor: fake" in line for line in lines)
+
+
+def test_continue_human_output_is_operator_timeline(tmp_path: Path) -> None:
+    project = _project(tmp_path, ["T-1"])
+    out = io.StringIO()
+
+    with contextlib.redirect_stdout(out):
+        code = cli_module.main(["--project", str(project), "continue", "--dry-run", "--task", "T-1"])
+
+    text = out.getvalue()
+    assert code == 0
+    assert text.count("StageMesh continue: task T-1") == 1
+    assert "Implementation #2" in text and "status: running" in text
+    assert "actor: fake" in text
+    assert "candidate:" in text
+    assert text.count("actor: fake") == 1
+    assert "Validation #" in text and "actor: contract" in text
+    assert "Review #" in text and "actor: builtin-deterministic-fallback" in text
+    assert "Integration #" in text and "actor: builtin" in text
+    assert "Run stopped: done" in text
+
+
+def test_json_continue_keeps_human_timeline_off_stdout(tmp_path: Path) -> None:
+    out = io.StringIO()
+
+    with contextlib.redirect_stdout(out):
+        code = cli_module.main(["--project", str(_project(tmp_path, ["T-1"])), "continue", "--dry-run", "--json"])
+
+    data = json.loads(out.getvalue())
+    assert code == 0 and data["stop_reason"] == "DONE"
+    assert "StageMesh continue" not in out.getvalue()
+    assert "Run stopped" not in out.getvalue()
+
+
+def test_timeline_notices_only_show_fallback_skip_or_refusal() -> None:
+    from stagemesh.run_ready import format_step
+
+    step = {
+        "step": 2,
+        "task_id": "T-1",
+        "progressed": 1,
+        "previous": {"stage": "IMPLEMENT", "status": "OPEN"},
+        "new": {
+            "stage": "VALIDATE",
+            "status": "OPEN",
+            "latest_candidate": "abc123def456",
+            "latest_candidate_provider": "claude",
+            "latest_agent": "claude",
+            "latest_evidence": {},
+        },
+    }
+    text = format_step(
+        step,
+        notices=[
+            "stage IMPLEMENT starting for task T-1",
+            "  selected implementation provider codex",
+            "  fallback: codex failed (provider_timeout) -> trying claude",
+            "  final implementation provider: claude; candidate abc123def456; result SUCCEEDED",
+            "  skipped grok: cli_not_installed: 'grok' is not callable on PATH",
+        ],
+    )
+
+    assert "actor: claude" in text
+    assert "selected implementation provider" not in text
+    assert "final implementation provider" not in text
+    assert "note: fallback: codex failed (provider_timeout) -> trying claude" in text
+    assert "note: skipped grok:" in text
+
+
+def test_timeline_shows_independent_review_refusal_only_as_notice() -> None:
+    from stagemesh.run_ready import format_step
+
+    step = {
+        "step": 4,
+        "task_id": "T-1",
+        "progressed": 0,
+        "previous": {"stage": "REVIEW", "status": "OPEN"},
+        "new": {
+            "stage": "REVIEW",
+            "status": "OPEN",
+            "latest_candidate": "abc123def456",
+            "latest_candidate_provider": "codex",
+            "latest_agent": "codex",
+            "latest_evidence": {
+                "review": {
+                    "status": "CAPACITY",
+                    "payload": {
+                        "review_provider": "dynamic-pool:",
+                        "independent_review_required": True,
+                    },
+                },
+            },
+        },
+    }
+
+    text = format_step(
+        step,
+        notices=[
+            "  provider pool considered: codex",
+            "  REFUSED: independent review cannot be satisfied; providers considered: codex: not_independent",
+        ],
+    )
+
+    assert "status: capacity" in text
+    assert "actor: dynamic-pool:" in text
+    assert "provider pool considered" not in text
+    assert "note: REFUSED: independent review cannot be satisfied" in text
+
+
+def test_timeline_uses_stage_actor_not_stale_implementation_provider() -> None:
+    from stagemesh.run_ready import format_step
+
+    base = {
+        "task_id": "T-1",
+        "progressed": 1,
+        "previous": {"status": "OPEN"},
+        "new": {
+            "status": "OPEN",
+            "latest_candidate": "abc123def456",
+            "latest_candidate_provider": "codex",
+            "latest_agent": "codex",
+            "latest_evidence": {
+                "validation": {"status": "FAILED", "payload": {"validator": "contract", "validation_checks": {}}},
+                "review": {
+                    "status": "FAILED",
+                    "payload": {
+                        "review_provider": "claude",
+                        "review_execution_provider": "claude",
+                        "independent_review_required": True,
+                        "independent_reviewer": True,
+                    },
+                },
+                "integration": {
+                    "status": "FAILED",
+                    "payload": {"integrator": "builtin", "integration_ref": "refs/heads/integration"},
+                },
+            },
+        },
+    }
+
+    validation = format_step({**base, "step": 3, "previous": {**base["previous"], "stage": "VALIDATE"}, "new": {**base["new"], "stage": "IMPLEMENT"}})
+    review = format_step({**base, "step": 4, "previous": {**base["previous"], "stage": "REVIEW"}, "new": {**base["new"], "stage": "IMPLEMENT"}})
+    integration = format_step({**base, "step": 5, "previous": {**base["previous"], "stage": "INTEGRATE"}, "new": {**base["new"], "stage": "IMPLEMENT"}})
+
+    assert "actor: contract" in validation and "actor: codex" not in validation
+    assert "actor: claude" in review and "actor: codex" not in review
+    assert "actor: builtin" in integration and "actor: codex" not in integration
+
+
+def test_no_progress_stop_reason_is_human_readable() -> None:
+    from stagemesh.run_ready import RunSummary, format_stop
+
+    summary = RunSummary(
+        started=True,
+        stop_reason="NO_PROGRESS",
+        task_id="T-1",
+        message="task.implementation_unsuccessful: provider_timeout",
+        final={"stage": "IMPLEMENT", "status": "OPEN"},
+    )
+
+    text = format_stop(summary)
+    assert "Run stopped: no progress" in text
+    assert "reason: task.implementation_unsuccessful: provider_timeout" in text
 
 
 def test_refuses_when_no_eligible_task(tmp_path: Path) -> None:
