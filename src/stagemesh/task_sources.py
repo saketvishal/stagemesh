@@ -29,6 +29,7 @@ class DiscoveredTask:
     state: str = "OPEN"
     dependencies: tuple[str, ...] = ()
     labels: tuple[str, ...] = ()
+    body: str = ""
 
 
 class LocalBacklogSource:
@@ -92,6 +93,7 @@ class LocalBacklogSource:
                     eligible=eligible,
                     state=state,
                     dependencies=tuple(dependencies),
+                    body=_description(item),
                 )
             )
         return discovered
@@ -239,6 +241,7 @@ def _github_issue_to_task(issue: dict[str, object]) -> DiscoveredTask:
         eligible=not {"stagemesh:deferred", "stagemesh:blocked"}.intersection(label_names) and state.lower() == "open",
         state="OPEN" if state.lower() == "open" else state.upper(),
         labels=tuple(label_names),
+        body=issue.get("body") if isinstance(issue.get("body"), str) else "",
         )
 
 
@@ -251,10 +254,21 @@ def _validate_source_name(value: str) -> str:
     return normalized
 
 
+def _description(item: dict[str, object]) -> str:
+    for key in ("objective", "description", "body"):
+        value = item.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    return ""
+
+
 def sync_source(store: Store, tasks: list[DiscoveredTask]) -> list[str]:
     ids: list[str] = []
     for task in tasks:
-        store.cache_source(task.source, task.source_id, {"eligible": task.eligible, "state": task.state}, task.state)
+        cached: dict[str, object] = {"eligible": task.eligible, "state": task.state}
+        if task.body:
+            cached["objective"] = task.body[:6000]  # lets auto-planning build a contract from the issue text
+        store.cache_source(task.source, task.source_id, cached, task.state)
         if task.eligible and task.state == "OPEN":
             ids.append(store.upsert_task(task.title, task.source, task.source_id))
             for dependency in task.dependencies:
