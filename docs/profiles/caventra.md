@@ -13,6 +13,7 @@ Check what a task will get, without writing anything:
 ```
 stagemesh --project C:\caventra profile --task 54        # type, evidence, gates, scope, limits
 stagemesh --project C:\caventra profile --json
+stagemesh --project C:\caventra project-smoke            # generic compatibility smoke (docs/profiles.md); issue text: caventra.smoke-issue.md
 ```
 
 ## Task types and validation gates
