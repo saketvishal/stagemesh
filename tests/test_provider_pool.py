@@ -35,15 +35,17 @@ SCRIPT = (
     "    print('{\"decision\":\"PASS\"}'); sys.exit(0)\n"
     "if mode == 'auth-fail':\n"
     "    sys.stderr.write('authentication_error: not logged in'); sys.exit(1)\n"
-    "pathlib.Path('docs/a.md').write_text('by ' + mode + '\\n')\n"
+    "pathlib.Path('docs/a.md').write_text('by ' + mode + ' ' + (sys.argv[2] if len(sys.argv) > 2 else '') + '\\n')\n"
 )
 
 
 class Rig:
-    def __init__(self, tmp_path: Path, modes: dict[str, str | None], pools: dict[str, tuple[str, ...]] | None = None):
+    def __init__(
+        self, tmp_path: Path, modes: dict[str, str | None], pools: dict[str, tuple[str, ...]] | None = None, **pool_kwargs
+    ):
         """modes: provider name -> behavior ('ok', 'auth-fail', 'review-rate-limit') or None for a missing CLI."""
         self.project = tmp_path / "repo"
-        self.project.mkdir()
+        self.project.mkdir(parents=True)
         git = self.git = GitWorkspace(self.project)
         git.init_if_needed()
         git.run("config", "user.email", "t@example.invalid")
@@ -79,6 +81,7 @@ class Rig:
             pools or {IMPLEMENT: tuple(modes), REVIEW: tuple(modes)},
             require_independent=True,
             log=self.log,
+            **pool_kwargs,
         )
         self.store = Store(self.project / ".stagemesh" / "stagemesh.sqlite3")
         self.store.migrate()
