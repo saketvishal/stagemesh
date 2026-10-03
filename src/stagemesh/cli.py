@@ -20,7 +20,6 @@ from .dashboard import dashboard_summary, render_dashboard
 from .demo import DemoValidationError, create_demo_project
 from .distributed import WorkQueue, WorkQueueError
 from .e2e_acceptance import EndToEndAcceptanceValidationError, end_to_end_acceptance
-from .execution import SubprocessExecutor
 from .external_evidence import (
     ExternalEvidenceValidationError,
     external_evidence_records,
@@ -48,11 +47,12 @@ from .registry import (
     RegistryValidationError,
 )
 from .run_ready import RunSummary, format_step, run_ready
+from .provider_pool import IMPLEMENT, REVIEW, PooledExecutor, ProviderLog, ProviderPool, default_pools, describe_verdicts
 from .release import ReleaseValidationError, build_release_artifact
 from .release_readiness import ReleaseReadinessValidationError, release_readiness
 from .retry import RetryRegistry, RetryValidationError
 from .review import Reviewer
-from .routing import Provider, Router, RoutingMode
+from .routing import RoutingMode
 from .security import SecurityBoundaryError, WorkspaceBoundary
 from .task_sources import (
     LocalBacklogSource,
@@ -170,7 +170,9 @@ def _sync_all_sources(store: Store, project: Path, config, targeted_task_id: str
         sync_source(store, _filter_targeted_tasks(source.discover(), targeted_task_id))
 
 
-def _build_coordinator(args, project: Path, config, store: Store, target: TargetSelection | None):
+def _build_coordinator(
+    args, project: Path, config, store: Store, target: TargetSelection | None, provider_log: ProviderLog | None = None
+):
     """Wire provider adapters, router, reviewer and integrator; raises _SetupError after printing why."""
     # Wire real provider adapters unless --dry-run is requested.
     executor = None
@@ -181,6 +183,7 @@ def _build_coordinator(args, project: Path, config, store: Store, target: Target
     require_independent_review = False
     integrator = None
     integration_ref = None
+    info_extra: dict[str, object] = {}
     if not getattr(args, "dry_run", False):
         require_independent_review = config.require_independent_review
         try:
@@ -189,58 +192,49 @@ def _build_coordinator(args, project: Path, config, store: Store, target: Target
             print(f"provider config error: {exc}", file=sys.stderr)
             raise _SetupError(2)
         adapter_by_name = {adapter.name: adapter for adapter in adapters}
-        router = Router(
-            [
-                Provider(
-                    adapter.name,
-                    adapter.capabilities,
-                    adapter.check_capacity() == CapacityKind.AVAILABLE,
-                )
-                for adapter in adapters
-            ],
-            mode=config.routing_mode,
-            stage_routes=config.stage_routes,
-            single_agent_provider=config.single_agent_provider,
-        )
         chosen_name = getattr(args, "provider", None)
-        if chosen_name:
-            adapter = adapter_by_name.get(chosen_name)
-            if adapter is None:
-                print(f"provider not found: {chosen_name}", file=sys.stderr)
-                raise _SetupError(2)
-        else:
-            routed = router.choose_for_stage("IMPLEMENT", "code")
-            adapter = adapter_by_name.get(routed.name) if routed else (adapters[0] if adapters else None)
-        if adapter is not None:
-            chosen_provider = adapter.name
-            executor = SubprocessExecutor(list(adapter.command), name=adapter.name)
-        review_adapter = None
-        if config.routing_mode == RoutingMode.STAGED:
-            routed_review = router.choose_for_stage("REVIEW", "review")
-            review_adapter = adapter_by_name.get(routed_review.name) if routed_review else None
-            if (
-                review_adapter is not None
-                and review_adapter.name != chosen_provider
-                and (adapter is None or review_adapter.command != adapter.command)
-            ):
-                reviewer = Reviewer(adapter=review_adapter, require_independent=require_independent_review)
-                chosen_review_provider = review_adapter.name
-                independent_review_configured = True
-            elif review_adapter is not None:
-                chosen_review_provider = "builtin-deterministic-fallback"
+        if chosen_name and chosen_name not in adapter_by_name:
+            print(f"provider not found: {chosen_name}", file=sys.stderr)
+            raise _SetupError(2)
+        pools = default_pools(
+            sorted(adapter_by_name),
+            config.stage_routes,
+            config.provider_pools,
+            config.single_agent_provider,
+            config.routing_mode,
+        )
+        if chosen_name:  # an explicit --provider pins implementation to that one provider (no fallback)
+            pools[IMPLEMENT] = (chosen_name,)
+        pool = ProviderPool(
+            adapters,
+            pools,
+            require_independent=require_independent_review,
+            cooldown_seconds=config.provider_failure_cooldown_seconds,
+            log=provider_log,
+        )
+        staged = config.routing_mode == RoutingMode.STAGED
+        ok, diagnostic, impl_verdicts, review_verdicts = pool.preflight(store, target.task_id if target else None)
+        if not staged:
+            ok = any(v.eligible for v in impl_verdicts)
+            diagnostic = f"no implementation provider is available. IMPLEMENT pool: {describe_verdicts(impl_verdicts)}"
+        if not ok:
+            print(diagnostic, file=sys.stderr)
+            raise _SetupError(2)
+        executor = PooledExecutor(pool)
+        chosen_provider = next(v.provider for v in impl_verdicts if v.eligible)
+        if staged:
+            reviewer = Reviewer(require_independent=require_independent_review, review_pool=pool)
+            chosen_review_provider = "dynamic-pool:" + ",".join(v.provider for v in review_verdicts if v.eligible)
+            independent_review_configured = True
         else:
             chosen_review_provider = "single-agent-deterministic-fallback"
-        if reviewer is None:
             reviewer = Reviewer(provider_name=chosen_review_provider, require_independent=require_independent_review)
-        if require_independent_review and not independent_review_configured:
-            print(
-                "independent review is required but cannot be satisfied: "
-                f"implement={chosen_provider} review={review_adapter.name if review_adapter else None} "
-                f"routing={config.routing_mode}. Route IMPLEMENT and REVIEW to distinct available providers "
-                "(routing.stage_routes) or set routing.require_independent_review to false for diagnostics.",
-                file=sys.stderr,
-            )
-            raise _SetupError(2)
+        info_extra.update(
+            implementation_pool=list(pools[IMPLEMENT]),
+            review_pool=list(pools[REVIEW]),
+            implementation_skipped=[v.to_dict() for v in impl_verdicts if not v.eligible],
+            review_skipped=[v.to_dict() for v in review_verdicts if not v.eligible],
+        )
         integration_ref = config.integration_ref or _current_branch_ref(project)
         if integration_ref is None:
             print("no integration_ref configured and the project has no current branch", file=sys.stderr)
@@ -261,6 +255,7 @@ def _build_coordinator(args, project: Path, config, store: Store, target: Target
         "independent_review_configured": independent_review_configured,
         "require_independent_review": require_independent_review,
         "integration_ref": integration_ref,
+        **info_extra,
     }
     return coord, info
 
@@ -469,9 +464,10 @@ def command_run_ready(args: argparse.Namespace) -> int:
     store.migrate()
     _sync_all_sources(store, project, config, requested)
     info: dict[str, object] = {}
+    provider_log = ProviderLog()
 
     def make_coordinator(target: TargetSelection) -> Coordinator:
-        coord, details = _build_coordinator(args, project, config, store, target)
+        coord, details = _build_coordinator(args, project, config, store, target, provider_log)
         info.update(details)
         return coord
 
@@ -479,14 +475,18 @@ def command_run_ready(args: argparse.Namespace) -> int:
         if not args.json:
             print(format_step(step), flush=True)
 
+    def on_start(message: str) -> None:
+        print(f"[stagemesh] {message}", file=sys.stderr, flush=True)
+
     try:
         summary = run_ready(
-            store, project, make_coordinator, task_id=requested, max_steps=getattr(args, "max_steps", 50), on_step=on_step
+            store, project, make_coordinator, task_id=requested, max_steps=getattr(args, "max_steps", 50), on_step=on_step, on_start=on_start
         )
     except _SetupError as exc:
         store.close()
         return exc.code
     store.close()
+    info["provider_events"] = provider_log.lines
     return _report_run_ready(summary, info, as_json=args.json)
 
 

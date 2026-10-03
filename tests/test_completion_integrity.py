@@ -282,7 +282,7 @@ def test_cli_refuses_to_start_when_required_review_provider_is_not_distinct(tmp_
     (runtime / "config.json").write_text(
         json.dumps(
             {
-                "routing": {"mode": "STAGED", "stage_routes": {"IMPLEMENT": "codex", "REVIEW": "claude"}},
+                "routing": {"mode": "STAGED", "pools": {"IMPLEMENT": ["codex"], "REVIEW": ["claude"]}},
                 "providers": {"codex": command, "claude": command},  # same underlying command: not independent
             }
         ),

@@ -36,6 +36,7 @@ def task_details(store: Store, task_id: str, now: float | None = None) -> dict[s
         "latest_candidate": None,
         "latest_validation": None,
         "latest_review": None,
+        "latest_integration": None,
         "active_claim": None,
         "active_executions": [],
     }
@@ -47,7 +48,7 @@ def task_details(store: Store, task_id: str, now: float | None = None) -> dict[s
             "durable_handoff": bool(candidate["durable_handoff"]),
             "created_at": candidate["created_at"],
         }
-        for key, kind in (("latest_validation", EvidenceKind.VALIDATION), ("latest_review", EvidenceKind.REVIEW)):
+        for key, kind in (("latest_validation", EvidenceKind.VALIDATION), ("latest_review", EvidenceKind.REVIEW), ("latest_integration", EvidenceKind.INTEGRATION)):
             row = store.conn.execute(
                 "SELECT status, created_at FROM evidence WHERE task_id=? AND candidate_sha=? AND kind=? "
                 "ORDER BY created_at DESC, rowid DESC LIMIT 1",
