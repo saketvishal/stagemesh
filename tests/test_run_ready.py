@@ -250,7 +250,7 @@ def test_refuses_multiple_eligible_tasks_without_task_flag(tmp_path: Path) -> No
 
 
 def test_refuses_task_without_contract(tmp_path: Path) -> None:
-    code, result = _run(_project(tmp_path, ["T-1"], contracts=[]))
+    code, result = _run(_project(tmp_path, ["T-1"], contracts=[]), "--no-auto-plan")
     assert code == 2 and result["stop_reason"] == "REFUSED:missing_contract"
 
 
