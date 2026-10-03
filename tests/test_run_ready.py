@@ -57,6 +57,17 @@ def test_completes_a_fake_task_through_done(tmp_path: Path) -> None:
     assert result["message"] == ""
     assert steps[-1]["new"]["latest_validation"] == "PASSED" and steps[-1]["new"]["latest_review"] == "PASSED"
     assert steps[-1]["new"]["latest_candidate"]
+    assert any(step["new"]["latest_agent"] == "fake" for step in steps)
+
+
+def test_formatted_step_reports_selected_coding_agent(tmp_path: Path) -> None:
+    from stagemesh.run_ready import format_step
+
+    project = _project(tmp_path, ["T-1"])
+    code, result = _run(project)
+    assert code == 0, result
+    lines = [format_step(step) for step in result["steps"]]
+    assert any("agent=fake" in line for line in lines)
 
 
 def test_refuses_when_no_eligible_task(tmp_path: Path) -> None:
