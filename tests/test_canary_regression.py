@@ -855,6 +855,25 @@ def test_code_failure_does_not_advance_stage(store: Store, tmp_path: Path) -> No
     assert payload["durable_handoff"] is False
 
 
+def test_task_claim_audit_records_worker_and_executor(store: Store, tmp_path: Path) -> None:
+    task_id = store.upsert_task("claim-audit-task")
+    store.advance_task(task_id, Stage.IMPLEMENT)
+
+    assert Coordinator(store, tmp_path, executor=CodeFailExecutor()).tick() == 0
+
+    for event in store.audit_events():
+        if event["event_type"] == "task.claimed":
+            payload = json.loads(event["payload"])
+            break
+    else:
+        raise AssertionError("expected task.claimed audit event")
+    assert payload["task_id"] == task_id
+    assert payload["claim_id"]
+    assert payload["worker_id"] == "local-worker"
+    assert payload["claim_type"] == "IMPLEMENTATION"
+    assert payload["executor"] == "code-fail"
+
+
 def test_success_without_candidate_reopens_implementation(store: Store, tmp_path: Path) -> None:
     task_id = store.upsert_task("missing-candidate-task")
     store.advance_task(task_id, Stage.IMPLEMENT)

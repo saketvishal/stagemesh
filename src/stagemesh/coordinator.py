@@ -122,9 +122,21 @@ class Coordinator:
         if stage is Stage.IMPLEMENT:
             if self._implementation_may_still_run(task_id):
                 return 0
-            claim_id = self.store.acquire_claim(task_id, "local-worker")
+            worker_id = "local-worker"
+            claim_id = self.store.acquire_claim(task_id, worker_id)
             if claim_id is None:
                 return 0
+            record_audit(
+                self.store,
+                "task.claimed",
+                {
+                    "task_id": task_id,
+                    "claim_id": claim_id,
+                    "worker_id": worker_id,
+                    "claim_type": "IMPLEMENTATION",
+                    "executor": self.executor.name,
+                },
+            )
             try:
                 result = self.executor.run(self.store, task_id, claim_id, self.project)
             except Exception as exc:  # noqa: BLE001 - provider crashes must release implementation claims.
