@@ -61,3 +61,18 @@ or an object with `command`, `capabilities` (`IMPLEMENT`, `REVIEW`), optional `p
 form the fallback chain in the same order. `STAGEMESH_<NAME>_CMD` overrides any provider command, `--provider` pins implementation,
 and SINGLE_AGENT mode still uses its one provider.
 
+## Choosing the next task
+
+Plain `stagemesh continue` runs the only eligible task, or ranks several and runs the best one. `--task <id>` bypasses ranking and
+is how a stale task is retried; `--choose` asks on the terminal. Ranking (best first): priority label, preferred label
+(`stagemesh:prep`, `prep`, `governance`, `readiness`), valid contract over one needing auto-planning, then issue number. Tasks with an
+excluded label (`stagemesh:blocked`, `stagemesh:deferred`), unmet dependencies, a stale failure (failed integration or pending
+remediation) or no contract that can be auto-planned are skipped. The reason is logged and returned as `selection` in `--json`.
+Tune it with:
+
+```json
+{ "task_selection": { "auto_select": true, "tie_breaker": "issue_number",
+                    "priority_labels": ["priority:p0", "priority:p1", "priority:p2", "priority:p3"],
+                    "preferred_labels": ["stagemesh:prep"], "excluded_labels": ["stagemesh:blocked"] } }
+```
+

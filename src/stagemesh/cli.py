@@ -502,6 +502,8 @@ def command_run_ready(args: argparse.Namespace) -> int:
         summary = run_ready(
             store, project, make_coordinator, task_id=requested, max_steps=getattr(args, "max_steps", 50), on_step=on_step, on_start=on_start,
             auto_plan=not getattr(args, "no_auto_plan", False),
+            policy=config.task_selection,
+            chooser=_interactive_chooser if getattr(args, "choose", False) else None,
         )
     except _SetupError as exc:
         store.close()
@@ -509,6 +511,17 @@ def command_run_ready(args: argparse.Namespace) -> int:
     store.close()
     info["provider_events"] = provider_log.lines
     return _report_run_ready(summary, info, as_json=args.json)
+
+
+def _interactive_chooser(candidates) -> str | None:
+    """Prompt on the terminal; returns None (a refusal) when stdin is not interactive or the answer is not a listed number."""
+    if not sys.stdin or not sys.stdin.isatty():
+        print("--choose needs an interactive terminal", file=sys.stderr)
+        return None
+    for number, candidate in enumerate(candidates, start=1):
+        print(f"  {number}. task {candidate.task_id}: {candidate.title[:80]} [{candidate.describe()}]", file=sys.stderr)
+    answer = input("Run which task? ").strip()
+    return candidates[int(answer) - 1].task_id if answer.isdigit() and 1 <= int(answer) <= len(candidates) else None
 
 
 def _report_run_ready(summary: RunSummary, info: dict[str, object], *, as_json: bool) -> int:
@@ -1480,6 +1493,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Run a single coordinator pass (legacy behavior) instead of supervising one task to completion",
     )
+    cont.add_argument("--choose", "--interactive", dest="choose", action="store_true", help="Pick among eligible tasks interactively")
     cont.add_argument("--no-auto-plan", action="store_true", help="Refuse instead of generating a missing change contract")
     cont.add_argument("--max-steps", type=int, default=50, help="Step budget for the supervised default mode")
     cont.add_argument("--json", action="store_true")
@@ -1506,6 +1520,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_ready_cmd.add_argument("--max-steps", type=int, default=50)
     run_ready_cmd.add_argument("--provider", help="Provider name to use for implementation")
     run_ready_cmd.add_argument("--dry-run", action="store_true", help="Use FakeExecutor instead of a real provider")
+    run_ready_cmd.add_argument("--choose", "--interactive", dest="choose", action="store_true", help="Pick among eligible tasks interactively")
     run_ready_cmd.add_argument("--no-auto-plan", action="store_true", help="Refuse instead of generating a missing change contract")
     run_ready_cmd.add_argument("--json", action="store_true")
     run_ready_cmd.set_defaults(func=command_run_ready)

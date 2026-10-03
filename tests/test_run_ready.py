@@ -20,9 +20,16 @@ FAKE_CONTRACT = {
 }
 
 
-def _project(tmp_path: Path, task_ids: list[str], contracts: list[str] | None = None) -> Path:
+def _project(
+    tmp_path: Path,
+    task_ids: list[str],
+    contracts: list[str] | None = None,
+    labels: dict[str, list[str]] | None = None,
+    config: dict | None = None,
+    dependencies: dict[str, list[str]] | None = None,
+) -> Path:
     project = tmp_path / "repo"
-    project.mkdir()
+    project.mkdir(parents=True)
     git = GitWorkspace(project)
     git.init_if_needed()
     git.run("config", "user.email", "test@example.invalid")
@@ -31,7 +38,22 @@ def _project(tmp_path: Path, task_ids: list[str], contracts: list[str] | None = 
     git.commit_all("base")
     runtime = project / ".stagemesh"
     (runtime / "contracts").mkdir(parents=True)
-    backlog = {"objective": "o", "tasks": [{"id": t, "title": f"task {t}", "eligible": True, "state": "OPEN"} for t in task_ids]}
+    backlog = {
+        "objective": "o",
+        "tasks": [
+            {
+                "id": t,
+                "title": f"task {t}",
+                "eligible": True,
+                "state": "OPEN",
+                "labels": (labels or {}).get(t, []),
+                "dependencies": (dependencies or {}).get(t, []),
+            }
+            for t in task_ids
+        ],
+    }
+    if config is not None:
+        (runtime / "config.json").write_text(json.dumps(config), encoding="utf-8")
     (runtime / "backlog.json").write_text(json.dumps(backlog), encoding="utf-8")
     for task_id in task_ids if contracts is None else contracts:
         (runtime / "contracts" / f"{task_id}.json").write_text(json.dumps(FAKE_CONTRACT), encoding="utf-8")
@@ -239,7 +261,7 @@ def test_refuses_when_no_eligible_task(tmp_path: Path) -> None:
 
 
 def test_refuses_multiple_eligible_tasks_without_task_flag(tmp_path: Path) -> None:
-    project = _project(tmp_path, ["A-1", "B-1"])
+    project = _project(tmp_path, ["A-1", "B-1"], config={"task_selection": {"auto_select": False}})
     code, result = _run(project)
     assert code == 2 and result["stop_reason"] == "REFUSED:multiple_eligible_tasks"
     assert sorted(result["detail"]["eligible"]) == ["A-1", "B-1"]
@@ -333,7 +355,7 @@ def test_continue_task_supervises_only_that_task_to_done(tmp_path: Path) -> None
 
 
 def test_continue_default_refuses_ambiguous_selection(tmp_path: Path) -> None:
-    code, result = _continue(_project(tmp_path, ["A-1", "B-1"]))
+    code, result = _continue(_project(tmp_path, ["A-1", "B-1"], config={"task_selection": {"auto_select": False}}))
     assert code == 2 and result["stop_reason"] == "REFUSED:multiple_eligible_tasks"
 
 

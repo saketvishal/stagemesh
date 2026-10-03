@@ -30,6 +30,7 @@ class DiscoveredTask:
     dependencies: tuple[str, ...] = ()
     labels: tuple[str, ...] = ()
     body: str = ""
+    created_at: str = ""
 
 
 class LocalBacklogSource:
@@ -94,6 +95,7 @@ class LocalBacklogSource:
                     state=state,
                     dependencies=tuple(dependencies),
                     body=_description(item),
+                    labels=_local_labels(item),
                 )
             )
         return discovered
@@ -242,6 +244,7 @@ def _github_issue_to_task(issue: dict[str, object]) -> DiscoveredTask:
         state="OPEN" if state.lower() == "open" else state.upper(),
         labels=tuple(label_names),
         body=issue.get("body") if isinstance(issue.get("body"), str) else "",
+        created_at=issue.get("created_at") if isinstance(issue.get("created_at"), str) else "",
         )
 
 
@@ -252,6 +255,13 @@ def _validate_source_name(value: str) -> str:
     if any(char.isspace() for char in normalized):
         raise TaskSourceValidationError("task source name must not contain whitespace")
     return normalized
+
+
+def _local_labels(item: dict[str, object]) -> tuple[str, ...]:
+    value = item.get("labels", ())
+    if isinstance(value, list) and all(isinstance(label, str) for label in value):
+        return tuple(value)
+    return ()
 
 
 def _description(item: dict[str, object]) -> str:
@@ -266,6 +276,10 @@ def sync_source(store: Store, tasks: list[DiscoveredTask]) -> list[str]:
     ids: list[str] = []
     for task in tasks:
         cached: dict[str, object] = {"eligible": task.eligible, "state": task.state}
+        if task.labels:
+            cached["labels"] = list(task.labels)
+        if task.created_at:
+            cached["created_at"] = task.created_at
         if task.body:
             cached["objective"] = task.body[:6000]  # lets auto-planning build a contract from the issue text
         store.cache_source(task.source, task.source_id, cached, task.state)
