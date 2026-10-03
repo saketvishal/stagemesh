@@ -46,6 +46,7 @@ class TaskSourceConfig:
     name: str
     kind: str
     path: Path | None = None
+    labels: tuple[str, ...] = ()
 
 
 def load_config(project: Path, config_path: Path | None = None) -> StageMeshConfig:
@@ -160,8 +161,13 @@ def _task_sources(project: Path, value: object) -> tuple[TaskSourceConfig, ...]:
             raise ConfigValidationError("task source name must be a non-empty string")
         if name in seen:
             raise ConfigValidationError(f"duplicate task source name: {name}")
-        if kind not in {"json", "google-ax"}:
+        if kind not in {"json", "google-ax", "github"}:
             raise ConfigValidationError(f"unsupported task source type for {name}: {kind}")
+        if kind == "github":
+            labels = _labels(item.get("labels", item.get("label", ())))
+            sources.append(TaskSourceConfig(name=name, kind=kind, labels=labels))
+            seen.add(name)
+            continue
         raw_path = _string(item.get("path"))
         if not raw_path:
             raise ConfigValidationError(f"task source {name} path must be a non-empty string")
@@ -175,3 +181,18 @@ def _task_sources(project: Path, value: object) -> tuple[TaskSourceConfig, ...]:
         sources.append(TaskSourceConfig(name=name, kind=kind, path=resolved_path))
         seen.add(name)
     return tuple(sources)
+
+
+def _labels(value: object) -> tuple[str, ...]:
+    if value in (None, "", []):
+        return ()
+    if isinstance(value, str):
+        labels = [value]
+    elif isinstance(value, list) and all(isinstance(item, str) for item in value):
+        labels = value
+    else:
+        raise ConfigValidationError("github task source labels must be a string or list of strings")
+    normalized = tuple(label.strip() for label in labels if label.strip())
+    if len(set(normalized)) != len(normalized):
+        raise ConfigValidationError("github task source labels must not contain duplicates")
+    return normalized

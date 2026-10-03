@@ -27,6 +27,7 @@ class DiscoveredTask:
     eligible: bool = True
     state: str = "OPEN"
     dependencies: tuple[str, ...] = ()
+    labels: tuple[str, ...] = ()
 
 
 class LocalBacklogSource:
@@ -103,9 +104,22 @@ class GoogleAxTaskSource(LocalBacklogSource):
     """Google AX export source using the local backlog task schema."""
 
 
-def task_sources_from_config(config: StageMeshConfig) -> list[LocalBacklogSource]:
-    sources: list[LocalBacklogSource] = []
+def task_sources_from_config(config: StageMeshConfig) -> list[object]:
+    sources: list[object] = []
     for source in config.task_sources:
+        if source.kind == "github":
+            if not config.github.owner or not config.github.repo:
+                raise TaskSourceValidationError(f"github task source {source.name} requires github.owner and github.repo")
+            sources.append(
+                ConfiguredGitHubTaskSource(
+                    config.github.owner,
+                    config.github.repo,
+                    config.github.token,
+                    labels=source.labels,
+                    name=source.name,
+                )
+            )
+            continue
         if source.kind not in {"json", "google-ax"} or source.path is None:
             raise TaskSourceValidationError(f"unsupported configured task source: {source.name}")
         source_class = GoogleAxTaskSource if source.kind == "google-ax" else JsonFileTaskSource
@@ -167,6 +181,30 @@ class GitHubApiIssueSource:
         return ([task for task in discovered if task is not None], "OK", None)
 
 
+class ConfiguredGitHubTaskSource:
+    def __init__(
+        self,
+        owner: str,
+        repo: str,
+        token: str | None,
+        *,
+        labels: tuple[str, ...] = (),
+        name: str = "github",
+    ):
+        self.name = _validate_source_name(name)
+        self.labels = labels
+        self.source = GitHubApiIssueSource(owner, repo, token)
+
+    def discover(self) -> list[DiscoveredTask]:
+        tasks, status, _retry_after = self.source.discover()
+        if status != "OK":
+            return []
+        if not self.labels:
+            return tasks
+        required = set(self.labels)
+        return [task for task in tasks if required.issubset(set(task.labels))]
+
+
 def _github_issue_to_task(issue: dict[str, object]) -> DiscoveredTask:
     number = issue.get("number")
     title = issue.get("title")
@@ -191,8 +229,9 @@ def _github_issue_to_task(issue: dict[str, object]) -> DiscoveredTask:
         source=GitHubIssueSource.name,
         source_id=str(number),
         title=title,
-        eligible="stagemesh:deferred" not in label_names and state.lower() == "open",
+        eligible=not {"stagemesh:deferred", "stagemesh:blocked"}.intersection(label_names) and state.lower() == "open",
         state="OPEN" if state.lower() == "open" else state.upper(),
+        labels=tuple(label_names),
         )
 
 
