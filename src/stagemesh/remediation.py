@@ -46,6 +46,19 @@ class RemediationPolicy:
         return store.add_remediation_attempt(finding_id, status, payload or {"attempted_at": time.time()})
 
 
+def remediation_context(store: Store, task_id: str) -> dict[str, object] | None:
+    """Persisted failure context for the most recent remediation of a task, or None for a first attempt."""
+    latest = store.latest_task_remediation(task_id)
+    if latest is None:
+        return None
+    findings = store.open_findings_for_candidate(task_id, str(latest["candidate_sha"]))
+    return {
+        "stage": str(latest["stage"]),
+        "candidate_sha": str(latest["candidate_sha"]),
+        "findings": [{"severity": row["severity"], "message": row["message"]} for row in findings],
+    }
+
+
 def _validate_text(value: str, field: str, max_length: int = 200) -> str:
     if not isinstance(value, str) or not value.strip():
         raise RemediationValidationError(f"{field} must be a non-empty string")

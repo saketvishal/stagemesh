@@ -608,8 +608,7 @@ def test_remediation_exhaustion_blocks_task(tmp_path: Path) -> None:
     store.add_candidate(task_id, sha, "implementer", True)
     store.advance_task(task_id, Stage.VALIDATE)
     assert Validator().validate(store, task_id, sha, project) is EvidenceStatus.FAILED
-    for finding in store.open_findings_for_candidate(task_id, sha):
-        store.add_remediation_attempt(finding["id"], "QUEUED")
+    store.add_task_remediation(task_id, "VALIDATE", sha)  # the one allowed remediation is already spent
 
     coord = Coordinator(store, project, remediation_policy=RemediationPolicy(max_attempts=1))
     assert coord.tick() == 1

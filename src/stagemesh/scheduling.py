@@ -23,6 +23,8 @@ class Scheduler:
             return SchedulingDecision(task_id, False, "missing")
         if task["stage"] == Stage.DONE or task["status"] == "DONE":
             return SchedulingDecision(task_id, False, "done")
+        if task["status"] == "BLOCKED":
+            return SchedulingDecision(task_id, False, "blocked")
         incomplete = self.store.incomplete_dependencies(task_id)
         if incomplete:
             return SchedulingDecision(task_id, False, f"waiting for {','.join(incomplete)}")
