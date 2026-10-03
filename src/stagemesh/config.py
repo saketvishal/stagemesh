@@ -37,6 +37,8 @@ class StageMeshConfig:
     single_agent_provider: str | None
     database_url: str | None
     source: str
+    require_independent_review: bool = True
+    integration_ref: str | None = None
 
 
 @dataclass(frozen=True)
@@ -80,6 +82,12 @@ def load_config(project: Path, config_path: Path | None = None) -> StageMeshConf
     routing_mode = os.environ.get("STAGEMESH_ROUTING_MODE") or _string(routing_data.get("mode")) or RoutingMode.STAGED
     if routing_mode not in {RoutingMode.SINGLE_AGENT, RoutingMode.STAGED}:
         raise ConfigValidationError(f"unsupported routing mode: {routing_mode}")
+    require_review = routing_data.get("require_independent_review", True)
+    if not isinstance(require_review, bool):
+        raise ConfigValidationError("routing.require_independent_review must be a boolean")
+    integration_ref = _string(data.get("integration_ref"))
+    if integration_ref and not integration_ref.startswith("refs/"):
+        integration_ref = f"refs/heads/{integration_ref}"
     return StageMeshConfig(
         project=project,
         github=github,
@@ -91,6 +99,8 @@ def load_config(project: Path, config_path: Path | None = None) -> StageMeshConf
         or _string(routing_data.get("single_agent_provider")),
         database_url=database_url,
         source=source,
+        require_independent_review=require_review,
+        integration_ref=integration_ref,
     )
 
 
