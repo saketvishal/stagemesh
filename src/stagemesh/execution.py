@@ -9,7 +9,12 @@ from .domain import ExecutionKind, ExecutionStatus
 from .git import GitWorkspace
 from .persistence import Store
 from .process_identity import popen_identity
-from .workspaces import prepare_task_workspace
+from .workspaces import (
+    NO_IMPLEMENTATION_CHANGE,
+    commit_implementation_candidate,
+    prepare_task_workspace,
+    record_task_baseline,
+)
 
 
 @dataclass(frozen=True)
@@ -75,6 +80,7 @@ class FakeExecutor(Executor):
     def run(self, store: Store, task_id: str, claim_id: str | None, project: Path) -> ExecutionResult:
         execution_id = store.start_execution(task_id=task_id, claim_id=claim_id, kind=ExecutionKind.IMPLEMENTATION)
         run_path = prepare_task_workspace(project, task_id)
+        record_task_baseline(store, task_id, run_path)
         workspace = GitWorkspace(run_path)
         workspace.init_if_needed()
         task_file = run_path / f"stagemesh-task-{task_id}.txt"
@@ -109,6 +115,7 @@ class SubprocessExecutor(Executor):
         task = store.get_task(task_id)
         from .providers import _build_task_prompt
         run_path = prepare_task_workspace(project, task_id)
+        baseline_sha = record_task_baseline(store, task_id, run_path)
         task_prompt = _build_task_prompt(task_id, task, run_path)
 
         try:
@@ -152,13 +159,17 @@ class SubprocessExecutor(Executor):
                 failure_reason=reason,
             )
 
-        workspace = GitWorkspace(run_path)
-        workspace.init_if_needed()
-        sha = workspace.commit_all(
+        sha = commit_implementation_candidate(
+            store,
+            task_id,
+            run_path,
+            baseline_sha,
             f"StageMesh implementation for {task_id}",
             attribution=attribution_for_worker("local-worker", self.name),
         )
-        if sha:
-            store.add_candidate(task_id, sha, self.name, durable_handoff=True)
+        if sha is None:
+            store.finish_execution(execution_id, ExecutionStatus.FAILED)
+            return ExecutionResult(ExecutionStatus.FAILED, failure_reason=NO_IMPLEMENTATION_CHANGE)
+        store.add_candidate(task_id, sha, self.name, durable_handoff=True)
         store.finish_execution(execution_id, ExecutionStatus.SUCCEEDED, sha)
-        return ExecutionResult(ExecutionStatus.SUCCEEDED, sha, durable_handoff=bool(sha))
+        return ExecutionResult(ExecutionStatus.SUCCEEDED, sha, durable_handoff=True)

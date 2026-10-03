@@ -14,10 +14,14 @@ from .capacity import CapacityKind, CapacityRegistry
 from .config import StageMeshConfig
 from .domain import ExecutionKind, ExecutionStatus
 from .execution import ExecutionResult, classify_failure
-from .git import GitWorkspace
 from .persistence import Store
 from .process_identity import popen_identity
-from .workspaces import prepare_task_workspace
+from .workspaces import (
+    NO_IMPLEMENTATION_CHANGE,
+    commit_implementation_candidate,
+    prepare_task_workspace,
+    record_task_baseline,
+)
 
 
 class ProviderValidationError(ValueError):
@@ -56,6 +60,7 @@ class RuntimeCommandAdapter:
         if self.check_capacity() != CapacityKind.AVAILABLE:
             return ExecutionResult(ExecutionStatus.FAILED, capacity_failure=True, failure_reason="provider_unavailable")
         run_path = prepare_task_workspace(project, task_id)
+        baseline_sha = record_task_baseline(store, task_id, run_path)
         task = store.get_task(task_id)
         task_prompt = _build_task_prompt(task_id, task, run_path)
         try:
@@ -87,12 +92,17 @@ class RuntimeCommandAdapter:
             is_cap, reason = classify_failure(proc.returncode, stdout, stderr)
             store.finish_execution(execution_id, ExecutionStatus.FAILED)
             return ExecutionResult(ExecutionStatus.FAILED, capacity_failure=is_cap, failure_reason=reason)
-        workspace = GitWorkspace(run_path)
-        workspace.init_if_needed()
-        sha = workspace.commit_all(
+        sha = commit_implementation_candidate(
+            store,
+            task_id,
+            run_path,
+            baseline_sha,
             f"StageMesh implementation for {task_id}",
             attribution=attribution_for_worker("local-worker", self.name),
         )
+        if sha is None:
+            store.finish_execution(execution_id, ExecutionStatus.FAILED)
+            return ExecutionResult(ExecutionStatus.FAILED, failure_reason=NO_IMPLEMENTATION_CHANGE)
         store.add_candidate(task_id, sha, self.name, durable_handoff=True)
         store.finish_execution(execution_id, ExecutionStatus.SUCCEEDED, sha)
         return ExecutionResult(ExecutionStatus.SUCCEEDED, sha, durable_handoff=True)

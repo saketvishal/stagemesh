@@ -4,7 +4,9 @@ import hashlib
 import shutil
 from pathlib import Path
 
+from .attribution import GitAttribution
 from .git import GitError, GitWorkspace
+from .persistence import Store
 
 
 def task_workspace(project: Path, task_id: str) -> Path:
@@ -49,3 +51,33 @@ def _ensure_head(workspace: GitWorkspace, root: Path) -> None:
     marker = root / ".stagemesh-root"
     marker.write_text("StageMesh workspace root\n", encoding="utf-8")
     workspace.commit_all("Initialize StageMesh workspace")
+
+
+NO_IMPLEMENTATION_CHANGE = "no_implementation_change"
+
+
+def record_task_baseline(store: Store, task_id: str, run_path: Path) -> str:
+    """Capture the task's starting SHA before the first provider run; it never changes afterwards."""
+    existing = store.task_baseline(task_id)
+    if existing is not None:
+        return existing
+    return store.set_task_baseline(task_id, GitWorkspace(run_path).head())
+
+
+def commit_implementation_candidate(
+    store: Store,
+    task_id: str,
+    run_path: Path,
+    baseline_sha: str,
+    message: str,
+    attribution: GitAttribution | None = None,
+) -> str | None:
+    """Commit the worktree and return the candidate SHA, or None when it is not a real new change."""
+    workspace = GitWorkspace(run_path)
+    sha = workspace.commit_all(message, attribution=attribution)
+    if sha.startswith("synthetic-") or sha == baseline_sha:
+        return None
+    if workspace.run("diff", "--quiet", baseline_sha, sha, check=False).returncode == 0:
+        return None
+    known = {row["sha"] for row in store.conn.execute("SELECT sha FROM candidates WHERE task_id=?", (task_id,))}
+    return None if sha in known else sha

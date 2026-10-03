@@ -12,7 +12,7 @@ def contract_for_candidate(store: Store, task_id: str, candidate_sha: str, proje
     if existing is not None:
         return bound_contract_from_record(dict(existing))
 
-    baseline_sha = _candidate_parent(project, candidate_sha)
+    baseline_sha = store.task_baseline(task_id) or _candidate_parent(project, candidate_sha)
     bound = bind_contract(project, task_id, baseline_sha=baseline_sha, candidate_sha=candidate_sha)
     store.bind_contract(
         task_id,
