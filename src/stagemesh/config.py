@@ -23,6 +23,20 @@ SELECTION_POLICIES = ("priority", "round_robin", "least_recently_used", "weighte
 _LEGACY_CAPABILITIES = {"code": "IMPLEMENT", "review": "REVIEW"}
 
 
+TIE_BREAKERS = ("issue_number", "created_at")
+
+
+@dataclass(frozen=True)
+class TaskSelectionConfig:
+    """How `continue` picks among several eligible tasks (labels are matched case-insensitively)."""
+
+    auto_select: bool = True
+    priority_labels: tuple[str, ...] = ("priority:p0", "priority:p1", "priority:p2", "priority:p3")  # best first
+    preferred_labels: tuple[str, ...] = ("stagemesh:prep", "prep", "governance", "readiness")  # best first
+    excluded_labels: tuple[str, ...] = ("stagemesh:blocked", "stagemesh:deferred")
+    tie_breaker: str = "issue_number"
+
+
 @dataclass(frozen=True)
 class ProviderSpec:
     """Optional per-provider metadata from the object form of a `providers` entry."""
@@ -61,6 +75,7 @@ class StageMeshConfig:
     provider_specs: dict[str, ProviderSpec] = field(default_factory=dict)
     provider_selection_policy: str = "priority"
     provider_weights: dict[str, int] = field(default_factory=dict)
+    task_selection: TaskSelectionConfig = field(default_factory=TaskSelectionConfig)
 
 
 @dataclass(frozen=True)
@@ -147,6 +162,7 @@ def load_config(project: Path, config_path: Path | None = None) -> StageMeshConf
         provider_specs=provider_specs,
         provider_selection_policy=str(policy),
         provider_weights=provider_weights,
+        task_selection=_task_selection(_optional_mapping(data, "task_selection")),
     )
 
 
@@ -209,6 +225,38 @@ def _provider_int(name: str, field_name: str, value: object, *, minimum: int) ->
     if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
         raise ConfigValidationError(f"provider {name} {field_name} must be an integer >= {minimum}")
     return value
+
+
+def _task_selection(data: dict[str, object]) -> TaskSelectionConfig:
+    defaults = TaskSelectionConfig()
+    unknown = set(data) - {"auto_select", "priority_labels", "preferred_labels", "excluded_labels", "tie_breaker"}
+    if unknown:
+        raise ConfigValidationError(f"task_selection has unsupported keys: {', '.join(sorted(unknown))}")
+    auto = data.get("auto_select", defaults.auto_select)
+    if not isinstance(auto, bool):
+        raise ConfigValidationError("task_selection.auto_select must be a boolean")
+    tie = data.get("tie_breaker", defaults.tie_breaker)
+    if tie not in TIE_BREAKERS:
+        raise ConfigValidationError(f"task_selection.tie_breaker must be one of: {', '.join(TIE_BREAKERS)}")
+
+    def labels(key: str, default: tuple[str, ...]) -> tuple[str, ...]:
+        value = data.get(key)
+        if value is None:
+            return default
+        if not isinstance(value, list) or not all(isinstance(item, str) and item.strip() for item in value):
+            raise ConfigValidationError(f"task_selection.{key} must be a list of non-empty label names")
+        normalized = tuple(item.strip() for item in value)
+        if len({item.casefold() for item in normalized}) != len(normalized):
+            raise ConfigValidationError(f"task_selection.{key} must not contain duplicates")
+        return normalized
+
+    return TaskSelectionConfig(
+        auto_select=auto,
+        priority_labels=labels("priority_labels", defaults.priority_labels),
+        preferred_labels=labels("preferred_labels", defaults.preferred_labels),
+        excluded_labels=labels("excluded_labels", defaults.excluded_labels),
+        tie_breaker=str(tie),
+    )
 
 
 def _provider_weights(data: dict[str, object]) -> dict[str, int]:
