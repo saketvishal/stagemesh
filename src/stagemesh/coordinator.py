@@ -118,6 +118,8 @@ class Coordinator:
             record_audit(self.store, "task.advance", {"task_id": task_id, "stage": Stage.IMPLEMENT})
             return 1
         if stage is Stage.IMPLEMENT:
+            if self._implementation_may_still_run(task_id):
+                return 0
             claim_id = self.store.acquire_claim(task_id, "local-worker")
             if claim_id is None:
                 return 0
@@ -198,6 +200,18 @@ class Coordinator:
             return self._advance_with_evidence(task_id, stage, sha, EvidenceKind.INTEGRATION, bound.digest)
         return 0
 
+    def _implementation_may_still_run(self, task_id: str) -> bool:
+        """True when a prior implementation process is LIVE or of UNKNOWN state; lease expiry is not proof of death."""
+        for execution in self.store.running_executions():
+            if execution["task_id"] != task_id or execution["kind"] != "IMPLEMENTATION":
+                continue
+            saved = self.store.execution_process_identity(execution["id"])
+            if classify_process(saved, process_identity(saved.pid)) == "DEAD":
+                self.store.mark_orphan_running_execution_failed(execution["id"], "DEAD_PROCESS_IDENTITY")
+                continue
+            return True
+        return False
+
     def _release_unsuccessful_implementation(
         self,
         task_id: str,
@@ -209,6 +223,9 @@ class Coordinator:
         durable_handoff: bool,
     ) -> None:
         execution = self.store.latest_execution_for_claim(claim_id)
+        if execution is not None and execution["status"] == ExecutionStatus.RUNNING:
+            # The executor call has returned or raised, so its provider is no longer ours to wait on.
+            self.store.finish_execution(execution["id"], ExecutionStatus.FAILED)
         self.store.release_claim(claim_id)
         record_audit(
             self.store,
@@ -255,8 +272,8 @@ class Coordinator:
                 f"{failed_stage} failed without structured findings",
             )
             findings = self.store.open_findings_for_candidate(task_id, sha)
-        eligible = [finding for finding in findings if self.remediation_policy.should_remediate(self.store, str(finding["id"]))]
-        if not eligible:
+        # The budget is scoped to task + failed stage so a new candidate SHA cannot reset it.
+        if self.store.task_remediation_count(task_id, str(failed_stage)) >= self.remediation_policy.max_attempts:
             self.store.block_task(task_id)
             record_audit(
                 self.store,
@@ -264,7 +281,8 @@ class Coordinator:
                 {"task_id": task_id, "candidate_sha": sha, "stage": failed_stage},
             )
             return 1
-        for finding in eligible:
+        self.store.add_task_remediation(task_id, str(failed_stage), sha)
+        for finding in findings:
             self.remediation_policy.record_attempt(
                 self.store,
                 str(finding["id"]),
@@ -283,7 +301,7 @@ class Coordinator:
                 "task_id": task_id,
                 "candidate_sha": sha,
                 "stage": failed_stage,
-                "finding_count": len(eligible),
+                "finding_count": len(findings),
             },
         )
         return 1

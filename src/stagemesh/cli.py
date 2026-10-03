@@ -346,6 +346,28 @@ def command_plan(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_retry_task(args: argparse.Namespace) -> int:
+    project = Path(args.project).resolve()
+    store = Store(db_path(project))
+    store.migrate()
+    task = store.get_task(args.task)
+    if task is None:
+        print(f"task does not exist: {args.task}", file=sys.stderr)
+        store.close()
+        return 2
+    if not store.unblock_task(args.task):
+        print(f"task is not blocked: {args.task} (status {task['status']})", file=sys.stderr)
+        store.close()
+        return 2
+    task = store.get_task(args.task)
+    if args.json:
+        print(json.dumps({"task_id": args.task, "status": task["status"], "stage": task["stage"]}, sort_keys=True))
+    else:
+        print(f"task {args.task} unblocked: status {task['status']} stage {task['stage']}")
+    store.close()
+    return 0
+
+
 def command_health(args: argparse.Namespace) -> int:
     project = Path(args.project).resolve()
     store = Store(db_path(project))
@@ -1259,6 +1281,10 @@ def build_parser() -> argparse.ArgumentParser:
     plan.add_argument("file")
     plan.add_argument("--json", action="store_true")
     plan.set_defaults(func=command_plan)
+    retry_task = sub.add_parser("retry-task", help="Return a BLOCKED task to OPEN with a fresh remediation budget")
+    retry_task.add_argument("--task", required=True)
+    retry_task.add_argument("--json", action="store_true")
+    retry_task.set_defaults(func=command_retry_task)
     health_cmd = sub.add_parser("health")
     health_cmd.add_argument("--json", action="store_true")
     health_cmd.set_defaults(func=command_health)

@@ -208,6 +208,14 @@ class Store:
                 canonical_json TEXT NOT NULL,
                 created_at REAL NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS task_remediations (
+                id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL REFERENCES tasks(id),
+                stage TEXT NOT NULL,
+                candidate_sha TEXT NOT NULL,
+                cleared INTEGER NOT NULL DEFAULT 0,
+                created_at REAL NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS external_evidence (
                 id TEXT PRIMARY KEY,
                 kind TEXT NOT NULL,
@@ -874,6 +882,57 @@ class Store:
         )
         self.conn.commit()
         return attempt_id
+
+    def add_task_remediation(self, task_id: str, stage: str, candidate_sha: str) -> str:
+        """Count one remediation against the task/stage budget, independent of candidate SHA."""
+        task_id = _validate_text(task_id, "task id")
+        stage = _validate_text(stage, "remediation stage")
+        candidate_sha = _validate_text(candidate_sha, "candidate sha")
+        remediation_id = str(uuid.uuid4())
+        self.conn.execute(
+            "INSERT INTO task_remediations(id, task_id, stage, candidate_sha, created_at) VALUES (?, ?, ?, ?, ?)",
+            (remediation_id, task_id, stage, candidate_sha, time.time()),
+        )
+        self.conn.commit()
+        return remediation_id
+
+    def task_remediation_count(self, task_id: str, stage: str) -> int:
+        row = self.conn.execute(
+            "SELECT COUNT(*) AS count FROM task_remediations WHERE task_id=? AND stage=? AND cleared=0",
+            (_validate_text(task_id, "task id"), _validate_text(stage, "remediation stage")),
+        ).fetchone()
+        return int(row["count"])
+
+    def latest_task_remediation(self, task_id: str) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT * FROM task_remediations WHERE task_id=? ORDER BY created_at DESC, rowid DESC LIMIT 1",
+            (_validate_text(task_id, "task id"),),
+        ).fetchone()
+
+    def unblock_task(self, task_id: str) -> bool:
+        """Return a BLOCKED task to OPEN and grant a fresh remediation budget; history is retained."""
+        task_id = _validate_text(task_id, "task id")
+        now = time.time()
+        with self.conn:
+            updated = self.conn.execute(
+                "UPDATE tasks SET status=?, updated_at=? WHERE id=? AND status=?",
+                (TaskStatus.OPEN, now, task_id, TaskStatus.BLOCKED),
+            ).rowcount
+            if updated != 1:
+                return False
+            cleared = self.conn.execute(
+                "UPDATE task_remediations SET cleared=1 WHERE task_id=? AND cleared=0", (task_id,)
+            ).rowcount
+            self.conn.execute(
+                "INSERT INTO audit_events VALUES (?, ?, ?, ?)",
+                (
+                    str(uuid.uuid4()),
+                    "task.unblocked",
+                    json.dumps({"task_id": task_id, "remediation_attempts_cleared": cleared}, sort_keys=True),
+                    now,
+                ),
+            )
+            return True
 
     def remediation_attempt_count(self, finding_id: str) -> int:
         finding_id = _validate_text(finding_id, "finding id")

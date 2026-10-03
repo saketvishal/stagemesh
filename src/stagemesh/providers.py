@@ -14,9 +14,17 @@ from .capacity import CapacityKind, CapacityRegistry
 from .config import StageMeshConfig
 from .contract_binding import ContractRejected, bind_task_contract
 from .domain import ExecutionKind, ExecutionStatus
-from .execution import ExecutionResult, classify_failure
+from .execution import (
+    PROVIDER_TIMEOUT,
+    ExecutionResult,
+    classify_failure,
+    communicate_bounded,
+    popen_session_kwargs,
+    provider_timeout_seconds,
+)
 from .persistence import Store
 from .process_identity import popen_identity
+from .remediation import remediation_context
 from .workspaces import (
     NO_IMPLEMENTATION_CHANGE,
     commit_implementation_candidate,
@@ -47,6 +55,7 @@ class RuntimeCommandAdapter:
     name: str
     command: tuple[str, ...]
     capabilities: frozenset[str] = frozenset({"code", "review", "validate"})
+    timeout_seconds: float | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "name", _validate_name(self.name))
@@ -67,7 +76,9 @@ class RuntimeCommandAdapter:
         except ContractRejected as exc:
             return ExecutionResult(ExecutionStatus.FAILED, failure_reason=f"{exc.reason}: {exc}")
         task = store.get_task(task_id)
-        task_prompt = _build_task_prompt(task_id, task, run_path, contract=bound.contract)
+        task_prompt = _build_task_prompt(
+            task_id, task, run_path, contract=bound.contract, remediation=remediation_context(store, task_id)
+        )
         try:
             proc = subprocess.Popen(
                 list(self.command),
@@ -78,6 +89,7 @@ class RuntimeCommandAdapter:
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
+                **popen_session_kwargs(),
             )
         except FileNotFoundError as exc:
             is_cap, reason = classify_failure(1, exc=exc)
@@ -92,7 +104,10 @@ class RuntimeCommandAdapter:
             boot_id=identity.boot_id,
             executable=identity.executable,
         )
-        stdout, stderr = proc.communicate(input=task_prompt)
+        stdout, stderr, timed_out = communicate_bounded(proc, task_prompt, provider_timeout_seconds(self.timeout_seconds))
+        if timed_out:
+            store.finish_execution(execution_id, ExecutionStatus.FAILED)
+            return ExecutionResult(ExecutionStatus.FAILED, failure_reason=PROVIDER_TIMEOUT)
         if proc.returncode != 0:
             is_cap, reason = classify_failure(proc.returncode, stdout, stderr)
             store.finish_execution(execution_id, ExecutionStatus.FAILED)
@@ -150,10 +165,13 @@ class RuntimeCommandAdapter:
                     stdin=subprocess.PIPE,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
+                    **popen_session_kwargs(),
                 )
             except FileNotFoundError:
                 return _review_failure("provider_unavailable")
-            stdout, stderr = proc.communicate(input=prompt)
+            stdout, stderr, timed_out = communicate_bounded(proc, prompt, provider_timeout_seconds(self.timeout_seconds))
+            if timed_out:
+                return _review_failure(PROVIDER_TIMEOUT)
             after_head = _git_output(review_path, "rev-parse", "HEAD")
             tracked_dirty = _tracked_content_changed(review_path)
             if after_head != before_head or tracked_dirty:
@@ -248,7 +266,13 @@ def _validate_capabilities(capabilities: frozenset[str]) -> frozenset[str]:
     return normalized
 
 
-def _build_task_prompt(task_id: str, task: object, project: Path | None = None, contract: object = None) -> str:
+def _build_task_prompt(
+    task_id: str,
+    task: object,
+    project: Path | None = None,
+    contract: object = None,
+    remediation: dict[str, object] | None = None,
+) -> str:
     """Build the prompt string sent via stdin to a provider CLI.
 
     The prompt gives the agent its task title and a reminder to commit any
@@ -268,13 +292,38 @@ def _build_task_prompt(task_id: str, task: object, project: Path | None = None, 
             contract_text = "\n\n" + contract_prompt(load_contract(project, task_id)) + "\n"
         except ContractError as exc:
             contract_text = f"\n\nChange contract is invalid and must be fixed before coding: {exc}\n"
+    remediation_text = _remediation_prompt(remediation) if remediation else ""
     return (
         f"StageMesh task: {title}\n\n"
         f"{contract_text}"
+        f"{remediation_text}"
         "Please implement the changes described above. "
         "When you are done, commit all changes to git with a descriptive commit message "
         "so StageMesh can record the resulting commit SHA as the implementation candidate.\n"
     )
+
+
+def _remediation_prompt(remediation: dict[str, object]) -> str:
+    lines = [
+        "",
+        f"Previous candidate {remediation['candidate_sha']} failed {remediation['stage']}.",
+        "",
+        "Required remediation:",
+        "",
+    ]
+    for finding in remediation["findings"][:20]:  # type: ignore[index]
+        lines.append(f"- [{finding['severity']}] {str(finding['message'])[:500]}")
+    lines.extend(
+        [
+            "",
+            (
+                "Fix only these findings while preserving the original task objective and the change contract above. "
+                "Do not make unrelated changes."
+            ),
+            "",
+        ]
+    )
+    return "\n".join(lines) + "\n"
 
 
 def _git_output(path: Path, *args: str) -> str:

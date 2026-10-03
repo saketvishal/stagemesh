@@ -26,7 +26,13 @@ def current_process_identity() -> ProcessIdentity:
 
 
 def popen_identity(proc: subprocess.Popen[str]) -> ProcessIdentity:
-    return ProcessIdentity(pid=proc.pid, create_time=None, boot_id=boot_id(), executable=proc.args[0] if proc.args else None)
+    """Capture the launched process's OS identity so it can be compared with a later observation."""
+    observed = process_identity(proc.pid)
+    if observed is not None and observed.is_known:
+        return observed
+    args = proc.args
+    executable = args if isinstance(args, str) else (args[0] if args else None)
+    return ProcessIdentity(pid=proc.pid, create_time=None, boot_id=boot_id(), executable=str(executable) if executable else None)
 
 
 def process_identity(pid: int | None) -> ProcessIdentity | None:
@@ -74,31 +80,43 @@ def _windows_process_identity(pid: int) -> ProcessIdentity | None:
     from ctypes import wintypes
 
     PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-    handle = ctypes.windll.kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    STILL_ACTIVE = 259
+    ERROR_INVALID_PARAMETER = 87
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+    kernel32.GetProcessTimes.argtypes = [wintypes.HANDLE] + [ctypes.POINTER(wintypes.FILETIME)] * 4
+    kernel32.QueryFullProcessImageNameW.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        wintypes.LPWSTR,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
     if not handle:
-        if ctypes.get_last_error() != 87:
-            return ProcessIdentity(pid=pid, create_time=None, boot_id=boot_id(), executable=None)
-        return None
+        if ctypes.get_last_error() == ERROR_INVALID_PARAMETER:
+            return None  # no such process
+        return ProcessIdentity(pid=pid, create_time=None, boot_id=boot_id(), executable=None)
     try:
+        exit_code = wintypes.DWORD()
+        if kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)) and exit_code.value != STILL_ACTIVE:
+            return None  # exited; a lingering handle elsewhere does not make it alive
         creation = wintypes.FILETIME()
         exit_time = wintypes.FILETIME()
         kernel = wintypes.FILETIME()
         user = wintypes.FILETIME()
-        if not ctypes.windll.kernel32.GetProcessTimes(
-            handle,
-            ctypes.byref(creation),
-            ctypes.byref(exit_time),
-            ctypes.byref(kernel),
-            ctypes.byref(user),
+        if not kernel32.GetProcessTimes(
+            handle, ctypes.byref(creation), ctypes.byref(exit_time), ctypes.byref(kernel), ctypes.byref(user)
         ):
-            return None
+            return ProcessIdentity(pid=pid, create_time=None, boot_id=boot_id(), executable=None)
         raw_creation = (creation.dwHighDateTime << 32) + creation.dwLowDateTime
         executable: str | None = None
         size = wintypes.DWORD(32768)
         buffer = ctypes.create_unicode_buffer(size.value)
-        query = getattr(ctypes.windll.kernel32, "QueryFullProcessImageNameW", None)
-        if query and query(handle, 0, buffer, ctypes.byref(size)):
+        if kernel32.QueryFullProcessImageNameW(handle, 0, buffer, ctypes.byref(size)):
             executable = buffer.value
         return ProcessIdentity(pid=pid, create_time=float(raw_creation), boot_id=boot_id(), executable=executable)
     finally:
-        ctypes.windll.kernel32.CloseHandle(handle)
+        kernel32.CloseHandle(handle)
