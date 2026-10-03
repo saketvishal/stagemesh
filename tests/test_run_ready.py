@@ -170,3 +170,37 @@ def test_continue_once_keeps_single_tick_behavior(tmp_path: Path) -> None:
     assert "stop_reason" not in result and result["progressed"] == 1  # legacy summary shape: exactly one tick
     assert result["targeted_task_id"] == "T-1"
     assert Store(project / ".stagemesh" / "stagemesh.sqlite3").get_task("T-1")["stage"] == "IMPLEMENT"
+
+
+def test_refuses_contract_larger_than_the_store_limit(tmp_path: Path) -> None:
+    project = _project(tmp_path, ["T-1"])
+    contract = dict(FAKE_CONTRACT, objective="x" * 11000)
+    (project / ".stagemesh" / "contracts" / "T-1.json").write_text(json.dumps(contract), encoding="utf-8")
+    code, result = _run(project)
+    assert code == 2 and result["stop_reason"] == "REFUSED:invalid_contract"
+    assert result["detail"]["limit"] == 10000 and result["detail"]["size"] > 10000
+    assert Store(project / ".stagemesh" / "stagemesh.sqlite3").latest_candidate("T-1") is None
+
+
+def test_no_progress_reports_the_concrete_provider_failure(tmp_path: Path) -> None:
+    from stagemesh.coordinator import Coordinator
+    from stagemesh.execution import Executor
+    from stagemesh.run_ready import run_ready
+
+    class Exploding(Executor):
+        name = "codex"
+
+        def run(self, store, task_id, claim_id, project):
+            raise RuntimeError("provider binary exploded")
+
+    project = _project(tmp_path, ["T-1"])
+    store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+    store.migrate()
+    store.upsert_task("t", source="local-backlog", source_id="T-1")
+
+    summary = run_ready(store, project, lambda target: Coordinator(store, project, executor=Exploding(), target=target), task_id="T-1")
+
+    assert summary.stop_reason == "NO_PROGRESS" and summary.final["stage"] == "IMPLEMENT"
+    assert "RuntimeError: provider binary exploded" in summary.message
+    assert summary.detail["failure"]["event"] == "task.implementation_unsuccessful"
+    assert summary.detail["failure"]["executor"] == "codex"

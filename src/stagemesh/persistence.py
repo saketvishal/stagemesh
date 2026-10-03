@@ -22,6 +22,9 @@ from .migrations import apply_migrations, current_schema_version
 SCHEMA_VERSION = 3
 
 
+MAX_CANONICAL_CONTRACT_CHARS = 10000
+
+
 class StoreValidationError(ValueError):
     pass
 
@@ -399,7 +402,7 @@ class Store:
         if not isinstance(version, int) or version < 1:
             raise StoreValidationError("contract version must be a positive integer")
         digest = _validate_text(digest, "contract hash", 128)
-        canonical_json = _validate_text(canonical_json, "canonical contract", 10000)
+        canonical_json = _validate_text(canonical_json, "canonical contract", MAX_CANONICAL_CONTRACT_CHARS)
         binding_id = str(uuid.uuid4())
         self.conn.execute(
             """
@@ -437,7 +440,7 @@ class Store:
         task_id = _validate_text(task_id, "task id")
         baseline_sha = _validate_text(baseline_sha, "baseline sha")
         digest = _validate_text(digest, "contract hash", 128)
-        canonical_json = _validate_text(canonical_json, "canonical contract", 10000)
+        canonical_json = _validate_text(canonical_json, "canonical contract", MAX_CANONICAL_CONTRACT_CHARS)
         if not isinstance(version, int) or version < 1:
             raise StoreValidationError("contract version must be a positive integer")
         self.conn.execute(
