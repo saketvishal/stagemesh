@@ -210,7 +210,17 @@ def approved_default_adapters() -> list[RuntimeCommandAdapter]:
 def adapters_from_config(config: StageMeshConfig) -> list[RuntimeCommandAdapter]:
     commands = {adapter.name: shlex.join(adapter.command) for adapter in approved_default_adapters()}
     commands.update(config.provider_commands)
-    return adapters_from_commands(commands)
+    adapters = adapters_from_commands(commands)
+    # Object-form entries declare which stages a provider serves; plain strings and built-ins serve both.
+    stage_caps = {"IMPLEMENT": "code", "REVIEW": "review"}
+    resolved = []
+    for adapter in adapters:
+        spec = config.provider_specs.get(adapter.name)
+        if spec is not None:
+            capabilities = frozenset({"validate", *(stage_caps[stage] for stage in spec.capabilities)})
+            adapter = RuntimeCommandAdapter(adapter.name, adapter.command, capabilities, adapter.timeout_seconds)
+        resolved.append(adapter)
+    return resolved
 
 
 def adapters_from_commands(commands: dict[str, str]) -> list[RuntimeCommandAdapter]:

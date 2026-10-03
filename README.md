@@ -43,3 +43,21 @@ the same task and stage within the cooldown (this is how auth and quota failures
 independent reviewer exists StageMesh refuses and lists every provider with its skip reason. Implementation always runs in an
 isolated git worktree and the integration ref only advances after validation, independent review and integration pass.
 
+### Provider registry and selection policies
+
+`codex`, `claude` and `grok` are built-in registry entries; any other name can be added under `providers`, as a plain command string
+or an object with `command`, `capabilities` (`IMPLEMENT`, `REVIEW`), optional `priority` (lower first) and `weight`:
+
+```json
+{ "providers": { "my-agent": { "command": "my-agent run", "capabilities": ["IMPLEMENT"] },
+                 "reviewer-bot": { "command": "reviewer-bot review", "capabilities": ["REVIEW"] } },
+  "routing": { "pools": { "IMPLEMENT": ["codex", "claude", "grok", "my-agent"], "REVIEW": ["claude", "grok", "reviewer-bot"] },
+               "provider_selection_policy": "round_robin", "provider_weights": { "claude": 2, "grok": 2 } } }
+```
+
+`provider_selection_policy` ranks the *eligible* providers of a stage (after CLI, capability, cooldown and independence checks):
+`priority` (default: priority, then pool order), `round_robin` (next after the provider that last answered for the stage),
+`least_recently_used` (never-used first, then oldest answer) or `weighted` (lowest `(uses+1)/weight` first). The remaining providers
+form the fallback chain in the same order. `STAGEMESH_<NAME>_CMD` overrides any provider command, `--provider` pins implementation,
+and SINGLE_AGENT mode still uses its one provider.
+
