@@ -110,6 +110,16 @@ class ContractEvaluation:
         return self.status == "PASSED"
 
 
+def task_contract_path(project: Path, task_id: str) -> Path | None:
+    for path in (
+        project / ".stagemesh" / "contracts" / f"{task_id}.json",
+        project / ".stagemesh" / "contracts" / f"{task_id}.contract.json",
+    ):
+        if path.exists():
+            return path
+    return None
+
+
 def load_contract(project: Path, task_id: str | None = None) -> ChangeContract:
     candidates = []
     if task_id:

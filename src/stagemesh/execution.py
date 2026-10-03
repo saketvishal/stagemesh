@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .attribution import attribution_for_worker
+from .contract_binding import ContractRejected, bind_task_contract
 from .domain import ExecutionKind, ExecutionStatus
 from .git import GitWorkspace
 from .persistence import Store
@@ -116,7 +117,11 @@ class SubprocessExecutor(Executor):
         from .providers import _build_task_prompt
         run_path = prepare_task_workspace(project, task_id)
         baseline_sha = record_task_baseline(store, task_id, run_path)
-        task_prompt = _build_task_prompt(task_id, task, run_path)
+        try:
+            bound = bind_task_contract(store, project, task_id, baseline_sha)
+        except ContractRejected as exc:
+            return ExecutionResult(ExecutionStatus.FAILED, failure_reason=f"{exc.reason}: {exc}")
+        task_prompt = _build_task_prompt(task_id, task, run_path, contract=bound.contract)
 
         try:
             proc = subprocess.Popen(

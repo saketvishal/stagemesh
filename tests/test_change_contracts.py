@@ -199,6 +199,8 @@ def test_reviewer_independently_creates_structured_findings(tmp_path: Path) -> N
 def test_bound_contract_survives_filesystem_mutation_after_validation(tmp_path: Path) -> None:
     workspace = _repo(tmp_path / "repo")
     project = workspace.path
+    store = _store(tmp_path)
+    task_id = store.upsert_task("mutation task")
     contract_path = project / "stagemesh.contract.json"
     contract_path.write_text(
         json.dumps(
@@ -206,6 +208,7 @@ def test_bound_contract_survives_filesystem_mutation_after_validation(tmp_path: 
                 "objective": "Source only",
                 "allowed_files": ["src/**", "stagemesh.contract.json"],
                 "forbidden_files": ["README.md"],
+                "required_tests": [{"name": "smoke", "command": [sys.executable, "-c", "pass"]}],
             }
         ),
         encoding="utf-8",
@@ -213,8 +216,6 @@ def test_bound_contract_survives_filesystem_mutation_after_validation(tmp_path: 
     (project / "src" / "app.py").write_text("VALUE = 7\n", encoding="utf-8")
     sha = workspace.commit_all("source candidate")
 
-    store = _store(tmp_path)
-    task_id = store.upsert_task("mutation task")
     store.add_candidate(task_id, sha, "implementer", True)
 
     assert Validator().validate(store, task_id, sha, project) is EvidenceStatus.PASSED
@@ -501,7 +502,10 @@ def test_integration_rejects_contract_hash_mismatch(tmp_path: Path) -> None:
 def test_provider_prompt_includes_change_contract(tmp_path: Path) -> None:
     project = tmp_path / "repo"
     project.mkdir()
-    (project / "stagemesh.contract.json").write_text(
+    store = _store(tmp_path)
+    task_id = store.upsert_task("prompt task")
+    (project / ".stagemesh" / "contracts").mkdir(parents=True)
+    (project / ".stagemesh" / "contracts" / f"{task_id}.json").write_text(
         json.dumps(
             {
                 "objective": "Only touch source",
@@ -511,8 +515,6 @@ def test_provider_prompt_includes_change_contract(tmp_path: Path) -> None:
         ),
         encoding="utf-8",
     )
-    store = _store(tmp_path)
-    task_id = store.upsert_task("prompt task")
     store.advance_task(task_id, "IMPLEMENT")
     script = (
         "import pathlib, sys\n"

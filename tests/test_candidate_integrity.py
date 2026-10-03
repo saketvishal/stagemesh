@@ -13,6 +13,9 @@ from stagemesh.persistence import Store
 TASK = "TASK-1"
 
 
+_SMOKE = {"name": "smoke", "command": [sys.executable, "-c", "pass"]}
+
+
 def _project(tmp_path: Path, contract: dict[str, object] | None = None) -> tuple[Path, GitWorkspace]:
     project = tmp_path / "repo"
     project.mkdir()
@@ -25,9 +28,9 @@ def _project(tmp_path: Path, contract: dict[str, object] | None = None) -> tuple
     (project / "src" / "forbidden.py").write_text("X = 1\n", encoding="utf-8")
     (project / "docs" / "a.md").write_text("a\n", encoding="utf-8")
     workspace.commit_all("base")
-    if contract is not None:
-        (project / ".stagemesh" / "contracts").mkdir(parents=True)
-        (project / ".stagemesh" / "contracts" / f"{TASK}.json").write_text(json.dumps(contract), encoding="utf-8")
+    contract = contract or {"objective": "integrity", "allowed_files": ["**"], "required_tests": [_SMOKE]}
+    (project / ".stagemesh" / "contracts").mkdir(parents=True)
+    (project / ".stagemesh" / "contracts" / f"{TASK}.json").write_text(json.dumps(contract), encoding="utf-8")
     return project, workspace
 
 
@@ -85,7 +88,12 @@ else:
 
 def test_remediation_cannot_hide_forbidden_change_and_baseline_is_immutable(tmp_path: Path) -> None:
     project, workspace = _project(
-        tmp_path, {"objective": "docs only", "allowed_files": ["docs/**"], "forbidden_files": ["src/forbidden.py"]}
+        tmp_path, {
+            "objective": "docs only",
+            "allowed_files": ["docs/**"],
+            "forbidden_files": ["src/forbidden.py"],
+            "required_tests": [_SMOKE],
+        }
     )
     base = workspace.head()
     store, coordinator = _coordinator(tmp_path, project, _REMEDIATION_PROVIDER)

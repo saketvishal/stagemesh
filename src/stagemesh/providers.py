@@ -12,6 +12,7 @@ from typing import Protocol
 from .attribution import attribution_for_worker
 from .capacity import CapacityKind, CapacityRegistry
 from .config import StageMeshConfig
+from .contract_binding import ContractRejected, bind_task_contract
 from .domain import ExecutionKind, ExecutionStatus
 from .execution import ExecutionResult, classify_failure
 from .persistence import Store
@@ -61,8 +62,12 @@ class RuntimeCommandAdapter:
             return ExecutionResult(ExecutionStatus.FAILED, capacity_failure=True, failure_reason="provider_unavailable")
         run_path = prepare_task_workspace(project, task_id)
         baseline_sha = record_task_baseline(store, task_id, run_path)
+        try:
+            bound = bind_task_contract(store, project, task_id, baseline_sha)
+        except ContractRejected as exc:
+            return ExecutionResult(ExecutionStatus.FAILED, failure_reason=f"{exc.reason}: {exc}")
         task = store.get_task(task_id)
-        task_prompt = _build_task_prompt(task_id, task, run_path)
+        task_prompt = _build_task_prompt(task_id, task, run_path, contract=bound.contract)
         try:
             proc = subprocess.Popen(
                 list(self.command),
@@ -243,7 +248,7 @@ def _validate_capabilities(capabilities: frozenset[str]) -> frozenset[str]:
     return normalized
 
 
-def _build_task_prompt(task_id: str, task: object, project: Path | None = None) -> str:
+def _build_task_prompt(task_id: str, task: object, project: Path | None = None, contract: object = None) -> str:
     """Build the prompt string sent via stdin to a provider CLI.
 
     The prompt gives the agent its task title and a reminder to commit any
@@ -256,7 +261,9 @@ def _build_task_prompt(task_id: str, task: object, project: Path | None = None) 
     row_keys = set(task.keys()) if isinstance(task, _sqlite3.Row) else set()
     title = task["title"] if "title" in row_keys else str(task_id)
     contract_text = ""
-    if project is not None:
+    if contract is not None:
+        contract_text = "\n\n" + contract_prompt(contract) + "\n"
+    elif project is not None:
         try:
             contract_text = "\n\n" + contract_prompt(load_contract(project, task_id)) + "\n"
         except ContractError as exc:
