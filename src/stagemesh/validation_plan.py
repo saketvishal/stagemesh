@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import fnmatch
 from dataclasses import dataclass
+from pathlib import Path
 
 from .contracts import ChangeContract, GateCommand
 
@@ -17,7 +18,7 @@ _CLASSIFICATIONS = {
     CORE_LIFECYCLE_OR_SCHEMA_SECURITY,
 }
 
-_BROAD_GATE_TOKENS = ("full pytest", "pytest", "invariant", "clean acceptance", "acceptance", "full ci", "ci")
+_BROAD_GATE_TOKENS = ("full pytest", "invariant", "clean acceptance", "acceptance", "full ci", "ci")
 _DOC_PATTERNS = ("README*", "docs/**", "*.md", "**/*.md", "*.rst", "**/*.rst")
 _DEPENDENCY_PATTERNS = (
     "pyproject.toml",
@@ -151,7 +152,7 @@ def _escalation_reasons(contract: ChangeContract, changed_files: tuple[str, ...]
 def _gate_allowed(gate: GateCommand, allowed: set[str], plan: ValidationPlan) -> bool:
     if gate.name in allowed:
         return True
-    is_broad = _is_broad_gate(gate.name) or any(_is_broad_gate(part) for part in gate.command)
+    is_broad = _is_broad_gate(gate.name) or _is_broad_command(gate.command)
     return is_broad and plan.allows_broad_validation
 
 
@@ -160,11 +161,11 @@ def _matching_gate_names(gates: tuple[GateCommand, ...], tokens: tuple[str, ...]
 
 
 def _non_broad_gate_names(contract: ChangeContract) -> tuple[str, ...]:
-    return tuple(gate.name for gate in contract.gates if not _is_broad_gate(gate.name) and not any(_is_broad_gate(part) for part in gate.command))
+    return tuple(gate.name for gate in contract.gates if not _is_broad_gate(gate.name) and not _is_broad_command(gate.command))
 
 
 def _broad_gate_names(contract: ChangeContract) -> tuple[str, ...]:
-    names = [gate.name for gate in contract.gates if _is_broad_gate(gate.name) or any(_is_broad_gate(part) for part in gate.command)]
+    names = [gate.name for gate in contract.gates if _is_broad_gate(gate.name) or _is_broad_command(gate.command)]
     names.extend(f"invariant:{item}" for item in contract.invariants)
     return tuple(names)
 
@@ -176,6 +177,26 @@ def _gate_names(gates: tuple[GateCommand, ...]) -> tuple[str, ...]:
 def _is_broad_gate(value: str) -> bool:
     folded = value.casefold()
     return any(token in folded for token in _BROAD_GATE_TOKENS)
+
+
+def _is_broad_command(command: tuple[str, ...]) -> bool:
+    if any(_is_broad_gate(part) for part in command):
+        return True
+    pytest_index = _pytest_index(command)
+    if pytest_index is None:
+        return False
+    targets = [part.replace("\\", "/").rstrip("/") for part in command[pytest_index + 1 :] if part and not part.startswith("-")]
+    return not targets or any(target in {".", "tests", "./tests"} for target in targets)
+
+
+def _pytest_index(command: tuple[str, ...]) -> int | None:
+    for index, part in enumerate(command):
+        name = Path(part).name.casefold()
+        if name in {"pytest", "pytest.exe"}:
+            return index
+        if part == "-m" and index + 1 < len(command) and command[index + 1].casefold() == "pytest":
+            return index + 1
+    return None
 
 
 def _matches(path: str, patterns: tuple[str, ...]) -> bool:
