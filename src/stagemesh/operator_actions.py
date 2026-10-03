@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import getpass
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -124,6 +125,70 @@ def recover_stale(store: Store, task_id: str) -> list[RecoveryAction]:
             action = "RELEASED" if released else "NOT_RECOVERABLE"
         actions.append(RecoveryAction(eid, str(execution["kind"]), execution["pid"], state, action))
     return actions
+
+
+RELEASE_UNKNOWN_REASON = "OPERATOR_RELEASE_UNKNOWN_IDENTITY"
+
+
+def release_unknown_execution(store: Store, task_id: str, execution_id: str, reason: str) -> RecoveryAction:
+    """Terminalize ONE running execution whose process identity cannot be established, on explicit operator instruction.
+
+    `recover_stale` never touches such executions: a missing pid or create time proves nothing about liveness. This is the
+    deliberate, inspected override. It refuses LIVE processes (never released) and provably DEAD ones (use `recover_stale`),
+    marks the execution FAILED (the row and its history stay), releases the claim of an implementation execution, and records
+    who did what and why in the audit log.
+    """
+    reason = (reason or "").strip()
+    if not reason:
+        raise OperatorActionError("a non-empty --reason is required: say what you inspected that shows the execution is dead")
+    task = store.get_task(task_id)
+    if task is None:
+        raise OperatorActionError(f"task does not exist: {task_id}")
+    execution = store.conn.execute("SELECT * FROM executions WHERE id=?", (execution_id,)).fetchone()
+    if execution is None or str(execution["task_id"]) != task_id:
+        raise OperatorActionError(f"execution {execution_id} does not belong to task {task_id}")
+    if execution["status"] != "RUNNING":
+        raise OperatorActionError(f"execution {execution_id} is {execution['status']}, not RUNNING; nothing to release")
+    state = _process_state(store, execution_id, execution["pid"])
+    if state == "LIVE":
+        raise OperatorActionError(f"execution {execution_id} is LIVE (pid {execution['pid']}); a live execution is never released")
+    if state == "DEAD":
+        raise OperatorActionError(
+            f"execution {execution_id} is provably DEAD; use plain `recover-stale --task {task_id}` instead of the unknown-identity override"
+        )
+    kind = str(execution["kind"])
+    if kind == ExecutionKind.IMPLEMENTATION and store.has_active_claim_for_execution(execution_id):
+        released = store.recover_stale_execution_claim(execution_id, RELEASE_UNKNOWN_REASON)
+    else:
+        released = store.mark_orphan_running_execution_failed(execution_id, RELEASE_UNKNOWN_REASON)
+    action = "RELEASED_BY_OPERATOR" if released else "NOT_RECOVERABLE"
+    record_audit(
+        store,
+        "recovery.operator_release_unknown",
+        {
+            "task_id": task_id,
+            "execution_id": execution_id,
+            "previous_status": str(execution["status"]),
+            "execution_kind": kind,
+            "task_stage": str(task["stage"]),
+            "task_status": str(task["status"]),
+            "claim_id": execution["claim_id"],
+            "pid": execution["pid"],
+            "process_state": state,
+            "reason": reason,
+            "operator": _operator(),
+            "operator_action": "RELEASE_UNKNOWN_EXECUTION",
+            "outcome": action,
+        },
+    )
+    return RecoveryAction(execution_id, kind, execution["pid"], state, action)
+
+
+def _operator() -> str:
+    try:
+        return getpass.getuser()
+    except Exception:  # noqa: BLE001 - an unnamed operator must not block recovery
+        return "unknown"
 
 
 def adopt_candidate(
