@@ -162,7 +162,7 @@ def load_config(project: Path, config_path: Path | None = None) -> StageMeshConf
         provider_specs=provider_specs,
         provider_selection_policy=str(policy),
         provider_weights=provider_weights,
-        task_selection=_task_selection(_optional_mapping(data, "task_selection")),
+        task_selection=_task_selection(_optional_mapping(data, "task_selection") or _profile_task_selection(project)),
     )
 
 
@@ -225,6 +225,16 @@ def _provider_int(name: str, field_name: str, value: object, *, minimum: int) ->
     if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
         raise ConfigValidationError(f"provider {name} {field_name} must be an integer >= {minimum}")
     return value
+
+
+def _profile_task_selection(project: Path) -> dict[str, object]:
+    """Task-selection defaults shipped with the project profile; config.json's own task_selection wins."""
+    try:
+        raw = json.loads((project / ".stagemesh" / "profile.json").read_text(encoding="utf-8"))
+        selection = raw.get("task_selection")
+        return selection if isinstance(selection, dict) else {}
+    except (OSError, ValueError, AttributeError):
+        return {}
 
 
 def _task_selection(data: dict[str, object]) -> TaskSelectionConfig:
