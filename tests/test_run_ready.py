@@ -136,3 +136,37 @@ def test_refuses_when_health_has_current_problems(tmp_path: Path) -> None:
     code, result = _run(project, "--task", "T-1")
     assert code == 2 and result["stop_reason"] == "REFUSED:current_problems"
     assert "blocked_tasks" in result["detail"]["problems"]
+
+
+def _continue(project: Path, *argv: str) -> tuple[int, dict]:
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        code = cli_module.main(["--project", str(project), "continue", "--dry-run", "--json", *argv])
+    return code, json.loads(out.getvalue())
+
+
+def test_continue_defaults_to_supervised_run_to_completion(tmp_path: Path) -> None:
+    code, result = _continue(_project(tmp_path, ["T-1"]))
+    assert code == 0 and result["stop_reason"] == "DONE" and result["final"]["stage"] == "DONE"
+    assert result["steps_run"] >= 5
+
+
+def test_continue_task_supervises_only_that_task_to_done(tmp_path: Path) -> None:
+    project = _project(tmp_path, ["A-1", "B-1"])
+    code, result = _continue(project, "--task", "A-1")
+    assert code == 0 and result["task_id"] == "A-1" and result["stop_reason"] == "DONE"
+    assert Store(project / ".stagemesh" / "stagemesh.sqlite3").get_task("B-1") is None  # targeted sync skips it
+
+
+def test_continue_default_refuses_ambiguous_selection(tmp_path: Path) -> None:
+    code, result = _continue(_project(tmp_path, ["A-1", "B-1"]))
+    assert code == 2 and result["stop_reason"] == "REFUSED:multiple_eligible_tasks"
+
+
+def test_continue_once_keeps_single_tick_behavior(tmp_path: Path) -> None:
+    project = _project(tmp_path, ["T-1"])
+    code, result = _continue(project, "--once", "--task", "T-1")
+    assert code == 0
+    assert "stop_reason" not in result and result["progressed"] == 1  # legacy summary shape: exactly one tick
+    assert result["targeted_task_id"] == "T-1"
+    assert Store(project / ".stagemesh" / "stagemesh.sqlite3").get_task("T-1")["stage"] == "IMPLEMENT"

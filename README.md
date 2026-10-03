@@ -18,7 +18,7 @@ Implementation agents run in per-task Git worktrees, not the shared checkout. Va
 python -m pip install -e ".[dev]"
 stagemesh init --project .
 stagemesh doctor
-stagemesh continue --once
+stagemesh continue --once   # one coordinator pass; plain `continue` supervises one task to completion
 stagemesh status
 pytest
 python scripts/invariants.py

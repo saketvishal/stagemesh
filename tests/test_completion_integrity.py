@@ -289,7 +289,7 @@ def test_cli_refuses_to_start_when_required_review_provider_is_not_distinct(tmp_
         encoding="utf-8",
     )
 
-    args = argparse.Namespace(project=str(project), once=False, json=True, provider=None, dry_run=False, task=None)
+    args = argparse.Namespace(project=str(project), once=True, json=True, provider=None, dry_run=False, task=None)
 
     assert cli_module.command_continue(args) == 2
     assert not marker.exists()
