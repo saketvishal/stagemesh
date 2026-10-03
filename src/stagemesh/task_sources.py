@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -152,7 +153,7 @@ class GitHubApiIssueSource:
 
     def discover(self) -> tuple[list[DiscoveredTask], str, float | None]:
         request = urllib.request.Request(
-            f"https://api.github.com/repos/{self.owner}/{self.repo}/issues?state=open",
+            f"https://api.github.com/repos/{self.owner}/{self.repo}/issues?state=open&per_page=100",
             headers={
                 "Accept": "application/vnd.github+json",
                 **({"Authorization": f"Bearer {self.token}"} if self.token else {}),
@@ -198,6 +199,12 @@ class ConfiguredGitHubTaskSource:
     def discover(self) -> list[DiscoveredTask]:
         tasks, status, _retry_after = self.source.discover()
         if status != "OK":
+            # Never let an unreachable/unauthorized source look like an empty backlog.
+            print(
+                f"warning: github task source {self.name} unavailable ({status}); "
+                "set STAGEMESH_GITHUB_TOKEN for private repositories",
+                file=sys.stderr,
+            )
             return []
         if not self.labels:
             return tasks

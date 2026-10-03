@@ -61,3 +61,11 @@ class _FakeIssueSource:
 
     def discover(self):
         return self.tasks, "OK", None
+
+
+def test_unavailable_github_source_warns_instead_of_looking_empty(capsys):
+    source = ConfiguredGitHubTaskSource("example", "repo", None, labels=("stagemesh:ready",))
+    source.source.discover = lambda: ([], "STALE", None)
+
+    assert source.discover() == []
+    assert "unavailable (STALE)" in capsys.readouterr().err
