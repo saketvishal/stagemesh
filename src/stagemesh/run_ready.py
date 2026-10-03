@@ -1,16 +1,18 @@
 from __future__ import annotations
 
+import json
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .contracts import task_contract_path
+from .contracts import ContractError, canonical_contract_json, parse_contract, task_contract_path
 from .coordinator import Coordinator, TargetSelection, TargetSelectionError
 from .domain import Stage, TaskStatus
 from .observability import health
 from .operator_actions import recover_stale, task_details
-from .persistence import Store
+from .persistence import MAX_CANONICAL_CONTRACT_CHARS, Store
 from .scheduling import Scheduler
 
 # A task whose latest execution failed is a normal remediation state, not a reason to stop supervising.
@@ -89,6 +91,47 @@ def select_task(store: Store, requested: str | None) -> str:
     return eligible[0]
 
 
+def _check_contract(store: Store, project: Path, task_id: str) -> None:
+    if store.task_contract(task_id) is not None:
+        return  # already frozen for this task
+    path = task_contract_path(project, task_id)
+    if path is None:
+        raise RunReadyRefusal("missing_contract", f"task {task_id} has no change contract", task_id=task_id)
+    try:
+        size = len(canonical_contract_json(parse_contract(json.loads(path.read_text(encoding="utf-8")))))
+    except (OSError, ValueError, ContractError) as exc:
+        raise RunReadyRefusal("invalid_contract", f"contract for {task_id} is invalid: {exc}", task_id=task_id) from exc
+    if size > MAX_CANONICAL_CONTRACT_CHARS:
+        raise RunReadyRefusal(
+            "invalid_contract",
+            f"contract for {task_id} is {size} characters canonicalized; the limit is {MAX_CANONICAL_CONTRACT_CHARS}. Shorten it.",
+            task_id=task_id,
+            size=size,
+            limit=MAX_CANONICAL_CONTRACT_CHARS,
+        )
+
+
+_FAILURE_EVENTS = ("task.implementation_unsuccessful", "task.capacity_failure", "integration.ref_missing_candidate")
+
+
+def _latest_failure(store: Store, task_id: str, since: float) -> dict[str, Any] | None:
+    """The concrete reason a tick made no progress, taken from audit events recorded during that tick."""
+    marks = ",".join("?" for _ in _FAILURE_EVENTS)
+    rows = store.conn.execute(
+        f"SELECT event_type, payload FROM audit_events WHERE created_at >= ? AND event_type IN ({marks}) "
+        "ORDER BY created_at DESC, rowid DESC",
+        (since, *_FAILURE_EVENTS),
+    ).fetchall()
+    for row in rows:
+        try:
+            payload = json.loads(row["payload"])
+        except (TypeError, ValueError):
+            continue
+        if payload.get("task_id") == task_id:
+            return {"event": row["event_type"], **{k: v for k, v in payload.items() if k in {"reason", "executor", "result_status", "execution_id", "candidate_sha", "integration_ref"}}}
+    return None
+
+
 def _snapshot(store: Store, task_id: str) -> dict[str, Any]:
     task = store.get_task(task_id)
     details = task_details(store, task_id)
@@ -139,8 +182,7 @@ def run_ready(
         for row in store.tasks():  # provably dead claims/executions only; live/unknown are never touched
             recovered.extend(_recover_dead(store, str(row["id"])))
         selected = select_task(store, task_id)
-        if task_contract_path(project, selected) is None and store.task_contract(selected) is None:
-            raise RunReadyRefusal("missing_contract", f"task {selected} has no change contract", task_id=selected)
+        _check_contract(store, project, selected)
         if any(row["task_id"] == selected for row in store.running_executions()):
             raise RunReadyRefusal(
                 "active_execution", f"task {selected} has a live or unknown execution; not recovering it", task_id=selected
@@ -166,6 +208,7 @@ def run_ready(
     for number in range(1, max_steps + 1):
         summary.recovered.extend(_recover_dead(store, selected))
         previous = _snapshot(store, selected)
+        tick_started = time.time()
         try:
             progressed = coordinator.tick()
         except TargetSelectionError as exc:
@@ -188,7 +231,13 @@ def run_ready(
             summary.detail["problems"] = list(problems)
             break
         if progressed == 0:
-            summary.stop_reason, summary.message = "NO_PROGRESS", "a tick made no progress (provider outage, review infrastructure or open claim)"
+            failure = _latest_failure(store, selected, tick_started)
+            summary.stop_reason = "NO_PROGRESS"
+            if failure is not None:
+                summary.detail["failure"] = failure
+                summary.message = f"{failure['event']}: {failure.get('reason', 'unknown')}"
+            else:
+                summary.message = "a tick made no progress and recorded no failure (review infrastructure unavailable or an open claim)"
             break
     else:
         summary.stop_reason, summary.message = "MAX_STEPS", f"stopped after {max_steps} steps"
