@@ -12,7 +12,7 @@ from .lifecycle import evidence_allows_advance
 from .persistence import Store
 from .process_identity import classify_process, process_identity
 from .remediation import RemediationPolicy
-from .review import Reviewer
+from .review import Reviewer, independent_review_verified
 from .scheduling import Scheduler
 from .validation import Validator
 
@@ -37,13 +37,15 @@ class Coordinator:
         integrator: Integrator | None = None,
         remediation_policy: RemediationPolicy | None = None,
         target: TargetSelection | None = None,
+        require_independent_review: bool = False,
     ):
         self.store = store
         self.project = Path(project)
         self.executor = executor or FakeExecutor()
         self.validator = validator or Validator()
-        self.reviewer = reviewer or Reviewer()
-        self.integrator = integrator or Integrator()
+        self.require_independent_review = require_independent_review
+        self.reviewer = reviewer or Reviewer(require_independent=require_independent_review)
+        self.integrator = integrator or Integrator(require_independent_review=require_independent_review)
         self.remediation_policy = remediation_policy or RemediationPolicy()
         self.target = target
 
@@ -186,10 +188,12 @@ class Coordinator:
             return self._advance_with_evidence(task_id, stage, sha, EvidenceKind.VALIDATION, bound.digest)
         if stage is Stage.REVIEW:
             bound = contract_for_candidate(self.store, task_id, sha, self.project)
-            if not self.store.has_bound_evidence(task_id, sha, EvidenceKind.REVIEW, bound.digest):
+            if not self._review_satisfied(task_id, sha, bound.digest):
                 self.reviewer.review(self.store, task_id, sha, self.project)
             if self.store.has_bound_evidence(task_id, sha, EvidenceKind.REVIEW, bound.digest, EvidenceStatus.FAILED):
                 return self._remediate_or_block(task_id, sha, Stage.REVIEW)
+            if not self._review_satisfied(task_id, sha, bound.digest):
+                return 0  # review infrastructure failure or unsatisfied independence: stay in REVIEW, no remediation
             return self._advance_with_evidence(task_id, stage, sha, EvidenceKind.REVIEW, bound.digest)
         if stage is Stage.INTEGRATE:
             bound = contract_for_candidate(self.store, task_id, sha, self.project)
@@ -243,8 +247,29 @@ class Coordinator:
             },
         )
 
+    def _review_satisfied(self, task_id: str, sha: str, contract_hash: str) -> bool:
+        for payload in self.store.bound_evidence_payloads(task_id, sha, EvidenceKind.REVIEW, contract_hash):
+            if not self.require_independent_review or independent_review_verified(payload):
+                return True
+        return False
+
+    def _integration_durable(self, task_id: str, sha: str) -> bool:
+        """DONE requires the configured integration ref to actually contain the exact candidate."""
+        if self.integrator.integration_ref is None:
+            return True  # synthetic evidence-only integrator (no durable ref configured)
+        if self.integrator.ref_contains(self.project, sha):
+            return True
+        record_audit(
+            self.store,
+            "integration.ref_missing_candidate",
+            {"task_id": task_id, "candidate_sha": sha, "integration_ref": self.integrator.integration_ref},
+        )
+        return False
+
     def _advance_with_evidence(self, task_id: str, stage: Stage, sha: str, kind: EvidenceKind, contract_hash: str) -> int:
         if not self.store.has_bound_evidence(task_id, sha, kind, contract_hash, EvidenceStatus.PASSED):
+            return 0
+        if kind is EvidenceKind.INTEGRATION and not self._integration_durable(task_id, sha):
             return 0
         decision = evidence_allows_advance(
             current=stage,

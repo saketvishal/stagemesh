@@ -415,7 +415,7 @@ def test_cli_continue_same_review_provider_falls_back_non_independent(tmp_path: 
     )
     project = _cli_project(
         tmp_path,
-        routing={"mode": "STAGED", "stage_routes": {"IMPLEMENT": "codex", "REVIEW": "codex"}},
+        routing={"mode": "STAGED", "require_independent_review": False, "stage_routes": {"IMPLEMENT": "codex", "REVIEW": "codex"}},
     )
     config_path = project / ".stagemesh" / "config.json"
     data = json.loads(config_path.read_text(encoding="utf-8"))
@@ -438,7 +438,7 @@ def test_cli_continue_single_agent_review_is_deterministic_non_independent(tmp_p
     )
     project = _cli_project(
         tmp_path,
-        routing={"mode": "SINGLE_AGENT", "single_agent_provider": "codex", "stage_routes": {"REVIEW": "claude"}},
+        routing={"mode": "SINGLE_AGENT", "require_independent_review": False, "single_agent_provider": "codex", "stage_routes": {"REVIEW": "claude"}},
     )
     config_path = project / ".stagemesh" / "config.json"
     data = json.loads(config_path.read_text(encoding="utf-8"))
