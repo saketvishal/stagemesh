@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import os
+import signal
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -10,6 +13,7 @@ from .domain import ExecutionKind, ExecutionStatus
 from .git import GitWorkspace
 from .persistence import Store
 from .process_identity import popen_identity
+from .remediation import remediation_context
 from .workspaces import (
     NO_IMPLEMENTATION_CHANGE,
     commit_implementation_candidate,
@@ -68,6 +72,54 @@ def classify_failure(
     return False, "implementation_failure"
 
 
+DEFAULT_PROVIDER_TIMEOUT_SECONDS = 3600.0
+PROVIDER_TIMEOUT = "provider_timeout"
+
+
+def provider_timeout_seconds(configured: float | None = None) -> float:
+    """Wall-clock limit for one provider subprocess: explicit value, STAGEMESH_PROVIDER_TIMEOUT_SECONDS, or 1h."""
+    if configured is not None and configured > 0:
+        return float(configured)
+    try:
+        value = float(os.environ.get("STAGEMESH_PROVIDER_TIMEOUT_SECONDS", ""))
+    except ValueError:
+        return DEFAULT_PROVIDER_TIMEOUT_SECONDS
+    return value if value > 0 else DEFAULT_PROVIDER_TIMEOUT_SECONDS
+
+
+def popen_session_kwargs() -> dict[str, object]:
+    """Start providers in their own process group so the whole tree can be killed on timeout."""
+    return {} if sys.platform == "win32" else {"start_new_session": True}
+
+
+def kill_process_tree(proc: subprocess.Popen[str]) -> None:
+    if sys.platform == "win32":
+        subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True, check=False)
+    else:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except OSError:
+            pass
+    try:
+        proc.kill()
+    except OSError:
+        pass
+
+
+def communicate_bounded(proc: subprocess.Popen[str], input_text: str, timeout: float) -> tuple[str, str, bool]:
+    """Run proc to completion, killing its process tree if it exceeds `timeout`. Returns (stdout, stderr, timed_out)."""
+    try:
+        stdout, stderr = proc.communicate(input=input_text, timeout=timeout)
+        return stdout, stderr, False
+    except subprocess.TimeoutExpired:
+        kill_process_tree(proc)
+        try:
+            stdout, stderr = proc.communicate(timeout=30)
+        except subprocess.TimeoutExpired:
+            stdout, stderr = "", ""
+        return stdout, stderr, True
+
+
 class Executor:
     name = "executor"
 
@@ -98,8 +150,9 @@ class FakeExecutor(Executor):
 class SubprocessExecutor(Executor):
     name = "subprocess"
 
-    def __init__(self, command: list[str], name: str | None = None):
+    def __init__(self, command: list[str], name: str | None = None, timeout_seconds: float | None = None):
         self.command = command
+        self.timeout_seconds = timeout_seconds
         if name is not None:
             self.name = name
 
@@ -121,7 +174,9 @@ class SubprocessExecutor(Executor):
             bound = bind_task_contract(store, project, task_id, baseline_sha)
         except ContractRejected as exc:
             return ExecutionResult(ExecutionStatus.FAILED, failure_reason=f"{exc.reason}: {exc}")
-        task_prompt = _build_task_prompt(task_id, task, run_path, contract=bound.contract)
+        task_prompt = _build_task_prompt(
+            task_id, task, run_path, contract=bound.contract, remediation=remediation_context(store, task_id)
+        )
 
         try:
             proc = subprocess.Popen(
@@ -133,6 +188,7 @@ class SubprocessExecutor(Executor):
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
+                **popen_session_kwargs(),
             )
         except FileNotFoundError as exc:
             is_cap, reason = classify_failure(1, exc=exc)
@@ -152,9 +208,12 @@ class SubprocessExecutor(Executor):
             boot_id=ident.boot_id,
             executable=ident.executable,
         )
-        stdout, stderr = proc.communicate(input=task_prompt)
+        stdout, stderr, timed_out = communicate_bounded(proc, task_prompt, provider_timeout_seconds(self.timeout_seconds))
         code = proc.returncode
 
+        if timed_out:
+            store.finish_execution(execution_id, ExecutionStatus.FAILED)
+            return ExecutionResult(ExecutionStatus.FAILED, failure_reason=PROVIDER_TIMEOUT)
         if code != 0:
             is_cap, reason = classify_failure(code, stdout, stderr)
             store.finish_execution(execution_id, ExecutionStatus.FAILED)
