@@ -14,7 +14,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from .auto_plan import detect_gates
+from .auto_plan import cached_state as _cached_state
+from .auto_plan import plannable, task_labels
 from .config import TaskSelectionConfig
 from .contracts import ContractError, canonical_contract_json, parse_contract, task_contract_path
 from .domain import EvidenceKind, EvidenceStatus, Stage, TaskStatus
@@ -85,25 +86,6 @@ class SelectionRefusal(Exception):
         self.detail = detail
 
 
-def task_labels(store: Store, task: Any) -> tuple[str, ...]:
-    state = _cached_state(store, task)
-    labels = state.get("labels")
-    return tuple(labels) if isinstance(labels, list) else ()
-
-
-def _cached_state(store: Store, task: Any) -> dict[str, Any]:
-    row = store.conn.execute(
-        "SELECT state FROM source_cache WHERE source=? AND source_id=?", (task["source"], task["source_id"])
-    ).fetchone()
-    if row is None:
-        return {}
-    try:
-        state = json.loads(row["state"])
-    except (TypeError, ValueError):
-        return {}
-    return state if isinstance(state, dict) else {}
-
-
 def _first_match(labels: tuple[str, ...], ordered: tuple[str, ...]) -> tuple[int, str | None]:
     folded = {label.casefold() for label in labels}
     for index, wanted in enumerate(ordered):
@@ -147,8 +129,9 @@ def _contract_state(store: Store, project: Path, task_id: str, auto_plan: bool) 
         return "valid" if size <= MAX_CANONICAL_CONTRACT_CHARS else "unplannable:contract exceeds the size limit"
     if not auto_plan:
         return "unplannable:no contract and auto-planning is disabled"
-    if not detect_gates(project):
-        return "unplannable:no contract and no validation gate can be generated"
+    why = plannable(store, project, task_id)
+    if why is not None:
+        return f"unplannable:no contract and cannot auto-plan: {why}"
     return "needs_auto_plan"
 
 

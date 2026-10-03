@@ -17,6 +17,7 @@ from typing import Any
 from .audit import record_audit
 from .contracts import ContractError, canonical_contract_json, parse_contract
 from .persistence import MAX_CANONICAL_CONTRACT_CHARS, Store
+from .profile import Profile, ProfileError, TypeDecision, build_contract as build_profile_contract, load_profile, resolve_type
 
 GENERATED_BY = "stagemesh-auto-plan"
 MAX_OBJECTIVE_CHARS = 4000
@@ -44,9 +45,13 @@ class AutoPlanResult:
     path: Path
     gates: tuple[str, ...]
     digest_chars: int
+    profile: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {"path": str(self.path), "gates": list(self.gates), "canonical_chars": self.digest_chars}
+        data: dict[str, Any] = {"path": str(self.path), "gates": list(self.gates), "canonical_chars": self.digest_chars}
+        if self.profile:
+            data["profile"] = self.profile
+        return data
 
 
 def _shell(command: str) -> list[str]:
@@ -80,21 +85,36 @@ def detect_gates(project: Path) -> list[dict[str, Any]]:
     return gates
 
 
-def task_objective(store: Store, task_id: str) -> str:
-    task = store.get_task(task_id)
-    if task is None:
-        raise AutoPlanError("task_not_found", f"task does not exist: {task_id}", "check the task id")
-    objective = str(task["title"]).strip()
+def cached_state(store: Store, task: Any) -> dict[str, Any]:
+    """What the task source last told us about the task (labels, created_at, description)."""
     row = store.conn.execute(
         "SELECT state FROM source_cache WHERE source=? AND source_id=?", (task["source"], task["source_id"])
     ).fetchone()
-    if row is not None:
-        try:
-            body = json.loads(row["state"]).get("objective")
-        except (TypeError, ValueError):
-            body = None
-        if isinstance(body, str) and body.strip():
-            objective = f"{objective}\n\n{body.strip()}"
+    if row is None:
+        return {}
+    try:
+        state = json.loads(row["state"])
+    except (TypeError, ValueError):
+        return {}
+    return state if isinstance(state, dict) else {}
+
+
+def task_labels(store: Store, task: Any) -> tuple[str, ...]:
+    labels = cached_state(store, task).get("labels")
+    return tuple(labels) if isinstance(labels, list) else ()
+
+
+def task_text(store: Store, task_id: str) -> tuple[str, str]:
+    task = store.get_task(task_id)
+    if task is None:
+        raise AutoPlanError("task_not_found", f"task does not exist: {task_id}", "check the task id")
+    body = cached_state(store, task).get("objective")
+    return str(task["title"]).strip(), body.strip() if isinstance(body, str) else ""
+
+
+def task_objective(store: Store, task_id: str) -> str:
+    title, body = task_text(store, task_id)
+    objective = f"{title}\n\n{body}" if body else title
     if len(objective) > MAX_OBJECTIVE_CHARS:
         objective = objective[: MAX_OBJECTIVE_CHARS - 15].rstrip() + " [truncated]"
     return objective
@@ -154,18 +174,68 @@ def validate_generated(payload: dict[str, Any]) -> int:
     return size
 
 
+def profile_payload(store: Store, project: Path, task_id: str) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    """The profile-built contract and its selection record, or None when the project has no profile."""
+    try:
+        profile = load_profile(project)
+        if profile is None:
+            return None
+        title, body = task_text(store, task_id)
+        task = store.get_task(task_id)
+        decision = resolve_type(profile, task_labels(store, task), title, body)
+        payload = build_profile_contract(profile, decision, task_objective(store, task_id), task_id, GENERATED_BY)
+    except ProfileError as exc:
+        raise AutoPlanError(
+            "invalid_profile", f"project profile is unusable: {exc}", "fix .stagemesh/profile.json (see `stagemesh profile`)"
+        ) from exc
+    _fit_objective(payload)
+    return payload, payload["profile"]
+
+
+def _fit_objective(payload: dict[str, Any]) -> None:
+    """Trim the objective so the canonical contract fits the store limit; gates and scope are never trimmed."""
+    for _ in range(3):
+        try:
+            size = len(canonical_contract_json(parse_contract(payload)))
+        except (ContractError, ValueError, TypeError):
+            return  # validate_generated reports it
+        excess = size - (MAX_CANONICAL_CONTRACT_CHARS - 200)
+        if excess <= 0 or len(payload["objective"]) <= 600:
+            return
+        keep = max(600, len(payload["objective"]) - excess - 15)
+        payload["objective"] = payload["objective"][:keep].rstrip() + " [truncated]"
+
+
+def plannable(store: Store, project: Path, task_id: str) -> str | None:
+    """None when a contract can be generated for the task, else the reason it cannot."""
+    try:
+        planned = profile_payload(store, project, task_id)
+        if planned is not None:
+            validate_generated(planned[0])
+            return None
+    except AutoPlanError as exc:
+        return exc.message
+    return None if detect_gates(project) else "no validation gate can be generated"
+
+
 def create_contract(store: Store, project: Path, task_id: str, *, gate_detector=None) -> AutoPlanResult:
     path = project / ".stagemesh" / "contracts" / f"{task_id}.json"
     if path.exists():
         raise AutoPlanError("contract_exists", f"refusing to overwrite existing contract {path}", "reuse the existing contract")
-    gates = (gate_detector or detect_gates)(project)
-    if not gates:
-        raise AutoPlanError(
-            "no_validation_gates",
-            "no validation gate could be detected (looked for npm test, pytest, cargo test, go test at the project root)",
-            f"write {path} by hand with explicit required_tests, or add a root-level test configuration",
-        )
-    payload = build_contract(store, project, task_id, gates)
+    profile_info: dict[str, Any] | None = None
+    planned = profile_payload(store, project, task_id) if gate_detector is None else None
+    if planned is not None:
+        payload, profile_info = planned
+        gates = payload["required_tests"]
+    else:
+        gates = (gate_detector or detect_gates)(project)
+        if not gates:
+            raise AutoPlanError(
+                "no_validation_gates",
+                "no validation gate could be detected (looked for npm test, pytest, cargo test, go test at the project root)",
+                f"write {path} by hand with explicit required_tests, add a root-level test configuration, or add .stagemesh/profile.json",
+            )
+        payload = build_contract(store, project, task_id, gates)
     size = validate_generated(payload)
     path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_suffix(".json.tmp")
@@ -173,4 +243,4 @@ def create_contract(store: Store, project: Path, task_id: str, *, gate_detector=
     os.replace(temp, path)
     names = tuple(str(g["name"]) for g in gates)
     record_audit(store, "contract.auto_generated", {"task_id": task_id, "path": str(path), "gates": list(names), "canonical_chars": size})
-    return AutoPlanResult(path, names, size)
+    return AutoPlanResult(path, names, size, profile_info)

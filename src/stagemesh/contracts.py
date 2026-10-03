@@ -3,6 +3,7 @@ from __future__ import annotations
 import fnmatch
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 import tempfile
@@ -39,6 +40,8 @@ class GateCommand:
     name: str
     command: list[str]
     timeout_seconds: int = 120
+    cwd: str | None = None  # relative to the gate checkout; never outside it
+    env: tuple[tuple[str, str], ...] = ()  # extra environment for this gate only, so test databases are explicit
 
 
 @dataclass(frozen=True)
@@ -457,10 +460,17 @@ def candidate_workspace(project: Path, candidate_sha: str) -> Iterator[Path]:
 
 
 def run_gate(project: Path, gate: GateCommand) -> GateResult:
+    run_dir = project / gate.cwd if gate.cwd else project
+    command = list(gate.command)
+    resolved = shutil.which(command[0])  # lets "npm" find npm.cmd on Windows without a shell
+    if resolved:
+        command[0] = resolved
+    environment = {**os.environ, **dict(gate.env)} if gate.env else None
     try:
         result = subprocess.run(
-            gate.command,
-            cwd=project,
+            command,
+            cwd=run_dir,
+            env=environment,
             text=True,
             encoding="utf-8",
             errors="replace",
@@ -581,7 +591,25 @@ def _command(value: Any, field: str) -> GateCommand:
     timeout = value.get("timeout_seconds", 120)
     if not isinstance(timeout, int) or timeout < 1:
         raise ContractError(f"{field} timeout_seconds must be a positive integer")
-    return GateCommand(name, command, timeout)
+    return GateCommand(name, command, timeout, _gate_cwd(value.get("cwd"), field), _gate_env(value.get("env"), field))
+
+
+def _gate_cwd(value: Any, field: str) -> str | None:
+    if value is None:
+        return None
+    text = _required_text(value, f"{field} cwd").replace("\\", "/")
+    parts = text.split("/")
+    if text.startswith("/") or ":" in text or ".." in parts:
+        raise ContractError(f"{field} cwd must be a relative path inside the checkout")
+    return text
+
+
+def _gate_env(value: Any, field: str) -> tuple[tuple[str, str], ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, dict) or not all(isinstance(k, str) and k and isinstance(v, str) for k, v in value.items()):
+        raise ContractError(f"{field} env must be an object of string values")
+    return tuple(sorted(value.items()))
 
 
 def _optional_positive_int(value: Any, field: str) -> int | None:
@@ -625,8 +653,13 @@ def _contract_payload(contract: ChangeContract) -> dict[str, Any]:
 
 
 def _gate_payload(gate: GateCommand) -> dict[str, Any]:
-    return {
+    payload: dict[str, Any] = {
         "name": gate.name,
         "command": list(gate.command),
         "timeout_seconds": gate.timeout_seconds,
     }
+    if gate.cwd:  # only when set, so existing contracts keep their digests
+        payload["cwd"] = gate.cwd
+    if gate.env:
+        payload["env"] = dict(gate.env)
+    return payload
