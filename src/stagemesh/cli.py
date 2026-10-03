@@ -35,7 +35,7 @@ from .integration import Integrator
 from .objectives import ObjectivePlanner, ObjectiveValidationError
 from .observability import health
 from .operator import operator_report
-from .operator_actions import OperatorActionError, adopt_candidate, recover_stale, task_details
+from .operator_actions import OperatorActionError, adopt_candidate, recover_stale, release_unknown_execution, task_details
 from .persistence import Store, StoreValidationError
 from .persistence_backends import probe_backend
 from .postgres_store import PostgresStore, PostgresUnavailable, postgres_schema_contract
@@ -797,7 +797,14 @@ def command_recover_stale(args: argparse.Namespace) -> int:
     store = Store(db_path(project))
     store.migrate()
     try:
-        actions = recover_stale(store, args.task)
+        if args.release_unknown:
+            if not args.execution:
+                raise OperatorActionError("--release-unknown needs --execution <id>: it releases one named execution, never a sweep")
+            actions = [release_unknown_execution(store, args.task, args.execution, args.reason or "")]
+        elif args.execution or args.reason:
+            raise OperatorActionError("--execution and --reason only apply together with --release-unknown")
+        else:
+            actions = recover_stale(store, args.task)
     except OperatorActionError as exc:
         print(str(exc), file=sys.stderr)
         store.close()
@@ -1808,8 +1815,15 @@ def build_parser() -> argparse.ArgumentParser:
     profile_cmd.add_argument("--task", help="Task id to explain (read-only)")
     profile_cmd.add_argument("--json", action="store_true")
     profile_cmd.set_defaults(func=command_profile)
-    recover = sub.add_parser("recover-stale", help="Release stale claims/executions whose process is provably dead")
+    recover = sub.add_parser("recover-stale", help="Release stale claims/executions whose process is provably dead (--release-unknown for an inspected unknown one)")
     recover.add_argument("--task", required=True)
+    recover.add_argument(
+        "--release-unknown",
+        action="store_true",
+        help="Operator override: terminalize ONE running execution whose process identity is unknown (needs --execution and --reason)",
+    )
+    recover.add_argument("--execution", help="Execution id to release with --release-unknown")
+    recover.add_argument("--reason", help="What you inspected that shows the execution is dead (recorded in the audit log)")
     recover.add_argument("--json", action="store_true")
     recover.set_defaults(func=command_recover_stale)
     adopt = sub.add_parser("adopt-candidate", help="Register an existing commit as the task's latest candidate")
