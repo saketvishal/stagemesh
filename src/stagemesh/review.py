@@ -56,7 +56,9 @@ class Reviewer:
         provider_name: str = "builtin-deterministic-fallback",
         adapter: ReviewAdapter | None = None,
         require_independent: bool = False,
+        review_pool: object | None = None,
     ):
+        self.review_pool = review_pool
         self.require_independent = require_independent
         self.fail_capacity = fail_capacity
         self.findings = findings or []
@@ -78,10 +80,16 @@ class Reviewer:
             "SELECT produced_by FROM candidates WHERE task_id=? AND sha=?", (task_id, candidate_sha)
         ).fetchone()
         implementer = str(produced["produced_by"]) if produced is not None else None
-        adapter_name = getattr(self.adapter, "name", None)
+        adapter = self.adapter
+        considered: list[dict[str, object]] = []
+        if self.review_pool is not None:
+            # Dynamic selection: first eligible provider that is not the implementer, with automatic fallback.
+            adapter, verdicts = self.review_pool.review_adapter(store, task_id, candidate_sha, implementer)
+            considered = [v.to_dict() for v in verdicts]
+        adapter_name = getattr(adapter, "name", None)
         reviewer_provider = adapter_name or self.provider_name
         same_provider = bool(implementer and _same_provider(reviewer_provider, implementer))
-        independent = bool(self.adapter is not None and reviewer_provider and implementer and not same_provider)
+        independent = bool(adapter is not None and reviewer_provider and implementer and not same_provider)
         findings = list(self.findings)
         infrastructure_failure: str | None = None
         review_payload: dict[str, object] = {
@@ -93,6 +101,8 @@ class Reviewer:
             "review_execution_invoked": False,
             "independent_review_required": self.require_independent,
         }
+        if considered:
+            review_payload["review_providers_considered"] = considered
         if same_provider and not self.require_independent:
             findings.append(
                 ReviewFinding(
@@ -127,7 +137,7 @@ class Reviewer:
                 )
                 for item in evaluation.findings
             )
-            if self.adapter is not None and not findings and not (same_provider and self.require_independent):
+            if adapter is not None and not findings and not (same_provider and self.require_independent):
                 review_payload["review_execution_invoked"] = True
                 prompt = (
                     f"Review candidate {candidate_sha} for task {task_id} under contract {bound.digest}.\n"
@@ -135,11 +145,16 @@ class Reviewer:
                     "Return JSON only: {\"decision\":\"PASS\"} or "
                     "{\"decision\":\"FAIL\",\"findings\":[{\"severity\":\"error\",\"message\":\"...\"}]}."
                 )
-                candidate_review = getattr(self.adapter, "review_candidate", None)
+                candidate_review = getattr(adapter, "review_candidate", None)
                 if callable(candidate_review):
                     response = candidate_review(prompt, project, candidate_sha)
                 else:
-                    response = self.adapter.review(prompt)
+                    response = adapter.review(prompt)
+                final_provider = getattr(adapter, "name", reviewer_provider)
+                if final_provider != reviewer_provider:  # a fallback reviewer produced the answer
+                    reviewer_provider = final_provider
+                    review_payload["review_provider"] = final_provider
+                    review_payload["review_execution_provider"] = final_provider
                 review_payload["review_response"] = response
                 try:
                     parsed = json.loads(response)
@@ -194,10 +209,16 @@ class Reviewer:
         if infrastructure_failure is not None and not findings:
             # Not a code defect: no findings, so no implementation remediation; the task stays in REVIEW.
             review_payload["review_infrastructure_failure"] = infrastructure_failure
+            providers_text = "; ".join(f"{c['provider']}: {c['reason']}" for c in considered)
             store.add_evidence(task_id, candidate_sha, EvidenceKind.REVIEW, EvidenceStatus.CAPACITY, review_payload)
             store.add_audit_event(
                 "review.infrastructure_failure",
-                {"task_id": task_id, "candidate_sha": candidate_sha, "reason": infrastructure_failure},
+                {
+                    "task_id": task_id,
+                    "candidate_sha": candidate_sha,
+                    "reason": infrastructure_failure,
+                    **({"providers": providers_text} if providers_text else {}),
+                },
             )
             store.finish_execution(execution_id, ExecutionStatus.FAILED, candidate_sha)
             return EvidenceStatus.CAPACITY
