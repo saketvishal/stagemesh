@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .auto_plan import AutoPlanError, create_contract
 from .contracts import ContractError, canonical_contract_json, parse_contract, task_contract_path
 from .coordinator import Coordinator, TargetSelection, TargetSelectionError
 from .domain import EvidenceKind, Stage, TaskStatus
@@ -38,6 +39,7 @@ class RunSummary:
     steps: list[dict[str, Any]] = field(default_factory=list)
     recovered: list[dict[str, Any]] = field(default_factory=list)
     final: dict[str, Any] | None = None
+    auto_plan: dict[str, Any] = field(default_factory=lambda: {"occurred": False, "reused_existing": False, "events": []})
     detail: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -55,6 +57,7 @@ class RunSummary:
             "steps": self.steps,
             "recovered": self.recovered,
             "final": self.final,
+            "auto_plan": self.auto_plan,
             **({"detail": self.detail} if self.detail else {}),
         }
 
@@ -93,12 +96,39 @@ def select_task(store: Store, requested: str | None) -> str:
     return eligible[0]
 
 
-def _check_contract(store: Store, project: Path, task_id: str) -> None:
+def _ensure_contract(
+    store: Store, project: Path, task_id: str, auto_plan: bool, plan_info: dict[str, Any], note: Callable[[str], None]
+) -> None:
     if store.task_contract(task_id) is not None:
+        plan_info["reused_existing"] = True
         return  # already frozen for this task
     path = task_contract_path(project, task_id)
     if path is None:
-        raise RunReadyRefusal("missing_contract", f"task {task_id} has no change contract", task_id=task_id)
+        note(f"task {task_id}: missing change contract detected")
+        if not auto_plan:
+            raise RunReadyRefusal(
+                "missing_contract",
+                f"task {task_id} has no change contract (auto-planning disabled by --no-auto-plan)",
+                task_id=task_id,
+                next_action=f"write .stagemesh/contracts/{task_id}.json or rerun without --no-auto-plan",
+            )
+        note(f"task {task_id}: auto-planning started (deterministic contract from the task objective)")
+        try:
+            result = create_contract(store, project, task_id)
+        except AutoPlanError as exc:
+            raise RunReadyRefusal(
+                "auto_plan_failed",
+                f"auto-planning failed for task {task_id}: {exc.message}",
+                task_id=task_id,
+                auto_plan_reason=exc.reason,
+                next_action=exc.next_action,
+            ) from exc
+        plan_info.update(occurred=True, **result.to_dict())
+        note(f"task {task_id}: contract created at {result.path} (gates: {', '.join(result.gates)})")
+        note(f"task {task_id}: continuing to implementation")
+        path = result.path
+    else:
+        plan_info["reused_existing"] = True
     try:
         size = len(canonical_contract_json(parse_contract(json.loads(path.read_text(encoding="utf-8")))))
     except (OSError, ValueError, ContractError) as exc:
@@ -376,16 +406,24 @@ def run_ready(
     max_steps: int = 50,
     on_step: Callable[[dict[str, Any]], None] | None = None,
     on_start: Callable[[str], None] | None = None,
+    auto_plan: bool = True,
 ) -> RunSummary:
     """Drive exactly one task through the existing coordinator until DONE, BLOCKED or a safe stop."""
     if max_steps < 1:
         return RunSummary(False, "REFUSED:invalid_max_steps", message="--max-steps must be at least 1")
     recovered: list[dict[str, Any]] = []
+    plan_info: dict[str, Any] = {"occurred": False, "reused_existing": False, "events": []}
+
+    def note(message: str) -> None:
+        plan_info["events"].append(message)
+        if on_start is not None:
+            on_start(message)
+
     try:
         for row in store.tasks():  # provably dead claims/executions only; live/unknown are never touched
             recovered.extend(_recover_dead(store, str(row["id"])))
         selected = select_task(store, task_id)
-        _check_contract(store, project, selected)
+        _ensure_contract(store, project, selected, auto_plan, plan_info, note)
         if any(row["task_id"] == selected for row in store.running_executions()):
             raise RunReadyRefusal(
                 "active_execution", f"task {selected} has a live or unknown execution; not recovering it", task_id=selected
@@ -397,10 +435,15 @@ def run_ready(
             )
     except RunReadyRefusal as refusal:
         return RunSummary(
-            False, f"REFUSED:{refusal.reason}", message=refusal.message, recovered=recovered, detail=refusal.detail
+            False,
+            f"REFUSED:{refusal.reason}",
+            message=refusal.message,
+            recovered=recovered,
+            detail=refusal.detail,
+            auto_plan=plan_info,
         )
 
-    summary = RunSummary(True, "UNSET", task_id=selected, recovered=recovered)
+    summary = RunSummary(True, "UNSET", task_id=selected, recovered=recovered, auto_plan=plan_info)
     try:
         coordinator = make_coordinator(TargetSelection(selected))
         coordinator.validate_target()
