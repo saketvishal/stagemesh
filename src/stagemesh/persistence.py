@@ -195,6 +195,11 @@ class Store:
                 reason TEXT NOT NULL,
                 updated_at REAL NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS task_baselines (
+                task_id TEXT PRIMARY KEY REFERENCES tasks(id),
+                baseline_sha TEXT NOT NULL,
+                created_at REAL NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS external_evidence (
                 id TEXT PRIMARY KEY,
                 kind TEXT NOT NULL,
@@ -392,6 +397,22 @@ class Store:
         if row is None:
             raise StoreValidationError("contract binding was not persisted")
         return str(row["id"])
+
+    def set_task_baseline(self, task_id: str, baseline_sha: str) -> str:
+        """Record the task's immutable baseline once; later calls return the original value."""
+        task_id = _validate_text(task_id, "task id")
+        baseline_sha = _validate_text(baseline_sha, "baseline sha")
+        self.conn.execute(
+            "INSERT OR IGNORE INTO task_baselines(task_id, baseline_sha, created_at) VALUES (?, ?, ?)",
+            (task_id, baseline_sha, time.time()),
+        )
+        self.conn.commit()
+        return str(self.task_baseline(task_id))
+
+    def task_baseline(self, task_id: str) -> str | None:
+        task_id = _validate_text(task_id, "task id")
+        row = self.conn.execute("SELECT baseline_sha FROM task_baselines WHERE task_id=?", (task_id,)).fetchone()
+        return str(row["baseline_sha"]) if row is not None else None
 
     def contract_binding(self, task_id: str, candidate_sha: str) -> sqlite3.Row | None:
         task_id = _validate_text(task_id, "task id")
