@@ -12,8 +12,10 @@ from .coordinator import Coordinator, TargetSelection, TargetSelectionError
 from .domain import Stage, TaskStatus
 from .observability import health
 from .operator_actions import recover_stale, task_details
+from .git import GitWorkspace
 from .persistence import MAX_CANONICAL_CONTRACT_CHARS, Store
 from .scheduling import Scheduler
+from .workspaces import task_workspace
 
 # A task whose latest execution failed is a normal remediation state, not a reason to stop supervising.
 _IGNORED_PROBLEMS = frozenset({"current_failed_executions"})
@@ -111,7 +113,12 @@ def _check_contract(store: Store, project: Path, task_id: str) -> None:
         )
 
 
-_FAILURE_EVENTS = ("task.implementation_unsuccessful", "task.capacity_failure", "integration.ref_missing_candidate")
+_FAILURE_EVENTS = (
+    "task.implementation_unsuccessful",
+    "task.capacity_failure",
+    "integration.ref_missing_candidate",
+    "review.infrastructure_failure",
+)
 
 
 def _latest_failure(store: Store, task_id: str, since: float) -> dict[str, Any] | None:
@@ -128,8 +135,17 @@ def _latest_failure(store: Store, task_id: str, since: float) -> dict[str, Any] 
         except (TypeError, ValueError):
             continue
         if payload.get("task_id") == task_id:
-            return {"event": row["event_type"], **{k: v for k, v in payload.items() if k in {"reason", "executor", "result_status", "execution_id", "candidate_sha", "integration_ref"}}}
+            return {"event": row["event_type"], **{k: v for k, v in payload.items() if k in {"reason", "executor", "result_status", "execution_id", "candidate_sha", "integration_ref", "providers"}}}
     return None
+
+
+def workspace_info(project: Path, task_id: str) -> dict[str, str]:
+    head = GitWorkspace(project).run("symbolic-ref", "--short", "-q", "HEAD", check=False)
+    branch = head.stdout.strip()
+    return {
+        "worktree": str(task_workspace(project, task_id)),
+        "checkout": f"branch {branch}" if head.returncode == 0 and branch else "detached HEAD",
+    }
 
 
 def _snapshot(store: Store, task_id: str) -> dict[str, Any]:
@@ -144,6 +160,7 @@ def _snapshot(store: Store, task_id: str) -> dict[str, Any]:
         "latest_agent": candidate.get("producer") or _latest_claimed_agent(store, task_id),
         "latest_validation": (details["latest_validation"] or {}).get("status"),
         "latest_review": (details["latest_review"] or {}).get("status"),
+        "latest_integration": (details["latest_integration"] or {}).get("status"),
         "active_claim": (
             {
                 "id": claim["id"],
@@ -202,6 +219,7 @@ def run_ready(
     task_id: str | None = None,
     max_steps: int = 50,
     on_step: Callable[[dict[str, Any]], None] | None = None,
+    on_start: Callable[[str], None] | None = None,
 ) -> RunSummary:
     """Drive exactly one task through the existing coordinator until DONE, BLOCKED or a safe stop."""
     if max_steps < 1:
@@ -234,9 +252,18 @@ def run_ready(
         summary.started, summary.stop_reason, summary.message = False, "REFUSED:target_not_runnable", str(exc)
         return summary
 
+    summary.detail["workspace"] = workspace_info(project, selected)
+    if on_start is not None:
+        on_start(
+            f"task {selected}: isolated worktree {summary.detail['workspace']['worktree']}; project checkout is on "
+            f"{summary.detail['workspace']['checkout']} and is not edited (the integration ref only advances after "
+            "validation, independent review and integration pass)"
+        )
     for number in range(1, max_steps + 1):
         summary.recovered.extend(_recover_dead(store, selected))
         previous = _snapshot(store, selected)
+        if on_start is not None:
+            on_start(f"step {number}: {previous['stage']} starting for task {selected}")
         tick_started = time.time()
         try:
             progressed = coordinator.tick()
@@ -264,7 +291,9 @@ def run_ready(
             summary.stop_reason = "NO_PROGRESS"
             if failure is not None:
                 summary.detail["failure"] = failure
-                summary.message = f"{failure['event']}: {failure.get('reason', 'unknown')}"
+                summary.message = f"{failure['event']}: {failure.get('reason', 'unknown')}" + (
+                    f" ({failure['providers']})" if failure.get("providers") else ""
+                )
             else:
                 summary.message = "a tick made no progress and recorded no failure (review infrastructure unavailable or an open claim)"
             break

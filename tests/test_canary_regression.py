@@ -415,7 +415,7 @@ def test_cli_continue_same_review_provider_falls_back_non_independent(tmp_path: 
     )
     project = _cli_project(
         tmp_path,
-        routing={"mode": "STAGED", "require_independent_review": False, "stage_routes": {"IMPLEMENT": "codex", "REVIEW": "codex"}},
+        routing={"mode": "STAGED", "require_independent_review": False, "pools": {"IMPLEMENT": ["codex"], "REVIEW": ["codex"]}},
     )
     config_path = project / ".stagemesh" / "config.json"
     data = json.loads(config_path.read_text(encoding="utf-8"))

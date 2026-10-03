@@ -22,6 +22,8 @@ def prepare_task_workspace(project: Path, task_id: str) -> Path:
     workspace.init_if_needed()
     _ensure_head(workspace, root)
     target = task_workspace(root, task_id)
+    if target == root or root in target.parents or target in root.parents:
+        raise GitError(f"refusing to run task {task_id} outside an isolated worktree: {target} overlaps {root}")
     if target.exists() and (target / ".git").exists():
         return target
     if target.exists():

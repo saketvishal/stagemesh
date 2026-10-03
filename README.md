@@ -26,3 +26,20 @@ python scripts/acceptance.py
 ```
 
 Runtime state lives in `.stagemesh/stagemesh.sqlite3` by default.
+
+## Provider pools and task isolation
+
+StageMesh picks providers at run time instead of one fixed provider per stage. Each stage (`IMPLEMENT`, `REVIEW`) has a pool
+(default `codex, claude, grok`; a `routing.stage_routes` entry is simply tried first). Set `routing.pools` to pin an explicit list:
+
+```json
+{ "routing": { "pools": { "IMPLEMENT": ["codex", "claude", "grok"], "REVIEW": ["claude", "grok", "codex"] },
+              "provider_failure_cooldown_seconds": 900 } }
+```
+
+A provider is skipped (with the reason logged to stderr) when its CLI is not callable, it lacks the stage capability, it failed for
+the same task and stage within the cooldown (this is how auth and quota failures are remembered), or, for `REVIEW` with
+`require_independent_review`, it produced the candidate or shares its command. Failures fall through the pool automatically; if no
+independent reviewer exists StageMesh refuses and lists every provider with its skip reason. Implementation always runs in an
+isolated git worktree and the integration ref only advances after validation, independent review and integration pass.
+
