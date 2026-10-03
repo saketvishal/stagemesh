@@ -76,3 +76,10 @@ Tune it with:
                     "preferred_labels": ["stagemesh:prep"], "excluded_labels": ["stagemesh:blocked"] } }
 ```
 
+## Project profiles
+
+A project that cannot be validated by guessing root-level test commands (a monorepo) ships `.stagemesh/profile.json`: task types
+(prep, frontend, backend, schema, full), their gates, allowed/forbidden files and size limits, and label behavior. Auto-planning
+builds contracts from it, `stagemesh profile --task <id>` shows what a task would get, and a hand-written contract still wins.
+See `docs/profiles.md` and the Caventra profile in `docs/profiles/caventra.md`.
+

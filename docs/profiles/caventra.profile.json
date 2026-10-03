@@ -1,0 +1,554 @@
+{
+  "schema_version": 1,
+  "name": "caventra",
+  "variables": {
+    "PYTHON": {
+      "win32": "C:\\caventra\\.venv\\Scripts\\python.exe",
+      "default": "python3"
+    },
+    "BASE_REF": "main"
+  },
+  "env_sets": {
+    "test_db": {
+      "DATABASE_URL": "postgresql+psycopg://caventra_app:caventra_app@localhost:55432/caventra_test",
+      "ADMIN_DATABASE_URL": "postgresql+psycopg://postgres:postgres@localhost:55432/caventra_test"
+    }
+  },
+  "forbidden_files": [
+    ".env",
+    ".env.*",
+    "**/.env",
+    "**/.env.*",
+    "**/*.pem",
+    "**/*.key",
+    "**/*.p12",
+    "**/*.pfx",
+    "**/id_rsa*",
+    "**/*secret*",
+    "**/credentials*.json",
+    ".mcp.json",
+    "data/**",
+    "private_matter_inputs/**",
+    "**/private_matter_inputs/**",
+    "**/uploads/**",
+    "**/*.sqlite",
+    "**/*.sqlite3",
+    "**/*.sqlite3-wal",
+    "**/*.sqlite3-shm",
+    "**/*.db",
+    "**/*.db-wal",
+    "**/*.db-shm",
+    "**/*.bak",
+    "docs/evaluations/sdd071/local/**",
+    ".stagemesh/**",
+    ".build-coordinator/**",
+    ".caventra_test/**",
+    ".venv/**",
+    "**/node_modules/**",
+    "**/.npm-cache/**",
+    "**/__pycache__/**",
+    "**/.pytest_cache/**",
+    "**/.pytest_tmp*/**",
+    "**/.eval_tmp/**",
+    "**/dist/**",
+    "**/.vite/**",
+    ".claude/**",
+    ".agents/**",
+    ".codex/**",
+    ".cursor/**",
+    ".gemini/**",
+    ".kiro/**",
+    ".kilo/**",
+    ".codegraph/**",
+    ".vscode/**",
+    ".idea/**",
+    "opencode.jsonc",
+    "AGENTS.md",
+    "GEMINI.md",
+    ".github/**",
+    "*.pem",
+    "*.key",
+    "*.p12",
+    "*.pfx",
+    "id_rsa*",
+    "*secret*",
+    "credentials*.json",
+    "uploads/**",
+    "*.sqlite",
+    "*.sqlite3",
+    "*.sqlite3-wal",
+    "*.sqlite3-shm",
+    "*.db",
+    "*.db-wal",
+    "*.db-shm",
+    "*.bak",
+    "node_modules/**",
+    ".npm-cache/**",
+    "__pycache__/**",
+    ".pytest_cache/**",
+    ".pytest_tmp*/**",
+    ".eval_tmp/**",
+    "dist/**",
+    ".vite/**"
+  ],
+  "defaults": {
+    "max_changed_files": 40,
+    "max_diff_lines": 4000
+  },
+  "gates": {
+    "hygiene": {
+      "name": "docs-static-hygiene",
+      "command": [
+        "${PYTHON}",
+        "scripts/quality_change.py",
+        "--skip-external",
+        "--base",
+        "${BASE_REF}"
+      ],
+      "timeout_seconds": 300
+    },
+    "diffcheck": {
+      "name": "docs-static-diff-check",
+      "command": [
+        "git",
+        "diff",
+        "--check",
+        "${BASE_REF}"
+      ],
+      "timeout_seconds": 120
+    },
+    "boundaries": {
+      "name": "docs-static-boundaries",
+      "command": [
+        "${PYTHON}",
+        "-m",
+        "pytest",
+        "-q",
+        "-p",
+        "no:cacheprovider",
+        "tests/engineering/test_modular_boundaries.py",
+        "tests/engineering/test_ratchet_enforcement.py"
+      ],
+      "cwd": "apps/api",
+      "env": "test_db",
+      "timeout_seconds": 600
+    },
+    "roadmaps": {
+      "name": "docs-static-roadmaps",
+      "command": [
+        "${PYTHON}",
+        "-m",
+        "pytest",
+        "-q",
+        "-p",
+        "no:cacheprovider",
+        "tests/engineering",
+        "-k",
+        "roadmap"
+      ],
+      "cwd": "apps/api",
+      "env": "test_db",
+      "timeout_seconds": 600
+    },
+    "frontend_install": {
+      "name": "frontend-install",
+      "command": [
+        "npm",
+        "--prefix",
+        "apps/web-v2",
+        "clean-install",
+        "--offline",
+        "--ignore-scripts",
+        "--no-audit",
+        "--no-fund"
+      ],
+      "timeout_seconds": 900
+    },
+    "frontend_vitest": {
+      "name": "frontend-vitest",
+      "command": [
+        "npm",
+        "--prefix",
+        "apps/web-v2",
+        "run",
+        "test"
+      ],
+      "timeout_seconds": 900
+    },
+    "frontend_lint": {
+      "name": "frontend-ui-lint",
+      "command": [
+        "npm",
+        "--prefix",
+        "apps/web-v2",
+        "run",
+        "ui:lint"
+      ],
+      "timeout_seconds": 600
+    },
+    "frontend_typecheck": {
+      "name": "frontend-typecheck",
+      "command": [
+        "npm",
+        "--prefix",
+        "apps/web-v2",
+        "run",
+        "typecheck"
+      ],
+      "timeout_seconds": 900
+    },
+    "backend_engineering": {
+      "name": "backend-engineering-known-failures",
+      "command": [
+        "${PYTHON}",
+        "-c",
+        "import sys; sys.path.insert(0, 'scripts'); import quality_change as q; r = q.run_known_failure_command(q.API_GATE_LABEL, [sys.executable, '-m', 'pytest', '-q', 'tests/engineering', '-p', 'no:cacheprovider', '--basetemp', str(q.ROOT / '.pytest_tmp_quality_change')], q.ROOT / 'apps/api'); print(r.detail); sys.exit(r.code)"
+      ],
+      "env": "test_db",
+      "timeout_seconds": 900
+    },
+    "backend_unit": {
+      "name": "backend-unit-tests",
+      "command": [
+        "${PYTHON}",
+        "-m",
+        "pytest",
+        "-q",
+        "-p",
+        "no:cacheprovider",
+        "tests/unit",
+        "--deselect",
+        "tests/unit/test_intelligence_boundary.py::test_no_hardcoded_matter_taxonomy[contracts.py2]",
+        "--deselect",
+        "tests/unit/test_intelligence_boundary.py::test_no_hardcoded_matter_taxonomy[family_divorce_mo_gal.py]",
+        "--deselect",
+        "tests/unit/test_intelligence_boundary.py::test_no_hardcoded_matter_taxonomy[family_divorce_mo_mediator.py]",
+        "--deselect",
+        "tests/unit/test_intelligence_boundary.py::test_no_hardcoded_matter_taxonomy[evaluator.py0]",
+        "--deselect",
+        "tests/unit/test_matter_eval_caventra_path.py::test_unsupported_claim_in_the_prompt_is_not_copied_into_output",
+        "--deselect",
+        "tests/unit/test_matter_eval_caventra_path.py::test_runner_scores_after_the_pipeline_and_matches_committed_held_out_output",
+        "--deselect",
+        "tests/unit/test_matter_eval_moat.py::test_committed_smoke_results_are_not_a_moat",
+        "--deselect",
+        "tests/unit/test_predicate_publication_coordinator_boundary.py::test_only_coordinator_and_noop_hook_import_the_projection_service",
+        "--deselect",
+        "tests/unit/test_predicate_publication_coordinator_boundary.py::test_document_service_only_calls_the_noop_hook",
+        "--deselect",
+        "tests/unit/test_reassessment_surface_boundary.py::test_document_and_reassessment_schemas_expose_no_diagnostics"
+      ],
+      "cwd": "apps/api",
+      "env": "test_db",
+      "timeout_seconds": 1200
+    },
+    "backend_auth": {
+      "name": "backend-auth-integration",
+      "command": [
+        "${PYTHON}",
+        "-m",
+        "pytest",
+        "-q",
+        "-p",
+        "no:cacheprovider",
+        "tests/integration",
+        "-k",
+        "test_identity_and_tenancy or test_auth_atomic or test_tenant_classif"
+      ],
+      "cwd": "apps/api",
+      "env": "test_db",
+      "timeout_seconds": 900
+    },
+    "schema_migrations": {
+      "name": "schema-migration-tests",
+      "command": [
+        "${PYTHON}",
+        "-m",
+        "pytest",
+        "-q",
+        "-p",
+        "no:cacheprovider",
+        "tests/integration/test_migrations.py"
+      ],
+      "cwd": "apps/api",
+      "env": "test_db",
+      "timeout_seconds": 1500
+    },
+    "full_regression": {
+      "name": "full-acceptance-regression",
+      "command": [
+        "${PYTHON}",
+        "-m",
+        "pytest",
+        "-q",
+        "-p",
+        "no:cacheprovider",
+        "tests/integration",
+        "tests/acceptance",
+        "--deselect",
+        "tests/integration/test_candidate_grounding_gate.py::test_a_reviewer_grounded_span_lets_acceptance_proceed",
+        "--deselect",
+        "tests/integration/test_candidate_grounding_gate.py::test_accept_grounding_gate_precedes_the_fact_writer",
+        "--deselect",
+        "tests/integration/test_document_reassessment.py::test_retried_acceptance_conflicts_and_does_not_reassess",
+        "--deselect",
+        "tests/integration/test_evaluation_adversarial.py::test_successful_replay_leaves_no_evaluation_user_or_observation",
+        "--deselect",
+        "tests/integration/test_q015_document_authority_promotion.py::test_same_page_body_date_does_not_inherit_clerk_stamp",
+        "--deselect",
+        "tests/integration/test_w2_document_intelligence.py::test_person_association_api",
+        "--deselect",
+        "tests/integration/test_case_guidance_concurrency.py::test_concurrent_supersede_and_retire_stay_consistent"
+      ],
+      "cwd": "apps/api",
+      "env": "test_db",
+      "timeout_seconds": 3600
+    }
+  },
+  "task_types": {
+    "prep": {
+      "summary": "Readiness, governance and documentation work. No product code.",
+      "labels": [
+        "stagemesh:prep",
+        "prep",
+        "governance",
+        "readiness",
+        "documentation",
+        "area:docs"
+      ],
+      "keywords": [
+        "readiness",
+        "governance",
+        "prepare",
+        "preparation",
+        "documentation",
+        "runbook"
+      ],
+      "allowed_files": [
+        "docs/**",
+        "README.md"
+      ],
+      "forbidden_files": [
+        "apps/**",
+        "migrations/**",
+        "packages/**",
+        "scripts/**",
+        "tooling/**",
+        "tests/**",
+        "agent-skills/**"
+      ],
+      "max_changed_files": 15,
+      "max_diff_lines": 1500,
+      "validation_level": "light",
+      "gates": [
+        "hygiene",
+        "diffcheck",
+        "boundaries",
+        "roadmaps"
+      ]
+    },
+    "frontend": {
+      "summary": "UI work in apps/web-v2.",
+      "labels": [
+        "area:frontend",
+        "area:ui",
+        "frontend",
+        "ui",
+        "ux"
+      ],
+      "keywords": [
+        "frontend",
+        "front-end",
+        "web-v2",
+        "ui",
+        "ux",
+        "react",
+        "css",
+        "vitest",
+        "playwright",
+        "layout",
+        "theme"
+      ],
+      "allowed_files": [
+        "apps/web-v2/src/**",
+        "apps/web-v2/tests/**"
+      ],
+      "protected_files": [
+        "apps/web-v2/package.json",
+        "apps/web-v2/package-lock.json",
+        "apps/web-v2/tsconfig*.json",
+        "apps/web-v2/vite.config.ts",
+        "apps/web-v2/playwright.config.ts",
+        "apps/web-v2/e2e/**",
+        "apps/web-v2/scripts/**",
+        "apps/web-v2/src/api/**",
+        "apps/web-v2/src/fixtures/**",
+        "apps/web/**"
+      ],
+      "max_changed_files": 40,
+      "max_diff_lines": 4000,
+      "validation_level": "standard",
+      "gates": [
+        "hygiene",
+        "diffcheck",
+        "frontend_install",
+        "frontend_vitest",
+        "frontend_lint",
+        "frontend_typecheck"
+      ]
+    },
+    "backend": {
+      "summary": "API and service work in apps/api (no schema changes).",
+      "labels": [
+        "area:backend",
+        "area:api",
+        "backend",
+        "api"
+      ],
+      "keywords": [
+        "backend",
+        "api",
+        "endpoint",
+        "fastapi",
+        "service",
+        "router",
+        "pydantic"
+      ],
+      "allowed_files": [
+        "apps/api/app/**",
+        "apps/api/tests/**"
+      ],
+      "protected_files": [
+        "apps/api/pyproject.toml",
+        "apps/api/alembic.ini",
+        "apps/api/migrations/**",
+        "apps/api/tests/conftest.py",
+        "apps/api/tests/engineering/**",
+        "apps/api/app/security/**",
+        "apps/api/app/db/**",
+        "docs/engineering/maintainability_baseline.json",
+        "docs/engineering/known_failures.json"
+      ],
+      "max_changed_files": 40,
+      "max_diff_lines": 4000,
+      "validation_level": "standard",
+      "gates": [
+        "hygiene",
+        "diffcheck",
+        "backend_engineering",
+        "backend_unit",
+        "backend_auth"
+      ]
+    },
+    "schema": {
+      "summary": "Database schema, models and Alembic migrations.",
+      "labels": [
+        "area:schema",
+        "area:database",
+        "area:migration",
+        "schema",
+        "migration",
+        "database"
+      ],
+      "keywords": [
+        "migration",
+        "migrations",
+        "alembic",
+        "schema",
+        "database schema"
+      ],
+      "allowed_files": [
+        "apps/api/migrations/versions/**",
+        "apps/api/app/models/**",
+        "apps/api/tests/integration/**"
+      ],
+      "protected_files": [
+        "apps/api/migrations/env.py",
+        "apps/api/alembic.ini",
+        "apps/api/tests/conftest.py",
+        "apps/api/app/db/**"
+      ],
+      "max_changed_files": 20,
+      "max_diff_lines": 2500,
+      "validation_level": "standard",
+      "gates": [
+        "hygiene",
+        "diffcheck",
+        "backend_engineering",
+        "schema_migrations",
+        "backend_auth"
+      ]
+    },
+    "full": {
+      "summary": "Broad, cross-cutting or unclassified work: everything runs.",
+      "labels": [
+        "validation:full",
+        "risk:high",
+        "area:full",
+        "high-risk"
+      ],
+      "keywords": [],
+      "allowed_files": [
+        "apps/api/app/**",
+        "apps/api/tests/**",
+        "apps/api/migrations/versions/**",
+        "apps/web-v2/src/**",
+        "apps/web-v2/tests/**",
+        "docs/**"
+      ],
+      "protected_files": [
+        "apps/api/pyproject.toml",
+        "apps/api/alembic.ini",
+        "apps/api/migrations/env.py",
+        "apps/api/tests/conftest.py",
+        "apps/api/tests/engineering/**",
+        "apps/web-v2/package.json",
+        "apps/web-v2/package-lock.json",
+        "apps/web-v2/e2e/**",
+        "apps/web-v2/scripts/**",
+        "docs/engineering/maintainability_baseline.json",
+        "docs/engineering/known_failures.json"
+      ],
+      "max_changed_files": 60,
+      "max_diff_lines": 6000,
+      "validation_level": "full",
+      "gates": [
+        "hygiene",
+        "diffcheck",
+        "frontend_install",
+        "frontend_vitest",
+        "frontend_lint",
+        "frontend_typecheck",
+        "backend_engineering",
+        "backend_unit",
+        "schema_migrations",
+        "full_regression"
+      ]
+    }
+  },
+  "type_selection": {
+    "default_type": "full",
+    "escalation_type": "full",
+    "escalate_at_product_types": 2
+  },
+  "task_selection": {
+    "auto_select": true,
+    "priority_labels": [
+      "priority:p0",
+      "priority:p1",
+      "priority:p2",
+      "priority:p3"
+    ],
+    "preferred_labels": [
+      "stagemesh:prep",
+      "prep",
+      "governance",
+      "readiness"
+    ],
+    "excluded_labels": [
+      "stagemesh:blocked",
+      "stagemesh:deferred"
+    ],
+    "tie_breaker": "issue_number"
+  }
+}
