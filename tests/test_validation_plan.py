@@ -69,8 +69,10 @@ def test_localized_code_schedules_focused_checks_only() -> None:
         objective="Update a localized component",
         allowed_files=("src/widgets/**",),
         required_tests=(
-            GateCommand("focused-widget-tests", [sys.executable, "-c", "pass"]),
+            GateCommand("focused-widget-tests", [sys.executable, "-m", "pytest", "tests/test_widget.py"]),
+            GateCommand("focused-widget-tests-direct", ["pytest", "tests/test_widget.py"]),
             GateCommand("full pytest", [sys.executable, "-m", "pytest"]),
+            GateCommand("repo pytest", [sys.executable, "-m", "pytest", "tests"]),
         ),
         typecheck=(GateCommand("focused-typecheck", [sys.executable, "-c", "pass"]),),
     )
@@ -79,8 +81,12 @@ def test_localized_code_schedules_focused_checks_only() -> None:
     scoped = planned_contract(contract, plan)
 
     assert plan.classification == LOCALIZED_CODE
-    assert plan.debug_checks == ("focused-widget-tests", "focused-typecheck")
-    assert [gate.name for gate in scoped.gates] == ["focused-widget-tests", "focused-typecheck"]
+    assert plan.debug_checks == ("focused-widget-tests", "focused-widget-tests-direct", "focused-typecheck")
+    assert [gate.name for gate in scoped.gates] == [
+        "focused-widget-tests",
+        "focused-widget-tests-direct",
+        "focused-typecheck",
+    ]
 
 
 def test_core_lifecycle_schema_security_records_escalation_reason() -> None:
@@ -99,6 +105,56 @@ def test_core_lifecycle_schema_security_records_escalation_reason() -> None:
     assert "full pytest" in plan.release_checks
     assert [gate.name for gate in scoped.gates] == ["full pytest"]
     assert scoped.invariants == ("python scripts/invariants.py",)
+
+
+def test_localized_focused_pytest_executes_through_planned_contract(tmp_path: Path) -> None:
+    project = tmp_path / "repo"
+    project.mkdir()
+    workspace = GitWorkspace(project)
+    workspace.init_if_needed()
+    workspace.run("config", "user.email", "test@example.invalid")
+    workspace.run("config", "user.name", "StageMesh Test")
+    (project / "src" / "widgets").mkdir(parents=True)
+    (project / "tests").mkdir()
+    (project / "src" / "widgets" / "card.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (project / "tests" / "test_widget.py").write_text(
+        "from src.widgets.card import VALUE\n\n\ndef test_value() -> None:\n    assert VALUE == 2\n",
+        encoding="utf-8",
+    )
+    workspace.commit_all("initial")
+    (project / ".stagemesh" / "contracts").mkdir(parents=True)
+    (project / ".stagemesh" / "contracts" / "TASK-2.json").write_text(
+        json.dumps(
+            {
+                "objective": "Localized widget",
+                "allowed_files": ["src/widgets/**", ".stagemesh/contracts/**"],
+                "required_tests": [
+                    {"name": "focused-widget-pytest", "command": [sys.executable, "-m", "pytest", "tests/test_widget.py"]},
+                    {"name": "full pytest", "command": [sys.executable, "-m", "pytest"]},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (project / "src" / "widgets" / "card.py").write_text("VALUE = 2\n", encoding="utf-8")
+    sha = workspace.commit_all("candidate")
+    store = Store(tmp_path / "state.sqlite3")
+    store.migrate()
+    task_id = store.upsert_task("localized widget", source_id="TASK-2")
+    store.add_candidate(task_id, sha, "test", True)
+
+    assert Validator().validate(store, task_id, sha, project) is EvidenceStatus.PASSED
+    row = store.conn.execute(
+        "SELECT payload FROM evidence WHERE task_id=? AND candidate_sha=? AND kind=?",
+        (task_id, sha, EvidenceKind.VALIDATION),
+    ).fetchone()
+    payload = json.loads(row["payload"])
+
+    assert payload["validation_plan"]["classification"] == LOCALIZED_CODE
+    assert payload["validation_plan"]["debug_checks"] == ["focused-widget-pytest"]
+    assert [gate["name"] for gate in payload["gates"]] == ["focused-widget-pytest"]
+    assert payload["gates"][0]["returncode"] == 0
+    store.close()
 
 
 def test_validator_persists_plan_and_runs_only_planned_gates(tmp_path: Path) -> None:
