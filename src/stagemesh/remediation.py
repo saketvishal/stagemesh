@@ -52,11 +52,29 @@ def remediation_context(store: Store, task_id: str) -> dict[str, object] | None:
     if latest is None:
         return None
     findings = store.open_findings_for_candidate(task_id, str(latest["candidate_sha"]))
-    return {
+    context: dict[str, object] = {
         "stage": str(latest["stage"]),
         "candidate_sha": str(latest["candidate_sha"]),
         "findings": [{"severity": row["severity"], "message": row["message"]} for row in findings],
     }
+    diagnosis = _latest_diagnosis(store, task_id, str(latest["candidate_sha"]))
+    if diagnosis is not None:
+        context["diagnosis"] = diagnosis
+    return context
+
+
+def _latest_diagnosis(store: Store, task_id: str, candidate_sha: str) -> dict[str, object] | None:
+    import json
+
+    rows = store.conn.execute("SELECT payload FROM audit_events WHERE event_type='task.diagnosis' ORDER BY created_at DESC, rowid DESC LIMIT 50")
+    for row in rows:
+        try:
+            payload = json.loads(row["payload"])
+        except (TypeError, ValueError):
+            continue
+        if payload.get("task_id") == task_id and payload.get("candidate_sha") == candidate_sha:
+            return {k: payload.get(k) for k in ("category", "summary", "recommendation", "provider_analysis")}
+    return None
 
 
 def _validate_text(value: str, field: str, max_length: int = 200) -> str:

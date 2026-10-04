@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 import stagemesh.cli as cli_module
+from stagemesh.diagnosis import DiagnosisPolicy
 from stagemesh.coordinator import Coordinator, TargetSelection, TargetSelectionError
 from stagemesh.domain import ExecutionKind, ExecutionStatus, Stage, TaskStatus
 from stagemesh.execution import SubprocessExecutor
@@ -91,7 +92,11 @@ def _drive_to_blocked(coordinator: Coordinator, store: Store) -> None:
 def test_remediation_budget_survives_new_candidate_shas_and_blocks(tmp_path: Path) -> None:
     project, store = _setup(tmp_path)
     coordinator = Coordinator(
-        store, project, executor=_out_of_scope_provider(tmp_path), remediation_policy=RemediationPolicy(max_attempts=3)
+        store,
+        project,
+        executor=_out_of_scope_provider(tmp_path),
+        remediation_policy=RemediationPolicy(max_attempts=3),
+        diagnosis_policy=DiagnosisPolicy(stop_on_repeat=False),  # this test is about the budget itself, not early diagnosis
     )
 
     _drive_to_blocked(coordinator, store)

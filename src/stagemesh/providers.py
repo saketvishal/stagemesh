@@ -323,6 +323,11 @@ def _remediation_prompt(remediation: dict[str, object]) -> str:
     ]
     for finding in remediation["findings"][:20]:  # type: ignore[index]
         lines.append(f"- [{finding['severity']}] {str(finding['message'])[:500]}")
+    diagnosis = remediation.get("diagnosis")
+    if isinstance(diagnosis, dict):
+        lines.extend(["", f"Diagnosis ({diagnosis.get('category')}): {str(diagnosis.get('summary'))[:500]}"])
+        if diagnosis.get("provider_analysis"):
+            lines.append(f"Independent analysis: {str(diagnosis['provider_analysis'])[:800]}")
     lines.extend(
         [
             "",
