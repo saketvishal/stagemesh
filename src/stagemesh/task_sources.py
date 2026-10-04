@@ -156,33 +156,38 @@ class GitHubApiIssueSource:
         self.now = time.time() if now is None else now
 
     def discover(self) -> tuple[list[DiscoveredTask], str, float | None]:
-        request = urllib.request.Request(
-            f"https://api.github.com/repos/{self.owner}/{self.repo}/issues?state=all&per_page=100",
-            headers={
-                "Accept": "application/vnd.github+json",
-                **({"Authorization": f"Bearer {self.token}"} if self.token else {}),
-            },
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=20) as response:
-                issues = json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            if exc.code in {403, 429}:
-                retry_after = exc.headers.get("Retry-After")
-                return [], "UNKNOWN", self.now + parse_retry_after(retry_after)
-            if exc.code in {401, 404}:
-                return [], "STALE", None
-            raise
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            return [], "UNKNOWN", None
-        if not isinstance(issues, list):
-            raise TaskSourceValidationError("github issues response must be a list")
         discovered = []
-        for issue in issues:
-            if not isinstance(issue, dict):
-                raise TaskSourceValidationError("github issue entries must be objects")
-            if "pull_request" not in issue:
-                discovered.append(_github_issue_to_task(issue))
+        page = 1
+        while True:
+            request = urllib.request.Request(
+                f"https://api.github.com/repos/{self.owner}/{self.repo}/issues?state=all&per_page=100&page={page}",
+                headers={
+                    "Accept": "application/vnd.github+json",
+                    **({"Authorization": f"Bearer {self.token}"} if self.token else {}),
+                },
+            )
+            try:
+                with urllib.request.urlopen(request, timeout=20) as response:
+                    issues = json.loads(response.read().decode("utf-8"))
+            except urllib.error.HTTPError as exc:
+                if exc.code in {403, 429}:
+                    retry_after = exc.headers.get("Retry-After")
+                    return [], "UNKNOWN", self.now + parse_retry_after(retry_after)
+                if exc.code in {401, 404}:
+                    return [], "STALE", None
+                raise
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                return [], "UNKNOWN", None
+            if not isinstance(issues, list):
+                raise TaskSourceValidationError("github issues response must be a list")
+            for issue in issues:
+                if not isinstance(issue, dict):
+                    raise TaskSourceValidationError("github issue entries must be objects")
+                if "pull_request" not in issue:
+                    discovered.append(_github_issue_to_task(issue))
+            if len(issues) < 100:
+                break
+            page += 1
         return ([task for task in discovered if task is not None], "OK", None)
 
 
@@ -292,6 +297,11 @@ def sync_source(store: Store, tasks: list[DiscoveredTask]) -> list[str]:
     ids: list[str] = []
     for task in tasks:
         cached: dict[str, object] = {"eligible": task.eligible, "state": task.state}
+        previous_source_state = (
+            store.source_state(task.source, task.source_id)
+            if task.source == GitHubIssueSource.name
+            else {}
+        )
         retirement_reason = _retirement_reason(task)
         if retirement_reason is not None and task.source == GitHubIssueSource.name:
             cached["retirement_reason"] = retirement_reason
@@ -311,7 +321,16 @@ def sync_source(store: Store, tasks: list[DiscoveredTask]) -> list[str]:
                 {"source_state": task.state, "eligible": task.eligible},
             )
         elif task.eligible and task.state == "OPEN":
-            ids.append(store.upsert_task(task.title, task.source, task.source_id))
+            task_id = store.upsert_task(task.title, task.source, task.source_id)
+            previous_retirement_reason = previous_source_state.get("retirement_reason")
+            if task.source == GitHubIssueSource.name and isinstance(previous_retirement_reason, str):
+                store.restore_source_task(
+                    task.source,
+                    task.source_id,
+                    previous_retirement_reason,
+                    {"source_state": task.state, "eligible": task.eligible},
+                )
+            ids.append(task_id)
             for dependency in task.dependencies:
                 store.add_dependency(task.source_id, dependency)
     return ids

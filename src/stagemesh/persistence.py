@@ -651,6 +651,67 @@ class Store:
             )
         return str(task["id"])
 
+    def restore_source_task(
+        self,
+        source: str,
+        source_id: str,
+        previous_reason: str,
+        payload: dict[str, Any] | None = None,
+    ) -> str | None:
+        """Return a source-retired task to OPEN when its source becomes runnable again."""
+        source = _validate_text(source, "source")
+        source_id = _validate_text(source_id, "source id")
+        previous_reason = _validate_text(previous_reason, "previous source retirement reason", 2000)
+        payload = _validate_payload(payload)
+        task = self.conn.execute(
+            "SELECT * FROM tasks WHERE source=? AND source_id=?",
+            (source, source_id),
+        ).fetchone()
+        if (
+            task is None
+            or task["stage"] == Stage.DONE
+            or task["status"] == TaskStatus.DONE
+            or task["status"] != TaskStatus.BLOCKED
+        ):
+            return None
+        now = time.time()
+        details = {
+            "task_id": task["id"],
+            "source": source,
+            "source_id": source_id,
+            "previous_reason": previous_reason,
+            "previous_stage": task["stage"],
+            "previous_status": task["status"],
+            **payload,
+        }
+        with self.conn:
+            self.conn.execute(
+                "UPDATE tasks SET status=?, updated_at=? WHERE id=?",
+                (TaskStatus.OPEN, now, task["id"]),
+            )
+            self.conn.execute(
+                "INSERT INTO source_events VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    str(uuid.uuid4()),
+                    source,
+                    source_id,
+                    "inbound",
+                    "RESTORED",
+                    json.dumps(details, sort_keys=True),
+                    now,
+                ),
+            )
+            self.conn.execute(
+                "INSERT INTO audit_events VALUES (?, ?, ?, ?)",
+                (
+                    str(uuid.uuid4()),
+                    "task.source_restored",
+                    json.dumps(details, sort_keys=True),
+                    now,
+                ),
+            )
+        return str(task["id"])
+
     def execution_process_identity(self, execution_id: str) -> ProcessIdentity:
         execution_id = _validate_text(execution_id, "execution id")
         row = self.conn.execute("SELECT * FROM executions WHERE id=?", (execution_id,)).fetchone()
