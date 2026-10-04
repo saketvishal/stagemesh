@@ -342,7 +342,11 @@ def _is_shared_root(path: Path) -> bool:
         if item
     }:
         return True
-    return len(resolved.parts) <= 2
+    return _is_legacy_global_worktree_root(resolved)
+
+
+def _is_legacy_global_worktree_root(path: Path) -> bool:
+    return path.name.casefold() == ".sm-wt" and path.parent == Path(path.anchor)
 
 
 def _is_inside(path: Path, parent: Path) -> bool:
