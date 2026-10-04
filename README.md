@@ -150,6 +150,40 @@ queue. It syncs the task sources, runs the project preflight, then starts up to 
   Ctrl+C, or on a global safety failure (for example the integration lock cannot be taken), which halts every task and releases
   its claims (`GLOBAL_SAFETY_FAILURE`). `--json` adds `preflight` and `refused` to the per-task lifecycle report of `--parallel`.
 
+## Diagnosis before remediation
+
+When a candidate fails validation, review or integration, StageMesh diagnoses the failure before it spends another implementation
+attempt. It summarizes the failing evidence, compares it with the task's earlier failed candidates (shas, numbers, timings and temp
+paths are ignored; reviewer wording may differ), and classifies it:
+
+| Category | Meaning | Typical fix |
+|---|---|---|
+| `contract_scope` | the contract forbids or does not cover what the task needs, or its size limits are too small | widen the contract or split the task |
+| `validation_gate` | a gate cannot run or is misconfigured (missing tool, timeout, no executable gate) | fix the gate or environment |
+| `review_finding` | the independent reviewer keeps raising the same concern | address it, or fix the acceptance criteria |
+| `implementation_defect` | a gate runs and fails on the code | read the output; the test may be wrong |
+| `provider_no_progress` | the provider produced nothing, or the same tree again | check the provider, try another |
+| `integration_conflict` | the integration ref moved and the candidate no longer lands | rebase or re-implement |
+
+When the same failure happens `repeat_threshold` times in a row (default 2), the task is blocked early with the diagnosis instead of
+burning the remaining budget (`stopped early, contract_scope (2 identical failures): ...` in `continue`, the `diagnosis` object in
+`--json`, and a `task.diagnosis_stop` audit event). A failure that differs from the previous one is progress and keeps the normal
+remediation loop. `retry-task` starts a fresh comparison. Every diagnosis is also stored as a `task.diagnosis` audit event and is
+passed to the next implementation attempt along with the findings.
+
+`stagemesh diagnose --task <id> [--json] [--threshold N] [--provider NAME]` shows the same diagnosis on demand (read-only). With a
+provider it also runs a separate diagnostic pass: the provider sees the recorded facts and a checkout of the candidate under the
+same read-only rules as independent review, and any change it makes to the checkout is discarded as a failure. Configure it to run
+automatically before each further implementation attempt:
+
+```json
+{ "diagnosis": { "repeat_threshold": 2, "stop_on_repeat": true, "provider": "claude", "dispatch": "every_failure" } }
+```
+
+`dispatch` is `every_failure` (before each further attempt), `on_repeat` (only when the failure repeats) or `never`. Without
+`provider` there is no provider pass. A provider that is unavailable or fails never blocks the lifecycle; the diagnosis is still
+recorded without its analysis. `stop_on_repeat: false` keeps diagnosing but spends the whole budget as before.
+
 ## Project profiles
 
 A project that cannot be validated by guessing root-level test commands (a monorepo) ships `.stagemesh/profile.json`: task types
