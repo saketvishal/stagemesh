@@ -56,6 +56,14 @@ class ParallelConfig:
 
 
 @dataclass(frozen=True)
+class RuntimeConfig:
+    """Project-owned runtime paths."""
+
+    worktree_root: Path
+    allow_unsafe_worktree_root: bool = False
+
+
+@dataclass(frozen=True)
 class GitHubConfig:
     owner: str | None = None
     repo: str | None = None
@@ -86,6 +94,7 @@ class StageMeshConfig:
     provider_weights: dict[str, int] = field(default_factory=dict)
     task_selection: TaskSelectionConfig = field(default_factory=TaskSelectionConfig)
     parallel: ParallelConfig = field(default_factory=ParallelConfig)
+    runtime: RuntimeConfig | None = None
 
 
 @dataclass(frozen=True)
@@ -154,6 +163,7 @@ def load_config(project: Path, config_path: Path | None = None) -> StageMeshConf
     integration_ref = _string(data.get("integration_ref"))
     if integration_ref and not integration_ref.startswith("refs/"):
         integration_ref = f"refs/heads/{integration_ref}"
+    runtime = _runtime(project, _optional_mapping(data, "runtime"))
     return StageMeshConfig(
         project=project,
         github=github,
@@ -174,6 +184,7 @@ def load_config(project: Path, config_path: Path | None = None) -> StageMeshConf
         provider_weights=provider_weights,
         task_selection=_task_selection(_optional_mapping(data, "task_selection") or _profile_task_selection(project)),
         parallel=_parallel(_optional_mapping(data, "parallel")),
+        runtime=runtime,
     )
 
 
@@ -243,6 +254,66 @@ def _parallel(data: dict[str, object]) -> ParallelConfig:
             raise ConfigValidationError(f"parallel.{key} must be an integer >= {minimum}")
         values[key] = value
     return ParallelConfig(**values)
+
+
+def _runtime(data_project: Path, data: dict[str, object]) -> RuntimeConfig:
+    unknown = set(data) - {"worktree_root", "allow_unsafe_worktree_root"}
+    if unknown:
+        raise ConfigValidationError(f"runtime has unsupported keys: {', '.join(sorted(unknown))}")
+    raw = _string(data.get("worktree_root")) or ".stagemesh/worktrees"
+    root = Path(raw).expanduser()
+    if not root.is_absolute():
+        root = data_project / root
+    allow_unsafe = data.get("allow_unsafe_worktree_root", False)
+    if not isinstance(allow_unsafe, bool):
+        raise ConfigValidationError("runtime.allow_unsafe_worktree_root must be a boolean")
+    resolved = root.resolve()
+    if not allow_unsafe:
+        _validate_worktree_root(data_project, resolved)
+    return RuntimeConfig(worktree_root=resolved, allow_unsafe_worktree_root=allow_unsafe)
+
+
+def _validate_worktree_root(project: Path, root: Path) -> None:
+    project = project.resolve()
+    if root == project:
+        raise ConfigValidationError("runtime.worktree_root must not be the project checkout")
+    if _is_broad_root(root):
+        raise ConfigValidationError(
+            "runtime.worktree_root is too broad; choose a project-owned directory such as "
+            ".stagemesh/worktrees "
+            "or set runtime.allow_unsafe_worktree_root=true after explicit operator review"
+        )
+    if root == Path.home().resolve():
+        raise ConfigValidationError(
+            "runtime.worktree_root must not be the home directory; choose a project-owned directory "
+            "such as .stagemesh/worktrees"
+        )
+    if root == project.parent.resolve():
+        raise ConfigValidationError(
+            "runtime.worktree_root must not be the project parent directory; choose a "
+            "project-owned directory such as .stagemesh/worktrees"
+        )
+    if _is_inside(root, project / ".git"):
+        raise ConfigValidationError("runtime.worktree_root must not be inside .git")
+    if root == project / ".stagemesh":
+        raise ConfigValidationError(
+            "runtime.worktree_root must be a child of .stagemesh, not .stagemesh itself"
+        )
+    if _is_inside(root, project) and not _is_inside(root, project / ".stagemesh"):
+        raise ConfigValidationError(
+            "runtime.worktree_root inside the project must be under .stagemesh so task worktrees "
+            "are not treated as product source"
+        )
+
+
+def _is_broad_root(path: Path) -> bool:
+    return path.parent == path
+
+
+def _is_inside(path: Path, parent: Path) -> bool:
+    path = path.resolve()
+    parent = parent.resolve()
+    return path == parent or parent in path.parents
 
 
 def _provider_int(name: str, field_name: str, value: object, *, minimum: int) -> int | None:
