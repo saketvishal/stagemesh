@@ -39,6 +39,16 @@ class TaskSelectionConfig:
 
 
 @dataclass(frozen=True)
+class DiagnosisConfig:
+    """Diagnosis before remediation: stop on a repeated failure, optionally ask a separate read-only provider first."""
+
+    repeat_threshold: int = 2
+    stop_on_repeat: bool = True
+    provider: str | None = None  # a provider name; unset means no diagnostic provider pass
+    dispatch: str = "every_failure"  # never | on_repeat | every_failure (only used when provider is set)
+
+
+@dataclass(frozen=True)
 class ProviderSpec:
     """Optional per-provider metadata from the object form of a `providers` entry."""
 
@@ -96,6 +106,7 @@ class StageMeshConfig:
     task_selection: TaskSelectionConfig = field(default_factory=TaskSelectionConfig)
     parallel: ParallelConfig = field(default_factory=ParallelConfig)
     runtime: RuntimeConfig | None = None
+    diagnosis: DiagnosisConfig = field(default_factory=DiagnosisConfig)
 
 
 @dataclass(frozen=True)
@@ -186,6 +197,7 @@ def load_config(project: Path, config_path: Path | None = None) -> StageMeshConf
         task_selection=_task_selection(_optional_mapping(data, "task_selection") or _profile_task_selection(project)),
         parallel=_parallel(_optional_mapping(data, "parallel")),
         runtime=runtime,
+        diagnosis=_diagnosis(_optional_mapping(data, "diagnosis"), known),
     )
 
 
@@ -241,6 +253,25 @@ def _provider_capabilities(name: str, value: object) -> frozenset[str]:
             f"provider {name} has unsupported capabilities: {', '.join(sorted(invalid))} (use {', '.join(PROVIDER_STAGES)})"
         )
     return frozenset(stages)
+
+
+def _diagnosis(data: dict[str, object], known_providers: set[str]) -> DiagnosisConfig:
+    unknown = set(data) - {"repeat_threshold", "stop_on_repeat", "provider", "dispatch"}
+    if unknown:
+        raise ConfigValidationError(f"diagnosis has unsupported keys: {', '.join(sorted(unknown))}")
+    threshold = data.get("repeat_threshold", 2)
+    if isinstance(threshold, bool) or not isinstance(threshold, int) or threshold < 2:
+        raise ConfigValidationError("diagnosis.repeat_threshold must be an integer >= 2")
+    stop = data.get("stop_on_repeat", True)
+    if not isinstance(stop, bool):
+        raise ConfigValidationError("diagnosis.stop_on_repeat must be a boolean")
+    provider = data.get("provider")
+    if provider is not None and (not isinstance(provider, str) or provider not in known_providers):
+        raise ConfigValidationError(f"diagnosis.provider must name a configured provider (got {provider!r})")
+    dispatch = data.get("dispatch", "every_failure")
+    if dispatch not in ("never", "on_repeat", "every_failure"):
+        raise ConfigValidationError("diagnosis.dispatch must be one of: never, on_repeat, every_failure")
+    return DiagnosisConfig(threshold, stop, provider, str(dispatch))
 
 
 def _parallel(data: dict[str, object]) -> ParallelConfig:
