@@ -39,6 +39,13 @@ class TaskSelectionConfig:
 
 
 @dataclass(frozen=True)
+class AutoPlanConfig:
+    """What auto-planning does when it cannot derive a bounded file scope: refuse (default) or write a marked BROAD contract."""
+
+    broad_scope: str = "refuse"  # refuse | allow
+
+
+@dataclass(frozen=True)
 class DiagnosisConfig:
     """Diagnosis before remediation: stop on a repeated failure, optionally ask a separate read-only provider first."""
 
@@ -107,6 +114,7 @@ class StageMeshConfig:
     parallel: ParallelConfig = field(default_factory=ParallelConfig)
     runtime: RuntimeConfig | None = None
     diagnosis: DiagnosisConfig = field(default_factory=DiagnosisConfig)
+    auto_plan: AutoPlanConfig = field(default_factory=AutoPlanConfig)
 
 
 @dataclass(frozen=True)
@@ -198,6 +206,7 @@ def load_config(project: Path, config_path: Path | None = None) -> StageMeshConf
         parallel=_parallel(_optional_mapping(data, "parallel")),
         runtime=runtime,
         diagnosis=_diagnosis(_optional_mapping(data, "diagnosis"), known),
+        auto_plan=_auto_plan(_optional_mapping(data, "auto_plan")),
     )
 
 
@@ -272,6 +281,16 @@ def _diagnosis(data: dict[str, object], known_providers: set[str]) -> DiagnosisC
     if dispatch not in ("never", "on_repeat", "every_failure"):
         raise ConfigValidationError("diagnosis.dispatch must be one of: never, on_repeat, every_failure")
     return DiagnosisConfig(threshold, stop, provider, str(dispatch))
+
+
+def _auto_plan(data: dict[str, object]) -> AutoPlanConfig:
+    unknown = set(data) - {"broad_scope"}
+    if unknown:
+        raise ConfigValidationError(f"auto_plan has unsupported keys: {', '.join(sorted(unknown))}")
+    broad = data.get("broad_scope", "refuse")
+    if broad not in ("refuse", "allow"):
+        raise ConfigValidationError("auto_plan.broad_scope must be one of: refuse, allow")
+    return AutoPlanConfig(str(broad))
 
 
 def _parallel(data: dict[str, object]) -> ParallelConfig:

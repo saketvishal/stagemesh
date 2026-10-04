@@ -83,8 +83,10 @@ def test_queue_run_auto_plans_a_missing_contract_and_runs_the_task_without_conti
     gate = {"name": "project-acceptance-fake", "command": [PY, "-c", "pass"], "timeout_seconds": 60}
     monkeypatch.setattr(auto_plan_module, "detect_gates", lambda project: [dict(gate)])
     said: list[tuple[str, str]] = []
-    rig = Rig(tmp_path, ["A", "B"])
+    rig = Rig(tmp_path, ["A", "B"], labels={"B": ["beta"]})
     (rig.project / ".stagemesh" / "contracts" / "B.json").unlink()
+    scope = {"schema_version": 1, "areas": [{"id": "beta", "labels": ["beta"], "allowed_files": ["out/B.txt"]}]}
+    (rig.project / "stagemesh.scope.json").write_text(json.dumps(scope), encoding="utf-8")
     runner = queue(rig, ScriptedExecutor(rig.files), emit=lambda task_id, text: said.append((task_id, text)))
     summary = runner.run()
     assert outcomes(summary) == {"A": "DONE", "B": "DONE"} and summary.succeeded

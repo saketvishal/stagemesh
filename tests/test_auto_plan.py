@@ -15,7 +15,7 @@ from stagemesh.git import GitWorkspace
 GATE = {"name": "project-acceptance-fake", "command": [sys.executable, "-c", "pass"], "timeout_seconds": 60}
 
 
-def _project(tmp_path: Path, description: str | None = "Add the widget endpoint.") -> Path:
+def _project(tmp_path: Path, description: str | None = "Add the widget endpoint.", broad: str | None = "allow") -> Path:
     project = tmp_path / "repo"
     project.mkdir()
     git = GitWorkspace(project)
@@ -30,6 +30,8 @@ def _project(tmp_path: Path, description: str | None = "Add the widget endpoint.
     if description is not None:
         task["description"] = description
     (runtime / "backlog.json").write_text(json.dumps({"tasks": [task]}), encoding="utf-8")
+    if broad is not None:  # these tests exercise repository-wide planning, which must be opted into explicitly
+        (runtime / "config.json").write_text(json.dumps({"auto_plan": {"broad_scope": broad}}), encoding="utf-8")
     return project
 
 
@@ -62,6 +64,7 @@ def test_missing_contract_is_generated_and_the_task_continues(tmp_path: Path, fa
         "missing change contract detected",
         "auto-planning started",
         "contract created",
+        "WARNING: contract scope is BROAD: BROAD",  # visible and intentional, never silent
         "continuing to implementation",
     ]
     contract = json.loads(_contract(project).read_text(encoding="utf-8"))

@@ -329,7 +329,8 @@ class ParallelRunner:
             if plan_info["occurred"]:
                 self._planned[task_id] = plan_info  # a task held back this round keeps its planning record for the round it starts in
                 gates = ", ".join(plan_info.get("gates", []))
-                self._say(task_id, f"task {task_id}: auto-planned contract {plan_info.get('path')} (gates: {gates})")
+                scope = (plan_info.get("scope") or {}).get("mode", "profile")
+                self._say(task_id, f"task {task_id}: auto-planned contract {plan_info.get('path')} (gates: {gates}; scope: {scope})")
             elif task_id in self._planned:
                 plan_info = self._planned[task_id]
             contract = load_task_contract(self.store, self.project, task_id)

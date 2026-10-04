@@ -202,6 +202,21 @@ findings, evidence or audit events, and write an audit event (`task.contract_reb
   baseline is not stale, the candidate is already integrated, or the history is ambiguous (`--force` only overrides the ambiguous
   cases).
 
+### Narrow auto-planned scopes
+
+Auto-planning no longer defaults to `allowed_files: ["**"]`. It derives the scope from the project's scope map,
+`stagemesh.scope.json` (or `.stagemesh/scope-map.json`): areas with the `labels` and `keywords` that select them and the narrow
+`allowed_files` they may touch (StageMesh ships its own: docs, provider, queue, recovery, planning). A task's labels are matched
+first, then its title, then its description. An `exclusive` area (docs) wins alone; otherwise up to two matching areas are
+combined, and more than that is treated as unbounded. The contract records its `scope` (mode, areas, evidence), and the log says
+`contract scope is narrow ... area <id> via label ...`. Narrow contracts that do not overlap no longer serialize each other in
+`queue-run`.
+
+If no bounded scope can be derived, auto-planning **refuses** (`no_bounded_scope`, shown by `queue-run` as
+`REFUSED:auto_plan_failed`). A repository-wide contract needs the explicit policy
+`{"auto_plan": {"broad_scope": "allow"}}` in `.stagemesh/config.json`; it is then marked BROAD (high risk) in the contract and in
+the log (`WARNING: contract scope is BROAD: ...`).
+
 `queue-run` auto-plans a task that has no contract with the same deterministic path as `continue` (log line
 `task <id>: auto-planned contract ...`), and still refuses it when no safe bounded contract can be derived or with `--no-auto-plan`.
 

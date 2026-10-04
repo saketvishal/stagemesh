@@ -1,0 +1,77 @@
+{
+  "schema_version": 1,
+  "areas": [
+    {
+      "id": "docs",
+      "labels": ["documentation", "docs"],
+      "keywords": ["documentation", "readme", "docs"],
+      "allowed_files": ["README.md", "docs/**"],
+      "exclusive": true
+    },
+    {
+      "id": "provider",
+      "labels": ["provider", "capacity"],
+      "keywords": ["provider", "providers", "provider pool", "capacity", "routing"],
+      "allowed_files": [
+        "src/stagemesh/providers.py",
+        "src/stagemesh/provider_pool.py",
+        "src/stagemesh/provider_acceptance.py",
+        "src/stagemesh/registry.py",
+        "src/stagemesh/routing.py",
+        "src/stagemesh/capacity.py",
+        "src/stagemesh/config.py",
+        "src/stagemesh/cli.py",
+        "tests/test_provider_*.py"
+      ]
+    },
+    {
+      "id": "queue",
+      "labels": ["queue", "scheduler", "parallel"],
+      "keywords": ["queue-run", "queue", "scheduler", "scheduling", "parallel", "concurrency", "worktree", "workspace"],
+      "allowed_files": [
+        "src/stagemesh/parallel.py",
+        "src/stagemesh/queue_run.py",
+        "src/stagemesh/concurrency.py",
+        "src/stagemesh/scheduling.py",
+        "src/stagemesh/workspaces.py",
+        "src/stagemesh/git.py",
+        "src/stagemesh/serialized_integration.py",
+        "tests/test_parallel.py",
+        "tests/test_queue_run.py"
+      ]
+    },
+    {
+      "id": "recovery",
+      "labels": ["recovery", "diagnosis"],
+      "keywords": ["recovery", "diagnosis", "diagnose", "rebind", "rebaseline", "baseline", "task-doctor", "remediation"],
+      "allowed_files": [
+        "src/stagemesh/recovery.py",
+        "src/stagemesh/baseline.py",
+        "src/stagemesh/diagnosis.py",
+        "src/stagemesh/remediation.py",
+        "src/stagemesh/operator_actions.py",
+        "src/stagemesh/contract_binding.py",
+        "src/stagemesh/cli.py",
+        "tests/test_task_recovery.py",
+        "tests/test_diagnosis.py"
+      ]
+    },
+    {
+      "id": "planning",
+      "labels": ["planning", "auto-plan"],
+      "keywords": ["auto-plan", "auto-planning", "auto-planned", "scope map"],
+      "allowed_files": [
+        "src/stagemesh/auto_plan.py",
+        "src/stagemesh/scope_map.py",
+        "src/stagemesh/config.py",
+        "src/stagemesh/run_ready.py",
+        "src/stagemesh/queue_run.py",
+        "src/stagemesh/cli.py",
+        "stagemesh.scope.json",
+        "tests/test_auto_plan.py",
+        "tests/test_scope_map.py",
+        "tests/test_queue_run.py"
+      ]
+    }
+  ]
+}
