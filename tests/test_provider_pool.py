@@ -170,6 +170,75 @@ def test_review_falls_back_to_the_next_independent_provider(tmp_path: Path) -> N
     assert "final review provider: grok" in text
 
 
+def test_grok_can_implement_and_is_skipped_from_reviewing_its_own_candidate(tmp_path: Path) -> None:
+    rig = Rig(
+        tmp_path,
+        {"codex": "ok", "claude": "ok", "grok": "ok"},
+        pools={IMPLEMENT: ("grok", "codex"), REVIEW: ("grok", "claude")},
+    )
+
+    rig.tick(4)  # plan, implement, validate, review
+
+    assert rig.store.latest_candidate(TASK)["produced_by"] == "grok"
+    payload = rig.review_payload()
+    assert payload["implementer_provider"] == "grok"
+    assert payload["review_provider"] == "claude"
+    assert payload["independent_reviewer"] is True
+    text = rig.text()
+    assert "selected implementation provider grok" in text
+    assert "skipped grok: not_independent: produced the candidate" in text
+    assert "selected review provider claude" in text
+
+
+def test_grok_can_be_selected_as_an_independent_reviewer(tmp_path: Path) -> None:
+    rig = Rig(
+        tmp_path,
+        {"codex": "ok", "claude": "ok", "grok": "ok"},
+        pools={IMPLEMENT: ("codex",), REVIEW: ("grok", "claude")},
+    )
+
+    rig.tick(4)  # plan, implement, validate, review
+
+    payload = rig.review_payload()
+    assert rig.store.latest_candidate(TASK)["produced_by"] == "codex"
+    assert payload["review_provider"] == "grok"
+    assert payload["independent_reviewer"] is True
+    assert "selected review provider grok" in rig.text()
+
+
+def test_operator_json_exposes_provider_selection_timeline(tmp_path: Path) -> None:
+    import contextlib
+    import io
+
+    import stagemesh.cli as cli_module
+
+    rig = Rig(
+        tmp_path,
+        {"codex": "ok", "claude": "ok", "grok": "ok"},
+        pools={IMPLEMENT: ("grok", "codex"), REVIEW: ("claude", "grok")},
+        policy="weighted",
+        weights={"grok": 2},
+    )
+    rig.tick(4)
+    rig.store.close()
+
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        code = cli_module.main(["--project", str(rig.project), "operator", "--json"])
+
+    assert code == 0
+    data = json.loads(out.getvalue())
+    section = next(section for section in data["sections"] if section["name"] == "Provider Selections")
+    assert {row["stage"] for row in section["rows"]} >= {IMPLEMENT, REVIEW}
+    implementation = next(row for row in section["rows"] if row["stage"] == IMPLEMENT)
+    assert implementation["policy"] == "weighted"
+    assert implementation["order"][0] == "grok"
+    assert any(
+        "provider_selection task=TASK-1 stage=IMPLEMENT policy=weighted" in line
+        for line in data["lines"]
+    )
+
+
 def test_refuses_clearly_when_only_the_implementer_is_available(tmp_path: Path) -> None:
     rig = Rig(tmp_path, {"codex": None, "claude": "ok", "grok": None})
 
@@ -229,6 +298,21 @@ def test_routing_pools_config_is_validated(tmp_path: Path) -> None:
         config.write_text(json.dumps({"routing": {"pools": bad}}), encoding="utf-8")
         with pytest.raises(ConfigValidationError):
             load_config(tmp_path)
+
+
+def test_grok_provider_pool_example_config_loads() -> None:
+    example = (
+        Path(__file__).resolve().parents[1]
+        / "docs"
+        / "examples"
+        / "grok-provider-pools.config.json"
+    )
+    config = load_config(example.parent, config_path=example)
+    assert config.provider_pools[IMPLEMENT] == ("grok", "codex", "claude")
+    assert config.provider_pools[REVIEW] == ("claude", "grok", "codex")
+    assert config.provider_specs["grok"].capabilities == frozenset({IMPLEMENT, REVIEW})
+    assert config.provider_selection_policy == "weighted"
+    assert config.provider_weights["grok"] == 2
 
 
 def test_cli_refuses_at_startup_when_only_the_implementer_is_available(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
