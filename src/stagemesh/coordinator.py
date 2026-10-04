@@ -5,7 +5,7 @@ from pathlib import Path
 
 from .audit import record_audit
 from .contract_binding import contract_for_candidate
-from .diagnosis import DIAGNOSIS_EVENT, DIAGNOSIS_STOP_EVENT, Diagnosis, DiagnosisPolicy, diagnose
+from .diagnosis import DIAGNOSIS_EVENT, DIAGNOSIS_STOP_EVENT, PROVIDER_NO_PROGRESS, STALE_BASELINE, Diagnosis, DiagnosisPolicy, diagnose
 from .domain import EvidenceKind, EvidenceStatus, ExecutionStatus, Stage, TaskStatus
 from .execution import Executor, FakeExecutor
 from .integration import Integrator
@@ -127,6 +127,8 @@ class Coordinator:
         if stage is Stage.IMPLEMENT:
             if self._implementation_may_still_run(task_id):
                 return 0
+            if self._provider_stalled(task_id):
+                return 1
             worker_id = self.worker_id
             claim_id = self.store.acquire_claim(task_id, worker_id)
             if claim_id is None:
@@ -284,6 +286,26 @@ class Coordinator:
             record_audit(self.store, "task.diagnosis_error", {"task_id": task_id, "reason": f"{type(exc).__name__}: {exc}"[:300]})
             return None
 
+    def _provider_stalled(self, task_id: str) -> bool:
+        """Before another implementation attempt: stop when the provider already made no progress on repeat. True means blocked."""
+        if not self.diagnosis_policy.stop_on_repeat:
+            return False
+        try:
+            diagnosis = diagnose(self.store, task_id, self.project, self.diagnosis_policy.repeat_threshold)
+        except Exception:  # noqa: BLE001 - diagnosis is advice; it must not break dispatch
+            return False
+        if diagnosis is None or diagnosis.category != PROVIDER_NO_PROGRESS or not diagnosis.repeated:
+            return False
+        self.store.block_task(task_id)
+        record_audit(self.store, DIAGNOSIS_EVENT, diagnosis.audit_payload())
+        record_audit(self.store, DIAGNOSIS_STOP_EVENT, {**diagnosis.audit_payload(), "remediation_attempts": 0})
+        record_audit(
+            self.store,
+            "task.remediation_exhausted",
+            {"task_id": task_id, "candidate_sha": diagnosis.candidate_sha, "stage": "IMPLEMENT", "reason": "repeated_failure_diagnosed"},
+        )
+        return True
+
     def _review_satisfied(self, task_id: str, sha: str, contract_hash: str) -> bool:
         for payload in self.store.bound_evidence_payloads(task_id, sha, EvidenceKind.REVIEW, contract_hash):
             if not self.require_independent_review or independent_review_verified(payload):
@@ -335,8 +357,9 @@ class Coordinator:
             )
             findings = self.store.open_findings_for_candidate(task_id, sha)
         diagnosis = self._diagnose(task_id, sha)
-        if diagnosis is not None and diagnosis.repeated and self.diagnosis_policy.stop_on_repeat:
-            # The same failure again: another implementation attempt would only repeat it. Stop with the diagnosis.
+        if diagnosis is not None and (diagnosis.repeated or diagnosis.stops_remediation) and self.diagnosis_policy.stop_on_repeat:
+            # The same failure again (or one a provider cannot fix, like a stale baseline): another implementation attempt would only
+            # repeat it. Stop with the diagnosis and the operator command that fixes it.
             self.store.block_task(task_id)
             record_audit(
                 self.store,
@@ -346,7 +369,12 @@ class Coordinator:
             record_audit(
                 self.store,
                 "task.remediation_exhausted",
-                {"task_id": task_id, "candidate_sha": sha, "stage": failed_stage, "reason": "repeated_failure_diagnosed"},
+                {
+                    "task_id": task_id,
+                    "candidate_sha": sha,
+                    "stage": failed_stage,
+                    "reason": "stale_baseline_diagnosed" if diagnosis.category == STALE_BASELINE else "repeated_failure_diagnosed",
+                },
             )
             return 1
         # The budget is scoped to task + failed stage so a new candidate SHA cannot reset it.

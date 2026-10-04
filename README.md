@@ -164,6 +164,7 @@ paths are ignored; reviewer wording may differ), and classifies it:
 | `implementation_defect` | a gate runs and fails on the code | read the output; the test may be wrong |
 | `provider_no_progress` | the provider produced nothing, or the same tree again | check the provider, try another |
 | `integration_conflict` | the integration ref moved and the candidate no longer lands | rebase or re-implement |
+| `stale_baseline` | the task baseline is behind the integration ref, so other tasks' files show up in this task's diff | `rebaseline-task` |
 
 When the same failure happens `repeat_threshold` times in a row (default 2), the task is blocked early with the diagnosis instead of
 burning the remaining budget (`stopped early, contract_scope (2 identical failures): ...` in `continue`, the `diagnosis` object in
@@ -179,6 +180,30 @@ automatically before each further implementation attempt:
 ```json
 { "diagnosis": { "repeat_threshold": 2, "stop_on_repeat": true, "provider": "claude", "dispatch": "every_failure" } }
 ```
+
+A `stale_baseline` stops the task at once, and a repeated `contract_scope`, `validation_gate` or `provider_no_progress` stops it
+before the implementation provider is called again: none of them can be fixed by more code. Findings are stored verbatim, shown in
+`continue`, `queue-run` and `diagnose`, and quoted unabridged (with the candidate sha) in the next implementation prompt.
+
+### Repairing a stuck task without touching SQLite
+
+All three commands go through the store, refuse while the task has an active claim or running execution, never delete candidates,
+findings, evidence or audit events, and write an audit event (`task.contract_rebound`, `task.rebaselined`).
+
+* `stagemesh task-doctor --task <id> [--json]` (read-only): stage/status, claims and executions, latest candidate, baseline (and
+  whether it is stale), contract digest/version, latest validation failures and review findings, diagnosis, and the next command.
+* `stagemesh rebind-contract --task <id> [--validate] [--force] [--reason TEXT] [--json]` re-reads
+  `.stagemesh/contracts/<id>.json`, canonicalizes it and replaces the frozen contract. The stored version is always this build's
+  supported version, never copied from the old row (this repairs `unsupported bound contract version: 2`). It refuses when passed
+  evidence bound to the old contract would stop counting, unless `--force` (the evidence is kept). `--validate` validates the
+  latest candidate and advances the task if it passes.
+* `stagemesh rebaseline-task --task <id> --to <integration-ref> [--validate] [--force] [--json]` moves a stale baseline to the
+  candidate's merge-base with the integration ref, removing files integrated by other work from the task diff. It refuses when the
+  baseline is not stale, the candidate is already integrated, or the history is ambiguous (`--force` only overrides the ambiguous
+  cases).
+
+`queue-run` auto-plans a task that has no contract with the same deterministic path as `continue` (log line
+`task <id>: auto-planned contract ...`), and still refuses it when no safe bounded contract can be derived or with `--no-auto-plan`.
 
 `dispatch` is `every_failure` (before each further attempt), `on_repeat` (only when the failure repeats) or `never`. Without
 `provider` there is no provider pass. A provider that is unavailable or fails never blocks the lifecycle; the diagnosis is still

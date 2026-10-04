@@ -10,6 +10,7 @@ before it, the failure repeats and a further attempt will almost certainly fail 
 * provider_no_progress - the provider produced nothing, or the same tree again
 * implementation_defect - a gate runs and fails on the code (tests, lint, types)
 * integration_conflict - the integration ref moved and the candidate no longer lands cleanly
+* stale_baseline     - the task baseline is behind the integration ref, so other tasks' files show up as this task's changes
 
 Nothing here calls a provider unless a `DiagnosisPolicy.analyst` is supplied; that optional pass is a separate, read-only provider
 run that sees the facts above, never the implementation worktree.
@@ -24,9 +25,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .baseline import BaselineAnalysis, analyze_baseline, resolve_integration_ref
 from .domain import EvidenceKind
 from .git import GitError, GitWorkspace
 from .persistence import Store
+from .remediation import latest_candidate_findings
 
 CONTRACT_SCOPE = "contract_scope"
 VALIDATION_GATE = "validation_gate"
@@ -34,7 +37,10 @@ REVIEW_FINDING = "review_finding"
 PROVIDER_NO_PROGRESS = "provider_no_progress"
 IMPLEMENTATION_DEFECT = "implementation_defect"
 INTEGRATION_CONFLICT = "integration_conflict"
-CATEGORIES = (CONTRACT_SCOPE, VALIDATION_GATE, REVIEW_FINDING, PROVIDER_NO_PROGRESS, IMPLEMENTATION_DEFECT, INTEGRATION_CONFLICT)
+STALE_BASELINE = "stale_baseline"
+CATEGORIES = (CONTRACT_SCOPE, VALIDATION_GATE, REVIEW_FINDING, PROVIDER_NO_PROGRESS, IMPLEMENTATION_DEFECT, INTEGRATION_CONFLICT, STALE_BASELINE)
+# Failures an implementation provider cannot fix: another attempt only repeats them, so a repeat stops the task for the operator.
+NON_CODE_CATEGORIES = frozenset({CONTRACT_SCOPE, VALIDATION_GATE, STALE_BASELINE, PROVIDER_NO_PROGRESS})
 
 DIAGNOSIS_EVENT = "task.diagnosis"
 DIAGNOSIS_STOP_EVENT = "task.diagnosis_stop"
@@ -126,6 +132,13 @@ class Diagnosis:
     categories: dict[str, int] = field(default_factory=dict)
     no_progress: dict[str, Any] | None = None
     provider_analysis: dict[str, Any] | None = None
+    review_findings: list[dict[str, Any]] = field(default_factory=list)
+    baseline: dict[str, Any] | None = None
+
+    @property
+    def stops_remediation(self) -> bool:
+        """True when spending another implementation attempt is pointless: a stale baseline at once, other non-code failures on repeat."""
+        return self.category == STALE_BASELINE or (self.repeated and self.category in NON_CODE_CATEGORIES)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -143,6 +156,8 @@ class Diagnosis:
             "categories": self.categories,
             "no_progress": self.no_progress,
             "provider_analysis": self.provider_analysis,
+            "review_findings": self.review_findings,
+            **({"baseline": self.baseline} if self.baseline else {}),
         }
 
     def audit_payload(self) -> dict[str, Any]:
@@ -178,9 +193,23 @@ class Diagnosis:
                 )
             )
         lines.append(f"  next step: {self.recommendation}")
+        lines.extend(format_findings(self.review_findings))
         if self.provider_analysis and self.provider_analysis.get("text"):
             lines.append(f"  provider analysis ({self.provider_analysis.get('provider')}): {str(self.provider_analysis['text'])[:600]}")
         return lines
+
+
+def format_findings(findings: list[dict[str, Any]]) -> list[str]:
+    """Findings verbatim, one per line group, for operator output."""
+    if not findings:
+        return []
+    sha = str(findings[0].get("candidate_sha") or "")[:12]
+    lines = [f"  findings on candidate {sha}:" if sha else "  findings:"]
+    for finding in findings:
+        first, *rest = str(finding["message"]).splitlines() or [""]
+        lines.append(f"    - [{finding['severity']}] {first}")
+        lines.extend(f"      {line}" for line in rest)
+    return lines
 
 
 @dataclass
@@ -236,7 +265,10 @@ def _classify(stage: str, codes: set[str], gate_findings: list[dict[str, Any]]) 
 
 def _last_reset(store: Store, task_id: str) -> float:
     """When an operator last gave the task a fresh budget (retry-task); failures before that are history, not a repeat."""
-    for row in store.conn.execute("SELECT payload, created_at FROM audit_events WHERE event_type='task.unblocked' ORDER BY created_at DESC, rowid DESC LIMIT 50"):
+    for row in store.conn.execute(
+        "SELECT payload, created_at FROM audit_events WHERE event_type IN ('task.unblocked', 'task.contract_rebound', 'task.rebaselined') "
+        "ORDER BY created_at DESC, rowid DESC LIMIT 50"
+    ):
         if _loads(row["payload"]).get("task_id") == task_id:
             return float(row["created_at"])
     return 0.0
@@ -279,6 +311,35 @@ def _failures(store: Store, task_id: str) -> list[Failure]:
     return failures
 
 
+def _stale_baseline(store: Store, project: Path | None, task_id: str, latest: Failure, integration_ref: str | None) -> BaselineAnalysis | None:
+    """The baseline analysis when the latest scope failure is explained by a stale baseline, else None. Never raises."""
+    if project is None:
+        return None
+    candidate = store.latest_candidate(task_id)
+    if candidate is None or str(candidate["sha"]) != latest.candidate_sha:
+        return None
+    try:
+        ref = integration_ref or resolve_integration_ref(project, _configured_ref(project))
+        if not ref:
+            return None
+        analysis = analyze_baseline(store, project, task_id, ref)
+    except Exception:  # noqa: BLE001 - classification is advice; fall back to contract_scope
+        return None
+    if not analysis.stale:
+        return None
+    blamed = set(latest.paths)
+    return analysis if not blamed or blamed & set(analysis.unrelated) else None
+
+
+def _configured_ref(project: Path) -> str | None:
+    try:
+        from .config import load_config
+
+        return load_config(project).integration_ref
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _no_progress(store: Store, task_id: str, since: float, project: Path | None, threshold: int) -> dict[str, Any] | None:
     """Implementation attempts after the last failed evidence that produced no candidate, or the same tree again."""
     rows = store.conn.execute(
@@ -319,11 +380,12 @@ _RECOMMENDATIONS = {
     CONTRACT_SCOPE: (
         "The contract, not the code, is what stops this task{paths}. Widen allowed_files / size limits (or remove the "
         "forbidden/protected entry) in .stagemesh/contracts/{task}.json if the change is legitimate, or split the task; then "
-        "`stagemesh retry-task --task {task}`. Another implementation attempt will hit the same wall."
+        "`stagemesh rebind-contract --task {task} --validate`. Another implementation attempt will hit the same wall."
     ),
     VALIDATION_GATE: (
         "A validation gate cannot run or is misconfigured ({gates}); that is an environment or contract problem, not a code "
-        "defect. Fix the gate command/tooling or the contract's required_tests, then `stagemesh retry-task --task {task}`."
+        "defect. Fix the gate tooling and `stagemesh retry-task --task {task}`, or correct the contract's required_tests and "
+        "`stagemesh rebind-contract --task {task} --validate`."
     ),
     REVIEW_FINDING: (
         "The independent reviewer keeps raising the same concern. Read the finding below and either address it yourself, correct "
@@ -336,7 +398,12 @@ _RECOMMENDATIONS = {
     ),
     PROVIDER_NO_PROGRESS: (
         "The provider is not producing a usable change (nothing committed, or the same tree again). Check provider "
-        "availability/credentials and that the task text is actionable, try a different provider (`--provider`), then retry."
+        "availability/credentials and that the task text is actionable (`stagemesh task-doctor --task {task}`), try a different "
+        "provider (`--provider`), then `stagemesh retry-task --task {task}`."
+    ),
+    STALE_BASELINE: (
+        "The task baseline is behind the integration ref: files integrated by other work appear in this task's diff{paths}. "
+        "Run `stagemesh rebaseline-task --task {task} --to {ref_hint}`; no code change is needed."
     ),
     INTEGRATION_CONFLICT: (
         "The integration ref moved and the candidate no longer lands cleanly. Rebase or re-implement on the current "
@@ -345,7 +412,9 @@ _RECOMMENDATIONS = {
 }
 
 
-def diagnose(store: Store, task_id: str, project: Path | None = None, threshold: int = 2) -> Diagnosis | None:
+def diagnose(
+    store: Store, task_id: str, project: Path | None = None, threshold: int = 2, integration_ref: str | None = None
+) -> Diagnosis | None:
     """The diagnosis for a task's failures so far, or None when it has no failed evidence and no no-progress attempts."""
     failures = _failures(store, task_id)
     since = failures[-1].created_at if failures else _last_reset(store, task_id)
@@ -379,6 +448,7 @@ def diagnose(store: Store, task_id: str, project: Path | None = None, threshold:
             if not latest.same_as(earlier):
                 break
             repeat_count += 1
+    baseline: dict[str, Any] | None = None
     stalled = no_progress is not None and (latest is None or no_progress["attempts"] > 0 or no_progress["identical_trees"])
     if stalled and no_progress is not None and (no_progress["repeated"] or latest is None):
         category = PROVIDER_NO_PROGRESS
@@ -393,13 +463,22 @@ def diagnose(store: Store, task_id: str, project: Path | None = None, threshold:
         assert latest is not None
         category, stage = latest.category, latest.stage
         repeated = repeat_count >= threshold
+        stale = _stale_baseline(store, project, task_id, latest, integration_ref) if category == CONTRACT_SCOPE else None
+        if stale is not None:
+            category, baseline = STALE_BASELINE, stale.to_dict()
         what = ", ".join(latest.gates) or ", ".join(latest.codes) or "reviewer findings"
         summary = f"{stage} failed on candidate {latest.candidate_sha[:10]}: {what}"
         if repeated:
             summary += f"; the same failure occurred on {repeat_count} consecutive candidates"
         elif len(failures) > 1:
             summary += f"; {len(failures)} failed checks so far, not identical to the previous one"
-        if latest.messages:
+        if stale is not None:
+            summary = (
+                f"{stage} failed on candidate {latest.candidate_sha[:10]}: {len(stale.unrelated)} file(s) outside the contract scope "
+                f"({', '.join(stale.unrelated[:5])}) were integrated by other work after this task's baseline "
+                f"{str(stale.baseline_sha)[:10]}; the baseline is stale, not the code"
+            )
+        elif latest.messages:
             summary += f". First finding: {latest.messages[0][:240]}"
     focus = latest
     template = _RECOMMENDATIONS[category]
@@ -407,7 +486,7 @@ def diagnose(store: Store, task_id: str, project: Path | None = None, threshold:
         task=task_id,
         gates=", ".join(focus.gates) if focus and focus.gates else "the failing gate",
         paths=(f" ({', '.join(focus.paths[:5])})" if focus and focus.paths else ""),
-        ref_hint="integration ref",
+        ref_hint=integration_ref or (baseline or {}).get("integration_ref") or "integration ref",
     )
     if category == REVIEW_FINDING and focus and focus.messages:
         recommendation += " Finding: " + focus.messages[0][:300]
@@ -425,6 +504,8 @@ def diagnose(store: Store, task_id: str, project: Path | None = None, threshold:
         comparison=comparison[-6:],
         categories=categories,
         no_progress=no_progress,
+        review_findings=latest_candidate_findings(store, task_id),
+        baseline=baseline,
     )
 
 
