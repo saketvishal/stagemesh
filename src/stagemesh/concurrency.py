@@ -72,7 +72,8 @@ class ProviderLimiter:
                 usable = [name for name in candidates if self._cooldown_until.get(name, 0.0) <= time.time()]
                 if not usable:
                     return None
-                for name in usable:
+                ordered = sorted(usable, key=lambda name: (self._active.get(name, 0), candidates.index(name)))
+                for name in ordered:
                     if self._has_room(name):
                         self._active[name] = self._active.get(name, 0) + 1
                         return name

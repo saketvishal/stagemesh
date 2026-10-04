@@ -511,6 +511,45 @@ def test_pooled_executor_never_overloads_a_provider_across_tasks(tmp_path: Path)
     assert summary.providers["limits"]["codex"]["limit"] == 1
 
 
+def test_balanced_pool_sends_concurrent_implementation_tasks_to_different_providers(tmp_path: Path) -> None:
+    from stagemesh.provider_pool import IMPLEMENT, REVIEW, PooledExecutor, ProviderLog, ProviderPool
+    from stagemesh.providers import RuntimeCommandAdapter
+
+    rig = Rig(tmp_path, ["A", "B"])
+    chosen: dict[str, str] = {}
+    guard = threading.Lock()
+    scripted = ScriptedExecutor(rig.files, barrier=threading.Barrier(2))
+
+    class BalancedAdapter(RuntimeCommandAdapter):
+        def check_capacity(self) -> str:
+            return "AVAILABLE"
+
+        def execute(self, store, task_id, claim_id, project):
+            with guard:
+                chosen[task_id] = self.name
+            return scripted.run(store, task_id, claim_id, project)
+
+    limiter = ProviderLimiter(default_limit=2)
+    adapters = [BalancedAdapter("codex", (sys.executable,)), BalancedAdapter("grok", (sys.executable,))]
+    integrator = SerializedIntegrator(rig.ref, False, rig.lock)
+
+    def make(target, store, task_id):
+        pool = ProviderPool(
+            adapters,
+            {IMPLEMENT: ("codex", "grok"), REVIEW: ("codex", "grok")},
+            require_independent=False,
+            log=ProviderLog(echo=False),
+            policy="least_recently_used",
+            limiter=limiter,
+        )
+        return Coordinator(store, rig.project, executor=PooledExecutor(pool), integrator=integrator, target=target, worker_id=worker_id_for(task_id))
+
+    runner = ParallelRunner(rig.store, rig.project, make, concurrency=2, poll_seconds=0.05, limiter=limiter)
+    summary = runner.run()
+    assert rig.outcomes(summary) == {"A": "DONE", "B": "DONE"}, summary.to_dict()
+    assert set(chosen.values()) == {"codex", "grok"}
+
+
 def test_provider_cooldown_is_shared_between_tasks(tmp_path: Path) -> None:
     from stagemesh.provider_pool import ProviderLog, ProviderPool
     from stagemesh.providers import RuntimeCommandAdapter

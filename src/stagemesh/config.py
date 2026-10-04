@@ -21,6 +21,11 @@ class ConfigValidationError(ValueError):
 BUILTIN_PROVIDERS = ("codex", "claude", "grok")
 PROVIDER_STAGES = ("IMPLEMENT", "REVIEW")
 SELECTION_POLICIES = ("priority", "round_robin", "least_recently_used", "weighted")
+PROVIDER_PROFILES = ("balanced",)
+BALANCED_PROVIDER_POOLS = {
+    "IMPLEMENT": ("codex", "grok", "claude"),
+    "REVIEW": ("claude", "grok", "codex"),
+}
 _LEGACY_CAPABILITIES = {"code": "IMPLEMENT", "review": "REVIEW"}
 
 
@@ -109,6 +114,7 @@ class StageMeshConfig:
     provider_failure_cooldown_seconds: float = 900.0
     provider_specs: dict[str, ProviderSpec] = field(default_factory=dict)
     provider_selection_policy: str = "priority"
+    provider_profile: str | None = None
     provider_weights: dict[str, int] = field(default_factory=dict)
     task_selection: TaskSelectionConfig = field(default_factory=TaskSelectionConfig)
     parallel: ParallelConfig = field(default_factory=ParallelConfig)
@@ -165,12 +171,18 @@ def load_config(project: Path, config_path: Path | None = None) -> StageMeshConf
     cooldown = routing_data.get("provider_failure_cooldown_seconds", 900.0)
     if isinstance(cooldown, bool) or not isinstance(cooldown, (int, float)) or cooldown < 0:
         raise ConfigValidationError("routing.provider_failure_cooldown_seconds must be a non-negative number")
-    policy = os.environ.get("STAGEMESH_PROVIDER_SELECTION_POLICY") or routing_data.get("provider_selection_policy", "priority")
+    profile = os.environ.get("STAGEMESH_PROVIDER_PROFILE") or _string(routing_data.get("provider_profile")) or _string(data.get("provider_profile"))
+    if profile is not None and profile not in PROVIDER_PROFILES:
+        raise ConfigValidationError(f"provider_profile must be one of: {', '.join(PROVIDER_PROFILES)}")
+    configured_policy = os.environ.get("STAGEMESH_PROVIDER_SELECTION_POLICY") or routing_data.get("provider_selection_policy")
+    policy = configured_policy or ("least_recently_used" if profile == "balanced" else "priority")
     if policy not in SELECTION_POLICIES:
         raise ConfigValidationError(
             f"routing.provider_selection_policy must be one of: {', '.join(SELECTION_POLICIES)}"
         )
     provider_pools = _provider_pools(_optional_mapping(routing_data, "pools"))
+    if profile == "balanced":
+        provider_pools = {**BALANCED_PROVIDER_POOLS, **provider_pools}
     provider_weights = _provider_weights(_optional_mapping(routing_data, "provider_weights"))
     known = set(BUILTIN_PROVIDERS) | set(provider_commands)
     for stage, names in provider_pools.items():
@@ -201,6 +213,7 @@ def load_config(project: Path, config_path: Path | None = None) -> StageMeshConf
         provider_failure_cooldown_seconds=float(cooldown),
         provider_specs=provider_specs,
         provider_selection_policy=str(policy),
+        provider_profile=profile,
         provider_weights=provider_weights,
         task_selection=_task_selection(_optional_mapping(data, "task_selection") or _profile_task_selection(project)),
         parallel=_parallel(_optional_mapping(data, "parallel")),
