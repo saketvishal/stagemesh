@@ -101,7 +101,8 @@ def test_github_api_issue_source_paginates_all_issue_states(monkeypatch):
         }
     ]
 
-    def fake_urlopen(request, _timeout):
+    def fake_urlopen(request, timeout):
+        assert timeout == 20
         calls.append(request.full_url)
         page = page_one if request.full_url.endswith("page=1") else page_two
         return _JsonResponse(page)
