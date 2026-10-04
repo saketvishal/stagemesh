@@ -1,0 +1,35 @@
+{
+  "providers": {
+    "codex": {
+      "command": "codex exec",
+      "capabilities": ["IMPLEMENT", "REVIEW"],
+      "priority": 20
+    },
+    "claude": {
+      "command": "claude -p",
+      "capabilities": ["IMPLEMENT", "REVIEW"],
+      "priority": 30
+    },
+    "grok": {
+      "command": "grok",
+      "capabilities": ["IMPLEMENT", "REVIEW"],
+      "priority": 10,
+      "weight": 2
+    }
+  },
+  "routing": {
+    "mode": "STAGED",
+    "require_independent_review": true,
+    "pools": {
+      "IMPLEMENT": ["grok", "codex", "claude"],
+      "REVIEW": ["claude", "grok", "codex"]
+    },
+    "provider_selection_policy": "weighted",
+    "provider_weights": {
+      "grok": 2,
+      "codex": 1,
+      "claude": 1
+    },
+    "provider_failure_cooldown_seconds": 900
+  }
+}
