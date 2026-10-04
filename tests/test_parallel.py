@@ -143,6 +143,23 @@ def test_unsafe_worktree_roots_are_refused_unless_explicitly_allowed(tmp_path: P
     with pytest.raises(ConfigValidationError, match="home directory"):
         load_config(project)
 
+    home_parent = Path.home().parent
+    shared_root = home_parent if home_parent.parent != home_parent else Path("/tmp")
+    (project / ".stagemesh" / "config.json").write_text(
+        json.dumps({"runtime": {"worktree_root": str(shared_root)}}),
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigValidationError, match="broad shared directory"):
+        load_config(project)
+
+    shallow_global_root = Path(tmp_path.anchor) / ".sm-wt"
+    (project / ".stagemesh" / "config.json").write_text(
+        json.dumps({"runtime": {"worktree_root": str(shallow_global_root)}}),
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigValidationError, match="broad shared directory"):
+        load_config(project)
+
     (project / ".stagemesh" / "config.json").write_text(
         json.dumps({"runtime": {"worktree_root": str(project / "src" / "worktrees")}}),
         encoding="utf-8",
@@ -155,6 +172,12 @@ def test_unsafe_worktree_roots_are_refused_unless_explicitly_allowed(tmp_path: P
         encoding="utf-8",
     )
     assert load_config(project).runtime.allow_unsafe_worktree_root is True
+
+    (project / ".stagemesh" / "config.json").write_text(
+        json.dumps({"runtime": {"worktree_root": str(shared_root), "allow_unsafe_worktree_root": True}}),
+        encoding="utf-8",
+    )
+    assert load_config(project).runtime.worktree_root == shared_root
 
 
 @pytest.mark.skipif(
