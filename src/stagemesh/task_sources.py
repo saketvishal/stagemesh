@@ -157,7 +157,7 @@ class GitHubApiIssueSource:
 
     def discover(self) -> tuple[list[DiscoveredTask], str, float | None]:
         request = urllib.request.Request(
-            f"https://api.github.com/repos/{self.owner}/{self.repo}/issues?state=open&per_page=100",
+            f"https://api.github.com/repos/{self.owner}/{self.repo}/issues?state=all&per_page=100",
             headers={
                 "Accept": "application/vnd.github+json",
                 **({"Authorization": f"Bearer {self.token}"} if self.token else {}),
@@ -213,7 +213,23 @@ class ConfiguredGitHubTaskSource:
         if not self.labels:
             return tasks
         required = set(self.labels)
-        return [task for task in tasks if required.issubset(set(task.labels))]
+        discovered: list[DiscoveredTask] = []
+        for task in tasks:
+            matches = required.issubset(set(task.labels))
+            discovered.append(
+                DiscoveredTask(
+                    task.source,
+                    task.source_id,
+                    task.title,
+                    eligible=task.eligible and matches,
+                    state=task.state,
+                    dependencies=task.dependencies,
+                    labels=task.labels,
+                    body=task.body,
+                    created_at=task.created_at,
+                )
+            )
+        return discovered
 
 
 def _github_issue_to_task(issue: dict[str, object]) -> DiscoveredTask:
@@ -276,18 +292,37 @@ def sync_source(store: Store, tasks: list[DiscoveredTask]) -> list[str]:
     ids: list[str] = []
     for task in tasks:
         cached: dict[str, object] = {"eligible": task.eligible, "state": task.state}
+        retirement_reason = _retirement_reason(task)
+        if retirement_reason is not None and task.source == GitHubIssueSource.name:
+            cached["retirement_reason"] = retirement_reason
         if task.labels:
             cached["labels"] = list(task.labels)
         if task.created_at:
             cached["created_at"] = task.created_at
         if task.body:
-            cached["objective"] = task.body[:6000]  # lets auto-planning build a contract from the issue text
+            # Lets auto-planning build a contract from the issue text.
+            cached["objective"] = task.body[:6000]
         store.cache_source(task.source, task.source_id, cached, task.state)
-        if task.eligible and task.state == "OPEN":
+        if retirement_reason is not None and task.source == GitHubIssueSource.name:
+            store.retire_source_task(
+                task.source,
+                task.source_id,
+                retirement_reason,
+                {"source_state": task.state, "eligible": task.eligible},
+            )
+        elif task.eligible and task.state == "OPEN":
             ids.append(store.upsert_task(task.title, task.source, task.source_id))
             for dependency in task.dependencies:
                 store.add_dependency(task.source_id, dependency)
     return ids
+
+
+def _retirement_reason(task: DiscoveredTask) -> str | None:
+    if task.state != "OPEN":
+        return "source closed"
+    if not task.eligible:
+        return "source no longer eligible"
+    return None
 
 
 class OutboundSync:
