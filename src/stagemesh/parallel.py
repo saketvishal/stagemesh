@@ -24,7 +24,7 @@ from typing import Any
 
 from .audit import record_audit
 from .concurrency import IntegrationLockTimeout, ProviderLimiter, contract_conflict
-from .config import TaskSelectionConfig
+from .config import RuntimeConfig, TaskSelectionConfig, load_config
 from .contracts import ChangeContract, ContractError, parse_contract, task_contract_path
 from .coordinator import Coordinator, TargetSelection, TargetSelectionError
 from .domain import ExecutionKind
@@ -235,6 +235,9 @@ class ParallelRunner:
         self._pending_selection: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {}
         self.summary = ParallelSummary(concurrency)
         self.global_failure: str | None = None
+        config = load_config(self.project)
+        assert config.runtime is not None
+        self.runtime: RuntimeConfig = config.runtime
 
     # -- shared, thread-safe helpers -------------------------------------------------------------------------------------
 
@@ -413,6 +416,7 @@ class ParallelRunner:
             drive_task(
                 store, self.project, coordinator, task_id, summary,
                 max_steps=self.max_steps, on_step=on_step, on_start=on_start, global_health=False, should_stop=self.stop.is_set,
+                worktree_root_path=self.runtime.worktree_root,
             )
             if summary.stop_reason == "DONE":
                 remove_task_workspace(self.project, task_id)

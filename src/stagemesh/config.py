@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
 from dataclasses import dataclass, field
@@ -261,6 +262,8 @@ def _runtime(data_project: Path, data: dict[str, object]) -> RuntimeConfig:
     if unknown:
         raise ConfigValidationError(f"runtime has unsupported keys: {', '.join(sorted(unknown))}")
     raw = _string(data.get("worktree_root")) or ".stagemesh/worktrees"
+    if os.sep == "/" and "\\" in raw and not raw.startswith("\\\\"):
+        raw = raw.replace("\\", "/")
     root = Path(raw).expanduser()
     if not root.is_absolute():
         root = data_project / root
@@ -270,7 +273,20 @@ def _runtime(data_project: Path, data: dict[str, object]) -> RuntimeConfig:
     resolved = root.resolve()
     if not allow_unsafe:
         _validate_worktree_root(data_project, resolved)
-    return RuntimeConfig(worktree_root=resolved, allow_unsafe_worktree_root=allow_unsafe)
+    return RuntimeConfig(
+        worktree_root=_project_scoped_worktree_root(data_project, resolved),
+        allow_unsafe_worktree_root=allow_unsafe,
+    )
+
+
+def _project_scoped_worktree_root(project: Path, root: Path) -> Path:
+    project = project.resolve()
+    root = root.resolve()
+    if _is_inside(root, project / ".stagemesh"):
+        return root
+    name = re.sub(r"[^A-Za-z0-9._-]+", "-", project.name).strip(".-") or "project"
+    digest = hashlib.sha1(str(project).encode("utf-8")).hexdigest()[:10]
+    return root / f"{name}-{digest}"
 
 
 def _validate_worktree_root(project: Path, root: Path) -> None:
