@@ -217,13 +217,14 @@ def _latest_evidence(store: Store, task_id: str, candidate_sha: str, kind: Evide
     return {"status": str(row["status"]), "payload": payload}
 
 
-def workspace_info(project: Path, task_id: str) -> dict[str, str]:
+def workspace_info(project: Path, task_id: str, worktree_root_path: Path | None = None) -> dict[str, str]:
     head = GitWorkspace(project).run("symbolic-ref", "--short", "-q", "HEAD", check=False)
     branch = head.stdout.strip()
+    root = Path(worktree_root_path).resolve() if worktree_root_path is not None else worktree_root(project)
     return {
         "project_checkout": str(Path(project).resolve()),
-        "worktree_root": str(worktree_root(project)),
-        "worktree": str(task_workspace(project, task_id)),
+        "worktree_root": str(root),
+        "worktree": str(task_workspace(project, task_id, root)),
         "checkout": f"branch {branch}" if head.returncode == 0 and branch else "detached HEAD",
     }
 
@@ -448,6 +449,7 @@ def run_ready(
     auto_plan: bool = True,
     policy: TaskSelectionConfig | None = None,
     chooser: Callable[[list[Candidate]], str | None] | None = None,
+    worktree_root_path: Path | None = None,
 ) -> RunSummary:
     """Drive exactly one task through the existing coordinator until DONE, BLOCKED or a safe stop."""
     if max_steps < 1:
@@ -497,7 +499,17 @@ def run_ready(
         summary.started, summary.stop_reason, summary.message = False, "REFUSED:target_not_runnable", str(exc)
         return summary
 
-    drive_task(store, project, coordinator, selected, summary, max_steps=max_steps, on_step=on_step, on_start=on_start)
+    drive_task(
+        store,
+        project,
+        coordinator,
+        selected,
+        summary,
+        max_steps=max_steps,
+        on_step=on_step,
+        on_start=on_start,
+        worktree_root_path=worktree_root_path,
+    )
     return summary
 
 
@@ -513,13 +525,14 @@ def drive_task(
     on_start: Callable[[str], None] | None = None,
     global_health: bool = True,
     should_stop: Callable[[], bool] | None = None,
+    worktree_root_path: Path | None = None,
 ) -> None:
     """Tick one task until DONE, BLOCKED or a safe stop, filling `summary`.
 
     `global_health=False` is for parallel runs: another task's failure or a blocked task elsewhere says nothing about this
     one, so only this task's own progress decides when it stops.
     """
-    summary.detail["workspace"] = workspace_info(project, selected)
+    summary.detail["workspace"] = workspace_info(project, selected, worktree_root_path)
     if on_start is not None:
         on_start(format_start(summary))
     for number in range(1, max_steps + 1):

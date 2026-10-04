@@ -106,10 +106,19 @@ the dependency is DONE.
   them (exit code 130). After a hard kill the next run releases claims whose owning process is provably dead and removes
   worktrees that belong to finished or unknown tasks.
 * **Worktree root.** Configure `runtime.worktree_root` in `.stagemesh/config.json` to move task worktrees to another reviewed
-  location. StageMesh refuses broad roots such as the filesystem root, drive root, home directory or project parent, and project
-  paths outside `.stagemesh`, unless `runtime.allow_unsafe_worktree_root` is explicitly set after operator review.
+  location. When that location is outside the project runtime directory, StageMesh creates a project-specific child below it so
+  cleanup cannot cross into another project's task worktrees. StageMesh refuses broad roots such as the filesystem root, drive root,
+  home directory or project parent, and project paths outside `.stagemesh`, unless `runtime.allow_unsafe_worktree_root` is explicitly
+  set after operator review. `stagemesh doctor` shows the effective worktree root and any legacy roots it can see.
   Older worktrees from the legacy global `.sm-wt` layout are never deleted automatically; inspect and remove them manually once no
-  interrupted task needs them.
+  interrupted task needs them:
+
+```bash
+stagemesh doctor
+git worktree list
+git worktree remove --force <legacy-worktree-path>
+git worktree prune
+```
 
 ```json
 { "runtime": { "worktree_root": ".stagemesh/worktrees" },

@@ -74,7 +74,7 @@ from .work_transport import (
     write_ack_envelope,
     write_packet_envelope,
 )
-from .workspaces import worktree_root
+from .workspaces import legacy_worktree_roots, worktree_root
 from .workers import WorkerValidationError, heartbeat_worker, register_worker
 
 
@@ -135,6 +135,8 @@ def command_doctor(args: argparse.Namespace) -> int:
         "python_interpreter": sys.executable,
         "imported_package_path": str(Path(__file__).resolve().parent),
         "project": str(project),
+        "worktree_root": str(config.runtime.worktree_root) if config.runtime else None,
+        "legacy_worktree_roots": [str(path) for path in legacy_worktree_roots(project) if path.exists()],
         "db": str(db_path(project)),
         "schema_version": store.schema_version(),
         "config_source": str(config.source),
@@ -153,6 +155,13 @@ def command_doctor(args: argparse.Namespace) -> int:
     print(f"python interpreter: {sys.executable}")
     print(f"imported package path: {Path(__file__).resolve().parent}")
     print(f"project: {project}")
+    if config.runtime:
+        print(f"worktree root: {config.runtime.worktree_root}")
+    legacy = [path for path in legacy_worktree_roots(project) if path.exists()]
+    if legacy:
+        print("legacy worktree roots:")
+        for path in legacy:
+            print(f"  {path}")
     print(f"db: {db_path(project)}")
     print(f"schema version: {store.schema_version()}")
     print(f"config source: {config.source}")
@@ -553,6 +562,7 @@ def command_run_ready(args: argparse.Namespace) -> int:
             auto_plan=not getattr(args, "no_auto_plan", False),
             policy=config.task_selection,
             chooser=_interactive_chooser if getattr(args, "choose", False) else None,
+            worktree_root_path=config.runtime.worktree_root if config.runtime else None,
         )
     except _SetupError as exc:
         store.close()
@@ -629,7 +639,7 @@ def command_run_parallel(args: argparse.Namespace, *, queue: bool = False) -> in
                 f"StageMesh {'queue-run' if queue else 'continue'}: up to {args.parallel} "
                 "tasks in parallel, one worktree per task",
                 f"project checkout: {project}",
-                f"worktree root: {worktree_root(project)}",
+                f"worktree root: {config.runtime.worktree_root if config.runtime else worktree_root(project)}",
             ]
         ),
     )

@@ -133,9 +133,21 @@ def test_worktree_root_defaults_to_project_runtime_directory(tmp_path: Path) -> 
 def test_configured_worktree_root_is_used(tmp_path: Path) -> None:
     configured = tmp_path / "stagemesh-task-worktrees"
     project = _project(tmp_path, ["T-1"], config={"runtime": {"worktree_root": str(configured)}})
-    assert load_config(project).runtime.worktree_root == configured
-    assert worktree_root(project) == configured
-    assert task_workspace(project, "T-1").parent == configured
+    root = load_config(project).runtime.worktree_root
+    assert root.parent == configured
+    assert root.name.startswith("repo-")
+    assert worktree_root(project) == root
+    assert task_workspace(project, "T-1").parent == root
+
+
+def test_configured_external_root_is_namespaced_per_project(tmp_path: Path) -> None:
+    configured = tmp_path / "shared-worktrees"
+    first = _project(tmp_path / "one", ["T-1"], config={"runtime": {"worktree_root": str(configured)}})
+    second = _project(tmp_path / "two", ["T-2"], config={"runtime": {"worktree_root": str(configured)}})
+
+    assert worktree_root(first).parent == configured
+    assert worktree_root(second).parent == configured
+    assert worktree_root(first) != worktree_root(second)
 
 
 def test_unsafe_worktree_roots_are_refused_unless_explicitly_allowed(tmp_path: Path) -> None:
@@ -165,7 +177,7 @@ def test_unsafe_worktree_roots_are_refused_unless_explicitly_allowed(tmp_path: P
         json.dumps({"runtime": {"worktree_root": str(dedicated_external_root)}}),
         encoding="utf-8",
     )
-    assert load_config(project).runtime.worktree_root == dedicated_external_root.resolve()
+    assert load_config(project).runtime.worktree_root.parent == dedicated_external_root.resolve()
 
     (project / ".stagemesh" / "config.json").write_text(
         json.dumps({"runtime": {"worktree_root": str(project / "src" / "worktrees")}}),
@@ -184,17 +196,23 @@ def test_unsafe_worktree_roots_are_refused_unless_explicitly_allowed(tmp_path: P
         json.dumps({"runtime": {"worktree_root": str(shared_root), "allow_unsafe_worktree_root": True}}),
         encoding="utf-8",
     )
-    assert load_config(project).runtime.worktree_root == shared_root
+    assert load_config(project).runtime.worktree_root.parent == shared_root
 
 
-@pytest.mark.skipif(
-    os.name != "nt",
-    reason="Windows-style absolute paths are only absolute on Windows",
-)
 def test_configured_worktree_root_accepts_windows_style_paths(tmp_path: Path) -> None:
     configured = tmp_path / "windows-worktrees"
-    project = _project(tmp_path, ["T-1"], config={"runtime": {"worktree_root": str(configured)}})
-    assert load_config(project).runtime.worktree_root == configured
+    raw = str(configured).replace(os.sep, "\\")
+    project = _project(tmp_path, ["T-1"], config={"runtime": {"worktree_root": raw}})
+    assert load_config(project).runtime.worktree_root.parent == configured.resolve()
+
+
+def test_default_project_worktree_root_is_excluded_from_git(tmp_path: Path) -> None:
+    project = _project(tmp_path, ["T-1"])
+    run_path = prepare_task_workspace(project, "T-1")
+
+    exclude = project / ".git" / "info" / "exclude"
+    assert ".stagemesh/worktrees/" in exclude.read_text(encoding="utf-8").splitlines()
+    assert GitWorkspace(project).run("status", "--short", "--", str(run_path), check=False).stdout == ""
 
 
 def test_sweep_does_not_delete_legacy_global_worktrees(tmp_path: Path) -> None:
@@ -205,11 +223,30 @@ def test_sweep_does_not_delete_legacy_global_worktrees(tmp_path: Path) -> None:
         / hashlib.sha1(str(rig.project.resolve()).encode("utf-8")).hexdigest()[:10]
     )
     old_worktree = old_root / "deadbeef0000"
-    old_worktree.mkdir(parents=True)
+    GitWorkspace(rig.project).run("worktree", "add", "--detach", str(old_worktree), "HEAD")
     (old_worktree / "stray.txt").write_text("legacy\n", encoding="utf-8")
 
     assert sweep_task_worktrees(rig.project, rig.store) == []
-    assert old_worktree.exists()
+    assert (old_worktree / ".git").exists()
+    GitWorkspace(rig.project).run("worktree", "remove", "--force", str(old_worktree), check=False)
+
+
+def test_doctor_reports_legacy_worktree_roots_for_manual_cleanup(tmp_path: Path) -> None:
+    rig = Rig(tmp_path, ["A"])
+    old_root = (
+        rig.project.parent
+        / ".sm-wt"
+        / hashlib.sha1(str(rig.project.resolve()).encode("utf-8")).hexdigest()[:10]
+    )
+    old_root.mkdir(parents=True)
+    out = io.StringIO()
+
+    with contextlib.redirect_stdout(out):
+        assert cli_module.main(["--project", str(rig.project), "doctor"]) == 0
+
+    text = out.getvalue()
+    assert "legacy worktree roots:" in text
+    assert str(old_root) in text
 
 
 def test_concurrency_limit_is_respected(tmp_path: Path) -> None:

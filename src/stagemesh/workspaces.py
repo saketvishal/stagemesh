@@ -25,16 +25,18 @@ def worktree_root(project: Path) -> Path:
     return config.runtime.worktree_root
 
 
-def task_workspace(project: Path, task_id: str) -> Path:
-    return worktree_root(project) / _task_key(task_id)
+def task_workspace(project: Path, task_id: str, root: Path | None = None) -> Path:
+    return (Path(root).resolve() if root is not None else worktree_root(project)) / _task_key(task_id)
 
 
 def prepare_task_workspace(project: Path, task_id: str) -> Path:
     root = Path(project).resolve()
     workspace = GitWorkspace(root)
     workspace.init_if_needed()
+    runtime_root = worktree_root(root)
+    _ensure_worktree_excluded(root, runtime_root)
     _ensure_head(workspace, root)
-    target = task_workspace(root, task_id)
+    target = task_workspace(root, task_id, runtime_root)
     overlaps_checkout = target == root or target in root.parents or (
         root in target.parents and not _under_runtime_dir(root, target)
     )
@@ -99,6 +101,24 @@ def sweep_task_worktrees(project: Path, store: Store) -> list[dict[str, str]]:
     return actions
 
 
+def legacy_worktree_roots(project: Path) -> list[Path]:
+    """Known legacy roots operators may inspect manually; StageMesh never removes them automatically."""
+    project = Path(project).resolve()
+    digest = hashlib.sha1(str(project).encode("utf-8")).hexdigest()[:10]
+    candidates = [
+        Path(project.anchor) / ".sm-wt" / digest,
+        project.parent / ".sm-wt" / digest,
+    ]
+    seen: set[str] = set()
+    roots: list[Path] = []
+    for candidate in candidates:
+        key = str(candidate.resolve()).casefold()
+        if key not in seen:
+            seen.add(key)
+            roots.append(candidate)
+    return roots
+
+
 def _under_runtime_dir(project: Path, target: Path) -> bool:
     runtime = (project / ".stagemesh").resolve()
     target = target.resolve()
@@ -111,6 +131,24 @@ def _ensure_head(workspace: GitWorkspace, root: Path) -> None:
     marker = root / ".stagemesh-root"
     marker.write_text("StageMesh workspace root\n", encoding="utf-8")
     workspace.commit_all("Initialize StageMesh workspace")
+
+
+def _ensure_worktree_excluded(root: Path, runtime_root: Path) -> None:
+    runtime_root = Path(runtime_root).resolve()
+    if root not in runtime_root.parents:
+        return
+    pattern = runtime_root.relative_to(root).as_posix().rstrip("/") + "/"
+    exclude = root / ".git" / "info" / "exclude"
+    try:
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        existing = exclude.read_text(encoding="utf-8") if exclude.exists() else ""
+        if pattern not in {item.strip() for item in existing.splitlines()}:
+            with exclude.open("a", encoding="utf-8") as handle:
+                if existing and not existing.endswith("\n"):
+                    handle.write("\n")
+                handle.write(pattern + "\n")
+    except OSError as exc:
+        raise GitError(f"could not exclude StageMesh worktrees from git: {exc}") from exc
 
 
 NO_IMPLEMENTATION_CHANGE = "no_implementation_change"
