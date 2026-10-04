@@ -296,31 +296,32 @@ def _description(item: dict[str, object]) -> str:
 def sync_source(store: Store, tasks: list[DiscoveredTask]) -> list[str]:
     ids: list[str] = []
     for task in tasks:
-        cached: dict[str, object] = {"eligible": task.eligible, "state": task.state}
+        state = _normalized_state(task.state)
+        cached: dict[str, object] = {"eligible": task.eligible, "state": state}
         previous_source_state = (
             store.source_state(task.source, task.source_id)
             if task.source == GitHubIssueSource.name
             else {}
         )
-        retirement_reason = _retirement_reason(task)
+        retirement_reason = _retirement_reason(task, state)
         if retirement_reason is not None and task.source == GitHubIssueSource.name:
             cached["retirement_reason"] = retirement_reason
-        if task.labels:
+        if task.labels or task.source == GitHubIssueSource.name:
             cached["labels"] = list(task.labels)
         if task.created_at:
             cached["created_at"] = task.created_at
         if task.body:
             # Lets auto-planning build a contract from the issue text.
             cached["objective"] = task.body[:6000]
-        store.cache_source(task.source, task.source_id, cached, task.state)
+        store.cache_source(task.source, task.source_id, cached, state)
         if retirement_reason is not None and task.source == GitHubIssueSource.name:
             store.retire_source_task(
                 task.source,
                 task.source_id,
                 retirement_reason,
-                {"source_state": task.state, "eligible": task.eligible},
+                {"source_state": state, "eligible": task.eligible},
             )
-        elif task.eligible and task.state == "OPEN":
+        elif task.eligible and state == "OPEN":
             task_id = store.upsert_task(task.title, task.source, task.source_id)
             previous_retirement_reason = previous_source_state.get("retirement_reason")
             if task.source == GitHubIssueSource.name and isinstance(previous_retirement_reason, str):
@@ -328,7 +329,7 @@ def sync_source(store: Store, tasks: list[DiscoveredTask]) -> list[str]:
                     task.source,
                     task.source_id,
                     previous_retirement_reason,
-                    {"source_state": task.state, "eligible": task.eligible},
+                    {"source_state": state, "eligible": task.eligible},
                 )
             ids.append(task_id)
             for dependency in task.dependencies:
@@ -336,8 +337,12 @@ def sync_source(store: Store, tasks: list[DiscoveredTask]) -> list[str]:
     return ids
 
 
-def _retirement_reason(task: DiscoveredTask) -> str | None:
-    if task.state != "OPEN":
+def _normalized_state(state: str) -> str:
+    return state.upper()
+
+
+def _retirement_reason(task: DiscoveredTask, state: str) -> str | None:
+    if state != "OPEN":
         return "source closed"
     if not task.eligible:
         return "source no longer eligible"
