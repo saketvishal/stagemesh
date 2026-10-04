@@ -17,6 +17,8 @@ from typing import Any
 from .audit import record_audit
 from .contracts import ContractError, canonical_contract_json, parse_contract
 from .persistence import MAX_CANONICAL_CONTRACT_CHARS, Store
+from .config import ConfigValidationError, load_config
+from .scope_map import ScopeDecision, ScopeMapError, derive_scope, load_scope_map
 from .profile import Profile, ProfileError, TypeDecision, build_contract as build_profile_contract, load_profile, resolve_type
 
 GENERATED_BY = "stagemesh-auto-plan"
@@ -46,9 +48,12 @@ class AutoPlanResult:
     gates: tuple[str, ...]
     digest_chars: int
     profile: dict[str, Any] | None = None
+    scope: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         data: dict[str, Any] = {"path": str(self.path), "gates": list(self.gates), "canonical_chars": self.digest_chars}
+        if self.scope:
+            data["scope"] = self.scope
         if self.profile:
             data["profile"] = self.profile
         return data
@@ -120,24 +125,60 @@ def task_objective(store: Store, task_id: str) -> str:
     return objective
 
 
-def build_contract(store: Store, project: Path, task_id: str, gates: list[dict[str, Any]]) -> dict[str, Any]:
+def derive_task_scope(store: Store, project: Path, task_id: str) -> ScopeDecision:
+    """The scope auto-planning would give the task (narrow from the project's scope map, or broad with the reason)."""
+    try:
+        areas = load_scope_map(project)
+    except ScopeMapError as exc:
+        raise AutoPlanError("invalid_scope_map", f"scope map is unusable: {exc}", "fix stagemesh.scope.json") from exc
+    title, body = task_text(store, task_id)
+    return derive_scope(areas, task_labels(store, store.get_task(task_id)), title, body)
+
+
+def resolve_scope(store: Store, project: Path, task_id: str) -> ScopeDecision:
+    """A narrow scope, or a BROAD one only when the project's auto_plan.broad_scope policy explicitly allows it; otherwise refuse."""
+    decision = derive_task_scope(store, project, task_id)
+    if decision.mode == "narrow":
+        return decision
+    try:
+        policy = load_config(project).auto_plan.broad_scope
+    except ConfigValidationError as exc:
+        raise AutoPlanError("invalid_config", f"config is unusable: {exc}", "fix .stagemesh/config.json") from exc
+    if policy != "allow":
+        raise AutoPlanError(
+            "no_bounded_scope",
+            f"no bounded file scope could be derived: {decision.reason}",
+            "label the task with an area from stagemesh.scope.json, add an area for it, write .stagemesh/contracts/<task>.json by hand, "
+            'or set {"auto_plan": {"broad_scope": "allow"}} in .stagemesh/config.json to accept a repository-wide contract',
+        )
+    return decision
+
+
+def build_contract(
+    store: Store, project: Path, task_id: str, gates: list[dict[str, Any]], scope: ScopeDecision | None = None
+) -> dict[str, Any]:
+    scope = scope or ScopeDecision("broad", ("**",), reason="no scope was derived")
+    broad = scope.mode == "broad"
     return {
         "objective": task_objective(store, task_id),
         "explicit": True,
-        # Scope is unknown, so use the highest validation tier: broad gates are allowed to run.
+        # Gate names contain "acceptance", so the planner treats them as the broad project gates; keep the top tier either way.
         "validation_classification": "CORE_LIFECYCLE_OR_SCHEMA_SECURITY",
-        "validation_escalation_reasons": ["auto-generated contract has no file scope; full project validation required"],
+        "validation_escalation_reasons": [
+            "auto-generated BROAD contract (high risk): " + scope.reason if broad else f"auto-generated contract for area {'+'.join(scope.areas)}: full project validation"
+        ],
         "acceptance_criteria": [
             "The change fulfils the task objective and nothing else.",
             "Every detected project test gate passes.",
         ],
-        "allowed_files": ["**"],
+        "allowed_files": list(scope.allowed_files),
         "forbidden_files": list(FORBIDDEN_FILES),
         "required_tests": gates,
-        "max_changed_files": 60,
-        "max_diff_lines": 6000,
+        "max_changed_files": 60 if broad else 25,
+        "max_diff_lines": 6000 if broad else 3000,
         "generated_by": GENERATED_BY,
         "source_task": task_id,
+        "scope": scope.to_dict(),
     }
 
 
@@ -215,7 +256,13 @@ def plannable(store: Store, project: Path, task_id: str) -> str | None:
             return None
     except AutoPlanError as exc:
         return exc.message
-    return None if detect_gates(project) else "no validation gate can be generated"
+    if not detect_gates(project):
+        return "no validation gate can be generated"
+    try:
+        resolve_scope(store, project, task_id)
+    except AutoPlanError as exc:
+        return exc.message
+    return None
 
 
 def create_contract(store: Store, project: Path, task_id: str, *, gate_detector=None) -> AutoPlanResult:
@@ -223,6 +270,7 @@ def create_contract(store: Store, project: Path, task_id: str, *, gate_detector=
     if path.exists():
         raise AutoPlanError("contract_exists", f"refusing to overwrite existing contract {path}", "reuse the existing contract")
     profile_info: dict[str, Any] | None = None
+    scope_info: dict[str, Any] | None = None
     planned = profile_payload(store, project, task_id) if gate_detector is None else None
     if planned is not None:
         payload, profile_info = planned
@@ -235,12 +283,14 @@ def create_contract(store: Store, project: Path, task_id: str, *, gate_detector=
                 "no validation gate could be detected (looked for npm test, pytest, cargo test, go test at the project root)",
                 f"write {path} by hand with explicit required_tests, add a root-level test configuration, or add .stagemesh/profile.json",
             )
-        payload = build_contract(store, project, task_id, gates)
+        scope = resolve_scope(store, project, task_id)
+        scope_info = scope.to_dict()
+        payload = build_contract(store, project, task_id, gates, scope)
     size = validate_generated(payload)
     path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_suffix(".json.tmp")
     temp.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     os.replace(temp, path)
     names = tuple(str(g["name"]) for g in gates)
-    record_audit(store, "contract.auto_generated", {"task_id": task_id, "path": str(path), "gates": list(names), "canonical_chars": size})
-    return AutoPlanResult(path, names, size, profile_info)
+    record_audit(store, "contract.auto_generated", {"task_id": task_id, "path": str(path), "gates": list(names), "canonical_chars": size, **({"scope": scope_info} if scope_info else {})})
+    return AutoPlanResult(path, names, size, profile_info, scope_info)

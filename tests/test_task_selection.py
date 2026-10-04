@@ -117,6 +117,8 @@ def test_preferred_labels_then_valid_contracts_break_priority_ties(tmp_path: Pat
     (tmp_path / "b").mkdir()
     project = _project(tmp_path / "b", ["T-1", "T-2"], contracts=["T-2"], labels={"T-1": ["priority:p1"], "T-2": ["priority:p1"]})
     (project / "package.json").write_text(json.dumps({"scripts": {"test": "exit 0"}}), encoding="utf-8")
+    scope = {"schema_version": 1, "areas": [{"id": "p1", "labels": ["priority:p1"], "allowed_files": ["src/**"]}]}
+    (project / "stagemesh.scope.json").write_text(json.dumps(scope), encoding="utf-8")  # a bounded scope is derivable for T-1
     store = _synced(project)
     selection = select_next_task(store, project, TaskSelectionConfig())
     assert selection.task_id == "T-2" and "valid contract beats one needing auto-planning" in selection.reason

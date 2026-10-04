@@ -159,6 +159,9 @@ def _ensure_contract(
             ) from exc
         plan_info.update(occurred=True, **result.to_dict())
         note(f"task {task_id}: contract created at {result.path} (gates: {', '.join(result.gates)})")
+        if result.scope:
+            level = "WARNING: contract scope is BROAD" if result.scope["mode"] == "broad" else "contract scope is narrow"
+            note(f"task {task_id}: {level}: {result.scope['summary']}")
         note(f"task {task_id}: continuing to implementation")
         path = result.path
     else:
