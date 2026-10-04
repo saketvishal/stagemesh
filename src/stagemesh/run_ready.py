@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .auto_plan import AutoPlanError, create_contract
+from .diagnosis import format_findings
 from .contracts import ContractError, canonical_contract_json, parse_contract, task_contract_path
 from .coordinator import Coordinator, TargetSelection, TargetSelectionError
 from .domain import EvidenceKind, Stage, TaskStatus
@@ -334,6 +335,9 @@ def format_stop(summary: RunSummary) -> str:
     diagnosis = summary.detail.get("diagnosis")
     if diagnosis:
         lines.append(f"  diagnosis: {diagnosis['category']} at {diagnosis['stage']}: {diagnosis['summary']}")
+        if diagnosis.get("recommendation"):
+            lines.append(f"  next step: {diagnosis['recommendation']}")
+        lines.extend(format_findings(diagnosis.get("review_findings", [])))
     if summary.final:
         lines.append(f"  final: {summary.final['stage']}/{summary.final['status']}")
     return "\n".join(lines)

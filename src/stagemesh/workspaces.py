@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import shutil
 import threading
 from pathlib import Path
@@ -120,6 +121,15 @@ def legacy_worktree_roots(project: Path) -> list[Path]:
 
 
 def _under_runtime_dir(project: Path, target: Path) -> bool:
+    """True when `target` is the project's runtime dir or below it.
+
+    Judged both lexically and after resolving symlinks: on Windows `Path.resolve()` can transiently answer differently while a
+    sibling task thread is creating or removing directories under the same root, which used to refuse a perfectly valid task
+    ("overlaps the checkout") and fail it with no progress.
+    """
+    lexical_runtime, lexical_target = Path(os.path.abspath(project / ".stagemesh")), Path(os.path.abspath(target))
+    if lexical_target == lexical_runtime or lexical_runtime in lexical_target.parents:
+        return True
     runtime = (project / ".stagemesh").resolve()
     target = target.resolve()
     return target == runtime or runtime in target.parents

@@ -10,6 +10,7 @@ from .contracts import (
     ContractError,
     bind_contract,
     bound_contract_from_record,
+    CONTRACT_VERSION,
     canonical_contract_json,
     parse_contract,
     task_contract_path,
@@ -42,7 +43,7 @@ def bind_task_contract(store: Store, project: Path, task_id: str, baseline_sha: 
         raise ContractRejected("missing_explicit_contract", "change contract must be explicit")
     canonical_json = canonical_contract_json(contract)
     digest = hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
-    store.bind_task_contract(task_id, baseline_sha, 1, digest, canonical_json)
+    store.bind_task_contract(task_id, baseline_sha, CONTRACT_VERSION, digest, canonical_json)
     return bound_contract_from_record(dict(store.task_contract(task_id)))
 
 

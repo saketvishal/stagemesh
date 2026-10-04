@@ -59,13 +59,41 @@ def test_conflicting_tasks_are_never_run_together(tmp_path: Path) -> None:
     assert any(d["reason"].startswith("allowed_paths") for d in summary.deferred)  # the overlap was reported, not hidden
 
 
-def test_missing_contract_is_refused_and_others_still_run(tmp_path: Path) -> None:
+def test_missing_contract_is_refused_when_auto_planning_is_disabled(tmp_path: Path) -> None:
     rig = Rig(tmp_path, ["A", "B"])
     (rig.project / ".stagemesh" / "contracts" / "B.json").unlink()
-    summary = queue(rig, ScriptedExecutor(rig.files)).run()
+    summary = queue(rig, ScriptedExecutor(rig.files), auto_plan=False).run()
     assert outcomes(summary) == {"A": "DONE", "B": "REFUSED:missing_contract"}
     assert summary.stop_reason == "PARTIAL" and "out/B.txt" not in rig.tree()
     assert not (rig.project / ".stagemesh" / "contracts" / "B.json").exists()  # nothing was auto-planned
+
+
+def test_missing_contract_is_refused_when_no_safe_contract_can_be_derived(tmp_path: Path) -> None:
+    rig = Rig(tmp_path, ["A", "B"])  # the rig project has no test tooling to build validation gates from
+    (rig.project / ".stagemesh" / "contracts" / "B.json").unlink()
+    summary = queue(rig, ScriptedExecutor(rig.files)).run()
+    assert outcomes(summary) == {"A": "DONE", "B": "REFUSED:auto_plan_failed"}
+    assert "cannot auto-plan" in next(t for t in summary.tasks if t.task_id == "B").summary.message
+    assert not (rig.project / ".stagemesh" / "contracts" / "B.json").exists() and "out/B.txt" not in rig.tree()
+
+
+def test_queue_run_auto_plans_a_missing_contract_and_runs_the_task_without_continue(tmp_path: Path, monkeypatch) -> None:
+    import stagemesh.auto_plan as auto_plan_module
+
+    gate = {"name": "project-acceptance-fake", "command": [PY, "-c", "pass"], "timeout_seconds": 60}
+    monkeypatch.setattr(auto_plan_module, "detect_gates", lambda project: [dict(gate)])
+    said: list[tuple[str, str]] = []
+    rig = Rig(tmp_path, ["A", "B"])
+    (rig.project / ".stagemesh" / "contracts" / "B.json").unlink()
+    runner = queue(rig, ScriptedExecutor(rig.files), emit=lambda task_id, text: said.append((task_id, text)))
+    summary = runner.run()
+    assert outcomes(summary) == {"A": "DONE", "B": "DONE"} and summary.succeeded
+    assert {"out/A.txt", "out/B.txt"} <= rig.tree()
+    generated = [json.loads(r["payload"]) for r in rig.store.conn.execute("SELECT payload FROM audit_events WHERE event_type='contract.auto_generated'")]
+    assert [g["task_id"] for g in generated] == ["B"] and generated[0]["gates"] == ["project-acceptance-fake"]
+    assert any(task == "B" and text.startswith("task B: auto-planned contract ") for task, text in said)
+    bound = rig.store.contract_binding("B", str(rig.store.latest_candidate("B")["sha"]))
+    assert bound is not None  # the auto-planned contract is what the candidate was validated against
 
 
 def test_dirty_working_tree_in_task_scope_is_refused(tmp_path: Path) -> None:
@@ -213,10 +241,19 @@ def test_cli_json_reports_per_task_progress_and_final_states(tmp_path: Path) -> 
 def test_cli_reports_refusals_in_json(tmp_path: Path) -> None:
     project = _smoke_project(tmp_path)
     (project / ".stagemesh" / "contracts" / "T-2.json").unlink()
-    code, out, _ = run_cli(project, "--concurrency", "2", "--dry-run", "--json")
+    code, out, _ = run_cli(project, "--concurrency", "2", "--dry-run", "--json", "--no-auto-plan")
     data = json.loads(out)
     assert code == 1 and data["stop_reason"] == "PARTIAL" and data["refused"] == ["T-2"]
     assert data["task_outcomes"] == {"T-1": "DONE", "T-2": "REFUSED:missing_contract"}
+
+
+def test_cli_queue_run_auto_plans_by_default(tmp_path: Path) -> None:
+    project = _smoke_project(tmp_path)
+    (project / ".stagemesh" / "contracts" / "T-2.json").unlink()
+    code, out, _ = run_cli(project, "--concurrency", "2", "--dry-run", "--json")
+    data = json.loads(out)
+    assert code == 0 and data["task_outcomes"] == {"T-1": "DONE", "T-2": "DONE"} and data["refused"] == []
+    assert (project / ".stagemesh" / "contracts" / "T-2.json").exists()
 
 
 def test_failing_project_smoke_refuses_the_whole_run(tmp_path: Path) -> None:
@@ -250,3 +287,42 @@ def test_unusable_profile_refuses_and_no_profile_falls_back_to_contracts(tmp_pat
 def test_cli_rejects_bad_concurrency(tmp_path: Path) -> None:
     project = _smoke_project(tmp_path)
     assert run_cli(project, "--concurrency", "0", "--dry-run")[0] == 2
+
+
+def test_dispatch_loop_reselects_when_a_deferred_blockers_finished_before_the_liveness_check(tmp_path: Path) -> None:
+    """Deterministic form of the race: a round defers a task and nothing is running any more -> select again, never exit."""
+    rig = Rig(tmp_path, ["A"])
+    runner = queue(rig, ScriptedExecutor(rig.files))
+    rounds: list[int] = []
+
+    def scripted_select(summary, free, running, attempted):
+        rounds.append(len(rounds))
+        runner._deferred_this_round = len(rounds) == 1  # round 1 defers a task whose blocker already finished
+        return []
+
+    runner._select_batch = scripted_select  # type: ignore[method-assign]
+    runner._dispatch_loop(runner.summary)
+    assert rounds == [0, 1]
+
+
+def test_a_deferred_task_is_not_admission_checked_until_its_blocker_has_finished(tmp_path: Path) -> None:
+    """The blocker's own in-flight writes dirty the checkout; checking the deferred task then would wrongly refuse it for good."""
+    files = {"A": ("shared/a.txt", "a\n"), "B": ("shared/b.txt", "b\n")}
+    rig = Rig(tmp_path, ["A", "B"], files=files)
+    for task_id in ("A", "B"):
+        write_contract(rig, task_id, allowed_files=["shared/**"])
+    executor = ScriptedExecutor(files)
+    runner = queue(rig, executor, concurrency=2)
+    admitted: list[tuple[str, float]] = []
+    original = runner._admit
+
+    def recording_admit(task_id, contract):
+        admitted.append((task_id, time.monotonic()))
+        return original(task_id, contract)
+
+    runner._admit = recording_admit  # type: ignore[method-assign]
+    summary = runner.run()
+    assert outcomes(summary) == {"A": "DONE", "B": "DONE"}
+    ended = {task: at for kind, task, at in executor.log if kind == "end"}
+    b_checks = [at for task, at in admitted if task == "B"]
+    assert b_checks and all(at >= ended["A"] for at in b_checks)
