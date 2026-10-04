@@ -280,12 +280,14 @@ class ProviderPool:
             last_use: dict[str, float] = {}
             for name, when in uses:
                 last_use[name] = when
-            ordered = sorted(base, key=lambda a: last_use.get(a.name, float("-inf")))
+            ordered = sorted(base, key=lambda a: (self._active(a.name), last_use.get(a.name, float("-inf"))))
             for a in ordered:
+                active = self._active(a.name)
+                load = f", active {active}" if active else ""
                 reasons[a.name] = (
-                    "least_recently_used: never used for this stage"
+                    f"least_recently_used: never used for this stage{load}"
                     if a.name not in last_use
-                    else f"least_recently_used: last used {int(time.time() - last_use[a.name])}s ago"
+                    else f"least_recently_used: last used {int(time.time() - last_use[a.name])}s ago{load}"
                 )
             return ordered, reasons
         counts: dict[str, int] = {}
@@ -293,12 +295,17 @@ class ProviderPool:
             counts[name] = counts.get(name, 0) + 1
         weight = lambda a: max(1, self.weights.get(a.name, 1))  # noqa: E731
         score = lambda a: Fraction(counts.get(a.name, 0) + 1, weight(a))  # noqa: E731
-        ordered = sorted(base, key=score)  # stable: ties keep priority/pool order
+        ordered = sorted(base, key=lambda a: (self._active(a.name), score(a)))  # stable ties keep priority/pool order
         for a in ordered:
+            active = self._active(a.name)
+            load = f", active {active}" if active else ""
             reasons[a.name] = (
-                f"weighted: weight {weight(a)}, {counts.get(a.name, 0)} prior use(s), score {score(a)} (lowest score first)"
+                f"weighted: weight {weight(a)}, {counts.get(a.name, 0)} prior use(s), score {score(a)}{load} (lowest score first)"
             )
         return ordered, reasons
+
+    def _active(self, provider: str) -> int:
+        return self.limiter.active(provider) if self.limiter is not None else 0
 
     def preflight(self, store: Store, task_id: str | None = None) -> tuple[bool, str, list[Verdict], list[Verdict]]:
         """Can this configuration possibly implement AND independently review? Returns (ok, diagnostic, impl, review)."""
@@ -444,14 +451,18 @@ class PooledExecutor(Executor):
             if limiter is not None:
                 # Wait for a free slot on any not-yet-tried provider, still honouring the policy order; a saturated preferred
                 # provider hands the task to the next one instead of being overloaded.
-                if not any(limiter.has_room(a.name) for a in remaining):
-                    log(f"  every provider is at capacity; waiting for a slot ({', '.join(a.name for a in remaining)})")
-                held = limiter.acquire([a.name for a in remaining])
+                by_load = sorted(remaining, key=lambda a: (limiter.active(a.name), remaining.index(a)))
+                if not any(limiter.has_room(a.name) for a in by_load):
+                    log(f"  every provider is at capacity; waiting for a slot ({', '.join(a.name for a in by_load)})")
+                held = limiter.acquire([a.name for a in by_load])
                 if held is None:
                     break  # every remaining provider went into cooldown while waiting
                 adapter = next(a for a in remaining if a.name == held)
                 if adapter is not remaining[0]:
-                    log(f"  provider {remaining[0].name} is at capacity -> using {adapter.name}")
+                    if limiter.has_room(remaining[0].name):
+                        log(f"  provider {remaining[0].name} already has active work -> using {adapter.name}")
+                    else:
+                        log(f"  provider {remaining[0].name} is at capacity -> using {adapter.name}")
             remaining.remove(adapter)
             if index:
                 log(f"  fallback: {previous_name} failed ({reasons[-1]}) -> trying {adapter.name}")

@@ -5,6 +5,7 @@ import json
 import platform
 import sys
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,7 +18,7 @@ from .capacity import CapacityKind, CapacityRegistry, CapacityValidationError
 from .ci import CIValidationError, broken_future_feature_gate, default_gates
 from .ci_wait import decide_ci_wait
 from .completion_audit import CompletionAuditValidationError, completion_audit
-from .config import ConfigValidationError, load_config
+from .config import BALANCED_PROVIDER_POOLS, ConfigValidationError, load_config
 from .coordinator import Coordinator, TargetSelection, TargetSelectionError
 from .dashboard import dashboard_summary, render_dashboard
 from .demo import DemoValidationError, create_demo_project
@@ -57,7 +58,7 @@ from .regenerate import format_results, regenerate_contracts
 from .recovery import RecoveryRefusal, format_doctor, rebaseline_task, rebind_contract, task_doctor
 from .run_ready import RunSummary, format_step_update, format_stop, run_ready
 from .serialized_integration import SerializedIntegrator
-from .provider_pool import IMPLEMENT, REVIEW, PooledExecutor, ProviderLog, ProviderPool, default_pools, describe_verdicts
+from .provider_pool import IMPLEMENT, REVIEW, PROVIDER_FAILURE_EVENT, PooledExecutor, ProviderLog, ProviderPool, default_pools, describe_verdicts
 from .release import ReleaseValidationError, build_release_artifact
 from .release_readiness import ReleaseReadinessValidationError, release_readiness
 from .retry import RetryRegistry, RetryValidationError
@@ -1409,12 +1410,14 @@ def command_capacity(args: argparse.Namespace) -> int:
     registry.record(args.primary, CapacityKind.AVAILABLE if not args.primary_down else CapacityKind.CAPACITY)
     registry.record(args.secondary, CapacityKind.AVAILABLE if not args.secondary_down else CapacityKind.CAPACITY)
     chosen = registry.choose_primary_secondary(args.primary, args.secondary)
+    project_report = _provider_capacity_report(Path(args.project).resolve())
     if args.json:
         print(
             json.dumps(
                 {
                     "chosen": chosen,
                     "providers": registry.snapshot((args.primary, args.secondary)),
+                    "provider_balancing": project_report,
                 },
                 indent=2,
                 sort_keys=True,
@@ -1422,6 +1425,136 @@ def command_capacity(args: argparse.Namespace) -> int:
         )
         return 0
     print(f"chosen: {chosen or 'NONE'}")
+    if project_report.get("available"):
+        print(f"active provider profile: {project_report['provider_profile'] or 'custom/default'}")
+        print(f"active selection policy: {project_report['selection_policy']}")
+        for stage, names in project_report["stage_pools"].items():
+            print(f"{stage} pool: {', '.join(names) or '(empty)'}")
+        for provider in project_report["providers"]:
+            state = provider["capacity"]
+            cooldown = f"; cooldown: {provider['cooldown']}" if provider["cooldown"] else ""
+            recent = ", ".join(f"{item['stage']} {item['seconds_ago']}s ago" for item in provider["recent_use"])
+            print(f"provider {provider['name']}: {state}; recent: {recent or 'never'}{cooldown}")
+    return 0
+
+
+def _provider_capacity_report(project: Path) -> dict[str, object]:
+    try:
+        config = load_config(project)
+        adapters = adapters_from_config(config)
+    except (ConfigValidationError, ProviderValidationError) as exc:
+        return {"available": False, "error": str(exc)}
+    runtime_dir(project).mkdir(parents=True, exist_ok=True)
+    store = Store(db_path(project))
+    store.migrate()
+    try:
+        adapter_by_name = {adapter.name: adapter for adapter in adapters}
+        stage_caps = {"IMPLEMENT": "code", "REVIEW": "review"}
+        capable = {
+            stage: {a.name for a in adapters if capability in a.capabilities} for stage, capability in stage_caps.items()
+        }
+        priorities = {n: spec.priority for n, spec in config.provider_specs.items() if spec.priority is not None}
+        pools = default_pools(
+            sorted(adapter_by_name),
+            config.stage_routes,
+            config.provider_pools,
+            config.single_agent_provider,
+            config.routing_mode,
+            capable=capable,
+            priorities=priorities,
+        )
+        pool = ProviderPool(
+            adapters,
+            pools,
+            require_independent=config.require_independent_review,
+            cooldown_seconds=config.provider_failure_cooldown_seconds,
+            log=ProviderLog(echo=False),
+            policy=config.provider_selection_policy,
+            weights={**{n: spec.weight for n, spec in config.provider_specs.items() if spec.weight is not None}, **config.provider_weights},
+            priorities=priorities,
+        )
+        recent_by_provider: dict[str, list[dict[str, object]]] = {name: [] for name in adapter_by_name}
+        now = time.time()
+        for stage in (IMPLEMENT, REVIEW):
+            for name, when in pool.uses(store, stage)[-20:]:
+                if name in recent_by_provider:
+                    recent_by_provider[name].append({"stage": stage, "seconds_ago": max(0, int(now - when))})
+        cooldowns = _recent_provider_failures(store, config.provider_failure_cooldown_seconds)
+        registry = CapacityRegistry()
+        for adapter in adapters:
+            registry.record(adapter.name, adapter.check_capacity())
+        states = {item["provider"]: item for item in registry.snapshot(tuple(sorted(adapter_by_name)))}
+        return {
+            "available": True,
+            "provider_profile": config.provider_profile,
+            "selection_policy": config.provider_selection_policy,
+            "stage_pools": {stage: list(names) for stage, names in pools.items()},
+            "providers": [
+                {
+                    "name": name,
+                    "capacity": states[name]["kind"],
+                    "usable": states[name]["usable"],
+                    "recent_use": recent_by_provider[name][-5:],
+                    "cooldown": cooldowns.get(name),
+                }
+                for name in sorted(adapter_by_name)
+            ],
+        }
+    finally:
+        store.close()
+
+
+def _recent_provider_failures(store: Store, cooldown_seconds: float) -> dict[str, str]:
+    if cooldown_seconds <= 0:
+        return {}
+    now = time.time()
+    rows = store.conn.execute(
+        "SELECT payload, created_at FROM audit_events WHERE event_type=? AND created_at>=? ORDER BY created_at DESC",
+        (PROVIDER_FAILURE_EVENT, now - cooldown_seconds),
+    ).fetchall()
+    cooldowns: dict[str, str] = {}
+    for row in rows:
+        try:
+            payload = json.loads(row["payload"])
+        except (TypeError, ValueError):
+            continue
+        provider = payload.get("provider")
+        if isinstance(provider, str) and provider not in cooldowns:
+            remaining = max(0, int(cooldown_seconds - (now - row["created_at"])))
+            cooldowns[provider] = f"{payload.get('reason') or 'failure'} ({remaining}s remaining)"
+    return cooldowns
+
+
+def command_provider_profile(args: argparse.Namespace) -> int:
+    if args.profile != "balanced":
+        print(f"unsupported provider profile: {args.profile}", file=sys.stderr)
+        return 2
+    project = Path(args.project).resolve()
+    path = project / ".stagemesh" / "config.json"
+    data: dict[str, object] = {}
+    if path.exists():
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+            print(f"config file must be valid JSON: {exc}", file=sys.stderr)
+            return 2
+        if not isinstance(loaded, dict):
+            print("config root must be an object", file=sys.stderr)
+            return 2
+        data = loaded
+    routing = data.setdefault("routing", {})
+    if not isinstance(routing, dict):
+        print("routing must be an object", file=sys.stderr)
+        return 2
+    routing["provider_profile"] = "balanced"
+    routing.setdefault("provider_selection_policy", "least_recently_used")
+    routing.setdefault("pools", {stage: list(names) for stage, names in BALANCED_PROVIDER_POOLS.items()})
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    if args.json:
+        print(json.dumps({"profile": "balanced", "config": str(path)}, sort_keys=True))
+    else:
+        print(f"provider profile active: balanced ({path})")
     return 0
 
 
@@ -1446,6 +1579,9 @@ def command_config(args: argparse.Namespace) -> int:
                         "mode": config.routing_mode,
                         "single_agent_provider": config.single_agent_provider,
                         "stage_routes": dict(sorted(config.stage_routes.items())),
+                        "provider_profile": config.provider_profile,
+                        "provider_selection_policy": config.provider_selection_policy,
+                        "pools": {stage: list(names) for stage, names in sorted(config.provider_pools.items())},
                     },
                     "providers": display_provider_commands,
                     "task_sources": [
@@ -1465,6 +1601,10 @@ def command_config(args: argparse.Namespace) -> int:
     print(f"database_url: {display_database_url}")
     print(f"routing.mode: {config.routing_mode}")
     print(f"routing.single_agent_provider: {config.single_agent_provider or ''}")
+    print(f"routing.provider_profile: {config.provider_profile or ''}")
+    print(f"routing.provider_selection_policy: {config.provider_selection_policy}")
+    for stage, names in sorted(config.provider_pools.items()):
+        print(f"routing.pool.{stage}: {', '.join(names)}")
     for stage, provider in sorted(config.stage_routes.items()):
         print(f"routing.stage.{stage}: {provider}")
     for name, command in display_provider_commands.items():
@@ -2044,6 +2184,12 @@ def build_parser() -> argparse.ArgumentParser:
     capacity.add_argument("--secondary-down", action="store_true")
     capacity.add_argument("--json", action="store_true")
     capacity.set_defaults(func=command_capacity)
+    provider_profile = sub.add_parser("provider-profile", help="Activate a built-in provider balancing profile")
+    provider_profile_sub = provider_profile.add_subparsers(dest="provider_profile_command", required=True)
+    provider_profile_use = provider_profile_sub.add_parser("use")
+    provider_profile_use.add_argument("profile", choices=["balanced"])
+    provider_profile_use.add_argument("--json", action="store_true")
+    provider_profile_use.set_defaults(func=command_provider_profile)
     config = sub.add_parser("config")
     config.add_argument("--config")
     config.add_argument("--json", action="store_true")

@@ -110,6 +110,41 @@ def test_default_policy_is_priority_and_stage_routes_still_load(tmp_path: Path) 
     assert config.provider_selection_policy == "priority" and config.stage_routes == {"IMPLEMENT": "codex", "REVIEW": "claude"}
 
 
+def test_balanced_provider_profile_supplies_stage_pools_and_lru_policy(tmp_path: Path) -> None:
+    config = load_config(_config(tmp_path, {"provider_profile": "balanced"}))
+    assert config.provider_profile == "balanced"
+    assert config.provider_selection_policy == "least_recently_used"
+    assert config.provider_pools[IMPLEMENT] == ("codex", "grok", "claude")
+    assert config.provider_pools[REVIEW] == ("claude", "grok", "codex")
+
+    override_project = tmp_path / "override"
+    override_project.mkdir()
+    override = load_config(
+        _config(
+            override_project,
+            {
+                "routing": {
+                    "provider_profile": "balanced",
+                    "provider_selection_policy": "weighted",
+                    "pools": {"IMPLEMENT": ["grok", "codex"]},
+                }
+            },
+        )
+    )
+    assert override.provider_selection_policy == "weighted"
+    assert override.provider_pools[IMPLEMENT] == ("grok", "codex")
+    assert override.provider_pools[REVIEW] == ("claude", "grok", "codex")
+
+
+def test_provider_profile_use_balanced_updates_project_config(tmp_path: Path) -> None:
+    code = cli_module.main(["--project", str(tmp_path), "provider-profile", "use", "balanced"])
+    assert code == 0
+    config = load_config(tmp_path)
+    assert config.provider_profile == "balanced"
+    assert config.provider_selection_policy == "least_recently_used"
+    assert config.provider_pools[IMPLEMENT] == ("codex", "grok", "claude")
+
+
 # --- custom providers, selection policies ----------------------------------------------------------
 
 
