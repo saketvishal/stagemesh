@@ -160,6 +160,13 @@ def test_unsafe_worktree_roots_are_refused_unless_explicitly_allowed(tmp_path: P
     with pytest.raises(ConfigValidationError, match="broad shared directory"):
         load_config(project)
 
+    dedicated_external_root = Path(tmp_path.anchor) / "stagemesh-task-worktrees"
+    (project / ".stagemesh" / "config.json").write_text(
+        json.dumps({"runtime": {"worktree_root": str(dedicated_external_root)}}),
+        encoding="utf-8",
+    )
+    assert load_config(project).runtime.worktree_root == dedicated_external_root.resolve()
+
     (project / ".stagemesh" / "config.json").write_text(
         json.dumps({"runtime": {"worktree_root": str(project / "src" / "worktrees")}}),
         encoding="utf-8",
