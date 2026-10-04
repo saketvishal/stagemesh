@@ -3,9 +3,18 @@ from __future__ import annotations
 import hashlib
 import os
 import subprocess
+import time
 from pathlib import Path
 
 from .attribution import GitAttribution
+
+
+_TRANSIENT_RETRIES = 4
+
+
+def _transient_file_error(stderr: str) -> bool:
+    """Windows briefly denies access to .git files another git process (or a scanner) has open; the same command succeeds a moment later."""
+    return "permission denied" in stderr.lower()
 
 
 class GitError(RuntimeError):
@@ -46,14 +55,18 @@ class GitWorkspace:
                 _validate_non_empty_string(value, f"git environment value for {key}", 1000)
         merged_env = os.environ.copy()
         merged_env.update(env or {})
-        result = subprocess.run(
-            ["git", *validated_args],
-            cwd=self.path,
-            text=True,
-            capture_output=True,
-            check=False,
-            env=merged_env,
-        )
+        for attempt in range(_TRANSIENT_RETRIES + 1):
+            result = subprocess.run(
+                ["git", *validated_args],
+                cwd=self.path,
+                text=True,
+                capture_output=True,
+                check=False,
+                env=merged_env,
+            )
+            if result.returncode == 0 or attempt == _TRANSIENT_RETRIES or not _transient_file_error(result.stderr):
+                break
+            time.sleep(0.1 * (attempt + 1))
         if check and result.returncode != 0:
             raise GitError(result.stderr.strip() or result.stdout.strip())
         return result

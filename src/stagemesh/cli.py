@@ -50,9 +50,10 @@ from .registry import (
     RegistryValidationError,
 )
 from .concurrency import IntegrationLock, ProviderLimiter
-from .diagnosis import DiagnosisPolicy, diagnose, make_adapter_analyst
+from .diagnosis import DiagnosisPolicy, diagnose, format_findings, make_adapter_analyst
 from .parallel import ParallelRunner, ParallelSummary, SetupRefused, worker_id_for
 from .queue_run import QueueRunner
+from .recovery import RecoveryRefusal, format_doctor, rebaseline_task, rebind_contract, task_doctor
 from .run_ready import RunSummary, format_step_update, format_stop, run_ready
 from .serialized_integration import SerializedIntegrator
 from .provider_pool import IMPLEMENT, REVIEW, PooledExecutor, ProviderLog, ProviderPool, default_pools, describe_verdicts
@@ -372,6 +373,69 @@ def command_diagnose(args: argparse.Namespace) -> int:
         print(f"task {args.task}")
         print("\n".join(diagnosis.format_lines()))
     return 0
+
+
+def _repair_command(args: argparse.Namespace, action) -> int:  # type: ignore[no-untyped-def]
+    """Shared shell for the repair commands: open the store, run `action(store, project)`, report a refusal as exit 2."""
+    project = Path(args.project).resolve()
+    store = Store(db_path(project))
+    store.migrate()
+    try:
+        report = action(store, project)
+    except RecoveryRefusal as exc:
+        print(json.dumps(exc.to_dict(), indent=2, sort_keys=True) if args.json else f"refused ({exc.code}): {exc}", file=None if args.json else sys.stderr)
+        return 2
+    finally:
+        store.close()
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=True, default=str))
+    return 0
+
+
+def command_rebind_contract(args: argparse.Namespace) -> int:
+    def run(store, project):  # type: ignore[no-untyped-def]
+        report = rebind_contract(store, project, args.task, validate=args.validate, reason=args.reason, force=args.force)
+        if not args.json:
+            old, new = (report["old_digest"] or "none")[:12], report["new_digest"][:12]
+            print(f"task {args.task}: contract rebound {old} -> {new} (version {report['old_version']} -> {report['new_version']})")
+            if report["invalidated_evidence"]:
+                print(f"  {len(report['invalidated_evidence'])} passed evidence row(s) no longer satisfy the task (kept as history)")
+            if report["unblocked"]:
+                print("  task unblocked with a fresh remediation budget")
+            check = report["validation"]
+            if check:
+                print("  validation: " + (f"{check['status']}" + (" - advanced" if check["advanced"] else "") if check["ran"] else f"not run ({check['reason']})"))
+            print(f"  stage/status: {report['stage']}/{report['status']}")
+        return report
+
+    return _repair_command(args, run)
+
+
+def command_rebaseline_task(args: argparse.Namespace) -> int:
+    def run(store, project):  # type: ignore[no-untyped-def]
+        report = rebaseline_task(store, project, args.task, args.to, validate=args.validate, force=args.force, reason=args.reason)
+        if not args.json:
+            print(f"task {args.task}: baseline {report['old_baseline'][:12]} -> {report['new_baseline'][:12]} (against {args.to})")
+            print(f"  changed files: {len(report['changed_files_before'])} -> {len(report['changed_files_after'])}")
+            for path in report["removed_files"][:20]:
+                print(f"    no longer in the task diff: {path}")
+            check = report["validation"]
+            if check:
+                print("  validation: " + (f"{check['status']}" + (" - advanced" if check["advanced"] else "") if check["ran"] else f"not run ({check['reason']})"))
+            print(f"  stage/status: {report['stage']}/{report['status']}")
+        return report
+
+    return _repair_command(args, run)
+
+
+def command_task_doctor(args: argparse.Namespace) -> int:
+    def run(store, project):  # type: ignore[no-untyped-def]
+        report = task_doctor(store, project, args.task, args.to, load_config(project).diagnosis.repeat_threshold)
+        if not args.json:
+            print(format_doctor(report))
+        return report
+
+    return _repair_command(args, run)
 
 
 def command_continue(args: argparse.Namespace) -> int:
@@ -732,6 +796,12 @@ def _report_parallel(summary: ParallelSummary, info: dict[str, object], *, as_js
         for task in summary.tasks:
             outcome = task.summary.stop_reason if task.summary else "UNSET"
             print(f"[{task.task_id}] result: {outcome}" + (f" - {task.summary.message}" if task.summary and task.summary.message else ""))
+            shown = task.summary.detail.get("diagnosis") if task.summary else None
+            if shown:
+                print(f"[{task.task_id}]   diagnosis: {shown['category']} at {shown['stage']}: {shown['summary']}")
+                print(f"[{task.task_id}]   next step: {shown['recommendation']}")
+                for line in format_findings(shown.get("review_findings", [])):
+                    print(f"[{task.task_id}] {line}")
         print(f"Parallel run stopped: {summary.stop_reason.replace('_', ' ').lower()}" + (f" ({summary.message})" if summary.message else ""))
     if summary.interrupted:
         return 130
@@ -1833,11 +1903,32 @@ def build_parser() -> argparse.ArgumentParser:
     diagnose_cmd.add_argument("--provider", help="Also run a separate read-only diagnostic provider pass with this provider")
     diagnose_cmd.add_argument("--json", action="store_true")
     diagnose_cmd.set_defaults(func=command_diagnose)
+    rebind = sub.add_parser("rebind-contract", help="Re-read .stagemesh/contracts/<id>.json and replace the task's frozen contract (audited; never edit SQLite)")
+    rebind.add_argument("--task", required=True)
+    rebind.add_argument("--validate", action="store_true", help="Validate the latest candidate against the new contract and advance if it passes")
+    rebind.add_argument("--force", action="store_true", help="Accept that passed evidence bound to the old contract stops counting (it is kept as history)")
+    rebind.add_argument("--reason", help="Why the contract changed (recorded in the audit event)")
+    rebind.add_argument("--json", action="store_true")
+    rebind.set_defaults(func=command_rebind_contract)
+    rebase = sub.add_parser("rebaseline-task", help="Move a stale task baseline to the candidate's merge-base with the integration ref (audited)")
+    rebase.add_argument("--task", required=True)
+    rebase.add_argument("--to", required=True, metavar="INTEGRATION_REF", help="Integration ref the baseline is recomputed against")
+    rebase.add_argument("--validate", action="store_true", help="Re-validate the latest candidate afterwards and advance if it passes")
+    rebase.add_argument("--force", action="store_true", help="Proceed in ambiguous cases (candidate not based on the baseline, diverged history)")
+    rebase.add_argument("--reason", help="Why the baseline moved (recorded in the audit event)")
+    rebase.add_argument("--json", action="store_true")
+    rebase.set_defaults(func=command_rebaseline_task)
+    doctor_task = sub.add_parser("task-doctor", help="Read-only task summary: claims, candidate, baseline, contract, failures, findings, diagnosis, next command")
+    doctor_task.add_argument("--task", required=True)
+    doctor_task.add_argument("--to", metavar="INTEGRATION_REF", help="Integration ref to compare the baseline with (default: configured ref or current branch)")
+    doctor_task.add_argument("--json", action="store_true")
+    doctor_task.set_defaults(func=command_task_doctor)
     queue_cmd = sub.add_parser(
         "queue-run", help="Run several ready tasks at once when their contracts do not conflict (strict admission, serial integration)"
     )
     queue_cmd.add_argument("--concurrency", type=int, required=True, metavar="N", help="Maximum tasks running at once")
     queue_cmd.add_argument("--max-steps", type=int, default=50, help="Step budget for each task")
+    queue_cmd.add_argument("--no-auto-plan", action="store_true", help="Refuse tasks without a contract instead of auto-planning one")
     queue_cmd.add_argument("--json", action="store_true")
     queue_cmd.add_argument("--provider", help="Provider name to use for implementation (e.g. claude, codex)")
     queue_cmd.add_argument("--dry-run", action="store_true", help="Use FakeExecutor instead of a real provider")

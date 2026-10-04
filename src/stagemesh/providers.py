@@ -318,11 +318,11 @@ def _remediation_prompt(remediation: dict[str, object]) -> str:
         "",
         f"Previous candidate {remediation['candidate_sha']} failed {remediation['stage']}.",
         "",
-        "Required remediation:",
+        f"Findings recorded against candidate {remediation['candidate_sha']} (verbatim; fix exactly these):",
         "",
     ]
-    for finding in remediation["findings"][:20]:  # type: ignore[index]
-        lines.append(f"- [{finding['severity']}] {str(finding['message'])[:500]}")
+    for finding in remediation["findings"][:50]:  # type: ignore[index]
+        lines.append(f"- [{finding['severity']}] {finding['message']}")
     diagnosis = remediation.get("diagnosis")
     if isinstance(diagnosis, dict):
         lines.extend(["", f"Diagnosis ({diagnosis.get('category')}): {str(diagnosis.get('summary'))[:500]}"])
