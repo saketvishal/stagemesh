@@ -62,6 +62,9 @@ or an object with `command`, `capabilities` (`IMPLEMENT`, `REVIEW`), optional `p
 form the fallback chain in the same order. `STAGEMESH_<NAME>_CMD` overrides any provider command, `--provider` pins implementation,
 and SINGLE_AGENT mode still uses its one provider.
 
+See `docs/examples/grok-provider-pools.config.json` for a project config that makes Grok a first-class IMPLEMENT and REVIEW
+provider while preserving independent review.
+
 ## Choosing the next task
 
 Plain `stagemesh continue` runs the only eligible task, or ranks several and runs the best one. `--task <id>` bypasses ranking and
