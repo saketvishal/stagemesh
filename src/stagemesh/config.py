@@ -288,6 +288,11 @@ def _validate_worktree_root(project: Path, root: Path) -> None:
             "runtime.worktree_root must not be the home directory; choose a project-owned directory "
             "such as .stagemesh/worktrees"
         )
+    if _is_shared_root(root):
+        raise ConfigValidationError(
+            "runtime.worktree_root must not be a broad shared directory; choose a dedicated "
+            "project-owned directory such as .stagemesh/worktrees"
+        )
     if root == project.parent.resolve():
         raise ConfigValidationError(
             "runtime.worktree_root must not be the project parent directory; choose a "
@@ -308,6 +313,36 @@ def _validate_worktree_root(project: Path, root: Path) -> None:
 
 def _is_broad_root(path: Path) -> bool:
     return path.parent == path
+
+
+def _is_shared_root(path: Path) -> bool:
+    home = Path.home().resolve()
+    resolved = path.resolve()
+    shared = {
+        Path.cwd().anchor,
+        os.environ.get("SystemDrive", "") + "\\",
+        "/tmp",
+        "/var/tmp",
+        "/usr",
+        "/var",
+        "/opt",
+        "C:\\Users",
+        "C:\\Windows",
+        "C:\\Program Files",
+        "C:\\Program Files (x86)",
+        "C:\\ProgramData",
+    }
+    try:
+        shared.add(str(home.parent))
+    except RuntimeError:
+        pass
+    if str(resolved).casefold().rstrip("\\/") in {
+        item.casefold().rstrip("\\/")
+        for item in shared
+        if item
+    }:
+        return True
+    return len(resolved.parts) <= 2
 
 
 def _is_inside(path: Path, parent: Path) -> bool:
