@@ -110,6 +110,10 @@ class ProviderPool:
         weights: dict[str, int] | None = None,
         priorities: dict[str, int] | None = None,
         limiter: ProviderLimiter | None = None,
+        expires_at: dict[str, float] | None = None,
+        skips: dict[str, dict[str, str]] | None = None,
+        unstructured: frozenset[str] | set[str] | None = None,
+        response_parsers: dict[str, Callable[[str], str]] | None = None,
     ):
         if policy not in SELECTION_POLICIES:
             raise ValueError(f"unknown provider selection policy: {policy}")
@@ -123,6 +127,10 @@ class ProviderPool:
         self.cooldown_seconds = cooldown_seconds
         self.log = log or ProviderLog()
         self.limiter = limiter  # set under parallel execution: per-provider slots and provider-wide cooldown
+        self.expires_at = dict(expires_at or {})  # agent -> end of its capacity/reset window (epoch seconds)
+        self.skips = {stage: dict(by_name) for stage, by_name in (skips or {}).items()}  # stage -> agent -> why it is not in the pool
+        self.unstructured = frozenset(unstructured or ())  # never preferred as a reviewer
+        self.response_parsers = dict(response_parsers or {})
 
     def pool(self, stage: str) -> tuple[str, ...]:
         return self.pools.get(stage, ())
@@ -133,7 +141,7 @@ class ProviderPool:
         """One verdict per pool member, in pool order, saying why it is or is not usable right now."""
         capability = STAGE_CAPABILITY[stage]
         implementer_adapter = self.adapters.get(implementer) if implementer else None
-        verdicts: list[Verdict] = []
+        verdicts: list[Verdict] = [Verdict(n, False, why) for n, why in self.skips.get(stage, {}).items() if n not in self.pool(stage)]
         for name in self.pool(stage):
             adapter = self.adapters.get(name)
             if adapter is None:
@@ -251,12 +259,38 @@ class ProviderPool:
         self, store: Store, stage: str, eligible: list[RuntimeCommandAdapter]
     ) -> tuple[list[RuntimeCommandAdapter], dict[str, str]]:
         """Rank eligible providers by the selection policy; the first is tried first and the rest are the fallback chain."""
+        ordered, reasons = self._order(store, stage, eligible)
+        if stage == REVIEW and self.unstructured:  # whatever the policy, an agent without reliable review JSON goes last
+            ordered = sorted(ordered, key=lambda a: a.name in self.unstructured)
+            for a in ordered:
+                if a.name in self.unstructured:
+                    reasons[a.name] = "last resort: not marked as reliably producing structured review JSON; " + reasons.get(a.name, "")
+        return ordered, reasons
+
+    def _order(
+        self, store: Store, stage: str, eligible: list[RuntimeCommandAdapter]
+    ) -> tuple[list[RuntimeCommandAdapter], dict[str, str]]:
         pool = list(self.pool(stage))
         index = {name: i for i, name in enumerate(pool)}
         base = sorted(eligible, key=lambda a: (self.priorities.get(a.name, DEFAULT_PRIORITY), index.get(a.name, len(pool))))
         reasons: dict[str, str] = {}
         if not base:
             return [], reasons
+        if stage == REVIEW and self.unstructured:  # an agent without reliable review JSON is only ever a last-resort reviewer
+            base = sorted(base, key=lambda a: a.name in self.unstructured)
+        if self.policy == "expires_soon":
+            now = time.time()
+            window = lambda a: self.expires_at.get(a.name) if self.expires_at.get(a.name, 0) > now else None  # noqa: E731
+            ordered = sorted(base, key=lambda a: (window(a) is None, window(a) or 0.0))  # stable: ties keep priority/pool order
+            for a in ordered:
+                end = window(a)
+                reasons[a.name] = (
+                    f"expires_soon: capacity window ends in {_span(end - now)}, the soonest of the eligible agents"
+                    if end is not None and a is ordered[0]
+                    else f"expires_soon: capacity window ends in {_span(end - now)}" if end is not None
+                    else "expires_soon: no pending capacity window, ordered by priority after agents that expire"
+                )
+            return ordered, reasons
         if self.policy == "priority":
             ordered = base
             for a in ordered:
@@ -350,6 +384,12 @@ class ProviderPool:
         return FallbackReviewAdapter(self, store, task_id, eligible), verdicts
 
 
+def _span(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    hours, rest = divmod(seconds, 3600)
+    return f"{hours}h{rest // 60:02d}m" if hours else f"{rest // 60}m{rest % 60:02d}s"
+
+
 def _same(adapter: RuntimeCommandAdapter, implementer: str, implementer_adapter: RuntimeCommandAdapter | None) -> bool:
     if adapter.name.casefold() == implementer.casefold():
         return True
@@ -393,7 +433,13 @@ class FallbackReviewAdapter:
             finally:
                 if held is not None and limiter is not None:
                     limiter.release(held)
-            reason = _infrastructure_reason(response)
+            parser = self.pool.response_parsers.get(adapter.name)
+            if parser is not None:
+                response = parser(response)  # the plugin's own normalisation (e.g. unwrap a fenced JSON block)
+            reason = _review_failure_reason(response)
+            if reason is not None and reason.startswith("malformed_review_output"):
+                # A reviewer that cannot produce the review JSON is a provider failure, never a product finding.
+                response = json.dumps({"decision": INFRASTRUCTURE_FAILURE, "reason": reason})
             if reason is None:
                 self.pool.log(f"  final review provider: {adapter.name} ({self.pool.kind(adapter.name)})")
                 self.pool.record_use(self.store, REVIEW, self.task_id, adapter.name, "ANSWERED")
@@ -405,6 +451,21 @@ class FallbackReviewAdapter:
             previous = adapter.name
         self.pool.log("  all eligible review providers failed: " + "; ".join(f"{a['provider']}: {a['reason']}" for a in self.attempts))
         return response
+
+
+def _review_failure_reason(response: str) -> str | None:
+    """Why a reviewer's answer is unusable: its own infrastructure-failure envelope, or output that is not the review JSON at all."""
+    try:
+        parsed = json.loads(response)
+    except (TypeError, ValueError):
+        return "malformed_review_output: the answer is not JSON"
+    if not isinstance(parsed, dict):
+        return "malformed_review_output: the answer is not a JSON object"
+    if parsed.get("decision") == INFRASTRUCTURE_FAILURE:
+        return str(parsed.get("reason") or "review_provider_failure")
+    if parsed.get("decision") not in ("PASS", "FAIL"):
+        return "malformed_review_output: decision must be PASS or FAIL"
+    return None
 
 
 def _infrastructure_reason(response: str) -> str | None:

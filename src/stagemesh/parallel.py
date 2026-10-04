@@ -94,6 +94,9 @@ class TaskLifecycle:
         }
 
 
+_SELECTION_MARKERS = ("selected implementation provider", "selected review provider", "at capacity", "already has active work")
+
+
 @dataclass
 class ParallelSummary:
     concurrency: int
@@ -422,6 +425,9 @@ class ParallelRunner:
                 provider=step["new"].get("latest_agent"),
             )
             self._say(task_id, format_step_update(step, notices=notices))
+            for line in notices:  # a queue also says which agent was chosen and why (the single-task timeline shows it as the actor)
+                if any(marker in line for marker in _SELECTION_MARKERS):
+                    self._say(task_id, line.strip())
 
         try:
             try:

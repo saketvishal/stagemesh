@@ -51,6 +51,8 @@ from .registry import (
     RegistryValidationError,
 )
 from .concurrency import IntegrationLock, ProviderLimiter
+from . import agents_cli
+from .agent_config import pool_kwargs
 from .diagnosis import DiagnosisPolicy, diagnose, format_findings, make_adapter_analyst
 from .parallel import ParallelRunner, ParallelSummary, SetupRefused, worker_id_for
 from .queue_run import QueueRunner
@@ -252,6 +254,7 @@ def _build_coordinator(
             weights=weights,
             priorities=priorities,
             limiter=parallel.limiter if parallel else None,
+            **pool_kwargs(config),
         )
         staged = config.routing_mode == RoutingMode.STAGED
         ok, diagnostic, impl_verdicts, review_verdicts = pool.preflight(store, target.task_id if target else None)
@@ -1418,6 +1421,7 @@ def command_capacity(args: argparse.Namespace) -> int:
                     "chosen": chosen,
                     "providers": registry.snapshot((args.primary, args.secondary)),
                     "provider_balancing": project_report,
+                    "agents": _agent_capacity(Path(args.project).resolve()),
                 },
                 indent=2,
                 sort_keys=True,
@@ -1430,12 +1434,22 @@ def command_capacity(args: argparse.Namespace) -> int:
         print(f"active selection policy: {project_report['selection_policy']}")
         for stage, names in project_report["stage_pools"].items():
             print(f"{stage} pool: {', '.join(names) or '(empty)'}")
+        agent_report = _agent_capacity(Path(args.project).resolve())
+        if agent_report.get("agents"):
+            print(agents_cli.format_status(agent_report))
         for provider in project_report["providers"]:
             state = provider["capacity"]
             cooldown = f"; cooldown: {provider['cooldown']}" if provider["cooldown"] else ""
             recent = ", ".join(f"{item['stage']} {item['seconds_ago']}s ago" for item in provider["recent_use"])
             print(f"provider {provider['name']}: {state}; recent: {recent or 'never'}{cooldown}")
     return 0
+
+
+def _agent_capacity(project: Path) -> dict[str, object]:
+    try:
+        return agents_cli.status_report(project)
+    except ConfigValidationError as exc:
+        return {"error": str(exc), "agents": []}
 
 
 def _provider_capacity_report(project: Path) -> dict[str, object]:
@@ -1472,6 +1486,7 @@ def _provider_capacity_report(project: Path) -> dict[str, object]:
             policy=config.provider_selection_policy,
             weights={**{n: spec.weight for n, spec in config.provider_specs.items() if spec.weight is not None}, **config.provider_weights},
             priorities=priorities,
+            **pool_kwargs(config),
         )
         recent_by_provider: dict[str, list[dict[str, object]]] = {name: [] for name in adapter_by_name}
         now = time.time()
@@ -2177,6 +2192,7 @@ def build_parser() -> argparse.ArgumentParser:
     health_cmd = sub.add_parser("health")
     health_cmd.add_argument("--json", action="store_true")
     health_cmd.set_defaults(func=command_health)
+    agents_cli.register(sub)
     capacity = sub.add_parser("capacity")
     capacity.add_argument("--primary", default="codex")
     capacity.add_argument("--secondary", default="claude")

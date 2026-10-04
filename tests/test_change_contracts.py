@@ -405,7 +405,7 @@ def test_reviewer_adapter_matching_implementer_is_rejected(tmp_path: Path) -> No
     store.close()
 
 
-def test_malformed_independent_review_output_fails_closed(tmp_path: Path) -> None:
+def test_malformed_independent_review_output_is_a_provider_failure_not_a_finding(tmp_path: Path) -> None:
     workspace = _repo(tmp_path / "repo")
     project = workspace.path
     (project / "src" / "app.py").write_text("VALUE = 12\n", encoding="utf-8")
@@ -416,9 +416,11 @@ def test_malformed_independent_review_output_fails_closed(tmp_path: Path) -> Non
     store.add_candidate(task_id, sha, "implementer", True)
     adapter = RecordingReviewAdapter(name="reviewer", response="PASS")
 
-    assert Reviewer(adapter=adapter).review(store, task_id, sha, project) is EvidenceStatus.FAILED
-    findings = store.open_findings_for_candidate(task_id, sha)
-    assert any("JSON with decision PASS or FAIL" in row["message"] for row in findings)
+    # fails closed (the task cannot advance), but as review infrastructure: no finding about the code is invented
+    assert Reviewer(adapter=adapter).review(store, task_id, sha, project) is EvidenceStatus.CAPACITY
+    assert not store.open_findings_for_candidate(task_id, sha)
+    failure = store.conn.execute("SELECT payload FROM audit_events WHERE event_type='review.infrastructure_failure'").fetchone()
+    assert "malformed_review_output" in json.loads(failure["payload"])["reason"]
     store.close()
 
 
