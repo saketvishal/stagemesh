@@ -19,6 +19,7 @@ from .git import GitError, GitWorkspace
 from .parallel import ParallelRunner
 from .profile import ProfileError, load_profile
 from .profile_smoke import run_smoke
+from .regenerate import recommendation_for
 from .run_ready import RunReadyRefusal
 
 RUNTIME_PREFIXES = (".stagemesh/", ".git/")  # StageMesh's own state is not project content
@@ -77,6 +78,7 @@ class QueueRunner(ParallelRunner):
         kwargs.setdefault("auto_plan", True)
         super().__init__(*args, **kwargs)
         self._dirty: list[str] | None = None
+        self._advised: set[str] = set()
 
     def _refuse_unrunnable(self, summary, skipped, attempted) -> None:  # type: ignore[no-untyped-def]
         for item in skipped:
@@ -98,7 +100,23 @@ class QueueRunner(ParallelRunner):
                 RunReadyRefusal(code, message, task_id=item["task_id"]),
             )
 
+    def _recommend_regeneration(self, task_id: str) -> None:
+        """Tell the operator once per task when its generated contract is broad but the scope map could now make it narrow."""
+        if task_id in self._advised:
+            return
+        self._advised.add(task_id)
+        advice = recommendation_for(self.store, self.project, task_id)
+        if advice is None:
+            return
+        self.summary.recommendations.append(advice)
+        self._say(
+            task_id,
+            f"task {task_id}: its auto-generated contract is broad ({', '.join(advice['old_scope'])}) but the scope map now gives "
+            f"{', '.join(advice['new_scope'])}; run `{advice['command']}` to narrow it (running with the broad contract meanwhile)",
+        )
+
     def _admit(self, task_id: str, contract: ChangeContract) -> RunReadyRefusal | None:
+        self._recommend_regeneration(task_id)
         try:
             dirty = dirty_paths(self.project)  # fresh each time: another task may just have landed
         except GitError as exc:

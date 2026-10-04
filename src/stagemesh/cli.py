@@ -53,6 +53,7 @@ from .concurrency import IntegrationLock, ProviderLimiter
 from .diagnosis import DiagnosisPolicy, diagnose, format_findings, make_adapter_analyst
 from .parallel import ParallelRunner, ParallelSummary, SetupRefused, worker_id_for
 from .queue_run import QueueRunner
+from .regenerate import format_results, regenerate_contracts
 from .recovery import RecoveryRefusal, format_doctor, rebaseline_task, rebind_contract, task_doctor
 from .run_ready import RunSummary, format_step_update, format_stop, run_ready
 from .serialized_integration import SerializedIntegrator
@@ -426,6 +427,21 @@ def command_rebaseline_task(args: argparse.Namespace) -> int:
         return report
 
     return _repair_command(args, run)
+
+
+def command_regenerate_contracts(args: argparse.Namespace) -> int:
+    def run(store, project):  # type: ignore[no-untyped-def]
+        results = regenerate_contracts(
+            store, project, args.task, dry_run=args.dry_run, validate=args.validate, force=args.force, reason=args.reason
+        )
+        refused.extend(r["task_id"] for r in results if r["status"] == "refused")
+        if not args.json:
+            print(format_results(results, args.dry_run))
+        return {"dry_run": args.dry_run, "results": results}
+
+    refused: list[str] = []
+    code = _repair_command(args, run)
+    return 2 if code == 0 and refused else code  # a refusal is not silent success
 
 
 def command_task_doctor(args: argparse.Namespace) -> int:
@@ -1918,6 +1934,17 @@ def build_parser() -> argparse.ArgumentParser:
     rebase.add_argument("--reason", help="Why the baseline moved (recorded in the audit event)")
     rebase.add_argument("--json", action="store_true")
     rebase.set_defaults(func=command_rebaseline_task)
+    regen = sub.add_parser(
+        "regenerate-contracts",
+        help="Re-plan auto-generated contracts whose scope differs from the current scope map (hand-written contracts are never touched)",
+    )
+    regen.add_argument("--task", help="Only this task (default: every task with an auto-generated contract)")
+    regen.add_argument("--dry-run", action="store_true", help="Show old/new scope and digests without changing anything")
+    regen.add_argument("--validate", action="store_true", help="Validate each started task's latest candidate against the new contract")
+    regen.add_argument("--force", action="store_true", help="Accept that passed evidence bound to the old contract stops counting (kept as history)")
+    regen.add_argument("--reason", help="Why (recorded in the audit events)")
+    regen.add_argument("--json", action="store_true")
+    regen.set_defaults(func=command_regenerate_contracts)
     doctor_task = sub.add_parser("task-doctor", help="Read-only task summary: claims, candidate, baseline, contract, failures, findings, diagnosis, next command")
     doctor_task.add_argument("--task", required=True)
     doctor_task.add_argument("--to", metavar="INTEGRATION_REF", help="Integration ref to compare the baseline with (default: configured ref or current branch)")

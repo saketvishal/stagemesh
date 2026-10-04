@@ -217,6 +217,19 @@ If no bounded scope can be derived, auto-planning **refuses** (`no_bounded_scope
 `{"auto_plan": {"broad_scope": "allow"}}` in `.stagemesh/config.json`; it is then marked BROAD (high risk) in the contract and in
 the log (`WARNING: contract scope is BROAD: ...`).
 
+### Migrating generated contracts after a scope-map change
+
+`stagemesh regenerate-contracts [--task <id>] [--dry-run] [--validate] [--force] [--reason TEXT] [--json]` re-plans contracts that
+StageMesh itself generated (`generated_by: stagemesh-auto-plan`) whose scope differs from the current scope map. It shows the old
+and new scope and digest for each task. It never touches a hand-written or profile-generated contract, never widens a contract
+(a task with no bounded scope keeps what it has), carries the old gates over unchanged, and refuses tasks that are done or have an
+active claim or running execution. For a task that has already started the new contract is applied through `rebind-contract`, so
+its history rules apply too (passed evidence bound to the old contract blocks it unless `--force`, and the contract file is put back
+exactly as it was when a task is refused). Each regenerated contract writes a `contract.regenerated` audit event; candidates,
+evidence, findings and audit rows are never deleted. `queue-run` prints
+`task <id>: its auto-generated contract is broad ... run stagemesh regenerate-contracts --task <id>` once per such task (also in
+`--json` as `recommendations`) and still runs it with the contract it has. The command exits 2 when any task was refused.
+
 `queue-run` auto-plans a task that has no contract with the same deterministic path as `continue` (log line
 `task <id>: auto-planned contract ...`), and still refuses it when no safe bounded contract can be derived or with `--no-auto-plan`.
 
