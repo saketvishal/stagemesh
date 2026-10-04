@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -29,6 +30,7 @@ def operator_report(store: Store) -> OperatorReport:
     events = store.source_events(limit=10)
     retries = store.retry_states()
     external_evidence = external_evidence_records(store)
+    provider_selections = _provider_selection_rows(store)
     stage_counts = Counter(str(task["stage"]) for task in tasks)
     status_counts = Counter(str(task["status"]) for task in tasks)
     attention_rows = []
@@ -61,6 +63,12 @@ def operator_report(store: Store) -> OperatorReport:
         lines.append(f"retry {retry['key']} attempts={retry['attempts']} reason={retry['reason']}")
     for evidence in external_evidence:
         lines.append(f"external_evidence {evidence.kind} {evidence.status} {evidence.candidate_sha or ''}")
+    for selection in provider_selections:
+        lines.append(
+            "provider_selection "
+            f"task={selection['task_id'] or ''} stage={selection['stage']} "
+            f"policy={selection['policy']} order={selection['order']}"
+        )
     sections = (
         OperatorSection(
             "Stage Summary",
@@ -132,5 +140,30 @@ def operator_report(store: Store) -> OperatorReport:
                 for evidence in external_evidence
             ),
         ),
+        OperatorSection("Provider Selections", tuple(provider_selections)),
     )
     return OperatorReport(summary="ok" if h.ok else "degraded", lines=tuple(lines), sections=sections)
+
+
+def _provider_selection_rows(store: Store) -> list[Mapping[str, object]]:
+    rows: list[Mapping[str, object]] = []
+    for event in store.audit_events(limit=50):
+        if event["event_type"] != "provider.selection":
+            continue
+        try:
+            payload = json.loads(event["payload"])
+        except (TypeError, ValueError):
+            continue
+        order = payload.get("order")
+        verdicts = payload.get("verdicts")
+        rows.append(
+            {
+                "task_id": payload.get("task_id"),
+                "stage": payload.get("stage"),
+                "policy": payload.get("policy"),
+                "order": order if isinstance(order, list) else [],
+                "verdicts": verdicts if isinstance(verdicts, list) else [],
+                "created_at": event["created_at"],
+            }
+        )
+    return rows
