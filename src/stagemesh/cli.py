@@ -74,6 +74,7 @@ from .work_transport import (
     write_ack_envelope,
     write_packet_envelope,
 )
+from .workspaces import worktree_root
 from .workers import WorkerValidationError, heartbeat_worker, register_worker
 
 
@@ -621,7 +622,17 @@ def command_run_parallel(args: argparse.Namespace, *, queue: bool = False) -> in
         emit=emit,
     )
     wiring.on_integration_event = lambda task_id, event, detail: runner.note(task_id, event, **detail)
-    emit("run", f"StageMesh {'queue-run' if queue else 'continue'}: up to {args.parallel} tasks in parallel, one worktree per task")
+    emit(
+        "run",
+        "\n".join(
+            [
+                f"StageMesh {'queue-run' if queue else 'continue'}: up to {args.parallel} "
+                "tasks in parallel, one worktree per task",
+                f"project checkout: {project}",
+                f"worktree root: {worktree_root(project)}",
+            ]
+        ),
+    )
     summary = runner.run()
     store.close()
     return _report_parallel(summary, info, as_json=args.json, preflight=gate)
