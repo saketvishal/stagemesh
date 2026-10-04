@@ -122,6 +122,9 @@ class ContractEvaluation:
         return self.status == "PASSED"
 
 
+CONTRACT_VERSION = 1  # the only bound-contract schema version this build understands; never derived from stored rows or operator edits
+
+
 def task_contract_path(project: Path, task_id: str) -> Path | None:
     for path in (
         project / ".stagemesh" / "contracts" / f"{task_id}.json",
@@ -158,14 +161,14 @@ def bind_contract(
     contract = load_contract(project, task_id)
     canonical_json = canonical_contract_json(contract)
     digest = hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
-    return BoundChangeContract(contract, 1, digest, canonical_json, baseline_sha, candidate_sha)
+    return BoundChangeContract(contract, CONTRACT_VERSION, digest, canonical_json, baseline_sha, candidate_sha)
 
 
 def bound_contract_from_record(record: dict[str, Any]) -> BoundChangeContract:
     version = record.get("version")
     digest = record.get("digest")
     canonical_json = record.get("canonical_json")
-    if version != 1:
+    if version != CONTRACT_VERSION:
         raise ContractError(f"unsupported bound contract version: {version}")
     if not isinstance(digest, str) or not digest:
         raise ContractError("bound contract hash is missing")

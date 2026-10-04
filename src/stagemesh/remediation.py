@@ -46,6 +46,30 @@ class RemediationPolicy:
         return store.add_remediation_attempt(finding_id, status, payload or {"attempted_at": time.time()})
 
 
+def recorded_findings(store: Store, task_id: str, candidate_sha: str) -> list[dict[str, object]]:
+    """The exact findings recorded against a candidate, verbatim and in the order they were raised (all statuses)."""
+    failed = store.conn.execute(
+        "SELECT kind FROM evidence WHERE task_id=? AND candidate_sha=? AND status='FAILED' ORDER BY created_at DESC, rowid DESC LIMIT 1",
+        (task_id, candidate_sha),
+    ).fetchone()
+    source = str(failed["kind"]) if failed is not None else None
+    rows = store.conn.execute(
+        "SELECT id, severity, message, status FROM findings WHERE task_id=? AND candidate_sha=? ORDER BY created_at, rowid", (task_id, candidate_sha)
+    )
+    return [
+        {"id": r["id"], "severity": r["severity"], "message": r["message"], "status": r["status"], "candidate_sha": candidate_sha, "source": source}
+        for r in rows
+    ]
+
+
+def latest_candidate_findings(store: Store, task_id: str, open_only: bool = True) -> list[dict[str, object]]:
+    candidate = store.latest_candidate(task_id)
+    if candidate is None:
+        return []
+    found = recorded_findings(store, task_id, str(candidate["sha"]))
+    return [f for f in found if f["status"] == "OPEN"] if open_only else found
+
+
 def remediation_context(store: Store, task_id: str) -> dict[str, object] | None:
     """Persisted failure context for the most recent remediation of a task, or None for a first attempt."""
     latest = store.latest_task_remediation(task_id)
@@ -55,7 +79,7 @@ def remediation_context(store: Store, task_id: str) -> dict[str, object] | None:
     context: dict[str, object] = {
         "stage": str(latest["stage"]),
         "candidate_sha": str(latest["candidate_sha"]),
-        "findings": [{"severity": row["severity"], "message": row["message"]} for row in findings],
+        "findings": [{"id": row["id"], "severity": row["severity"], "message": row["message"]} for row in findings],
     }
     diagnosis = _latest_diagnosis(store, task_id, str(latest["candidate_sha"]))
     if diagnosis is not None:

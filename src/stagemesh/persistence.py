@@ -585,6 +585,76 @@ class Store:
             (claim_id,),
         ).fetchone()
 
+    def has_active_claim(self, task_id: str) -> bool:
+        task_id = _validate_text(task_id, "task id")
+        return self.conn.execute("SELECT 1 FROM claims WHERE task_id=? AND active=1", (task_id,)).fetchone() is not None
+
+    def rebind_task_contract(
+        self, task_id: str, version: int, digest: str, canonical_json: str, candidate_sha: str | None = None
+    ) -> None:
+        """Replace the frozen task contract (and the binding of `candidate_sha`, if any) in one transaction.
+
+        Unlike `bind_task_contract` the first binding does not win here: this is the operator repair path, so the caller
+        (recovery.rebind_contract) is responsible for the safety checks and the audit event. Baselines are left untouched.
+        """
+        task_id = _validate_text(task_id, "task id")
+        digest = _validate_text(digest, "contract hash", 128)
+        canonical_json = _validate_text(canonical_json, "canonical contract", MAX_CANONICAL_CONTRACT_CHARS)
+        if not isinstance(version, int) or isinstance(version, bool) or version < 1:
+            raise StoreValidationError("contract version must be a positive integer")
+        with self.conn:
+            updated = self.conn.execute(
+                "UPDATE task_contracts SET version=?, digest=?, canonical_json=? WHERE task_id=?",
+                (version, digest, canonical_json, task_id),
+            ).rowcount
+            if updated == 0:
+                baseline = self.task_baseline(task_id)
+                if baseline is None:
+                    raise StoreValidationError("task has no baseline to bind a contract to")
+                self.conn.execute(
+                    "INSERT INTO task_contracts VALUES (?, ?, ?, ?, ?, ?)", (task_id, baseline, version, digest, canonical_json, time.time())
+                )
+            if candidate_sha is not None:
+                self.conn.execute(
+                    "UPDATE contract_bindings SET version=?, digest=?, canonical_json=? WHERE task_id=? AND candidate_sha=?",
+                    (version, digest, canonical_json, task_id, candidate_sha),
+                )
+
+    def rebaseline_task(self, task_id: str, baseline_sha: str, candidate_sha: str | None = None) -> None:
+        """Move the task baseline (and the frozen contract's and `candidate_sha`'s binding baseline) in one transaction."""
+        task_id = _validate_text(task_id, "task id")
+        baseline_sha = _validate_text(baseline_sha, "baseline sha")
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO task_baselines(task_id, baseline_sha, created_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(task_id) DO UPDATE SET baseline_sha=excluded.baseline_sha",
+                (task_id, baseline_sha, time.time()),
+            )
+            self.conn.execute("UPDATE task_contracts SET baseline_sha=? WHERE task_id=?", (baseline_sha, task_id))
+            if candidate_sha is not None:
+                self.conn.execute(
+                    "UPDATE contract_bindings SET baseline_sha=? WHERE task_id=? AND candidate_sha=?", (baseline_sha, task_id, candidate_sha)
+                )
+
+    def contract_bindings_for_task(self, task_id: str) -> list[sqlite3.Row]:
+        task_id = _validate_text(task_id, "task id")
+        return list(self.conn.execute("SELECT * FROM contract_bindings WHERE task_id=? ORDER BY created_at, rowid", (task_id,)))
+
+    def passed_evidence_for_digest(self, task_id: str, digest: str) -> list[sqlite3.Row]:
+        """PASSED evidence rows (any candidate) whose payload is bound to `digest`."""
+        task_id = _validate_text(task_id, "task id")
+        rows = self.conn.execute(
+            "SELECT id, candidate_sha, kind, payload FROM evidence WHERE task_id=? AND status='PASSED' ORDER BY created_at, rowid", (task_id,)
+        )
+        matched = []
+        for row in rows:
+            try:
+                if json.loads(row["payload"]).get("contract_hash") == digest:
+                    matched.append(row)
+            except (TypeError, json.JSONDecodeError):
+                continue
+        return matched
+
     def block_task(self, task_id: str) -> None:
         task_id = _validate_text(task_id, "task id")
         self.conn.execute(

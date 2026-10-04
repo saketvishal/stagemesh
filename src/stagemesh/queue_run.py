@@ -1,6 +1,6 @@
 """`stagemesh queue-run`: a supervised queue over the parallel runner with strict, contract-driven admission.
 
-On top of ParallelRunner it adds the rules a shared queue needs: no contract means refusal (nothing is auto-planned), a task is
+On top of ParallelRunner it adds the rules a shared queue needs: a missing contract is auto-planned deterministically (and refused when that cannot be done safely), a task is
 refused when the working tree is dirty anywhere it may write, and two tasks never run together when their allowed write scopes
 overlap. Selection is conservative (patterns are compared, not files), so it can serialize tasks that would not really collide,
 never the reverse.
@@ -72,7 +72,9 @@ def dirty_in_scope(contract: ChangeContract, dirty: list[str]) -> list[str]:
 
 class QueueRunner(ParallelRunner):
     def __init__(self, *args: Any, **kwargs: Any):
-        kwargs["auto_plan"] = False  # a queue never invents a task's scope: no contract, no run
+        # Missing contracts are auto-planned by the same deterministic path `continue` uses (unless --no-auto-plan). That path fails
+        # closed: with no detectable validation gate, or a contract that does not round-trip, the task is refused, never run unbounded.
+        kwargs.setdefault("auto_plan", True)
         super().__init__(*args, **kwargs)
         self._dirty: list[str] | None = None
 
@@ -81,13 +83,16 @@ class QueueRunner(ParallelRunner):
             if item.get("kind") != "unplannable" or item["task_id"] in attempted:
                 continue
             attempted.add(item["task_id"])
-            missing = item["reason"].startswith("no contract")
-            code = "missing_contract" if missing else "invalid_contract"
-            message = (
-                f"task {item['task_id']} has no change contract; write .stagemesh/contracts/{item['task_id']}.json"
-                if missing
-                else f"task {item['task_id']}: {item['reason']}"
-            )
+            reason = item["reason"]
+            if reason.startswith("no contract and auto-planning is disabled"):
+                code = "missing_contract"
+                message = f"task {item['task_id']} has no change contract; write .stagemesh/contracts/{item['task_id']}.json or rerun without --no-auto-plan"
+            elif reason.startswith("no contract and cannot auto-plan"):
+                code = "auto_plan_failed"
+                message = f"task {item['task_id']}: {reason}; write .stagemesh/contracts/{item['task_id']}.json by hand"
+            else:
+                code = "invalid_contract"
+                message = f"task {item['task_id']}: {reason}"
             self._record_refusal(
                 summary, {"task_id": item["task_id"], "contract": item["reason"]}, {"occurred": False, "reused_existing": False, "events": []},
                 RunReadyRefusal(code, message, task_id=item["task_id"]),

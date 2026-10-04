@@ -235,6 +235,8 @@ class ParallelRunner:
         self._pending_selection: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {}
         self.summary = ParallelSummary(concurrency)
         self.global_failure: str | None = None
+        self._deferred_this_round = False
+        self._planned: dict[str, dict[str, Any]] = {}
         config = load_config(self.project)
         assert config.runtime is not None
         self.runtime: RuntimeConfig = config.runtime
@@ -284,12 +286,15 @@ class ParallelRunner:
         while not self.stop.is_set():
             running = [task_id for task_id, thread in self._threads.items() if thread.is_alive()]
             free = self.concurrency - len(running)
+            self._deferred_this_round = False
             if free > 0:
                 for task_id in self._select_batch(summary, free, running, attempted):
                     attempted.add(task_id)
                     self._start(task_id)
             running = [task_id for task_id, thread in self._threads.items() if thread.is_alive()]
             if not running:
+                if self._deferred_this_round:
+                    continue  # a task was held back for a blocker that has since finished: select again instead of dropping it
                 break
             try:
                 self._done.get(timeout=self.poll_seconds)
@@ -321,20 +326,29 @@ class ParallelRunner:
                 attempted.add(task_id)
                 self._record_refusal(summary, candidate.to_dict(), plan_info, refusal)
                 continue
+            if plan_info["occurred"]:
+                self._planned[task_id] = plan_info  # a task held back this round keeps its planning record for the round it starts in
+                gates = ", ".join(plan_info.get("gates", []))
+                self._say(task_id, f"task {task_id}: auto-planned contract {plan_info.get('path')} (gates: {gates})")
+            elif task_id in self._planned:
+                plan_info = self._planned[task_id]
             contract = load_task_contract(self.store, self.project, task_id)
+            # Conflicts first: a task held back for a running blocker must not be refused for the dirty files that blocker is
+            # writing (or integrating) right now. It is admitted, or refused, only once nothing it conflicts with is running.
+            blocker = next(((other, why) for other, c in active.items() if (why := self._conflict(contract, c))), None)
+            if blocker is not None:
+                deferred[task_id] = {"task_id": task_id, "blocked_by": blocker[0], "reason": str(blocker[1])}
+                continue
             refusal = self._admit(task_id, contract)
             if refusal is not None:
                 attempted.add(task_id)
                 self._record_refusal(summary, candidate.to_dict(), plan_info, refusal)
                 continue
-            blocker = next(((other, why) for other, c in active.items() if (why := self._conflict(contract, c))), None)
-            if blocker is not None:
-                deferred[task_id] = {"task_id": task_id, "blocked_by": blocker[0], "reason": str(blocker[1])}
-                continue
             active[task_id] = contract
             self._contracts[task_id] = contract
             self._pending_selection[task_id] = (candidate.to_dict(), plan_info)
             chosen.append(task_id)
+        self._deferred_this_round = bool(deferred)
         for item in deferred.values():
             if not any(d["task_id"] == item["task_id"] and d["blocked_by"] == item["blocked_by"] for d in summary.deferred):
                 summary.deferred.append(item)
@@ -370,6 +384,10 @@ class ParallelRunner:
             self.summary.tasks.append(lifecycle)
         self.note(task_id, "selected", priority=selection.get("priority"), contract=selection.get("contract"))
         self._say(task_id, f"selected (up to {self.concurrency} tasks run concurrently)")
+        for message in plan_info.get("events", []):
+            self._say(task_id, message)
+        if plan_info.get("occurred"):
+            self.note(task_id, "auto_planned", path=plan_info.get("path"), gates=plan_info.get("gates"))
         thread = threading.Thread(target=self._work, args=(task_id, lifecycle), name=f"stagemesh-{task_id}", daemon=True)
         self._threads[task_id] = thread
         thread.start()
