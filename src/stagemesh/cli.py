@@ -50,6 +50,7 @@ from .registry import (
     RegistryValidationError,
 )
 from .concurrency import IntegrationLock, ProviderLimiter
+from .diagnosis import DiagnosisPolicy, diagnose, make_adapter_analyst
 from .parallel import ParallelRunner, ParallelSummary, SetupRefused, worker_id_for
 from .queue_run import QueueRunner
 from .run_ready import RunSummary, format_step_update, format_stop, run_ready
@@ -301,6 +302,7 @@ def _build_coordinator(
         integrator=integrator,
         target=target,
         require_independent_review=require_independent_review,
+        diagnosis_policy=_diagnosis_policy(config, project, {} if getattr(args, "dry_run", False) else adapter_by_name),
         **({"worker_id": worker_id_for(target.task_id)} if parallel and target else {}),
     )
     info = {
@@ -321,6 +323,55 @@ class ParallelWiring:
     limiter: ProviderLimiter
     lock: IntegrationLock
     on_integration_event: Callable[[str, str, dict[str, object]], None] | None = None
+
+
+def _diagnosis_policy(config, project: Path, adapters: dict[str, object]) -> DiagnosisPolicy:
+    """Stop-on-repeat policy from config; the separate diagnostic provider pass only exists when a provider is configured."""
+    settings = config.diagnosis
+    analyst = None
+    if settings.provider and settings.dispatch != "never" and settings.provider in adapters:
+        analyst = make_adapter_analyst(adapters[settings.provider], project)
+    return DiagnosisPolicy(settings.repeat_threshold, settings.stop_on_repeat, settings.dispatch, analyst)
+
+
+def command_diagnose(args: argparse.Namespace) -> int:
+    """Read-only: why is this task failing? Summarizes the failing evidence, compares candidates and classifies the failure."""
+    project = Path(args.project).resolve()
+    config = load_config(project)
+    store = Store(db_path(project))
+    store.migrate()
+    if store.get_task(args.task) is None:
+        print(f"task does not exist: {args.task}", file=sys.stderr)
+        store.close()
+        return 2
+    diagnosis = diagnose(store, args.task, project, args.threshold or config.diagnosis.repeat_threshold)
+    if diagnosis is None:
+        store.close()
+        print(json.dumps({"task_id": args.task, "diagnosis": None}) if args.json else f"task {args.task}: no failed checks or stalled attempts to diagnose")
+        return 0
+    provider = args.provider or config.diagnosis.provider
+    if provider:  # an explicit operator request: run the separate read-only provider pass now
+        try:
+            adapters = {a.name: a for a in adapters_from_config(config)}
+        except ProviderValidationError as exc:
+            print(f"provider config error: {exc}", file=sys.stderr)
+            store.close()
+            return 2
+        if provider not in adapters:
+            print(f"provider not found: {provider}", file=sys.stderr)
+            store.close()
+            return 2
+        if diagnosis.candidate_sha:
+            diagnosis.provider_analysis = make_adapter_analyst(adapters[provider], project)(diagnosis, diagnosis.candidate_sha)
+        if diagnosis.provider_analysis is None:
+            print(f"diagnostic provider {provider} gave no usable answer; showing the recorded facts only", file=sys.stderr)
+    store.close()
+    if args.json:
+        print(json.dumps(diagnosis.to_dict(), indent=2, sort_keys=True))
+    else:
+        print(f"task {args.task}")
+        print("\n".join(diagnosis.format_lines()))
+    return 0
 
 
 def command_continue(args: argparse.Namespace) -> int:
@@ -1774,6 +1825,14 @@ def build_parser() -> argparse.ArgumentParser:
     doctor = sub.add_parser("doctor")
     doctor.add_argument("--json", action="store_true")
     doctor.set_defaults(func=command_doctor)
+    diagnose_cmd = sub.add_parser(
+        "diagnose", help="Explain why a task keeps failing: failing evidence, comparison across candidates, category, next step"
+    )
+    diagnose_cmd.add_argument("--task", required=True)
+    diagnose_cmd.add_argument("--threshold", type=int, help="Identical failures that count as a repeat (default: config, 2)")
+    diagnose_cmd.add_argument("--provider", help="Also run a separate read-only diagnostic provider pass with this provider")
+    diagnose_cmd.add_argument("--json", action="store_true")
+    diagnose_cmd.set_defaults(func=command_diagnose)
     queue_cmd = sub.add_parser(
         "queue-run", help="Run several ready tasks at once when their contracts do not conflict (strict admission, serial integration)"
     )

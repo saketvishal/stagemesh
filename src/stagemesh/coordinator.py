@@ -5,6 +5,7 @@ from pathlib import Path
 
 from .audit import record_audit
 from .contract_binding import contract_for_candidate
+from .diagnosis import DIAGNOSIS_EVENT, DIAGNOSIS_STOP_EVENT, Diagnosis, DiagnosisPolicy, diagnose
 from .domain import EvidenceKind, EvidenceStatus, ExecutionStatus, Stage, TaskStatus
 from .execution import Executor, FakeExecutor
 from .integration import Integrator
@@ -39,8 +40,10 @@ class Coordinator:
         target: TargetSelection | None = None,
         require_independent_review: bool = False,
         worker_id: str = "local-worker",
+        diagnosis_policy: DiagnosisPolicy | None = None,
     ):
         self.worker_id = worker_id
+        self.diagnosis_policy = diagnosis_policy or DiagnosisPolicy()
         self.store = store
         self.project = Path(project)
         self.executor = executor or FakeExecutor()
@@ -261,6 +264,26 @@ class Coordinator:
             },
         )
 
+    def _diagnose(self, task_id: str, sha: str) -> Diagnosis | None:
+        """Diagnose the task's failures (and, when an analyst is configured, run its separate read-only pass); never raises."""
+        policy = self.diagnosis_policy
+        try:
+            diagnosis = diagnose(self.store, task_id, self.project, policy.repeat_threshold)
+            if diagnosis is None:
+                return None
+            wanted = policy.dispatch == "every_failure" or (policy.dispatch == "on_repeat" and diagnosis.repeated)
+            if policy.analyst is not None and wanted:
+                try:
+                    diagnosis.provider_analysis = policy.analyst(diagnosis, sha)
+                except Exception as exc:  # noqa: BLE001 - the diagnostic pass is optional; it must never block the lifecycle
+                    diagnosis.provider_analysis = None
+                    record_audit(self.store, "task.diagnosis_provider_failed", {"task_id": task_id, "reason": f"{type(exc).__name__}: {exc}"[:300]})
+            record_audit(self.store, DIAGNOSIS_EVENT, diagnosis.audit_payload())
+            return diagnosis
+        except Exception as exc:  # noqa: BLE001 - diagnosis is advice; a bug in it must not change remediation behavior
+            record_audit(self.store, "task.diagnosis_error", {"task_id": task_id, "reason": f"{type(exc).__name__}: {exc}"[:300]})
+            return None
+
     def _review_satisfied(self, task_id: str, sha: str, contract_hash: str) -> bool:
         for payload in self.store.bound_evidence_payloads(task_id, sha, EvidenceKind.REVIEW, contract_hash):
             if not self.require_independent_review or independent_review_verified(payload):
@@ -311,6 +334,21 @@ class Coordinator:
                 f"{failed_stage} failed without structured findings",
             )
             findings = self.store.open_findings_for_candidate(task_id, sha)
+        diagnosis = self._diagnose(task_id, sha)
+        if diagnosis is not None and diagnosis.repeated and self.diagnosis_policy.stop_on_repeat:
+            # The same failure again: another implementation attempt would only repeat it. Stop with the diagnosis.
+            self.store.block_task(task_id)
+            record_audit(
+                self.store,
+                DIAGNOSIS_STOP_EVENT,
+                {**diagnosis.audit_payload(), "remediation_attempts": self.store.task_remediation_count(task_id, str(failed_stage))},
+            )
+            record_audit(
+                self.store,
+                "task.remediation_exhausted",
+                {"task_id": task_id, "candidate_sha": sha, "stage": failed_stage, "reason": "repeated_failure_diagnosed"},
+            )
+            return 1
         # The budget is scoped to task + failed stage so a new candidate SHA cannot reset it.
         if self.store.task_remediation_count(task_id, str(failed_stage)) >= self.remediation_policy.max_attempts:
             self.store.block_task(task_id)

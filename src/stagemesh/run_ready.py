@@ -305,11 +305,35 @@ def format_start(summary: RunSummary) -> str:
     return "\n".join(lines)
 
 
+def _attach_diagnosis(summary: RunSummary, store: Store, project: Path, task_id: str, coordinator: Coordinator) -> None:
+    """Put the actionable diagnosis next to the stop reason; for a repeat-failure stop it replaces the generic message."""
+    from .diagnosis import DIAGNOSIS_STOP_EVENT, diagnose
+
+    try:
+        threshold = coordinator.diagnosis_policy.repeat_threshold
+        diagnosis = diagnose(store, task_id, project, threshold)
+        if diagnosis is None:
+            return
+        summary.detail["diagnosis"] = diagnosis.to_dict()
+        rows = store.conn.execute(
+            "SELECT payload FROM audit_events WHERE event_type=? ORDER BY created_at DESC, rowid DESC LIMIT 20", (DIAGNOSIS_STOP_EVENT,)
+        ).fetchall()
+        early = next((p for p in (json.loads(r["payload"]) for r in rows) if p.get("task_id") == task_id), None)
+        if summary.stop_reason == "BLOCKED" and early is not None:
+            summary.detail["stopped_early"] = True
+            summary.message = f"stopped early, {early['category']} ({early['repeat_count']} identical failures): {early['recommendation']}"
+    except Exception as exc:  # noqa: BLE001 - advice must never break the run summary
+        summary.detail["diagnosis_error"] = f"{type(exc).__name__}: {exc}"
+
+
 def format_stop(summary: RunSummary) -> str:
     reason = _human_stop_reason(summary.stop_reason)
     lines = [f"Run stopped: {reason}"]
     if summary.message:
         lines.append(f"  reason: {summary.message}")
+    diagnosis = summary.detail.get("diagnosis")
+    if diagnosis:
+        lines.append(f"  diagnosis: {diagnosis['category']} at {diagnosis['stage']}: {diagnosis['summary']}")
     if summary.final:
         lines.append(f"  final: {summary.final['stage']}/{summary.final['status']}")
     return "\n".join(lines)
@@ -559,6 +583,7 @@ def drive_task(
             break
         if new["status"] == TaskStatus.BLOCKED:
             summary.stop_reason, summary.message = "BLOCKED", "task exhausted its remediation budget; use retry-task after review"
+            _attach_diagnosis(summary, store, project, selected, coordinator)
             break
         if global_health:
             problems = current_problems(store)
@@ -577,6 +602,7 @@ def drive_task(
                 )
             else:
                 summary.message = "a tick made no progress and recorded no failure (review infrastructure unavailable or an open claim)"
+            _attach_diagnosis(summary, store, project, selected, coordinator)
             break
     else:
         summary.stop_reason, summary.message = "MAX_STEPS", f"stopped after {max_steps} steps"
