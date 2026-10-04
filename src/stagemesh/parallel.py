@@ -104,6 +104,7 @@ class ParallelSummary:
     skipped: list[dict[str, str]] = field(default_factory=list)
     recovered: list[dict[str, Any]] = field(default_factory=list)
     swept: list[dict[str, str]] = field(default_factory=list)
+    recommendations: list[dict[str, Any]] = field(default_factory=list)
     providers: dict[str, Any] = field(default_factory=dict)
     interrupted: bool = False
 
@@ -125,6 +126,7 @@ class ParallelSummary:
             "skipped": self.skipped,
             "recovered": self.recovered,
             "worktrees_swept": self.swept,
+            "recommendations": self.recommendations,
             "providers": self.providers,
         }
 
