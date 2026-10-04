@@ -6,6 +6,7 @@ import threading
 from pathlib import Path
 
 from .attribution import GitAttribution
+from .config import load_config
 from .git import GitError, GitWorkspace
 from .persistence import Store
 
@@ -19,8 +20,9 @@ def _task_key(task_id: str) -> str:
 
 
 def worktree_root(project: Path) -> Path:
-    root = Path(project).resolve()
-    return root.parent / ".sm-wt" / hashlib.sha1(str(root).encode("utf-8")).hexdigest()[:10]
+    config = load_config(Path(project).resolve())
+    assert config.runtime is not None
+    return config.runtime.worktree_root
 
 
 def task_workspace(project: Path, task_id: str) -> Path:
@@ -33,8 +35,14 @@ def prepare_task_workspace(project: Path, task_id: str) -> Path:
     workspace.init_if_needed()
     _ensure_head(workspace, root)
     target = task_workspace(root, task_id)
-    if target == root or root in target.parents or target in root.parents:
-        raise GitError(f"refusing to run task {task_id} outside an isolated worktree: {target} overlaps {root}")
+    overlaps_checkout = target == root or target in root.parents or (
+        root in target.parents and not _under_runtime_dir(root, target)
+    )
+    if overlaps_checkout:
+        raise GitError(
+            f"refusing to run task {task_id} outside a validated runtime worktree root: "
+            f"{target} overlaps {root}"
+        )
     with _WORKTREE_CREATION:
         if target.exists() and (target / ".git").exists():
             return target
@@ -89,6 +97,12 @@ def sweep_task_worktrees(project: Path, store: Store) -> list[dict[str, str]]:
         actions.append({"task_id": task_id or "", "worktree": str(entry), "action": "REMOVED", "reason": reason})
     git.run("worktree", "prune", check=False)
     return actions
+
+
+def _under_runtime_dir(project: Path, target: Path) -> bool:
+    runtime = (project / ".stagemesh").resolve()
+    target = target.resolve()
+    return target == runtime or runtime in target.parents
 
 
 def _ensure_head(workspace: GitWorkspace, root: Path) -> None:

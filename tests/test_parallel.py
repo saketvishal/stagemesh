@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import _thread
 import contextlib
+import hashlib
 import io
 import json
+import os
 import subprocess
 import sys
 import threading
@@ -121,6 +123,63 @@ def test_two_independent_tasks_run_concurrently_in_separate_worktrees(tmp_path: 
         assert [e["seq"] for e in task.events] == list(range(1, len(task.events) + 1))
     assert not rig.store.conn.execute("SELECT 1 FROM claims WHERE active=1").fetchall()
     assert not (worktree_root(rig.project) / "x").exists() and not any(worktree_root(rig.project).iterdir())  # DONE removes worktrees
+
+
+def test_worktree_root_defaults_to_project_runtime_directory(tmp_path: Path) -> None:
+    project = _project(tmp_path, ["T-1"])
+    assert worktree_root(project) == project / ".stagemesh" / "worktrees"
+
+
+def test_configured_worktree_root_is_used(tmp_path: Path) -> None:
+    configured = tmp_path / "stagemesh-task-worktrees"
+    project = _project(tmp_path, ["T-1"], config={"runtime": {"worktree_root": str(configured)}})
+    assert load_config(project).runtime.worktree_root == configured
+    assert worktree_root(project) == configured
+    assert task_workspace(project, "T-1").parent == configured
+
+
+def test_unsafe_worktree_roots_are_refused_unless_explicitly_allowed(tmp_path: Path) -> None:
+    project = _project(tmp_path, ["T-1"], config={"runtime": {"worktree_root": str(Path.home())}})
+    with pytest.raises(ConfigValidationError, match="home directory"):
+        load_config(project)
+
+    (project / ".stagemesh" / "config.json").write_text(
+        json.dumps({"runtime": {"worktree_root": str(project / "src" / "worktrees")}}),
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigValidationError, match="product source"):
+        load_config(project)
+
+    (project / ".stagemesh" / "config.json").write_text(
+        json.dumps({"runtime": {"worktree_root": str(Path.home()), "allow_unsafe_worktree_root": True}}),
+        encoding="utf-8",
+    )
+    assert load_config(project).runtime.allow_unsafe_worktree_root is True
+
+
+@pytest.mark.skipif(
+    os.name != "nt",
+    reason="Windows-style absolute paths are only absolute on Windows",
+)
+def test_configured_worktree_root_accepts_windows_style_paths(tmp_path: Path) -> None:
+    configured = tmp_path / "windows-worktrees"
+    project = _project(tmp_path, ["T-1"], config={"runtime": {"worktree_root": str(configured)}})
+    assert load_config(project).runtime.worktree_root == configured
+
+
+def test_sweep_does_not_delete_legacy_global_worktrees(tmp_path: Path) -> None:
+    rig = Rig(tmp_path, ["A"])
+    old_root = (
+        rig.project.parent
+        / ".sm-wt"
+        / hashlib.sha1(str(rig.project.resolve()).encode("utf-8")).hexdigest()[:10]
+    )
+    old_worktree = old_root / "deadbeef0000"
+    old_worktree.mkdir(parents=True)
+    (old_worktree / "stray.txt").write_text("legacy\n", encoding="utf-8")
+
+    assert sweep_task_worktrees(rig.project, rig.store) == []
+    assert old_worktree.exists()
 
 
 def test_concurrency_limit_is_respected(tmp_path: Path) -> None:

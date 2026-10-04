@@ -18,7 +18,7 @@ from .persistence import MAX_CANONICAL_CONTRACT_CHARS, Store
 from .config import TaskSelectionConfig
 from .scheduling import Scheduler
 from .task_selection import Candidate, Selection, SelectionRefusal, select_next_task
-from .workspaces import task_workspace
+from .workspaces import task_workspace, worktree_root
 
 # A task whose latest execution failed is a normal remediation state, not a reason to stop supervising.
 _IGNORED_PROBLEMS = frozenset({"current_failed_executions"})
@@ -221,6 +221,8 @@ def workspace_info(project: Path, task_id: str) -> dict[str, str]:
     head = GitWorkspace(project).run("symbolic-ref", "--short", "-q", "HEAD", check=False)
     branch = head.stdout.strip()
     return {
+        "project_checkout": str(Path(project).resolve()),
+        "worktree_root": str(worktree_root(project)),
         "worktree": str(task_workspace(project, task_id)),
         "checkout": f"branch {branch}" if head.returncode == 0 and branch else "detached HEAD",
     }
@@ -291,10 +293,14 @@ def format_running(step_number: int, task_id: str, snapshot: dict[str, Any]) -> 
 def format_start(summary: RunSummary) -> str:
     workspace = summary.detail.get("workspace", {})
     lines = [f"StageMesh continue: task {summary.task_id}"]
+    if workspace.get("project_checkout"):
+        lines.append(f"  project checkout: {workspace['project_checkout']}")
+    if workspace.get("worktree_root"):
+        lines.append(f"  worktree root: {workspace['worktree_root']}")
     if workspace.get("worktree"):
-        lines.append(f"  worktree: {workspace['worktree']}")
+        lines.append(f"  task worktree: {workspace['worktree']}")
     if workspace.get("checkout"):
-        lines.append(f"  project checkout: {workspace['checkout']}")
+        lines.append(f"  integration checkout: {workspace['checkout']}")
     return "\n".join(lines)
 
 

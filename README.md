@@ -85,7 +85,8 @@ dependency-blocked and unplannable tasks are never started. A task whose depende
 the dependency is DONE.
 
 * **Isolation.** Every running task has its own worktree and its own database connection; a task that crashes or fails stops
-  only itself (the run ends `PARTIAL`). A DONE task's worktree is removed.
+  only itself (the run ends `PARTIAL`). By default, task worktrees live under the project-owned runtime directory
+  `.stagemesh/worktrees`; a DONE task's worktree is removed.
 * **Conflicts.** A candidate task is deferred while a running task conflicts with it: a shared `exclusive_resources` entry in the
   contracts (for example `"exclusive_resources": ["test-db"]`), or a `protected_files` pattern that overlaps the other task's
   allowed or protected files. Deferrals are listed under `deferred` in `--json`.
@@ -104,9 +105,15 @@ the dependency is DONE.
   releases their claims and discards uncommitted partial edits; worktrees with committed work are kept and the next run resumes
   them (exit code 130). After a hard kill the next run releases claims whose owning process is provably dead and removes
   worktrees that belong to finished or unknown tasks.
+* **Worktree root.** Configure `runtime.worktree_root` in `.stagemesh/config.json` to move task worktrees to another reviewed
+  location. StageMesh refuses broad roots such as the filesystem root, drive root, home directory or project parent, and project
+  paths outside `.stagemesh`, unless `runtime.allow_unsafe_worktree_root` is explicitly set after operator review.
+  Older worktrees from the legacy global `.sm-wt` layout are never deleted automatically; inspect and remove them manually once no
+  interrupted task needs them.
 
 ```json
-{ "parallel": { "provider_max_concurrency": 2, "integration_rebase_attempts": 2 },
+{ "runtime": { "worktree_root": ".stagemesh/worktrees" },
+  "parallel": { "provider_max_concurrency": 2, "integration_rebase_attempts": 2 },
   "providers": { "codex": { "command": "codex exec", "max_concurrency": 3 } } }
 ```
 
