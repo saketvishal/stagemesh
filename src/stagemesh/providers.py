@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from .agents import default_registry
 from .attribution import attribution_for_worker
 from .capacity import CapacityKind, CapacityRegistry
 from .config import StageMeshConfig
@@ -197,19 +198,15 @@ class RuntimeReviewAdapter:
 
 
 def approved_default_adapters() -> list[RuntimeCommandAdapter]:
-    commands: dict[str, str] = {}
-    for name, env_name, fallback in [
-        ("codex", "STAGEMESH_CODEX_CMD", "codex exec"),
-        ("claude", "STAGEMESH_CLAUDE_CMD", "claude -p"),
-        ("grok", "STAGEMESH_GROK_CMD", "grok"),
-    ]:
-        commands[name] = os.environ.get(env_name) or fallback
+    commands = {plugin.id: os.environ.get(plugin.env_command_var) or plugin.command for plugin in default_registry().plugins()}
     return adapters_from_commands(commands)
 
 
 def adapters_from_config(config: StageMeshConfig) -> list[RuntimeCommandAdapter]:
     commands = {adapter.name: shlex.join(adapter.command) for adapter in approved_default_adapters()}
     commands.update(config.provider_commands)
+    for name in config.disabled_agents:  # an operator-disabled agent is not a candidate anywhere (not even --provider)
+        commands.pop(name, None)
     adapters = adapters_from_commands(commands)
     # Object-form entries declare which stages a provider serves; plain strings and built-ins serve both.
     stage_caps = {"IMPLEMENT": "code", "REVIEW": "review"}

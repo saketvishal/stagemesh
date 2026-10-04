@@ -150,6 +150,51 @@ queue. It syncs the task sources, runs the project preflight, then starts up to 
   Ctrl+C, or on a global safety failure (for example the integration lock cannot be taken), which halts every task and releases
   its claims (`GLOBAL_SAFETY_FAILURE`). `--json` adds `preflight` and `refused` to the per-task lifecycle report of `--parallel`.
 
+## Agents (plugin-based provider routing)
+
+Every coding/review agent is an `AgentPlugin` (`src/stagemesh/agents.py`): stable id, display name, default command template, the
+stages it serves (IMPLEMENT / REVIEW), whether it reliably produces structured review JSON, default max concurrency, optional config
+schema, health check, failure classification, response parser, read-only-review and implementation support, and attribution
+metadata. Codex, Claude and Grok are registered through the same `AgentRegistry.register` call any other plugin would use; the queue
+and coordinator contain no agent-specific code. Plugins are declarative and carry no secrets (credentials stay in the agent's own CLI
+login or `STAGEMESH_<ID>_CMD`).
+
+```
+stagemesh agents list                                   # known plugins
+stagemesh agents status [--json]                        # effective config, source of each value, health, cooldown, recent use
+stagemesh agents configure --enable claude --disable codex,grok --max-concurrency claude=2
+stagemesh agents configure --implementation claude,grok --review grok,claude --policy expires_soon     --weight claude=3,grok=2 --priority claude=10 --expires-at claude=2026-12-01T00:00:00Z,grok=1893456000
+stagemesh configure agents ...                          # same command; add --show to only inspect; --json for scripts
+```
+
+`configure` validates the whole result before saving to `.stagemesh/agents.json` (runtime state: an allow-list of routing and capacity
+keys, so no token or command can be stored there; task contracts are never touched). With no flags in a terminal it prompts.
+`stagemesh capacity` prints the same agent table.
+
+**Precedence** (highest first, per value): environment (`STAGEMESH_PROVIDER_SELECTION_POLICY`, `STAGEMESH_<ID>_CMD`) > runtime config
+(`.stagemesh/agents.json`) > project config (`config.json`: `providers`, `routing.pools`, `routing.stage_routes`,
+`routing.provider_weights`, `routing.provider_selection_policy`, `provider_profile`) > the plugin's and StageMesh's defaults.
+A runtime pool replaces the project pool only for the stage it names. Existing configs without `agents.json` behave exactly as
+before.
+
+**Routing.** Disabled agents are not candidates at all (not even `--provider`); agents not assigned to a stage, cooling down,
+unhealthy (CLI missing), or the producer of the candidate (independent review) are skipped, and each skip and each selection is
+logged at stage start (`skipped codex: disabled: ...`, `selected implementation provider claude ...: expires_soon: capacity window ends
+in 29m`, `provider claude is at capacity -> using grok`). Policies: `priority`, `round_robin`, `least_recently_used`, `weighted`, and
+`expires_soon`, which prefers the eligible agent whose `--expires-at` capacity window ends soonest (an agent with no pending window
+is ordered after those, by priority). `max_concurrency` is per agent: with only Claude enabled and `claude=2`, two non-conflicting
+tasks run through Claude at once (independent review must then be disabled explicitly, `routing.require_independent_review: false`,
+since a single agent cannot review its own candidate).
+
+**Review reliability.** An agent that is not marked as producing structured review JSON is never an implicit reviewer (assign it
+with `--review` to allow it) and is always ordered after reliable reviewers. Malformed review output is a provider failure, never a
+finding about the code: the reviewer is cooled down for that task and stage and the next eligible reviewer is tried; with none left,
+the review stays in REVIEW as infrastructure failure.
+
+**While a queue runs.** `queue-run`/`continue` load the configuration once when they start. Edits made by `agents configure` afterwards
+do not affect that run or any provider process already running; the next command picks them up. Selections within a run are therefore
+deterministic.
+
 ## Diagnosis before remediation
 
 When a candidate fails validation, review or integration, StageMesh diagnoses the failure before it spends another implementation

@@ -7,6 +7,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .agents import default_registry
 from .domain import Stage
 from .github import detect_github_repository
 from .routing import RoutingMode
@@ -18,9 +19,9 @@ class ConfigValidationError(ValueError):
 
 
 # Default registry entries (their commands live in providers.approved_default_adapters). They are not the only providers allowed.
-BUILTIN_PROVIDERS = ("codex", "claude", "grok")
+BUILTIN_PROVIDERS = default_registry().builtin_ids()  # registered through the same plugin interface as any other agent
 PROVIDER_STAGES = ("IMPLEMENT", "REVIEW")
-SELECTION_POLICIES = ("priority", "round_robin", "least_recently_used", "weighted")
+SELECTION_POLICIES = ("priority", "round_robin", "least_recently_used", "weighted", "expires_soon")
 PROVIDER_PROFILES = ("balanced",)
 BALANCED_PROVIDER_POOLS = {
     "IMPLEMENT": ("codex", "grok", "claude"),
@@ -121,6 +122,14 @@ class StageMeshConfig:
     runtime: RuntimeConfig | None = None
     diagnosis: DiagnosisConfig = field(default_factory=DiagnosisConfig)
     auto_plan: AutoPlanConfig = field(default_factory=AutoPlanConfig)
+    # Filled by agent_config.apply_agent_state (runtime agent settings merged over the project config above):
+    agent_report: dict[str, dict] = field(default_factory=dict)  # effective per-agent values with the source of each
+    agent_skips: dict[str, dict[str, str]] = field(default_factory=dict)  # stage -> agent -> why it is not in the pool
+    agent_expiry: dict[str, float] = field(default_factory=dict)  # agent -> end of its capacity/reset window (epoch)
+    agent_unstructured: frozenset[str] = frozenset()  # agents never preferred as reviewers (no reliable review JSON)
+    disabled_agents: frozenset[str] = frozenset()
+    agent_policy_source: str = "built-in default"
+    agent_state_file: str | None = None
 
 
 @dataclass(frozen=True)
@@ -132,6 +141,14 @@ class TaskSourceConfig:
 
 
 def load_config(project: Path, config_path: Path | None = None) -> StageMeshConfig:
+    """The effective configuration: the project config with the runtime agent settings applied on top (see agent_config)."""
+    from .agent_config import apply_agent_state
+
+    return apply_agent_state(project.resolve(), load_base_config(project, config_path))
+
+
+def load_base_config(project: Path, config_path: Path | None = None) -> StageMeshConfig:
+    """The project config alone (config.json, environment overrides, built-in defaults), before runtime agent settings."""
     project = project.resolve()
     path = config_path or project / ".stagemesh" / "config.json"
     data: dict[str, object] = {}
