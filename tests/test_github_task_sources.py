@@ -1,7 +1,17 @@
 import json
 
 from stagemesh.config import load_config
-from stagemesh.task_sources import ConfiguredGitHubTaskSource, DiscoveredTask, GitHubIssueSource, task_sources_from_config
+from stagemesh.domain import EvidenceKind, EvidenceStatus, Stage, TaskStatus
+from stagemesh.operator_actions import task_details
+from stagemesh.persistence import Store
+from stagemesh.scheduling import Scheduler
+from stagemesh.task_sources import (
+    ConfiguredGitHubTaskSource,
+    DiscoveredTask,
+    GitHubIssueSource,
+    sync_source,
+    task_sources_from_config,
+)
 
 
 def test_configured_github_task_source_is_loaded_from_config(tmp_path):
@@ -11,7 +21,9 @@ def test_configured_github_task_source_is_loaded_from_config(tmp_path):
         json.dumps(
             {
                 "github": {"owner": "example", "repo": "repo"},
-                "task_sources": [{"name": "github-ready", "type": "github", "labels": ["stagemesh:ready"]}],
+                "task_sources": [
+                    {"name": "github-ready", "type": "github", "labels": ["stagemesh:ready"]}
+                ],
             }
         ),
         encoding="utf-8",
@@ -35,7 +47,9 @@ def test_github_task_source_filters_to_required_labels():
         ]
     )
 
-    assert [task.source_id for task in source.discover()] == ["1"]
+    tasks = source.discover()
+
+    assert [(task.source_id, task.eligible) for task in tasks] == [("1", True), ("2", False)]
 
 
 def test_github_issue_source_blocks_deferred_and_blocked_labels():
@@ -69,3 +83,101 @@ def test_unavailable_github_source_warns_instead_of_looking_empty(capsys):
 
     assert source.discover() == []
     assert "unavailable (STALE)" in capsys.readouterr().err
+
+
+def test_syncing_closed_github_issue_retires_local_task_from_auto_selection(tmp_path):
+    store = _store(tmp_path)
+    try:
+        task_id = store.upsert_task("ready", source="github", source_id="1")
+        store.advance_task(task_id, Stage.IMPLEMENT)
+        claim_id = store.acquire_claim(task_id, "worker-a")
+        assert claim_id is not None
+        store.add_candidate(task_id, "abc123", "fake", True)
+        store.add_evidence(task_id, "abc123", EvidenceKind.VALIDATION, EvidenceStatus.PASSED)
+
+        ids = sync_source(
+            store,
+            [DiscoveredTask("github", "1", "ready", eligible=False, state="CLOSED")],
+        )
+
+        task = store.get_task(task_id)
+        assert ids == []
+        assert task["stage"] == Stage.IMPLEMENT
+        assert task["status"] == TaskStatus.BLOCKED
+        assert Scheduler(store).decision(task_id).reason == "source closed"
+        assert store.latest_candidate(task_id)["sha"] == "abc123"
+        assert store.has_evidence(task_id, "abc123", EvidenceKind.VALIDATION)
+        active_claim = store.conn.execute(
+            "SELECT 1 FROM claims WHERE task_id=? AND active=1",
+            (task_id,),
+        ).fetchone()
+        assert active_claim is None
+        assert task_details(store, task_id)["source_reason"] == "source closed"
+    finally:
+        store.close()
+
+
+def test_syncing_github_issue_without_required_label_retires_local_task(tmp_path):
+    store = _store(tmp_path)
+    try:
+        task_id = store.upsert_task("ready", source="github", source_id="1")
+
+        ids = sync_source(
+            store,
+            [DiscoveredTask("github", "1", "ready", eligible=False, labels=())],
+        )
+
+        assert ids == []
+        assert store.get_task(task_id)["status"] == TaskStatus.BLOCKED
+        assert Scheduler(store).decision(task_id).reason == "source no longer eligible"
+        assert task_details(store, task_id)["source_reason"] == "source no longer eligible"
+    finally:
+        store.close()
+
+
+def test_closed_github_sync_preserves_done_task(tmp_path):
+    store = _store(tmp_path)
+    try:
+        task_id = store.upsert_task("done", source="github", source_id="1")
+        store.advance_task(task_id, Stage.DONE)
+
+        sync_source(
+            store,
+            [DiscoveredTask("github", "1", "done", eligible=False, state="CLOSED")],
+        )
+
+        task = store.get_task(task_id)
+        assert task["stage"] == Stage.DONE
+        assert task["status"] == TaskStatus.DONE
+        assert Scheduler(store).decision(task_id).reason == "done"
+    finally:
+        store.close()
+
+
+def test_task_source_label_filter_change_retires_previously_matching_issue(tmp_path):
+    store = _store(tmp_path)
+    try:
+        task_id = store.upsert_task("old ready", source="github", source_id="1")
+        source = ConfiguredGitHubTaskSource(
+            "example",
+            "repo",
+            None,
+            labels=("stagemesh:ready",),
+        )
+        source.source = _FakeIssueSource(
+            [DiscoveredTask("github", "1", "old ready", labels=("bug",))]
+        )
+
+        ids = sync_source(store, source.discover())
+
+        assert ids == []
+        assert store.get_task(task_id)["status"] == TaskStatus.BLOCKED
+        assert Scheduler(store).decision(task_id).reason == "source no longer eligible"
+    finally:
+        store.close()
+
+
+def _store(tmp_path) -> Store:
+    store = Store(tmp_path / "state.sqlite3")
+    store.migrate()
+    return store
