@@ -289,6 +289,23 @@ def test_explicit_provider_flag_pins_implementation_to_that_provider(tmp_path: P
     assert coord.executor.pool.pool(REVIEW) == ("beta", "gamma") and info["selection_policy"] == "round_robin"
 
 
+def test_cli_wiring_reports_the_policy_selected_provider(tmp_path: Path) -> None:
+    _, (coord, info) = _wired(
+        tmp_path,
+        {
+            "routing": {
+                "pools": {"IMPLEMENT": ["alpha", "beta"], "REVIEW": ["gamma", "beta"]},
+                "provider_selection_policy": "weighted",
+                "provider_weights": {"beta": 2},
+            }
+        },
+        provider=None,
+    )
+    assert coord.executor.pool.pool(IMPLEMENT) == ("alpha", "beta")
+    assert info["provider"] == "beta"
+    assert info["review_provider"] == "dynamic-pool:beta,gamma"
+
+
 def test_single_agent_mode_stays_single_provider_under_any_policy(tmp_path: Path) -> None:
     _, (coord, info) = _wired(
         tmp_path,

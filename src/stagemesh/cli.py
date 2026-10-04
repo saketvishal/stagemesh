@@ -258,10 +258,13 @@ def _build_coordinator(
             print(diagnostic, file=sys.stderr)
             raise _SetupError(2)
         executor = PooledExecutor(pool)
-        chosen_provider = next(v.provider for v in impl_verdicts if v.eligible)
+        impl_eligible = [adapter_by_name[v.provider] for v in impl_verdicts if v.eligible]
+        review_eligible = [adapter_by_name[v.provider] for v in review_verdicts if v.eligible]
+        chosen_provider = pool.order(store, IMPLEMENT, impl_eligible)[0][0].name
         if staged:
             reviewer = Reviewer(require_independent=require_independent_review, review_pool=pool)
-            chosen_review_provider = "dynamic-pool:" + ",".join(v.provider for v in review_verdicts if v.eligible)
+            ordered_reviewers = [a.name for a in pool.order(store, REVIEW, review_eligible)[0]]
+            chosen_review_provider = "dynamic-pool:" + ",".join(ordered_reviewers)
             independent_review_configured = True
         else:
             chosen_review_provider = "single-agent-deterministic-fallback"
