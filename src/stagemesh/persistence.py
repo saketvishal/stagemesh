@@ -594,6 +594,63 @@ class Store:
         self.conn.execute("UPDATE claims SET active=0 WHERE task_id=?", (task_id,))
         self.conn.commit()
 
+    def retire_source_task(
+        self,
+        source: str,
+        source_id: str,
+        reason: str,
+        payload: dict[str, Any] | None = None,
+    ) -> str | None:
+        """Make a non-DONE source-backed task non-runnable while preserving all history."""
+        source = _validate_text(source, "source")
+        source_id = _validate_text(source_id, "source id")
+        reason = _validate_text(reason, "source retirement reason", 2000)
+        payload = _validate_payload(payload)
+        task = self.conn.execute(
+            "SELECT * FROM tasks WHERE source=? AND source_id=?",
+            (source, source_id),
+        ).fetchone()
+        if task is None or task["stage"] == Stage.DONE or task["status"] == TaskStatus.DONE:
+            return None
+        now = time.time()
+        details = {
+            "task_id": task["id"],
+            "source": source,
+            "source_id": source_id,
+            "reason": reason,
+            "previous_stage": task["stage"],
+            "previous_status": task["status"],
+            **payload,
+        }
+        with self.conn:
+            self.conn.execute(
+                "UPDATE tasks SET status=?, updated_at=? WHERE id=?",
+                (TaskStatus.BLOCKED, now, task["id"]),
+            )
+            self.conn.execute("UPDATE claims SET active=0 WHERE task_id=?", (task["id"],))
+            self.conn.execute(
+                "INSERT INTO source_events VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    str(uuid.uuid4()),
+                    source,
+                    source_id,
+                    "inbound",
+                    "RETIRED",
+                    json.dumps(details, sort_keys=True),
+                    now,
+                ),
+            )
+            self.conn.execute(
+                "INSERT INTO audit_events VALUES (?, ?, ?, ?)",
+                (
+                    str(uuid.uuid4()),
+                    "task.source_retired",
+                    json.dumps(details, sort_keys=True),
+                    now,
+                ),
+            )
+        return str(task["id"])
+
     def execution_process_identity(self, execution_id: str) -> ProcessIdentity:
         execution_id = _validate_text(execution_id, "execution id")
         row = self.conn.execute("SELECT * FROM executions WHERE id=?", (execution_id,)).fetchone()
@@ -733,6 +790,21 @@ class Store:
             (source, source_id, json.dumps(state, sort_keys=True), status, retry_after, time.time()),
         )
         self.conn.commit()
+
+    def source_state(self, source: str, source_id: str) -> dict[str, Any]:
+        source = _validate_text(source, "source")
+        source_id = _validate_text(source_id, "source id")
+        row = self.conn.execute(
+            "SELECT state FROM source_cache WHERE source=? AND source_id=?",
+            (source, source_id),
+        ).fetchone()
+        if row is None:
+            return {}
+        try:
+            state = json.loads(row["state"])
+        except (TypeError, json.JSONDecodeError):
+            return {}
+        return state if isinstance(state, dict) else {}
 
     def save_objective(self, objective_id: str, title: str, payload: dict[str, Any]) -> None:
         objective_id = _validate_text(objective_id, "objective id")

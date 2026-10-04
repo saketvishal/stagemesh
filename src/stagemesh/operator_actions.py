@@ -32,15 +32,24 @@ def _process_state(store: Store, execution_id: str, pid: int | None) -> str:
 def task_details(store: Store, task_id: str, now: float | None = None) -> dict[str, Any]:
     """Decision-ready view of one task: candidate, latest evidence, active claim and running executions."""
     now = time.time() if now is None else now
+    task = store.get_task(task_id)
     candidate = store.latest_candidate(task_id)
     details: dict[str, Any] = {
         "latest_candidate": None,
         "latest_validation": None,
         "latest_review": None,
         "latest_integration": None,
+        "source_state": None,
+        "source_reason": None,
         "active_claim": None,
         "active_executions": [],
     }
+    if task is not None and task["source_id"] is not None:
+        state = store.source_state(str(task["source"]), str(task["source_id"]))
+        details["source_state"] = state or None
+        reason = state.get("retirement_reason")
+        if isinstance(reason, str) and reason:
+            details["source_reason"] = reason
     if candidate is not None:
         sha = str(candidate["sha"])
         details["latest_candidate"] = {
