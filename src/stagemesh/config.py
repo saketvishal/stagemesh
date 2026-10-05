@@ -69,6 +69,7 @@ class ProviderSpec:
     priority: int | None = None
     weight: int | None = None
     max_concurrency: int | None = None  # simultaneous provider runs allowed under parallel execution
+    review_command: str | None = None  # read-only command used for REVIEW; `command` is then the implementation command
 
 
 @dataclass(frozen=True)
@@ -262,7 +263,7 @@ def _parse_providers(data: dict[str, object]) -> tuple[dict[str, str], dict[str,
         if not name or any(char.isspace() for char in name):
             raise ConfigValidationError("provider names must be non-empty strings without whitespace")
         if isinstance(value, dict):
-            unknown = set(value) - {"command", "capabilities", "priority", "weight", "max_concurrency"}
+            unknown = set(value) - {"command", "review_command", "capabilities", "priority", "weight", "max_concurrency"}
             if unknown:
                 raise ConfigValidationError(f"provider {name} has unsupported keys: {', '.join(sorted(unknown))}")
             command = _string(value.get("command"))
@@ -271,6 +272,7 @@ def _parse_providers(data: dict[str, object]) -> tuple[dict[str, str], dict[str,
                 priority=_provider_int(name, "priority", value.get("priority"), minimum=0),
                 weight=_provider_int(name, "weight", value.get("weight"), minimum=1),
                 max_concurrency=_provider_int(name, "max_concurrency", value.get("max_concurrency"), minimum=1),
+                review_command=_string(value.get("review_command")) or None,
             )
         else:
             command = _string(value)

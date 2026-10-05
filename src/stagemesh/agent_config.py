@@ -265,6 +265,7 @@ def apply_agent_state(
                 priority=values["priority"],
                 weight=values["weight"] if (runtime.weight is not None or legacy_weight is not None) else None,
                 max_concurrency=values["max_concurrency"],
+                review_command=legacy.review_command if legacy else None,
             )
         if runtime.weight is not None:
             weights[name] = runtime.weight

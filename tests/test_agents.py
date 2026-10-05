@@ -449,3 +449,15 @@ def test_load_state_round_trips_and_rejects_unknown_agents(tmp_path: Path) -> No
     state_path(project).write_text(json.dumps({"schema_version": 1, "agents": {"ghost": {"enabled": False}}}), encoding="utf-8")
     with pytest.raises(ConfigValidationError, match="unknown agent: ghost"):
         load_config(project)
+
+
+def test_provider_review_command_is_separate_from_the_implementation_command(tmp_path: Path) -> None:
+    project = plain_project(
+        tmp_path,
+        {"providers": {"claude": {"command": "claude -p --permission-mode acceptEdits", "review_command": "claude -p --allowedTools Read"}}},
+    )
+    config = load_config(project)
+    adapters = {a.name: a for a in adapters_from_config(config)}
+    assert adapters["claude"].command == ("claude", "-p", "--permission-mode", "acceptEdits")
+    assert adapters["claude"].review_command == ("claude", "-p", "--allowedTools", "Read")
+    assert adapters["codex"].review_command is None

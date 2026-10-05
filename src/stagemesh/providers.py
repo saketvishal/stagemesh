@@ -57,6 +57,7 @@ class RuntimeCommandAdapter:
     command: tuple[str, ...]
     capabilities: frozenset[str] = frozenset({"code", "review", "validate"})
     timeout_seconds: float | None = None
+    review_command: tuple[str, ...] | None = None  # read-only command for review_candidate; defaults to `command`
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "name", _validate_name(self.name))
@@ -158,7 +159,7 @@ class RuntimeCommandAdapter:
                 return _review_infrastructure_failure("review workspace did not checkout exact candidate")
             try:
                 proc = subprocess.Popen(
-                    list(self.command),
+                    list(self.review_command or self.command),
                     cwd=review_path,
                     text=True,
                     encoding="utf-8",
@@ -215,7 +216,13 @@ def adapters_from_config(config: StageMeshConfig) -> list[RuntimeCommandAdapter]
         spec = config.provider_specs.get(adapter.name)
         if spec is not None:
             capabilities = frozenset({"validate", *(stage_caps[stage] for stage in spec.capabilities)})
-            adapter = RuntimeCommandAdapter(adapter.name, adapter.command, capabilities, adapter.timeout_seconds)
+            adapter = RuntimeCommandAdapter(
+                adapter.name,
+                adapter.command,
+                capabilities,
+                adapter.timeout_seconds,
+                tuple(shlex.split(spec.review_command)) if spec.review_command else None,
+            )
         resolved.append(adapter)
     return resolved
 
