@@ -15,9 +15,15 @@ import stagemesh.cli as cli_module
 from stagemesh.concurrency import IntegrationLock
 from stagemesh.config import load_config
 from stagemesh.contracts import parse_contract
+from stagemesh.coordinator import Coordinator
+from stagemesh.domain import ExecutionKind, ExecutionStatus
+from stagemesh.execution import ExecutionResult, communicate_bounded
 from stagemesh.git import GitWorkspace
-from stagemesh.parallel import recover_orphaned_claims
+from stagemesh.parallel import recover_orphaned_claims, worker_id_for
 from stagemesh.queue_run import QueueRunner, dirty_in_scope, dirty_paths, preflight, write_scope_overlap
+from stagemesh.review import Reviewer
+from stagemesh.serialized_integration import SerializedIntegrator
+from stagemesh.workspaces import prepare_task_workspace, task_workspace
 
 from test_parallel import Rig, ScriptedExecutor, contract_for
 from test_run_ready import _project
@@ -192,6 +198,114 @@ def test_global_safety_failure_halts_every_task(tmp_path: Path) -> None:
     assert summary.stop_reason == "GLOBAL_SAFETY_FAILURE" and "integration lock" in summary.message
     assert "out/A.txt" not in rig.tree() and "out/B.txt" not in rig.tree()
     assert not rig.store.conn.execute("SELECT 1 FROM claims WHERE active=1").fetchall()
+
+
+def test_pause_prevents_new_queue_admissions_until_resume(tmp_path: Path) -> None:
+    rig = Rig(tmp_path, ["A", "B"])
+    holder: dict[str, QueueRunner] = {}
+    errors: list[str] = []
+
+    class SlowFirst(ScriptedExecutor):
+        def run(self, store, task_id, claim_id, project):
+            if task_id == "A":
+                holder["runner"].pause_admission("maintenance")
+
+                def resume_later() -> None:
+                    time.sleep(0.4)
+                    if any(kind == "start" and task == "B" for kind, task, _ in executor.log):
+                        errors.append("B started while admission was paused")
+                    holder["runner"].resume_admission("maintenance complete")
+
+                threading.Thread(target=resume_later).start()
+            return super().run(store, task_id, claim_id, project)
+
+    executor = SlowFirst(rig.files)
+    runner = queue(rig, executor, concurrency=1)
+    holder["runner"] = runner
+    summary = runner.run()
+    assert not errors
+    assert outcomes(summary) == {"A": "DONE", "B": "DONE"}
+    assert summary.control["state"] == "resumed"
+    events = [
+        json.loads(r["payload"])
+        for r in rig.store.conn.execute(
+            "SELECT payload FROM audit_events WHERE event_type='queue.admission_control'"
+        )
+    ]
+    assert [e["state"] for e in events] == ["paused", "resumed"]
+
+
+def test_stop_during_implementation_releases_claims_and_next_run_resumes(tmp_path: Path) -> None:
+    rig = Rig(tmp_path, ["A"])
+    holder: dict[str, QueueRunner] = {}
+
+    class HangingImplementation(ScriptedExecutor):
+        def run(self, store, task_id, claim_id, project):
+            execution_id = store.start_execution(task_id=task_id, claim_id=claim_id, kind=ExecutionKind.IMPLEMENTATION)
+            run_path = prepare_task_workspace(project, task_id)
+            (run_path / "half.txt").write_text("partial\n", encoding="utf-8")
+            holder["runner"].stop_admission("operator stop", terminate_running=True)
+            deadline = time.monotonic() + 10
+            while not holder["runner"].stop.is_set() and time.monotonic() < deadline:
+                time.sleep(0.02)
+            store.finish_execution(execution_id, ExecutionStatus.FAILED)
+            return ExecutionResult(ExecutionStatus.FAILED, failure_reason="stopped")
+
+    runner = queue(rig, HangingImplementation(rig.files), concurrency=1, interrupt_grace_seconds=5)
+    holder["runner"] = runner
+    summary = runner.run()
+    assert summary.stop_reason == "STOPPED"
+    assert outcomes(summary) == {"A": "STOPPED"}
+    assert not rig.store.conn.execute("SELECT 1 FROM claims WHERE active=1").fetchall()
+    assert not list(rig.store.running_executions())
+    assert rig.store.get_task("A")["status"] == "OPEN"
+    assert task_workspace(rig.project, "A").exists() and not (task_workspace(rig.project, "A") / "half.txt").exists()
+    assert rig.store.conn.execute("SELECT 1 FROM audit_events WHERE event_type='queue.stop'").fetchone()
+    assert outcomes(queue(rig, ScriptedExecutor(rig.files), concurrency=1).run()) == {"A": "DONE"}
+
+
+def test_stop_during_review_kills_tracked_provider_and_fails_execution(tmp_path: Path) -> None:
+    rig = Rig(tmp_path, ["A"])
+    holder: dict[str, QueueRunner] = {}
+
+    class HangingReviewAdapter:
+        name = "review-stop-provider"
+
+        def review_candidate(self, prompt, project, sha):
+            proc = subprocess.Popen(
+                [PY, "-c", "import time; time.sleep(60)"],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            holder["runner"].stop_admission("operator stop", terminate_running=True)
+            communicate_bounded(proc, "prompt", 120)
+            return json.dumps({"decision": "INFRASTRUCTURE_FAILURE", "reason": "stopped"})
+
+    integrator = SerializedIntegrator(rig.ref, False, rig.lock)
+
+    def make(target, store, task_id):
+        return Coordinator(
+            store,
+            rig.project,
+            executor=ScriptedExecutor(rig.files),
+            reviewer=Reviewer(adapter=HangingReviewAdapter()),
+            integrator=integrator,
+            target=target,
+            worker_id=worker_id_for(task_id),
+        )
+
+    runner = QueueRunner(rig.store, rig.project, make, concurrency=1, poll_seconds=0.05, interrupt_grace_seconds=5)
+    holder["runner"] = runner
+    summary = runner.run()
+    assert summary.stop_reason == "STOPPED"
+    assert outcomes(summary) == {"A": "STOPPED"}
+    assert not rig.store.conn.execute("SELECT 1 FROM claims WHERE active=1").fetchall()
+    assert not list(rig.store.running_executions())
+    failed = rig.store.conn.execute("SELECT kind FROM executions WHERE task_id='A' AND status='FAILED'")
+    assert any(e["kind"] == "REVIEW" for e in failed)
+    assert outcomes(queue(rig, ScriptedExecutor(rig.files), concurrency=1).run()) == {"A": "DONE"}
 
 
 def test_scope_overlap_rules() -> None:
