@@ -54,6 +54,7 @@ from .diagnosis import DiagnosisPolicy, diagnose, format_findings, make_adapter_
 from .parallel import ParallelRunner, ParallelSummary, SetupRefused, worker_id_for
 from .queue_run import QueueRunner
 from .recovery import RecoveryRefusal, format_doctor, rebaseline_task, rebind_contract, task_doctor
+from .timing import format_task_timing, task_timing
 from .run_ready import RunSummary, format_step_update, format_stop, run_ready
 from .serialized_integration import SerializedIntegrator
 from .provider_pool import IMPLEMENT, REVIEW, PooledExecutor, ProviderLog, ProviderPool, default_pools, describe_verdicts
@@ -434,6 +435,18 @@ def command_task_doctor(args: argparse.Namespace) -> int:
         if not args.json:
             print(format_doctor(report))
         return report
+
+    return _repair_command(args, run)
+
+
+def command_task_timing(args: argparse.Namespace) -> int:
+    def run(store, project):  # type: ignore[no-untyped-def]
+        if store.get_task(args.task) is None:
+            raise RecoveryRefusal("unknown_task", f"no task {args.task}")
+        timing = task_timing(store, args.task)
+        if not args.json:
+            print(format_task_timing(timing, verbose=args.verbose))
+        return timing
 
     return _repair_command(args, run)
 
@@ -1923,6 +1936,11 @@ def build_parser() -> argparse.ArgumentParser:
     doctor_task.add_argument("--to", metavar="INTEGRATION_REF", help="Integration ref to compare the baseline with (default: configured ref or current branch)")
     doctor_task.add_argument("--json", action="store_true")
     doctor_task.set_defaults(func=command_task_doctor)
+    timing_cmd = sub.add_parser("task-timing", help="Read-only per-execution timing (actor, started, finished, duration, result) and a task timing summary")
+    timing_cmd.add_argument("--task", required=True)
+    timing_cmd.add_argument("--verbose", action="store_true", help="Show task, candidate SHA, started and finished times")
+    timing_cmd.add_argument("--json", action="store_true")
+    timing_cmd.set_defaults(func=command_task_timing)
     queue_cmd = sub.add_parser(
         "queue-run", help="Run several ready tasks at once when their contracts do not conflict (strict admission, serial integration)"
     )

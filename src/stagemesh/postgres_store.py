@@ -76,7 +76,9 @@ CREATE TABLE IF NOT EXISTS executions (
     executable TEXT,
     candidate_sha TEXT,
     started_at DOUBLE PRECISION NOT NULL,
-    updated_at DOUBLE PRECISION NOT NULL
+    updated_at DOUBLE PRECISION NOT NULL,
+    actor TEXT,
+    result TEXT
 );
 CREATE TABLE IF NOT EXISTS candidates (
     id TEXT PRIMARY KEY,
