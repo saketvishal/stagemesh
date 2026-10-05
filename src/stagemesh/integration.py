@@ -34,6 +34,7 @@ class Integrator:
             claim_id=None,
             kind=ExecutionKind.INTEGRATION,
             candidate_sha=candidate_sha,
+            actor="stagemesh-integrator",
         )
         findings: list[dict[str, object]] = []
         payload: dict[str, object] = {

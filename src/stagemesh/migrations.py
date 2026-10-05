@@ -43,6 +43,14 @@ MIGRATIONS = [
         ALTER TABLE evidence_new RENAME TO evidence;
         """,
     ),
+    Migration(
+        4,
+        "execution actor and result",
+        """
+        ALTER TABLE executions ADD COLUMN actor TEXT;
+        ALTER TABLE executions ADD COLUMN result TEXT;
+        """,
+    ),
 ]
 
 
