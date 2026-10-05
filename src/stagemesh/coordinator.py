@@ -248,7 +248,7 @@ class Coordinator:
         execution = self.store.latest_execution_for_claim(claim_id)
         if execution is not None and execution["status"] == ExecutionStatus.RUNNING:
             # The executor call has returned or raised, so its provider is no longer ours to wait on.
-            self.store.finish_execution(execution["id"], ExecutionStatus.FAILED)
+            self.store.finish_execution(execution["id"], ExecutionStatus.FAILED, result="executor_aborted")
         self.store.release_claim(claim_id)
         record_audit(
             self.store,

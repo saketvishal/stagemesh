@@ -18,6 +18,7 @@ class Validator:
             claim_id=None,
             kind=ExecutionKind.VALIDATION,
             candidate_sha=candidate_sha,
+            actor="stagemesh-validator",
         )
         try:
             bound = contract_for_candidate(store, task_id, candidate_sha, project)

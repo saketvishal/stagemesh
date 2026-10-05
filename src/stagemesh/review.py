@@ -71,10 +71,11 @@ class Reviewer:
             claim_id=None,
             kind=ExecutionKind.REVIEW,
             candidate_sha=candidate_sha,
+            actor=self.provider_name,
         )
         if self.fail_capacity:
             store.add_evidence(task_id, candidate_sha, EvidenceKind.REVIEW, EvidenceStatus.CAPACITY, {"provider": "fake"})
-            store.finish_execution(execution_id, ExecutionStatus.FAILED, candidate_sha)
+            store.finish_execution(execution_id, ExecutionStatus.FAILED, candidate_sha, result="capacity")
             return EvidenceStatus.CAPACITY
         produced = store.conn.execute(
             "SELECT produced_by FROM candidates WHERE task_id=? AND sha=?", (task_id, candidate_sha)
@@ -220,7 +221,7 @@ class Reviewer:
                     **({"providers": providers_text} if providers_text else {}),
                 },
             )
-            store.finish_execution(execution_id, ExecutionStatus.FAILED, candidate_sha)
+            store.finish_execution(execution_id, ExecutionStatus.FAILED, candidate_sha, actor=reviewer_provider, result="capacity")
             return EvidenceStatus.CAPACITY
         if findings:
             for finding in findings:
@@ -233,8 +234,8 @@ class Reviewer:
                 EvidenceStatus.FAILED,
                 {**review_payload, "finding_count": len(findings)},
             )
-            store.finish_execution(execution_id, ExecutionStatus.FAILED, candidate_sha)
+            store.finish_execution(execution_id, ExecutionStatus.FAILED, candidate_sha, actor=reviewer_provider, result="findings")
             return EvidenceStatus.FAILED
         store.add_evidence(task_id, candidate_sha, EvidenceKind.REVIEW, EvidenceStatus.PASSED, review_payload)
-        store.finish_execution(execution_id, ExecutionStatus.SUCCEEDED, candidate_sha)
+        store.finish_execution(execution_id, ExecutionStatus.SUCCEEDED, candidate_sha, actor=reviewer_provider)
         return EvidenceStatus.PASSED
