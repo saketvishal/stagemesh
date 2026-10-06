@@ -390,9 +390,23 @@ class Supervisor:
         self.store.advance_task(task_id, Stage.IMPLEMENT)
 
     def _rebind_ownership(self, task_id: str, replacement: str) -> None:
+        """After a refresh, move the task's idle worktree onto the replacement so the guard sees StageMesh's own change, not a mutation.
+
+        Only a worktree with no running execution and no uncommitted tracked changes is moved; anything else is left exactly as it is
+        (and the recorded expectation is not changed), because moving it could destroy work.
+        """
         ownership = load_ownership(self.store, task_id)
-        if ownership is not None:
-            save_ownership(self.store, replace(ownership, expected_head=replacement))
+        if ownership is None:
+            return
+        worktree = Path(ownership.worktree)
+        if self._execution_running(task_id) or not (worktree / ".git").exists():
+            return
+        work = GitFacts(worktree)
+        if work.git.run("status", "--porcelain", "--untracked-files=no", check=False).stdout.strip():
+            return
+        if work.git.run("checkout", "--detach", "--quiet", replacement, check=False).returncode != 0:
+            return
+        save_ownership(self.store, replace(ownership, expected_head=replacement, tracked_fingerprint=tracked_fingerprint(worktree)))
 
     # --- capability 5: PR dependencies ---------------------------------------------------------------------------------------------
 

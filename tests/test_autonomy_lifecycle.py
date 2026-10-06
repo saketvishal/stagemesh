@@ -345,3 +345,43 @@ def test_a_crashed_providers_own_leftovers_are_not_an_external_mutation(tmp_path
 
     assert [d for d in decisions(store, TASK) if d["condition"] == "EXTERNAL_WORKSPACE_MUTATION"] == []
     assert store.latest_candidate(TASK) is not None
+
+
+def test_refreshing_a_candidate_moves_the_owned_worktree_so_the_guard_sees_no_mutation(tmp_path: Path) -> None:
+    """Independent-review finding: with a claimed worktree, a refresh must not look like an external HEAD rewrite on the next check."""
+    from stagemesh.workspaces import prepare_task_workspace
+
+    project, store, base = _project(tmp_path)
+    original = _task_at_integrate(store, project, base)
+    worktree = prepare_task_workspace(project, TASK)
+    git(worktree, "checkout", "-q", "--detach", original)  # the task worktree sits on the candidate, as after a real implementation
+    supervisor = Supervisor(store, project, integration_ref=REF)
+    supervisor.claim_workspace(TASK, worktree)
+    main_tip = commit(project, {"docs/notes.md": "unrelated normal commit\n"}, "main advances normally")
+
+    decision = supervisor.reconcile_base(TASK)
+
+    replacement = decision.shas["replacement_candidate"]
+    assert git(worktree, "rev-parse", "HEAD") == replacement  # the worktree followed the refresh
+    assert git(project, "rev-parse", f"{replacement}^") == main_tip
+    assert supervisor.check_workspace(TASK) is None  # no false EXTERNAL_WORKSPACE_MUTATION
+    assert supervisor.allow(Stage.VALIDATE, TASK, replacement) is True
+    assert [d["condition"] for d in decisions(store, TASK)] == ["BASE_ADVANCED"]
+
+
+def test_refresh_leaves_a_dirty_worktree_alone_and_keeps_the_recorded_expectation(tmp_path: Path) -> None:
+    from stagemesh.workspaces import prepare_task_workspace
+
+    project, store, base = _project(tmp_path)
+    original = _task_at_integrate(store, project, base)
+    worktree = prepare_task_workspace(project, TASK)
+    git(worktree, "checkout", "-q", "--detach", original)
+    supervisor = Supervisor(store, project, integration_ref=REF)
+    supervisor.claim_workspace(TASK, worktree)
+    (worktree / "src" / "app.py").write_text("VALUE = 'uncommitted'\n", encoding="utf-8")
+    commit(project, {"docs/notes.md": "x\n"}, "main advances")
+
+    supervisor.reconcile_base(TASK)
+
+    assert git(worktree, "rev-parse", "HEAD") == original  # not touched: it has uncommitted work
+    assert (worktree / "src" / "app.py").read_text(encoding="utf-8") == "VALUE = 'uncommitted'\n"
