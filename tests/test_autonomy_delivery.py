@@ -311,3 +311,45 @@ def test_merge_refuses_a_pr_whose_base_is_not_the_integration_branch(tmp_path: P
     assert decision.action is not Action.MERGE
     assert all(call[0] != "merge" for call in prs.calls)  # never sent to a branch other than the one policy was evaluated against
     assert "base" in decision.trace_line().lower() or "base" in str(decision.detail).lower() or decision.observed
+
+
+def test_base_that_advances_while_waiting_for_ci_prevents_a_stale_merge_ready(tmp_path: Path) -> None:
+    """Independent-review finding: the base is re-synchronised right before judging, not only at the start of delivery."""
+    repo, remote, store, prs, base, candidate = _rig(tmp_path)
+    work = tmp_path / "other"
+    git(tmp_path, "clone", "-q", str(remote), str(work))
+    pending = HostedCIRun(candidate, {"unit": GateOutcome("unit", Conclusion.PENDING)}, complete=False)
+    ci = ScriptedCI({candidate: [pending, _ok(candidate)], base: [_ok(base)]})
+    clock = Clock()
+
+    def sleep_and_advance(seconds: float) -> None:
+        clock.sleep(seconds)
+        if len(clock.sleeps) == 1:  # while the supervisor waits for CI, someone else lands work on main
+            commit(work, {"docs/n.md": "n\n"}, "main advances during the wait")
+            git(work, "push", "-q", "origin", "main")
+
+    report = deliver(_supervisor(store, repo, prs, ci), TASK, remote="origin", base="main", pulls=prs, ci=ci, title=TITLE, clock=clock, sleep=sleep_and_advance, merge=True)
+
+    assert report.status == "NEEDS_REVALIDATION" and not report.merge_performed
+    assert all(call[0] != "merge" for call in prs.calls)  # never merged on the stale view
+    assert store.get_task(TASK)["stage"] == Stage.VALIDATE and report.candidate_sha != candidate
+
+
+def test_merge_when_ready_fetches_the_base_before_it_judges(tmp_path: Path) -> None:
+    from stagemesh.autonomy.ci_diagnosis import diagnose_ci
+    from stagemesh.autonomy.decisions import Action
+    from stagemesh.autonomy.dependencies import CIRollup, PRState, PullRequest
+
+    repo, remote, store, prs, base, candidate = _rig(tmp_path)
+    prs.update(PullRequest(5, candidate, "feat/widget", "main", PRState.OPEN, CIRollup.SUCCESS, True))
+    work = tmp_path / "other"
+    git(tmp_path, "clone", "-q", str(remote), str(work))
+    commit(work, {"docs/n.md": "n\n"}, "main advanced; this clone's origin/main is stale")
+    git(work, "push", "-q", "origin", "main")
+    ci = ScriptedCI({})
+    supervisor = _supervisor(store, repo, prs, ci)
+
+    decision = supervisor.merge_when_ready(TASK, 5, ci=diagnose_ci(_ok(candidate), _ok(base)), remote="origin")
+
+    assert decision.action is not Action.MERGE and all(call[0] != "merge" for call in prs.calls)
+    assert decision.action in {Action.REFRESH_CANDIDATE, Action.CREATE_RETARGETED_CANDIDATE}  # the stale candidate is refreshed, not merged

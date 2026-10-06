@@ -622,6 +622,28 @@ class Supervisor:
 
     def _merge_when_ready(self, task_id: str, pr_number: int, ci: CIDiagnosis | None, method: str, remote: str | None) -> AutonomyDecision:
         assert self.pull_requests is not None
+        if remote:  # judge against the base as it is now, not as it was when this clone last looked
+            fetched = self.facts.git.run("fetch", "--quiet", remote, self._integration_branch(), check=False)
+            if fetched.returncode != 0:
+                return self.record(
+                    AutonomyDecision(
+                        Condition.MERGE_POLICY_UNSATISFIED,
+                        POLICY,
+                        Action.WAIT,
+                        task_id,
+                        {"pr": str(pr_number), "reason": "base_unobservable"},
+                        {},
+                        {"fetch_error": fetched.stderr.strip()[:200]},
+                    )
+                )
+            refreshed = self.reconcile_base(task_id)
+            if refreshed is not None and refreshed.action in {
+                Action.REFRESH_CANDIDATE,
+                Action.CREATE_RETARGETED_CANDIDATE,
+                Action.RECONSTRUCT_ON_NEW_BASE,
+                Action.ESCALATE_TO_FOUNDER,
+            }:
+                return refreshed  # the candidate changed (or needs a human): nothing is merged on the old evidence
         prov = self.provenance(task_id)
         pr = self.pull_requests.get(pr_number)
         if pr is None or prov.candidate_sha is None:

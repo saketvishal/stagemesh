@@ -166,6 +166,20 @@ def deliver(
         return report
 
 
+def _sync_base(supervisor: Supervisor, report: DeliveryReport, remote: str, base: str) -> tuple[str | None, tuple[str, str] | None]:
+    """Fetch the base and reconcile the candidate against it. Returns the base SHA and, when delivery must stop, (status, recommendation)."""
+    supervisor.facts.git.run("fetch", "--quiet", remote, base)
+    base_sha = supervisor.facts.resolve(supervisor.integration_ref)
+    report.base_sha = base_sha
+    refresh = supervisor.reconcile_base(report.task_id)
+    if refresh is not None and refresh.action in {Action.REFRESH_CANDIDATE, Action.CREATE_RETARGETED_CANDIDATE, Action.RECONSTRUCT_ON_NEW_BASE}:
+        report.candidate_sha = str(supervisor.store.latest_candidate(report.task_id)["sha"])
+        return base_sha, ("NEEDS_REVALIDATION", f"{base} advanced; the candidate was refreshed to a new SHA that must be validated and reviewed again")
+    if refresh is not None and refresh.requires_human:
+        return base_sha, ("NOT_PUBLISHED", f"escalated: {refresh.escalation.reason.value}")  # type: ignore[union-attr]
+    return base_sha, None
+
+
 def _deliver_pass(
     supervisor: Supervisor,
     task_id: str,
@@ -206,15 +220,9 @@ def _deliver_pass(
         return finish("NOT_PUBLISHED", "evidence does not authorize delivering this candidate; nothing was published")
     sha = prov.candidate_sha
 
-    facts.git.run("fetch", "--quiet", remote, base)
-    base_sha = facts.resolve(supervisor.integration_ref)
-    report.base_sha = base_sha
-    refresh = supervisor.reconcile_base(task_id)
-    if refresh is not None and refresh.action in {Action.REFRESH_CANDIDATE, Action.CREATE_RETARGETED_CANDIDATE, Action.RECONSTRUCT_ON_NEW_BASE}:
-        report.candidate_sha = str(supervisor.store.latest_candidate(task_id)["sha"])
-        return finish("NEEDS_REVALIDATION", f"{base} advanced; the candidate was refreshed to a new SHA that must be validated and reviewed again")
-    if refresh is not None and refresh.requires_human:
-        return finish("NOT_PUBLISHED", f"escalated: {refresh.escalation.reason.value}")  # type: ignore[union-attr]
+    base_sha, early = _sync_base(supervisor, report, remote, base)
+    if early is not None:
+        return finish(*early)
 
     branch = branch_name(task_id, sha)
     report.branch = branch
@@ -252,6 +260,10 @@ def _deliver_pass(
     if run is None or not run.complete:
         return finish("PUBLISHED_WAITING", f"hosted CI for {sha[:7]} did not finish within {int(wait_seconds)}s; delivery will be re-evaluated")
 
+    # The base may have moved while CI ran: look again right before judging, so a stale view can never become MERGE_READY.
+    base_sha, early = _sync_base(supervisor, report, remote, base)
+    if early is not None:
+        return finish(*early)
     assert base_sha is not None
     decision = supervisor.assess_ci(task_id, sha, base_sha, scope=supervisor._scope(task_id, sha))
     diagnosis = supervisor.last_ci_diagnosis
