@@ -217,6 +217,7 @@ def test_pause_prevents_new_queue_admissions_until_resume(tmp_path: Path) -> Non
                     holder["runner"].resume_admission("maintenance complete")
 
                 threading.Thread(target=resume_later).start()
+                time.sleep(0.6)
             return super().run(store, task_id, claim_id, project)
 
     executor = SlowFirst(rig.files)
@@ -233,6 +234,16 @@ def test_pause_prevents_new_queue_admissions_until_resume(tmp_path: Path) -> Non
         )
     ]
     assert [e["state"] for e in events] == ["paused", "resumed"]
+
+
+def test_pause_without_running_tasks_exits_cleanly(tmp_path: Path) -> None:
+    rig = Rig(tmp_path, ["A"])
+    runner = queue(rig, ScriptedExecutor(rig.files), concurrency=1)
+    runner.pause_admission("maintenance")
+    summary = runner.run()
+    assert summary.stop_reason == "PAUSED"
+    assert outcomes(summary) == {}
+    assert rig.store.get_task("A")["status"] == "OPEN"
 
 
 def test_stop_during_implementation_releases_claims_and_next_run_resumes(tmp_path: Path) -> None:
@@ -262,6 +273,25 @@ def test_stop_during_implementation_releases_claims_and_next_run_resumes(tmp_pat
     assert task_workspace(rig.project, "A").exists() and not (task_workspace(rig.project, "A") / "half.txt").exists()
     assert rig.store.conn.execute("SELECT 1 FROM audit_events WHERE event_type='queue.stop'").fetchone()
     assert outcomes(queue(rig, ScriptedExecutor(rig.files), concurrency=1).run()) == {"A": "DONE"}
+
+
+def test_stop_request_preserves_unknown_process_identity_until_recovery_override(tmp_path: Path) -> None:
+    rig = Rig(tmp_path, ["A"])
+    claim = rig.store.acquire_claim("A", worker_id_for("A"))
+    assert claim
+    execution_id = rig.store.start_execution(
+        task_id="A",
+        claim_id=claim,
+        kind=ExecutionKind.IMPLEMENTATION,
+        pid=os.getpid(),
+    )
+    runner = queue(rig, ScriptedExecutor(rig.files), concurrency=1)
+    runner.stop_admission("operator stop", terminate_running=True)
+    summary = runner.run()
+    assert summary.stop_reason == "STOPPED"
+    row = rig.store.conn.execute("SELECT status FROM executions WHERE id=?", (execution_id,)).fetchone()
+    assert row["status"] == "RUNNING"
+    assert rig.store.conn.execute("SELECT active FROM claims WHERE id=?", (claim,)).fetchone()["active"] == 1
 
 
 def test_stop_during_review_kills_tracked_provider_and_fails_execution(tmp_path: Path) -> None:
@@ -340,6 +370,13 @@ def run_cli(project: Path, *argv: str) -> tuple[int, str, str]:
     return code, out.getvalue(), err.getvalue()
 
 
+def run_stagemesh_cli(project: Path, *argv: str) -> tuple[int, str, str]:
+    out, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        code = cli_module.main(["--project", str(project), *argv])
+    return code, out.getvalue(), err.getvalue()
+
+
 def test_cli_json_reports_per_task_progress_and_final_states(tmp_path: Path) -> None:
     project = _smoke_project(tmp_path)
     code, out, _ = run_cli(project, "--concurrency", "2", "--dry-run", "--json")
@@ -352,6 +389,36 @@ def test_cli_json_reports_per_task_progress_and_final_states(tmp_path: Path) -> 
         assert events[0] == "selected" and events[-1] == "finished" and "started" in events
         assert [e["stage"] for e in task["lifecycle"] if e["event"] == "stage"][:2] == ["PLAN", "IMPLEMENT"]
         assert task["final"]["stage"] == "DONE" and all(step["task_id"] == task["task_id"] for step in task["steps"])
+
+
+def test_cli_queue_control_commands_and_status_surfaces(tmp_path: Path) -> None:
+    project = _smoke_project(tmp_path)
+    code, out, _ = run_stagemesh_cli(project, "queue-control", "pause", "--reason", "maintenance", "--json")
+    control = json.loads(out)
+    assert code == 0 and control["state"] == "paused"
+
+    code, out, _ = run_stagemesh_cli(project, "status", "--json")
+    status = json.loads(out)
+    assert code == 0 and status["queue_control"]["state"] == "paused"
+
+    from stagemesh.persistence import Store
+
+    wrapped = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+    execution_id = wrapped.start_execution(task_id="T-1", claim_id=None, kind=ExecutionKind.REVIEW, pid=os.getpid())
+    wrapped.close()
+
+    code, out, _ = run_stagemesh_cli(project, "health", "--json")
+    health = json.loads(out)
+    assert code == 0 and health["queue_control"]["state"] == "paused"
+    assert [e["id"] for e in health["queue_control"]["active_executions"]] == [execution_id]
+
+    code, out, _ = run_stagemesh_cli(project, "task-doctor", "--task", "T-1", "--json")
+    doctor = json.loads(out)
+    assert code == 0 and doctor["queue_control"]["state"] == "paused"
+    assert [e["id"] for e in doctor["queue_control"]["active_executions"]] == [execution_id]
+
+    code, out, _ = run_stagemesh_cli(project, "queue-control", "resume", "--json")
+    assert code == 0 and json.loads(out)["state"] == "running"
 
 
 def test_cli_reports_refusals_in_json(tmp_path: Path) -> None:
