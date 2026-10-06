@@ -187,22 +187,31 @@ before the implementation provider is called again: none of them can be fixed by
 
 ### Workspace ownership and external-mutation detection
 
-Each task's worktree is written by one StageMesh execution at a time. An execution takes an exclusive lease on the worktree (an owner
-file in its private git dir, so a second execution is refused) and, when it finishes, *seals* the result: the HEAD, a fingerprint of any
-uncommitted files, and the candidate SHA it produced. Nothing is added to the database. The agent's own edits, and linear commits it makes
-while it holds the lease, are the authorized result and become the sealed candidate.
+Each task's worktree is written by one StageMesh execution at a time. An execution claims the worktree with an owner file in its private
+git dir, created atomically (`O_EXCL`); a live owner makes every other claim fail closed. A claim of a dead owner's lease is serialized by
+a per-workspace OS file lock, so when several executions find the same dead owner exactly one takes it over and the rest are refused. When
+an execution finishes it *seals* the result: the HEAD, a content fingerprint of the uncommitted files, and the candidate SHA it produced.
+Nothing is added to the database. The agent's own edits, and linear commits it makes while it holds the lease, are the authorized result.
 
 The worktree and the candidate rows are compared with the seal before the agent starts and after it exits, before and after validation,
 before and after independent review, before integration, and before a rebase rewrites the worktree. Review always runs in a throwaway
-checkout of the exact candidate SHA, never in the implementation worktree. Any difference nobody authorized (a new commit, an edited or
-added file, a moved HEAD, a lost lease, a candidate that is not the sealed one, validation evidence missing for this exact SHA) records an
-`EXTERNAL_WORKSPACE_MUTATION` audit event (task, execution or claim, workspace, stage, expected and observed SHA, changed paths, remedy),
-blocks the task and stops: no validation, review, merge or evidence acceptance happens against the unexpected state, and nothing in the
-workspace is reset, adopted or committed.
+checkout of the exact candidate SHA, never in the implementation worktree, and a validation gate that moves HEAD in its checkout cannot
+pass. These differences are treated as external mutation: a new commit or moved HEAD, a modified, added or deleted file whose content
+differs from the seal, a lost or foreign lease, a candidate that is not the sealed one, or missing PASSED validation evidence for the exact
+candidate SHA. Each records an `EXTERNAL_WORKSPACE_MUTATION` audit event (task, execution or claim, workspace, stage, reason, expected and
+observed SHA, changed paths, remedy) and blocks the task. The mutated workspace is not reset, committed or adopted, and the task does not
+advance on it. Evidence rows already written around the detection are not deleted.
 
-To recover, inspect the workspace and either reset it to the event's `expected_sha` or remove it (`git worktree remove --force <workspace>`),
-then `stagemesh retry-task --task <id>`. Worktrees created before this feature are adopted the first time they are used, but only when HEAD
-is the task's recorded candidate (or baseline). Recovery is always explicit and operator-driven; StageMesh never reconciles on its own.
+**Dead owners.** A lease whose owning process is dead is taken over only if the workspace is exactly what that owner last sealed; then
+`workspace.lease_recovered` is audited. If anything differs (a commit, a tracked edit, any added file) the claim is refused as an external
+mutation instead, so a killed agent's half-written output also needs an operator. An execution interrupted by an exception or Ctrl+C while
+it still holds its lease seals what it left, under the same rules as a normal exit.
+
+**Older worktrees.** A worktree with no ownership record (created before this feature) is adopted only when HEAD is the task's recorded
+candidate (or baseline) and its tracked files are clean. Untracked files in such a worktree are not checked.
+
+**Recovery is explicit.** Inspect the workspace and either reset it to the event's `expected_sha` or remove it
+(`git worktree remove --force <workspace>`), then `stagemesh retry-task --task <id>`. StageMesh never reconciles on its own.
 
 **What this guarantees, and what it does not.** StageMesh provides exclusive StageMesh ownership of a task worktree, verification of the
 exact starting state, a bounded window in which changes are authorized, a linear sealed candidate, and fail-closed detection at lifecycle
@@ -210,6 +219,12 @@ boundaries. It does *not* prove which process changed or committed files during 
 lease holder's agent from an unrelated process running as the same user, and StageMesh does not try to infer it from commit identity,
 timestamps or process guesses. Cryptographic, process or container isolation of same-user filesystem writers is separate future hardening
 work; until then, same-user mutation during that window is not solved, only bounded.
+
+**Known gaps (follow-up hardening).** The fingerprint does not cover the index state alone (staging an already-dirty file), skip-worktree
+or assume-unchanged edits, ignored files, or a branch switch at the same SHA. The owner file is written just after it is created, so a
+concurrent claimant in that instant can see it unreadable and fail closed. Validation evidence recorded before a detection is reused after
+`retry-task`. `parallel` partial-edit cleanup, `adopt-candidate --validate` and `recovery` revalidation do not go through the guard. A gate
+that dirties its checkout without moving HEAD is not detected.
 
 ### Repairing a stuck task without touching SQLite
 

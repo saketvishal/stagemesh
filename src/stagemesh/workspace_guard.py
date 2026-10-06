@@ -19,6 +19,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sys
 import tempfile
 import time
 import uuid
@@ -29,7 +30,7 @@ from typing import Any
 
 from .audit import record_audit
 from .domain import EvidenceKind, EvidenceStatus, ExecutionStatus, ProcessIdentity
-from .git import GitWorkspace
+from .git import GitError, GitWorkspace
 from .persistence import Store
 from .process_identity import classify_process, process_identity
 from .workspaces import prepare_task_workspace, task_workspace
@@ -39,6 +40,8 @@ OWNERSHIP_INITIALIZED = "workspace.ownership_initialized"
 LEASE_RECOVERED = "workspace.lease_recovered"
 OWNER_FILE = "stagemesh-owner.json"
 LEDGER_FILE = "stagemesh-workspace.json"
+OWNER_MUTEX_FILE = "stagemesh-owner.lock"
+OWNER_MUTEX_TIMEOUT = 10.0  # seconds a claim waits for another claim of the same workspace to finish
 LEDGER_VERSION = 1
 MAX_FINGERPRINT_PATHS = 500  # beyond this only the digest is kept, so the changed paths cannot be listed
 MAX_REPORTED_PATHS = 20
@@ -87,13 +90,16 @@ def observe(path: Path) -> dict[str, Any]:
     git = GitWorkspace(path)
     head = git.run("rev-parse", "HEAD").stdout.strip()
     status = git.run("--no-optional-locks", "status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames").stdout
-    dirty = {entry[3:]: _content_hash(path / entry[3:]) for entry in status.split("\0") if len(entry) > 3}
+    entries = [entry for entry in status.split("\0") if len(entry) > 3]
+    dirty = {entry[3:]: _content_hash(path / entry[3:]) for entry in entries}
+    tracked_dirty = sorted(entry[3:] for entry in entries if not entry.startswith("??"))  # modified, staged or deleted tracked paths
     digest = hashlib.sha256(json.dumps(sorted(dirty.items())).encode("utf-8")).hexdigest()
     return {
         "head": head,
         "dirty": dirty if len(dirty) <= MAX_FINGERPRINT_PATHS else {},
         "dirty_count": len(dirty),
         "dirty_digest": digest,
+        "tracked_dirty": tracked_dirty[:MAX_REPORTED_PATHS],
     }
 
 
@@ -171,6 +177,15 @@ def _self_owner(token: str, task_id: str, kind: str, claim_id: str | None) -> di
     }
 
 
+def _paths_between(workspace: Path, expected_sha: str, observed_sha: str) -> list[str]:
+    """Files that differ between the sealed commit and the commit now at HEAD, for the audit record (best effort)."""
+    try:
+        result = GitWorkspace(workspace).run("diff", "--name-only", expected_sha, observed_sha, check=False)
+    except (GitError, OSError):
+        return []
+    return sorted(line for line in result.stdout.splitlines() if line)[:MAX_REPORTED_PATHS]
+
+
 # --- reporting -----------------------------------------------------------------------------------------------------------
 
 
@@ -190,6 +205,8 @@ def _mutation(
     detail: str | None = None,
 ) -> WorkspaceMutation:
     """Record the deterministic audit event (fixed keys, no timestamps in the payload) and return the exception to raise."""
+    if not changed_paths and reason == "head_changed" and workspace is not None and expected_sha and observed_sha:
+        changed_paths = _paths_between(workspace, expected_sha, observed_sha)
     payload: dict[str, Any] = {
         "task_id": task_id,
         "execution_id": execution_id,
@@ -331,14 +348,6 @@ class WorkspaceLease:
             except OSError:
                 pass
 
-    def _mark_interrupted(self) -> None:
-        """The execution died without sealing: keep the old ledger but tell the next owner partial edits are the dead run's, not external."""
-        try:
-            if (self._gitdir / LEDGER_FILE).read_bytes() == self._ledger_bytes:
-                _atomic_write(self._gitdir / LEDGER_FILE, {**self._ledger, "interrupted_by": self.execution_id or self.claim_id or self.kind})
-        except OSError:
-            pass
-
 
 def _load_ledger(gitdir: Path) -> tuple[dict[str, Any] | None, bytes]:
     data = _read_json(gitdir / LEDGER_FILE)
@@ -350,8 +359,73 @@ def _load_ledger(gitdir: Path) -> tuple[dict[str, Any] | None, bytes]:
     return data, (gitdir / LEDGER_FILE).read_bytes()
 
 
+def _try_lock(handle: Any) -> bool:
+    try:
+        if sys.platform == "win32":
+            import msvcrt
+
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    except OSError:
+        return False
+
+
+def _unlock(handle: Any) -> None:
+    try:
+        if sys.platform == "win32":
+            import msvcrt
+
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    except OSError:
+        pass
+
+
+@contextmanager
+def _owner_mutex(gitdir: Path, timeout: float = OWNER_MUTEX_TIMEOUT) -> Iterator[bool]:
+    """Serializes every claim (and so every dead-owner takeover) of one workspace, across threads and processes.
+
+    An OS file lock, so the kernel releases it if the holder dies: there is no stale mutex to recover from, and no decision depends on
+    timing. Yields False when the lock could not be had within `timeout`; the caller then refuses rather than guess.
+    """
+    handle = open(gitdir / OWNER_MUTEX_FILE, "a+b")  # noqa: SIM115 - closed in the finally below
+    try:
+        deadline = time.monotonic() + timeout
+        locked = _try_lock(handle)
+        while not locked and time.monotonic() < deadline:
+            time.sleep(0.01)
+            locked = _try_lock(handle)
+        try:
+            yield locked
+        finally:
+            if locked:
+                _unlock(handle)
+    finally:
+        handle.close()
+
+
 def _claim(store: Store, task_id: str, kind: str, path: Path, gitdir: Path, token: str, claim_id: str | None) -> bool:
-    """Create the owner file exclusively. Returns True when a dead owner's stale file was replaced; refuses a live or unreadable owner."""
+    """Take the owner file. Returns True when a dead owner's stale file was replaced; refuses a live or unreadable owner.
+
+    The whole read-judge-replace sequence runs under the workspace's owner mutex, so two executions that both see the same dead owner cannot
+    both take over: the second one waits, then finds the first one's live record and is refused.
+    """
+    with _owner_mutex(gitdir) as locked:
+        if not locked:
+            raise _mutation(store, task_id=task_id, stage=f"{kind}:acquire", reason="workspace_owned_by_another_execution", workspace=path, expected_sha=None, observed_sha=None, claim_id=claim_id, detail="another execution is claiming this workspace and did not finish in time")
+        return _claim_locked(store, task_id, kind, path, gitdir, token, claim_id)
+
+
+def _claim_locked(store: Store, task_id: str, kind: str, path: Path, gitdir: Path, token: str, claim_id: str | None) -> bool:
     target = gitdir / OWNER_FILE
     recovered = False
     for _attempt in range(2):
@@ -429,6 +503,8 @@ def _establish(lease: WorkspaceLease, existed: bool) -> None:
         anchor = _anchor_sha(store, task_id)
         if existed and anchor is not None and seen["head"] != anchor:
             raise lease._fail("acquire", "no_ownership_record_and_head_differs", observed=seen["head"], expected=anchor)
+        if existed and seen["tracked_dirty"]:
+            raise lease._fail("acquire", "legacy_workspace_has_uncommitted_changes", observed=seen["head"], expected=anchor or seen["head"], paths=seen["tracked_dirty"], detail="a workspace with no ownership record is adopted only when its tracked files are clean")
         lease._ledger, lease._ledger_bytes = {"head": seen["head"], "candidate": latest}, b""
         lease._write_ledger(seen, latest)
         record_audit(store, OWNERSHIP_INITIALIZED, {"task_id": task_id, "workspace": str(lease.path), "head": seen["head"], "adopted_existing": existed, "kind": lease.kind})
@@ -436,19 +512,15 @@ def _establish(lease: WorkspaceLease, existed: bool) -> None:
     lease._ledger, lease._ledger_bytes = ledger, raw
     if ledger.get("task_id") not in (None, task_id):
         raise lease._fail("acquire", "workspace_belongs_to_another_task", observed=seen["head"], detail=str(ledger.get("task_id")))
-    if lease._recovering or ledger.get("interrupted_by"):
-        # A previous execution died holding this workspace: its partial edits and commits are its own. Accept only a history-preserving state.
-        sealed = ledger["head"]
-        if seen["head"] != sealed and GitWorkspace(lease.path).run("merge-base", "--is-ancestor", sealed, seen["head"], check=False).returncode != 0:
-            raise lease._fail("acquire", "head_not_descendant", observed=seen["head"])
-        record_audit(store, LEASE_RECOVERED, {"task_id": task_id, "workspace": str(lease.path), "sealed_head": sealed, "observed_head": seen["head"], "kind": lease.kind, "interrupted_by": ledger.get("interrupted_by")})
-        lease._write_ledger(seen, ledger.get("candidate"))
-        return
     difference = _difference(ledger, seen)
     if difference is not None:
         raise lease._fail("acquire", difference[0], observed=seen["head"], paths=difference[1])
     if ledger.get("candidate") != latest:
         raise lease._fail("acquire", "candidate_provenance_changed", observed=latest, expected=ledger.get("candidate"))
+    if lease._recovering:
+        # The previous owner died, but the workspace is exactly what it last sealed, so taking it over adopts nothing. Anything else was
+        # refused above as an external mutation: recovery never accepts a difference.
+        record_audit(store, LEASE_RECOVERED, {"task_id": task_id, "workspace": str(lease.path), "sealed_head": ledger["head"], "observed_head": seen["head"], "kind": lease.kind})
 
 
 @contextmanager
@@ -464,7 +536,13 @@ def owned_workspace(store: Store, project: Path, task_id: str, kind: str, *, cla
         lease.release()
         raise
     except BaseException:
-        lease._mark_interrupted()
+        # An exception (or Ctrl+C) ended the block while this execution still holds the lease: what its agent left is its own output, sealed
+        # under the same rules as a normal exit. A mutation found while doing so is recorded and found again by the next acquire.
+        lease._agent_ran = True
+        try:
+            _seal_or_fail(lease)
+        except WorkspaceMutation:
+            pass
         lease.release()
         raise
     else:
@@ -558,6 +636,8 @@ def verify_candidate_workspace(
             anchor = _anchor_sha(store, task_id)
             if anchor is not None and seen["head"] != anchor:
                 raise fail("no_ownership_record_and_head_differs", expected=anchor, observed=seen["head"])
+            if seen["tracked_dirty"]:
+                raise fail("legacy_workspace_has_uncommitted_changes", expected=anchor or seen["head"], observed=seen["head"], paths=seen["tracked_dirty"])
             ledger = {"head": seen["head"], "dirty_digest": seen["dirty_digest"], "dirty": seen["dirty"], "candidate": _latest_candidate_sha(store, task_id), "sealed_by": None}
         else:
             difference = _difference(ledger, seen)
