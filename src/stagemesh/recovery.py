@@ -30,6 +30,7 @@ from .lifecycle import evidence_allows_advance
 from .operator_actions import OperatorActionError, _operator, task_details
 from .persistence import MAX_CANONICAL_CONTRACT_CHARS, Store
 from .remediation import latest_candidate_findings
+from .timing import format_task_summary, task_timing
 from .validation import Validator
 
 REBIND_EVENT = "task.contract_rebound"
@@ -298,6 +299,7 @@ def task_doctor(store: Store, project: Path, task_id: str, integration_ref: str 
             else None
         ),
         "recent_repairs": _recent_repairs(store, task_id),
+        "timing": task_timing(store, task_id),
     }
     report["recommended_command"], report["recommendation_reason"] = _recommend(report, task_id, ref)
     return report
@@ -407,6 +409,8 @@ def format_doctor(report: dict[str, Any]) -> str:
     lines.append(f"  diagnosis: {d['category']} at {d['stage']}: {d['summary']}" if d else "  diagnosis: none")
     for repair in report["recent_repairs"]:
         lines.append(f"  repair: {repair['event']} by {repair['operator']}: {repair['reason']}")
+    if report["timing"]["executions"]:
+        lines.extend("  " + line for line in format_task_summary(report["timing"]).splitlines())
     lines.append(f"  next: {report['recommended_command'] or '(nothing)'}  # {report['recommendation_reason']}")
     return "\n".join(lines)
 

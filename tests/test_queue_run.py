@@ -11,6 +11,8 @@ import threading
 import time
 from pathlib import Path
 
+import pytest
+
 import stagemesh.cli as cli_module
 from stagemesh.concurrency import IntegrationLock
 from stagemesh.config import load_config
@@ -285,45 +287,67 @@ def test_stop_during_implementation_releases_claims_and_next_run_resumes(tmp_pat
     assert outcomes(queue(rig, ScriptedExecutor(rig.files), concurrency=1).run()) == {"A": "DONE"}
 
 
-def test_stop_request_preserves_unknown_process_identity_until_recovery_override(tmp_path: Path) -> None:
+def test_mid_run_stop_preserves_unknown_process_identity_until_recovery_override(tmp_path: Path) -> None:
     rig = Rig(tmp_path, ["A"])
     holder: dict[str, QueueRunner] = {}
     seen: dict[str, str] = {}
+    release_worker = threading.Event()
 
     class UnknownIdentityImplementation(ScriptedExecutor):
         def run(self, store, task_id, claim_id, project):
             seen["claim"] = claim_id
-            seen["execution"] = store.start_execution(
+            seen["execution"] = store.start_execution(  # a pid with no recorded create time: identity can never be proven
                 task_id=task_id,
                 claim_id=claim_id,
                 kind=ExecutionKind.IMPLEMENTATION,
                 pid=os.getpid(),
             )
             holder["runner"].stop_admission("operator stop", terminate_running=True)
-            time.sleep(0.3)
+            release_worker.wait(20)  # stay alive through _halt/_abandon, like a provider that outlives the grace period
             return ExecutionResult(ExecutionStatus.FAILED, failure_reason="stopped")
 
-    runner = queue(rig, UnknownIdentityImplementation(rig.files), concurrency=1, interrupt_grace_seconds=0.05)
+    runner = queue(rig, UnknownIdentityImplementation(rig.files), concurrency=1, interrupt_grace_seconds=0.2)
     holder["runner"] = runner
-    summary = runner.run()
-    assert summary.stop_reason == "STOPPED"
-    row = rig.store.conn.execute("SELECT status FROM executions WHERE id=?", (seen["execution"],)).fetchone()
-    assert row["status"] == "RUNNING"
-    assert queue_control_state(rig.store)["state"] == "stopped"
+    try:
+        summary = runner.run()
+        assert summary.stop_reason == "STOPPED"
+        row = rig.store.conn.execute("SELECT status FROM executions WHERE id=?", (seen["execution"],)).fetchone()
+        assert row["status"] == "RUNNING"
+        assert rig.store.conn.execute("SELECT active FROM claims WHERE id=?", (seen["claim"],)).fetchone()["active"] == 1
+        skipped = [
+            json.loads(r["payload"])
+            for r in rig.store.conn.execute("SELECT payload FROM audit_events WHERE event_type='task.abandon_skipped_unknown_execution'")
+        ]
+        assert [e["execution_id"] for e in skipped] == [seen["execution"]]
+        for control in surfaced_queue_control(rig.project).values():
+            assert control["state"] == "stopped"
+            assert [e["id"] for e in control["active_executions"]] == [seen["execution"]]
 
-    code, out, _ = run_stagemesh_cli(
-        rig.project,
-        "recover-stale",
-        "--task",
-        "A",
-        "--release-unknown",
-        "--execution",
-        seen["execution"],
-        "--reason",
-        "test verified the runner stopped before the unknown execution could be identified",
-    )
-    assert code == 0 and "RELEASED_BY_OPERATOR" in out
-    assert not list(rig.store.running_executions())
+        # the next run must neither touch nor re-admit the protected task
+        again = queue(rig, ScriptedExecutor(rig.files), concurrency=1).run()
+        assert "DONE" not in outcomes(again).values()
+        row = rig.store.conn.execute("SELECT status FROM executions WHERE id=?", (seen["execution"],)).fetchone()
+        assert row["status"] == "RUNNING"
+
+        code, out, _ = run_stagemesh_cli(
+            rig.project,
+            "recover-stale",
+            "--task",
+            "A",
+            "--release-unknown",
+            "--execution",
+            seen["execution"],
+            "--reason",
+            "test verified the runner stopped before the unknown execution could be identified",
+        )
+        assert code == 0 and "RELEASED_BY_OPERATOR" in out
+        assert not list(rig.store.running_executions())
+        assert rig.store.conn.execute("SELECT active FROM claims WHERE id=?", (seen["claim"],)).fetchone()["active"] == 0
+    finally:
+        release_worker.set()
+        for thread in runner._threads.values():
+            thread.join(timeout=10)
+    assert outcomes(queue(rig, ScriptedExecutor(rig.files), concurrency=1).run()) == {"A": "DONE"}
 
 
 def test_stop_during_review_kills_tracked_provider_and_fails_execution(tmp_path: Path) -> None:
@@ -371,16 +395,66 @@ def test_stop_during_review_kills_tracked_provider_and_fails_execution(tmp_path:
     assert outcomes(queue(rig, ScriptedExecutor(rig.files), concurrency=1).run()) == {"A": "DONE"}
 
 
-def test_keyboard_interrupt_records_stopped_control_state(tmp_path: Path) -> None:
-    rig = Rig(tmp_path, ["A"])
+def surfaced_queue_control(project: Path) -> dict[str, dict]:
+    """queue_control exactly as the operator sees it through `status --json` and `health --json`."""
+    surfaced = {}
+    for command in ("status", "health"):
+        code, out, _ = run_stagemesh_cli(project, command, "--json")
+        assert code == 0
+        surfaced[command] = json.loads(out)["queue_control"]
+    return surfaced
 
-    class InterruptingQueueRunner(QueueRunner):
-        def _dispatch_loop(self, summary):
-            raise KeyboardInterrupt
 
-    summary = rig.runner(ScriptedExecutor(rig.files), 1, runner_class=InterruptingQueueRunner).run()
-    assert summary.stop_reason == "INTERRUPTED"
-    assert queue_control_state(rig.store)["state"] == "stopped"
+def control_events(rig: Rig, state: str) -> list[dict]:
+    events = [
+        json.loads(r["payload"])
+        for r in rig.store.conn.execute("SELECT payload FROM audit_events WHERE event_type='queue.admission_control' ORDER BY rowid")
+    ]
+    return [e for e in events if e["state"] == state]
+
+
+@pytest.mark.parametrize("mode", ["graceful", "terminate", "ctrl-c"])
+def test_every_stop_path_ends_stopped_on_status_and_health(tmp_path: Path, mode: str) -> None:
+    rig = Rig(tmp_path, ["A", "B"])
+    holder: dict[str, QueueRunner] = {}
+    started = threading.Event()
+
+    class StoppingRunner(QueueRunner):
+        def _apply_control_requests(self) -> None:
+            if mode == "ctrl-c" and started.is_set():
+                raise KeyboardInterrupt  # Ctrl+C lands in the dispatcher while A is running
+            super()._apply_control_requests()
+
+    class RunningFirst(ScriptedExecutor):
+        def run(self, store, task_id, claim_id, project):
+            if task_id != "A":
+                return super().run(store, task_id, claim_id, project)
+            if mode == "graceful":
+                holder["runner"].stop_admission("operator stop")  # A finishes; B is never admitted
+                return super().run(store, task_id, claim_id, project)
+            execution_id = store.start_execution(task_id=task_id, claim_id=claim_id, kind=ExecutionKind.IMPLEMENTATION)
+            if mode == "terminate":
+                holder["runner"].stop_admission("operator stop", terminate_running=True)
+            else:
+                started.set()
+            assert wait_until(holder["runner"].stop.is_set, 10)
+            store.finish_execution(execution_id, ExecutionStatus.FAILED)
+            return ExecutionResult(ExecutionStatus.FAILED, failure_reason="stopped")
+
+    runner = rig.runner(RunningFirst(rig.files), 1, runner_class=StoppingRunner, interrupt_grace_seconds=5)
+    holder["runner"] = runner
+    summary = runner.run()
+
+    assert summary.stop_reason == ("INTERRUPTED" if mode == "ctrl-c" else "STOPPED")
+    assert outcomes(summary) == {"A": {"graceful": "DONE", "terminate": "STOPPED", "ctrl-c": "INTERRUPTED"}[mode]}
+    for control in surfaced_queue_control(rig.project).values():
+        assert control["state"] == "stopped"
+        assert not control["paused"] and not control["stopping"]
+        assert control["active_executions"] == []
+    assert len(control_events(rig, "stopped")) == 1
+    assert not rig.store.conn.execute("SELECT 1 FROM claims WHERE active=1").fetchall()
+    assert rig.store.get_task("B")["status"] == "OPEN"
+    assert set(outcomes(queue(rig, ScriptedExecutor(rig.files), concurrency=2).run()).values()) == {"DONE"}
 
 
 def test_scope_overlap_rules() -> None:
@@ -493,6 +567,44 @@ def test_cli_pause_and_resume_control_a_live_runner(tmp_path: Path) -> None:
     summary = runner.run()
     assert not errors
     assert outcomes(summary) == {"A": "DONE", "B": "DONE"}
+
+
+@pytest.mark.parametrize("terminate", [False, True])
+def test_cli_stop_request_stops_a_live_runner(tmp_path: Path, terminate: bool) -> None:
+    rig = Rig(tmp_path, ["A", "B"])
+    holder: dict[str, QueueRunner] = {}
+    errors: list[str] = []
+
+    class StopFromOperator(ScriptedExecutor):
+        def run(self, store, task_id, claim_id, project):
+            if task_id != "A":
+                return super().run(store, task_id, claim_id, project)
+            argv = ["queue-control", "stop", "--reason", "operator stop", "--json"] + (["--terminate-running"] if terminate else [])
+            code, out, _ = run_stagemesh_cli(rig.project, *argv)  # only the DB request: nothing calls the runner directly
+            if code != 0 or json.loads(out)["state"] != "stopping":
+                errors.append("stop command failed")
+            observed = holder["runner"].stop.is_set if terminate else (lambda: holder["runner"].admission_stopped)
+            if not wait_until(observed, 10):
+                errors.append("runner did not pick up the stop request")
+            if terminate:
+                execution_id = store.start_execution(task_id=task_id, claim_id=claim_id, kind=ExecutionKind.IMPLEMENTATION)
+                store.finish_execution(execution_id, ExecutionStatus.FAILED)
+                return ExecutionResult(ExecutionStatus.FAILED, failure_reason="stopped")
+            return super().run(store, task_id, claim_id, project)
+
+    executor = StopFromOperator(rig.files)
+    runner = queue(rig, executor, concurrency=1, interrupt_grace_seconds=5)
+    holder["runner"] = runner
+    summary = runner.run()
+    assert not errors
+    assert summary.stop_reason == "STOPPED"
+    assert outcomes(summary) == {"A": "STOPPED" if terminate else "DONE"}
+    assert not any(kind == "start" and task == "B" for kind, task, _ in executor.log)
+    for control in surfaced_queue_control(rig.project).values():
+        assert control["state"] == "stopped" and control["active_executions"] == []
+    assert len(control_events(rig, "stopped")) == 1
+    assert not rig.store.conn.execute("SELECT 1 FROM claims WHERE active=1").fetchall()
+    assert set(outcomes(queue(rig, ScriptedExecutor(rig.files), concurrency=2).run()).values()) == {"DONE"}
 
 
 def test_cli_reports_refusals_in_json(tmp_path: Path) -> None:
