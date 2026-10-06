@@ -10,11 +10,11 @@ from .audit import record_audit
 from .concurrency import IntegrationLock
 from .contract_binding import contract_for_candidate
 from .contracts import ContractError
-from .domain import EvidenceStatus, Stage
+from .domain import EvidenceStatus, ExecutionKind, Stage
 from .git import GitError, GitWorkspace
 from .integration import Integrator
 from .persistence import Store
-from .workspaces import prepare_task_workspace
+from .workspace_guard import owned_workspace
 
 REBASED_EVENT = "integration.rebased"
 STALE_BASE = "integration_stale_base"  # the ref advanced and the rebase budget is spent
@@ -96,34 +96,39 @@ class SerializedIntegrator(Integrator):
             return False
         try:
             bound = contract_for_candidate(store, task_id, candidate_sha, project)
-            worktree = prepare_task_workspace(project, task_id)
-            git = GitWorkspace(worktree)
-            git.run("reset", "--hard", "HEAD", check=False)
-            git.run("clean", "-fdq", check=False)
-            git.run("checkout", "--detach", candidate_sha)
-            result = git.run("rebase", tip, check=False)
-            if result.returncode != 0:
-                conflicts = [
-                    line for line in git.run("diff", "--name-only", "--diff-filter=U", check=False).stdout.splitlines() if line
-                ]
-                git.run("rebase", "--abort", check=False)
-                git.run("checkout", "--detach", candidate_sha, check=False)
-                self._typed_failure = (
-                    REBASE_CONFLICT,
-                    f"{self.integration_ref} advanced to {tip} and candidate {candidate_sha} conflicts with it"
-                    + (f" in {', '.join(conflicts[:10])}" if conflicts else "")
-                    + "; ref left unchanged",
-                )
-                self._emit(task_id, REBASE_CONFLICT, {"ref_tip": tip, "conflicts": conflicts[:10]})
-                return False
-            rebased = git.head()
+            # The rebase rewrites the task worktree, so it runs under the workspace lease: an external edit or commit since the candidate
+            # was sealed stops here (WorkspaceMutation propagates to the coordinator) instead of being reset or rebased over.
+            with owned_workspace(store, project, task_id, ExecutionKind.INTEGRATION) as lease:
+                worktree = lease.path
+                git = GitWorkspace(worktree)
+                git.run("reset", "--hard", "HEAD", check=False)
+                git.run("clean", "-fdq", check=False)
+                git.run("checkout", "--detach", candidate_sha)
+                result = git.run("rebase", tip, check=False)
+                if result.returncode != 0:
+                    conflicts = [
+                        line for line in git.run("diff", "--name-only", "--diff-filter=U", check=False).stdout.splitlines() if line
+                    ]
+                    git.run("rebase", "--abort", check=False)
+                    git.run("checkout", "--detach", candidate_sha, check=False)
+                    lease.seal(candidate_sha)
+                    self._typed_failure = (
+                        REBASE_CONFLICT,
+                        f"{self.integration_ref} advanced to {tip} and candidate {candidate_sha} conflicts with it"
+                        + (f" in {', '.join(conflicts[:10])}" if conflicts else "")
+                        + "; ref left unchanged",
+                    )
+                    self._emit(task_id, REBASE_CONFLICT, {"ref_tip": tip, "conflicts": conflicts[:10]})
+                    return False
+                rebased = git.head()
+                previous = store.latest_candidate(task_id)
+                producer = str(previous["produced_by"]) if previous is not None else "rebase"
+                store.add_candidate(task_id, rebased, producer, durable_handoff=True)
+                lease.seal(rebased)
         except (GitError, ContractError, OSError) as exc:
             self._typed_failure = (REBASE_CONFLICT, f"could not rebase candidate {candidate_sha} onto {tip}: {exc}")
             self._emit(task_id, REBASE_CONFLICT, {"ref_tip": tip, "error": str(exc)[:200]})
             return False
-        previous = store.latest_candidate(task_id)
-        producer = str(previous["produced_by"]) if previous is not None else "rebase"
-        store.add_candidate(task_id, rebased, producer, durable_handoff=True)
         store.bind_contract(task_id, rebased, tip, bound.version, bound.digest, bound.canonical_json)
         store.advance_task(task_id, Stage.VALIDATE)
         record_audit(

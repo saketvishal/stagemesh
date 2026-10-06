@@ -185,6 +185,26 @@ A `stale_baseline` stops the task at once, and a repeated `contract_scope`, `val
 before the implementation provider is called again: none of them can be fixed by more code. Findings are stored verbatim, shown in
 `continue`, `queue-run` and `diagnose`, and quoted unabridged (with the candidate sha) in the next implementation prompt.
 
+### Workspace ownership and external-mutation detection
+
+Each task's worktree is written by one StageMesh execution at a time. An execution takes an exclusive lease on the worktree (an owner
+file in its private git dir, so a second execution is refused) and, when it finishes, *seals* the result: the HEAD, a fingerprint of any
+uncommitted files, and the candidate SHA it produced. Nothing is added to the database. The agent's own edits, and linear commits it makes
+while it holds the lease, are the authorized result and become the sealed candidate.
+
+The worktree and the candidate rows are compared with the seal before the agent starts and after it exits, before and after validation,
+before and after independent review, before integration, and before a rebase rewrites the worktree. Review always runs in a throwaway
+checkout of the exact candidate SHA, never in the implementation worktree. Any difference nobody authorized (a new commit, an edited or
+added file, a moved HEAD, a lost lease, a candidate that is not the sealed one, validation evidence missing for this exact SHA) records an
+`EXTERNAL_WORKSPACE_MUTATION` audit event (task, execution or claim, workspace, stage, expected and observed SHA, changed paths, remedy),
+blocks the task and stops: no validation, review, merge or evidence acceptance happens against the unexpected state, and nothing in the
+workspace is reset, adopted or committed.
+
+To recover, inspect the workspace and either reset it to the event's `expected_sha` or remove it (`git worktree remove --force <workspace>`),
+then `stagemesh retry-task --task <id>`. Worktrees created before this feature are adopted the first time they are used, but only when HEAD
+is the task's recorded candidate (or baseline). Limit: git cannot tell the lease holder's agent commit from another process's commit made
+*while that agent runs*; that window is bounded (exclusive lease, exact state at start, linear history, one sealed result), not closed.
+
 ### Repairing a stuck task without touching SQLite
 
 All three commands go through the store, refuse while the task has an active claim or running execution, never delete candidates,

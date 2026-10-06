@@ -15,6 +15,7 @@ from .lifecycle import evidence_allows_advance
 from .persistence import Store
 from .process_identity import classify_process, process_identity
 from .validation import Validator
+from .workspace_guard import pin_candidate
 
 
 class OperatorActionError(ValueError):
@@ -245,6 +246,7 @@ def adopt_candidate(
         )
     if not already_latest:
         store.add_candidate(task_id, resolved, producer, True)
+        pin_candidate(project, task_id, resolved)  # the operator's registration is an authorized change of candidate
         record_audit(
             store,
             "candidate.adopted",
