@@ -63,7 +63,7 @@ class MergeVerdict:
 class IntegrationPolicy:
     require_independent_review: bool = True
     allow_baseline_ci_failures: bool = True  # gates failing identically on base do not block, but are recorded
-    baseline_requires_detail: bool = False  # True: refuse baseline classification that rests on gate conclusions alone
+    baseline_requires_detail: bool = True  # gates classified baseline from conclusions alone (no logs/tests) do not make a candidate merge-ready
     require_mergeable: bool = True
 
     def evaluate(self, facts: MergeFacts, *, task_id: str | None = None) -> MergeVerdict:
@@ -190,7 +190,10 @@ def _ci_condition(ci: CIDiagnosis) -> Condition:
 
 
 def _ci_action(ci: CIDiagnosis) -> Action:
-    return plan_ci_response(ci, task_id=None).action
+    action = plan_ci_response(ci, task_id=None).action
+    if action is Action.RECORD_BASELINE_FAILURE_AND_PROCEED:
+        return Action.REQUEST_BASE_CI  # reaching here means the baseline evidence was too weak to merge on: get log-level evidence
+    return action
 
 
 # --- post-merge verification --------------------------------------------------------------------------------------------------------

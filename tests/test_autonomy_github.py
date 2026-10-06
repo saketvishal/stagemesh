@@ -188,9 +188,15 @@ def test_scenario_e_real_incident_main_red_on_both_gates_is_baseline_for_a_candi
 
     assert {g.gate: g.klass for g in diagnosis.gates} == {"linux": CIClass.BASELINE_FAILURE, "windows": CIClass.BASELINE_FAILURE}
     assert {g.evidence for g in diagnosis.gates} == {"GATE_LEVEL"}  # honest about how weak the comparison is: conclusions only
-    assert diagnosis.merge_blockers() == []
-    assert len(diagnosis.merge_blockers(baseline_requires_detail=True)) == 2  # a stricter policy can refuse gate-level evidence
-    assert IntegrationPolicy(baseline_requires_detail=True).baseline_requires_detail
+    # Independent-review finding: with no log lines or test names on either side, a *new* failure of an already-red gate looks identical,
+    # so gate-level evidence classifies the gates as baseline but is NOT enough to call the candidate merge-ready by default.
+    assert IntegrationPolicy().baseline_requires_detail is True
+    assert len(diagnosis.merge_blockers(baseline_requires_detail=True)) == 2
+    assert diagnosis.merge_blockers(baseline_requires_detail=False) == []  # an explicit, recorded opt-out
+    from stagemesh.autonomy.ci_diagnosis import plan_ci_response
+
+    decision = plan_ci_response(diagnosis, task_id=TASK)
+    assert decision.action is Action.RECORD_BASELINE_FAILURE_AND_PROCEED and decision.detail["weak_baseline_evidence"] == ["linux", "windows"]
 
 
 def test_scenario_f_real_shape_candidate_failing_a_gate_that_passes_on_base_is_a_regression() -> None:
@@ -347,3 +353,25 @@ def test_live_boundary_reads_a_real_merged_pull_request_and_real_check_runs() ->
     run = GitHubHostedCI(OWNER, REPO, transport).run_for(MAIN)
     assert run is not None and set(run.gates) >= {"linux", "windows"} and run.complete
     assert prs.get(10**9) is None
+
+
+def test_gate_level_baseline_evidence_blocks_the_merge_policy_and_asks_for_log_level_evidence() -> None:
+    from stagemesh.autonomy.merge_policy import MergeFacts
+
+    ci = GitHubHostedCI(OWNER, REPO, RecordedTransport({("GET", _checks(MAIN)): (200, {}, REAL_MAIN_CHECK_RUNS), ("GET", _checks("c" * 40)): (200, {}, REAL_MAIN_CHECK_RUNS)}))
+    diagnosis = diagnose_ci(ci.run_for("c" * 40), ci.run_for(MAIN))
+    from stagemesh.autonomy.base_state import BaseState
+    from stagemesh.autonomy.provenance import CandidateProvenance
+
+    c, b = "c" * 40, MAIN
+    facts = MergeFacts(
+        provenance=CandidateProvenance(TASK, b, c, c, c, None),
+        base=BaseState(Condition.BASE_UNCHANGED, b, b, c),
+        review_independent=True,
+        ci=diagnosis,
+        mergeable=True,
+    )
+    strict = IntegrationPolicy().evaluate(facts, task_id=TASK)
+    assert not strict.may_merge and [x.name for x in strict.unsatisfied] == ["ci"]
+    assert strict.decision.action is Action.REQUEST_BASE_CI  # not "proceed": the evidence has to get better, nobody is asked to decide
+    assert IntegrationPolicy(baseline_requires_detail=False).evaluate(facts, task_id=TASK).may_merge

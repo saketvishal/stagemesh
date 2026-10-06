@@ -82,6 +82,7 @@ A project opts in with `.stagemesh/autonomy.json`; without it there is no behavi
   "trusted_committer_emails": ["stagemesh@stagemesh.invalid"],
   "max_reconstructs": 1,
   "allow_baseline_ci_failures": true,
+  "baseline_requires_detail": true,
   "unknown_identity": "FENCE" }
 ```
 
@@ -140,7 +141,8 @@ Ordered by value for reaching the gate:
    calls `merge_when_ready` on a schedule, and `continue` does not select a next task after a verified DONE. (`finish_task` records the outcome.)
 3. **Hosted CI is not wired into the CLI.** `GitHubHostedCI` exists and is verified read-only against live GitHub, but no configuration attaches
    it to the integration guard. Check runs carry no logs, so baseline comparison is gate-level (`GATE_LEVEL` evidence, reported in the
-   trace; `baseline_requires_detail` can forbid it). Job-log retrieval is not implemented.
+   trace) and, by default (`baseline_requires_detail: true`), is not enough to call a candidate merge-ready: the policy asks for log-level base
+   evidence instead. Job-log retrieval is not implemented.
 4. **Test-observation convention has no producer.** Scenario G relies on `STAGEMESH_TEST_OBSERVATION` lines; no StageMesh test fixture emits them yet.
 5. **Destructive git requests are not intercepted.** `decide_git_operation` is policy only; StageMesh's own git calls are not routed through it.
 6. **PR merge flow is not exposed in the CLI** (library entry point `Supervisor.merge_when_ready`).

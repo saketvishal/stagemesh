@@ -35,10 +35,11 @@ class AutonomySettings:
     trusted_committer_emails: tuple[str, ...] = TRUSTED_COMMITTER_EMAILS
     max_reconstructs: int = 1
     allow_baseline_ci_failures: bool = True
+    baseline_requires_detail: bool = True
     unknown_identity: UnknownIdentityStrategy = UnknownIdentityStrategy.FENCE
 
     def integration_policy(self) -> IntegrationPolicy:
-        return IntegrationPolicy(allow_baseline_ci_failures=self.allow_baseline_ci_failures)
+        return IntegrationPolicy(allow_baseline_ci_failures=self.allow_baseline_ci_failures, baseline_requires_detail=self.baseline_requires_detail)
 
     def recovery_policy(self) -> RecoveryPolicy:
         return RecoveryPolicy(unknown_identity=self.unknown_identity)
@@ -53,7 +54,7 @@ def load_settings(runtime_dir: Path) -> AutonomySettings:
     data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
         raise ValueError(f"{path} must contain a JSON object")  # noqa: TRY004 - callers treat ValueError as "invalid settings"
-    unknown = set(data) - {"enabled", "trusted_committer_emails", "max_reconstructs", "allow_baseline_ci_failures", "unknown_identity"}
+    unknown = set(data) - {"enabled", "trusted_committer_emails", "max_reconstructs", "allow_baseline_ci_failures", "baseline_requires_detail", "unknown_identity"}
     if unknown:
         raise ValueError(f"{path} has unsupported keys: {', '.join(sorted(unknown))}")
     emails = tuple(str(item) for item in data.get("trusted_committer_emails", TRUSTED_COMMITTER_EMAILS))
@@ -62,6 +63,7 @@ def load_settings(runtime_dir: Path) -> AutonomySettings:
         trusted_committer_emails=tuple(dict.fromkeys((*TRUSTED_COMMITTER_EMAILS, *emails))),
         max_reconstructs=int(data.get("max_reconstructs", 1)),
         allow_baseline_ci_failures=bool(data.get("allow_baseline_ci_failures", True)),
+        baseline_requires_detail=bool(data.get("baseline_requires_detail", True)),
         unknown_identity=UnknownIdentityStrategy(str(data.get("unknown_identity", "FENCE")).upper()),
     )
 

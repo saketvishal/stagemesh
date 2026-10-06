@@ -783,7 +783,10 @@ class Supervisor:
         decision = self.assess_ci(task_id, sha, base_sha, scope=self._scope(task_id, sha))
         diagnosis = self.last_ci_diagnosis
         assert diagnosis is not None
-        if not diagnosis.merge_blockers(allow_baseline_failures=self.integration_policy.allow_baseline_ci_failures):
+        if not diagnosis.merge_blockers(
+            allow_baseline_failures=self.integration_policy.allow_baseline_ci_failures,
+            baseline_requires_detail=self.integration_policy.baseline_requires_detail,
+        ):
             return True
         if decision.action in {Action.REMEDIATE_CANDIDATE, Action.FIX_TEST_FIXTURE}:
             self._send_back_for_ci_remediation(task_id, sha, diagnosis, decision)
