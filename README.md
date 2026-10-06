@@ -202,8 +202,14 @@ workspace is reset, adopted or committed.
 
 To recover, inspect the workspace and either reset it to the event's `expected_sha` or remove it (`git worktree remove --force <workspace>`),
 then `stagemesh retry-task --task <id>`. Worktrees created before this feature are adopted the first time they are used, but only when HEAD
-is the task's recorded candidate (or baseline). Limit: git cannot tell the lease holder's agent commit from another process's commit made
-*while that agent runs*; that window is bounded (exclusive lease, exact state at start, linear history, one sealed result), not closed.
+is the task's recorded candidate (or baseline). Recovery is always explicit and operator-driven; StageMesh never reconciles on its own.
+
+**What this guarantees, and what it does not.** StageMesh provides exclusive StageMesh ownership of a task worktree, verification of the
+exact starting state, a bounded window in which changes are authorized, a linear sealed candidate, and fail-closed detection at lifecycle
+boundaries. It does *not* prove which process changed or committed files during the authorized agent execution window: git cannot tell the
+lease holder's agent from an unrelated process running as the same user, and StageMesh does not try to infer it from commit identity,
+timestamps or process guesses. Cryptographic, process or container isolation of same-user filesystem writers is separate future hardening
+work; until then, same-user mutation during that window is not solved, only bounded.
 
 ### Repairing a stuck task without touching SQLite
 
