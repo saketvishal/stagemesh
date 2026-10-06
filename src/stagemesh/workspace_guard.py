@@ -242,6 +242,7 @@ class WorkspaceLease:
         self._ledger: dict[str, Any] = {}
         self._ledger_bytes = b""
         self._agent_ran = False
+        self._window_open = False
         self._sealed = False
         self._released = False
 
@@ -299,6 +300,8 @@ class WorkspaceLease:
         difference = _difference(self._ledger, seen)
         if difference is not None:
             raise self._fail(stage, difference[0], observed=seen["head"], paths=difference[1])
+        if stage == "before_agent":
+            self._window_open = True
 
     def after_agent(self) -> None:
         """The agent has exited: its output is authorized if HEAD is the sealed HEAD or a linear descendant of it and the lease held."""
@@ -536,13 +539,16 @@ def owned_workspace(store: Store, project: Path, task_id: str, kind: str, *, cla
         lease.release()
         raise
     except BaseException:
-        # An exception (or Ctrl+C) ended the block while this execution still holds the lease: what its agent left is its own output, sealed
-        # under the same rules as a normal exit. A mutation found while doing so is recorded and found again by the next acquire.
-        lease._agent_ran = True
+        # After the before-agent check, an exception or Ctrl+C seals what this execution left.
+        # Before that check, a difference is not the agent's output and must not be sealed as authorized.
+        if lease._window_open:
+            lease._agent_ran = True
         try:
             _seal_or_fail(lease)
         except WorkspaceMutation:
-            pass
+            _fail_execution(lease)
+            lease.release()
+            raise
         lease.release()
         raise
     else:
