@@ -310,6 +310,7 @@ class ParallelRunner:
         self._admission_paused = threading.Event()
         self._admission_stopped = threading.Event()
         self._terminate_requested = threading.Event()
+        self._protected_claims: set[str] = set()  # claims of executions with unknown process identity; only an operator releases them
         self._lock = threading.Lock()
         self._lifecycles: dict[str, TaskLifecycle] = {}
         self._provider_logs: dict[str, ProviderLog] = {}
@@ -387,6 +388,13 @@ class ParallelRunner:
         finally:
             audit.close()
 
+    def _record_stopped(self, reason: str, *, terminate_running: bool) -> None:
+        """Close a stop with exactly one `stopped` control event, whichever path (graceful, terminate, Ctrl+C) finished it."""
+        latest = latest_queue_control(self.store)
+        if latest is not None and latest.get("state") == "stopped":
+            return
+        self._record_control("stopped", reason, terminate_running=terminate_running)
+
     def _active_execution_snapshot(self) -> list[dict[str, Any]]:
         snapshot = Store(self.store.db_path)
         try:
@@ -446,7 +454,7 @@ class ParallelRunner:
     def _startup(self, summary: ParallelSummary) -> None:
         latest = latest_queue_control(self.store)
         if latest is not None and latest.get("state") == "stopping":
-            self._record_control("stopped", "previous stop completed", terminate_running=False)
+            self._record_stopped("previous stop completed", terminate_running=False)
         summary.recovered.extend(recover_orphaned_claims(self.store, self.project))
         for row in self.store.tasks():  # provably dead provider processes only; live/unknown are never touched
             summary.recovered.extend(_recover_dead(self.store, str(row["id"])))
@@ -672,6 +680,7 @@ class ParallelRunner:
             if state == "UNKNOWN":
                 if execution["claim_id"]:
                     protected_claims.add(str(execution["claim_id"]))
+                    self._protected_claims.add(str(execution["claim_id"]))
                 record_audit(
                     store,
                     "task.abandon_skipped_unknown_execution",
@@ -752,6 +761,8 @@ class ParallelRunner:
             for claim in final.conn.execute("SELECT id, task_id FROM claims WHERE active=1 AND worker_id LIKE ?", (f"{WORKER_PREFIX}{os.getpid()}-%",)).fetchall():
                 if str(claim["task_id"]) not in self._threads:
                     continue  # only tasks this run started; anything else is somebody else's claim
+                if str(claim["id"]) in self._protected_claims:
+                    continue  # unknown process identity: stays claimed until `recover-stale --release-unknown`
                 final.release_claim(str(claim["id"]))
                 self.note(str(claim["task_id"]), "claim_released")
         finally:
@@ -764,15 +775,15 @@ class ParallelRunner:
             summary.stop_reason, summary.message = "GLOBAL_SAFETY_FAILURE", self.global_failure
         elif summary.interrupted:
             summary.stop_reason, summary.message = "INTERRUPTED", "interrupted; claims released, worktrees kept for resume"
-            self._record_control("stopped", "keyboard interrupt stop completed", terminate_running=True)
+            self._record_stopped("keyboard interrupt stop completed", terminate_running=True)
         elif self._terminate_requested.is_set():
             summary.stop_reason = "STOPPED"
             summary.message = "operator stop requested; claims released, worktrees kept for resume"
-            self._record_control("stopped", "operator stop completed", terminate_running=True)
+            self._record_stopped("operator stop completed", terminate_running=True)
         elif self._admission_stopped.is_set():
             summary.stop_reason = "STOPPED"
             summary.message = "queue admission stopped; active tasks were allowed to finish"
-            self._record_control("stopped", "queue admission stop completed", terminate_running=False)
+            self._record_stopped("queue admission stop completed", terminate_running=False)
         elif self._admission_paused.is_set():
             summary.stop_reason, summary.message = "PAUSED", "queue admission paused"
         elif not summary.tasks:
