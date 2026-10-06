@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from stagemesh.domain import ExecutionStatus
-from stagemesh.persistence import Store
+from stagemesh.persistence import SCHEMA_VERSION, Store
 from stagemesh.providers import RuntimeCommandAdapter
 
 
@@ -47,7 +47,7 @@ def main() -> int:
             init_data["project"] != str(project.resolve())
             or init_data["runtime"] != str((project / ".stagemesh").resolve())
             or init_data["db"] != str((project / ".stagemesh" / "stagemesh.sqlite3").resolve())
-            or init_data["schema_version"] != 3
+            or init_data["schema_version"] != SCHEMA_VERSION
             or init_data["registered"] is not False
         ):
             raise AssertionError(init_json)
@@ -597,7 +597,7 @@ def main() -> int:
             "python interpreter:",
             "imported package path:",
             "db:",
-            "schema version: 3",
+            f"schema version: {SCHEMA_VERSION}",
             "backend: sqlite",
         ]
         missing = [item for item in required if item not in doctor]
@@ -606,7 +606,7 @@ def main() -> int:
         doctor_json = run([sys.executable, "-m", "stagemesh.cli", "--project", str(project), "doctor", "--json"], ROOT, env)
         doctor_data = json.loads(doctor_json)
         if (
-            doctor_data["schema_version"] != 3
+            doctor_data["schema_version"] != SCHEMA_VERSION
             or doctor_data["backend"] != "sqlite"
             or doctor_data["backend_available"] is not True
             or doctor_data["github_configured"] is not False
@@ -883,7 +883,20 @@ def main() -> int:
         provider_store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
         try:
             provider_task = provider_store.upsert_task("runtime provider execution")
-            provider_result = RuntimeCommandAdapter("custom", (sys.executable, "--version")).execute(
+            contracts = project / ".stagemesh" / "contracts"  # implementation fails closed without an explicit task contract
+            contracts.mkdir(parents=True, exist_ok=True)
+            (contracts / f"{provider_task}.json").write_text(
+                json.dumps(
+                    {
+                        "objective": "write provider-output.txt",
+                        "allowed_files": ["provider-output.txt"],
+                        "required_tests": [{"name": "smoke", "command": [sys.executable, "-c", "pass"]}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            write_output = "from pathlib import Path; Path('provider-output.txt').write_text('durable provider output', encoding='utf-8')"
+            provider_result = RuntimeCommandAdapter("custom", (sys.executable, "-c", write_output)).execute(
                 provider_store,
                 provider_task,
                 None,
@@ -935,7 +948,7 @@ def main() -> int:
             "ok: True" not in health
             or "done: 4" not in health
             or "blocked_tasks: 0" not in health
-            or "failed_executions: 0" not in health
+            or "failed_executions_current: 0" not in health
             or "unknown_executions: 0" not in health
         ):
             raise AssertionError(health)

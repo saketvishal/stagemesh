@@ -80,7 +80,7 @@ from stagemesh.lifecycle import LifecycleError, evidence_allows_advance
 from stagemesh.objectives import ObjectivePlanner, ObjectiveValidationError
 from stagemesh.observability import health
 from stagemesh.operator import operator_report
-from stagemesh.persistence import Store, StoreValidationError
+from stagemesh.persistence import SCHEMA_VERSION, Store, StoreValidationError
 from stagemesh.persistence_backends import probe_backend
 from stagemesh.postgres_store import (
     POSTGRES_SCHEMA_TABLES,
@@ -145,6 +145,7 @@ from stagemesh.work_transport import (
     write_packet_envelope,
 )
 from stagemesh.workers import WorkerValidationError, heartbeat_worker, register_worker
+from stagemesh.workspaces import NO_IMPLEMENTATION_CHANGE
 
 
 def assert_raises(exc_type, fn, *args, **kwargs) -> None:
@@ -199,6 +200,20 @@ class HandoffExecutor(FakeExecutor):
     def run(self, store: Store, task_id: str, claim_id: str | None, project: Path) -> ExecutionResult:
         result = super().run(store, task_id, claim_id, project)
         return ExecutionResult(result.status, result.candidate_sha, durable_handoff=True)
+
+
+WRITE_PROVIDER_OUTPUT = "from pathlib import Path; Path('provider-output.txt').write_text('durable provider output', encoding='utf-8')"
+
+
+def write_explicit_contract(project: Path, task_id: str, allowed_file: str) -> None:
+    contracts = project / ".stagemesh" / "contracts"
+    contracts.mkdir(parents=True, exist_ok=True)
+    contract = {
+        "objective": f"write {allowed_file}",
+        "allowed_files": [allowed_file],
+        "required_tests": [{"name": "smoke", "command": [sys.executable, "-c", "pass"]}],
+    }
+    (contracts / f"{task_id}.json").write_text(json.dumps(contract), encoding="utf-8")
 
 
 def with_store(fn) -> None:
@@ -1182,7 +1197,7 @@ def main() -> int:
         first = store.schema_version()
         store.migrate()
         second = store.schema_version()
-        assert first == second == 3
+        assert first == second == SCHEMA_VERSION
 
     def backend_probe_reports_postgres_dependency(store: Store, project: Path) -> None:
         sqlite_probe = probe_backend(None, project / ".stagemesh" / "stagemesh.sqlite3")
@@ -1406,7 +1421,8 @@ def main() -> int:
     def runtime_provider_execution_is_durable(store: Store, project: Path) -> None:
         project.mkdir(parents=True)
         task_id = store.upsert_task("provider execution")
-        adapter = RuntimeCommandAdapter("custom", (sys.executable, "--version"))
+        write_explicit_contract(project, task_id, "provider-output.txt")  # execution fails closed without an explicit contract
+        adapter = RuntimeCommandAdapter("custom", (sys.executable, "-c", WRITE_PROVIDER_OUTPUT))
         result = adapter.execute(store, task_id, None, project)
         assert result.status is ExecutionStatus.SUCCEEDED
         assert result.durable_handoff is True
@@ -1421,12 +1437,20 @@ def main() -> int:
         assert execution["candidate_sha"] == result.candidate_sha
         assert execution["pid"] is not None
         failed_task = store.upsert_task("provider execution fails")
+        write_explicit_contract(project, failed_task, "provider-output.txt")
         failing = RuntimeCommandAdapter("custom", (sys.executable, "-c", "import sys; sys.exit(7)"))
         failed = failing.execute(store, failed_task, None, project)
         assert failed.status is ExecutionStatus.FAILED
         failed_execution = store.conn.execute("SELECT * FROM executions WHERE task_id=?", (failed_task,)).fetchone()
         assert failed_execution["status"] == ExecutionStatus.FAILED
         assert failed_execution["candidate_sha"] is None
+        no_change_task = store.upsert_task("provider execution changes nothing")
+        write_explicit_contract(project, no_change_task, "provider-output.txt")
+        no_change = RuntimeCommandAdapter("custom", (sys.executable, "--version")).execute(store, no_change_task, None, project)
+        assert no_change.status is ExecutionStatus.FAILED and no_change.failure_reason == NO_IMPLEMENTATION_CHANGE
+        assert no_change.candidate_sha is None and store.latest_candidate(no_change_task) is None
+        no_change_execution = store.conn.execute("SELECT * FROM executions WHERE task_id=?", (no_change_task,)).fetchone()
+        assert no_change_execution["status"] == ExecutionStatus.FAILED and no_change_execution["candidate_sha"] is None
 
     def github_acceptance_models_sync_contract(store: Store, project: Path) -> None:
         result = run_github_acceptance(store)
