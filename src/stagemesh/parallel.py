@@ -665,15 +665,35 @@ class ParallelRunner:
 
     def _abandon(self, store: Store, task_id: str, why: str) -> None:
         """Kill this task's provider processes, fail its running executions and release its claims; keep committed work."""
+        protected_claims: set[str] = set()
         for execution in [e for e in store.running_executions() if e["task_id"] == task_id]:
+            saved = store.execution_process_identity(str(execution["id"]))
+            state = classify_process(saved, process_identity(execution["pid"]))
+            if state == "UNKNOWN":
+                if execution["claim_id"]:
+                    protected_claims.add(str(execution["claim_id"]))
+                record_audit(
+                    store,
+                    "task.abandon_skipped_unknown_execution",
+                    {
+                        "task_id": task_id,
+                        "execution_id": str(execution["id"]),
+                        "execution_kind": str(execution["kind"]),
+                        "claim_id": execution["claim_id"],
+                        "reason": why,
+                    },
+                )
+                continue
             if execution["kind"] == ExecutionKind.IMPLEMENTATION and execution["pid"]:
-                saved = store.execution_process_identity(str(execution["id"]))
-                if classify_process(saved, process_identity(execution["pid"])) != "DEAD":
+                if state == "LIVE":
                     _kill_pid(int(execution["pid"]))
             store.mark_orphan_running_execution_failed(str(execution["id"]), f"PARALLEL_{why.upper()}")
         for claim in store.conn.execute("SELECT id FROM claims WHERE task_id=? AND active=1 AND worker_id LIKE ?", (task_id, WORKER_PREFIX + "%")).fetchall():
+            if str(claim["id"]) in protected_claims:
+                continue
             store.release_claim(str(claim["id"]))
-        discard_partial_edits(self.project, task_id)
+        if not protected_claims:
+            discard_partial_edits(self.project, task_id)
         record_audit(store, "task.abandoned", {"task_id": task_id, "reason": why})
 
     def _interrupt(self, summary: ParallelSummary) -> None:
@@ -703,7 +723,9 @@ class ParallelRunner:
                 if thread.is_alive():  # stop the provider so the worker's tick returns instead of running to its timeout
                     for execution in [e for e in cleanup.running_executions() if e["task_id"] == task_id and e["pid"]]:
                         if execution["kind"] == ExecutionKind.IMPLEMENTATION:
-                            _kill_pid(int(execution["pid"]))
+                            saved = cleanup.execution_process_identity(str(execution["id"]))
+                            if classify_process(saved, process_identity(execution["pid"])) == "LIVE":
+                                _kill_pid(int(execution["pid"]))
             deadline = time.monotonic() + self.interrupt_grace_seconds
             for thread in self._threads.values():
                 thread.join(timeout=max(0.0, deadline - time.monotonic()))
@@ -742,9 +764,11 @@ class ParallelRunner:
             summary.stop_reason, summary.message = "GLOBAL_SAFETY_FAILURE", self.global_failure
         elif summary.interrupted:
             summary.stop_reason, summary.message = "INTERRUPTED", "interrupted; claims released, worktrees kept for resume"
+            self._record_control("stopped", "keyboard interrupt stop completed", terminate_running=True)
         elif self._terminate_requested.is_set():
             summary.stop_reason = "STOPPED"
             summary.message = "operator stop requested; claims released, worktrees kept for resume"
+            self._record_control("stopped", "operator stop completed", terminate_running=True)
         elif self._admission_stopped.is_set():
             summary.stop_reason = "STOPPED"
             summary.message = "queue admission stopped; active tasks were allowed to finish"
