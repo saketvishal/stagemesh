@@ -16,6 +16,7 @@ import pytest
 from test_bounded_execution import TASK
 from test_bounded_execution import _setup as _base_setup
 
+import stagemesh.workspace_guard as guard
 from stagemesh.contracts import evaluate_contract, parse_contract
 from stagemesh.coordinator import Coordinator, TargetSelection, TargetSelectionError
 from stagemesh.domain import (
@@ -347,9 +348,8 @@ def test_second_execution_cannot_claim_a_leased_worktree(tmp_path: Path) -> None
     assert run_implementation(store, provider(tmp_path, WRITE_DOC), project).status is ExecutionStatus.SUCCEEDED
 
 
-def test_lease_of_a_dead_process_is_recovered_and_audited(tmp_path: Path) -> None:
-    project, store = _setup(tmp_path)
-    run_implementation(store, provider(tmp_path, WRITE_DOC), project)
+def plant_dead_owner(project: Path) -> None:
+    """Leave the owner file a killed execution would leave: a real process identity whose process no longer exists."""
     proc = subprocess.Popen([PY, "-c", "import time; time.sleep(30)"])
     identity = popen_identity(proc)
     proc.kill()
@@ -359,13 +359,147 @@ def test_lease_of_a_dead_process_is_recovered_and_audited(tmp_path: Path) -> Non
                     "create_time": identity.create_time, "boot_id": identity.boot_id, "executable": identity.executable}),
         encoding="utf-8",
     )  # fmt: skip
-    (worktree(project) / "docs" / "partial.md").write_text("the dead run's leftovers", encoding="utf-8")
+
+
+def test_dead_owner_with_a_workspace_exactly_as_sealed_is_recovered_and_audited(tmp_path: Path) -> None:  # N2-C
+    project, store = _setup(tmp_path)
+    first = run_implementation(store, provider(tmp_path, WRITE_DOC), project)
+    plant_dead_owner(project)
 
     lease = acquire_workspace(store, project, TASK, ExecutionKind.IMPLEMENTATION)
     lease.release()
 
     (event,) = events(store, LEASE_RECOVERED)
-    assert event["task_id"] == TASK and mutation_events(store) == []
+    assert event["task_id"] == TASK and event["sealed_head"] == event["observed_head"] == first.candidate_sha
+    assert mutation_events(store) == []
+    assert run_implementation(store, provider(tmp_path, "import pathlib\npathlib.Path('docs/b.md').write_text('b')\n"), project).status is ExecutionStatus.SUCCEEDED
+
+
+def test_dead_owner_then_outside_commit_is_not_recovered(tmp_path: Path) -> None:  # N2-A
+    project, store = _setup(tmp_path)
+    first = run_implementation(store, provider(tmp_path, WRITE_DOC), project)
+    plant_dead_owner(project)
+    foreign = external_commit(project, "outside.txt")
+
+    with pytest.raises(WorkspaceMutation) as raised:
+        acquire_workspace(store, project, TASK, ExecutionKind.IMPLEMENTATION)
+
+    assert raised.value.reason == "head_changed"
+    (event,) = mutation_events(store)
+    assert event["expected_sha"] == first.candidate_sha and event["observed_sha"] == foreign and event["changed_paths"] == ["outside.txt"]
+    assert events(store, LEASE_RECOVERED) == []  # recovery never happened
+    assert GitWorkspace(worktree(project)).head() == foreign  # nothing adopted or reset
+    assert not (gitdir_of(project) / OWNER_FILE).exists()  # and the claimant did not keep a lease
+
+
+def test_dead_owner_then_tracked_edit_is_not_recovered(tmp_path: Path) -> None:  # N2-B
+    project, store = _setup(tmp_path)
+    run_implementation(store, provider(tmp_path, WRITE_DOC), project)
+    plant_dead_owner(project)
+    (worktree(project) / "docs" / "a.md").write_text("edited after the owner died\n", encoding="utf-8")
+
+    with pytest.raises(WorkspaceMutation) as raised:
+        acquire_workspace(store, project, TASK, ExecutionKind.IMPLEMENTATION)
+
+    assert raised.value.reason == "working_tree_modified"
+    (event,) = mutation_events(store)
+    assert event["changed_paths"] == ["docs/a.md"] and events(store, LEASE_RECOVERED) == []
+    assert (worktree(project) / "docs" / "a.md").read_text(encoding="utf-8") == "edited after the owner died\n"
+
+
+def test_dead_owner_then_untracked_leftover_is_not_recovered(tmp_path: Path) -> None:
+    project, store = _setup(tmp_path)
+    run_implementation(store, provider(tmp_path, WRITE_DOC), project)
+    plant_dead_owner(project)
+    (worktree(project) / "docs" / "partial.md").write_text("a killed agent's half-written file", encoding="utf-8")
+
+    with pytest.raises(WorkspaceMutation) as raised:
+        acquire_workspace(store, project, TASK, ExecutionKind.IMPLEMENTATION)
+
+    assert raised.value.reason == "working_tree_modified" and mutation_events(store)[0]["changed_paths"] == ["docs/partial.md"]
+
+
+def test_task_blocks_when_a_dead_owners_workspace_changed(tmp_path: Path) -> None:
+    project, store, coord, _sha = advance_to(Stage.VALIDATE, tmp_path)
+    store.advance_task(TASK, Stage.IMPLEMENT)  # rework is requested, then the previous attempt's owner is found dead
+    plant_dead_owner(project)
+    external_commit(project, "outside.txt")
+
+    coord.tick()
+
+    assert store.get_task(TASK)["status"] == TaskStatus.BLOCKED
+    assert mutation_events(store)[0]["reason"] == "head_changed" and events(store, LEASE_RECOVERED) == []
+
+
+def test_interrupted_execution_seals_what_it_left_and_the_next_one_proceeds(tmp_path: Path) -> None:
+    project, store = _setup(tmp_path)
+    run_implementation(store, provider(tmp_path, WRITE_DOC), project)
+
+    class Interrupted(Exception):
+        pass
+
+    with pytest.raises(Interrupted), guard.owned_workspace(store, project, TASK, ExecutionKind.IMPLEMENTATION) as lease:
+        lease.check("before_agent")
+        (lease.path / "docs" / "a.md").write_text("half done when Ctrl+C arrived\n", encoding="utf-8")
+        raise Interrupted
+
+    assert not (gitdir_of(project) / OWNER_FILE).exists()
+    assert "interrupted_by" not in ledger_of(project)  # no leniency marker exists any more: the state was sealed under the lease
+    lease = acquire_workspace(store, project, TASK, ExecutionKind.IMPLEMENTATION)  # the interrupted run's own output is not an outside change
+    lease.release()
+    assert mutation_events(store) == [] and events(store, LEASE_RECOVERED) == []
+
+
+def test_two_simultaneous_takeovers_of_a_dead_owner_have_exactly_one_winner(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:  # N1
+    project, store = _setup(tmp_path)
+    run_implementation(store, provider(tmp_path, WRITE_DOC), project)
+    plant_dead_owner(project)
+    db = project / ".stagemesh" / "stagemesh.sqlite3"
+    a_judging, b_blocked = threading.Event(), threading.Event()
+    real_try_lock, real_active = guard._try_lock, guard._owner_is_active
+
+    def try_lock(handle):
+        got = real_try_lock(handle)
+        if not got:
+            b_blocked.set()  # a second claimant found the workspace's takeover mutex held
+        return got
+
+    def owner_is_active(owner):
+        if threading.current_thread().name == "A":
+            a_judging.set()
+            b_blocked.wait(15)  # A has read the dead owner; hold the decision until B is provably contending for the same takeover
+            return False
+        return real_active(owner)
+
+    monkeypatch.setattr(guard, "_try_lock", try_lock)
+    monkeypatch.setattr(guard, "_owner_is_active", owner_is_active)
+    outcome: dict[str, object] = {}
+
+    def claim(name: str) -> None:
+        local = Store(db)
+        try:
+            outcome[name] = acquire_workspace(local, project, TASK, ExecutionKind.IMPLEMENTATION, claim_id=f"claim-{name}")
+        except WorkspaceMutation as exc:
+            outcome[name] = exc
+        finally:
+            local.close()
+
+    thread_a = threading.Thread(target=claim, args=("A",), name="A")
+    thread_a.start()
+    assert a_judging.wait(30)
+    thread_b = threading.Thread(target=claim, args=("B",), name="B")
+    thread_b.start()
+    thread_a.join(60)
+    thread_b.join(60)
+
+    winners = [name for name, value in outcome.items() if isinstance(value, guard.WorkspaceLease)]
+    losers = [value for value in outcome.values() if isinstance(value, WorkspaceMutation)]
+    assert b_blocked.is_set() and winners == ["A"] and len(losers) == 1
+    assert losers[0].reason == "workspace_owned_by_another_execution"
+    owner = json.loads((gitdir_of(project) / OWNER_FILE).read_text(encoding="utf-8"))
+    assert owner["token"] == outcome["A"]._token  # the winner's record survived: B never replaced it
+    assert len(events(store, LEASE_RECOVERED)) == 1
+    outcome["A"].release()
 
 
 def test_unreadable_owner_record_fails_closed(tmp_path: Path) -> None:
@@ -588,6 +722,38 @@ def test_worktree_from_before_this_feature_is_adopted_only_when_it_matches_the_d
     with pytest.raises(WorkspaceMutation) as raised:
         verify_candidate_workspace(store, project, TASK, sha, "VALIDATE:before_validation")
     assert raised.value.reason == "no_ownership_record_and_head_differs"
+
+
+def test_legacy_worktree_with_matching_head_but_dirty_tracked_file_is_not_adoptable(tmp_path: Path) -> None:  # N3
+    project, store = _setup(tmp_path)
+    wt = prepare_task_workspace(project, TASK)  # no ledger
+    (wt / "docs" / "a.md").write_text("legacy agent output\n", encoding="utf-8")
+    sha = GitWorkspace(wt).commit_all("legacy candidate")
+    store.add_candidate(TASK, sha, "legacy", durable_handoff=True)
+    (wt / "docs" / "a.md").write_text("uncommitted edit nobody sealed\n", encoding="utf-8")  # HEAD still matches the candidate
+
+    with pytest.raises(WorkspaceMutation) as at_boundary:
+        verify_candidate_workspace(store, project, TASK, sha, "VALIDATE:before_validation")
+    with pytest.raises(WorkspaceMutation) as at_acquire:
+        acquire_workspace(store, project, TASK, ExecutionKind.IMPLEMENTATION)
+
+    assert at_boundary.value.reason == at_acquire.value.reason == "legacy_workspace_has_uncommitted_changes"
+    assert [e["changed_paths"] for e in mutation_events(store)] == [["docs/a.md"], ["docs/a.md"]]
+    assert not (gitdir_of(project) / LEDGER_FILE).exists()  # nothing was sealed over the dirty state
+    assert (wt / "docs" / "a.md").read_text(encoding="utf-8") == "uncommitted edit nobody sealed\n"  # and nothing was reset
+
+
+def test_clean_legacy_worktree_is_still_adopted_on_acquire(tmp_path: Path) -> None:
+    project, store = _setup(tmp_path)
+    wt = prepare_task_workspace(project, TASK)
+    (wt / "docs" / "a.md").write_text("legacy agent output\n", encoding="utf-8")
+    sha = GitWorkspace(wt).commit_all("legacy candidate")
+    store.add_candidate(TASK, sha, "legacy", durable_handoff=True)
+
+    lease = acquire_workspace(store, project, TASK, ExecutionKind.IMPLEMENTATION)
+    lease.release()
+
+    assert ledger_of(project)["head"] == sha == ledger_of(project)["candidate"] and mutation_events(store) == []
 
 
 def test_tasks_without_a_worktree_are_not_blocked_by_the_guard(tmp_path: Path) -> None:
