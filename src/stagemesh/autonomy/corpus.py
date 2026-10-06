@@ -48,6 +48,7 @@ INCIDENT_CORPUS: tuple[Scenario, ...] = (
         _t(P + "test_scenario_a_second_writer_commit_is_detected_quarantined_and_never_adopted", "fail_closed"),
         _t(P + "test_scenario_a_second_writer_push_to_the_published_candidate_branch", "fail_closed"),
         _t(P + "test_stagemesh_own_commit_is_an_owner_advance_not_a_mutation", "success"),
+        _t(L + "test_a_crashed_providers_own_leftovers_are_not_an_external_mutation", "success"),
     ), True),
     Scenario("B", "Normal main advancement", "ordinary main advancement", (
         _t(L + "test_scenario_b_end_to_end_stale_candidate_is_refreshed_reevidenced_and_integrated", "success"),

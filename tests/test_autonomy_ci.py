@@ -260,3 +260,23 @@ def test_scenario_g_defect_outside_the_task_scope_is_deferred_not_fixed() -> Non
 
 def test_malformed_observation_markers_are_ignored() -> None:
     assert observations_from_log("STAGEMESH_TEST_OBSERVATION {not json}\nSTAGEMESH_TEST_OBSERVATION {\"test_id\": \"x\"}") == []
+
+
+def test_different_environments_are_never_compared_as_if_they_were_the_same() -> None:
+    """Found by dogfooding: this branch's local CI vs main's hosted CI failed `invariants` at different assertions (this machine has a
+    GitHub token set; hosted CI does not). That is not evidence about the candidate."""
+    candidate = HostedCIRun(CAND, {"invariants": _failed("invariants", "AssertionError: assert config.github.configured is False")}, environment="local")
+    base = HostedCIRun(BASE, {"invariants": _failed("invariants", "AssertionError: assert first == second == 3")}, environment="github-actions")
+
+    diagnosis = diagnose_ci(candidate, base)
+    (gate,) = diagnosis.gates
+
+    assert gate.klass is CIClass.GENUINE_UNKNOWN and gate.evidence == "ENVIRONMENT_MISMATCH"
+    assert plan_ci_response(diagnosis, task_id=TASK).action is Action.REQUEST_BASE_CI  # rerun base where the candidate ran
+    assert diagnosis.notes and "different" not in diagnosis.notes[0] and "local" in diagnosis.notes[0]
+    assert diagnosis.merge_blockers()  # not merge-ready, and not remediated either
+
+    same_env = diagnose_ci(HostedCIRun(CAND, candidate.gates, environment="local"), HostedCIRun(BASE, base.gates, environment="local"))
+    assert same_env.gates[0].klass is CIClass.CANDIDATE_REGRESSION  # in one environment the same logs are a real difference
+    unlabeled = diagnose_ci(HostedCIRun(CAND, candidate.gates), HostedCIRun(BASE, base.gates))
+    assert unlabeled.gates[0].klass is CIClass.CANDIDATE_REGRESSION  # unlabeled environments keep the previous behavior

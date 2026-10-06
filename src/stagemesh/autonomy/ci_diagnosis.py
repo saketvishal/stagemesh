@@ -116,6 +116,7 @@ class HostedCIRun:
     sha: str
     gates: Mapping[str, GateOutcome]
     complete: bool = True
+    environment: str = ""  # where the run executed (e.g. "github-actions", "local"); empty when unknown
 
 
 class HostedCI(Protocol):
@@ -256,6 +257,7 @@ def diagnose_gate(
     *,
     dependency: GateOutcome | None = None,
     defects: Iterable[TestDefect] = (),
+    same_environment: bool = True,
 ) -> GateDiagnosis:
     if candidate is None or candidate.conclusion is Conclusion.MISSING:
         return GateDiagnosis(name, CIClass.PENDING, "the candidate has not reported this gate yet")
@@ -274,6 +276,17 @@ def diagnose_gate(
     base_failed = base is not None and base.conclusion.failed
     base_passed = base is not None and base.conclusion is Conclusion.SUCCESS
     base_signature = base.signature if base is not None and base_failed else ""
+
+    if base is not None and not same_environment and base_failed and signature != base_signature:
+        # Different failures in different environments prove nothing about the candidate: base must be rerun where the candidate ran.
+        return GateDiagnosis(
+            name,
+            CIClass.GENUINE_UNKNOWN,
+            "candidate and base ran in different environments and failed differently; base CI must be rerun in the candidate's environment",
+            signature,
+            base_signature,
+            evidence="ENVIRONMENT_MISMATCH",
+        )
 
     if base_passed:
         if dependency is not None and dependency.conclusion.failed and dependency.signature == signature:
@@ -384,7 +397,10 @@ def diagnose_ci(
     base_gates = base.gates if base is not None and base.complete else {}
     dep_gates = dependency.gates if dependency is not None else {}
     names = sorted(set(candidate.gates if candidate else ()) | set(base.gates if base else ()))
+    same_environment = not (candidate and base and candidate.environment and base.environment and candidate.environment != base.environment)
     notes: list[str] = []
+    if not same_environment:
+        notes.append(f"candidate ran in {candidate.environment!r} but base in {base.environment!r}")  # type: ignore[union-attr]
     if base is None:
         notes.append("no base CI run available: failures cannot be attributed to the candidate")
     elif not base.complete:
@@ -401,6 +417,7 @@ def diagnose_ci(
                 base_gates.get(name),
                 dependency=dep_gates.get(name),
                 defects=defects,
+                same_environment=same_environment,
             )
         )
     return CIDiagnosis(sha, base.sha if base is not None else None, tuple(diagnoses), tuple(notes))
@@ -446,7 +463,8 @@ def plan_ci_response(
     elif overall is CIClass.DEPENDENCY_BASE_PR_FAILURE:
         action = Action.BLOCK_ON_DEPENDENCY
     elif overall is CIClass.GENUINE_UNKNOWN:
-        action = Action.REQUEST_BASE_CI if diagnosis.base_sha is None else (Action.RERUN_CI if reruns_left > 0 else Action.WAIT)
+        mismatch = any(g.evidence == "ENVIRONMENT_MISMATCH" for g in diagnosis.gates)
+        action = Action.REQUEST_BASE_CI if diagnosis.base_sha is None or mismatch else (Action.RERUN_CI if reruns_left > 0 else Action.WAIT)
     elif overall is CIClass.UNSUPPORTED_ENVIRONMENT:
         action = Action.RECORD_AND_DEFER
     else:  # BASELINE_FAILURE

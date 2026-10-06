@@ -82,7 +82,7 @@ from .autonomy.integration import SupervisedIntegrator
 from .autonomy.isolation import check_isolation
 from .autonomy.review_adapter import supervise_reviewer
 from .autonomy.supervisor import Supervisor
-from .autonomy.wiring import load_settings
+from .autonomy.wiring import SUPERVISED_MIN_REFRESH_ATTEMPTS, load_settings
 from .workers import WorkerValidationError, heartbeat_worker, register_worker
 
 
@@ -332,7 +332,7 @@ def _build_coordinator(
                 integration_ref,
                 require_independent_review,
                 parallel.lock if parallel else IntegrationLock(runtime_dir(project) / "integration.lock"),
-                max_rebases=config.parallel.integration_rebase_attempts,
+                max_rebases=max(config.parallel.integration_rebase_attempts, SUPERVISED_MIN_REFRESH_ATTEMPTS),
                 on_event=parallel.on_integration_event if parallel else None,
             )
     elif parallel:  # --dry-run: evidence-only integration, still behind the lock

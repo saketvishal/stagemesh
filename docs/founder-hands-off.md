@@ -24,7 +24,7 @@ are rejected at construction time.
 | **Founder Hands-Off gate** | **NOT MET** |
 | Ten-task autonomy streak | **0 / 10** (no real task has been run under the supervisor yet) |
 | Capability readiness | **55%** (level model below; 3/3 requires proof on real tasks, which no capability has) |
-| Incident scenarios with permanent regression tests | **12 of 12** (A to L), 33 mapped tests, all passing |
+| Incident scenarios with permanent regression tests | **12 of 12** (A to L), 34 mapped tests, all passing |
 | First milestone (A, B, C, E/F) | implemented and passing end to end through the real coordinator |
 | Human escalations observed on real tasks | **0** (no real tasks yet) |
 
@@ -147,6 +147,12 @@ Ordered by value for reaching the gate:
 7. **`recover_unknown` runs only when a task needs implementation**; there is no periodic sweep of UNKNOWN reviews/validations.
 8. Escalations are persisted and shown in the trace, but there is no push notification to the founder.
 9. `Coordinator.recover` and `recover-stale --release-unknown` remain available as manual operator tools and are outside the supervisor.
+10. **Providers that commit on their own fail closed.** Commits are trusted only by committer identity (`trusted_committer_emails`; default
+    the StageMesh identities). A provider CLI that commits itself with its own identity is treated as an external writer until its
+    email is listed. This is safe but would stall a hands-off run; the right fix is to learn the provider's identity from the adapter.
+11. **Refresh budget.** Supervised runs allow at least 5 automatic refreshes (`SUPERVISED_MIN_REFRESH_ATTEMPTS`); a ref that advances
+    more often still ends in the typed `integration_stale_base` block and needs `retry-task`.
+12. **Supervisor settings are read from `.stagemesh/autonomy.json` only**; there is no `config.json` section or CLI flag yet.
 
 ## Baseline failures observed (deferred, deliberately not fixed here)
 

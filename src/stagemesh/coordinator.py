@@ -49,7 +49,7 @@ class Coordinator:
         diagnosis_policy: DiagnosisPolicy | None = None,
         guard: Any | None = None,
     ):
-        self.guard = guard  # optional autonomy supervisor: allow(), integration_verified(), recover_unknown()
+        self.guard = guard  # optional autonomy supervisor: allow(), integration_verified(), recover_unknown(), execution_finished()
         self.worker_id = worker_id
         self.diagnosis_policy = diagnosis_policy or DiagnosisPolicy()
         self.store = store
@@ -263,6 +263,8 @@ class Coordinator:
             # The executor call has returned or raised, so its provider is no longer ours to wait on.
             self.store.finish_execution(execution["id"], ExecutionStatus.FAILED, result="executor_aborted")
         self.store.release_claim(claim_id)
+        if self.guard is not None:
+            self.guard.execution_finished(task_id)  # the owner's leftovers are not an external mutation
         record_audit(
             self.store,
             "task.implementation_unsuccessful",

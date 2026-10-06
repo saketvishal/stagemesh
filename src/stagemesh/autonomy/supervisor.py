@@ -188,6 +188,21 @@ class Supervisor:
             return None
         return self.record(self._quarantine(task_id, ownership, check.mutations, (not running) if restore is None else restore))
 
+    def execution_finished(self, task_id: str) -> None:
+        """An owned execution ended (successfully or not): what it left in the worktree is the owner's, not a second writer's.
+
+        HEAD and ref movement by anyone else is still detected first (and recorded; the restore happens at the next hand-over);
+        only then are the owner's uncommitted tracked edits adopted as the new expectation.
+        """
+        try:
+            if self.check_workspace(task_id, execution_running=True, restore=False) is not None:
+                return
+            ownership = load_ownership(self.store, task_id)
+            if ownership is not None and (Path(ownership.worktree) / ".git").exists():
+                save_ownership(self.store, replace(ownership, tracked_fingerprint=tracked_fingerprint(Path(ownership.worktree))))
+        except GitError:
+            return  # unobservable: the next hand-over will fail closed
+
     def require_clean_workspace(self, task_id: str, *, fetch: bool = False) -> None:
         decision = self.check_workspace(task_id, fetch=fetch)
         if decision is not None:

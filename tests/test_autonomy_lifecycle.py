@@ -313,3 +313,35 @@ def test_scenario_f_remediation_budget_exhaustion_is_a_typed_specific_escalation
     assert escalation["reason"] == "REMEDIATION_BUDGET_EXHAUSTED"
     assert escalation["attempted"] and escalation["why_undeterminable"]
     assert "unit" in escalation["smallest_decision"] and escalation["smallest_decision"].endswith("?")
+
+
+_CRASHING_PROVIDER = chr(10).join(
+    [
+        "import sys",
+        "from pathlib import Path",
+        "marker = Path('../attempt.marker')",
+        "first = not marker.exists()",
+        "marker.write_text('x')",
+        "if first:",
+        "    Path('src/app.py').write_text('VALUE = 2  # half-finished edit, then the provider crashed' + chr(10))",
+        "    sys.exit(3)",
+        "Path('src/widget.py').write_text('W = 1' + chr(10))",
+    ]
+)
+
+
+def test_a_crashed_providers_own_leftovers_are_not_an_external_mutation(tmp_path: Path) -> None:
+    """Uncommitted edits left by the owning provider when it crashed are the owner's, not a second writer's."""
+    project, store, base = _project(tmp_path)
+    store.upsert_task("add the widget", source_id=TASK)
+    store.advance_task(TASK, Stage.IMPLEMENT)
+    script = tmp_path / "provider.py"
+    script.write_text(_CRASHING_PROVIDER, encoding="utf-8")
+    supervisor = Supervisor(store, project, integration_ref=REF)
+    coordinator = _coordinator(store, project, supervisor, executor=SubprocessExecutor([sys.executable, str(script)], name="codex"))
+
+    assert coordinator.tick() == 0  # attempt 1 crashed after editing a tracked file
+    assert coordinator.tick() == 1  # attempt 2 starts from the leftovers without being mistaken for a second writer
+
+    assert [d for d in decisions(store, TASK) if d["condition"] == "EXTERNAL_WORKSPACE_MUTATION"] == []
+    assert store.latest_candidate(TASK) is not None

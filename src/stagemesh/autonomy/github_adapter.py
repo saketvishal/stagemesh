@@ -155,7 +155,7 @@ class GitHubHostedCI(GitHubClientBase):
             outcome = self._gate(run)
             complete = complete and outcome.conclusion is not Conclusion.PENDING
             gates[outcome.name] = outcome
-        return HostedCIRun(sha, gates, complete=complete and bool(runs))
+        return HostedCIRun(sha, gates, complete=complete and bool(runs), environment="github-actions")
 
     def rollup(self, sha: str) -> CIRollup:
         run = self.run_for(sha)

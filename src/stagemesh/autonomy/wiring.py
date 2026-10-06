@@ -23,6 +23,9 @@ from .merge_policy import IntegrationPolicy
 from .recovery_policy import RecoveryPolicy, UnknownIdentityStrategy
 
 SETTINGS_FILE = "autonomy.json"
+# A busy integration ref must not strand a supervised task behind a manual `retry-task`: refreshing is cheap relative to a founder
+# instruction, so supervised runs allow at least this many automatic refreshes regardless of `parallel.integration_rebase_attempts`.
+SUPERVISED_MIN_REFRESH_ATTEMPTS = 5
 ENV_FLAG = "STAGEMESH_AUTONOMY"
 
 
