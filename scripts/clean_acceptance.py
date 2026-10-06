@@ -8,6 +8,9 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+
+from stagemesh.persistence import SCHEMA_VERSION
 
 
 def run(command: list[str], cwd: Path, env: dict[str, str] | None = None) -> str:
@@ -71,7 +74,7 @@ def main() -> int:
             "executable path:",
             "imported package path:",
             f"project: {project.resolve()}",
-            "schema version: 3",
+            f"schema version: {SCHEMA_VERSION}",
             "backend: sqlite",
         ]
         missing = [item for item in required if item not in doctor]

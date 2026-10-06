@@ -80,7 +80,7 @@ from stagemesh.lifecycle import LifecycleError, evidence_allows_advance
 from stagemesh.objectives import ObjectivePlanner, ObjectiveValidationError
 from stagemesh.observability import health
 from stagemesh.operator import operator_report
-from stagemesh.persistence import Store, StoreValidationError
+from stagemesh.persistence import SCHEMA_VERSION, Store, StoreValidationError
 from stagemesh.persistence_backends import probe_backend
 from stagemesh.postgres_store import (
     POSTGRES_SCHEMA_TABLES,
@@ -1182,7 +1182,7 @@ def main() -> int:
         first = store.schema_version()
         store.migrate()
         second = store.schema_version()
-        assert first == second == 3
+        assert first == second == SCHEMA_VERSION
 
     def backend_probe_reports_postgres_dependency(store: Store, project: Path) -> None:
         sqlite_probe = probe_backend(None, project / ".stagemesh" / "stagemesh.sqlite3")

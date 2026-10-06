@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from stagemesh.domain import ExecutionStatus
-from stagemesh.persistence import Store
+from stagemesh.persistence import SCHEMA_VERSION, Store
 from stagemesh.providers import RuntimeCommandAdapter
 
 
@@ -47,7 +47,7 @@ def main() -> int:
             init_data["project"] != str(project.resolve())
             or init_data["runtime"] != str((project / ".stagemesh").resolve())
             or init_data["db"] != str((project / ".stagemesh" / "stagemesh.sqlite3").resolve())
-            or init_data["schema_version"] != 3
+            or init_data["schema_version"] != SCHEMA_VERSION
             or init_data["registered"] is not False
         ):
             raise AssertionError(init_json)
@@ -597,7 +597,7 @@ def main() -> int:
             "python interpreter:",
             "imported package path:",
             "db:",
-            "schema version: 3",
+            f"schema version: {SCHEMA_VERSION}",
             "backend: sqlite",
         ]
         missing = [item for item in required if item not in doctor]
@@ -606,7 +606,7 @@ def main() -> int:
         doctor_json = run([sys.executable, "-m", "stagemesh.cli", "--project", str(project), "doctor", "--json"], ROOT, env)
         doctor_data = json.loads(doctor_json)
         if (
-            doctor_data["schema_version"] != 3
+            doctor_data["schema_version"] != SCHEMA_VERSION
             or doctor_data["backend"] != "sqlite"
             or doctor_data["backend_available"] is not True
             or doctor_data["github_configured"] is not False
