@@ -4,6 +4,8 @@ import json
 import os
 from pathlib import Path
 
+from test_queue_run import _smoke_project, run_stagemesh_cli
+
 import stagemesh.cli as cli_module
 from stagemesh.audit import record_audit
 from stagemesh.config import load_config
@@ -12,8 +14,6 @@ from stagemesh.parallel import QUEUE_CONTROL_EVENT
 from stagemesh.persistence import Store
 from stagemesh.process_identity import process_identity
 from stagemesh.queue_visibility import format_queue_control, queue_control_report
-
-from test_queue_run import _smoke_project, run_stagemesh_cli
 
 
 def _store(project: Path) -> Store:
@@ -110,11 +110,18 @@ def test_text_status_health_and_task_doctor_show_operator_fields(tmp_path: Path)
         f"stale (process gone): {ids['DEAD']}",
         f"unknown process identity: {ids['UNKNOWN']}",
     ]
-    for argv in (("status",), ("task-doctor", "--task", "T-1"), ("queue-control", "status")):
+    for argv in (("status",), ("task-doctor", "--task", "T-1")):
         code, out, _ = run_stagemesh_cli(project, *argv)
         assert code == 0, argv
         for fragment in expected:
             assert fragment in out, (argv, fragment, out)
+
+    code, out, _ = run_stagemesh_cli(project, "queue-control", "status")
+    assert code == 0
+    lines = [line.strip() for line in out.splitlines()]
+    assert lines[:2] == ["queue admission: stopping", "active executions: 3"], out  # legacy shape, details follow
+    for fragment in expected[1:]:
+        assert fragment in out, (fragment, out)
 
     code, out, _ = run_stagemesh_cli(project, "health")
     assert code == 0
@@ -167,3 +174,48 @@ def test_display_commands_do_not_change_queue_control_state(tmp_path: Path) -> N
     for argv in (("status",), ("health", "--json"), ("task-doctor", "--task", "T-1"), ("queue-control", "status")):
         run_stagemesh_cli(project, *argv)
     assert snapshot() == before
+
+
+def test_ctrl_c_stop_after_resume_does_not_show_an_earlier_cycles_stop_reason(tmp_path: Path) -> None:
+    project = _smoke_project(tmp_path)
+    store = _store(project)
+
+    def event(state: str, reason: str, source: str) -> None:
+        record_audit(store, QUEUE_CONTROL_EVENT, {"at": "2099-01-01T00:00:00.000+00:00", "state": state, "reason": reason, "terminate_running": False, "source": source})
+
+    event("stopping", "deploy freeze", "operator")
+    event("stopped", "operator stop completed", "runner")
+    assert queue_control_report(store)["stop_reason"] == "deploy freeze"
+    event("resumed", "all clear", "operator")
+    assert queue_control_report(store)["stop_reason"] is None
+    event("stopped", "keyboard interrupt stop completed", "runner")  # Ctrl+C closes a stop nobody requested this cycle
+    report = queue_control_report(store)
+    assert report["state"] == "stopped" and report["stop_reason"] == "keyboard interrupt stop completed"
+    event("paused", "maintenance", "operator")
+    assert queue_control_report(store)["stop_reason"] is None
+    event("stopping", "second freeze", "operator")
+    assert queue_control_report(store)["stop_reason"] == "second freeze"
+    store.close()
+
+
+def test_execution_without_a_pid_is_unknown_not_stale_and_prints_cleanly(tmp_path: Path) -> None:
+    project = _smoke_project(tmp_path)
+    store = _store(project)
+    cli_module._sync_all_sources(store, project, load_config(project), None)
+    execution_id = store.start_execution(task_id="T-1", claim_id=None, kind=ExecutionKind.IMPLEMENTATION)  # in-process executor: no pid
+    store.close()
+
+    code, out, _ = run_stagemesh_cli(project, "status", "--json")
+    control = json.loads(out)["queue_control"]
+    assert code == 0 and control["execution_ids"] == [execution_id] and control["task_ids"] == ["T-1"]
+    assert control["pids"] == [] and control["stale_execution_ids"] == []
+    assert control["unknown_execution_ids"] == [execution_id]
+    execution = control["active_executions"][0]
+    assert execution["pid"] is None and execution["process_state"] == "UNKNOWN"
+
+    for argv in (("status",), ("task-doctor", "--task", "T-1"), ("queue-control", "status"), ("health",)):
+        code, out, _ = run_stagemesh_cli(project, *argv)
+        assert code == 0, argv
+        assert f"execution {execution_id}: task T-1 IMPLEMENTATION pid unknown process UNKNOWN" in out, (argv, out)
+        assert "tasks: T-1; pids: none known" in out, (argv, out)
+        assert f"unknown process identity: {execution_id}" in out and "stale (process gone)" not in out, (argv, out)
