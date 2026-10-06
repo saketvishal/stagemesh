@@ -295,27 +295,27 @@ def check_ownership(
     if ownership.candidate_ref and ownership.expected_ref_tip:
         tip = facts.resolve(ownership.candidate_ref)
         if tip != ownership.expected_ref_tip:
+            # Unlike HEAD (which StageMesh itself advances), a candidate ref only moves by registration: any other move is a mutation,
+            # whoever committed it (`foreign` lists the untrusted commits purely as information).
             foreign = _foreign_commits(facts, ownership, ownership.expected_ref_tip, tip)
-            if foreign:
-                result.mutations.append(
-                    Mutation("CANDIDATE_REF_MOVED", ownership.expected_ref_tip, tip or "missing", tuple(foreign), ownership.candidate_ref)
-                )
+            result.mutations.append(
+                Mutation("CANDIDATE_REF_MOVED", ownership.expected_ref_tip, tip or "missing", tuple(foreign), ownership.candidate_ref)
+            )
     if ownership.remote and ownership.remote_branch and ownership.expected_remote_tip:
         if fetch:
             facts.git.run("fetch", "--quiet", ownership.remote, ownership.remote_branch, check=False)
         tip = facts.resolve(f"refs/remotes/{ownership.remote}/{ownership.remote_branch}")
         if tip != ownership.expected_remote_tip:
             foreign = _foreign_commits(facts, ownership, ownership.expected_remote_tip, tip)
-            if foreign:
-                result.mutations.append(
-                    Mutation(
-                        "REMOTE_REF_MOVED",
-                        ownership.expected_remote_tip,
-                        tip or "missing",
-                        tuple(foreign),
-                        f"{ownership.remote}/{ownership.remote_branch}",
-                    )
+            result.mutations.append(
+                Mutation(
+                    "REMOTE_REF_MOVED",
+                    ownership.expected_remote_tip,
+                    tip or "missing",
+                    tuple(foreign),
+                    f"{ownership.remote}/{ownership.remote_branch}",
                 )
+            )
     if not execution_running and not result.mutations and ownership.tracked_fingerprint:
         current = tracked_fingerprint(worktree)
         if head == ownership.expected_head and current != ownership.tracked_fingerprint:

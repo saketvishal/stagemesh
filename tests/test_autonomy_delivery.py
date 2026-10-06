@@ -279,3 +279,35 @@ def test_cli_deliver_refuses_without_the_supervisor_enabled(tmp_path: Path, caps
     (repo / ".stagemesh" / "autonomy.json").write_text(json.dumps({"enabled": True}), encoding="utf-8")
     code = main(["--project", str(repo), "autonomy", "deliver", "--task", TASK])
     assert code in {2, 3}  # no GitHub remote / not isolated here: it refuses cleanly instead of publishing
+
+
+def test_an_existing_pr_with_the_wrong_base_is_retargeted_before_anything_else(tmp_path: Path) -> None:
+    """Independent-review finding: a reused PR's base must be verified, never assumed."""
+    repo, remote, store, prs, base, candidate = _rig(tmp_path)
+    from stagemesh.autonomy.dependencies import CIRollup, PRState, PullRequest
+
+    prs.update(PullRequest(7, candidate, branch_name(TASK, candidate), "some-other-branch", PRState.OPEN, CIRollup.SUCCESS, True))
+    ci = ScriptedCI({candidate: [_ok(candidate)], base: [_ok(base)]})
+
+    report = _deliver(_supervisor(store, repo, prs, ci), prs, ci)
+
+    assert ("set_base", 7, "main") in prs.calls and prs.prs[7].base_ref == "main"
+    assert report.status == "MERGE_READY" and report.pr_number == 7
+
+
+def test_merge_refuses_a_pr_whose_base_is_not_the_integration_branch(tmp_path: Path) -> None:
+    repo, remote, store, prs, base, candidate = _rig(tmp_path)
+    from stagemesh.autonomy.dependencies import CIRollup, PRState, PullRequest
+    from stagemesh.autonomy.decisions import Action
+
+    prs.update(PullRequest(7, candidate, "feat/x", "release-branch", PRState.OPEN, CIRollup.SUCCESS, True))
+    ci = ScriptedCI({candidate: [_ok(candidate)], base: [_ok(base)]})
+    supervisor = _supervisor(store, repo, prs, ci)
+    from stagemesh.autonomy.ci_diagnosis import diagnose_ci
+
+    diagnosis = diagnose_ci(_ok(candidate), _ok(base))
+    decision = supervisor.merge_when_ready(TASK, 7, ci=diagnosis)
+
+    assert decision.action is not Action.MERGE
+    assert all(call[0] != "merge" for call in prs.calls)  # never sent to a branch other than the one policy was evaluated against
+    assert "base" in decision.trace_line().lower() or "base" in str(decision.detail).lower() or decision.observed

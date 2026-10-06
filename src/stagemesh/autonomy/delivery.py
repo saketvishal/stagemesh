@@ -239,6 +239,8 @@ def _deliver_pass(
     report.evidence = evidence
     body = pr_body(task_id, title, sha, evidence)
     pr = pulls.find_open(branch)
+    if pr is not None and pr.base_ref != base:  # a reused PR's base is verified, never assumed
+        pr = pulls.set_base(pr.number, base)
     pr = pulls.edit(pr.number, title, body) if pr is not None else pulls.open_pr(branch, base, title, body, sha)
     report.pr_number = pr.number
 

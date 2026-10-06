@@ -46,7 +46,7 @@ BASE_HISTORY_REWRITTEN old_base=141d756 new_base=970efeb tree_equivalent=true or
 |---|---|---|
 | `AutonomyDecision`, `EscalationReason`, trace, ledger | `decisions.py` | typed decisions, escalation contract, durable trace, ten-task streak |
 | `CandidateProvenance` | `provenance.py` | baseline / candidate / validation / review / integration SHAs and lineage; evidence authorizes only the exact candidate |
-| `WorkspaceOwnership` | `provenance.py`, `supervisor.py` | detects HEAD, tracked-file, candidate-ref and remote-ref changes nobody registered; quarantines, never adopts |
+| `WorkspaceOwnership` | `provenance.py`, `supervisor.py` | detects HEAD, tracked-file, candidate-ref and remote-ref changes nobody registered; quarantines, never adopts. Trust model: the worktree HEAD may advance by commits from trusted committer identities (StageMesh itself, listed provider emails); candidate and remote refs only move by registration, whoever commits |
 | `BaseState` | `base_state.py` | classifies unchanged / advanced / history rewritten (tree-equivalent or not) / dependency landed; builds replacement candidates with equivalence proof |
 | `CIDiagnosis` | `ci_diagnosis.py` | compares candidate CI with base CI per gate; separates test defects from production defects |
 | `PRDependency` | `dependencies.py` | stacked PR blocking and automatic resumption |

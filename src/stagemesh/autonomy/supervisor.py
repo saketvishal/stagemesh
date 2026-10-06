@@ -628,6 +628,19 @@ class Supervisor:
             return self.record(
                 AutonomyDecision(Condition.MERGE_POLICY_UNSATISFIED, POLICY, Action.WAIT, task_id, {"pr": str(pr_number), "reason": "pull request or candidate unknown"})
             )
+        if pr.base_ref != self._integration_branch():
+            # Merging is irreversible: the policy was evaluated against the integration branch, so the PR must target exactly it.
+            return self.record(
+                AutonomyDecision(
+                    Condition.MERGE_POLICY_UNSATISFIED,
+                    POLICY,
+                    Action.WAIT,
+                    task_id,
+                    {"pr": str(pr_number), "base_mismatch": f"{pr.base_ref} != {self._integration_branch()}"},
+                    {"candidate": prov.candidate_sha},
+                    {"merged": False, "required": "retarget the PR to the integration branch first"},
+                )
+            )
         dependencies = None
         if any(edge.pr == pr_number for edge in self.declared_dependencies()):
             dependencies = self.assess_dependencies(task_id, pr_number, apply=False)

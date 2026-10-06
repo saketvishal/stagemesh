@@ -296,3 +296,22 @@ def test_ownership_round_trips_through_the_durable_store(tmp_path: Path) -> None
     claimed = claim_workspace(store, TASK, worktree, owner_execution_id="exec-9")
     loaded = load_ownership(store, TASK)
     assert isinstance(loaded, WorkspaceOwnership) and loaded == claimed
+
+
+def test_a_registered_ref_moved_by_a_trusted_identity_is_still_a_mutation(tmp_path: Path) -> None:
+    """Independent-review finding: only HEAD may be advanced by trusted identity; candidate/remote refs must move by registration."""
+    repo, worktree, base = _repo_with_worktree(tmp_path)
+    git(repo, "branch", "feat/cand", base)
+    store = new_store(tmp_path)
+    store.upsert_task("add the widget", source_id=TASK)
+    supervisor = Supervisor(store, repo, integration_ref="main")
+    supervisor.claim_workspace(TASK, worktree, candidate_ref="refs/heads/feat/cand")
+    git(repo, "checkout", "-q", "feat/cand")
+    moved = commit(repo, {"src/other.py": "O = 1\n"}, "moved by another process using the StageMesh identity", who=STAGEMESH)
+    git(repo, "checkout", "-q", "main")
+
+    decision = supervisor.check_workspace(TASK)
+
+    assert decision is not None and decision.detail["mutations"][0]["kind"] == "CANDIDATE_REF_MOVED"
+    assert git(repo, "rev-parse", "refs/heads/feat/cand") == base  # restored to the registered tip (the moved commit is preserved)
+    assert git(repo, "rev-parse", decision.detail["quarantine_refs"]["CANDIDATE_REF_MOVED"]) == moved
