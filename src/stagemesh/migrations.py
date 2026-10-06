@@ -54,6 +54,11 @@ MIGRATIONS = [
 ]
 
 
+def latest_schema_version() -> int:
+    """Highest version ``apply_migrations`` records after the base schema inserts version 1."""
+    return max((migration.version for migration in MIGRATIONS), default=1)
+
+
 def apply_migrations(conn: sqlite3.Connection) -> int:
     current = current_schema_version(conn)
     for migration in MIGRATIONS:
