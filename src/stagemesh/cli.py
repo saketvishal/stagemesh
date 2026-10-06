@@ -54,7 +54,7 @@ from .concurrency import IntegrationLock, ProviderLimiter
 from . import agents_cli
 from .agent_config import pool_kwargs
 from .diagnosis import DiagnosisPolicy, diagnose, format_findings, make_adapter_analyst
-from .parallel import ParallelRunner, ParallelSummary, SetupRefused, worker_id_for
+from .parallel import ParallelRunner, ParallelSummary, SetupRefused, queue_control_state, request_queue_control, worker_id_for
 from .queue_run import QueueRunner
 from .regenerate import format_results, regenerate_contracts
 from .recovery import RecoveryRefusal, format_doctor, rebaseline_task, rebind_contract, task_doctor
@@ -557,6 +557,7 @@ def command_status(args: argparse.Namespace) -> int:
     store = Store(db_path(project))
     store.migrate()
     rows = store.tasks()
+    control = queue_control_state(store)
     if args.json:
         report = health(store)
         print(
@@ -571,6 +572,7 @@ def command_status(args: argparse.Namespace) -> int:
                     "unknown_execution_count": report.unknown_execution_count,
                     "backlog_state": report.backlog_state,
                     "latest_implementation_failure": report.latest_implementation_failure,
+                    "queue_control": control,
                     **_health_scope_fields(report),
                     "tasks": [
                         {
@@ -593,6 +595,7 @@ def command_status(args: argparse.Namespace) -> int:
         return 0
     if not rows:
         print("backlog: EMPTY")
+    print(f"queue admission: {control['state']} (active executions: {len(control['active_executions'])})")
     for row in rows:
         print(f"{row['id']} {row['stage']} {row['status']} {row['title']}")
     store.close()
@@ -716,6 +719,28 @@ def command_queue_run(args: argparse.Namespace) -> int:
         return 2
     args.parallel = args.concurrency
     return command_run_parallel(args, queue=True)
+
+
+def command_queue_control(args: argparse.Namespace) -> int:
+    project = Path(args.project).resolve()
+    store = Store(db_path(project))
+    store.migrate()
+    reason = getattr(args, "reason", None) or f"operator requested queue {args.queue_control_command}"
+    if args.queue_control_command == "pause":
+        report = request_queue_control(store, "paused", reason)
+    elif args.queue_control_command == "resume":
+        report = request_queue_control(store, "resumed", reason)
+    elif args.queue_control_command == "stop":
+        report = request_queue_control(store, "stopping", reason, terminate_running=args.terminate_running)
+    else:
+        report = queue_control_state(store)
+    store.close()
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=True, default=str))
+    else:
+        print(f"queue admission: {report['state']}")
+        print(f"active executions: {len(report['active_executions'])}")
+    return 0
 
 
 def command_run_parallel(args: argparse.Namespace, *, queue: bool = False) -> int:
@@ -1017,6 +1042,7 @@ def command_health(args: argparse.Namespace) -> int:
     store = Store(db_path(project))
     store.migrate()
     report = health(store)
+    control = queue_control_state(store)
     if args.json:
         print(
             json.dumps(
@@ -1030,6 +1056,7 @@ def command_health(args: argparse.Namespace) -> int:
                     "unknown_execution_count": report.unknown_execution_count,
                     "backlog_state": report.backlog_state,
                     "latest_implementation_failure": report.latest_implementation_failure,
+                    "queue_control": control,
                     **_health_scope_fields(report),
                 },
                 indent=2,
@@ -1049,6 +1076,8 @@ def command_health(args: argparse.Namespace) -> int:
     print(f"failed_executions_current: {report.current_failed_execution_count}")
     print(f"stale_running_executions: {report.stale_execution_count}")
     print(f"unknown_executions: {report.unknown_execution_count}")
+    print(f"queue_admission: {control['state']}")
+    print(f"queue_active_executions: {len(control['active_executions'])}")
     if report.latest_implementation_failure:
         print(f"latest_implementation_failure: {report.latest_implementation_failure.get('reason')}")
     print(f"backlog: {report.backlog_state}")
@@ -2115,6 +2144,24 @@ def build_parser() -> argparse.ArgumentParser:
     queue_cmd.add_argument("--provider", help="Provider name to use for implementation (e.g. claude, codex)")
     queue_cmd.add_argument("--dry-run", action="store_true", help="Use FakeExecutor instead of a real provider")
     queue_cmd.set_defaults(func=command_queue_run)
+    queue_control = sub.add_parser("queue-control", help="Pause, resume, stop or inspect queue admission")
+    queue_control_sub = queue_control.add_subparsers(dest="queue_control_command", required=True)
+    queue_pause = queue_control_sub.add_parser("pause", help="Pause new queue admissions; running tasks continue")
+    queue_pause.add_argument("--reason")
+    queue_pause.add_argument("--json", action="store_true")
+    queue_pause.set_defaults(func=command_queue_control)
+    queue_resume = queue_control_sub.add_parser("resume", help="Resume queue admissions after a pause")
+    queue_resume.add_argument("--reason")
+    queue_resume.add_argument("--json", action="store_true")
+    queue_resume.set_defaults(func=command_queue_control)
+    queue_stop = queue_control_sub.add_parser("stop", help="Stop new queue admissions; running tasks finish unless termination is requested")
+    queue_stop.add_argument("--reason")
+    queue_stop.add_argument("--terminate-running", action="store_true", help="Terminate active provider work through the audited stop path")
+    queue_stop.add_argument("--json", action="store_true")
+    queue_stop.set_defaults(func=command_queue_control)
+    queue_control_status = queue_control_sub.add_parser("status", help="Show current queue admission state and active executions")
+    queue_control_status.add_argument("--json", action="store_true")
+    queue_control_status.set_defaults(func=command_queue_control)
     cont = sub.add_parser("continue")
     cont.add_argument(
         "--once",
