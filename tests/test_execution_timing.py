@@ -52,7 +52,7 @@ def _run(store: Store, clock: Clock, kind: ExecutionKind, seconds: float, status
 
 @pytest.mark.parametrize(
     ("seconds", "text"),
-    [(0, "0s"), (0.4, "0s"), (4, "4s"), (59.6, "1m 00s"), (68, "1m 08s"), (146, "2m 26s"), (494, "8m 14s"), (3789, "1h 03m 09s"), (None, "-")],
+    [(0, "0s"), (0.4, "0s"), (4, "4s"), (59.6, "1m 00s"), (68, "1m 08s"), (146, "2m 26s"), (494, "8m 14s"), (3789, "1h 03m"), (3600, "1h 00m"), (None, "-")],
 )
 def test_format_duration(seconds: float | None, text: str) -> None:
     assert format_duration(seconds) == text
@@ -232,3 +232,24 @@ def test_real_implementation_and_validation_failure_are_timed(tmp_path: Path) ->
     assert (validation["stage"], validation["actor"], validation["result"]) == ("VALIDATE", "stagemesh-validator", "failed")
     assert validation["candidate_sha"] == str(candidate["sha"])
     assert validation["duration_seconds"] >= 0
+
+
+def test_continue_step_output_and_json_show_execution_duration(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    from test_run_ready import _project
+
+    project = _project(tmp_path, ["T-1"])
+    assert cli_module.main(["--project", str(project), "continue", "--dry-run", "--task", "T-1"]) == 0
+    human = capsys.readouterr().out
+    assert any(line.startswith("  duration: ") and line.endswith("s") for line in human.splitlines())
+
+    project = _project(tmp_path / "json", ["T-1"])
+    assert cli_module.main(["--project", str(project), "run-ready", "--dry-run", "--json"]) == 0
+    steps = json.loads(capsys.readouterr().out)["steps"]
+    timed = [step for step in steps if step["executions"]]
+    assert timed
+    for step in timed:
+        assert isinstance(step["duration_seconds"], float) and step["duration_seconds"] >= 0
+        for rec in step["executions"]:
+            assert rec["finished_at"] >= rec["started_at"] > 0
+            assert rec["duration_seconds"] == pytest.approx(rec["finished_at"] - rec["started_at"], abs=0.001)
+            assert rec["actor"] and rec["result"] == "passed"
