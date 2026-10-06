@@ -18,6 +18,7 @@ from .review import Reviewer, independent_review_verified
 from .scheduling import Scheduler
 from .serialized_integration import REBASE_CONFLICT, STALE_BASE
 from .validation import Validator
+from .workspace_guard import EXTERNAL_WORKSPACE_MUTATION, WorkspaceMutation, verify_candidate_workspace
 
 
 _REF_STATE_CODES = frozenset({REBASE_CONFLICT, STALE_BASE})
@@ -161,6 +162,14 @@ class Coordinator:
                     durable_handoff=False,
                 )
                 return 0
+            if result.failure_reason == EXTERNAL_WORKSPACE_MUTATION:
+                # The execution's workspace was changed outside StageMesh. Another attempt would run on the same tampered state, so the
+                # task stops (blocked) until an operator restores or removes the workspace; nothing from it is adopted.
+                self._release_unsuccessful_implementation(
+                    task_id, claim_id, status=str(result.status), reason=EXTERNAL_WORKSPACE_MUTATION, candidate_sha=None, durable_handoff=False
+                )
+                self._block_on_mutation(task_id, "IMPLEMENT")
+                return 1
             if result.capacity_failure:
                 # Provider is unavailable (not-found, rate-limit, capacity exhausted).
                 # Release the claim immediately so the task can be re-dispatched rather
@@ -204,29 +213,56 @@ class Coordinator:
             return 0
         sha = str(candidate["sha"])
         if stage is Stage.VALIDATE:
+            if not self._workspace_intact(task_id, sha, "VALIDATE:before_validation"):
+                return 1
             bound = contract_for_candidate(self.store, task_id, sha, self.project)
             if not self.store.has_bound_evidence(task_id, sha, EvidenceKind.VALIDATION, bound.digest):
                 self.validator.validate(self.store, task_id, sha, self.project)
+                if not self._workspace_intact(task_id, sha, "VALIDATE:after_validation"):
+                    return 1  # the evidence just recorded is not accepted: the task does not advance or remediate on it
             if self.store.has_bound_evidence(task_id, sha, EvidenceKind.VALIDATION, bound.digest, EvidenceStatus.FAILED):
                 return self._remediate_or_block(task_id, sha, Stage.VALIDATE)
             return self._advance_with_evidence(task_id, stage, sha, EvidenceKind.VALIDATION, bound.digest)
         if stage is Stage.REVIEW:
+            if not self._workspace_intact(task_id, sha, "REVIEW:before_review", require=(EvidenceKind.VALIDATION,)):
+                return 1
             bound = contract_for_candidate(self.store, task_id, sha, self.project)
             if not self._review_satisfied(task_id, sha, bound.digest):
                 self.reviewer.review(self.store, task_id, sha, self.project)
+                if not self._workspace_intact(task_id, sha, "REVIEW:after_review", require=(EvidenceKind.VALIDATION,)):
+                    return 1
             if self.store.has_bound_evidence(task_id, sha, EvidenceKind.REVIEW, bound.digest, EvidenceStatus.FAILED):
                 return self._remediate_or_block(task_id, sha, Stage.REVIEW)
             if not self._review_satisfied(task_id, sha, bound.digest):
                 return 0  # review infrastructure failure or unsatisfied independence: stay in REVIEW, no remediation
             return self._advance_with_evidence(task_id, stage, sha, EvidenceKind.REVIEW, bound.digest)
         if stage is Stage.INTEGRATE:
+            if not self._workspace_intact(task_id, sha, "INTEGRATE:before_integration", require=(EvidenceKind.VALIDATION, EvidenceKind.REVIEW)):
+                return 1
             bound = contract_for_candidate(self.store, task_id, sha, self.project)
             if not self.store.has_bound_evidence(task_id, sha, EvidenceKind.INTEGRATION, bound.digest):
-                self.integrator.integrate(self.store, task_id, sha, self.project)
+                try:
+                    self.integrator.integrate(self.store, task_id, sha, self.project)
+                except WorkspaceMutation:
+                    self._block_on_mutation(task_id, "INTEGRATE")
+                    return 1
             if self.store.has_bound_evidence(task_id, sha, EvidenceKind.INTEGRATION, bound.digest, EvidenceStatus.FAILED):
                 return self._remediate_or_block(task_id, sha, Stage.INTEGRATE)
             return self._advance_with_evidence(task_id, stage, sha, EvidenceKind.INTEGRATION, bound.digest)
         return 0
+
+    def _workspace_intact(self, task_id: str, sha: str, stage: str, require: tuple[EvidenceKind, ...] = ()) -> bool:
+        """Prove the candidate is exactly what the authorized execution sealed; on any difference record it, block the task and say no."""
+        try:
+            verify_candidate_workspace(self.store, self.project, task_id, sha, stage, require=require)
+        except WorkspaceMutation:
+            self._block_on_mutation(task_id, stage)
+            return False
+        return True
+
+    def _block_on_mutation(self, task_id: str, stage: str) -> None:
+        self.store.block_task(task_id)
+        record_audit(self.store, "task.blocked", {"task_id": task_id, "reason": EXTERNAL_WORKSPACE_MUTATION, "stage": stage})
 
     def _implementation_may_still_run(self, task_id: str) -> bool:
         """True when a prior implementation process is LIVE or of UNKNOWN state; lease expiry is not proof of death."""

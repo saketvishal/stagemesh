@@ -185,6 +185,48 @@ A `stale_baseline` stops the task at once, and a repeated `contract_scope`, `val
 before the implementation provider is called again: none of them can be fixed by more code. Findings are stored verbatim, shown in
 `continue`, `queue-run` and `diagnose`, and quoted unabridged (with the candidate sha) in the next implementation prompt.
 
+### Workspace ownership and external-mutation detection
+
+Each task's worktree is written by one StageMesh execution at a time. An execution claims the worktree with an owner file in its private
+git dir, created atomically (`O_EXCL`); a live owner makes every other claim fail closed. A claim of a dead owner's lease is serialized by
+a per-workspace OS file lock, so when several executions find the same dead owner exactly one takes it over and the rest are refused. When
+an execution finishes it *seals* the result: the HEAD, a content fingerprint of the uncommitted files, and the candidate SHA it produced.
+Nothing is added to the database. The agent's own edits, and linear commits it makes while it holds the lease, are the authorized result.
+
+The worktree and the candidate rows are compared with the seal before the agent starts and after it exits, before and after validation,
+before and after independent review, before integration, and before a rebase rewrites the worktree. Review always runs in a throwaway
+checkout of the exact candidate SHA, never in the implementation worktree, and a validation gate that moves HEAD in its checkout cannot
+pass. These differences are treated as external mutation: a new commit or moved HEAD, a modified, added or deleted file whose content
+differs from the seal, a lost or foreign lease, a candidate that is not the sealed one, or missing PASSED validation evidence for the exact
+candidate SHA. Each records an `EXTERNAL_WORKSPACE_MUTATION` audit event (task, execution or claim, workspace, stage, reason, expected and
+observed SHA, changed paths, remedy) and blocks the task. The mutated workspace is not reset, committed or adopted, and the task does not
+advance on it. Evidence rows already written around the detection are not deleted.
+
+**Dead owners.** A lease whose owning process is dead is taken over only if the workspace is exactly what that owner last sealed; then
+`workspace.lease_recovered` is audited. If anything differs (a commit, a tracked edit, any added file) the claim is refused as an external
+mutation instead, so a killed agent's half-written output also needs an operator. An execution interrupted by an exception or Ctrl+C
+after the before-agent check seals what it left. An interrupt before that check does not adopt a change that appeared first.
+
+**Older worktrees.** A worktree with no ownership record (created before this feature) is adopted only when HEAD is the task's recorded
+candidate (or baseline) and its tracked files are clean. Untracked files in such a worktree are not checked.
+
+**Recovery is explicit.** Inspect the workspace and either reset it to the event's `expected_sha` or remove it
+(`git worktree remove --force <workspace>`), then `stagemesh retry-task --task <id>`. StageMesh never reconciles on its own.
+
+**What this guarantees, and what it does not.** StageMesh provides exclusive StageMesh ownership of a task worktree, verification of the
+exact starting state, a bounded window in which changes are authorized, a linear sealed candidate, and fail-closed detection at lifecycle
+boundaries. It does *not* prove which process changed or committed files during the authorized agent execution window: git cannot tell the
+lease holder's agent from an unrelated process running as the same user, and StageMesh does not try to infer it from commit identity,
+timestamps or process guesses. Cryptographic, process or container isolation of same-user filesystem writers is separate future hardening
+work; until then, same-user mutation during that window is not solved, only bounded.
+
+**Known gaps (follow-up hardening).** The fingerprint does not cover the index state alone (staging an already-dirty file), skip-worktree
+or assume-unchanged edits, ignored files, or a branch switch at the same SHA. Claimants hold the per-workspace lock across the
+owner-file create and JSON write, so they wait instead of reading a partial record. A reader that does not take that lock can still
+see an unreadable record and fail closed. Validation evidence recorded before a detection is reused after
+`retry-task`. `parallel` partial-edit cleanup, `adopt-candidate --validate` and `recovery` revalidation do not go through the guard. A gate
+that dirties its checkout without moving HEAD is not detected.
+
 ### Repairing a stuck task without touching SQLite
 
 All three commands go through the store, refuse while the task has an active claim or running execution, never delete candidates,
