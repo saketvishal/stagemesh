@@ -22,8 +22,9 @@ from .task_selection import Candidate, Selection, SelectionRefusal, select_next_
 from .timing import execution_timings, format_duration, step_duration
 from .workspaces import task_workspace, worktree_root
 
-# A task whose latest execution failed is a normal remediation state, not a reason to stop supervising.
-_IGNORED_PROBLEMS = frozenset({"current_failed_executions"})
+# Task-local backlog problems: another task's failed execution or BLOCKED status says nothing about the selected task.
+# The selected task's own BLOCKED status is refused explicitly in run_ready. Global hazards (unknown/stale executions) stay fatal.
+_IGNORED_PROBLEMS = frozenset({"current_failed_executions", "blocked_tasks"})
 
 
 class RunReadyRefusal(Exception):
@@ -501,6 +502,12 @@ def run_ready(
         selection_info.update(selection.to_dict())
         _log_selection(selection, on_start)
         selected = selection.task_id
+        if store.get_task(selected)["status"] == TaskStatus.BLOCKED:
+            raise RunReadyRefusal(
+                "task_blocked",
+                f"task {selected} is BLOCKED; inspect diagnosis and use retry-task after remediation",
+                task_id=selected,
+            )
         _ensure_contract(store, project, selected, auto_plan, plan_info, note)
         if any(row["task_id"] == selected for row in store.running_executions()):
             raise RunReadyRefusal(
