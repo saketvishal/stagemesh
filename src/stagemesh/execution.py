@@ -15,10 +15,10 @@ from .git import GitWorkspace
 from .persistence import Store
 from .process_identity import popen_identity
 from .remediation import remediation_context
+from .workspace_guard import EXTERNAL_WORKSPACE_MUTATION, WorkspaceMutation, owned_workspace
 from .workspaces import (
     NO_IMPLEMENTATION_CHANGE,
     commit_implementation_candidate,
-    prepare_task_workspace,
     record_task_baseline,
 )
 
@@ -159,20 +159,28 @@ class FakeExecutor(Executor):
     name = "fake"
 
     def run(self, store: Store, task_id: str, claim_id: str | None, project: Path) -> ExecutionResult:
-        execution_id = store.start_execution(task_id=task_id, claim_id=claim_id, kind=ExecutionKind.IMPLEMENTATION, actor=self.name)
-        run_path = prepare_task_workspace(project, task_id)
-        record_task_baseline(store, task_id, run_path)
-        workspace = GitWorkspace(run_path)
-        workspace.init_if_needed()
-        task_file = run_path / f"stagemesh-task-{task_id}.txt"
-        task_file.write_text(f"implemented {task_id}\n", encoding="utf-8")
-        sha = workspace.commit_all(
-            f"StageMesh implementation for {task_id}",
-            attribution=attribution_for_worker("local-worker", self.name),
-        )
-        store.add_candidate(task_id, sha, self.name, durable_handoff=True)
-        store.finish_execution(execution_id, ExecutionStatus.SUCCEEDED, sha)
-        return ExecutionResult(ExecutionStatus.SUCCEEDED, sha, durable_handoff=True)
+        try:
+            with owned_workspace(store, project, task_id, ExecutionKind.IMPLEMENTATION, claim_id=claim_id) as lease:
+                execution_id = store.start_execution(task_id=task_id, claim_id=claim_id, kind=ExecutionKind.IMPLEMENTATION, actor=self.name)
+                lease.bind_execution(execution_id)
+                run_path = lease.path
+                record_task_baseline(store, task_id, run_path)
+                workspace = GitWorkspace(run_path)
+                workspace.init_if_needed()
+                lease.check("before_agent")
+                task_file = run_path / f"stagemesh-task-{task_id}.txt"
+                task_file.write_text(f"implemented {task_id}\n", encoding="utf-8")
+                lease.after_agent()
+                sha = workspace.commit_all(
+                    f"StageMesh implementation for {task_id}",
+                    attribution=attribution_for_worker("local-worker", self.name),
+                )
+                store.add_candidate(task_id, sha, self.name, durable_handoff=True)
+                lease.seal(sha)
+                store.finish_execution(execution_id, ExecutionStatus.SUCCEEDED, sha)
+                return ExecutionResult(ExecutionStatus.SUCCEEDED, sha, durable_handoff=True)
+        except WorkspaceMutation:
+            return ExecutionResult(ExecutionStatus.FAILED, failure_reason=EXTERNAL_WORKSPACE_MUTATION)
 
 
 class SubprocessExecutor(Executor):
@@ -196,16 +204,25 @@ class SubprocessExecutor(Executor):
 
         task = store.get_task(task_id)
         from .providers import _build_task_prompt
-        run_path = prepare_task_workspace(project, task_id)
+
+        try:
+            with owned_workspace(store, project, task_id, ExecutionKind.IMPLEMENTATION, claim_id=claim_id) as lease:
+                return self._run_owned(store, task_id, claim_id, project, task, lease, _build_task_prompt)
+        except WorkspaceMutation:
+            return ExecutionResult(ExecutionStatus.FAILED, failure_reason=EXTERNAL_WORKSPACE_MUTATION)
+
+    def _run_owned(self, store, task_id, claim_id, project, task, lease, build_prompt) -> ExecutionResult:  # type: ignore[no-untyped-def]
+        run_path = lease.path
         baseline_sha = record_task_baseline(store, task_id, run_path)
         try:
             bound = bind_task_contract(store, project, task_id, baseline_sha)
         except ContractRejected as exc:
             return ExecutionResult(ExecutionStatus.FAILED, failure_reason=f"{exc.reason}: {exc}")
-        task_prompt = _build_task_prompt(
+        task_prompt = build_prompt(
             task_id, task, run_path, contract=bound.contract, remediation=remediation_context(store, task_id)
         )
 
+        lease.check("before_agent")
         try:
             proc = subprocess.Popen(
                 self.command,
@@ -237,8 +254,10 @@ class SubprocessExecutor(Executor):
             boot_id=ident.boot_id,
             executable=ident.executable,
         )
+        lease.bind_execution(execution_id)
         stdout, stderr, timed_out = communicate_bounded(proc, task_prompt, provider_timeout_seconds(self.timeout_seconds))
         code = proc.returncode
+        lease.after_agent()
 
         if timed_out:
             store.finish_execution(execution_id, ExecutionStatus.FAILED, result=PROVIDER_TIMEOUT)
@@ -264,5 +283,6 @@ class SubprocessExecutor(Executor):
             store.finish_execution(execution_id, ExecutionStatus.FAILED, result=NO_IMPLEMENTATION_CHANGE)
             return ExecutionResult(ExecutionStatus.FAILED, failure_reason=NO_IMPLEMENTATION_CHANGE)
         store.add_candidate(task_id, sha, self.name, durable_handoff=True)
+        lease.seal(sha)
         store.finish_execution(execution_id, ExecutionStatus.SUCCEEDED, sha)
         return ExecutionResult(ExecutionStatus.SUCCEEDED, sha, durable_handoff=True)
