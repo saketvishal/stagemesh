@@ -40,6 +40,7 @@ from .persistence import Store, StoreValidationError
 from .persistence_backends import probe_backend
 from .postgres_store import PostgresStore, PostgresUnavailable, postgres_schema_contract
 from .process_identity import current_process_identity
+from .queue_visibility import format_queue_control, queue_control_report
 from .provider_acceptance import run_provider_acceptance
 from .providers import ProviderValidationError, adapters_from_config
 from .redaction import redact_command_secrets, redact_url_credentials
@@ -51,7 +52,7 @@ from .registry import (
 )
 from .concurrency import IntegrationLock, ProviderLimiter
 from .diagnosis import DiagnosisPolicy, diagnose, format_findings, make_adapter_analyst
-from .parallel import ParallelRunner, ParallelSummary, SetupRefused, queue_control_state, request_queue_control, worker_id_for
+from .parallel import ParallelRunner, ParallelSummary, SetupRefused, request_queue_control, worker_id_for
 from .queue_run import QueueRunner
 from .recovery import RecoveryRefusal, format_doctor, rebaseline_task, rebind_contract, task_doctor
 from .timing import format_task_timing, task_timing
@@ -569,7 +570,7 @@ def command_status(args: argparse.Namespace) -> int:
     store = Store(db_path(project))
     store.migrate()
     rows = store.tasks()
-    control = queue_control_state(store)
+    control = queue_control_report(store)
     if args.json:
         report = health(store)
         print(
@@ -607,7 +608,8 @@ def command_status(args: argparse.Namespace) -> int:
         return 0
     if not rows:
         print("backlog: EMPTY")
-    print(f"queue admission: {control['state']} (active executions: {len(control['active_executions'])})")
+    for line in format_queue_control(control):
+        print(line)
     for row in rows:
         print(f"{row['id']} {row['stage']} {row['status']} {row['title']}")
     store.close()
@@ -745,13 +747,16 @@ def command_queue_control(args: argparse.Namespace) -> int:
     elif args.queue_control_command == "stop":
         report = request_queue_control(store, "stopping", reason, terminate_running=args.terminate_running)
     else:
-        report = queue_control_state(store)
+        report = queue_control_report(store)
     store.close()
     if args.json:
         print(json.dumps(report, indent=2, sort_keys=True, default=str))
     else:
         print(f"queue admission: {report['state']}")
         print(f"active executions: {len(report['active_executions'])}")
+        if args.queue_control_command == "status":
+            for line in format_queue_control(report)[1:]:
+                print(line)
     return 0
 
 
@@ -1054,7 +1059,7 @@ def command_health(args: argparse.Namespace) -> int:
     store = Store(db_path(project))
     store.migrate()
     report = health(store)
-    control = queue_control_state(store)
+    control = queue_control_report(store)
     if args.json:
         print(
             json.dumps(
@@ -1090,6 +1095,8 @@ def command_health(args: argparse.Namespace) -> int:
     print(f"unknown_executions: {report.unknown_execution_count}")
     print(f"queue_admission: {control['state']}")
     print(f"queue_active_executions: {len(control['active_executions'])}")
+    for line in format_queue_control(control)[1:]:
+        print(line.strip())
     if report.latest_implementation_failure:
         print(f"latest_implementation_failure: {report.latest_implementation_failure.get('reason')}")
     print(f"backlog: {report.backlog_state}")
