@@ -327,15 +327,18 @@ class Store:
         boot_id: str | None = None,
         executable: str | None = None,
         candidate_sha: str | None = None,
+        actor: str | None = None,
     ) -> str:
         task_id = _validate_text(task_id, "task id")
         claim_id = _validate_optional_text(claim_id, "claim id")
         kind = _validate_enum(kind, ExecutionKind, "execution kind")
+        actor = _validate_optional_text(actor, "execution actor")
         candidate_sha = _validate_optional_text(candidate_sha, "candidate sha")
         execution_id = str(uuid.uuid4())
         now = time.time()
         self.conn.execute(
-            "INSERT INTO executions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO executions(id, task_id, claim_id, kind, status, pid, process_create_time, boot_id, "
+            "executable, candidate_sha, started_at, updated_at, actor) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 execution_id,
                 task_id,
@@ -349,18 +352,31 @@ class Store:
                 candidate_sha,
                 now,
                 now,
+                actor,
             ),
         )
         self.conn.commit()
         return execution_id
 
-    def finish_execution(self, execution_id: str, status: ExecutionStatus, candidate_sha: str | None = None) -> None:
+    def finish_execution(
+        self,
+        execution_id: str,
+        status: ExecutionStatus,
+        candidate_sha: str | None = None,
+        *,
+        actor: str | None = None,
+        result: str | None = None,
+    ) -> None:
+        """Close an execution; `updated_at` is its finish time (see timing.py). `result` is a short failure reason."""
         execution_id = _validate_text(execution_id, "execution id")
         status = _validate_enum(status, ExecutionStatus, "execution status")
         candidate_sha = _validate_optional_text(candidate_sha, "candidate sha")
+        actor = _validate_optional_text(actor, "execution actor")
+        result = _validate_optional_text(result, "execution result")
         self.conn.execute(
-            "UPDATE executions SET status=?, candidate_sha=COALESCE(?, candidate_sha), updated_at=? WHERE id=?",
-            (status, candidate_sha, time.time(), execution_id),
+            "UPDATE executions SET status=?, candidate_sha=COALESCE(?, candidate_sha), actor=COALESCE(?, actor), "
+            "result=COALESCE(?, result), updated_at=? WHERE id=?",
+            (status, candidate_sha, actor, result, time.time(), execution_id),
         )
         self.conn.commit()
 
@@ -828,7 +844,7 @@ class Store:
             if task is None or task["status"] != TaskStatus.CLAIMED or task["stage"] != claim["stage"]:
                 return False
             self.conn.execute(
-                "UPDATE executions SET status=?, updated_at=? WHERE id=? AND status=?",
+                "UPDATE executions SET status=?, result='recovered_stale', updated_at=? WHERE id=? AND status=?",
                 (ExecutionStatus.FAILED, now, execution_id, ExecutionStatus.RUNNING),
             )
             self.conn.execute("UPDATE claims SET active=0 WHERE id=? AND active=1", (claim["id"],))
@@ -871,7 +887,7 @@ class Store:
             if task is None:
                 return False
             updated = self.conn.execute(
-                "UPDATE executions SET status=?, updated_at=? WHERE id=? AND status=?",
+                "UPDATE executions SET status=?, result='orphaned', updated_at=? WHERE id=? AND status=?",
                 (ExecutionStatus.FAILED, now, execution_id, ExecutionStatus.RUNNING),
             ).rowcount
             if updated != 1:

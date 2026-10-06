@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -15,7 +16,11 @@ from .process_identity import classify_process, process_identity
 from .remediation import RemediationPolicy
 from .review import Reviewer, independent_review_verified
 from .scheduling import Scheduler
+from .serialized_integration import REBASE_CONFLICT, STALE_BASE
 from .validation import Validator
+
+
+_REF_STATE_CODES = frozenset({REBASE_CONFLICT, STALE_BASE})
 
 
 @dataclass(frozen=True)
@@ -248,7 +253,7 @@ class Coordinator:
         execution = self.store.latest_execution_for_claim(claim_id)
         if execution is not None and execution["status"] == ExecutionStatus.RUNNING:
             # The executor call has returned or raised, so its provider is no longer ours to wait on.
-            self.store.finish_execution(execution["id"], ExecutionStatus.FAILED)
+            self.store.finish_execution(execution["id"], ExecutionStatus.FAILED, result="executor_aborted")
         self.store.release_claim(claim_id)
         record_audit(
             self.store,
@@ -345,6 +350,21 @@ class Coordinator:
         )
         return 1
 
+    def _integration_failure_is_ref_state(self, task_id: str, sha: str) -> bool:
+        """True when the latest failed INTEGRATION evidence for the candidate is a typed rebase conflict or stale base."""
+        row = self.store.conn.execute(
+            "SELECT payload FROM evidence WHERE task_id=? AND candidate_sha=? AND kind=? AND status=? "
+            "ORDER BY created_at DESC, rowid DESC LIMIT 1",
+            (task_id, sha, EvidenceKind.INTEGRATION, EvidenceStatus.FAILED),
+        ).fetchone()
+        if row is None:
+            return False
+        try:
+            findings = json.loads(row["payload"]).get("findings", [])
+        except (TypeError, ValueError):
+            return False
+        return any(isinstance(f, dict) and f.get("code") in _REF_STATE_CODES for f in findings)
+
     def _remediate_or_block(self, task_id: str, sha: str, failed_stage: Stage) -> int:
         findings = self.store.open_findings_for_candidate(task_id, sha)
         if not findings:
@@ -356,6 +376,16 @@ class Coordinator:
                 f"{failed_stage} failed without structured findings",
             )
             findings = self.store.open_findings_for_candidate(task_id, sha)
+        if failed_stage is Stage.INTEGRATE and self._integration_failure_is_ref_state(task_id, sha):
+            # The code is fine; the integration ref moved and the candidate cannot be rebased onto it. A provider re-run
+            # would only reproduce the same tree, so stop with the typed finding for the operator.
+            self.store.block_task(task_id)
+            record_audit(
+                self.store,
+                "task.remediation_exhausted",
+                {"task_id": task_id, "candidate_sha": sha, "stage": failed_stage, "reason": "integration_ref_state"},
+            )
+            return 1
         diagnosis = self._diagnose(task_id, sha)
         if diagnosis is not None and (diagnosis.repeated or diagnosis.stops_remediation) and self.diagnosis_policy.stop_on_repeat:
             # The same failure again (or one a provider cannot fix, like a stale baseline): another implementation attempt would only
