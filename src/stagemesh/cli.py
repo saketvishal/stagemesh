@@ -30,6 +30,7 @@ from .external_evidence import (
 )
 from .final_report import FinalReportValidationError, candidate_sha, render_final_report
 from .git import GitWorkspace
+from .handoff import HandoffError, build_handoff, write_handoff
 from .github_acceptance import run_github_acceptance
 from .objectives import ObjectivePlanner, ObjectiveValidationError
 from .observability import health
@@ -453,6 +454,20 @@ def command_task_timing(args: argparse.Namespace) -> int:
         return timing
 
     return _repair_command(args, run)
+
+
+def command_handoff_export(args: argparse.Namespace) -> int:
+    project = Path(args.project).resolve()
+    document = build_handoff(project, integration_ref=args.to)
+    path = write_handoff(document, project, Path(args.out) if args.out else None, force=args.force)
+    relative = path.relative_to(project).as_posix()
+    if args.json:
+        print(json.dumps({"path": relative, "schema": document["schema"], "bytes": path.stat().st_size, "warnings": document["warnings"]}, indent=2, sort_keys=True))
+        return 0
+    print(f"wrote handoff package to {relative}")
+    for warning in document["warnings"]:
+        print(f"warning: {warning}", file=sys.stderr)
+    return 0
 
 
 def command_continue(args: argparse.Namespace) -> int:
@@ -2002,6 +2017,16 @@ def build_parser() -> argparse.ArgumentParser:
     queue_control_status = queue_control_sub.add_parser("status", help="Show current queue admission state and active executions")
     queue_control_status.add_argument("--json", action="store_true")
     queue_control_status.set_defaults(func=command_queue_control)
+    handoff = sub.add_parser("handoff", help="Package state for review without copy-paste")
+    handoff_sub = handoff.add_subparsers(dest="handoff_command", required=True)
+    handoff_export = handoff_sub.add_parser(
+        "export", help="Write a redacted, read-only JSON handoff package (git, tasks, queue state, executions, tests, scope, next action)"
+    )
+    handoff_export.add_argument("--out", help="Output file inside the project (default: .stagemesh/handoff/<UTC timestamp>.json)")
+    handoff_export.add_argument("--to", metavar="INTEGRATION_REF", help="Integration ref to diff against (default: configured ref or origin/HEAD)")
+    handoff_export.add_argument("--force", action="store_true", help="Overwrite --out if it exists")
+    handoff_export.add_argument("--json", action="store_true", help="Print the written path and schema instead of a sentence")
+    handoff_export.set_defaults(func=command_handoff_export)
     cont = sub.add_parser("continue")
     cont.add_argument(
         "--once",
@@ -2319,6 +2344,9 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     except DemoValidationError as exc:
         print(f"demo error: {exc}", file=sys.stderr)
+        return 2
+    except HandoffError as exc:
+        print(f"handoff error: {exc}", file=sys.stderr)
         return 2
 
 
