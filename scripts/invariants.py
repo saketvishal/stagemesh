@@ -1435,7 +1435,11 @@ def main() -> int:
         assert execution["status"] == ExecutionStatus.SUCCEEDED
         assert execution["kind"] == ExecutionKind.IMPLEMENTATION
         assert execution["candidate_sha"] == result.candidate_sha
-        assert execution["pid"] is not None
+        assert execution["pid"] is not None and execution["executable"]
+        committed = subprocess.run(
+            ["git", "show", f"{result.candidate_sha}:provider-output.txt"], cwd=project, text=True, capture_output=True, check=True
+        )
+        assert committed.stdout == "durable provider output"  # the candidate is a real commit of the deterministic change
         failed_task = store.upsert_task("provider execution fails")
         write_explicit_contract(project, failed_task, "provider-output.txt")
         failing = RuntimeCommandAdapter("custom", (sys.executable, "-c", "import sys; sys.exit(7)"))
