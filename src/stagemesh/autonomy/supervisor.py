@@ -36,6 +36,7 @@ from .ci_diagnosis import (
 )
 from .decisions import (
     DECISION_EVENT,
+    OUTCOME_EVENT,
     Action,
     AutonomyDecision,
     Condition,
@@ -45,6 +46,7 @@ from .decisions import (
     decision_trace,
     record_decision,
     record_task_outcome,
+    trace_marker,
 )
 from .dependencies import (
     DependencyAssessment,
@@ -148,6 +150,13 @@ class Supervisor:
     def trace(self, task_id: str | None = None) -> list[dict[str, object]]:
         return decision_trace(self.store, task_id)
 
+    def trace_marker(self) -> int:
+        return trace_marker(self.store)
+
+    def trace_after(self, task_id: str, marker: int) -> list[dict[str, object]]:
+        """Exactly this task's decisions made after `marker`, however many other decisions were recorded meanwhile."""
+        return decision_trace(self.store, task_id, limit=10000, after_rowid=marker)
+
     # --- capability 1: candidate integrity --------------------------------------------------------------------------------------
 
     def provenance(self, task_id: str) -> CandidateProvenance:
@@ -204,6 +213,17 @@ class Supervisor:
                 save_ownership(self.store, replace(ownership, tracked_fingerprint=tracked_fingerprint(Path(ownership.worktree))))
         except GitError:
             return  # unobservable: the next hand-over will fail closed
+
+    def candidate_committed(self, task_id: str, sha: str) -> None:
+        """StageMesh itself committed `sha` in the task worktree: register it as the expected HEAD. Trust is by registration, never by a
+        committer identity the worktree declares for itself. Ignored unless the worktree really is at `sha`."""
+        ownership = load_ownership(self.store, task_id)
+        if ownership is None:
+            return
+        worktree = Path(ownership.worktree)
+        if not (worktree / ".git").exists() or GitFacts(worktree).resolve("HEAD") != sha:
+            return
+        save_ownership(self.store, replace(ownership, expected_head=sha, tracked_fingerprint=tracked_fingerprint(worktree)))
 
     def require_clean_workspace(self, task_id: str, *, fetch: bool = False) -> None:
         decision = self.check_workspace(task_id, fetch=fetch)
@@ -274,7 +294,7 @@ class Supervisor:
         )
 
     def _candidate_tainted(self, ownership: WorkspaceOwnership) -> bool:
-        """True when the latest candidate itself contains commits by an identity StageMesh does not trust."""
+        """True when the latest candidate's own range contains a commit that is neither registered with StageMesh nor by a trusted provider."""
         candidate = self.store.latest_candidate(ownership.task_id)
         baseline = self.store.task_baseline(ownership.task_id)
         if candidate is None or baseline is None or not self.facts.exists(str(candidate["sha"])) or not self.facts.exists(baseline):
@@ -282,8 +302,9 @@ class Supervisor:
         if not self.facts.is_ancestor(baseline, str(candidate["sha"])):
             return False
         trusted = {e.casefold() for e in ownership.trusted_committer_emails}
+        registered = {str(row["sha"]) for row in self.store.conn.execute("SELECT sha FROM candidates WHERE task_id=?", (ownership.task_id,))}
         return any(
-            self.facts.commit(sha).committer_email.casefold() not in trusted
+            sha not in registered and self.facts.commit(sha).committer_email.casefold() not in trusted
             for sha in self.facts.commits_between(baseline, str(candidate["sha"]))
         )
 
@@ -474,6 +495,12 @@ class Supervisor:
     ) -> AutonomyDecision:
         if self.hosted_ci is None:
             raise RuntimeError("a HostedCI adapter is required to diagnose CI")
+        spent = sum(
+            1
+            for d in decision_trace(self.store, task_id)
+            if d.get("action") == Action.RERUN_CI.value and (d.get("shas") or {}).get("candidate") == candidate_sha
+        )
+        reruns_left = max(0, reruns_left - spent)  # the budget is durable: it does not reset on every observation
         candidate_run = self.hosted_ci.run_for(candidate_sha)
         base_run = self.hosted_ci.run_for(base_sha)  # compared before anything is concluded about the candidate
         dependency_run = self.hosted_ci.run_for(dependency_sha) if dependency_sha else None
@@ -491,9 +518,20 @@ class Supervisor:
 
     # --- capability 8: review -------------------------------------------------------------------------------------------------------
 
-    def assess_review(self, task_id: str, report: ReviewReport, scope: TaskScope, *, candidate_sha: str | None = None, independent_required: bool = True) -> ReviewAssessment:
+    def assess_review(
+        self,
+        task_id: str,
+        report: ReviewReport,
+        scope: TaskScope,
+        *,
+        candidate_sha: str | None = None,
+        independent_required: bool = True,
+        candidate_changed_files: tuple[str, ...] = (),
+    ) -> ReviewAssessment:
         sha = candidate_sha or str(self.store.latest_candidate(task_id)["sha"])
-        assessment = assess_review(report, candidate_sha=sha, scope=scope, task_id=task_id, independent_required=independent_required)
+        assessment = assess_review(
+            report, candidate_sha=sha, scope=scope, task_id=task_id, independent_required=independent_required, candidate_changed_files=candidate_changed_files
+        )
         for item in assessment.deferred:
             record_deferred(self.store, task_id, item)
         self.record(assessment.decision)
@@ -561,6 +599,8 @@ class Supervisor:
     def verify_integration(self, task_id: str, candidate_sha: str, *, merge_sha: str | None = None) -> PostMergeVerdict:
         """After integration: record the resulting main SHA, verify landed content and run post-merge checks."""
         prov = self.provenance(task_id)
+        if merge_sha is None:
+            merge_sha = self._recorded_landing(task_id, candidate_sha)
         verdict = verify_integration(
             self.facts,
             integration_ref=self.integration_ref,
@@ -749,7 +789,16 @@ class Supervisor:
         escalations = tuple(
             str(d["escalation"]["reason"]) for d in decision_trace(self.store, task_id) if d.get("escalation")
         )
-        record_task_outcome(self.store, TaskOutcome(task_id, True, operational_interventions, escalations, notes))
+        outcome = TaskOutcome(task_id, True, operational_interventions, escalations, notes)
+        already = self.store.conn.execute(
+            "SELECT payload FROM audit_events WHERE event_type=? AND json_extract(payload, '$.task_id')=? ORDER BY created_at DESC, rowid DESC LIMIT 1",
+            (OUTCOME_EVENT, task_id),
+        ).fetchone()
+        if already is not None:
+            previous = json.loads(already["payload"])
+            if previous.get("completed") and previous.get("operational_interventions") == operational_interventions:
+                return True  # idempotent: recording the same completion again changes nothing
+        record_task_outcome(self.store, outcome)
         return True
 
     # --- recovery policy (K) and destructive operations (L) -----------------------------------------------------------------------------
@@ -914,6 +963,20 @@ class Supervisor:
         self.store.add_task_remediation(task_id, "INTEGRATE", sha)
         self.store.advance_task(task_id, Stage.IMPLEMENT)
         record_audit(self.store, "autonomy.ci_remediation_queued", {"task_id": task_id, "candidate_sha": sha, "gates": [g.gate for g in fix], "action": decision.action.value})
+
+    def _recorded_landing(self, task_id: str, candidate_sha: str) -> str | None:
+        """The integration ref tip recorded by this candidate's passed INTEGRATION evidence: where it landed, not where the ref is today."""
+        row = self.store.conn.execute(
+            "SELECT payload FROM evidence WHERE task_id=? AND candidate_sha=? AND kind=? AND status=? ORDER BY created_at DESC, rowid DESC LIMIT 1",
+            (task_id, candidate_sha, EvidenceKind.INTEGRATION, EvidenceStatus.PASSED),
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            landed = json.loads(row["payload"]).get("integration_ref_after")
+        except (TypeError, ValueError):
+            return None
+        return str(landed) if landed and self.facts.exists(str(landed)) else None
 
     def integration_verified(self, task_id: str, sha: str) -> bool:
         return self.verify_integration(task_id, sha).may_mark_done

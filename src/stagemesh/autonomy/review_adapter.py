@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from ..contract_binding import contract_for_candidate
+from ..contracts import changed_files
 from ..persistence import Store
 from .decisions import Action
 from .review_policy import ReviewFindingInput, ReviewReport
@@ -83,7 +84,14 @@ class ScopedReviewAdapter:
         )
         implementer = store.conn.execute("SELECT produced_by FROM candidates WHERE task_id=? AND sha=?", (task_id, candidate_sha)).fetchone()
         report = ReviewReport(candidate_sha, self.name, str(implementer["produced_by"]) if implementer else None, tuple(findings))
-        assessment = self.supervisor.assess_review(task_id, report, scope, candidate_sha=candidate_sha, independent_required=False)
+        baseline = store.task_baseline(task_id)
+        try:
+            changed = tuple(changed_files(self.supervisor.project, candidate_sha, baseline)) if baseline else ()
+        except Exception:  # noqa: BLE001 - unknown change set: treat out-of-scope findings as before, never as a pass for edited files
+            changed = ()
+        assessment = self.supervisor.assess_review(
+            task_id, report, scope, candidate_sha=candidate_sha, independent_required=False, candidate_changed_files=changed
+        )
         if assessment.decision.action is Action.ESCALATE_TO_FOUNDER:
             store.block_task(task_id)  # remediation cannot fix a scope question: stop and ask the specific question
             blocking = [f for f in findings if f.is_blocking]

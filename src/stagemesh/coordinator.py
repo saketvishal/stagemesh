@@ -49,7 +49,7 @@ class Coordinator:
         diagnosis_policy: DiagnosisPolicy | None = None,
         guard: Any | None = None,
     ):
-        self.guard = guard  # optional autonomy supervisor: allow(), integration_verified(), recover_unknown(), execution_finished()
+        self.guard = guard  # optional autonomy supervisor: allow(), integration_verified(), recover_unknown(), execution_finished(), candidate_committed()
         self.worker_id = worker_id
         self.diagnosis_policy = diagnosis_policy or DiagnosisPolicy()
         self.store = store
@@ -181,6 +181,8 @@ class Coordinator:
                 )
                 return 0
             if result.status is ExecutionStatus.SUCCEEDED and result.candidate_sha and result.durable_handoff:
+                if self.guard is not None:
+                    self.guard.candidate_committed(task_id, result.candidate_sha)  # StageMesh's own commit is registered, not inferred
                 self.store.advance_task(task_id, Stage.VALIDATE)
                 record_audit(
                     self.store,

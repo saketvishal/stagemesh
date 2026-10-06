@@ -65,6 +65,7 @@ class Condition(StrEnum):
     POST_MERGE_VERIFICATION_FAILED = "POST_MERGE_VERIFICATION_FAILED"
     ISOLATION_VIOLATION = "ISOLATION_VIOLATION"
     REMEDIATION_BUDGET_EXHAUSTED = "REMEDIATION_BUDGET_EXHAUSTED"
+    CI_FAILURE_UNRESOLVED = "CI_FAILURE_UNRESOLVED"
 
 
 class Action(StrEnum):
@@ -111,6 +112,7 @@ class EscalationReason(StrEnum):
     DEPENDENCY_CYCLE = "DEPENDENCY_CYCLE"
     SCOPE_EXTENSION_REQUIRED_BY_ACCEPTANCE_CRITERION = "SCOPE_EXTENSION_REQUIRED_BY_ACCEPTANCE_CRITERION"
     REMEDIATION_BUDGET_EXHAUSTED = "REMEDIATION_BUDGET_EXHAUSTED"
+    CI_FAILURE_UNRESOLVED = "CI_FAILURE_UNRESOLVED"
 
 
 # Questions StageMesh must never put to the founder; a smallest-decision that reduces to one of these is rejected at construction.
@@ -222,21 +224,28 @@ def record_decision(store: Store, decision: AutonomyDecision) -> str:
     return record_audit(store, DECISION_EVENT, decision.to_dict())
 
 
-def decision_trace(store: Store, task_id: str | None = None, limit: int = 500) -> list[dict[str, Any]]:
-    """Recorded decisions, oldest first, optionally for one task."""
-    rows = store.conn.execute(
-        "SELECT payload, created_at FROM audit_events WHERE event_type=? ORDER BY created_at DESC, rowid DESC LIMIT ?",
-        (DECISION_EVENT, limit),
-    ).fetchall()
+def decision_trace(store: Store, task_id: str | None = None, limit: int = 500, after_rowid: int = 0) -> list[dict[str, Any]]:
+    """Recorded decisions, oldest first. The task filter is applied in SQL, so other tasks' decisions never push this task's out."""
+    query = "SELECT rowid AS rid, payload, created_at FROM audit_events WHERE event_type=? AND rowid>?"
+    params: list[Any] = [DECISION_EVENT, after_rowid]
+    if task_id is not None:
+        query += " AND json_extract(payload, '$.task_id')=?"
+        params.append(task_id)
+    rows = store.conn.execute(query + " ORDER BY created_at DESC, rowid DESC LIMIT ?", (*params, limit)).fetchall()
     decisions: list[dict[str, Any]] = []
     for row in reversed(rows):
         try:
             payload = json.loads(row["payload"])
         except (TypeError, ValueError):
             continue
-        if task_id is None or payload.get("task_id") == task_id:
-            decisions.append({**payload, "recorded_at": row["created_at"]})
+        decisions.append({**payload, "recorded_at": row["created_at"], "rowid": row["rid"]})
     return decisions
+
+
+def trace_marker(store: Store) -> int:
+    """The newest audit rowid right now; `decision_trace(..., after_rowid=marker)` is then exactly what was decided afterwards."""
+    row = store.conn.execute("SELECT COALESCE(MAX(rowid), 0) AS m FROM audit_events").fetchone()
+    return int(row["m"])
 
 
 # --- Founder Hands-Off ledger -----------------------------------------------------------------------------------------------------
@@ -280,20 +289,32 @@ def autonomy_streak(store: Store) -> dict[str, Any]:
     rows = store.conn.execute(
         "SELECT payload FROM audit_events WHERE event_type=? ORDER BY created_at, rowid", (OUTCOME_EVENT,)
     ).fetchall()
-    streak = 0
-    escalations: list[str] = []
-    total = 0
+    latest: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
     for row in rows:
         try:
             payload = json.loads(row["payload"])
         except (TypeError, ValueError):
             continue
-        total += 1
+        task = str(payload.get("task_id"))
+        if task in latest:
+            order.remove(task)  # a task counts once, at the position of its latest outcome: re-recording can never add to the streak
+        latest[task] = payload
+        order.append(task)
+    streak = 0
+    escalations: list[str] = []
+    total = len(order)
+    for task in order:
+        payload = latest[task]
         escalations.extend(str(item) for item in payload.get("escalations", []))
-        if payload.get("completed") and int(payload.get("operational_interventions", 0)) == 0:
+        clean = int(payload.get("operational_interventions", 0)) == 0
+        if payload.get("completed") and clean:
             streak += 1
-        elif payload.get("completed") or int(payload.get("operational_interventions", 0)) > 0:
+        elif payload.get("completed") or not clean:
             streak = 0
+        elif not payload.get("escalations"):
+            streak = 0  # a task that failed without waiting on a legitimate decision breaks "consecutive"
+        # else: waiting on a typed escalation is neutral
     return {
         "streak": streak,
         "required": REQUIRED_STREAK,

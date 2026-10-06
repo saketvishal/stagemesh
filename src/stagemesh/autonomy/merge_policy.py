@@ -137,6 +137,12 @@ class IntegrationPolicy:
         )
         if facts.ci is None:
             ci_check = PolicyCheck("ci", False, "no hosted CI result for the candidate", Condition.CI_PENDING, Action.WAIT)
+        elif facts.ci.candidate_sha != prov.candidate_sha:
+            ci_check = PolicyCheck(
+                "ci", False, f"the CI diagnosis is for another candidate ({facts.ci.candidate_sha[:7]})", Condition.CI_PENDING, Action.WAIT
+            )
+        elif not facts.ci.gates:
+            ci_check = PolicyCheck("ci", False, "no CI gates were observed for the candidate", Condition.CI_PENDING, Action.WAIT)
         else:
             blockers = facts.ci.merge_blockers(
                 allow_baseline_failures=self.allow_baseline_ci_failures, baseline_requires_detail=self.baseline_requires_detail

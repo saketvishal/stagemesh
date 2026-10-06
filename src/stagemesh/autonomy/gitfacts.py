@@ -16,8 +16,10 @@ from pathlib import Path
 from ..git import GitError, GitWorkspace
 
 STAGEMESH_COMMITTER = ("StageMesh", "stagemesh@stagemesh.invalid")
-# Identities StageMesh itself commits as (attribution helper, and the repo-local config set on task worktrees).
-TRUSTED_COMMITTER_EMAILS = ("stagemesh@stagemesh.invalid", "stagemesh@example.invalid")
+# No committer identity is trusted by default: the worktree's own configured identity is self-declared, so a second writer committing
+# there would pass for StageMesh. StageMesh's own commits are *registered* (Supervisor.candidate_committed); a provider that commits
+# by itself is trusted only through an explicit `trusted_committer_emails` entry.
+TRUSTED_COMMITTER_EMAILS: tuple[str, ...] = ()
 NULL_SHA = "0" * 40
 _SHA = re.compile(r"^[0-9a-f]{40}$")
 

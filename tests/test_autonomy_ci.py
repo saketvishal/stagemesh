@@ -138,7 +138,8 @@ def test_infrastructure_failure_is_rerun_not_remediated() -> None:
     diagnosis = diagnose_ci(candidate, base)
     assert diagnosis.overall is CIClass.INFRASTRUCTURE_FAILURE
     assert plan_ci_response(diagnosis, task_id=TASK, reruns_left=1).action is Action.RERUN_CI
-    assert plan_ci_response(diagnosis, task_id=TASK, reruns_left=0).action is Action.WAIT  # bounded: no infinite reruns
+    exhausted = plan_ci_response(diagnosis, task_id=TASK, reruns_left=0)  # bounded: no infinite reruns and no endless wait
+    assert exhausted.action is Action.ESCALATE_TO_FOUNDER and exhausted.escalation.reason.value == "CI_FAILURE_UNRESOLVED"
 
 
 def test_failure_that_passes_on_rerun_of_the_same_sha_is_a_fragile_test() -> None:

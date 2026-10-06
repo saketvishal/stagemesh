@@ -144,6 +144,12 @@ def candidate_lineage(store: Store, task_id: str, candidate_sha: str | None) -> 
     return tuple(reversed(chain)) if len(chain) > 1 else ()
 
 
+def is_verified_done(store: Store, task_id: str) -> bool:
+    """DONE in the store AND an integration SHA recorded by passed INTEGRATION evidence: the only completion the streak accepts."""
+    task = store.get_task(task_id)
+    return task is not None and str(task["stage"]) == "DONE" and _integration_sha(store, task_id) is not None
+
+
 def revoke_evidence(store: Store, task_id: str, candidate_sha: str, reason: str) -> None:
     """Mark the candidate's evidence as no longer authorizing integration. The evidence rows themselves are kept."""
     record_audit(store, REVOKED_EVENT, {"task_id": task_id, "candidate_sha": candidate_sha, "reason": reason})

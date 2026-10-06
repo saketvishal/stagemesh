@@ -110,7 +110,14 @@ def pr_body(task_id: str, title: str, sha: str, evidence: dict[str, Any]) -> str
     return "\n".join(lines)
 
 
-_PUSH_DENIED = re.compile(r"(authentication failed|permission denied|permission to \S+ denied|could not read username|403|access denied|not authorized)", re.IGNORECASE)
+_PUSH_DENIED = re.compile(
+    r"(authentication failed|permission denied|permission to \S+ denied|could not read username|access denied|not authorized|^(?:remote|fatal|error):.*\b403\b)",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+class BaseUnobservable(RuntimeError):
+    """The remote base could not be fetched (network or host problem that is not an authorization problem)."""
 
 
 class PushDenied(RuntimeError):
@@ -137,9 +144,18 @@ def deliver(
     Host authorization problems become a typed escalation (`ESCALATED`); rate limits become a wait. Neither raises.
     """
     report = DeliveryReport(task_id, "NOT_PUBLISHED", base_ref=f"{remote}/{base}")
-    trace_start = len(supervisor.trace(task_id))
+    marker = supervisor.trace_marker()
     try:
-        return _deliver_pass(supervisor, task_id, report, remote, base, pulls, ci, title, wait_seconds, poll_seconds, merge, clock, sleep)
+        return _deliver_pass(supervisor, task_id, report, marker, remote, base, pulls, ci, title, wait_seconds, poll_seconds, merge, clock, sleep)
+    except BaseUnobservable as error:
+        supervisor.record(
+            AutonomyDecision(
+                Condition.CI_PENDING, "delivery/v1", Action.WAIT, task_id, {"reason": "base_unobservable"}, {}, {"fetch_error": str(error)[:200]}
+            )
+        )
+        report.recommendation = "the remote could not be reached; nothing was published and delivery will be retried"
+        report.decisions = [d["trace"] for d in supervisor.trace_after(task_id, marker)]
+        return report
     except (GitHubAuthorizationError, GitHubRateLimited, PushDenied) as error:
         if isinstance(error, GitHubRateLimited):
             decision = AutonomyDecision(
@@ -162,13 +178,17 @@ def deliver(
             report.status = "ESCALATED"
             report.recommendation = f"escalated: {decision.escalation.reason.value}"  # type: ignore[union-attr]
         supervisor.record(decision)
-        report.decisions = [d["trace"] for d in supervisor.trace(task_id)[trace_start:]]
+        report.decisions = [d["trace"] for d in supervisor.trace_after(task_id, marker)]
         return report
 
 
 def _sync_base(supervisor: Supervisor, report: DeliveryReport, remote: str, base: str) -> tuple[str | None, tuple[str, str] | None]:
     """Fetch the base and reconcile the candidate against it. Returns the base SHA and, when delivery must stop, (status, recommendation)."""
-    supervisor.facts.git.run("fetch", "--quiet", remote, base)
+    fetched = supervisor.facts.git.run("fetch", "--quiet", remote, base, check=False)
+    if fetched.returncode != 0:
+        if _PUSH_DENIED.search(fetched.stderr):
+            raise PushDenied(fetched.stderr.strip()[:300])
+        raise BaseUnobservable(fetched.stderr.strip())
     base_sha = supervisor.facts.resolve(supervisor.integration_ref)
     report.base_sha = base_sha
     refresh = supervisor.reconcile_base(report.task_id)
@@ -184,6 +204,7 @@ def _deliver_pass(
     supervisor: Supervisor,
     task_id: str,
     report: DeliveryReport,
+    marker: int,
     remote: str,
     base: str,
     pulls: Pulls,
@@ -196,11 +217,10 @@ def _deliver_pass(
     sleep: Callable[[float], None],
 ) -> DeliveryReport:
     facts = supervisor.facts
-    trace_start = len(supervisor.trace(task_id))
 
     def finish(status: str, recommendation: str) -> DeliveryReport:
         report.status, report.recommendation = status, recommendation
-        report.decisions = [d["trace"] for d in supervisor.trace(task_id)[trace_start:]]
+        report.decisions = [d["trace"] for d in supervisor.trace_after(task_id, marker)]
         return report
 
     prov = supervisor.provenance(task_id)
@@ -274,6 +294,10 @@ def _deliver_pass(
         return finish("PUBLISHED_REMEDIATING", "hosted CI shows a failure this candidate introduced; the task was sent back for remediation")
 
     current = pulls.get(pr.number) or pr
+    if current.head_sha and current.head_sha != sha:
+        # someone pushed to the PR branch after delivery: the CI and evidence above belong to a different commit
+        supervisor.record(supervisor._pr_head_moved(task_id, pr.number, sha, current.head_sha))
+        return finish("PUBLISHED_NOT_READY", f"PR #{pr.number} head is {current.head_sha[:7]}, not the validated candidate {sha[:7]}; nothing was merged")
     mergeable_deadline = clock() + wait_seconds
     while current.mergeable is None and clock() < mergeable_deadline:  # hosts compute mergeability lazily
         sleep(poll_seconds)

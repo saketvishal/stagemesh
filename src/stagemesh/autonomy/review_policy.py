@@ -87,8 +87,10 @@ class ReviewAssessment:
         return "\n".join(lines)
 
 
-def classify_finding(finding: ReviewFindingInput, scope: TaskScope) -> ClassifiedFinding:
-    in_scope = finding.path is None or scope.permits(finding.path)
+def classify_finding(finding: ReviewFindingInput, scope: TaskScope, candidate_changed_files: tuple[str, ...] = ()) -> ClassifiedFinding:
+    changed = {path.replace("\\", "/") for path in candidate_changed_files}
+    # A file the candidate itself changed is the candidate's responsibility whatever the contract says about it.
+    in_scope = finding.path is None or scope.permits(finding.path) or finding.path.replace("\\", "/") in changed
     if finding.category == "test_defect":
         return ClassifiedFinding(finding, FindingClass.TEST_DEFECT, "reviewer identified a test problem, not a production defect")
     if finding.category == "suggestion":
@@ -116,6 +118,7 @@ def assess_review(
     scope: TaskScope,
     task_id: str | None,
     independent_required: bool = True,
+    candidate_changed_files: tuple[str, ...] = (),
 ) -> ReviewAssessment:
     shas = {"candidate": candidate_sha, "review": report.reviewed_sha}
     observed = {"reviewer": report.reviewer_provider or "unknown", "implementer": report.implementer_provider or "unknown"}
@@ -133,7 +136,7 @@ def assess_review(
             reason="reviewer is the implementation provider, unknown, or never actually executed",
         )
 
-    classified = [classify_finding(f, scope) for f in report.findings]
+    classified = [classify_finding(f, scope, candidate_changed_files) for f in report.findings]
     remediate = [c.finding for c in classified if c.klass is FindingClass.BLOCKING_IN_SCOPE]
     fix_tests = [c.finding for c in classified if c.klass is FindingClass.TEST_DEFECT and (c.finding.path is None or scope.permits(c.finding.path))]
     deferred = [

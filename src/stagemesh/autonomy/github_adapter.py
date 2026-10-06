@@ -175,10 +175,17 @@ class GitHubHostedCI(GitHubClientBase):
         if status != 200 or not isinstance(payload, dict):
             raise GitHubAdapterError(status, f"unexpected check-runs response for {sha}")
         runs = payload.get("check_runs") or []
+        by_name: dict[str, list[dict]] = {}
+        for run in runs:
+            by_name.setdefault(str(run.get("name") or "unnamed"), []).append(run)
         gates: dict[str, GateOutcome] = {}
         complete = True
-        for run in runs:
-            outcome = self._gate(run)
+        for attempts in by_name.values():
+            # Re-runs of a check appear as further check runs with the same name: the newest is the verdict, earlier ones are attempts.
+            attempts.sort(key=lambda r: (str(r.get("started_at") or ""), int(r.get("id") or 0)), reverse=True)
+            latest = self._gate(attempts[0])
+            earlier = tuple(self._gate(r).conclusion for r in attempts[1:] if r.get("status") == "completed")
+            outcome = GateOutcome(latest.name, latest.conclusion, latest.log, latest.failing_tests, earlier)
             complete = complete and outcome.conclusion is not Conclusion.PENDING
             gates[outcome.name] = outcome
         return HostedCIRun(sha, gates, complete=complete and bool(runs), environment="github-actions")

@@ -61,7 +61,7 @@ def load_settings(runtime_dir: Path) -> AutonomySettings:
     emails = tuple(str(item) for item in data.get("trusted_committer_emails", TRUSTED_COMMITTER_EMAILS))
     return AutonomySettings(
         enabled=bool(data.get("enabled", False)) or enabled_by_env,
-        trusted_committer_emails=tuple(dict.fromkeys((*TRUSTED_COMMITTER_EMAILS, *emails))),
+        trusted_committer_emails=tuple(dict.fromkeys(emails)),
         max_reconstructs=int(data.get("max_reconstructs", 1)),
         allow_baseline_ci_failures=bool(data.get("allow_baseline_ci_failures", True)),
         baseline_requires_detail=bool(data.get("baseline_requires_detail", True)),

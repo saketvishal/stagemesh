@@ -196,12 +196,13 @@ def test_scenario_a_second_writer_push_to_the_published_candidate_branch(tmp_pat
 
 
 def test_stagemesh_own_commit_is_an_owner_advance_not_a_mutation(tmp_path: Path) -> None:
-    repo, worktree, _base = _repo_with_worktree(tmp_path)
+    repo, worktree, base = _repo_with_worktree(tmp_path)
     store = new_store(tmp_path)
     store.upsert_task("add the widget", source_id=TASK)
     supervisor = Supervisor(store, repo, integration_ref="main")
     supervisor.claim_workspace(TASK, worktree)
     mine = commit(worktree, {"src/widget.py": "W = 1\n"}, "StageMesh implementation", who=STAGEMESH)
+    supervisor.candidate_committed(TASK, mine)  # StageMesh registers what it committed; trust is not inferred from an identity
 
     assert supervisor.check_workspace(TASK) is None
     assert load_ownership(store, TASK).expected_head == mine

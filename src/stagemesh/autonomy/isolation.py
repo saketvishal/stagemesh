@@ -96,15 +96,28 @@ def _enclosing_stagemesh_checkout(path: Path | str, own_project: Path) -> Path |
     return None
 
 
+class UnreadableIsolationConfig(ValueError):
+    pass
+
+
+def _declared_forbidden(config: Path) -> list[Path]:
+    """The forbidden list from isolation.json. An unreadable or malformed file raises: forgetting the list would fail open."""
+    try:
+        data = json.loads(config.read_text(encoding="utf-8"))
+        items = data["forbidden_checkouts"] if isinstance(data, dict) else None
+        if not isinstance(items, list):
+            raise ValueError("isolation.json must be an object with a forbidden_checkouts list")  # noqa: TRY004
+        return [Path(str(item)) for item in items if str(item).strip()]
+    except (OSError, ValueError, KeyError) as exc:
+        raise UnreadableIsolationConfig(f"{config} is unreadable or malformed: {exc}") from exc
+
+
 def configured_forbidden_checkouts(project: Path, explicit: Iterable[Path | str] = ()) -> list[Path]:
     found: list[Path] = [Path(item) for item in explicit]
     found += [Path(item) for item in os.environ.get(FORBIDDEN_ENV, "").split(os.pathsep) if item.strip()]
     config = Path(project) / ".stagemesh" / ISOLATION_FILE
-    try:
-        data = json.loads(config.read_text(encoding="utf-8"))
-        found += [Path(str(item)) for item in data.get("forbidden_checkouts", []) if str(item).strip()]
-    except (OSError, ValueError, AttributeError):
-        pass
+    if config.exists():
+        found += _declared_forbidden(config)
     unique: dict[str, Path] = {}
     for item in found:
         unique.setdefault(_norm(item), item)
@@ -144,7 +157,11 @@ def check_isolation(
     paths, findings = runtime_paths(project)
     for name, value in (extra_paths or {}).items():
         paths[name] = Path(value)
-    forbidden = configured_forbidden_checkouts(project, forbidden_checkouts)
+    try:
+        forbidden = configured_forbidden_checkouts(project, forbidden_checkouts)
+    except UnreadableIsolationConfig as exc:
+        forbidden = []
+        findings.append(IsolationFinding("UNREADABLE_ISOLATION_CONFIG", str(exc), str(project / ".stagemesh" / ISOLATION_FILE)))
     report = IsolationReport(str(project), {k: str(v) for k, v in paths.items()}, [str(p) for p in forbidden], findings)
     runtime = project / ".stagemesh"
 

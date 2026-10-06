@@ -18,6 +18,7 @@ from .decisions import (
     record_task_outcome,
 )
 from .isolation import check_isolation
+from .provenance import is_verified_done
 
 EXIT_NOT_ISOLATED = 3
 
@@ -156,6 +157,10 @@ def command_record_outcome(args: argparse.Namespace) -> int:
     for reason in args.escalation or ():
         EscalationReason(reason)  # reject anything that is not a typed escalation reason
     store = _store(Path(args.project).resolve())
+    if args.completed and not is_verified_done(store, args.task):
+        print(f"refusing to record {args.task} as completed: DONE with a recorded integration is not verified")
+        store.close()
+        return 2
     record_task_outcome(
         store,
         TaskOutcome(args.task, args.completed, args.interventions, tuple(args.escalation or ()), args.notes or ""),
