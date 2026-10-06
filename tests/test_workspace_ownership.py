@@ -677,3 +677,17 @@ def test_executor_works_in_a_project_directory_that_does_not_exist_yet(tmp_path:
     assert store.get_task(task_id)["stage"] == Stage.VALIDATE
     assert ledger_of(project, task_id)["candidate"] == store.latest_candidate(task_id)["sha"]
     store.close()
+
+
+def test_boundary_checks_skip_a_project_directory_that_does_not_exist(tmp_path: Path) -> None:
+    store = Store(tmp_path / "state.sqlite3")
+    store.migrate()
+    task_id = store.upsert_task("work")
+    store.add_candidate(task_id, "abc123", "fake", True)
+    project = tmp_path / "never-created"
+
+    verify_candidate_workspace(store, project, task_id, "abc123", "VALIDATE:before_validation")  # no worktree is owned, nothing to compare
+    pin_candidate(project, task_id, "abc123")
+
+    assert not project.exists() and mutation_events(store) == []
+    store.close()

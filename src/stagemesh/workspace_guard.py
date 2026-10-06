@@ -498,7 +498,10 @@ def _fail_execution(lease: WorkspaceLease) -> None:
 
 def pin_candidate(project: Path, task_id: str, candidate_sha: str) -> None:
     """An operator action registered `candidate_sha`; record it in the ledger so it is the candidate every later check expects."""
-    target = task_workspace(Path(project).resolve(), task_id)
+    root = Path(project).resolve()
+    if not root.is_dir():
+        return  # no project checkout, so no task worktree to pin
+    target = task_workspace(root, task_id)
     if not (target / ".git").exists():
         return
     gitdir = _gitdir(target)
@@ -521,8 +524,8 @@ def verify_candidate_workspace(
 ) -> None:
     """Prove, at a lifecycle boundary, that `candidate_sha` is exactly what the authorized execution produced. Raises WorkspaceMutation."""
     root = Path(project).resolve()
-    target = task_workspace(root, task_id)
-    owned = (target / ".git").exists()
+    target = task_workspace(root, task_id) if root.is_dir() else root  # a project that does not exist yet owns no worktree
+    owned = root.is_dir() and (target / ".git").exists()
     ledger: dict[str, Any] | None = None
     seen: dict[str, Any] | None = None
 
