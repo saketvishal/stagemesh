@@ -402,6 +402,7 @@ def _anchor_sha(store: Store, task_id: str) -> str | None:
 def acquire_workspace(store: Store, project: Path, task_id: str, kind: str, *, claim_id: str | None = None) -> WorkspaceLease:
     """Create or reuse the task's worktree, take its exclusive lease and prove it is exactly what the last authorized execution sealed."""
     root = Path(project).resolve()
+    GitWorkspace(root).init_if_needed()  # as prepare_task_workspace does first: the project may not exist yet, and the config read below needs it
     existed = (task_workspace(root, task_id) / ".git").exists()
     path = prepare_task_workspace(root, task_id)
     gitdir = _gitdir(path)
