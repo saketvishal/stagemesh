@@ -322,16 +322,116 @@ def test_stops_at_max_steps_with_clear_reason(tmp_path: Path) -> None:
     assert result["final"]["stage"] != "DONE" and "2 steps" in result["message"]
 
 
-def test_refuses_when_health_has_current_problems(tmp_path: Path) -> None:
-    project = _project(tmp_path, ["T-1"])
+def _block_other(project: Path, source_id: str = "X-1") -> str:
     store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
     store.migrate()
-    other = store.upsert_task("blocked one", source="local", source_id="X-1")
+    other = store.upsert_task("blocked one", source="local", source_id=source_id)
     store.block_task(other)
     store.close()
+    return other
+
+
+def _status(project: Path, task_id: str) -> str:
+    store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+    try:
+        return str(store.get_task(task_id)["status"])
+    finally:
+        store.close()
+
+
+def test_health_still_reports_blocked_tasks(tmp_path: Path) -> None:
+    from stagemesh.observability import health
+
+    project = _project(tmp_path, ["T-1"])
+    _block_other(project)
+    store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+    report = health(store)
+    store.close()
+    assert report.blocked_task_count > 0 and "blocked_tasks" in report.current_problems and not report.ok
+
+
+def test_unrelated_blocked_task_does_not_stop_explicit_run(tmp_path: Path) -> None:
+    project = _project(tmp_path, ["T-1"])
+    blocked = _block_other(project)
     code, result = _run(project, "--task", "T-1")
-    assert code == 2 and result["stop_reason"] == "REFUSED:current_problems"
-    assert "blocked_tasks" in result["detail"]["problems"]
+    assert code == 0 and result["stop_reason"] == "DONE" and result["task_id"] == "T-1", result
+    assert _status(project, blocked) == "BLOCKED"  # never auto-mutated
+
+
+def test_unrelated_blocked_task_does_not_stop_auto_run(tmp_path: Path) -> None:
+    project = _project(tmp_path, ["T-1"])
+    blocked = _block_other(project)
+    code, result = _run(project)
+    assert code == 0 and result["stop_reason"] == "DONE" and result["task_id"] == "T-1", result
+    assert result["selection"]["task_id"] == "T-1" and result["selection"]["mode"] != "explicit"
+    assert _status(project, blocked) == "BLOCKED"
+
+
+def test_explicit_blocked_task_is_refused_without_execution(tmp_path: Path) -> None:
+    project = _project(tmp_path, ["T-1"])
+    blocked = _block_other(project)
+    code, result = _run(project, "--task", blocked)
+    assert code == 2 and result["stop_reason"] == "REFUSED:task_blocked" and result["started"] is False, result
+    assert "retry-task" in result["message"] and result["steps_run"] == 0
+    store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+    assert store.conn.execute("SELECT COUNT(*) FROM executions").fetchone()[0] == 0
+    store.close()
+    assert _status(project, blocked) == "BLOCKED"
+
+
+def test_current_failed_executions_remain_nonfatal_but_global_hazards_fatal(tmp_path: Path) -> None:
+    from stagemesh.observability import health
+    from stagemesh.run_ready import current_problems
+
+    project, store = _setup(tmp_path, FAKE_CONTRACT)
+    store.conn.execute("UPDATE tasks SET status='BLOCKED' WHERE id=?", (TASK,))
+    store.conn.commit()
+    assert "blocked_tasks" in health(store).current_problems
+    assert current_problems(store) == ()
+    # unknown execution: fatal
+    claim = store.acquire_claim(TASK, "w", lease_seconds=-1)
+    from stagemesh.domain import ExecutionKind
+
+    execution_id = store.start_execution(task_id=TASK, claim_id=claim, kind=ExecutionKind.IMPLEMENTATION, pid=None)
+    store.conn.execute("UPDATE executions SET status='UNKNOWN' WHERE id=?", (execution_id,))
+    store.conn.commit()
+    assert "unknown_executions" in current_problems(store)
+    # failed execution alone: nonfatal
+    store.conn.execute("UPDATE executions SET status='FAILED' WHERE id=?", (execution_id,))
+    store.conn.commit()
+    assert "unknown_executions" not in current_problems(store)
+    assert "current_failed_executions" not in current_problems(store)
+    store.close()
+
+
+def test_stale_running_execution_remains_fatal_for_current_problems(tmp_path: Path) -> None:
+    from stagemesh.run_ready import current_problems
+
+    project, store = _setup(tmp_path, FAKE_CONTRACT)
+    proc = subprocess.Popen(SLEEPER)
+    _running_execution(store, proc)
+    proc.kill()
+    proc.wait()
+    store.conn.execute("UPDATE tasks SET status='BLOCKED' WHERE id=?", (TASK,))
+    store.conn.commit()
+    assert current_problems(store) == ("stale_running_executions",)
+    store.close()
+
+
+def test_unrelated_unknown_execution_still_refuses_run(tmp_path: Path) -> None:
+    from stagemesh.domain import ExecutionKind
+
+    project = _project(tmp_path, ["T-1"])
+    other = _block_other(project)
+    store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+    claim = store.acquire_claim(other, "w", lease_seconds=-1)
+    execution_id = store.start_execution(task_id=other, claim_id=claim, kind=ExecutionKind.IMPLEMENTATION, pid=None)
+    store.conn.execute("UPDATE executions SET status='UNKNOWN' WHERE id=?", (execution_id,))
+    store.conn.commit()
+    store.close()
+    code, result = _run(project, "--task", "T-1")
+    assert code == 2 and result["stop_reason"] == "REFUSED:current_problems", result
+    assert "unknown_executions" in result["detail"]["problems"] and "blocked_tasks" not in result["detail"]["problems"]
 
 
 def _continue(project: Path, *argv: str) -> tuple[int, dict]:
