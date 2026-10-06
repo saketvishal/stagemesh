@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from .audit import record_audit
 from .contract_binding import contract_for_candidate
@@ -46,7 +47,9 @@ class Coordinator:
         require_independent_review: bool = False,
         worker_id: str = "local-worker",
         diagnosis_policy: DiagnosisPolicy | None = None,
+        guard: Any | None = None,
     ):
+        self.guard = guard  # optional autonomy supervisor: allow(), integration_verified(), recover_unknown()
         self.worker_id = worker_id
         self.diagnosis_policy = diagnosis_policy or DiagnosisPolicy()
         self.store = store
@@ -203,6 +206,8 @@ class Coordinator:
         if candidate is None or not candidate["durable_handoff"]:
             return 0
         sha = str(candidate["sha"])
+        if self.guard is not None and not self.guard.allow(stage, task_id, sha):
+            return 0  # fail closed: the supervisor recorded why (external mutation, evidence not bound to this candidate, ...)
         if stage is Stage.VALIDATE:
             bound = contract_for_candidate(self.store, task_id, sha, self.project)
             if not self.store.has_bound_evidence(task_id, sha, EvidenceKind.VALIDATION, bound.digest):
@@ -234,9 +239,12 @@ class Coordinator:
             if execution["task_id"] != task_id or execution["kind"] != "IMPLEMENTATION":
                 continue
             saved = self.store.execution_process_identity(execution["id"])
-            if classify_process(saved, process_identity(saved.pid)) == "DEAD":
+            state = classify_process(saved, process_identity(saved.pid))
+            if state == "DEAD":
                 self.store.mark_orphan_running_execution_failed(execution["id"], "DEAD_PROCESS_IDENTITY")
                 continue
+            if state == "UNKNOWN" and self.guard is not None and self.guard.recover_unknown(task_id, str(execution["id"])):
+                continue  # fenced under the explicit recovery policy (never declared dead): the task continues on a replacement worktree
             return True
         return False
 
@@ -322,7 +330,8 @@ class Coordinator:
         if self.integrator.integration_ref is None:
             return True  # synthetic evidence-only integrator (no durable ref configured)
         if self.integrator.ref_contains(self.project, sha):
-            return True
+            # DONE only after integration is verified: expected content landed and post-merge checks passed.
+            return self.guard is None or bool(self.guard.integration_verified(task_id, sha))
         record_audit(
             self.store,
             "integration.ref_missing_candidate",

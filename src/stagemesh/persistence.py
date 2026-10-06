@@ -872,6 +872,40 @@ class Store:
             )
             return True
 
+    def fence_unknown_execution(self, execution_id: str, reason: str) -> bool:
+        """Stop waiting on a RUNNING execution whose process identity is UNKNOWN, without claiming it is dead.
+
+        The row becomes status UNKNOWN (never FAILED/orphaned): its history stays truthful, its claim is released so the task can
+        continue on a replacement worktree, and nothing it later produces is trusted by StageMesh.
+        """
+        execution_id = _validate_text(execution_id, "execution id")
+        reason = _validate_text(reason, "fence reason")
+        now = time.time()
+        with self.conn:
+            execution = self.conn.execute("SELECT * FROM executions WHERE id=? AND status=?", (execution_id, ExecutionStatus.RUNNING)).fetchone()
+            if execution is None:
+                return False
+            self.conn.execute(
+                "UPDATE executions SET status=?, result=?, updated_at=? WHERE id=? AND status=?",
+                (ExecutionStatus.UNKNOWN, "fenced_identity_unknown", now, execution_id, ExecutionStatus.RUNNING),
+            )
+            if execution["claim_id"] is not None:
+                self.conn.execute("UPDATE claims SET active=0 WHERE id=? AND active=1", (execution["claim_id"],))
+                self.conn.execute(
+                    "UPDATE tasks SET status=?, updated_at=? WHERE id=? AND status=?",
+                    (TaskStatus.OPEN, now, execution["task_id"], TaskStatus.CLAIMED),
+                )
+            self.conn.execute(
+                "INSERT INTO audit_events VALUES (?, ?, ?, ?)",
+                (
+                    str(uuid.uuid4()),
+                    "recovery.unknown_execution_fenced",
+                    json.dumps({"task_id": execution["task_id"], "execution_id": execution_id, "execution_kind": execution["kind"], "reason": reason}, sort_keys=True),
+                    now,
+                ),
+            )
+            return True
+
     def mark_orphan_running_execution_failed(self, execution_id: str, reason: str) -> bool:
         execution_id = _validate_text(execution_id, "execution id")
         reason = _validate_text(reason, "recovery reason")
