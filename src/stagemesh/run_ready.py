@@ -19,10 +19,12 @@ from .persistence import MAX_CANONICAL_CONTRACT_CHARS, Store
 from .config import TaskSelectionConfig
 from .scheduling import Scheduler
 from .task_selection import Candidate, Selection, SelectionRefusal, select_next_task
+from .timing import execution_timings, format_duration, step_duration
 from .workspaces import task_workspace, worktree_root
 
-# A task whose latest execution failed is a normal remediation state, not a reason to stop supervising.
-_IGNORED_PROBLEMS = frozenset({"current_failed_executions"})
+# Task-local backlog problems: another task's failed execution or BLOCKED status says nothing about the selected task.
+# The selected task's own BLOCKED status is refused explicitly in run_ready. Global hazards (unknown/stale executions) stay fatal.
+_IGNORED_PROBLEMS = frozenset({"current_failed_executions", "blocked_tasks"})
 
 
 class RunReadyRefusal(Exception):
@@ -359,6 +361,8 @@ def format_step(step: dict[str, Any], notices: list[str] | None = None) -> str:
         lines.append(f"  actor: {actor}")
     for detail in _stage_details(stage, previous, new):
         lines.append(f"  {detail}")
+    if step.get("duration_seconds") is not None:
+        lines.append(f"  duration: {format_duration(step['duration_seconds'])}")
     for notice in notices:
         lines.append(f"  note: {notice}")
     return "\n".join(lines)
@@ -501,6 +505,12 @@ def run_ready(
         selection_info.update(selection.to_dict())
         _log_selection(selection, on_start)
         selected = selection.task_id
+        if store.get_task(selected)["status"] == TaskStatus.BLOCKED:
+            raise RunReadyRefusal(
+                "task_blocked",
+                f"task {selected} is BLOCKED; inspect diagnosis and use retry-task after remediation",
+                task_id=selected,
+            )
         _ensure_contract(store, project, selected, auto_plan, plan_info, note)
         if any(row["task_id"] == selected for row in store.running_executions()):
             raise RunReadyRefusal(
@@ -581,6 +591,8 @@ def drive_task(
             summary.stop_reason, summary.message = "TARGET_ERROR", str(exc)
             break
         step = {"step": number, "task_id": selected, "progressed": progressed, "previous": previous, "new": _snapshot(store, selected)}
+        step["executions"] = [rec for rec in execution_timings(store, selected) if rec["started_at"] >= tick_started]
+        step["duration_seconds"] = step_duration(step["executions"])
         summary.steps.append(step)
         if on_step is not None:
             on_step(step)
