@@ -404,6 +404,7 @@ def test_cli_queue_control_commands_and_status_surfaces(tmp_path: Path) -> None:
     from stagemesh.persistence import Store
 
     wrapped = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+    cli_module._sync_all_sources(wrapped, project, load_config(project), None)
     execution_id = wrapped.start_execution(task_id="T-1", claim_id=None, kind=ExecutionKind.REVIEW, pid=os.getpid())
     wrapped.close()
 
