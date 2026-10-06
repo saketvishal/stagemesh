@@ -21,7 +21,7 @@ from stagemesh.coordinator import Coordinator
 from stagemesh.domain import ExecutionKind, ExecutionStatus
 from stagemesh.execution import ExecutionResult, communicate_bounded
 from stagemesh.git import GitWorkspace
-from stagemesh.parallel import queue_control_state, recover_orphaned_claims, worker_id_for
+from stagemesh.parallel import queue_control_state, recover_orphaned_claims, request_queue_control, worker_id_for
 from stagemesh.queue_run import QueueRunner, dirty_in_scope, dirty_paths, preflight, write_scope_overlap
 from stagemesh.review import Reviewer
 from stagemesh.serialized_integration import SerializedIntegrator
@@ -283,6 +283,18 @@ def test_stop_during_implementation_releases_claims_and_next_run_resumes(tmp_pat
     assert rig.store.conn.execute("SELECT 1 FROM audit_events WHERE event_type='queue.stop'").fetchone()
     assert queue_control_state(rig.store)["state"] == "stopped"
     assert outcomes(queue(rig, ScriptedExecutor(rig.files), concurrency=1).run()) == {"A": "DONE"}
+    assert queue_control_state(rig.store)["state"] == "running"
+
+
+def test_resume_after_stop_request_does_not_cancel_the_stop(tmp_path: Path) -> None:
+    rig = Rig(tmp_path, ["A"])
+    runner = queue(rig, ScriptedExecutor(rig.files), concurrency=1)
+    request_queue_control(rig.store, "stopping", "operator stop", terminate_running=False)
+    request_queue_control(rig.store, "resumed", "resume does not undo stop")
+    summary = runner.run()
+    assert outcomes(summary) == {}
+    assert summary.control["state"] == "stopped"
+    assert queue_control_state(rig.store)["state"] == "stopped"
 
 
 def test_mid_run_stop_preserves_unknown_process_identity_until_recovery_override(tmp_path: Path) -> None:

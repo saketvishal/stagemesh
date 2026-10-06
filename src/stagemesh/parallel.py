@@ -407,31 +407,42 @@ class ParallelRunner:
             self.summary.control["active_executions"] = self._active_execution_snapshot()
 
     def _apply_control_requests(self) -> None:
-        latest = latest_queue_control(self.store)
-        if latest is None:
-            return
-        rowid = int(latest["rowid"])
-        if rowid <= self._last_control_rowid:
-            return
-        self._last_control_rowid = rowid
-        state = str(latest.get("state"))
-        reason = str(latest.get("reason") or "operator request")
-        terminate = bool(latest.get("terminate_running"))
-        if state == "paused":
-            self._admission_paused.set()
-            self._refresh_control_state("paused")
-            self._say("run", f"queue admission paused: {reason}")
-        elif state == "resumed":
-            self._admission_paused.clear()
-            self._refresh_control_state("running")
-            self._say("run", f"queue admission resumed: {reason}")
-        elif state == "stopping":
-            self._admission_stopped.set()
-            if terminate:
-                self._terminate_requested.set()
-                self.stop.set()
-            self._refresh_control_state("stopping")
-            self._say("run", f"queue admission stopping: {reason}")
+        rows = self.store.conn.execute(
+            """
+            SELECT payload, rowid FROM audit_events
+            WHERE event_type=? AND rowid>?
+            ORDER BY rowid
+            """,
+            (QUEUE_CONTROL_EVENT, self._last_control_rowid),
+        ).fetchall()
+        for row in rows:
+            self._last_control_rowid = int(row["rowid"])
+            try:
+                payload = json.loads(row["payload"])
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            state = str(payload.get("state"))
+            reason = str(payload.get("reason") or "operator request")
+            terminate = bool(payload.get("terminate_running"))
+            if state == "paused":
+                self._admission_paused.set()
+                self._refresh_control_state("paused")
+                self._say("run", f"queue admission paused: {reason}")
+            elif state == "resumed":
+                # Resume ends a pause. It does not cancel a stop that was already requested.
+                self._admission_paused.clear()
+                if not self._admission_stopped.is_set():
+                    self._refresh_control_state("running")
+                    self._say("run", f"queue admission resumed: {reason}")
+            elif state == "stopping":
+                self._admission_stopped.set()
+                if terminate:
+                    self._terminate_requested.set()
+                    self.stop.set()
+                self._refresh_control_state("stopping")
+                self._say("run", f"queue admission stopping: {reason}")
 
     # -- dispatcher --------------------------------------------------------------------------------------------------------
 
@@ -450,6 +461,10 @@ class ParallelRunner:
         latest = latest_queue_control(self.store)
         if latest is not None and latest.get("state") == "stopping":
             self._record_stopped("previous stop completed", terminate_running=False)
+        if not self._admission_paused.is_set():
+            latest = latest_queue_control(self.store)
+            if latest is not None and latest.get("state") in {"stopped", "stopping"}:
+                self._record_control("running", "queue run started", terminate_running=False)
         summary.recovered.extend(recover_orphaned_claims(self.store, self.project))
         for row in self.store.tasks():  # provably dead provider processes only; live/unknown are never touched
             summary.recovered.extend(_recover_dead(self.store, str(row["id"])))
