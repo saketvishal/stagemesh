@@ -1,0 +1,580 @@
+"""Execution-owned task worktrees and detection of external mutation.
+
+A task's worktree is writable by exactly one StageMesh execution at a time. The execution takes an exclusive *lease* (an owner file in the
+worktree's private git dir, created with O_EXCL), and every authorized outcome is *sealed* into a ledger beside it: the HEAD, a
+fingerprint of any uncommitted files, and the candidate SHA that execution produced. Everything StageMesh later does with that candidate
+(the next implementation attempt, validation, review, integration) first compares the worktree and the candidate rows with the ledger.
+Any difference that no active, authorized execution explains is an external mutation: StageMesh records a deterministic
+`EXTERNAL_WORKSPACE_MUTATION` audit event and raises `WorkspaceMutation`, and the caller stops and blocks the task instead of adopting it.
+
+What counts as authorized: the working-tree edits and linear fast-forward commits the lease holder's agent leaves behind when its process
+exits (agents are told to commit). Git cannot tell an agent commit from another process's commit made *while that agent is running*, so
+that window is bounded rather than closed: the lease excludes other StageMesh executions, the tree must be exactly as sealed before the
+agent starts, HEAD must still descend from the sealed HEAD afterwards, and the result is sealed as the one candidate every later stage must
+match. Nothing here writes to the database beyond audit events; state lives in the worktree's git dir and is removed with the worktree.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import tempfile
+import time
+import uuid
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Any
+
+from .audit import record_audit
+from .domain import EvidenceKind, EvidenceStatus, ExecutionStatus, ProcessIdentity
+from .git import GitWorkspace
+from .persistence import Store
+from .process_identity import classify_process, process_identity
+from .workspaces import prepare_task_workspace, task_workspace
+
+EXTERNAL_WORKSPACE_MUTATION = "EXTERNAL_WORKSPACE_MUTATION"
+OWNERSHIP_INITIALIZED = "workspace.ownership_initialized"
+LEASE_RECOVERED = "workspace.lease_recovered"
+OWNER_FILE = "stagemesh-owner.json"
+LEDGER_FILE = "stagemesh-workspace.json"
+LEDGER_VERSION = 1
+MAX_FINGERPRINT_PATHS = 500  # beyond this only the digest is kept, so the changed paths cannot be listed
+MAX_REPORTED_PATHS = 20
+
+REMEDY = (
+    "inspect the workspace; either reset it to expected_sha (git reset --hard <expected_sha> && git clean -fd) or remove it "
+    "(git worktree remove --force <workspace>), then run `stagemesh retry-task`. StageMesh will not adopt the change."
+)
+
+
+class WorkspaceMutation(RuntimeError):
+    """The worktree, its owner or the candidate provenance is not what an authorized execution left. `detail` is the audit payload."""
+
+    def __init__(self, detail: dict[str, Any]):
+        self.detail = detail
+        super().__init__(
+            f"{EXTERNAL_WORKSPACE_MUTATION} at {detail.get('stage')}: {detail.get('reason')} "
+            f"(expected {detail.get('expected_sha')}, observed {detail.get('observed_sha')})"
+        )
+
+    @property
+    def reason(self) -> str:
+        return str(self.detail.get("reason"))
+
+
+# --- observation ---------------------------------------------------------------------------------------------------------
+
+
+def _content_hash(path: Path) -> str:
+    try:
+        if path.is_symlink():
+            return "link:" + os.readlink(path)
+        if not path.is_file():
+            return "absent"
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1 << 20), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+    except OSError:
+        return "unreadable"
+
+
+def observe(path: Path) -> dict[str, Any]:
+    """HEAD plus a fingerprint of every uncommitted path (modified, staged, deleted and untracked) in a worktree."""
+    git = GitWorkspace(path)
+    head = git.run("rev-parse", "HEAD").stdout.strip()
+    status = git.run("--no-optional-locks", "status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames").stdout
+    dirty = {entry[3:]: _content_hash(path / entry[3:]) for entry in status.split("\0") if len(entry) > 3}
+    digest = hashlib.sha256(json.dumps(sorted(dirty.items())).encode("utf-8")).hexdigest()
+    return {
+        "head": head,
+        "dirty": dirty if len(dirty) <= MAX_FINGERPRINT_PATHS else {},
+        "dirty_count": len(dirty),
+        "dirty_digest": digest,
+    }
+
+
+def _changed_paths(sealed: dict[str, Any], seen: dict[str, Any]) -> list[str]:
+    before, after = sealed.get("dirty") or {}, seen.get("dirty") or {}
+    return sorted(p for p in set(before) | set(after) if before.get(p) != after.get(p))[:MAX_REPORTED_PATHS]
+
+
+def _difference(ledger: dict[str, Any], seen: dict[str, Any]) -> tuple[str, list[str]] | None:
+    if seen["head"] != ledger["head"]:
+        return "head_changed", []
+    if seen["dirty_digest"] != ledger["dirty_digest"]:
+        return "working_tree_modified", _changed_paths(ledger, seen)
+    return None
+
+
+# --- files in the worktree's git dir --------------------------------------------------------------------------------------
+
+
+def _gitdir(path: Path) -> Path:
+    return Path(GitWorkspace(path).run("rev-parse", "--absolute-git-dir").stdout.strip())
+
+
+def _atomic_write(target: Path, payload: dict[str, Any]) -> None:
+    fd, temp_name = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, sort_keys=True, indent=2) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_name, target)
+    except BaseException:
+        try:
+            os.unlink(temp_name)
+        except OSError:
+            pass
+        raise
+
+
+def _read_json(path: Path) -> dict[str, Any] | None:
+    """The parsed file, None when absent; ValueError when present but unusable (fail closed, never treated as absent)."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise ValueError(f"{path.name} is unreadable: {exc}") from exc
+    try:
+        value = json.loads(text)
+    except ValueError as exc:
+        raise ValueError(f"{path.name} is not valid JSON") from exc
+    if not isinstance(value, dict):
+        raise ValueError(f"{path.name} is not an object")  # noqa: TRY004 - callers handle ValueError uniformly
+    return value
+
+
+def _owner_is_active(owner: dict[str, Any]) -> bool:
+    saved = ProcessIdentity(owner.get("pid"), owner.get("create_time"), owner.get("boot_id"), owner.get("executable"))
+    return classify_process(saved, process_identity(saved.pid)) != "DEAD"  # an unverifiable owner is treated as alive
+
+
+def _self_owner(token: str, task_id: str, kind: str, claim_id: str | None) -> dict[str, Any]:
+    me = process_identity(os.getpid())
+    return {
+        "token": token,
+        "task_id": task_id,
+        "kind": kind,
+        "claim_id": claim_id,
+        "execution_id": None,
+        "pid": os.getpid(),
+        "create_time": me.create_time if me else None,
+        "boot_id": me.boot_id if me else None,
+        "executable": me.executable if me else None,
+        "acquired_at": time.time(),
+    }
+
+
+# --- reporting -----------------------------------------------------------------------------------------------------------
+
+
+def _mutation(
+    store: Store,
+    *,
+    task_id: str,
+    stage: str,
+    reason: str,
+    workspace: Path | None,
+    expected_sha: str | None,
+    observed_sha: str | None,
+    execution_id: str | None = None,
+    claim_id: str | None = None,
+    candidate_sha: str | None = None,
+    changed_paths: Sequence[str] = (),
+    detail: str | None = None,
+) -> WorkspaceMutation:
+    """Record the deterministic audit event (fixed keys, no timestamps in the payload) and return the exception to raise."""
+    payload: dict[str, Any] = {
+        "task_id": task_id,
+        "execution_id": execution_id,
+        "claim_id": claim_id,
+        "workspace": str(workspace) if workspace is not None else None,
+        "stage": stage,
+        "reason": reason,
+        "expected_sha": expected_sha,
+        "observed_sha": observed_sha,
+        "candidate_sha": candidate_sha,
+        "changed_paths": list(changed_paths)[:MAX_REPORTED_PATHS],
+        "detail": detail,
+        "remedy": REMEDY,
+    }
+    record_audit(store, EXTERNAL_WORKSPACE_MUTATION, payload)
+    return WorkspaceMutation(payload)
+
+
+# --- the lease an execution holds ----------------------------------------------------------------------------------------
+
+
+class WorkspaceLease:
+    def __init__(self, store: Store, task_id: str, kind: str, path: Path, gitdir: Path, token: str, claim_id: str | None, recovering: bool):
+        self.store = store
+        self.task_id = task_id
+        self.kind = kind
+        self.path = path
+        self.claim_id = claim_id
+        self.execution_id: str | None = None
+        self._gitdir = gitdir
+        self._token = token
+        self._recovering = recovering
+        self._ledger: dict[str, Any] = {}
+        self._ledger_bytes = b""
+        self._agent_ran = False
+        self._sealed = False
+        self._released = False
+
+    # -- identity -------------------------------------------------------------------------------------------------------
+
+    @property
+    def ledger(self) -> dict[str, Any]:
+        return dict(self._ledger)
+
+    def bind_execution(self, execution_id: str) -> None:
+        self.execution_id = execution_id
+        owner = self._read_owner()
+        if owner is not None and owner.get("token") == self._token:
+            _atomic_write(self._gitdir / OWNER_FILE, {**owner, "execution_id": execution_id})
+
+    def _read_owner(self) -> dict[str, Any] | None:
+        try:
+            return _read_json(self._gitdir / OWNER_FILE)
+        except ValueError:
+            return None
+
+    def _fail(self, stage: str, reason: str, *, observed: str | None, expected: str | None = None, paths: Sequence[str] = (), detail: str | None = None) -> WorkspaceMutation:
+        return _mutation(
+            self.store,
+            task_id=self.task_id,
+            stage=f"{self.kind}:{stage}",
+            reason=reason,
+            workspace=self.path,
+            expected_sha=expected if expected is not None else self._ledger.get("head"),
+            observed_sha=observed,
+            execution_id=self.execution_id,
+            claim_id=self.claim_id,
+            candidate_sha=self._ledger.get("candidate"),
+            changed_paths=paths,
+            detail=detail,
+        )
+
+    # -- checks ---------------------------------------------------------------------------------------------------------
+
+    def _check_ownership(self, stage: str, observed_head: str | None) -> None:
+        try:
+            owner = _read_json(self._gitdir / OWNER_FILE)
+            ledger_bytes = (self._gitdir / LEDGER_FILE).read_bytes()
+        except (ValueError, OSError) as exc:
+            raise self._fail(stage, "ownership_record_unreadable", observed=observed_head, detail=str(exc)) from exc
+        if owner is None or owner.get("token") != self._token:
+            raise self._fail(stage, "workspace_ownership_lost", observed=observed_head, detail=f"owner is now {(owner or {}).get('execution_id') or (owner or {}).get('claim_id')}")
+        if ledger_bytes != self._ledger_bytes:
+            raise self._fail(stage, "ownership_ledger_changed", observed=observed_head)
+
+    def check(self, stage: str) -> None:
+        """The worktree is exactly what was sealed (HEAD and every uncommitted path) and this lease still owns it."""
+        seen = observe(self.path)
+        self._check_ownership(stage, seen["head"])
+        difference = _difference(self._ledger, seen)
+        if difference is not None:
+            raise self._fail(stage, difference[0], observed=seen["head"], paths=difference[1])
+
+    def after_agent(self) -> None:
+        """The agent has exited: its output is authorized if HEAD is the sealed HEAD or a linear descendant of it and the lease held."""
+        self._agent_ran = True
+        seen = observe(self.path)
+        self._check_ownership("after_agent", seen["head"])
+        sealed = self._ledger["head"]
+        if seen["head"] != sealed and GitWorkspace(self.path).run("merge-base", "--is-ancestor", sealed, seen["head"], check=False).returncode != 0:
+            raise self._fail("after_agent", "head_not_descendant", observed=seen["head"], detail="HEAD was moved off the sealed commit's history")
+
+    # -- sealing --------------------------------------------------------------------------------------------------------
+
+    def seal(self, candidate_sha: str | None = None) -> None:
+        """Record the current worktree as the authorized result of this execution, and `candidate_sha` as the candidate it produced."""
+        seen = observe(self.path)
+        candidate = candidate_sha if candidate_sha is not None else self._ledger.get("candidate")
+        self._write_ledger(seen, candidate)
+        self._sealed = True
+
+    def _write_ledger(self, seen: dict[str, Any], candidate: str | None, **extra: Any) -> None:
+        ledger = {
+            "version": LEDGER_VERSION,
+            "task_id": self.task_id,
+            "head": seen["head"],
+            "dirty": seen["dirty"],
+            "dirty_count": seen["dirty_count"],
+            "dirty_digest": seen["dirty_digest"],
+            "candidate": candidate,
+            "sealed_by": self.execution_id,
+            "sealed_kind": self.kind,
+            **extra,
+        }
+        _atomic_write(self._gitdir / LEDGER_FILE, ledger)
+        self._ledger = ledger
+        self._ledger_bytes = (self._gitdir / LEDGER_FILE).read_bytes()
+
+    # -- release --------------------------------------------------------------------------------------------------------
+
+    def release(self) -> None:
+        if self._released:
+            return
+        self._released = True
+        owner = self._read_owner()
+        if owner is not None and owner.get("token") == self._token:
+            try:
+                os.unlink(self._gitdir / OWNER_FILE)
+            except OSError:
+                pass
+
+    def _mark_interrupted(self) -> None:
+        """The execution died without sealing: keep the old ledger but tell the next owner partial edits are the dead run's, not external."""
+        try:
+            if (self._gitdir / LEDGER_FILE).read_bytes() == self._ledger_bytes:
+                _atomic_write(self._gitdir / LEDGER_FILE, {**self._ledger, "interrupted_by": self.execution_id or self.claim_id or self.kind})
+        except OSError:
+            pass
+
+
+def _load_ledger(gitdir: Path) -> tuple[dict[str, Any] | None, bytes]:
+    data = _read_json(gitdir / LEDGER_FILE)
+    if data is None:
+        return None, b""
+    for key in ("head", "dirty_digest", "dirty", "candidate"):
+        if key not in data:
+            raise ValueError(f"{LEDGER_FILE} is missing {key}")
+    return data, (gitdir / LEDGER_FILE).read_bytes()
+
+
+def _claim(store: Store, task_id: str, kind: str, path: Path, gitdir: Path, token: str, claim_id: str | None) -> bool:
+    """Create the owner file exclusively. Returns True when a dead owner's stale file was replaced; refuses a live or unreadable owner."""
+    target = gitdir / OWNER_FILE
+    recovered = False
+    for _attempt in range(2):
+        try:
+            fd = os.open(target, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            try:
+                owner = _read_json(target)
+            except ValueError as exc:
+                raise _mutation(store, task_id=task_id, stage=f"{kind}:acquire", reason="ownership_record_unreadable", workspace=path, expected_sha=None, observed_sha=None, claim_id=claim_id, detail=str(exc)) from exc
+            if owner is not None and _owner_is_active(owner):
+                raise _mutation(
+                    store,
+                    task_id=task_id,
+                    stage=f"{kind}:acquire",
+                    reason="workspace_owned_by_another_execution",
+                    workspace=path,
+                    expected_sha=None,
+                    observed_sha=None,
+                    execution_id=owner.get("execution_id"),
+                    claim_id=claim_id,
+                    detail=f"owned by {owner.get('kind')} execution {owner.get('execution_id') or owner.get('claim_id')} (pid {owner.get('pid')})",
+                ) from None
+            try:
+                os.unlink(target)
+            except FileNotFoundError:
+                pass
+            recovered = recovered or owner is not None
+            continue
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(_self_owner(token, task_id, kind, claim_id), sort_keys=True) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        return recovered
+    raise _mutation(store, task_id=task_id, stage=f"{kind}:acquire", reason="workspace_owned_by_another_execution", workspace=path, expected_sha=None, observed_sha=None, claim_id=claim_id, detail="lost the race for the owner file")
+
+
+def _latest_candidate_sha(store: Store, task_id: str) -> str | None:
+    row = store.latest_candidate(task_id)
+    return str(row["sha"]) if row is not None else None
+
+
+def _anchor_sha(store: Store, task_id: str) -> str | None:
+    """What the database says an unrecorded worktree's HEAD must be: the latest candidate, else the task baseline."""
+    return _latest_candidate_sha(store, task_id) or store.task_baseline(task_id)
+
+
+def acquire_workspace(store: Store, project: Path, task_id: str, kind: str, *, claim_id: str | None = None) -> WorkspaceLease:
+    """Create or reuse the task's worktree, take its exclusive lease and prove it is exactly what the last authorized execution sealed."""
+    root = Path(project).resolve()
+    existed = (task_workspace(root, task_id) / ".git").exists()
+    path = prepare_task_workspace(root, task_id)
+    gitdir = _gitdir(path)
+    token = uuid.uuid4().hex
+    recovered = _claim(store, task_id, kind, path, gitdir, token, claim_id)
+    lease = WorkspaceLease(store, task_id, kind, path, gitdir, token, claim_id, recovered)
+    try:
+        _establish(lease, existed)
+    except BaseException:
+        lease.release()
+        raise
+    return lease
+
+
+def _establish(lease: WorkspaceLease, existed: bool) -> None:
+    store, task_id = lease.store, lease.task_id
+    try:
+        ledger, raw = _load_ledger(lease._gitdir)
+    except ValueError as exc:
+        raise lease._fail("acquire", "ownership_record_unreadable", observed=None, detail=str(exc)) from exc
+    seen = observe(lease.path)
+    latest = _latest_candidate_sha(store, task_id)
+    if ledger is None:
+        anchor = _anchor_sha(store, task_id)
+        if existed and anchor is not None and seen["head"] != anchor:
+            raise lease._fail("acquire", "no_ownership_record_and_head_differs", observed=seen["head"], expected=anchor)
+        lease._ledger, lease._ledger_bytes = {"head": seen["head"], "candidate": latest}, b""
+        lease._write_ledger(seen, latest)
+        record_audit(store, OWNERSHIP_INITIALIZED, {"task_id": task_id, "workspace": str(lease.path), "head": seen["head"], "adopted_existing": existed, "kind": lease.kind})
+        return
+    lease._ledger, lease._ledger_bytes = ledger, raw
+    if ledger.get("task_id") not in (None, task_id):
+        raise lease._fail("acquire", "workspace_belongs_to_another_task", observed=seen["head"], detail=str(ledger.get("task_id")))
+    if lease._recovering or ledger.get("interrupted_by"):
+        # A previous execution died holding this workspace: its partial edits and commits are its own. Accept only a history-preserving state.
+        sealed = ledger["head"]
+        if seen["head"] != sealed and GitWorkspace(lease.path).run("merge-base", "--is-ancestor", sealed, seen["head"], check=False).returncode != 0:
+            raise lease._fail("acquire", "head_not_descendant", observed=seen["head"])
+        record_audit(store, LEASE_RECOVERED, {"task_id": task_id, "workspace": str(lease.path), "sealed_head": sealed, "observed_head": seen["head"], "kind": lease.kind, "interrupted_by": ledger.get("interrupted_by")})
+        lease._write_ledger(seen, ledger.get("candidate"))
+        return
+    difference = _difference(ledger, seen)
+    if difference is not None:
+        raise lease._fail("acquire", difference[0], observed=seen["head"], paths=difference[1])
+    if ledger.get("candidate") != latest:
+        raise lease._fail("acquire", "candidate_provenance_changed", observed=latest, expected=ledger.get("candidate"))
+
+
+@contextmanager
+def owned_workspace(store: Store, project: Path, task_id: str, kind: str, *, claim_id: str | None = None) -> Iterator[WorkspaceLease]:
+    """`with owned_workspace(...) as lease:` holds the lease for the block. A mutation fails the execution; any other exit keeps state honest."""
+    lease = acquire_workspace(store, project, task_id, kind, claim_id=claim_id)
+    try:
+        yield lease
+        if not lease._sealed:
+            _seal_or_fail(lease)
+    except WorkspaceMutation:
+        _fail_execution(lease)
+        lease.release()
+        raise
+    except BaseException:
+        lease._mark_interrupted()
+        lease.release()
+        raise
+    else:
+        lease.release()
+
+
+def _seal_or_fail(lease: WorkspaceLease) -> None:
+    """The block ended without sealing (a failed or empty attempt): the state must still be explained by this execution."""
+    seen = observe(lease.path)
+    lease._check_ownership("release", seen["head"])
+    descends = lease._agent_ran and GitWorkspace(lease.path).run("merge-base", "--is-ancestor", lease._ledger["head"], seen["head"], check=False).returncode == 0
+    if seen["head"] != lease._ledger["head"] and not descends:
+        raise lease._fail("release", "head_changed", observed=seen["head"])
+    if not lease._agent_ran:
+        difference = _difference(lease._ledger, seen)
+        if difference is not None:
+            raise lease._fail("release", difference[0], observed=seen["head"], paths=difference[1])
+    lease._write_ledger(seen, lease._ledger.get("candidate"))
+
+
+def _fail_execution(lease: WorkspaceLease) -> None:
+    if lease.execution_id is None:
+        return
+    row = lease.store.conn.execute("SELECT status FROM executions WHERE id=?", (lease.execution_id,)).fetchone()
+    if row is not None and row["status"] == ExecutionStatus.RUNNING:
+        lease.store.finish_execution(lease.execution_id, ExecutionStatus.FAILED, result="external_workspace_mutation")
+
+
+# --- stage boundaries (no lease: validation, review and integration never write the implementation worktree) ----------------
+
+
+def pin_candidate(project: Path, task_id: str, candidate_sha: str) -> None:
+    """An operator action registered `candidate_sha`; record it in the ledger so it is the candidate every later check expects."""
+    target = task_workspace(Path(project).resolve(), task_id)
+    if not (target / ".git").exists():
+        return
+    gitdir = _gitdir(target)
+    try:
+        ledger, _raw = _load_ledger(gitdir)
+    except ValueError:
+        return  # an unreadable ledger is reported by the next check; an operator action must not hide it
+    if ledger is not None:
+        _atomic_write(gitdir / LEDGER_FILE, {**ledger, "candidate": candidate_sha})
+
+
+def verify_candidate_workspace(
+    store: Store,
+    project: Path,
+    task_id: str,
+    candidate_sha: str,
+    stage: str,
+    *,
+    require: Sequence[EvidenceKind] = (),
+) -> None:
+    """Prove, at a lifecycle boundary, that `candidate_sha` is exactly what the authorized execution produced. Raises WorkspaceMutation."""
+    root = Path(project).resolve()
+    target = task_workspace(root, task_id)
+    owned = (target / ".git").exists()
+    ledger: dict[str, Any] | None = None
+    seen: dict[str, Any] | None = None
+
+    def fail(reason: str, *, expected: str | None, observed: str | None, paths: Sequence[str] = (), detail: str | None = None) -> WorkspaceMutation:
+        return _mutation(
+            store,
+            task_id=task_id,
+            stage=stage,
+            reason=reason,
+            workspace=target if owned else None,
+            expected_sha=expected,
+            observed_sha=observed,
+            execution_id=(ledger or {}).get("sealed_by"),
+            candidate_sha=candidate_sha,
+            changed_paths=paths,
+            detail=detail,
+        )
+
+    if owned:
+        gitdir = _gitdir(target)
+        try:
+            ledger, _raw = _load_ledger(gitdir)
+            owner = _read_json(gitdir / OWNER_FILE)
+        except ValueError as exc:
+            raise fail("ownership_record_unreadable", expected=None, observed=None, detail=str(exc)) from exc
+        seen = observe(target)
+        if owner is not None and _owner_is_active(owner):
+            raise fail("workspace_owned_by_another_execution", expected=(ledger or {}).get("head"), observed=seen["head"], detail=f"{owner.get('kind')} execution {owner.get('execution_id') or owner.get('claim_id')} holds the lease")
+        if ledger is None:
+            anchor = _anchor_sha(store, task_id)
+            if anchor is not None and seen["head"] != anchor:
+                raise fail("no_ownership_record_and_head_differs", expected=anchor, observed=seen["head"])
+            ledger = {"head": seen["head"], "dirty_digest": seen["dirty_digest"], "dirty": seen["dirty"], "candidate": _latest_candidate_sha(store, task_id), "sealed_by": None}
+        else:
+            difference = _difference(ledger, seen)
+            if difference is not None:
+                raise fail(difference[0], expected=ledger["head"], observed=seen["head"], paths=difference[1])
+    expected_candidate = (ledger or {}).get("candidate")
+    latest = _latest_candidate_sha(store, task_id)
+    if (expected_candidate is not None and expected_candidate != candidate_sha) or (latest is not None and latest != candidate_sha):
+        raise fail("candidate_provenance_changed", expected=expected_candidate or latest, observed=candidate_sha if expected_candidate != candidate_sha else latest)
+    for kind in require:
+        if not store.has_evidence(task_id, candidate_sha, kind, EvidenceStatus.PASSED):
+            raise fail(f"candidate_without_{str(kind).lower()}_evidence", expected=expected_candidate or candidate_sha, observed=candidate_sha, detail=f"no PASSED {kind} evidence is recorded for exactly this candidate")
+
+
+__all__ = [
+    "EXTERNAL_WORKSPACE_MUTATION",
+    "WorkspaceLease",
+    "WorkspaceMutation",
+    "acquire_workspace",
+    "observe",
+    "owned_workspace",
+    "pin_candidate",
+    "verify_candidate_workspace",
+]

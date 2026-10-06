@@ -456,7 +456,13 @@ def candidate_workspace(project: Path, candidate_sha: str) -> Iterator[Path]:
     target = temp_root / "checkout"
     try:
         workspace.run("worktree", "add", "--detach", str(target), candidate_sha)
+        expected = workspace.run("rev-parse", f"{candidate_sha}^{{commit}}").stdout.strip()
+        checkout = GitWorkspace(target)
+        if checkout.head() != expected:
+            raise GitError(f"candidate checkout is not exactly {expected}")
         yield target
+        if checkout.head() != expected:  # a gate moved HEAD: the tree that ran is no longer the candidate
+            raise GitError(f"a gate moved the candidate checkout off {expected}")
     finally:
         try:
             workspace.run("worktree", "remove", "--force", str(target), check=False)
