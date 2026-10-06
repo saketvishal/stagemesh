@@ -30,14 +30,14 @@ _RESULT = {
 
 
 def format_duration(seconds: float | None) -> str:
-    """Compact human duration: 4s, 2m 26s, 1h 03m 09s. Fractions round to the nearest second."""
+    """Compact human duration: 42s, 3m 18s, 1h 04m. Fractions round to the nearest second; hours drop the seconds."""
     if seconds is None:
         return "-"
     total = max(0, round(seconds))
     hours, rest = divmod(total, 3600)
     minutes, secs = divmod(rest, 60)
     if hours:
-        return f"{hours}h {minutes:02d}m {secs:02d}s"
+        return f"{hours}h {minutes:02d}m"
     if minutes:
         return f"{minutes}m {secs:02d}s"
     return f"{secs}s"
@@ -100,6 +100,12 @@ def task_timing(store: Store, task_id: str) -> dict[str, Any]:
             "running": sum(1 for rec in records if rec["finished_at"] is None),
         },
     }
+
+
+def step_duration(records: list[dict[str, Any]]) -> float | None:
+    """Total execution time of the finished executions a lifecycle step ran, or None when it ran none."""
+    finished = [rec["duration_seconds"] for rec in records if rec["duration_seconds"] is not None]
+    return round(sum(finished), 3) if finished else None
 
 
 def format_task_summary(timing: dict[str, Any]) -> str:
