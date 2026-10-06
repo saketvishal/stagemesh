@@ -376,7 +376,9 @@ def format_doctor(report: dict[str, Any]) -> str:
     lines = [f"task {report['task_id']}: {report['title']}", f"  stage/status: {report['stage']}/{report['status']}"]
     control = report.get("queue_control") or {}
     if control:
-        lines.append(f"  queue admission: {control['state']} (active executions: {len(control['active_executions'])})")
+        from .queue_visibility import format_queue_control
+
+        lines.extend(format_queue_control(control, "  "))
     claim = report["active_claim"]
     lines.append(f"  active claim: {claim['id']} ({claim['stage']}, worker {claim['worker_id']})" if claim else "  active claim: none")
     execs = report["active_executions"]
@@ -414,6 +416,6 @@ def format_doctor(report: dict[str, Any]) -> str:
 
 
 def _queue_control_summary(store: Store) -> dict[str, Any]:
-    from .parallel import queue_control_state
+    from .queue_visibility import queue_control_report
 
-    return queue_control_state(store)
+    return queue_control_report(store)
