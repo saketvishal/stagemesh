@@ -148,12 +148,38 @@ def test_failure_that_passes_on_rerun_of_the_same_sha_is_a_fragile_test() -> Non
     assert gate.klass is CIClass.BROKEN_FRAGILE_TEST and "rerun" in gate.reason
 
 
-def test_unsupported_environment_is_not_a_code_failure() -> None:
+def test_unsupported_environment_without_base_evidence_is_classified_but_never_tolerated() -> None:
     candidate = _run(CAND, macos=_failed("macos", "ERROR: Unsupported Python 3.8; requires python >=3.11"))
-    (gate,) = diagnose_ci(candidate, None).gates
-    assert gate.klass is CIClass.UNSUPPORTED_ENVIRONMENT
-    decision = plan_ci_response(diagnose_ci(candidate, None), task_id=TASK)
-    assert decision.action is Action.RECORD_AND_DEFER and decision.condition is Condition.CI_UNSUPPORTED_ENVIRONMENT
+    diagnosis = diagnose_ci(candidate, None)
+    (gate,) = diagnosis.gates
+    assert gate.klass is CIClass.UNSUPPORTED_ENVIRONMENT and gate.evidence == "NO_BASE"
+    decision = plan_ci_response(diagnosis, task_id=TASK)
+    assert decision.condition is Condition.CI_UNSUPPORTED_ENVIRONMENT and decision.action is Action.REQUEST_BASE_CI
+    assert diagnosis.merge_blockers()  # the candidate may have caused it (e.g. by raising requires-python): not tolerable without base proof
+
+
+def test_unsupported_environment_is_tolerated_only_when_base_fails_the_same_environmental_way() -> None:
+    env_error = "ERROR: Unsupported Python 3.8; requires python >=3.11"
+    base = _run(BASE, macos=_failed("macos", env_error + " (runner image 20240101)"))
+    diagnosis = diagnose_ci(_run(CAND, macos=_failed("macos", "ERROR: Unsupported Python 3.8; requires python >=3.11 (runner image 20240202)")), base)
+    # identical failure on both sides is a baseline failure; an environment error on both sides with differing text is confirmed-by-base
+    assert diagnosis.gates[0].klass in {CIClass.BASELINE_FAILURE, CIClass.UNSUPPORTED_ENVIRONMENT}
+    assert diagnosis.merge_blockers() == []
+    different_text = diagnose_ci(_run(CAND, macos=_failed("macos", "requires python >=3.12 not satisfied")), base)
+    (gate,) = different_text.gates
+    assert gate.klass is CIClass.UNSUPPORTED_ENVIRONMENT and gate.evidence == "BASE_CONFIRMED"
+    assert different_text.merge_blockers() == []
+
+
+def test_candidate_that_turns_an_already_red_gate_into_an_environment_error_is_a_regression() -> None:
+    """Independent-review finding: a candidate raising requires-python must not hide behind a gate that was already red."""
+    base = _run(BASE, unit=_failed("unit", tests=("t::old",)))
+    candidate = _run(CAND, unit=_failed("unit", "ERROR: Unsupported Python 3.8; requires python >=3.11"))
+    diagnosis = diagnose_ci(candidate, base)
+    (gate,) = diagnosis.gates
+    assert gate.klass is CIClass.CANDIDATE_REGRESSION
+    assert plan_ci_response(diagnosis, task_id=TASK).action is Action.REMEDIATE_CANDIDATE
+    assert diagnosis.merge_blockers() and diagnosis.merge_blockers(allow_baseline_failures=True)
 
 
 def test_dependency_base_pr_failure_is_attributed_to_the_dependency_not_the_candidate() -> None:

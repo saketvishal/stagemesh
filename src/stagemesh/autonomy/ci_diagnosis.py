@@ -310,8 +310,17 @@ def diagnose_gate(
             )
         if candidate.infrastructure:
             return GateDiagnosis(name, CIClass.INFRASTRUCTURE_FAILURE, "failure differs from base and matches an infrastructure signature", signature, base_signature)
-        if candidate.unsupported_environment:
-            return GateDiagnosis(name, CIClass.UNSUPPORTED_ENVIRONMENT, "failure is an unsupported-environment error, not a code failure", signature, base_signature)
+        if candidate.unsupported_environment and base.unsupported_environment:
+            return GateDiagnosis(
+                name,
+                CIClass.UNSUPPORTED_ENVIRONMENT,
+                "base fails this gate with the same kind of unsupported-environment error",
+                signature,
+                base_signature,
+                evidence="BASE_CONFIRMED",
+            )
+        # An environment-looking error on a gate that was red for another reason is a change in how the candidate fails, not proof the
+        # environment is at fault (a candidate can raise requires-python): it falls through to a regression.
         new_tests = tuple(sorted(set(candidate.failing_tests) - set(base.failing_tests)))
         return GateDiagnosis(
             name, CIClass.CANDIDATE_REGRESSION, "the gate fails on base and the candidate fails it differently (new failures)", signature, base_signature, new_tests
@@ -323,7 +332,13 @@ def diagnose_gate(
     if candidate.infrastructure:
         return GateDiagnosis(name, CIClass.INFRASTRUCTURE_FAILURE, "failure matches an infrastructure signature and names no failing test", signature)
     if candidate.unsupported_environment:
-        return GateDiagnosis(name, CIClass.UNSUPPORTED_ENVIRONMENT, "failure is an unsupported-environment error, not a code failure", signature)
+        return GateDiagnosis(
+            name,
+            CIClass.UNSUPPORTED_ENVIRONMENT,
+            "failure looks like an unsupported-environment error, but without base CI the candidate cannot be ruled out as its cause",
+            signature,
+            evidence="NO_BASE",
+        )
     return GateDiagnosis(name, CIClass.GENUINE_UNKNOWN, "no base CI evidence for this gate; cannot attribute the failure to the candidate", signature)
 
 
@@ -367,6 +382,12 @@ class CIDiagnosis:
         if allow_baseline_failures:
             tolerated |= {CIClass.BASELINE_FAILURE, CIClass.UNSUPPORTED_ENVIRONMENT}
         blockers = [f"{g.gate}: {g.klass.value} ({g.reason})" for g in self.gates if g.klass not in tolerated]
+        # an environment error is tolerable only when base demonstrably fails the same way
+        blockers += [
+            f"{g.gate}: UNSUPPORTED_ENVIRONMENT not confirmed by base CI ({g.reason})"
+            for g in self.by_class(CIClass.UNSUPPORTED_ENVIRONMENT)
+            if g.evidence != "BASE_CONFIRMED" and CIClass.UNSUPPORTED_ENVIRONMENT in tolerated
+        ]
         if allow_baseline_failures and baseline_requires_detail:
             blockers += [f"{g.gate}: BASELINE_FAILURE compared by gate conclusion only" for g in self.weak_baseline_gates()]
         return blockers
@@ -466,7 +487,10 @@ def plan_ci_response(
         mismatch = any(g.evidence == "ENVIRONMENT_MISMATCH" for g in diagnosis.gates)
         action = Action.REQUEST_BASE_CI if diagnosis.base_sha is None or mismatch else (Action.RERUN_CI if reruns_left > 0 else Action.WAIT)
     elif overall is CIClass.UNSUPPORTED_ENVIRONMENT:
-        action = Action.RECORD_AND_DEFER
+        unconfirmed = [g.gate for g in diagnosis.by_class(CIClass.UNSUPPORTED_ENVIRONMENT) if g.evidence != "BASE_CONFIRMED"]
+        action = Action.REQUEST_BASE_CI if unconfirmed else Action.RECORD_AND_DEFER
+        if unconfirmed:
+            detail["unconfirmed_by_base"] = unconfirmed
     else:  # BASELINE_FAILURE
         action = Action.RECORD_BASELINE_FAILURE_AND_PROCEED
         detail["deferred_baseline_failures"] = [g.gate for g in diagnosis.by_class(CIClass.BASELINE_FAILURE)]
