@@ -159,7 +159,7 @@ class FakeExecutor(Executor):
     name = "fake"
 
     def run(self, store: Store, task_id: str, claim_id: str | None, project: Path) -> ExecutionResult:
-        execution_id = store.start_execution(task_id=task_id, claim_id=claim_id, kind=ExecutionKind.IMPLEMENTATION)
+        execution_id = store.start_execution(task_id=task_id, claim_id=claim_id, kind=ExecutionKind.IMPLEMENTATION, actor=self.name)
         run_path = prepare_task_workspace(project, task_id)
         record_task_baseline(store, task_id, run_path)
         workspace = GitWorkspace(run_path)
@@ -231,6 +231,7 @@ class SubprocessExecutor(Executor):
             task_id=task_id,
             claim_id=claim_id,
             kind=ExecutionKind.IMPLEMENTATION,
+            actor=self.name,
             pid=ident.pid,
             process_create_time=ident.create_time,
             boot_id=ident.boot_id,
@@ -240,11 +241,11 @@ class SubprocessExecutor(Executor):
         code = proc.returncode
 
         if timed_out:
-            store.finish_execution(execution_id, ExecutionStatus.FAILED)
+            store.finish_execution(execution_id, ExecutionStatus.FAILED, result=PROVIDER_TIMEOUT)
             return ExecutionResult(ExecutionStatus.FAILED, failure_reason=PROVIDER_TIMEOUT)
         if code != 0:
             is_cap, reason = classify_failure(code, stdout, stderr)
-            store.finish_execution(execution_id, ExecutionStatus.FAILED)
+            store.finish_execution(execution_id, ExecutionStatus.FAILED, result=reason)
             return ExecutionResult(
                 ExecutionStatus.FAILED,
                 capacity_failure=is_cap,
@@ -260,7 +261,7 @@ class SubprocessExecutor(Executor):
             attribution=attribution_for_worker("local-worker", self.name),
         )
         if sha is None:
-            store.finish_execution(execution_id, ExecutionStatus.FAILED)
+            store.finish_execution(execution_id, ExecutionStatus.FAILED, result=NO_IMPLEMENTATION_CHANGE)
             return ExecutionResult(ExecutionStatus.FAILED, failure_reason=NO_IMPLEMENTATION_CHANGE)
         store.add_candidate(task_id, sha, self.name, durable_handoff=True)
         store.finish_execution(execution_id, ExecutionStatus.SUCCEEDED, sha)

@@ -101,6 +101,7 @@ class RuntimeCommandAdapter:
             task_id=task_id,
             claim_id=claim_id,
             kind=ExecutionKind.IMPLEMENTATION,
+            actor=self.name,
             pid=identity.pid,
             process_create_time=identity.create_time,
             boot_id=identity.boot_id,
@@ -108,11 +109,11 @@ class RuntimeCommandAdapter:
         )
         stdout, stderr, timed_out = communicate_bounded(proc, task_prompt, provider_timeout_seconds(self.timeout_seconds))
         if timed_out:
-            store.finish_execution(execution_id, ExecutionStatus.FAILED)
+            store.finish_execution(execution_id, ExecutionStatus.FAILED, result=PROVIDER_TIMEOUT)
             return ExecutionResult(ExecutionStatus.FAILED, failure_reason=PROVIDER_TIMEOUT)
         if proc.returncode != 0:
             is_cap, reason = classify_failure(proc.returncode, stdout, stderr)
-            store.finish_execution(execution_id, ExecutionStatus.FAILED)
+            store.finish_execution(execution_id, ExecutionStatus.FAILED, result=reason)
             return ExecutionResult(ExecutionStatus.FAILED, capacity_failure=is_cap, failure_reason=reason)
         sha = commit_implementation_candidate(
             store,
@@ -123,7 +124,7 @@ class RuntimeCommandAdapter:
             attribution=attribution_for_worker("local-worker", self.name),
         )
         if sha is None:
-            store.finish_execution(execution_id, ExecutionStatus.FAILED)
+            store.finish_execution(execution_id, ExecutionStatus.FAILED, result=NO_IMPLEMENTATION_CHANGE)
             return ExecutionResult(ExecutionStatus.FAILED, failure_reason=NO_IMPLEMENTATION_CHANGE)
         store.add_candidate(task_id, sha, self.name, durable_handoff=True)
         store.finish_execution(execution_id, ExecutionStatus.SUCCEEDED, sha)

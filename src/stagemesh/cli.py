@@ -32,7 +32,6 @@ from .external_evidence import (
 from .final_report import FinalReportValidationError, candidate_sha, render_final_report
 from .git import GitWorkspace
 from .github_acceptance import run_github_acceptance
-from .integration import Integrator
 from .objectives import ObjectivePlanner, ObjectiveValidationError
 from .observability import health
 from .operator import operator_report
@@ -58,6 +57,7 @@ from .parallel import ParallelRunner, ParallelSummary, SetupRefused, worker_id_f
 from .queue_run import QueueRunner
 from .regenerate import format_results, regenerate_contracts
 from .recovery import RecoveryRefusal, format_doctor, rebaseline_task, rebind_contract, task_doctor
+from .timing import format_task_timing, task_timing
 from .run_ready import RunSummary, format_step_update, format_stop, run_ready
 from .serialized_integration import SerializedIntegrator
 from .provider_pool import IMPLEMENT, REVIEW, PROVIDER_FAILURE_EVENT, PooledExecutor, ProviderLog, ProviderPool, default_pools, describe_verdicts
@@ -296,7 +296,12 @@ def _build_coordinator(
                 on_event=parallel.on_integration_event,
             )
             if parallel
-            else Integrator(integration_ref=integration_ref, require_independent_review=require_independent_review)
+            else SerializedIntegrator(
+                integration_ref,
+                require_independent_review,
+                IntegrationLock(runtime_dir(project) / "integration.lock"),
+                max_rebases=config.parallel.integration_rebase_attempts,
+            )
         )
     elif parallel:  # --dry-run: evidence-only integration, still behind the lock
         integrator = SerializedIntegrator(None, False, parallel.lock)
@@ -454,6 +459,18 @@ def command_task_doctor(args: argparse.Namespace) -> int:
         if not args.json:
             print(format_doctor(report))
         return report
+
+    return _repair_command(args, run)
+
+
+def command_task_timing(args: argparse.Namespace) -> int:
+    def run(store, project):  # type: ignore[no-untyped-def]
+        if store.get_task(args.task) is None:
+            raise RecoveryRefusal("unknown_task", f"no task {args.task}")
+        timing = task_timing(store, args.task)
+        if not args.json:
+            print(format_task_timing(timing, verbose=args.verbose))
+        return timing
 
     return _repair_command(args, run)
 
@@ -2105,6 +2122,11 @@ def build_parser() -> argparse.ArgumentParser:
     doctor_task.add_argument("--to", metavar="INTEGRATION_REF", help="Integration ref to compare the baseline with (default: configured ref or current branch)")
     doctor_task.add_argument("--json", action="store_true")
     doctor_task.set_defaults(func=command_task_doctor)
+    timing_cmd = sub.add_parser("task-timing", help="Read-only per-execution timing (actor, started, finished, duration, result) and a task timing summary")
+    timing_cmd.add_argument("--task", required=True)
+    timing_cmd.add_argument("--verbose", action="store_true", help="Show task, candidate SHA, started and finished times")
+    timing_cmd.add_argument("--json", action="store_true")
+    timing_cmd.set_defaults(func=command_task_timing)
     queue_cmd = sub.add_parser(
         "queue-run", help="Run several ready tasks at once when their contracts do not conflict (strict admission, serial integration)"
     )
