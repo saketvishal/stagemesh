@@ -216,3 +216,13 @@ A project that cannot be validated by guessing root-level test commands (a monor
 builds contracts from it, `stagemesh profile --task <id>` shows what a task would get, and a hand-written contract still wins.
 See `docs/profiles.md` and the Caventra profile in `docs/profiles/caventra.md`.
 
+### Packaging state for review
+
+* `stagemesh handoff export [--out FILE] [--to INTEGRATION_REF] [--force] [--json]` (read-only) writes one redacted JSON file
+  (default `.stagemesh/handoff/<UTC timestamp>.json`, always inside the project, never over an existing file without `--force`).
+  It holds the branch and SHA, task states, queue state (ready/blocked/claimed, work packets, retries, workers, dirty tree), active
+  executions, the latest run (recent executions and audit events), stored gate commands/results, changed files, each task's contract
+  scope (allowed/forbidden/protected files, limits, gate names) and an advisory next command. Schema: `stagemesh.handoff/1`;
+  `stagemesh.handoff.validate_handoff` checks a document. Secret-looking keys and values, URL credentials, environment secrets and
+  absolute paths are redacted; gate environments and output, prompts, canonical contract JSON and configuration are never read in.
+
