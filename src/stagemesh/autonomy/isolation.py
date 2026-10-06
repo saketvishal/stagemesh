@@ -138,6 +138,7 @@ def check_isolation(
     extra_paths: Mapping[str, Path | str] | None = None,
     allow_external_runtime_paths: bool = False,
     check_running_code: bool = False,
+    expected_code_checkout: Path | str | None = None,
 ) -> IsolationReport:
     project = Path(project).resolve()
     paths, findings = runtime_paths(project)
@@ -182,19 +183,22 @@ def check_isolation(
 
     _check_git_store(project, report)
     _check_shared_state(project, report, registry_path, database_url)
-    if check_running_code:
-        _check_running_code(project, report)
+    if check_running_code or expected_code_checkout is not None:
+        _check_running_code(project, report, Path(expected_code_checkout) if expected_code_checkout is not None else None)
     return report
 
 
-def _check_running_code(project: Path, report: IsolationReport) -> None:
-    """When the project is itself a StageMesh checkout, the StageMesh code executing must be this checkout's, not another's.
+def _check_running_code(project: Path, report: IsolationReport, expected_checkout: Path | None = None) -> None:
+    """The StageMesh code executing must come from the checkout it is supposed to come from.
 
-    A global editable install (`pip install -e` of some other checkout) makes `import stagemesh` resolve there unless `PYTHONPATH=src`.
+    By default that is the project itself when the project is a StageMesh checkout (an ordinary project may use any installed StageMesh).
+    When the project is managed *by another checkout's* StageMesh (StageMesh developing StageMesh), `expected_checkout` names the
+    tool checkout explicitly and the code must come from exactly there. A global editable install of some other checkout makes
+    `import stagemesh` resolve elsewhere unless `PYTHONPATH=src`.
     """
-    own_package = project / "src" / "stagemesh"
-    if not own_package.is_dir():
-        return  # an ordinary project that merely uses StageMesh: any installed StageMesh is legitimate
+    own_package = (expected_checkout or project) / "src" / "stagemesh"
+    if expected_checkout is None and not own_package.is_dir():
+        return
     import stagemesh
 
     running = Path(os.path.realpath(stagemesh.__file__)).parent
@@ -202,7 +206,7 @@ def _check_running_code(project: Path, report: IsolationReport) -> None:
         report.findings.append(
             IsolationFinding(
                 "RUNNING_CODE_FROM_OTHER_CHECKOUT",
-                f"StageMesh code is being imported from {running}, not from this checkout ({own_package}); run with PYTHONPATH=src or install this checkout",
+                f"StageMesh code is being imported from {running}, not from {own_package}; run with PYTHONPATH=src or install the right checkout",
                 str(running),
                 str(running.parent.parent),
             )

@@ -37,6 +37,7 @@ class AutonomySettings:
     allow_baseline_ci_failures: bool = True
     baseline_requires_detail: bool = True
     unknown_identity: UnknownIdentityStrategy = UnknownIdentityStrategy.FENCE
+    code_checkout: str | None = None  # the checkout whose StageMesh code must be running (StageMesh developing another StageMesh checkout)
 
     def integration_policy(self) -> IntegrationPolicy:
         return IntegrationPolicy(allow_baseline_ci_failures=self.allow_baseline_ci_failures, baseline_requires_detail=self.baseline_requires_detail)
@@ -54,7 +55,7 @@ def load_settings(runtime_dir: Path) -> AutonomySettings:
     data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
         raise ValueError(f"{path} must contain a JSON object")  # noqa: TRY004 - callers treat ValueError as "invalid settings"
-    unknown = set(data) - {"enabled", "trusted_committer_emails", "max_reconstructs", "allow_baseline_ci_failures", "baseline_requires_detail", "unknown_identity"}
+    unknown = set(data) - {"enabled", "trusted_committer_emails", "max_reconstructs", "allow_baseline_ci_failures", "baseline_requires_detail", "unknown_identity", "code_checkout"}
     if unknown:
         raise ValueError(f"{path} has unsupported keys: {', '.join(sorted(unknown))}")
     emails = tuple(str(item) for item in data.get("trusted_committer_emails", TRUSTED_COMMITTER_EMAILS))
@@ -65,6 +66,7 @@ def load_settings(runtime_dir: Path) -> AutonomySettings:
         allow_baseline_ci_failures=bool(data.get("allow_baseline_ci_failures", True)),
         baseline_requires_detail=bool(data.get("baseline_requires_detail", True)),
         unknown_identity=UnknownIdentityStrategy(str(data.get("unknown_identity", "FENCE")).upper()),
+        code_checkout=str(data["code_checkout"]) if data.get("code_checkout") else None,
     )
 
 

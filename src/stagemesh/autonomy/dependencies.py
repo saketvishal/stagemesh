@@ -51,7 +51,24 @@ class PullRequestAdapter(Protocol):
     def set_base(self, number: int, base_ref: str) -> PullRequest:
         ...
 
+    def find_by_head(self, head_ref: str) -> PullRequest | None:
+        """The most recent PR (any state) whose head branch is `head_ref`: the parent of a PR stacked on that branch."""
+        ...
+
     def merge(self, number: int, expected_head_sha: str, method: str = "squash") -> MergeOutcome:
+        ...
+
+
+class PullRequestPublisher(Protocol):
+    """Opening and updating the PR for a candidate branch (idempotent: an existing open PR for the branch is edited, not duplicated)."""
+
+    def find_open(self, head_ref: str) -> PullRequest | None:
+        ...
+
+    def open_pr(self, head_ref: str, base_ref: str, title: str, body: str, head_sha: str | None = None) -> PullRequest:
+        ...
+
+    def edit(self, number: int, title: str, body: str) -> PullRequest:
         ...
 
 
@@ -67,6 +84,8 @@ class FakePullRequests:
         self.prs: dict[int, PullRequest] = {pr.number: pr for pr in prs}
         self.calls: list[tuple[str, int, str]] = []
         self.on_merge = on_merge  # lands the PR in the test's git repository and returns the resulting commit SHA
+        self.bodies: dict[int, tuple[str, str]] = {}
+        self.default_mergeable: bool | None = None  # what the host reports for a newly opened PR (None: not computed yet)
 
     def get(self, number: int) -> PullRequest | None:
         self.calls.append(("get", number, ""))
@@ -82,6 +101,28 @@ class FakePullRequests:
 
     def update(self, pr: PullRequest) -> None:
         self.prs[pr.number] = pr
+
+    def find_by_head(self, head_ref: str) -> PullRequest | None:
+        self.calls.append(("find_by_head", 0, head_ref))
+        matches = [pr for pr in self.prs.values() if pr.head_ref == head_ref]
+        return max(matches, key=lambda pr: pr.number) if matches else None
+
+    def find_open(self, head_ref: str) -> PullRequest | None:
+        self.calls.append(("find_open", 0, head_ref))
+        return next((pr for pr in self.prs.values() if pr.head_ref == head_ref and pr.state is PRState.OPEN), None)
+
+    def open_pr(self, head_ref: str, base_ref: str, title: str, body: str, head_sha: str | None = None) -> PullRequest:
+        self.calls.append(("open_pr", 0, head_ref))
+        number = max(self.prs, default=0) + 1
+        pr = PullRequest(number, head_sha or "", head_ref, base_ref, PRState.OPEN, CIRollup.PENDING, self.default_mergeable)
+        self.prs[number] = pr
+        self.bodies[number] = (title, body)
+        return pr
+
+    def edit(self, number: int, title: str, body: str) -> PullRequest:
+        self.calls.append(("edit", number, title))
+        self.bodies[number] = (title, body)
+        return self.prs[number]
 
     def merge(self, number: int, expected_head_sha: str, method: str = "squash") -> MergeOutcome:
         self.calls.append(("merge", number, expected_head_sha))

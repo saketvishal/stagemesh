@@ -8,6 +8,7 @@ review and help diagnose; none of the decisions made here consult one.
 from __future__ import annotations
 
 import json
+import re
 import time
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import replace
@@ -48,6 +49,7 @@ from .decisions import (
 from .dependencies import (
     DependencyAssessment,
     PRDependency,
+    PullRequest,
     PullRequestAdapter,
     evaluate_dependencies,
     load_pull_requests,
@@ -427,6 +429,7 @@ class Supervisor:
         edges = self.declared_dependencies()
         numbers = {pr_number, *(e.depends_on for e in edges), *(e.pr for e in edges)}
         prs = load_pull_requests(self.pull_requests, sorted(numbers))
+        self._discover_stack_parents(pr_number, prs)
         previous = [d for d in decision_trace(self.store, task_id) if d.get("condition", "").startswith("DEPENDENCY_") or d.get("action") == Action.BLOCK_ON_DEPENDENCY.value]
         was_blocked = bool(previous) and previous[-1].get("action") == Action.BLOCK_ON_DEPENDENCY.value
         assessment = evaluate_dependencies(
@@ -438,6 +441,23 @@ class Supervisor:
                 self.pull_requests.set_base(pr_number, assessment.retarget_base_to)
             self.reconcile_base(task_id, dependency_landed=True)
         return assessment
+
+    def _integration_branch(self) -> str:
+        ref = self.integration_ref.removeprefix("refs/heads/")
+        return re.sub(r"^refs/remotes/[^/]+/", "", ref)
+
+    def _discover_stack_parents(self, pr_number: int, prs: dict[int, PullRequest | None]) -> None:
+        """Stacking is also implied by a PR's base branch being another PR's head branch, declared or not: ask the host who owns it."""
+        assert self.pull_requests is not None
+        current = prs.get(pr_number)
+        for _ in range(8):  # a stack deeper than this is a planning error, not something to walk forever
+            if current is None or current.base_ref == self._integration_branch():
+                return
+            parent = self.pull_requests.find_by_head(current.base_ref)
+            if parent is None or parent.number == current.number or parent.number in prs:
+                return
+            prs[parent.number] = parent
+            current = parent
 
     # --- capabilities 6 and 7: CI ----------------------------------------------------------------------------------------------------
 
@@ -626,7 +646,7 @@ class Supervisor:
                 )
             )
         if remote:
-            self.facts.git.run("fetch", "--quiet", remote, self.integration_ref.removeprefix("refs/heads/"), check=False)
+            self.facts.git.run("fetch", "--quiet", remote, self._integration_branch(), check=False)
         post = self.verify_integration(task_id, prov.candidate_sha, merge_sha=result.sha)
         if not post.verified:
             return post.decision  # type: ignore[return-value]
@@ -811,6 +831,10 @@ class Supervisor:
             return TaskScope.from_contract(contract_for_candidate(self.store, task_id, sha, self.project).contract, deferred_items(self.store, task_id))
         except Exception:  # noqa: BLE001 - scope only refines the response; a missing contract must not hide a CI failure
             return None
+
+    def remediate_from_ci(self, task_id: str, sha: str, diagnosis: CIDiagnosis, decision: AutonomyDecision) -> None:
+        """Public entry for callers that diagnosed CI themselves (delivery): same bounded, scoped remediation as the integration guard."""
+        self._send_back_for_ci_remediation(task_id, sha, diagnosis, decision)
 
     def _send_back_for_ci_remediation(self, task_id: str, sha: str, diagnosis: CIDiagnosis, decision: AutonomyDecision) -> None:
         """The implementation agent is told exactly which gates to fix and which already-red gates it must leave alone."""

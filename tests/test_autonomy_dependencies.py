@@ -205,3 +205,41 @@ def test_scenario_j_red_dependency_blocks_downstream_and_resumes_when_it_is_fixe
     assert ("set_base", 2, "main") in prs.calls
     assert store.get_task(T2)["stage"] == Stage.REVIEW and store.latest_candidate(T2)["sha"] == two
     assert load_provenance(store, T2).authorizes_integration()
+
+
+# --- review finding: stacking must be discovered from the PR's base branch, not only from declarations --------------------------------------------
+
+
+def test_an_undeclared_stack_is_discovered_from_the_base_branch_and_blocks(tmp_path: Path) -> None:
+    repo, store, prs, supervisor, base, one, two = _stack(tmp_path)
+    store.conn.execute("DELETE FROM audit_events WHERE event_type='autonomy.pr_dependency'")  # nobody declared "PR2 depends on PR1"
+    store.conn.commit()
+
+    blocked = supervisor.assess_dependencies(T2, 2)
+
+    assert blocked.blocked and blocked.blocked_on == [1]  # found by asking the host which PR owns feat/one
+    assert ("find_by_head", 0, "feat/one") in prs.calls
+    prs.update(PullRequest(1, one, "feat/one", "main", PRState.OPEN, CIRollup.FAILURE, True))
+    assert supervisor.assess_dependencies(T2, 2).red == [1]
+
+
+def test_an_undeclared_stack_resumes_after_the_parent_lands(tmp_path: Path) -> None:
+    repo, store, prs, supervisor, base, one, two = _stack(tmp_path)
+    store.conn.execute("DELETE FROM audit_events WHERE event_type='autonomy.pr_dependency'")
+    store.conn.commit()
+    assert supervisor.assess_dependencies(T2, 2).blocked
+    git(repo, "merge", "-q", "--ff-only", "feat/one")
+    prs.update(PullRequest(1, one, "feat/one", "main", PRState.MERGED, CIRollup.SUCCESS, True, one))
+
+    resumed = supervisor.assess_dependencies(T2, 2)
+
+    assert resumed.can_resume and ("set_base", 2, "main") in prs.calls
+
+
+def test_a_pr_based_on_the_integration_branch_costs_no_parent_lookup(tmp_path: Path) -> None:
+    repo, store, prs, supervisor, base, one, two = _stack(tmp_path)
+    store.conn.execute("DELETE FROM audit_events WHERE event_type='autonomy.pr_dependency'")
+    store.conn.commit()
+    assessment = supervisor.assess_dependencies(T1_UNSTACKED := "TASK-9", 1)
+    assert assessment.decision.action is Action.PROCEED and T1_UNSTACKED
+    assert not any(call[0] == "find_by_head" for call in prs.calls)

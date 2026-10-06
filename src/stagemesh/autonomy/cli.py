@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import subprocess
 from pathlib import Path
 
 from ..persistence import Store
@@ -83,6 +85,73 @@ def command_readiness(args: argparse.Namespace) -> int:
     return 0
 
 
+def _github_token() -> str | None:
+    token = os.environ.get("STAGEMESH_GITHUB_TOKEN") or os.environ.get("GITHUB_TOKEN")
+    if token:
+        return token
+    result = subprocess.run(["gh", "auth", "token"], capture_output=True, text=True, check=False)
+    return (result.stdout.strip() or None) if result.returncode == 0 else None
+
+
+def command_deliver(args: argparse.Namespace) -> int:
+    """Publish the task's validated, reviewed candidate as a branch and PR, observe hosted CI and report merge-readiness."""
+    from ..github import UrlLibGitHubTransport, detect_github_repository
+    from .delivery import deliver, write_report
+    from .github_adapter import GitHubHostedCI, GitHubPullRequests
+    from .supervisor import Supervisor
+    from .wiring import load_settings
+
+    project = Path(args.project).resolve()
+    settings = load_settings(project / ".stagemesh")
+    if not settings.enabled:
+        print("the supervisor is not enabled for this project (.stagemesh/autonomy.json)")
+        return 2
+    isolation = check_isolation(project, check_running_code=True, expected_code_checkout=settings.code_checkout)
+    if not isolation.isolated:
+        for finding in isolation.findings:
+            print(f"isolation violation [{finding.code}]: {finding.message}")
+        return EXIT_NOT_ISOLATED
+    repository = detect_github_repository(project, args.remote)
+    if repository is None:
+        print(f"remote {args.remote!r} is not a GitHub repository")
+        return 2
+    transport = UrlLibGitHubTransport(_github_token())
+    ci = GitHubHostedCI(repository.owner, repository.repo, transport)
+    pulls = GitHubPullRequests(repository.owner, repository.repo, transport, ci)
+    store = _store(project)
+    task = store.get_task(args.task)
+    if task is None:
+        print(f"task does not exist: {args.task}")
+        return 2
+    supervisor = Supervisor(
+        store,
+        project,
+        integration_ref=f"refs/remotes/{args.remote}/{args.base}",
+        hosted_ci=ci,
+        pull_requests=pulls,
+        integration_policy=settings.integration_policy(),
+        recovery_policy=settings.recovery_policy(),
+        max_reconstructs=settings.max_reconstructs,
+    )
+    report = deliver(
+        supervisor,
+        args.task,
+        remote=args.remote,
+        base=args.base,
+        pulls=pulls,
+        ci=ci,
+        title=str(task["title"]),
+        wait_seconds=args.wait_seconds,
+        poll_seconds=args.poll_seconds,
+        merge=args.merge,
+    )
+    path = write_report(project, report)
+    store.close()
+    print(json.dumps(report.to_dict(), indent=2, sort_keys=True) if args.json else report.to_markdown())
+    print(f"report: {path}")
+    return 1 if report.status in {"NOT_PUBLISHED", "ESCALATED"} else 0
+
+
 def command_record_outcome(args: argparse.Namespace) -> int:
     for reason in args.escalation or ():
         EscalationReason(reason)  # reject anything that is not a typed escalation reason
@@ -119,6 +188,18 @@ def register_autonomy_commands(sub: argparse._SubParsersAction) -> None:  # type
     readiness = commands.add_parser("readiness", help="Capability readiness, incident corpus coverage and the ten-task gate")
     readiness.add_argument("--json", action="store_true")
     readiness.set_defaults(func=command_readiness)
+
+    deliver_cmd = commands.add_parser(
+        "deliver", help="Publish the validated, reviewed candidate as a branch + PR, observe hosted CI, report merge-readiness (merge is off unless --merge)"
+    )
+    deliver_cmd.add_argument("--task", required=True)
+    deliver_cmd.add_argument("--remote", default="origin")
+    deliver_cmd.add_argument("--base", default="main")
+    deliver_cmd.add_argument("--wait-seconds", type=float, default=900.0)
+    deliver_cmd.add_argument("--poll-seconds", type=float, default=20.0)
+    deliver_cmd.add_argument("--merge", action="store_true", help="allow the supervisor to merge when every policy condition holds")
+    deliver_cmd.add_argument("--json", action="store_true")
+    deliver_cmd.set_defaults(func=command_deliver)
 
     outcome = commands.add_parser("record-outcome", help="Record one real task's outcome for the streak")
     outcome.add_argument("--task", required=True)

@@ -235,3 +235,25 @@ def test_ordinary_projects_may_use_any_installed_stagemesh(tmp_path: Path) -> No
     ordinary = _checkout(tmp_path / "ordinary", stagemesh_shaped=False)
     (ordinary / ".stagemesh").mkdir(exist_ok=True)
     assert "RUNNING_CODE_FROM_OTHER_CHECKOUT" not in _codes(check_isolation(ordinary, check_running_code=True))
+
+
+def test_a_declared_tool_checkout_must_be_the_one_whose_code_is_running(tmp_path: Path) -> None:
+    """StageMesh developing StageMesh: the project is a StageMesh checkout, the tool code comes from a named, different checkout."""
+    import stagemesh
+
+    tool_checkout = Path(stagemesh.__file__).resolve().parents[2]  # this checkout: its src/stagemesh is what is imported
+    target = _checkout(tmp_path / "target")  # StageMesh-shaped, but not where the running code lives
+    assert "RUNNING_CODE_FROM_OTHER_CHECKOUT" in _codes(check_isolation(target, check_running_code=True))  # default: wrong
+    declared = check_isolation(target, check_running_code=True, expected_code_checkout=tool_checkout)
+    assert "RUNNING_CODE_FROM_OTHER_CHECKOUT" not in _codes(declared)  # explicitly declared tool checkout is accepted
+    wrong = check_isolation(target, expected_code_checkout=tmp_path / "somewhere-else")
+    assert "RUNNING_CODE_FROM_OTHER_CHECKOUT" in _codes(wrong)  # ...and only that one
+
+
+def test_autonomy_settings_accept_a_code_checkout(tmp_path: Path) -> None:
+    from stagemesh.autonomy.wiring import load_settings
+
+    runtime = tmp_path / ".stagemesh"
+    runtime.mkdir()
+    (runtime / "autonomy.json").write_text(json.dumps({"enabled": True, "code_checkout": str(tmp_path / "tool")}), encoding="utf-8")
+    assert load_settings(runtime).code_checkout == str(tmp_path / "tool")

@@ -101,6 +101,32 @@ class GitHubPullRequests(GitHubClientBase):
             raise GitHubAdapterError(status, f"could not retarget #{number} to {base_ref}")
         return self._to_pull_request(payload)
 
+    def find_by_head(self, head_ref: str) -> PullRequest | None:
+        status, payload = self._request("GET", f"/pulls?state=all&head={quote(self.owner)}:{quote(head_ref, safe='')}&sort=created&direction=desc&per_page=5")
+        if status != 200 or not isinstance(payload, list):
+            raise GitHubAdapterError(status, f"unexpected pull request listing for {head_ref}")
+        return self._to_pull_request(payload[0]) if payload else None
+
+    def find_open(self, head_ref: str) -> PullRequest | None:
+        """The open PR whose head is `head_ref` (a branch of this repository), if any."""
+        status, payload = self._request("GET", f"/pulls?state=open&head={quote(self.owner)}:{quote(head_ref, safe='')}&per_page=5")
+        if status != 200 or not isinstance(payload, list):
+            raise GitHubAdapterError(status, f"unexpected pull request listing for {head_ref}")
+        return self._to_pull_request(payload[0]) if payload else None
+
+    def open_pr(self, head_ref: str, base_ref: str, title: str, body: str, head_sha: str | None = None) -> PullRequest:
+        status, payload = self._request("POST", "/pulls", {"title": title, "head": head_ref, "base": base_ref, "body": body})
+        if status != 201 or not isinstance(payload, dict):
+            message = str(payload.get("message", "")) if isinstance(payload, dict) else ""
+            raise GitHubAdapterError(status, f"could not open a pull request for {head_ref}: {message}")
+        return self._to_pull_request(payload)
+
+    def edit(self, number: int, title: str, body: str) -> PullRequest:
+        status, payload = self._request("PATCH", f"/pulls/{int(number)}", {"title": title, "body": body})
+        if status != 200 or not isinstance(payload, dict):
+            raise GitHubAdapterError(status, f"could not update #{number}")
+        return self._to_pull_request(payload)
+
     def merge(self, number: int, expected_head_sha: str, method: str = "squash") -> MergeOutcome:
         """Merge only if the PR head is still `expected_head_sha` (the SHA that was validated and reviewed)."""
         if method not in {"merge", "squash", "rebase"}:

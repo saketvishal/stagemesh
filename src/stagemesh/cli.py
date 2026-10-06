@@ -225,7 +225,7 @@ def _build_coordinator(
         print(f"autonomy config error: {exc}", file=sys.stderr)  # fail closed: never silently run unsupervised
         raise _SetupError(2)
     if autonomy.enabled:  # supervised runs fail closed if any runtime path resolves into another StageMesh checkout
-        isolation = check_isolation(project, check_running_code=True)
+        isolation = check_isolation(project, check_running_code=True, expected_code_checkout=autonomy.code_checkout)
         if not isolation.isolated:
             for finding in isolation.findings:
                 print(f"isolation violation [{finding.code}]: {finding.message}", file=sys.stderr)
