@@ -756,12 +756,12 @@ def command_queue_control(args: argparse.Namespace) -> int:
     store.close()
     if args.json:
         print(json.dumps(report, indent=2, sort_keys=True, default=str))
-    elif args.queue_control_command == "status":
-        for line in format_queue_control(report):
-            print(line)
     else:
         print(f"queue admission: {report['state']}")
         print(f"active executions: {len(report['active_executions'])}")
+        if args.queue_control_command == "status":
+            for line in format_queue_control(report)[1:]:
+                print(line)
     return 0
 
 

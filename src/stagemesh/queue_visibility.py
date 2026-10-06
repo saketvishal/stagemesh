@@ -14,24 +14,38 @@ from .persistence import Store
 from .process_identity import classify_process, process_identity
 
 STOP_STATES = {"stopping", "stopped"}
+CYCLE_BOUNDARY_STATES = {"resumed", "paused"}
 
 
 def _stop_reason(store: Store, state: str) -> str | None:
-    """The operator's reason for the stop in effect; the runner's later 'stopped' event only says it finished."""
+    """Why the queue is stopping/stopped: the operator's reason from the current stop cycle.
+
+    The runner's later 'stopped' event only says the stop finished, so look back for the 'stopping' request, but
+    never past a resume/pause (an earlier cycle). A stop with no request in this cycle (e.g. Ctrl+C) uses the
+    latest event's own reason.
+    """
     if state not in STOP_STATES:
         return None
     rows = store.conn.execute(
         "SELECT payload FROM audit_events WHERE event_type=? ORDER BY created_at DESC, rowid DESC",
         (QUEUE_CONTROL_EVENT,),
     ).fetchall()
-    for row in rows:
+    latest_reason: str | None = None
+    for index, row in enumerate(rows):
         try:
             payload = json.loads(row["payload"])
         except (TypeError, ValueError):
             continue
-        if isinstance(payload, dict) and payload.get("state") == "stopping" and payload.get("reason"):
-            return str(payload["reason"])
-    return None
+        if not isinstance(payload, dict):
+            continue
+        reason = str(payload["reason"]) if payload.get("reason") else None
+        if index == 0:
+            latest_reason = reason
+        if payload.get("state") in CYCLE_BOUNDARY_STATES:
+            break
+        if payload.get("state") == "stopping" and reason:
+            return reason
+    return latest_reason
 
 
 def queue_control_report(store: Store) -> dict[str, Any]:
