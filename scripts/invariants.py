@@ -93,6 +93,7 @@ from stagemesh.postgres_store import (
 )
 from stagemesh.process_identity import classify_process
 from stagemesh.provider_acceptance import run_provider_acceptance
+from stagemesh.workspaces import NO_IMPLEMENTATION_CHANGE
 from stagemesh.providers import (
     ProviderValidationError,
     RuntimeCommandAdapter,
@@ -211,6 +212,29 @@ def with_store(fn) -> None:
         finally:
             store.close()
             shutil.rmtree(tmp / "project" / ".git", ignore_errors=True)
+
+
+def _durable_provider_command() -> tuple[str, str, str]:
+    return (
+        sys.executable,
+        "-c",
+        "from pathlib import Path; Path('durable-implementation.txt').write_text('durable\\n', encoding='utf-8')",
+    )
+
+
+def _write_durable_provider_contract(project: Path, task_id: str) -> None:
+    directory = project / ".stagemesh" / "contracts"
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / f"{task_id}.json").write_text(
+        json.dumps(
+            {
+                "objective": "Record a durable implementation candidate",
+                "explicit": True,
+                "allowed_files": ["durable-implementation.txt"],
+            }
+        ),
+        encoding="utf-8",
+    )
 
 
 def main() -> int:
@@ -1406,7 +1430,8 @@ def main() -> int:
     def runtime_provider_execution_is_durable(store: Store, project: Path) -> None:
         project.mkdir(parents=True)
         task_id = store.upsert_task("provider execution")
-        adapter = RuntimeCommandAdapter("custom", (sys.executable, "--version"))
+        _write_durable_provider_contract(project, task_id)
+        adapter = RuntimeCommandAdapter("custom", _durable_provider_command())
         result = adapter.execute(store, task_id, None, project)
         assert result.status is ExecutionStatus.SUCCEEDED
         assert result.durable_handoff is True
@@ -1415,18 +1440,33 @@ def main() -> int:
         assert candidate is not None
         assert candidate["sha"] == result.candidate_sha
         assert candidate["produced_by"] == "custom"
+        assert candidate["durable_handoff"] == 1
         execution = store.conn.execute("SELECT * FROM executions WHERE task_id=?", (task_id,)).fetchone()
         assert execution["status"] == ExecutionStatus.SUCCEEDED
         assert execution["kind"] == ExecutionKind.IMPLEMENTATION
         assert execution["candidate_sha"] == result.candidate_sha
         assert execution["pid"] is not None
+        assert execution["executable"]
         failed_task = store.upsert_task("provider execution fails")
+        _write_durable_provider_contract(project, failed_task)
         failing = RuntimeCommandAdapter("custom", (sys.executable, "-c", "import sys; sys.exit(7)"))
         failed = failing.execute(store, failed_task, None, project)
         assert failed.status is ExecutionStatus.FAILED
         failed_execution = store.conn.execute("SELECT * FROM executions WHERE task_id=?", (failed_task,)).fetchone()
         assert failed_execution["status"] == ExecutionStatus.FAILED
         assert failed_execution["candidate_sha"] is None
+        noop_task = store.upsert_task("provider execution no-op")
+        _write_durable_provider_contract(project, noop_task)
+        noop = RuntimeCommandAdapter("custom", (sys.executable, "--version")).execute(store, noop_task, None, project)
+        assert noop.status is ExecutionStatus.FAILED
+        assert noop.failure_reason == NO_IMPLEMENTATION_CHANGE
+        assert noop.candidate_sha is None
+        assert noop.durable_handoff is False
+        assert store.latest_candidate(noop_task) is None
+        noop_execution = store.conn.execute("SELECT * FROM executions WHERE task_id=?", (noop_task,)).fetchone()
+        assert noop_execution["status"] == ExecutionStatus.FAILED
+        assert noop_execution["candidate_sha"] is None
+        assert noop_execution["result"] == NO_IMPLEMENTATION_CHANGE
 
     def github_acceptance_models_sync_contract(store: Store, project: Path) -> None:
         result = run_github_acceptance(store)

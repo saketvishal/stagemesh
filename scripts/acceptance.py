@@ -15,6 +15,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from stagemesh.domain import ExecutionStatus
 from stagemesh.persistence import SCHEMA_VERSION, Store
 from stagemesh.providers import RuntimeCommandAdapter
+from stagemesh.workspaces import NO_IMPLEMENTATION_CHANGE
 
 
 def run(command: list[str], cwd: Path, env: dict[str, str] | None = None) -> str:
@@ -33,6 +34,29 @@ def run_failure(command: list[str], cwd: Path, expected: str, env: dict[str, str
     output = result.stdout + result.stderr
     if result.returncode != 2 or expected not in output:
         raise AssertionError(output)
+
+
+def _durable_provider_command() -> tuple[str, str, str]:
+    return (
+        sys.executable,
+        "-c",
+        "from pathlib import Path; Path('durable-implementation.txt').write_text('durable\\n', encoding='utf-8')",
+    )
+
+
+def _write_durable_provider_contract(project: Path, task_id: str) -> None:
+    directory = project / ".stagemesh" / "contracts"
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / f"{task_id}.json").write_text(
+        json.dumps(
+            {
+                "objective": "Record a durable implementation candidate",
+                "explicit": True,
+                "allowed_files": ["durable-implementation.txt"],
+            }
+        ),
+        encoding="utf-8",
+    )
 
 
 def main() -> int:
@@ -883,7 +907,8 @@ def main() -> int:
         provider_store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
         try:
             provider_task = provider_store.upsert_task("runtime provider execution")
-            provider_result = RuntimeCommandAdapter("custom", (sys.executable, "--version")).execute(
+            _write_durable_provider_contract(project, provider_task)
+            provider_result = RuntimeCommandAdapter("custom", _durable_provider_command()).execute(
                 provider_store,
                 provider_task,
                 None,
@@ -898,14 +923,51 @@ def main() -> int:
             provider_store.close()
         if (
             provider_result.status is not ExecutionStatus.SUCCEEDED
+            or provider_result.durable_handoff is not True
             or provider_result.candidate_sha is None
             or provider_execution is None
             or provider_execution["status"] != "SUCCEEDED"
             or provider_execution["candidate_sha"] != provider_result.candidate_sha
+            or provider_execution["pid"] is None
             or provider_candidate is None
             or provider_candidate["produced_by"] != "custom"
+            or provider_candidate["sha"] != provider_result.candidate_sha
+            or provider_candidate["durable_handoff"] != 1
         ):
             raise AssertionError("runtime provider execution was not durable")
+        with tempfile.TemporaryDirectory(prefix="stagemesh-noop-provider-") as noop_raw:
+            noop_project = Path(noop_raw) / "project"
+            noop_project.mkdir()
+            noop_store = Store(noop_project / ".stagemesh" / "stagemesh.sqlite3")
+            try:
+                noop_store.migrate()
+                noop_task = noop_store.upsert_task("runtime provider no-op")
+                _write_durable_provider_contract(noop_project, noop_task)
+                noop_result = RuntimeCommandAdapter("custom", (sys.executable, "--version")).execute(
+                    noop_store,
+                    noop_task,
+                    None,
+                    noop_project,
+                )
+                noop_execution = noop_store.conn.execute(
+                    "SELECT * FROM executions WHERE task_id=? ORDER BY updated_at DESC LIMIT 1",
+                    (noop_task,),
+                ).fetchone()
+                noop_candidate = noop_store.latest_candidate(noop_task)
+            finally:
+                noop_store.close()
+        if (
+            noop_result.status is not ExecutionStatus.FAILED
+            or noop_result.failure_reason != NO_IMPLEMENTATION_CHANGE
+            or noop_result.candidate_sha is not None
+            or noop_result.durable_handoff is not False
+            or noop_candidate is not None
+            or noop_execution is None
+            or noop_execution["status"] != "FAILED"
+            or noop_execution["candidate_sha"] is not None
+            or noop_execution["result"] != NO_IMPLEMENTATION_CHANGE
+        ):
+            raise AssertionError("no-op provider was treated as a successful implementation")
         github_acceptance = run(
             [sys.executable, "-m", "stagemesh.cli", "--project", str(project), "github-acceptance"],
             ROOT,
@@ -935,7 +997,8 @@ def main() -> int:
             "ok: True" not in health
             or "done: 4" not in health
             or "blocked_tasks: 0" not in health
-            or "failed_executions: 0" not in health
+            or "failed_executions_historical: 0" not in health
+            or "failed_executions_current: 0" not in health
             or "unknown_executions: 0" not in health
         ):
             raise AssertionError(health)
