@@ -204,8 +204,8 @@ advance on it. Evidence rows already written around the detection are not delete
 
 **Dead owners.** A lease whose owning process is dead is taken over only if the workspace is exactly what that owner last sealed; then
 `workspace.lease_recovered` is audited. If anything differs (a commit, a tracked edit, any added file) the claim is refused as an external
-mutation instead, so a killed agent's half-written output also needs an operator. An execution interrupted by an exception or Ctrl+C while
-it still holds its lease seals what it left, under the same rules as a normal exit.
+mutation instead, so a killed agent's half-written output also needs an operator. An execution interrupted by an exception or Ctrl+C
+after the before-agent check seals what it left. An interrupt before that check does not adopt a change that appeared first.
 
 **Older worktrees.** A worktree with no ownership record (created before this feature) is adopted only when HEAD is the task's recorded
 candidate (or baseline) and its tracked files are clean. Untracked files in such a worktree are not checked.
@@ -221,8 +221,9 @@ timestamps or process guesses. Cryptographic, process or container isolation of 
 work; until then, same-user mutation during that window is not solved, only bounded.
 
 **Known gaps (follow-up hardening).** The fingerprint does not cover the index state alone (staging an already-dirty file), skip-worktree
-or assume-unchanged edits, ignored files, or a branch switch at the same SHA. The owner file is written just after it is created, so a
-concurrent claimant in that instant can see it unreadable and fail closed. Validation evidence recorded before a detection is reused after
+or assume-unchanged edits, ignored files, or a branch switch at the same SHA. Claimants hold the per-workspace lock across the
+owner-file create and JSON write, so they wait instead of reading a partial record. A reader that does not take that lock can still
+see an unreadable record and fail closed. Validation evidence recorded before a detection is reused after
 `retry-task`. `parallel` partial-edit cleanup, `adopt-candidate --validate` and `recovery` revalidation do not go through the guard. A gate
 that dirties its checkout without moving HEAD is not detected.
 
