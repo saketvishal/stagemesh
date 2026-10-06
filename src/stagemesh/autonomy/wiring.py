@@ -1,6 +1,7 @@
 """Opt-in wiring of the supervisor into the existing lifecycle.
 
-A project opts in with `.stagemesh/autonomy.json` (or `STAGEMESH_AUTONOMY=1`). Opted-out projects see no behavior change: none of
+A project opts in with `.stagemesh/autonomy.json` and nothing else: no environment variable or global setting can enable it, so a
+project that did not opt in is never supervised. Opted-out projects see no behavior change: none of
 the hooks below do anything and the coordinator runs with no guard.
 
     { "enabled": true,
@@ -13,7 +14,6 @@ the hooks below do anything and the coordinator runs with no guard.
 from __future__ import annotations
 
 import json
-import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -26,7 +26,6 @@ SETTINGS_FILE = "autonomy.json"
 # A busy integration ref must not strand a supervised task behind a manual `retry-task`: refreshing is cheap relative to a founder
 # instruction, so supervised runs allow at least this many automatic refreshes regardless of `parallel.integration_rebase_attempts`.
 SUPERVISED_MIN_REFRESH_ATTEMPTS = 5
-ENV_FLAG = "STAGEMESH_AUTONOMY"
 
 
 @dataclass(frozen=True)
@@ -46,12 +45,25 @@ class AutonomySettings:
         return RecoveryPolicy(unknown_identity=self.unknown_identity)
 
 
+def _flag(data: dict, key: str, default: bool) -> bool:
+    value = data.get(key, default)
+    if not isinstance(value, bool):  # "false" is a truthy string: a config meant to fail closed must not guess
+        raise ValueError(f"autonomy.json: {key} must be true or false, not {value!r}")  # noqa: TRY004
+    return value
+
+
+def _count(data: dict, key: str, default: int) -> int:
+    value = data.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"autonomy.json: {key} must be a non-negative integer, not {value!r}")
+    return value
+
+
 def load_settings(runtime_dir: Path) -> AutonomySettings:
     """Settings from `<runtime>/autonomy.json`; an invalid file raises rather than silently disabling the supervisor."""
-    enabled_by_env = os.environ.get(ENV_FLAG, "").strip().lower() in {"1", "true", "yes", "on"}
     path = Path(runtime_dir) / SETTINGS_FILE
     if not path.is_file():
-        return AutonomySettings(enabled=enabled_by_env)
+        return AutonomySettings(enabled=False)
     data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
         raise ValueError(f"{path} must contain a JSON object")  # noqa: TRY004 - callers treat ValueError as "invalid settings"
@@ -60,11 +72,11 @@ def load_settings(runtime_dir: Path) -> AutonomySettings:
         raise ValueError(f"{path} has unsupported keys: {', '.join(sorted(unknown))}")
     emails = tuple(str(item) for item in data.get("trusted_committer_emails", TRUSTED_COMMITTER_EMAILS))
     return AutonomySettings(
-        enabled=bool(data.get("enabled", False)) or enabled_by_env,
+        enabled=_flag(data, "enabled", False),
         trusted_committer_emails=tuple(dict.fromkeys(emails)),
-        max_reconstructs=int(data.get("max_reconstructs", 1)),
-        allow_baseline_ci_failures=bool(data.get("allow_baseline_ci_failures", True)),
-        baseline_requires_detail=bool(data.get("baseline_requires_detail", True)),
+        max_reconstructs=_count(data, "max_reconstructs", 1),
+        allow_baseline_ci_failures=_flag(data, "allow_baseline_ci_failures", True),
+        baseline_requires_detail=_flag(data, "baseline_requires_detail", True),
         unknown_identity=UnknownIdentityStrategy(str(data.get("unknown_identity", "FENCE")).upper()),
         code_checkout=str(data["code_checkout"]) if data.get("code_checkout") else None,
     )

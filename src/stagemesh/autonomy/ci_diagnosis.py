@@ -11,6 +11,7 @@ that behavior is protected from being "fixed" (`guard_remediation`).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from collections.abc import Iterable, Mapping
@@ -69,10 +70,10 @@ def condition_for(klass: CIClass) -> Condition:
 
 
 _INFRA = re.compile(
-    r"(runner (has )?received a shutdown signal|lost communication with the server|the operation was canceled|econnreset|"
+    r"(runner (has )?received a shutdown signal|lost communication with the server|econnreset|"
     r"etimedout|connection reset by peer|no space left on device|503 service unavailable|502 bad gateway|"
     r"could not resolve host|temporary failure in name resolution|rate limit exceeded|"
-    r"error: the process .* failed to start|unable to download action|failed to download action|internal server error)",
+    r"error: the process .* failed to start|unable to download action|failed to download action)",
     re.IGNORECASE,
 )
 _UNSUPPORTED = re.compile(
@@ -97,8 +98,11 @@ class GateOutcome:
         """Failure identity that survives SHAs, timings and temp paths: failing tests when known, else the key error lines."""
         if self.failing_tests:
             return "tests:" + ",".join(sorted(self.failing_tests))
-        lines = [normalize(line) for line in self.log.splitlines() if _KEY_LINE.search(line)]
-        return "log:" + "|".join(sorted(set(lines))[:20])
+        lines = sorted({normalize(line) for line in self.log.splitlines() if _KEY_LINE.search(line)})
+        if not lines:
+            return _NO_DETAIL
+        # every distinct failure line takes part: truncating would let a new failure that sorts last hide behind an old red gate
+        return f"log:{len(lines)}:{hashlib.sha256(chr(10).join(lines).encode('utf-8')).hexdigest()[:16]}"
 
     @property
     def infrastructure(self) -> bool:

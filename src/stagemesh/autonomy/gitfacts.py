@@ -112,6 +112,15 @@ class GitFacts:
         parts = result.stdout.split()
         return parts[0] if result.returncode == 0 and parts else None
 
+    def fetch_branch(self, remote: str, branch: str) -> subprocess.CompletedProcess[str]:
+        """Fetch one branch into its remote-tracking ref with an explicit, forced refspec.
+
+        `git fetch <remote> <branch>` only updates `refs/remotes/<remote>/<branch>` when a configured refspec happens to map it, and
+        without `+` it would refuse to follow a force-rewritten branch, hiding exactly the rewrite StageMesh must see. The tracking ref
+        is not a branch anyone works on, so forcing it destroys nothing.
+        """
+        return self.git.run("fetch", "--quiet", remote, f"+refs/heads/{branch}:refs/remotes/{remote}/{branch}", check=False)
+
     def ref_exists(self, ref: str) -> bool:
         return self.git.run("show-ref", "--verify", "--quiet", ref, check=False).returncode == 0
 

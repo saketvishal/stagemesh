@@ -105,14 +105,19 @@ class GitHubPullRequests(GitHubClientBase):
         status, payload = self._request("GET", f"/pulls?state=all&head={quote(self.owner)}:{quote(head_ref, safe='')}&sort=created&direction=desc&per_page=5")
         if status != 200 or not isinstance(payload, list):
             raise GitHubAdapterError(status, f"unexpected pull request listing for {head_ref}")
-        return self._to_pull_request(payload[0]) if payload else None
+        return self._detailed(payload[0]) if payload else None
 
     def find_open(self, head_ref: str) -> PullRequest | None:
         """The open PR whose head is `head_ref` (a branch of this repository), if any."""
         status, payload = self._request("GET", f"/pulls?state=open&head={quote(self.owner)}:{quote(head_ref, safe='')}&per_page=5")
         if status != 200 or not isinstance(payload, list):
             raise GitHubAdapterError(status, f"unexpected pull request listing for {head_ref}")
-        return self._to_pull_request(payload[0]) if payload else None
+        return self._detailed(payload[0]) if payload else None
+
+    def _detailed(self, listed: dict) -> PullRequest:
+        """List payloads omit mergeability and the merged flag: read the single-PR resource for the facts policy depends on."""
+        full = self.get(int(listed["number"]))
+        return full if full is not None else self._to_pull_request(listed)
 
     def open_pr(self, head_ref: str, base_ref: str, title: str, body: str, head_sha: str | None = None) -> PullRequest:
         status, payload = self._request("POST", "/pulls", {"title": title, "head": head_ref, "base": base_ref, "body": body})
@@ -143,7 +148,7 @@ class GitHubPullRequests(GitHubClientBase):
 
     def _to_pull_request(self, data: dict) -> PullRequest:
         head, base = data.get("head") or {}, data.get("base") or {}
-        if data.get("merged"):
+        if data.get("merged") or data.get("merged_at"):  # list payloads carry merged_at, not merged
             state = PRState.MERGED
         elif data.get("state") == "closed":
             state = PRState.CLOSED
@@ -169,12 +174,17 @@ class GitHubHostedCI(GitHubClientBase):
     """`HostedCI` over check runs. Check-run payloads carry no logs, so failure identity is gate-level unless output text lists tests."""
 
     def run_for(self, sha: str) -> HostedCIRun | None:
-        status, payload = self._request("GET", f"/commits/{quote(sha)}/check-runs?per_page=100", missing_ok=True)
-        if status == 404:
-            return None
-        if status != 200 or not isinstance(payload, dict):
-            raise GitHubAdapterError(status, f"unexpected check-runs response for {sha}")
-        runs = payload.get("check_runs") or []
+        runs: list[dict] = []
+        for page in range(1, 11):  # a gate beyond the first page must not silently disappear
+            status, payload = self._request("GET", f"/commits/{quote(sha)}/check-runs?per_page=100&page={page}", missing_ok=True)
+            if status == 404 and page == 1:
+                return None
+            if status != 200 or not isinstance(payload, dict):
+                raise GitHubAdapterError(status, f"unexpected check-runs response for {sha}")
+            batch = payload.get("check_runs") or []
+            runs.extend(batch)
+            if len(batch) < 100 or len(runs) >= int(payload.get("total_count") or 0):
+                break
         by_name: dict[str, list[dict]] = {}
         for run in runs:
             by_name.setdefault(str(run.get("name") or "unnamed"), []).append(run)

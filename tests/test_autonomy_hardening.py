@@ -337,3 +337,171 @@ def test_a_blocking_finding_on_a_file_the_candidate_itself_changed_is_never_wave
     assert waved.approved  # out of scope and untouched by the candidate: deferred
     caught = assess_review(report, candidate_sha="a" * 40, scope=scope, task_id=TASK, candidate_changed_files=("src/legacy.py",))
     assert not caught.approved and caught.remediate == [finding]  # the candidate edited it: this is its defect, not someone else's
+
+
+# --- independent-review round: tracking refs are fetched explicitly; opt-in is project-local only --------------------------------------------------------
+
+
+def test_fetching_a_base_updates_the_tracking_ref_whatever_refspecs_are_configured(tmp_path: Path) -> None:
+    from stagemesh.autonomy.gitfacts import GitFacts
+
+    remote = tmp_path / "remote.git"
+    remote.mkdir()
+    git(remote, "init", "-q", "--bare", "-b", "main")
+    repo = init_repo(tmp_path / "repo")
+    first = commit(repo, {"a.txt": "a\n"}, "first")
+    git(repo, "remote", "add", "origin", str(remote))
+    git(repo, "push", "-q", "origin", "main")
+    git(repo, "fetch", "-q", "origin")
+    git(repo, "config", "--replace-all", "remote.origin.fetch", "+refs/heads/unrelated:refs/remotes/origin/unrelated")  # no mapping for main
+    other = tmp_path / "other"
+    git(tmp_path, "clone", "-q", str(remote), str(other))
+    second = commit(other, {"b.txt": "b\n"}, "second")
+    git(other, "push", "-q", "origin", "main")
+    facts = GitFacts(repo)
+    assert facts.resolve("refs/remotes/origin/main") == first
+
+    assert facts.fetch_branch("origin", "main").returncode == 0
+
+    assert facts.resolve("refs/remotes/origin/main") == second
+
+
+def test_the_tracking_ref_follows_a_force_rewritten_remote_branch(tmp_path: Path) -> None:
+    from stagemesh.autonomy.gitfacts import GitFacts
+
+    remote = tmp_path / "remote.git"
+    remote.mkdir()
+    git(remote, "init", "-q", "--bare", "-b", "main")
+    repo = init_repo(tmp_path / "repo")
+    commit(repo, {"a.txt": "a\n"}, "first")
+    git(repo, "remote", "add", "origin", str(remote))
+    git(repo, "push", "-q", "origin", "main")
+    facts = GitFacts(repo)
+    facts.fetch_branch("origin", "main")
+    rewritten = git(remote, "commit-tree", "main^{tree}", "-m", "history rewritten with the same tree")
+    git(remote, "update-ref", "refs/heads/main", rewritten)  # the host's main was rewritten
+
+    facts.fetch_branch("origin", "main")
+
+    assert facts.resolve("refs/remotes/origin/main") == rewritten  # a rewrite is observable, not hidden behind a non-forced fetch
+
+
+def test_the_global_environment_cannot_enable_the_supervisor(tmp_path: Path, monkeypatch) -> None:
+    from stagemesh.autonomy.wiring import load_settings
+
+    monkeypatch.setenv("STAGEMESH_AUTONOMY", "1")
+    runtime = tmp_path / ".stagemesh"
+    runtime.mkdir()
+    assert load_settings(runtime).enabled is False  # a project that did not opt in is never supervised
+    (runtime / "autonomy.json").write_text(json.dumps({"enabled": True}), encoding="utf-8")
+    assert load_settings(runtime).enabled is True
+
+
+# --- advisory-review round: list payloads, signatures, budgets, strict settings, pagination --------------------------------------------------------
+
+
+class _Transport:
+    def __init__(self, routes):
+        self.routes = routes
+        self.calls = []
+
+    def request(self, method, path, body=None):
+        self.calls.append((method, path))
+        for (m, prefix), response in self.routes.items():
+            if m == method and path.startswith(prefix):
+                return response(path) if callable(response) else response
+        return 404, {}, {"message": "Not Found"}
+
+
+def test_a_squash_landed_parent_found_through_the_list_endpoint_is_merged_not_closed() -> None:
+    """The list endpoint returns merged_at, not merged: a landed dependency must not become a founder escalation."""
+    from stagemesh.autonomy.github_adapter import GitHubPullRequests
+
+    listed = {"number": 1, "state": "closed", "merged_at": "2026-10-06T06:04:48Z", "head": {"sha": "a" * 40, "ref": "feat/one"}, "base": {"ref": "main"}}
+    detail = {**listed, "merged": True, "merge_commit_sha": "m" * 40}
+    transport = _Transport({("GET", "/repos/o/r/pulls?state=all"): (200, {}, [listed]), ("GET", "/repos/o/r/pulls/1"): (200, {}, detail)})
+
+    parent = GitHubPullRequests("o", "r", transport).find_by_head("feat/one")
+
+    from stagemesh.autonomy.dependencies import PRState
+
+    assert parent is not None and parent.state is PRState.MERGED and parent.merge_commit_sha == "m" * 40
+    only_listed = GitHubPullRequests("o", "r", _Transport({("GET", "/repos/o/r/pulls?state=all"): (200, {}, [listed])})).find_by_head("feat/one")
+    assert only_listed is None or only_listed.state is PRState.MERGED  # even with nothing but the list payload, merged_at means merged
+
+
+def test_a_timeout_message_is_not_an_infrastructure_signature() -> None:
+    base = HostedCIRun(BASE, {"unit": GateOutcome("unit", Conclusion.SUCCESS)}, environment="github-actions")
+    hang = GateOutcome("unit", Conclusion.CANCELLED, "The operation was canceled.", rerun_conclusions=(Conclusion.CANCELLED,))
+    diagnosis = diagnose_ci(HostedCIRun(CAND, {"unit": hang}, environment="github-actions"), base)
+    assert diagnosis.gates[0].klass is CIClass.CANDIDATE_REGRESSION  # a step that hits timeout-minutes logs exactly this, twice
+    server = GateOutcome("unit", Conclusion.FAILURE, "internal server error from the code under test")
+    assert diagnose_ci(HostedCIRun(CAND, {"unit": server}, environment="github-actions"), base).gates[0].klass is CIClass.CANDIDATE_REGRESSION
+
+
+def test_baseline_signatures_compare_every_failure_line_not_the_first_twenty() -> None:
+    many = "\n".join(f"error: module {chr(97 + n)}{chr(97 + n)} failed" for n in range(30))  # 30 distinct normalized failure lines
+    base = HostedCIRun(BASE, {"unit": GateOutcome("unit", Conclusion.FAILURE, many)}, environment="github-actions")
+    worse = HostedCIRun(CAND, {"unit": GateOutcome("unit", Conclusion.FAILURE, many + "\nerror: zzz a brand new failure sorts last")}, environment="github-actions")
+    same = HostedCIRun(CAND, {"unit": GateOutcome("unit", Conclusion.FAILURE, many)}, environment="github-actions")
+    assert diagnose_ci(worse, base).gates[0].klass is CIClass.CANDIDATE_REGRESSION
+    assert diagnose_ci(same, base).gates[0].klass is CIClass.BASELINE_FAILURE
+
+
+def test_the_integration_guard_refuses_to_pass_when_no_gate_was_observed(tmp_path: Path) -> None:
+    from stagemesh.autonomy.ci_diagnosis import FakeHostedCI
+
+    project, store, base = _project(tmp_path)
+    candidate = _task_at_integrate(store, project, base)
+    supervisor = Supervisor(store, project, integration_ref=REF, hosted_ci=FakeHostedCI([]))  # CI has not reported anything for either SHA
+    assert supervisor.allow(Stage.INTEGRATE, TASK, candidate) is False
+
+
+def test_a_failed_push_that_is_not_a_branch_conflict_is_not_reported_as_one(tmp_path: Path) -> None:
+    import re
+
+    from stagemesh.autonomy.delivery import _PUSH_CONFLICT
+
+    assert re.search(_PUSH_CONFLICT, " ! [rejected]        abc -> stagemesh/t (non-fast-forward)", re.IGNORECASE)
+    assert re.search(_PUSH_CONFLICT, "error: failed to push some refs; Updates were rejected because the tip is behind", re.IGNORECASE)
+    assert not re.search(_PUSH_CONFLICT, "fatal: unable to access 'https://github.com/x/y.git/': Could not resolve host: github.com", re.IGNORECASE)
+
+
+def test_the_rerun_budget_counts_requests_not_distinct_decisions(tmp_path: Path) -> None:
+    from stagemesh.autonomy.ci_diagnosis import FakeHostedCI
+
+    store = new_store(tmp_path)
+    store.upsert_task("t", source_id=TASK)
+    ci = FakeHostedCI([_run(CAND, unit=GateOutcome("unit", Conclusion.FAILURE, "502 Bad Gateway")), _run(BASE, unit=GateOutcome("unit", Conclusion.SUCCESS))])
+    supervisor = Supervisor(store, tmp_path, integration_ref="main", hosted_ci=ci)
+    actions = [supervisor.assess_ci(TASK, CAND, BASE, reruns_left=3).action for _ in range(5)]
+    assert actions == [Action.RERUN_CI] * 3 + [Action.ESCALATE_TO_FOUNDER] * 2  # identical consecutive decisions no longer hide the spend
+
+
+def test_settings_reject_loosely_typed_values_instead_of_guessing(tmp_path: Path) -> None:
+    import pytest
+
+    from stagemesh.autonomy.wiring import load_settings
+
+    runtime = tmp_path / ".stagemesh"
+    runtime.mkdir()
+    for bad in ({"enabled": "false"}, {"enabled": True, "allow_baseline_ci_failures": "false"}, {"enabled": True, "max_reconstructs": "2"}, {"enabled": True, "baseline_requires_detail": 0}):
+        (runtime / "autonomy.json").write_text(json.dumps(bad), encoding="utf-8")
+        with pytest.raises(ValueError):
+            load_settings(runtime)
+    (runtime / "autonomy.json").write_text(json.dumps({"enabled": True, "max_reconstructs": 2}), encoding="utf-8")
+    assert load_settings(runtime).max_reconstructs == 2
+
+
+def test_check_runs_beyond_the_first_page_are_read() -> None:
+    from stagemesh.autonomy.github_adapter import GitHubHostedCI
+
+    def page(path):
+        import re as _re
+
+        number = int(_re.search(r"[?&]page=(\d+)", path).group(1))
+        runs = [{"id": n, "name": f"gate-{n}", "status": "completed", "conclusion": "success", "output": {}} for n in range((number - 1) * 100, number * 100 if number < 3 else 250)]
+        return 200, {}, {"total_count": 250, "check_runs": runs}
+
+    run = GitHubHostedCI("o", "r", _Transport({("GET", "/repos/o/r/commits/"): page})).run_for(CAND)
+    assert len(run.gates) == 250 and "gate-249" in run.gates

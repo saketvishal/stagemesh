@@ -116,6 +116,9 @@ _PUSH_DENIED = re.compile(
 )
 
 
+_PUSH_CONFLICT = r"(\[rejected\]|non-fast-forward|fetch first|already exists|stale info|updates were rejected)"
+
+
 class BaseUnobservable(RuntimeError):
     """The remote base could not be fetched (network or host problem that is not an authorization problem)."""
 
@@ -184,7 +187,7 @@ def deliver(
 
 def _sync_base(supervisor: Supervisor, report: DeliveryReport, remote: str, base: str) -> tuple[str | None, tuple[str, str] | None]:
     """Fetch the base and reconcile the candidate against it. Returns the base SHA and, when delivery must stop, (status, recommendation)."""
-    fetched = supervisor.facts.git.run("fetch", "--quiet", remote, base, check=False)
+    fetched = supervisor.facts.fetch_branch(remote, base)
     if fetched.returncode != 0:
         if _PUSH_DENIED.search(fetched.stderr):
             raise PushDenied(fetched.stderr.strip()[:300])
@@ -249,6 +252,8 @@ def _deliver_pass(
     push = facts.git.run("push", "--quiet", remote, f"{sha}:refs/heads/{branch}", check=False)  # never --force: an existing branch must already be this SHA
     if push.returncode != 0 and _PUSH_DENIED.search(push.stderr):
         raise PushDenied(push.stderr.strip()[:300])
+    if push.returncode != 0 and not re.search(_PUSH_CONFLICT, push.stderr, re.IGNORECASE):
+        raise BaseUnobservable(f"push failed: {push.stderr.strip()[:200]}")  # network/host trouble is a wait, never a false "branch exists"
     if push.returncode != 0:
         supervisor.record(
             AutonomyDecision(

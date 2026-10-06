@@ -309,7 +309,7 @@ def check_ownership(
             )
     if ownership.remote and ownership.remote_branch and ownership.expected_remote_tip:
         if fetch:
-            facts.git.run("fetch", "--quiet", ownership.remote, ownership.remote_branch, check=False)
+            facts.fetch_branch(ownership.remote, ownership.remote_branch)
         tip = facts.resolve(f"refs/remotes/{ownership.remote}/{ownership.remote_branch}")
         if tip != ownership.expected_remote_tip:
             foreign = _foreign_commits(facts, ownership, ownership.expected_remote_tip, tip)

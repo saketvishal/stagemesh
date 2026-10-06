@@ -91,6 +91,7 @@ from .scope import DeferredItem, TaskScope, deferred_items, record_deferred
 POLICY = "supervisor/v1"
 DEPENDENCY_EVENT = "autonomy.pr_dependency"
 INTEGRATED_EVENT = "autonomy.integrated"
+CI_RERUN_EVENT = "autonomy.ci_rerun_requested"
 _BLOCKING_SEVERITIES = frozenset({"blocker", "critical", "high", "major", "error"})
 
 
@@ -497,10 +498,10 @@ class Supervisor:
             raise RuntimeError("a HostedCI adapter is required to diagnose CI")
         spent = sum(
             1
-            for d in decision_trace(self.store, task_id)
-            if d.get("action") == Action.RERUN_CI.value and (d.get("shas") or {}).get("candidate") == candidate_sha
+            for row in self.store.conn.execute("SELECT payload FROM audit_events WHERE event_type=?", (CI_RERUN_EVENT,))
+            if json.loads(row["payload"]).get("task_id") == task_id and json.loads(row["payload"]).get("candidate_sha") == candidate_sha
         )
-        reruns_left = max(0, reruns_left - spent)  # the budget is durable: it does not reset on every observation
+        reruns_left = max(0, reruns_left - spent)  # the budget is durable (counted per request, not per distinct decision)
         candidate_run = self.hosted_ci.run_for(candidate_sha)
         base_run = self.hosted_ci.run_for(base_sha)  # compared before anything is concluded about the candidate
         dependency_run = self.hosted_ci.run_for(dependency_sha) if dependency_sha else None
@@ -514,6 +515,8 @@ class Supervisor:
             if gate.klass is CIClass.BASELINE_FAILURE:  # recorded as deferred work; never "fixed" as part of this task
                 record_deferred(self.store, task_id, DeferredItem(f"gate {gate.gate} already fails on base {base_sha[:7]}", "ci", None, candidate_sha))
         self.last_ci_diagnosis = diagnosis
+        if decision.action is Action.RERUN_CI:
+            record_audit(self.store, CI_RERUN_EVENT, {"task_id": task_id, "candidate_sha": candidate_sha})
         return self.record(decision)
 
     # --- capability 8: review -------------------------------------------------------------------------------------------------------
@@ -663,7 +666,7 @@ class Supervisor:
     def _merge_when_ready(self, task_id: str, pr_number: int, ci: CIDiagnosis | None, method: str, remote: str | None) -> AutonomyDecision:
         assert self.pull_requests is not None
         if remote:  # judge against the base as it is now, not as it was when this clone last looked
-            fetched = self.facts.git.run("fetch", "--quiet", remote, self._integration_branch(), check=False)
+            fetched = self.facts.fetch_branch(remote, self._integration_branch())
             if fetched.returncode != 0:
                 return self.record(
                     AutonomyDecision(
@@ -721,7 +724,7 @@ class Supervisor:
                 )
             )
         if remote:
-            self.facts.git.run("fetch", "--quiet", remote, self._integration_branch(), check=False)
+            self.facts.fetch_branch(remote, self._integration_branch())
         post = self.verify_integration(task_id, prov.candidate_sha, merge_sha=result.sha)
         if not post.verified:
             return post.decision  # type: ignore[return-value]
@@ -901,6 +904,8 @@ class Supervisor:
         decision = self.assess_ci(task_id, sha, base_sha, scope=self._scope(task_id, sha))
         diagnosis = self.last_ci_diagnosis
         assert diagnosis is not None
+        if not diagnosis.gates:
+            return False  # CI has reported nothing for the candidate or base: absence of evidence is not a pass
         if not diagnosis.merge_blockers(
             allow_baseline_failures=self.integration_policy.allow_baseline_ci_failures,
             baseline_requires_detail=self.integration_policy.baseline_requires_detail,
