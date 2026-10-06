@@ -660,3 +660,20 @@ def test_one_tasks_mutation_does_not_block_another_task(tmp_path: Path) -> None:
     assert run_implementation(store, FakeExecutor(), project, TASK).failure_reason == EXTERNAL_WORKSPACE_MUTATION
     verify_candidate_workspace(store, project, "TASK-2", str(store.latest_candidate("TASK-2")["sha"]), "VALIDATE:before_validation")
     assert {e["task_id"] for e in mutation_events(store)} == {TASK}
+
+
+def test_executor_works_in_a_project_directory_that_does_not_exist_yet(tmp_path: Path) -> None:
+    """scripts/invariants.py runs the coordinator against a not-yet-created project; the guard must not need it to exist first."""
+    store = Store(tmp_path / "state.sqlite3")
+    store.migrate()
+    task_id = store.upsert_task("work")
+    store.advance_task(task_id, Stage.IMPLEMENT)
+    assert store.acquire_claim(task_id, "worker-a", lease_seconds=-1)
+    project = tmp_path / "project"
+    assert not project.exists()
+
+    assert Coordinator(store, project).tick() == 1
+
+    assert store.get_task(task_id)["stage"] == Stage.VALIDATE
+    assert ledger_of(project, task_id)["candidate"] == store.latest_candidate(task_id)["sha"]
+    store.close()
