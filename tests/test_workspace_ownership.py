@@ -450,6 +450,22 @@ def test_interrupted_execution_seals_what_it_left_and_the_next_one_proceeds(tmp_
     assert mutation_events(store) == [] and events(store, LEASE_RECOVERED) == []
 
 
+def test_interrupt_before_the_agent_does_not_seal_an_external_change(tmp_path: Path) -> None:
+    project, store = _setup(tmp_path)
+    run_implementation(store, provider(tmp_path, WRITE_DOC), project)
+
+    class Interrupted(Exception):
+        pass
+
+    with pytest.raises(guard.WorkspaceMutation), guard.owned_workspace(store, project, TASK, ExecutionKind.IMPLEMENTATION) as lease:
+        (lease.path / "docs" / "a.md").write_text("changed before the agent window\n", encoding="utf-8")
+        raise Interrupted  # an interrupt before the before-agent check: the change cannot be the agent's output
+
+    with pytest.raises(guard.WorkspaceMutation):
+        acquire_workspace(store, project, TASK, ExecutionKind.IMPLEMENTATION)  # and it was not sealed, so the next claim refuses it too
+    assert mutation_events(store)
+
+
 def test_two_simultaneous_takeovers_of_a_dead_owner_have_exactly_one_winner(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:  # N1
     project, store = _setup(tmp_path)
     run_implementation(store, provider(tmp_path, WRITE_DOC), project)
