@@ -13,8 +13,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from stagemesh.domain import ExecutionStatus
-from stagemesh.persistence import Store
+from stagemesh.persistence import SCHEMA_VERSION, Store
 from stagemesh.providers import RuntimeCommandAdapter
+from stagemesh.workspaces import NO_IMPLEMENTATION_CHANGE
 
 
 def run(command: list[str], cwd: Path, env: dict[str, str] | None = None) -> str:
@@ -47,7 +48,7 @@ def main() -> int:
             init_data["project"] != str(project.resolve())
             or init_data["runtime"] != str((project / ".stagemesh").resolve())
             or init_data["db"] != str((project / ".stagemesh" / "stagemesh.sqlite3").resolve())
-            or init_data["schema_version"] != 3
+            or init_data["schema_version"] != SCHEMA_VERSION
             or init_data["registered"] is not False
         ):
             raise AssertionError(init_json)
@@ -597,7 +598,7 @@ def main() -> int:
             "python interpreter:",
             "imported package path:",
             "db:",
-            "schema version: 3",
+            f"schema version: {SCHEMA_VERSION}",
             "backend: sqlite",
         ]
         missing = [item for item in required if item not in doctor]
@@ -606,7 +607,7 @@ def main() -> int:
         doctor_json = run([sys.executable, "-m", "stagemesh.cli", "--project", str(project), "doctor", "--json"], ROOT, env)
         doctor_data = json.loads(doctor_json)
         if (
-            doctor_data["schema_version"] != 3
+            doctor_data["schema_version"] != SCHEMA_VERSION
             or doctor_data["backend"] != "sqlite"
             or doctor_data["backend_available"] is not True
             or doctor_data["github_configured"] is not False
@@ -883,7 +884,20 @@ def main() -> int:
         provider_store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
         try:
             provider_task = provider_store.upsert_task("runtime provider execution")
-            provider_result = RuntimeCommandAdapter("custom", (sys.executable, "--version")).execute(
+            contracts = project / ".stagemesh" / "contracts"  # implementation fails closed without an explicit task contract
+            contracts.mkdir(parents=True, exist_ok=True)
+            (contracts / f"{provider_task}.json").write_text(
+                json.dumps(
+                    {
+                        "objective": "write provider-output.txt",
+                        "allowed_files": ["provider-output.txt"],
+                        "required_tests": [{"name": "smoke", "command": [sys.executable, "-c", "pass"]}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            write_output = "from pathlib import Path; Path('provider-output.txt').write_text('durable provider output', encoding='utf-8')"
+            provider_result = RuntimeCommandAdapter("custom", (sys.executable, "-c", write_output)).execute(
                 provider_store,
                 provider_task,
                 None,
@@ -898,14 +912,58 @@ def main() -> int:
             provider_store.close()
         if (
             provider_result.status is not ExecutionStatus.SUCCEEDED
+            or provider_result.durable_handoff is not True
             or provider_result.candidate_sha is None
             or provider_execution is None
             or provider_execution["status"] != "SUCCEEDED"
             or provider_execution["candidate_sha"] != provider_result.candidate_sha
+            or provider_execution["pid"] is None
             or provider_candidate is None
             or provider_candidate["produced_by"] != "custom"
+            or provider_candidate["sha"] != provider_result.candidate_sha
+            or provider_candidate["durable_handoff"] != 1
         ):
             raise AssertionError("runtime provider execution was not durable")
+        with tempfile.TemporaryDirectory(prefix="stagemesh-noop-provider-") as noop_raw:
+            noop_project = Path(noop_raw) / "project"
+            noop_project.mkdir()
+            noop_store = Store(noop_project / ".stagemesh" / "stagemesh.sqlite3")
+            try:
+                noop_store.migrate()
+                noop_task = noop_store.upsert_task("runtime provider no-op")
+                noop_contracts = noop_project / ".stagemesh" / "contracts"
+                noop_contracts.mkdir(parents=True, exist_ok=True)
+                (noop_contracts / f"{noop_task}.json").write_text(
+                    json.dumps(
+                        {
+                            "objective": "write provider-output.txt",
+                            "allowed_files": ["provider-output.txt"],
+                            "required_tests": [{"name": "smoke", "command": [sys.executable, "-c", "pass"]}],
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                noop_result = RuntimeCommandAdapter("custom", (sys.executable, "--version")).execute(
+                    noop_store, noop_task, None, noop_project
+                )
+                noop_execution = noop_store.conn.execute(
+                    "SELECT * FROM executions WHERE task_id=?", (noop_task,)
+                ).fetchone()
+                noop_candidate = noop_store.latest_candidate(noop_task)
+            finally:
+                noop_store.close()
+        if (
+            noop_result.status is not ExecutionStatus.FAILED
+            or noop_result.failure_reason != NO_IMPLEMENTATION_CHANGE
+            or noop_result.candidate_sha is not None
+            or noop_result.durable_handoff is not False
+            or noop_candidate is not None
+            or noop_execution is None
+            or noop_execution["status"] != "FAILED"
+            or noop_execution["candidate_sha"] is not None
+            or noop_execution["result"] != NO_IMPLEMENTATION_CHANGE
+        ):
+            raise AssertionError("no-op provider was treated as a successful implementation")
         github_acceptance = run(
             [sys.executable, "-m", "stagemesh.cli", "--project", str(project), "github-acceptance"],
             ROOT,
@@ -935,7 +993,8 @@ def main() -> int:
             "ok: True" not in health
             or "done: 4" not in health
             or "blocked_tasks: 0" not in health
-            or "failed_executions: 0" not in health
+            or "failed_executions_historical: 0" not in health
+            or "failed_executions_current: 0" not in health
             or "unknown_executions: 0" not in health
         ):
             raise AssertionError(health)

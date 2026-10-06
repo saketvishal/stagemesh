@@ -8,6 +8,7 @@ their claims and discards uncommitted partial edits, so a restart resumes from c
 
 from __future__ import annotations
 
+import json
 import os
 import queue
 import re
@@ -47,6 +48,7 @@ from .workspaces import remove_task_workspace, sweep_task_worktrees, task_worksp
 
 WORKER_PREFIX = "parallel-"
 _WORKER_PID = re.compile(r"^parallel-(\d+)-")
+QUEUE_CONTROL_EVENT = "queue.admission_control"
 
 
 class SetupRefused(Exception):
@@ -63,6 +65,76 @@ def worker_id_for(task_id: str) -> str:
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+
+
+def _active_execution_rows(store: Store) -> list[dict[str, Any]]:
+    return [
+        {
+            "id": str(row["id"]),
+            "task_id": str(row["task_id"]),
+            "claim_id": row["claim_id"],
+            "kind": str(row["kind"]),
+            "pid": row["pid"],
+            "candidate_sha": row["candidate_sha"],
+        }
+        for row in store.running_executions()
+    ]
+
+
+def latest_queue_control(store: Store) -> dict[str, Any] | None:
+    row = store.conn.execute(
+        """
+        SELECT payload, created_at, rowid
+        FROM audit_events
+        WHERE event_type=?
+        ORDER BY created_at DESC, rowid DESC
+        LIMIT 1
+        """,
+        (QUEUE_CONTROL_EVENT,),
+    ).fetchone()
+    if row is None:
+        return None
+    try:
+        payload = json.loads(row["payload"])
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return {**payload, "created_at": row["created_at"], "rowid": row["rowid"]}
+
+
+def queue_control_state(store: Store) -> dict[str, Any]:
+    latest = latest_queue_control(store)
+    state = str(latest.get("state")) if latest else "running"
+    if state == "resumed":
+        state = "running"
+    return {
+        "state": state,
+        "paused": state == "paused",
+        "stopping": state == "stopping",
+        "latest": latest,
+        "active_executions": _active_execution_rows(store),
+    }
+
+
+def request_queue_control(
+    store: Store,
+    state: str,
+    reason: str,
+    *,
+    terminate_running: bool = False,
+) -> dict[str, Any]:
+    if state not in {"paused", "resumed", "stopping"}:
+        raise ValueError(f"unsupported queue control state: {state}")
+    event = {
+        "at": _now(),
+        "state": state,
+        "reason": reason,
+        "terminate_running": terminate_running,
+        "source": "operator",
+    }
+    record_audit(store, QUEUE_CONTROL_EVENT, event)
+    return queue_control_state(store)
 
 
 @dataclass
@@ -106,6 +178,9 @@ class ParallelSummary:
     swept: list[dict[str, str]] = field(default_factory=list)
     providers: dict[str, Any] = field(default_factory=dict)
     interrupted: bool = False
+    control: dict[str, Any] = field(
+        default_factory=lambda: {"state": "running", "events": [], "active_executions": []}
+    )
 
     @property
     def succeeded(self) -> bool:
@@ -126,6 +201,7 @@ class ParallelSummary:
             "recovered": self.recovered,
             "worktrees_swept": self.swept,
             "providers": self.providers,
+            "control": self.control,
         }
 
 
@@ -226,6 +302,10 @@ class ParallelRunner:
         self.interrupt_grace_seconds = interrupt_grace_seconds
         self.poll_seconds = poll_seconds
         self.stop = threading.Event()
+        self._admission_paused = threading.Event()
+        self._admission_stopped = threading.Event()
+        self._terminate_requested = threading.Event()
+        self._protected_claims: set[str] = set()  # claims of executions with unknown process identity; only an operator releases them
         self._lock = threading.Lock()
         self._lifecycles: dict[str, TaskLifecycle] = {}
         self._provider_logs: dict[str, ProviderLog] = {}
@@ -237,6 +317,10 @@ class ParallelRunner:
         self.global_failure: str | None = None
         self._deferred_this_round = False
         self._planned: dict[str, dict[str, Any]] = {}
+        latest_control = latest_queue_control(self.store) or {}
+        self._last_control_rowid = int(latest_control.get("rowid") or 0)
+        if latest_control.get("state") == "paused":
+            self._admission_paused.set()
         config = load_config(self.project)
         assert config.runtime is not None
         self.runtime: RuntimeConfig = config.runtime
@@ -258,6 +342,108 @@ class ParallelRunner:
         if self.emit is not None:
             self.emit(task_id, text)
 
+    def pause_admission(self, reason: str = "operator_pause") -> None:
+        """Stop admitting new tasks until resume_admission() is called; running tasks are left alone."""
+        self._admission_paused.set()
+        self._record_control("paused", reason, terminate_running=False)
+
+    def resume_admission(self, reason: str = "operator_resume") -> None:
+        """Resume task admission after pause_admission()."""
+        self._admission_paused.clear()
+        self._record_control("resumed", reason, terminate_running=False)
+
+    def stop_admission(self, reason: str = "operator_stop", *, terminate_running: bool = False) -> None:
+        """Stop admitting new tasks; optionally terminate active provider work through the audited cleanup path."""
+        self._admission_stopped.set()
+        if terminate_running:
+            self._terminate_requested.set()
+            self.stop.set()
+        self._record_control("stopping", reason, terminate_running=terminate_running)
+
+    @property
+    def admission_paused(self) -> bool:
+        return self._admission_paused.is_set()
+
+    @property
+    def admission_stopped(self) -> bool:
+        return self._admission_stopped.is_set()
+
+    def _record_control(self, state: str, reason: str, *, terminate_running: bool) -> None:
+        event = {"at": _now(), "state": state, "reason": reason, "terminate_running": terminate_running, "source": "runner"}
+        with self._lock:
+            self.summary.control["state"] = state
+            self.summary.control.setdefault("events", []).append(event)
+        self._say("run", f"queue admission {state}: {reason}")
+        audit = Store(self.store.db_path)
+        try:
+            record_audit(audit, QUEUE_CONTROL_EVENT, event)
+            latest = latest_queue_control(audit)
+            if latest is not None:
+                self._last_control_rowid = int(latest["rowid"])
+        finally:
+            audit.close()
+
+    def _record_stopped(self, reason: str, *, terminate_running: bool) -> None:
+        """Close a stop with exactly one `stopped` control event, whichever path (graceful, terminate, Ctrl+C) finished it."""
+        latest = latest_queue_control(self.store)
+        if latest is not None and latest.get("state") == "stopped":
+            return
+        self._record_control("stopped", reason, terminate_running=terminate_running)
+
+    def _active_execution_snapshot(self) -> list[dict[str, Any]]:
+        snapshot = Store(self.store.db_path)
+        try:
+            return _active_execution_rows(snapshot)
+        finally:
+            snapshot.close()
+
+    def _refresh_control_state(self, state: str | None = None) -> None:
+        with self._lock:
+            if state is not None:
+                self.summary.control["state"] = state
+            self.summary.control["paused"] = self._admission_paused.is_set()
+            self.summary.control["stopping"] = self._admission_stopped.is_set()
+            self.summary.control["terminate_requested"] = self._terminate_requested.is_set()
+            self.summary.control["active_executions"] = self._active_execution_snapshot()
+
+    def _apply_control_requests(self) -> None:
+        rows = self.store.conn.execute(
+            """
+            SELECT payload, rowid FROM audit_events
+            WHERE event_type=? AND rowid>?
+            ORDER BY rowid
+            """,
+            (QUEUE_CONTROL_EVENT, self._last_control_rowid),
+        ).fetchall()
+        for row in rows:
+            self._last_control_rowid = int(row["rowid"])
+            try:
+                payload = json.loads(row["payload"])
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            state = str(payload.get("state"))
+            reason = str(payload.get("reason") or "operator request")
+            terminate = bool(payload.get("terminate_running"))
+            if state == "paused":
+                self._admission_paused.set()
+                self._refresh_control_state("paused")
+                self._say("run", f"queue admission paused: {reason}")
+            elif state == "resumed":
+                # Resume ends a pause. It does not cancel a stop that was already requested.
+                self._admission_paused.clear()
+                if not self._admission_stopped.is_set():
+                    self._refresh_control_state("running")
+                    self._say("run", f"queue admission resumed: {reason}")
+            elif state == "stopping":
+                self._admission_stopped.set()
+                if terminate:
+                    self._terminate_requested.set()
+                    self.stop.set()
+                self._refresh_control_state("stopping")
+                self._say("run", f"queue admission stopping: {reason}")
+
     # -- dispatcher --------------------------------------------------------------------------------------------------------
 
     def run(self) -> ParallelSummary:
@@ -272,6 +458,15 @@ class ParallelRunner:
         return summary
 
     def _startup(self, summary: ParallelSummary) -> None:
+        latest = latest_queue_control(self.store)
+        if latest is not None and latest.get("state") == "stopping":
+            # The stop was requested before this runner polled. Honor it; do not rewrite it to running.
+            self._admission_stopped.set()
+            if bool(latest.get("terminate_running")):
+                self._terminate_requested.set()
+                self.stop.set()
+        elif not self._admission_paused.is_set() and latest is not None and latest.get("state") == "stopped":
+            self._record_control("running", "queue run started", terminate_running=False)
         summary.recovered.extend(recover_orphaned_claims(self.store, self.project))
         for row in self.store.tasks():  # provably dead provider processes only; live/unknown are never touched
             summary.recovered.extend(_recover_dead(self.store, str(row["id"])))
@@ -284,7 +479,27 @@ class ParallelRunner:
     def _dispatch_loop(self, summary: ParallelSummary) -> None:
         attempted: set[str] = set()
         while not self.stop.is_set():
+            self._apply_control_requests()
             running = [task_id for task_id, thread in self._threads.items() if thread.is_alive()]
+            if self._admission_stopped.is_set():
+                if not running:
+                    break
+                self._refresh_control_state("stopping")
+                try:
+                    self._done.get(timeout=self.poll_seconds)
+                except queue.Empty:
+                    pass
+                continue
+            if self._admission_paused.is_set():
+                if not running:
+                    self._refresh_control_state("paused")
+                    break
+                self._refresh_control_state("paused")
+                try:
+                    self._done.get(timeout=self.poll_seconds)
+                except queue.Empty:
+                    pass
+                continue
             free = self.concurrency - len(running)
             self._deferred_this_round = False
             if free > 0:
@@ -300,8 +515,15 @@ class ParallelRunner:
                 self._done.get(timeout=self.poll_seconds)
             except queue.Empty:
                 pass
-        if self.global_failure is not None:
-            self._halt(summary, interrupted=False)
+        if self._terminate_requested.is_set():
+            self._halt(summary, interrupted=False, reason="operator stop requested", stop_reason="STOPPED")
+        elif self.global_failure is not None:
+            self._halt(
+                summary,
+                interrupted=False,
+                reason=f"global safety failure: {self.global_failure}",
+                stop_reason="GLOBAL_SAFETY_FAILURE",
+            )
         elif not self.stop.is_set():
             for task_id, thread in list(self._threads.items()):
                 thread.join()
@@ -459,32 +681,67 @@ class ParallelRunner:
 
     def _abandon(self, store: Store, task_id: str, why: str) -> None:
         """Kill this task's provider processes, fail its running executions and release its claims; keep committed work."""
+        protected_claims: set[str] = set()
         for execution in [e for e in store.running_executions() if e["task_id"] == task_id]:
-            if execution["kind"] == ExecutionKind.IMPLEMENTATION and execution["pid"]:
-                saved = store.execution_process_identity(str(execution["id"]))
-                if classify_process(saved, process_identity(execution["pid"])) != "DEAD":
-                    _kill_pid(int(execution["pid"]))
+            saved = store.execution_process_identity(str(execution["id"]))
+            state = classify_process(saved, process_identity(execution["pid"]))
+            if state == "UNKNOWN":
+                if execution["claim_id"]:
+                    protected_claims.add(str(execution["claim_id"]))
+                    self._protected_claims.add(str(execution["claim_id"]))
+                record_audit(
+                    store,
+                    "task.abandon_skipped_unknown_execution",
+                    {
+                        "task_id": task_id,
+                        "execution_id": str(execution["id"]),
+                        "execution_kind": str(execution["kind"]),
+                        "claim_id": execution["claim_id"],
+                        "reason": why,
+                    },
+                )
+                continue
+            if execution["kind"] == ExecutionKind.IMPLEMENTATION and execution["pid"] and state == "LIVE":
+                _kill_pid(int(execution["pid"]))
             store.mark_orphan_running_execution_failed(str(execution["id"]), f"PARALLEL_{why.upper()}")
         for claim in store.conn.execute("SELECT id FROM claims WHERE task_id=? AND active=1 AND worker_id LIKE ?", (task_id, WORKER_PREFIX + "%")).fetchall():
+            if str(claim["id"]) in protected_claims:
+                continue
             store.release_claim(str(claim["id"]))
-        discard_partial_edits(self.project, task_id)
+        if not protected_claims:
+            discard_partial_edits(self.project, task_id)
         record_audit(store, "task.abandoned", {"task_id": task_id, "reason": why})
 
     def _interrupt(self, summary: ParallelSummary) -> None:
-        self._halt(summary, interrupted=True)
+        self.stop_admission("keyboard interrupt", terminate_running=True)
+        self._halt(summary, interrupted=True, reason="interrupted", stop_reason="INTERRUPTED")
 
-    def _halt(self, summary: ParallelSummary, *, interrupted: bool) -> None:
+    def _halt(self, summary: ParallelSummary, *, interrupted: bool, reason: str, stop_reason: str) -> None:
         summary.interrupted = interrupted
         self.stop.set()
-        self._say("run", "interrupted: stopping all tasks, releasing claims and keeping their worktrees" if interrupted else f"global safety failure: {self.global_failure}; stopping all tasks")
+        self._admission_stopped.set()
+        self._refresh_control_state("stopping")
+        self._say(
+            "run",
+            "interrupted: stopping all tasks, releasing claims and keeping their worktrees"
+            if interrupted
+            else f"{reason}; stopping all tasks",
+        )
         cleanup = Store(self.store.db_path)
         try:
+            record_audit(
+                cleanup,
+                "queue.stop",
+                {"reason": reason, "stop_reason": stop_reason, "interrupted": interrupted},
+            )
             kill_active_provider_processes()  # implementation AND review providers: nothing may outlive the interrupt
             for task_id, thread in self._threads.items():
                 if thread.is_alive():  # stop the provider so the worker's tick returns instead of running to its timeout
                     for execution in [e for e in cleanup.running_executions() if e["task_id"] == task_id and e["pid"]]:
                         if execution["kind"] == ExecutionKind.IMPLEMENTATION:
-                            _kill_pid(int(execution["pid"]))
+                            saved = cleanup.execution_process_identity(str(execution["id"]))
+                            if classify_process(saved, process_identity(execution["pid"])) == "LIVE":
+                                _kill_pid(int(execution["pid"]))
             deadline = time.monotonic() + self.interrupt_grace_seconds
             for thread in self._threads.values():
                 thread.join(timeout=max(0.0, deadline - time.monotonic()))
@@ -492,9 +749,15 @@ class ParallelRunner:
                 lifecycle = self._lifecycles[task_id]
                 stuck = thread.is_alive()
                 if lifecycle.summary is not None and lifecycle.summary.stop_reason in {"UNSET", "INTERRUPTED"}:
-                    lifecycle.summary.stop_reason = "INTERRUPTED"
-                    self._abandon(cleanup, task_id, "interrupted")
-                    self.note(task_id, "interrupted", worktree=str(task_workspace(self.project, task_id)), worker_still_running=stuck)
+                    lifecycle.summary.stop_reason = stop_reason
+                    lifecycle.summary.message = reason
+                    self._abandon(cleanup, task_id, stop_reason.lower())
+                    self.note(
+                        task_id,
+                        stop_reason.lower(),
+                        worktree=str(task_workspace(self.project, task_id)),
+                        worker_still_running=stuck,
+                    )
         finally:
             cleanup.close()
 
@@ -505,17 +768,31 @@ class ParallelRunner:
             for claim in final.conn.execute("SELECT id, task_id FROM claims WHERE active=1 AND worker_id LIKE ?", (f"{WORKER_PREFIX}{os.getpid()}-%",)).fetchall():
                 if str(claim["task_id"]) not in self._threads:
                     continue  # only tasks this run started; anything else is somebody else's claim
+                if str(claim["id"]) in self._protected_claims:
+                    continue  # unknown process identity: stays claimed until `recover-stale --release-unknown`
                 final.release_claim(str(claim["id"]))
                 self.note(str(claim["task_id"]), "claim_released")
         finally:
             final.close()
         if self.limiter is not None:
             summary.providers = {"limits": self.limiter.snapshot()}
+        self._refresh_control_state()
         outcomes = [t.summary.stop_reason if t.summary else "UNSET" for t in summary.tasks]
         if self.global_failure is not None:
             summary.stop_reason, summary.message = "GLOBAL_SAFETY_FAILURE", self.global_failure
         elif summary.interrupted:
             summary.stop_reason, summary.message = "INTERRUPTED", "interrupted; claims released, worktrees kept for resume"
+            self._record_stopped("keyboard interrupt stop completed", terminate_running=True)
+        elif self._terminate_requested.is_set():
+            summary.stop_reason = "STOPPED"
+            summary.message = "operator stop requested; claims released, worktrees kept for resume"
+            self._record_stopped("operator stop completed", terminate_running=True)
+        elif self._admission_stopped.is_set():
+            summary.stop_reason = "STOPPED"
+            summary.message = "queue admission stopped; active tasks were allowed to finish"
+            self._record_stopped("queue admission stop completed", terminate_running=False)
+        elif self._admission_paused.is_set():
+            summary.stop_reason, summary.message = "PAUSED", "queue admission paused"
         elif not summary.tasks:
             summary.stop_reason = "REFUSED:no_eligible_task"
             summary.message = "no eligible OPEN task" + (
