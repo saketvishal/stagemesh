@@ -44,8 +44,9 @@ class ScriptedExecutor(Executor):
 
     name = "scripted"
 
-    def __init__(self, files: dict[str, tuple[str, str]], barrier: threading.Barrier | None = None, fail: set[str] | None = None):
+    def __init__(self, files: dict[str, tuple[str, str]], barrier: threading.Barrier | None = None, fail: set[str] | None = None, barrier_tasks: set[str] | None = None):
         self.files = files
+        self.barrier_tasks = barrier_tasks
         self.barrier = barrier
         self.fail = fail or set()
         self.lock = threading.Lock()
@@ -63,7 +64,7 @@ class ScriptedExecutor(Executor):
         from stagemesh.workspaces import record_task_baseline
 
         record_task_baseline(store, task_id, run_path)
-        if self.barrier is not None:
+        if self.barrier is not None and (self.barrier_tasks is None or task_id in self.barrier_tasks):
             self.barrier.wait(timeout=20)  # only passes when the tasks really run at the same time
         rel, content = self.files[task_id]
         (run_path / rel).parent.mkdir(parents=True, exist_ok=True)
@@ -417,7 +418,9 @@ def test_integration_lock_excludes_other_processes(tmp_path: Path) -> None:
 def test_unresolvable_main_advance_leaves_a_typed_state_and_keeps_other_tasks(tmp_path: Path) -> None:
     files = {"A": ("shared.txt", "from A\n"), "B": ("shared.txt", "from B\n"), "C": ("out/C.txt", "C\n")}
     rig = Rig(tmp_path, ["A", "B", "C"], files=files)
-    summary = rig.runner(ScriptedExecutor(files, barrier=threading.Barrier(2)), concurrency=2, max_steps=40).run()
+    summary = rig.runner(
+        ScriptedExecutor(files, barrier=threading.Barrier(2), barrier_tasks={"A", "B"}), concurrency=2, max_steps=40
+    ).run()
     outcomes = rig.outcomes(summary)
     winner, loser = ("A", "B") if outcomes["A"] == "DONE" else ("B", "A")
     assert outcomes[winner] == "DONE" and outcomes[loser] != "DONE", outcomes

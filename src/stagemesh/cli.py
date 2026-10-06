@@ -31,7 +31,6 @@ from .external_evidence import (
 from .final_report import FinalReportValidationError, candidate_sha, render_final_report
 from .git import GitWorkspace
 from .github_acceptance import run_github_acceptance
-from .integration import Integrator
 from .objectives import ObjectivePlanner, ObjectiveValidationError
 from .observability import health
 from .operator import operator_report
@@ -292,7 +291,12 @@ def _build_coordinator(
                 on_event=parallel.on_integration_event,
             )
             if parallel
-            else Integrator(integration_ref=integration_ref, require_independent_review=require_independent_review)
+            else SerializedIntegrator(
+                integration_ref,
+                require_independent_review,
+                IntegrationLock(runtime_dir(project) / "integration.lock"),
+                max_rebases=config.parallel.integration_rebase_attempts,
+            )
         )
     elif parallel:  # --dry-run: evidence-only integration, still behind the lock
         integrator = SerializedIntegrator(None, False, parallel.lock)
