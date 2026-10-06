@@ -236,7 +236,31 @@ def recover_orphaned_claims(
         if match is None or not dead(int(match.group(1))):
             continue
         task_id = str(claim["task_id"])
-        for execution in [e for e in store.running_executions() if e["claim_id"] == claim["id"]]:
+        running = [e for e in store.running_executions() if e["claim_id"] == claim["id"]]
+        unknown = [
+            e
+            for e in running
+            if e["pid"] is not None and classify_process(store.execution_process_identity(str(e["id"])), process_identity(e["pid"])) == "UNKNOWN"
+        ]
+        if unknown:
+            # A dead runner proves nothing about a provider whose recorded process cannot be identified: the claim stays until
+            # `recover-stale --release-unknown`, however many runs start meanwhile. The protection must outlive the runner process.
+            for execution in unknown:
+                record_audit(
+                    store,
+                    "recovery.parallel_claim_protected_unknown",
+                    {
+                        "task_id": task_id,
+                        "claim_id": str(claim["id"]),
+                        "execution_id": str(execution["id"]),
+                        "pid": int(execution["pid"]),
+                        "worker_id": str(claim["worker_id"]),
+                        "reason": "unknown_process_identity",
+                        "action": "RECOVERY_DEFERRED",
+                    },
+                )
+            continue
+        for execution in running:
             store.mark_orphan_running_execution_failed(str(execution["id"]), "PARALLEL_WORKER_DEAD")
         store.release_claim(str(claim["id"]))
         record_audit(
