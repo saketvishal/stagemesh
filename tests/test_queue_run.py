@@ -286,6 +286,16 @@ def test_stop_during_implementation_releases_claims_and_next_run_resumes(tmp_pat
     assert queue_control_state(rig.store)["state"] == "running"
 
 
+def test_stop_requested_before_the_runner_starts_is_honored(tmp_path: Path) -> None:
+    rig = Rig(tmp_path, ["A"])
+    request_queue_control(rig.store, "stopping", "operator stop", terminate_running=False)
+    summary = queue(rig, ScriptedExecutor(rig.files), concurrency=1).run()
+    assert outcomes(summary) == {}
+    assert summary.control["state"] == "stopped"
+    assert queue_control_state(rig.store)["state"] == "stopped"
+    assert len(control_events(rig, "stopped")) == 1
+
+
 def test_resume_after_stop_request_does_not_cancel_the_stop(tmp_path: Path) -> None:
     rig = Rig(tmp_path, ["A"])
     runner = queue(rig, ScriptedExecutor(rig.files), concurrency=1)

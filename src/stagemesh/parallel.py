@@ -460,11 +460,13 @@ class ParallelRunner:
     def _startup(self, summary: ParallelSummary) -> None:
         latest = latest_queue_control(self.store)
         if latest is not None and latest.get("state") == "stopping":
-            self._record_stopped("previous stop completed", terminate_running=False)
-        if not self._admission_paused.is_set():
-            latest = latest_queue_control(self.store)
-            if latest is not None and latest.get("state") in {"stopped", "stopping"}:
-                self._record_control("running", "queue run started", terminate_running=False)
+            # The stop was requested before this runner polled. Honor it; do not rewrite it to running.
+            self._admission_stopped.set()
+            if bool(latest.get("terminate_running")):
+                self._terminate_requested.set()
+                self.stop.set()
+        elif not self._admission_paused.is_set() and latest is not None and latest.get("state") == "stopped":
+            self._record_control("running", "queue run started", terminate_running=False)
         summary.recovered.extend(recover_orphaned_claims(self.store, self.project))
         for row in self.store.tasks():  # provably dead provider processes only; live/unknown are never touched
             summary.recovered.extend(_recover_dead(self.store, str(row["id"])))
