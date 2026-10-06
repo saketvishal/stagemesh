@@ -275,3 +275,72 @@ def test_execution_without_a_pid_is_unknown_not_stale_and_prints_cleanly(tmp_pat
         assert "tasks: T-1; pids: none known" in out, (argv, out)
         assert f"unknown process identity: {execution_id}" in out, (argv, out)
         assert "stale (process gone)" not in out, (argv, out)
+
+
+def _history(store: Store, *events: tuple[str, str, str]) -> dict:
+    """Record (state, reason, source) queue-control events in order and return the resulting report."""
+    for state, reason, source in events:
+        record_audit(
+            store,
+            QUEUE_CONTROL_EVENT,
+            {"at": "2099-01-01T00:00:00.000+00:00", "state": state, "reason": reason, "terminate_running": False, "source": source},
+        )
+    return queue_control_report(store)
+
+
+_FIRST_STOP = (("stopping", "deploy freeze", "operator"), ("stopped", "operator stop completed", "runner"))
+_NEW_RUN = ("running", "queue run started", "runner")
+
+
+def test_scenario_a_new_run_then_ctrl_c_reports_the_ctrl_c_reason(tmp_path: Path) -> None:
+    store = _store(_smoke_project(tmp_path))
+    report = _history(
+        store, *_FIRST_STOP, _NEW_RUN,
+        ("stopping", "keyboard interrupt", "runner"), ("stopped", "keyboard interrupt stop completed", "runner"),
+    )
+    store.close()
+    assert report["state"] == "stopped" and report["stop_reason"] == "keyboard interrupt"
+
+
+def test_scenario_b_stop_reason_never_reaches_back_past_a_new_run(tmp_path: Path) -> None:
+    store = _store(_smoke_project(tmp_path))
+    report = _history(store, *_FIRST_STOP, _NEW_RUN, ("stopped", "new run completed stop", "runner"))
+    store.close()
+    assert report["state"] == "stopped"
+    assert report["stop_reason"] == "new run completed stop"  # not the earlier run's "deploy freeze"
+    assert report["last_event"]["reason"] == "new run completed stop"
+
+
+def test_scenario_c_pause_resume_stop_across_runs_uses_only_the_current_cycle(tmp_path: Path) -> None:
+    store = _store(_smoke_project(tmp_path))
+    report = _history(
+        store, *_FIRST_STOP, _NEW_RUN,
+        ("paused", "maintenance", "operator"), ("resumed", "all clear", "operator"),
+        ("stopping", "second freeze", "operator"),
+    )
+    assert report["state"] == "stopping" and report["stop_reason"] == "second freeze"
+    report = _history(store, ("stopped", "operator stop completed", "runner"))
+    assert report["state"] == "stopped" and report["stop_reason"] == "second freeze"
+    report = _history(store, _NEW_RUN, ("paused", "again", "operator"), ("resumed", "again done", "operator"),
+                      ("stopped", "closed without a request", "runner"))
+    store.close()
+    assert report["stop_reason"] == "closed without a request"  # nothing from the earlier cycles
+
+
+def test_scenario_d_ctrl_c_after_a_new_run_never_reports_a_previous_cycles_reason(tmp_path: Path) -> None:
+    store = _store(_smoke_project(tmp_path))
+    first = _history(store, *_FIRST_STOP, _NEW_RUN)
+    assert first["state"] == "running" and first["stop_reason"] is None  # a live run shows no stop reason at all
+    report = _history(
+        store, ("stopping", "keyboard interrupt", "runner"), ("stopped", "keyboard interrupt stop completed", "runner")
+    )
+    store.close()
+    assert report["stop_reason"] == "keyboard interrupt"
+
+
+def test_a_stop_honored_at_startup_keeps_its_own_reason_without_a_running_event(tmp_path: Path) -> None:
+    """A stopping request stored before a run starts is the same cycle: no `running` separates it from its `stopped`."""
+    store = _store(_smoke_project(tmp_path))
+    report = _history(store, ("stopping", "deploy freeze", "operator"), ("stopped", "queue admission stop completed", "runner"))
+    store.close()
+    assert report["stop_reason"] == "deploy freeze"
