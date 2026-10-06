@@ -276,6 +276,7 @@ def task_doctor(store: Store, project: Path, task_id: str, integration_ref: str 
         "title": task["title"],
         "stage": str(task["stage"]),
         "status": str(task["status"]),
+        "queue_control": _queue_control_summary(store),
         "active_claim": details["active_claim"],
         "active_executions": details["active_executions"],
         "latest_candidate": details["latest_candidate"],
@@ -373,6 +374,9 @@ def _recommend(report: dict[str, Any], task_id: str, ref: str | None) -> tuple[s
 def format_doctor(report: dict[str, Any]) -> str:
     c, b = report["contract"], report["baseline"]
     lines = [f"task {report['task_id']}: {report['title']}", f"  stage/status: {report['stage']}/{report['status']}"]
+    control = report.get("queue_control") or {}
+    if control:
+        lines.append(f"  queue admission: {control['state']} (active executions: {len(control['active_executions'])})")
     claim = report["active_claim"]
     lines.append(f"  active claim: {claim['id']} ({claim['stage']}, worker {claim['worker_id']})" if claim else "  active claim: none")
     execs = report["active_executions"]
@@ -407,3 +411,9 @@ def format_doctor(report: dict[str, Any]) -> str:
         lines.extend("  " + line for line in format_task_summary(report["timing"]).splitlines())
     lines.append(f"  next: {report['recommended_command'] or '(nothing)'}  # {report['recommendation_reason']}")
     return "\n".join(lines)
+
+
+def _queue_control_summary(store: Store) -> dict[str, Any]:
+    from .parallel import queue_control_state
+
+    return queue_control_state(store)
