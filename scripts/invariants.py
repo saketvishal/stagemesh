@@ -1455,6 +1455,7 @@ def main() -> int:
         assert no_change.candidate_sha is None and store.latest_candidate(no_change_task) is None
         no_change_execution = store.conn.execute("SELECT * FROM executions WHERE task_id=?", (no_change_task,)).fetchone()
         assert no_change_execution["status"] == ExecutionStatus.FAILED and no_change_execution["candidate_sha"] is None
+        assert no_change_execution["result"] == NO_IMPLEMENTATION_CHANGE
 
     def github_acceptance_models_sync_contract(store: Store, project: Path) -> None:
         result = run_github_acceptance(store)
