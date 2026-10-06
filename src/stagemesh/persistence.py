@@ -17,9 +17,9 @@ from .domain import (
     Stage,
     TaskStatus,
 )
-from .migrations import apply_migrations, current_schema_version
+from .migrations import apply_migrations, current_schema_version, latest_schema_version
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = latest_schema_version()
 
 
 MAX_CANONICAL_CONTRACT_CHARS = 10000
