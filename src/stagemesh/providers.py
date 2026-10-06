@@ -25,10 +25,15 @@ from .execution import (
 from .persistence import Store
 from .process_identity import popen_identity
 from .remediation import remediation_context
+from .workspace_guard import (
+    EXTERNAL_WORKSPACE_MUTATION,
+    WorkspaceLease,
+    WorkspaceMutation,
+    owned_workspace,
+)
 from .workspaces import (
     NO_IMPLEMENTATION_CHANGE,
     commit_implementation_candidate,
-    prepare_task_workspace,
     record_task_baseline,
 )
 
@@ -69,7 +74,14 @@ class RuntimeCommandAdapter:
     def execute(self, store: Store, task_id: str, claim_id: str | None, project: Path) -> ExecutionResult:
         if self.check_capacity() != CapacityKind.AVAILABLE:
             return ExecutionResult(ExecutionStatus.FAILED, capacity_failure=True, failure_reason="provider_unavailable")
-        run_path = prepare_task_workspace(project, task_id)
+        try:
+            with owned_workspace(store, project, task_id, ExecutionKind.IMPLEMENTATION, claim_id=claim_id) as lease:
+                return self._execute_owned(store, task_id, claim_id, project, lease)
+        except WorkspaceMutation:
+            return ExecutionResult(ExecutionStatus.FAILED, failure_reason=EXTERNAL_WORKSPACE_MUTATION)
+
+    def _execute_owned(self, store: Store, task_id: str, claim_id: str | None, project: Path, lease: WorkspaceLease) -> ExecutionResult:
+        run_path = lease.path
         baseline_sha = record_task_baseline(store, task_id, run_path)
         try:
             bound = bind_task_contract(store, project, task_id, baseline_sha)
@@ -79,6 +91,7 @@ class RuntimeCommandAdapter:
         task_prompt = _build_task_prompt(
             task_id, task, run_path, contract=bound.contract, remediation=remediation_context(store, task_id)
         )
+        lease.check("before_agent")
         try:
             proc = subprocess.Popen(
                 list(self.command),
@@ -105,7 +118,9 @@ class RuntimeCommandAdapter:
             boot_id=identity.boot_id,
             executable=identity.executable,
         )
+        lease.bind_execution(execution_id)
         stdout, stderr, timed_out = communicate_bounded(proc, task_prompt, provider_timeout_seconds(self.timeout_seconds))
+        lease.after_agent()
         if timed_out:
             store.finish_execution(execution_id, ExecutionStatus.FAILED, result=PROVIDER_TIMEOUT)
             return ExecutionResult(ExecutionStatus.FAILED, failure_reason=PROVIDER_TIMEOUT)
@@ -125,6 +140,7 @@ class RuntimeCommandAdapter:
             store.finish_execution(execution_id, ExecutionStatus.FAILED, result=NO_IMPLEMENTATION_CHANGE)
             return ExecutionResult(ExecutionStatus.FAILED, failure_reason=NO_IMPLEMENTATION_CHANGE)
         store.add_candidate(task_id, sha, self.name, durable_handoff=True)
+        lease.seal(sha)
         store.finish_execution(execution_id, ExecutionStatus.SUCCEEDED, sha)
         return ExecutionResult(ExecutionStatus.SUCCEEDED, sha, durable_handoff=True)
 
