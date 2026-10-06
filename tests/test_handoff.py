@@ -357,8 +357,8 @@ def test_external_evidence_keeps_the_ten_newest_rows(tmp_path: Path) -> None:
     project, store, _sha = with_candidate(tmp_path)
     for i in range(13):
         store.add_external_evidence("ci", "PASS", f"https://ci.example/run/{i}", None, f"run {i}")
-    for i, row in enumerate(store.external_evidence()[::-1]):  # distinct, known timestamps: run/0 is the oldest
-        store.conn.execute("UPDATE external_evidence SET created_at=? WHERE id=?", (1000.0 + i, row["id"]))
+    for i in range(13):  # explicit distinct timestamps keyed by each row's URL, so the result never depends on clock resolution or row order
+        store.conn.execute("UPDATE external_evidence SET created_at=? WHERE url=?", (1000.0 + i, f"https://ci.example/run/{i}"))
     store.conn.commit()
 
     urls = [e["url"] for e in build_handoff(project)["latest_run"]["external_evidence"]]
