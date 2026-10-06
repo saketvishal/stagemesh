@@ -10,8 +10,11 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import os
 import sys
+import tempfile
 from pathlib import Path
+from typing import Any
 
 import pytest
 from test_bounded_execution import TASK
@@ -23,6 +26,7 @@ from stagemesh.domain import EvidenceKind, EvidenceStatus, ExecutionKind, Stage,
 from stagemesh.git import GitWorkspace
 from stagemesh.handoff import (
     HANDOFF_SCHEMA,
+    MAX_ROWS,
     MAX_TEXT,
     TOP_LEVEL_KEYS,
     HandoffError,
@@ -254,6 +258,127 @@ def test_writing_a_directory_target_is_refused(tmp_path: Path) -> None:
     project, _store, _sha = with_candidate(tmp_path)
     with pytest.raises(HandoffError, match="is a directory"):
         write_handoff(build_handoff(project), project, project / "docs")
+
+
+def _plant_symlink(link: Path, destination: Path) -> None:
+    try:
+        link.symlink_to(destination)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks are not available in this environment")
+
+
+def test_predictable_sibling_symlink_cannot_redirect_the_write_outside_the_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    project, _store, _sha = with_candidate(tmp_path)
+    outside = tmp_path / "outside.txt"
+    outside.write_text("outside-original", encoding="utf-8")
+    target = project / ".stagemesh" / "handoff" / "mine.json"
+    target.parent.mkdir(parents=True)
+    for guess in (".tmp", ".json.tmp"):  # every guessable sibling name, including the old fixed "<target>.tmp"
+        _plant_symlink(target.with_name(target.name + guess), outside)
+    _plant_symlink(target.with_name(target.name[: -len(".json")] + ".tmp"), outside)
+    created: list[Path] = []
+    real = tempfile.mkstemp
+
+    def recording_mkstemp(**kwargs: Any) -> tuple[int, str]:
+        fd, name = real(**kwargs)
+        created.append(Path(name))
+        return fd, name
+
+    monkeypatch.setattr(tempfile, "mkstemp", recording_mkstemp)
+
+    written = write_handoff(build_handoff(project), project, target)
+
+    assert outside.read_text(encoding="utf-8") == "outside-original"
+    assert json.loads(written.read_text(encoding="utf-8"))["schema"] == HANDOFF_SCHEMA
+    (temp,) = created
+    assert temp.parent == target.parent and temp.name != target.name + ".tmp" and not temp.exists()  # random, same directory, gone after publish
+    assert all(link.is_symlink() for link in target.parent.glob("mine*.tmp"))  # the planted links are untouched
+
+
+def test_existing_temp_like_file_is_not_truncated(tmp_path: Path) -> None:
+    project, _store, _sha = with_candidate(tmp_path)
+    target = project / ".stagemesh" / "handoff" / "mine.json"
+    target.parent.mkdir(parents=True)
+    bystanders = {target.with_name("mine.json.tmp"): "bystander-1", target.with_name("mine.tmp"): "bystander-2", target.with_name(".mine.json.tmp"): "bystander-3"}
+    for path, text in bystanders.items():
+        path.write_text(text, encoding="utf-8")
+
+    write_handoff(build_handoff(project), project, target)
+
+    assert {path: path.read_text(encoding="utf-8") for path in bystanders} == bystanders
+    assert json.loads(target.read_text(encoding="utf-8"))["schema"] == HANDOFF_SCHEMA
+
+
+def test_force_applies_to_the_final_target_only_and_replaces_it_atomically(tmp_path: Path) -> None:
+    project, _store, _sha = with_candidate(tmp_path)
+    target = project / ".stagemesh" / "handoff" / "mine.json"
+    target.parent.mkdir(parents=True)
+    target.write_text("old", encoding="utf-8")
+    doc = build_handoff(project)
+
+    with pytest.raises(HandoffError, match="already exists"):
+        write_handoff(doc, project, target)
+    assert target.read_text(encoding="utf-8") == "old"
+
+    write_handoff(doc, project, target, force=True)
+    assert json.loads(target.read_text(encoding="utf-8"))["schema"] == HANDOFF_SCHEMA
+    assert [p.name for p in target.parent.iterdir()] == ["mine.json"]  # no temp file left behind
+
+
+@pytest.mark.parametrize("failing", ["replace", "fsync"])
+def test_temp_file_is_removed_when_publishing_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failing: str) -> None:
+    project, _store, _sha = with_candidate(tmp_path)
+    target = project / ".stagemesh" / "handoff" / "mine.json"
+    target.parent.mkdir(parents=True)
+    target.write_text("old", encoding="utf-8")
+    doc = build_handoff(project)
+
+    def boom(*_args: object, **_kwargs: object) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(os, failing, boom)
+    with pytest.raises(OSError, match="disk full"):
+        write_handoff(doc, project, target, force=True)
+    monkeypatch.undo()
+
+    assert target.read_text(encoding="utf-8") == "old"  # the previous file is intact
+    assert [p.name for p in target.parent.iterdir()] == ["mine.json"]
+
+
+def test_git_directory_is_rejected_before_anything_is_created(tmp_path: Path) -> None:
+    project, _store, _sha = with_candidate(tmp_path)
+    before = sorted(p.relative_to(project) for p in (project / ".git").rglob("*"))
+    with pytest.raises(HandoffError, match=".git"):
+        write_handoff(build_handoff(project), project, Path(".git") / "handoff.json")
+    assert sorted(p.relative_to(project) for p in (project / ".git").rglob("*")) == before
+
+
+def test_external_evidence_keeps_the_ten_newest_rows(tmp_path: Path) -> None:
+    project, store, _sha = with_candidate(tmp_path)
+    for i in range(13):
+        store.add_external_evidence("ci", "PASS", f"https://ci.example/run/{i}", None, f"run {i}")
+    for i, row in enumerate(store.external_evidence()[::-1]):  # distinct, known timestamps: run/0 is the oldest
+        store.conn.execute("UPDATE external_evidence SET created_at=? WHERE id=?", (1000.0 + i, row["id"]))
+    store.conn.commit()
+
+    urls = [e["url"] for e in build_handoff(project)["latest_run"]["external_evidence"]]
+
+    assert urls == [f"https://ci.example/run/{i}" for i in range(12, 2, -1)]  # newest first, exactly ten
+    assert "https://ci.example/run/0" not in urls
+
+
+def test_work_packets_keep_the_newest_window_oldest_to_newest(tmp_path: Path) -> None:
+    project, store, _sha = with_candidate(tmp_path)
+    ids = [store.enqueue_work(TASK, "VALIDATE", None, None, {"n": i}) for i in range(MAX_ROWS + 5)]
+    for i, packet_id in enumerate(ids):  # distinct, known timestamps
+        store.conn.execute("UPDATE work_packets SET created_at=? WHERE id=?", (1000.0 + i, packet_id))
+    store.conn.commit()
+
+    queue = build_handoff(project)["queue_control"]["work_packets"]
+    exported = [p["id"] for p in queue["recent"]]
+
+    assert len(exported) == MAX_ROWS and exported == ids[-MAX_ROWS:]
+    assert ids[0] not in exported and sum(queue["by_status"].values()) == MAX_ROWS + 5  # counts still cover every packet
 
 
 # --- redaction -----------------------------------------------------------------------------------------------------------

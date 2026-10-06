@@ -9,11 +9,13 @@ the package at all.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
 import shlex
 import sqlite3
+import tempfile
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -380,7 +382,7 @@ def _queue_control(store: Store, tasks: list[Any], dirty: list[str], now: float)
             "by_status": packet_status,
             "recent": [
                 {"id": p["id"], "task_id": p["task_id"], "stage": p["stage"], "status": p["status"], "worker_id": p["worker_id"], "candidate_sha": p["candidate_sha"]}
-                for p in packets[:MAX_ROWS]
+                for p in packets[-MAX_ROWS:]  # the newest window, still oldest to newest
             ],
         },
         "retry_state": [
@@ -422,7 +424,7 @@ def _latest_run(store: Store, now: float) -> dict[str, Any]:
         "latest_implementation_failure": failure,
         "external_evidence": [
             {"kind": e["kind"], "status": e["status"], "url": redact_url_credentials(e["url"]), "candidate_sha": e["candidate_sha"], "recorded_at": _iso(e["created_at"])}
-            for e in store.external_evidence()[-10:]
+            for e in store.external_evidence()[:10]  # newest first
         ],
     }
 
@@ -536,9 +538,30 @@ def write_handoff(document: dict[str, Any], project: Path, out: Path | None, *, 
     if target.exists() and not force:
         raise HandoffError(f"{target.name} already exists; choose another --out or pass --force")
     target.parent.mkdir(parents=True, exist_ok=True)
-    temp = target.with_name(target.name + ".tmp")
-    temp.write_text(json.dumps(document, indent=2, sort_keys=True, ensure_ascii=False) + "\n", encoding="utf-8")
-    os.replace(temp, target)
+    text = json.dumps(document, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+    # The temp file is created exclusively (O_CREAT|O_EXCL) under a random name beside the target: an existing file or symlink at any
+    # guessable path is never opened, truncated or followed. --force concerns only the final target, which os.replace publishes atomically.
+    fd, temp_name = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.", suffix=".tmp")
+    temp = Path(temp_name)
+    try:
+        try:
+            WorkspaceBoundary(project).require_inside(temp)
+            if ".git" in temp.resolve().relative_to(project).parts:
+                raise HandoffError("handoff temp file must not be inside .git")
+        except ValueError as exc:
+            raise HandoffError(f"handoff temp file must be inside the project: {exc}") from exc
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+            fd = -1  # the file object owns the descriptor now
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp, target)
+    except BaseException:
+        if fd >= 0:
+            os.close(fd)
+        with contextlib.suppress(OSError):
+            temp.unlink()
+        raise
     return target
 
 
