@@ -33,6 +33,7 @@ STAGE_CAPABILITY = {IMPLEMENT: "code", REVIEW: "review"}
 DEFAULT_PROVIDER_ORDER = BUILTIN_PROVIDERS  # built-ins sort ahead of custom providers when no priority says otherwise
 DEFAULT_PRIORITY = 100
 DEFAULT_FAILURE_COOLDOWN_SECONDS = 900.0
+DEFAULT_QUOTA_COOLDOWN_SECONDS = 21600.0
 PROVIDER_FAILURE_EVENT = "provider.failure"
 PROVIDER_SELECTION_EVENT = "provider.selection"
 PROVIDER_USED_EVENT = "provider.used"
@@ -120,6 +121,12 @@ def default_pools(
     return pools
 
 
+def _failure_cooldown_seconds(reason: str, configured: float) -> float:
+    if reason == "quota_rate_limit":
+        return max(configured, DEFAULT_QUOTA_COOLDOWN_SECONDS)
+    return configured
+
+
 class ProviderPool:
     def __init__(
         self,
@@ -184,16 +191,24 @@ class ProviderPool:
         now = time.time()
         rows = store.conn.execute(
             "SELECT payload, created_at FROM audit_events WHERE event_type=? AND created_at>=? ORDER BY created_at DESC",
-            (PROVIDER_FAILURE_EVENT, now - self.cooldown_seconds),
+            (PROVIDER_FAILURE_EVENT, now - max(self.cooldown_seconds, DEFAULT_QUOTA_COOLDOWN_SECONDS)),
         ).fetchall()
         for row in rows:
             try:
                 payload = json.loads(row["payload"])
             except (TypeError, ValueError):
                 continue
-            if payload.get("task_id") == task_id and payload.get("stage") == stage and payload.get("provider") == provider:
-                age = int(now - row["created_at"])
-                return f"recent_failure: {payload.get('reason')} {age}s ago (cooldown {int(self.cooldown_seconds)}s)"
+            if payload.get("stage") != stage or payload.get("provider") != provider:
+                continue
+            reason = str(payload.get("reason") or "provider_failure")
+            age = int(now - row["created_at"])
+            cooldown = _failure_cooldown_seconds(reason, self.cooldown_seconds)
+            if age > cooldown:
+                continue
+            if reason in _CAPACITY_OUTCOMES:
+                return f"provider_cooldown: {reason} {age}s ago (cooldown {int(cooldown)}s)"
+            if payload.get("task_id") == task_id:
+                return f"recent_failure: {reason} {age}s ago (cooldown {int(cooldown)}s)"
         return None
 
     def record_failure(

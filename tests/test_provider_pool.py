@@ -361,14 +361,17 @@ def test_no_implementation_provider_available_lists_every_provider(tmp_path: Pat
     assert rig.pool.preflight(rig.store)[0] is False
 
 
-def test_recently_failed_provider_is_skipped_for_the_same_task_and_stage_only(tmp_path: Path) -> None:
+def test_capacity_failure_cools_provider_across_tasks_for_the_same_stage(tmp_path: Path) -> None:
     rig = Rig(tmp_path, {"codex": "ok", "claude": "ok"})
     rig.pool.record_failure(rig.store, IMPLEMENT, TASK, "codex", "quota_rate_limit")
 
     same = {v.provider: v for v in rig.pool.evaluate(rig.store, IMPLEMENT, TASK)}
-    assert not same["codex"].eligible and same["codex"].reason.startswith("recent_failure: quota_rate_limit")
-    assert same["claude"].eligible
-    assert all(v.eligible for v in rig.pool.evaluate(rig.store, IMPLEMENT, "OTHER-TASK"))
+    other = {v.provider: v for v in rig.pool.evaluate(rig.store, IMPLEMENT, "OTHER-TASK")}
+
+    assert not same["codex"].eligible and same["codex"].reason.startswith("provider_cooldown: quota_rate_limit")
+    assert "cooldown 21600s" in same["codex"].reason
+    assert not other["codex"].eligible and other["codex"].reason.startswith("provider_cooldown: quota_rate_limit")
+    assert same["claude"].eligible and other["claude"].eligible
     assert all(v.eligible for v in rig.pool.evaluate(rig.store, REVIEW, TASK))
 
 
