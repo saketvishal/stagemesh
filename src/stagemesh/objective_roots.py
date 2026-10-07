@@ -3,8 +3,6 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from .task_sources_types import SourceTaskLike
-
 GITHUB_SOURCE = "github"
 OBJECTIVE_LABELS = frozenset(
     {
@@ -26,7 +24,7 @@ def folded_labels(labels: tuple[str, ...] | list[str]) -> frozenset[str]:
     return frozenset(str(label).casefold() for label in labels)
 
 
-def source_issue_is_objective(labels: tuple[str, ...], body: str = "") -> bool:
+def source_issue_is_objective(labels: tuple[str, ...]) -> bool:
     """True only for source issues explicitly classified as planning/objective roots.
 
     StageMesh must not infer this from a broad-looking title/body; ordinary implementation tasks can also contain sections named
@@ -73,7 +71,7 @@ def objective_root_reason(store: Any, task: Any) -> str | None:
     return "historical source objective root" if row is not None else None
 
 
-def objective_payload(source_id: str, title: str, labels: tuple[str, ...], body: str, dependencies: tuple[str, ...]) -> dict[str, Any]:
+def objective_payload(source_id: str, labels: tuple[str, ...], body: str, dependencies: tuple[str, ...]) -> dict[str, Any]:
     return {
         "source": GITHUB_SOURCE,
         "source_id": source_id,
