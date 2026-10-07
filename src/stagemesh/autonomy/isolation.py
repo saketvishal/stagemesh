@@ -36,7 +36,7 @@ class IsolationViolation(RuntimeError):
 @dataclass(frozen=True)
 class IsolationFinding:
     code: str
-    message: str
+    message: str = ""
     path: str = ""
     other_checkout: str = ""
 
@@ -206,13 +206,16 @@ def check_isolation(
     return report
 
 
-def _check_running_code(project: Path, report: IsolationReport, expected_checkout: Path | None = None) -> None:
-    """The StageMesh code executing must come from the checkout it is supposed to come from.
+def _project_local_install_root(project: Path) -> Path:
+    return project / ".stagemesh" / "tooling" / "venv"
 
-    By default that is the project itself when the project is a StageMesh checkout (an ordinary project may use any installed StageMesh).
-    When the project is managed *by another checkout's* StageMesh (StageMesh developing StageMesh), `expected_checkout` names the
-    tool checkout explicitly and the code must come from exactly there. A global editable install of some other checkout makes
-    `import stagemesh` resolve elsewhere unless `PYTHONPATH=src`.
+
+def _check_running_code(project: Path, report: IsolationReport, expected_checkout: Path | None = None) -> None:
+    """The StageMesh code executing must come from the expected checkout or this project's owned tool runtime.
+
+    By default, a StageMesh-shaped project may run either from its source tree or from its project-local bootstrap install under
+    `.stagemesh/tooling/venv`. Ordinary projects may use any installed StageMesh. When `expected_checkout` is supplied, only that
+    checkout is accepted as the tool source.
     """
     own_package = (expected_checkout or project) / "src" / "stagemesh"
     if expected_checkout is None and not own_package.is_dir():
@@ -220,15 +223,21 @@ def _check_running_code(project: Path, report: IsolationReport, expected_checkou
     import stagemesh
 
     running = Path(os.path.realpath(stagemesh.__file__)).parent
-    if not _inside(running, own_package):
-        report.findings.append(
-            IsolationFinding(
-                "RUNNING_CODE_FROM_OTHER_CHECKOUT",
-                f"StageMesh code is being imported from {running}, not from {own_package}; run with PYTHONPATH=src or install the right checkout",
-                str(running),
-                str(running.parent.parent),
-            )
+    if _inside(running, own_package):
+        return
+    if expected_checkout is None and _inside(running, _project_local_install_root(project)):
+        return
+    expected = f"{own_package}"
+    if expected_checkout is None:
+        expected += f" or {_project_local_install_root(project)}"
+    report.findings.append(
+        IsolationFinding(
+            "RUNNING_CODE_FROM_OTHER_CHECKOUT",
+            f"StageMesh code is being imported from {running}, not from {expected}; run this checkout's project-local StageMesh install",
+            str(running),
+            str(running.parent.parent),
         )
+    )
 
 
 def _is_stagemesh_candidate_worktree(path: Path | str) -> bool:
