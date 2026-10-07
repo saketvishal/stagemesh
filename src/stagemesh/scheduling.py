@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .domain import Stage
+from .objective_roots import objective_root_reason
 from .persistence import Store
 
 
@@ -24,6 +25,9 @@ class Scheduler:
             return SchedulingDecision(task_id, False, "missing")
         if task["stage"] == Stage.DONE or task["status"] == "DONE":
             return SchedulingDecision(task_id, False, "done")
+        objective_reason = objective_root_reason(self.store, task)
+        if objective_reason is not None:
+            return SchedulingDecision(task_id, False, objective_reason)
         source_reason = _source_refusal_reason(self.store, task)
         if source_reason is not None:
             return SchedulingDecision(task_id, False, source_reason)
