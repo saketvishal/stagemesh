@@ -92,7 +92,7 @@ def assert_objective_root_refusal(project: Path) -> None:
     run_failure(
         [sys.executable, "-m", "stagemesh.cli", "--project", str(project), "run-ready", "--task", task_id, "--dry-run"],
         ROOT,
-        "objective_root_not_runnable",
+        "objective root not runnable",
     )
 
 
