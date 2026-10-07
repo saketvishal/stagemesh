@@ -40,7 +40,7 @@ def default_gate_commands(include_acceptance: bool = True) -> list[tuple[str, li
         ("clean_acceptance", [sys.executable, "scripts/clean_acceptance.py"]),
     ]
     if include_acceptance:
-        gates.append(("acceptance", [sys.executable, "scripts/acceptance.py"]))
+        gates.append(("acceptance", [sys.executable, "scripts/project_local_acceptance.py"]))
     return gates
 
 

@@ -8,9 +8,6 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "src"))
-
-from stagemesh.persistence import SCHEMA_VERSION
 
 
 def run(command: list[str], cwd: Path, env: dict[str, str] | None = None) -> str:
@@ -41,53 +38,55 @@ def copy_clean_tree(source: Path, destination: Path) -> None:
         shutil.copy2(source / relative, target)
 
 
+def venv_python(venv: Path) -> Path:
+    return venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+
+
+def venv_stagemesh(venv: Path) -> Path:
+    return venv / ("Scripts/stagemesh.exe" if os.name == "nt" else "bin/stagemesh")
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory(prefix="stagemesh-clean-acceptance-") as raw:
         tmp = Path(raw)
         clean_root = tmp / "checkout"
-        install_target = tmp / "install"
         project = tmp / "synthetic-project"
+        venv = tmp / "project-runtime"
         clean_root.mkdir()
         project.mkdir()
         copy_clean_tree(ROOT, clean_root)
-        run(
-            [
-                sys.executable,
-                "-m",
-                "pip",
-                "install",
-                ".",
-                "--target",
-                str(install_target),
-                "--no-cache-dir",
-                "--upgrade",
-            ],
-            clean_root,
-        )
-        env = {"PYTHONPATH": str(install_target)}
-        init = run([sys.executable, "-m", "stagemesh.cli", "--project", str(project), "init"], clean_root, env)
+        run([sys.executable, "-m", "venv", str(venv)], clean_root)
+        py = venv_python(venv)
+        run([str(py), "-m", "pip", "install", "--upgrade", "pip"], clean_root)
+        run([str(py), "-m", "pip", "install", "."], clean_root)
+        stagemesh = venv_stagemesh(venv)
+        if not stagemesh.exists():
+            raise AssertionError(f"missing installed stagemesh entry point: {stagemesh}")
+        init = run([str(stagemesh), "--project", str(project), "init"], clean_root)
         if "initialized StageMesh" not in init:
             raise AssertionError(init)
-        doctor = run([sys.executable, "-m", "stagemesh.cli", "--project", str(project), "doctor"], clean_root, env)
+        doctor = run([str(stagemesh), "--project", str(project), "doctor"], clean_root)
         required = [
             "version:",
             "executable path:",
             "imported package path:",
             f"project: {project.resolve()}",
-            f"schema version: {SCHEMA_VERSION}",
+            "schema version:",
             "backend: sqlite",
+            "editable/development status: installed",
         ]
         missing = [item for item in required if item not in doctor]
         if missing:
             raise AssertionError(f"doctor missing {missing}\n{doctor}")
-        backend = run([sys.executable, "-m", "stagemesh.cli", "--project", str(project), "backend"], clean_root, env)
+        if str(clean_root / "src") in doctor:
+            raise AssertionError(f"doctor used source checkout instead of installed runtime\n{doctor}")
+        backend = run([str(stagemesh), "--project", str(project), "backend"], clean_root)
         if "name: sqlite" not in backend or "postgres schema contract: 18 tables" not in backend:
             raise AssertionError(backend)
         report = project / ".stagemesh" / "final-report.md"
         report_output = run(
-            [sys.executable, "-m", "stagemesh.cli", "--project", str(project), "report", "--output", str(report)],
+            [str(stagemesh), "--project", str(project), "report", "--output", str(report)],
             clean_root,
-            env,
         )
         report_text = report.read_text(encoding="utf-8") if report.exists() else ""
         if "report:" not in report_output or "## Final Architecture" not in report_text:
