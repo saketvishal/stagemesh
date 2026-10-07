@@ -389,22 +389,33 @@ class WorkspaceLease:
         target = self._gitdir / OWNER_FILE
         last_error: OSError | None = None
 
-        with _owner_mutex(self._gitdir):
+        with _owner_mutex(self._gitdir) as locked:
+            if not locked:
+                detail = {
+                    "task_id": self.task_id,
+                    "workspace": str(self.path),
+                    "token": self._token,
+                    "reason": "owner_mutex_timeout",
+                    "execution_id": self.execution_id,
+                    "claim_id": self.claim_id,
+                }
+                raise WorkspaceReleaseError(detail)
+
             for attempt in range(_RELEASE_RETRIES):
+                if not target.exists():
+                    self._released = True
+                    return
+
                 try:
                     owner = _read_json(target)
                 except ValueError:
-                    owner = None
+                    owner = {"token": self._token}  # corrupt record on disk; attempt removal
                 except OSError as exc:
                     last_error = exc
                     time.sleep(_RELEASE_RETRY_INTERVAL)
                     continue
 
-                if owner is None:
-                    self._released = True
-                    return
-
-                if owner.get("token") != self._token:
+                if owner is not None and owner.get("token") != self._token:
                     # Foreign owner: do not delete another claimant's record
                     self._released = True
                     return
@@ -517,26 +528,34 @@ def _safe_cleanup_created_owner(target: Path, token: str) -> None:
       unlinking is safe because this is called while holding the workspace owner mutex.
     - If target has content, it is unlinked only if its token matches our token.
     - If the file belongs to another token or process, it is preserved.
+    - If cleanup fails after retries, raises WorkspaceReleaseError fail-closed.
     """
-    for _ in range(5):
+    last_error: OSError | None = None
+    for attempt in range(5):
+        if not target.exists():
+            return
         try:
-            if not target.exists():
-                return
-            try:
-                data = _read_json(target)
-                if data is not None and data.get("token") != token:
-                    return  # foreign owner record, do not delete
-            except ValueError:
-                pass
-            try:
-                os.unlink(target)
-                return
-            except FileNotFoundError:
-                return
-            except OSError:
-                time.sleep(0.02)
-        except OSError:
+            data = _read_json(target)
+            if data is not None and data.get("token") != token:
+                return  # foreign owner record, do not delete
+        except ValueError:
             pass
+        try:
+            os.unlink(target)
+            return
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            last_error = exc
+            if attempt < 4:
+                time.sleep(0.02)
+    if target.exists():
+        raise WorkspaceReleaseError({
+            "workspace": str(target.parent),
+            "token": token,
+            "reason": "owner_file_cleanup_failed",
+            "error": str(last_error),
+        })
 
 
 def _claim_locked(store: Store, task_id: str, kind: str, path: Path, gitdir: Path, token: str, claim_id: str | None) -> bool:
@@ -629,7 +648,8 @@ def acquire_workspace(store: Store, project: Path, task_id: str, kind: str, *, c
         if lease is not None:
             lease.release()
         else:
-            _safe_cleanup_created_owner(gitdir / OWNER_FILE, token)
+            with _owner_mutex(gitdir):
+                _safe_cleanup_created_owner(gitdir / OWNER_FILE, token)
         raise
 def _establish(lease: WorkspaceLease, existed: bool) -> None:
     store, task_id = lease.store, lease.task_id

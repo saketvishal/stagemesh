@@ -1355,3 +1355,54 @@ def test_release_never_deletes_foreign_owner_record(tmp_path: Path) -> None:
     assert json.loads(owner_file.read_text(encoding="utf-8"))["token"] == "foreign-token-999"
 
     owner_file.unlink()
+
+
+def test_release_fails_closed_when_owner_mutex_times_out(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    project, store = _setup(tmp_path)
+    lease = acquire_workspace(store, project, TASK, ExecutionKind.IMPLEMENTATION)
+
+    # Simulate mutex acquisition failure during release
+    from contextlib import contextmanager
+
+    @contextmanager
+    def fake_mutex(gitdir, timeout=None):
+        yield False
+
+    monkeypatch.setattr(guard, "_owner_mutex", fake_mutex)
+
+    with pytest.raises(guard.WorkspaceReleaseError) as raised:
+        lease.release()
+
+    assert raised.value.reason == "owner_mutex_timeout"
+    monkeypatch.undo()
+    lease.release()
+
+
+def test_release_removes_corrupt_owner_file_rather_than_silently_leaving_it(tmp_path: Path) -> None:
+    project, store = _setup(tmp_path)
+    lease = acquire_workspace(store, project, TASK, ExecutionKind.IMPLEMENTATION)
+    owner_file = lease._gitdir / OWNER_FILE
+
+    # Corrupt the owner file content
+    owner_file.write_text("not-valid-json", encoding="utf-8")
+
+    lease.release()
+    assert not owner_file.exists(), "release must clean up corrupt owner file rather than silently reporting success"
+
+
+def test_safe_cleanup_created_owner_raises_when_unlink_permanently_fails(tmp_path: Path) -> None:
+    project, _store = _setup(tmp_path)
+    prepare_task_workspace(project, TASK)
+    gitdir = gitdir_of(project)
+    owner_file = gitdir / OWNER_FILE
+    owner_file.write_text(json.dumps({"token": "my-token"}), encoding="utf-8")
+
+    # Hold handle open without delete sharing so unlink fails
+    handle = open(owner_file, "r", encoding="utf-8")  # noqa: SIM115
+    try:
+        with pytest.raises(guard.WorkspaceReleaseError) as raised:
+            guard._safe_cleanup_created_owner(owner_file, "my-token")
+        assert raised.value.reason == "owner_file_cleanup_failed"
+    finally:
+        handle.close()
+        owner_file.unlink()
