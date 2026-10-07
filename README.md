@@ -191,8 +191,11 @@ Each task's worktree is written by one StageMesh execution at a time. An executi
 git dir, created atomically (`O_EXCL`); while that owner is alive every other claim fails closed. Claims, including the takeover of a dead
 owner's lease, are serialized by a per-workspace OS file lock: when several executions find the same dead owner, exactly one takes it over
 and the others are refused while it holds the lease (a claim that cannot get the lock within 10 seconds is refused too). Once the owner
-releases, a later claim proceeds like any other, checked against the seal. The lease is released on every exit path once it was taken,
-including a failing seal or audit write. When an execution finishes it *seals* the result: the HEAD, a content fingerprint of the
+releases, a later claim proceeds like any other, checked against the seal. An acquisition that fails after creating the owner file
+safely unwinds under the per-workspace lock without stranding an empty or corrupt record. On exit, release cleans up the owner record
+under the workspace lock with bounded retries for transient sharing contention (such as Windows file handles); if release permanently
+cannot complete, it surfaces a typed `WorkspaceReleaseError` and fails closed rather than silently reporting success. Cleanup never
+removes a foreign owner's record. When an execution finishes it *seals* the result: the HEAD, a content fingerprint of the
 uncommitted files, and the candidate SHA it produced. The agent's own edits, and linear commits it makes while it holds the lease, are the
 authorized result.
 

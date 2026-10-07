@@ -42,6 +42,8 @@ OWNER_FILE = "stagemesh-owner.json"
 LEDGER_FILE = "stagemesh-workspace.json"
 OWNER_MUTEX_FILE = "stagemesh-owner.lock"
 OWNER_MUTEX_TIMEOUT = 10.0  # seconds a claim waits for another claim of the same workspace to finish
+_RELEASE_RETRIES = 10
+_RELEASE_RETRY_INTERVAL = 0.05
 LEDGER_VERSION = 1
 MAX_FINGERPRINT_PATHS = 500  # beyond this only the digest is kept, so the changed paths cannot be listed
 MAX_REPORTED_PATHS = 20
@@ -67,6 +69,21 @@ class WorkspaceMutation(RuntimeError):
         return str(self.detail.get("reason"))
 
 
+
+
+class WorkspaceReleaseError(RuntimeError):
+    """The lease could not be released because its ownership file could not be unlinked."""
+
+    def __init__(self, detail: dict[str, Any]):
+        self.detail = detail
+        super().__init__(
+            f"workspace lease release failed at {detail.get('workspace')}: {detail.get('reason')} "
+            f"(token {detail.get('token')})"
+        )
+
+    @property
+    def reason(self) -> str:
+        return str(self.detail.get("reason"))
 # --- observation ---------------------------------------------------------------------------------------------------------
 
 
@@ -369,14 +386,51 @@ class WorkspaceLease:
     def release(self) -> None:
         if self._released:
             return
-        self._released = True
-        owner = self._read_owner()
-        if owner is not None and owner.get("token") == self._token:
-            try:
-                os.unlink(self._gitdir / OWNER_FILE)
-            except OSError:
-                pass
+        target = self._gitdir / OWNER_FILE
+        last_error: OSError | None = None
 
+        with _owner_mutex(self._gitdir):
+            for attempt in range(_RELEASE_RETRIES):
+                try:
+                    owner = _read_json(target)
+                except ValueError:
+                    owner = None
+                except OSError as exc:
+                    last_error = exc
+                    time.sleep(_RELEASE_RETRY_INTERVAL)
+                    continue
+
+                if owner is None:
+                    self._released = True
+                    return
+
+                if owner.get("token") != self._token:
+                    # Foreign owner: do not delete another claimant's record
+                    self._released = True
+                    return
+
+                try:
+                    os.unlink(target)
+                    self._released = True
+                    return
+                except FileNotFoundError:
+                    self._released = True
+                    return
+                except OSError as exc:
+                    last_error = exc
+                    if attempt < _RELEASE_RETRIES - 1:
+                        time.sleep(_RELEASE_RETRY_INTERVAL)
+
+        detail = {
+            "task_id": self.task_id,
+            "workspace": str(self.path),
+            "token": self._token,
+            "reason": "owner_file_unlink_failed",
+            "error": str(last_error),
+            "execution_id": self.execution_id,
+            "claim_id": self.claim_id,
+        }
+        raise WorkspaceReleaseError(detail)
 
 def _load_ledger(gitdir: Path) -> tuple[dict[str, Any] | None, bytes]:
     data = _read_json(gitdir / LEDGER_FILE)
@@ -455,6 +509,36 @@ def _claim(store: Store, task_id: str, kind: str, path: Path, gitdir: Path, toke
         return _claim_locked(store, task_id, kind, path, gitdir, token, claim_id)
 
 
+def _safe_cleanup_created_owner(target: Path, token: str) -> None:
+    """Safely unlink an owner file created during a failed acquisition attempt.
+
+    Never deletes another claimant's valid owner file:
+    - If target is empty or unreadable corrupt JSON created by us before write,
+      unlinking is safe because this is called while holding the workspace owner mutex.
+    - If target has content, it is unlinked only if its token matches our token.
+    - If the file belongs to another token or process, it is preserved.
+    """
+    for _ in range(5):
+        try:
+            if not target.exists():
+                return
+            try:
+                data = _read_json(target)
+                if data is not None and data.get("token") != token:
+                    return  # foreign owner record, do not delete
+            except ValueError:
+                pass
+            try:
+                os.unlink(target)
+                return
+            except FileNotFoundError:
+                return
+            except OSError:
+                time.sleep(0.02)
+        except OSError:
+            pass
+
+
 def _claim_locked(store: Store, task_id: str, kind: str, path: Path, gitdir: Path, token: str, claim_id: str | None) -> bool:
     target = gitdir / OWNER_FILE
     recovered = False
@@ -485,11 +569,32 @@ def _claim_locked(store: Store, task_id: str, kind: str, path: Path, gitdir: Pat
                 pass
             recovered = recovered or owner is not None
             continue
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(json.dumps(_self_owner(token, task_id, kind, claim_id), sort_keys=True) + "\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        return recovered
+
+        created = True
+        try:
+            try:
+                owner_data = _self_owner(token, task_id, kind, claim_id)
+                payload = json.dumps(owner_data, sort_keys=True) + "\n"
+            except BaseException:
+                os.close(fd)
+                fd = None
+                raise
+
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                fd = None
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            return recovered
+        except BaseException:
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+            if created:
+                _safe_cleanup_created_owner(target, token)
+            raise
     raise _mutation(store, task_id=task_id, stage=f"{kind}:acquire", reason="workspace_owned_by_another_execution", workspace=path, expected_sha=None, observed_sha=None, claim_id=claim_id, detail="lost the race for the owner file")
 
 
@@ -515,15 +620,17 @@ def acquire_workspace(store: Store, project: Path, task_id: str, kind: str, *, c
         raise _mutation(store, task_id=task_id, stage=f"{kind}:acquire", reason="git_output_undecodable", workspace=path, expected_sha=None, observed_sha=None, claim_id=claim_id, detail=str(exc)) from exc
     token = uuid.uuid4().hex
     recovered = _claim(store, task_id, kind, path, gitdir, token, claim_id)
-    lease = WorkspaceLease(store, task_id, kind, path, gitdir, token, claim_id, recovered)
+    lease: WorkspaceLease | None = None
     try:
+        lease = WorkspaceLease(store, task_id, kind, path, gitdir, token, claim_id, recovered)
         _establish(lease, existed)
+        return lease
     except BaseException:
-        lease.release()
+        if lease is not None:
+            lease.release()
+        else:
+            _safe_cleanup_created_owner(gitdir / OWNER_FILE, token)
         raise
-    return lease
-
-
 def _establish(lease: WorkspaceLease, existed: bool) -> None:
     store, task_id = lease.store, lease.task_id
     try:
@@ -702,6 +809,7 @@ __all__ = [
     "EXTERNAL_WORKSPACE_MUTATION",
     "WorkspaceLease",
     "WorkspaceMutation",
+    "WorkspaceReleaseError",
     "acquire_workspace",
     "observe",
     "owned_workspace",

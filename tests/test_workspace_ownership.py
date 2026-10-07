@@ -1210,3 +1210,148 @@ def test_rebase_fails_closed_on_a_workspace_changed_since_it_was_sealed(tmp_path
     assert mutation_events(rig.store)[-1]["stage"] == "INTEGRATION:acquire"
     coord.tick()
     assert rig.store.get_task(REBASE_TASK)["status"] == TaskStatus.BLOCKED  # and the coordinator blocks it
+
+
+# --- Blocker 1: acquisition failure cleanup and foreign owner safety ---------------------------------------------------------
+
+
+def test_acquisition_failure_cleans_up_owner_file_when_self_owner_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    project, store = _setup(tmp_path)
+    monkeypatch.setattr(guard, "_self_owner", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("self_owner_failed")))
+
+    with pytest.raises(RuntimeError, match="self_owner_failed"):
+        acquire_workspace(store, project, TASK, ExecutionKind.IMPLEMENTATION)
+
+    owner_file = gitdir_of(project) / OWNER_FILE
+    assert not owner_file.exists(), f"owner file was stranded after failed acquisition: {owner_file}"
+
+    # Subsequent legitimate claim in the same process succeeds
+    monkeypatch.undo()
+    lease = acquire_workspace(store, project, TASK, ExecutionKind.IMPLEMENTATION)
+    assert lease is not None
+    lease.release()
+
+
+def test_acquisition_failure_cleans_up_owner_file_when_json_write_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    project, store = _setup(tmp_path)
+
+    def failing_fdopen(*args, **kwargs):
+        raise OSError("disk_full_during_write")
+
+    monkeypatch.setattr(guard.os, "fdopen", failing_fdopen)
+    with pytest.raises(OSError, match="disk_full_during_write"):
+        acquire_workspace(store, project, TASK, ExecutionKind.IMPLEMENTATION)
+
+    owner_file = gitdir_of(project) / OWNER_FILE
+    assert not owner_file.exists(), f"owner file was stranded after failed write: {owner_file}"
+
+    monkeypatch.undo()
+    lease = acquire_workspace(store, project, TASK, ExecutionKind.IMPLEMENTATION)
+    assert lease is not None
+    lease.release()
+
+
+def test_acquisition_failure_cleans_up_owner_file_when_process_identity_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    project, store = _setup(tmp_path)
+    monkeypatch.setattr(guard, "process_identity", lambda pid: (_ for _ in ()).throw(OSError("proc_identity_unavailable")))
+
+    with pytest.raises(OSError, match="proc_identity_unavailable"):
+        acquire_workspace(store, project, TASK, ExecutionKind.IMPLEMENTATION)
+
+    owner_file = gitdir_of(project) / OWNER_FILE
+    assert not owner_file.exists(), f"owner file was stranded after failed process identity: {owner_file}"
+
+    monkeypatch.undo()
+    lease = acquire_workspace(store, project, TASK, ExecutionKind.IMPLEMENTATION)
+    assert lease is not None
+    lease.release()
+
+
+def test_acquisition_failure_never_deletes_foreign_owner_record(tmp_path: Path) -> None:
+    project, _store = _setup(tmp_path)
+    prepare_task_workspace(project, TASK)
+    gitdir = gitdir_of(project)
+    foreign_owner = {
+        "token": "foreign-token-123",
+        "task_id": TASK,
+        "kind": "implementation",
+        "claim_id": "foreign-claim",
+        "pid": 999999,
+    }
+    owner_file = gitdir / OWNER_FILE
+    owner_file.write_text(json.dumps(foreign_owner), encoding="utf-8")
+
+    assert hasattr(guard, "_safe_cleanup_created_owner"), "cleanup function must exist"
+    guard._safe_cleanup_created_owner(owner_file, "my-token-456")
+    assert owner_file.exists()
+    assert json.loads(owner_file.read_text(encoding="utf-8"))["token"] == "foreign-token-123"
+
+
+# --- Blocker 2: Windows release contention and typed release failure --------------------------------------------------------
+
+
+def test_release_permanent_sharing_contention_fails_closed_with_typed_error(tmp_path: Path) -> None:
+    project, store = _setup(tmp_path)
+    handle = None
+    owner_file = None
+    lease_ref = []
+    try:
+        release_err = getattr(guard, "WorkspaceReleaseError", RuntimeError)
+        with pytest.raises(release_err) as raised, guard.owned_workspace(store, project, TASK, ExecutionKind.IMPLEMENTATION) as lease:
+            lease_ref.append(lease)
+            owner_file = lease._gitdir / OWNER_FILE
+            assert owner_file.exists()
+            handle = open(owner_file, "r", encoding="utf-8")  # noqa: SIM115 - handle held open to test sharing contention
+
+        assert hasattr(guard, "WorkspaceReleaseError") and issubclass(type(raised.value), guard.WorkspaceReleaseError)
+        assert raised.value.reason == "owner_file_unlink_failed"
+        assert owner_file.exists(), "owner file must remain when release could not complete"
+    finally:
+        if handle is not None:
+            handle.close()
+    if lease_ref:
+        lease_ref[0].release()
+    assert not owner_file.exists()
+
+
+def test_release_recovers_from_transient_sharing_contention(tmp_path: Path) -> None:
+    project, store = _setup(tmp_path)
+    lease = acquire_workspace(store, project, TASK, ExecutionKind.IMPLEMENTATION)
+    owner_file = lease._gitdir / OWNER_FILE
+    assert owner_file.exists()
+
+    handle = open(owner_file, "r", encoding="utf-8")  # noqa: SIM115 - handle held open to test sharing contention
+
+    def delayed_close():
+        import time
+        time.sleep(0.08)
+        handle.close()
+
+    closer = threading.Thread(target=delayed_close)
+    closer.start()
+    try:
+        lease.release()
+        assert not owner_file.exists()
+    finally:
+        closer.join()
+
+
+def test_release_never_deletes_foreign_owner_record(tmp_path: Path) -> None:
+    project, store = _setup(tmp_path)
+    lease = acquire_workspace(store, project, TASK, ExecutionKind.IMPLEMENTATION)
+    owner_file = lease._gitdir / OWNER_FILE
+
+    foreign_owner = {
+        "token": "foreign-token-999",
+        "task_id": TASK,
+        "kind": "implementation",
+        "claim_id": "foreign-claim",
+        "pid": 999999,
+    }
+    owner_file.write_text(json.dumps(foreign_owner), encoding="utf-8")
+
+    lease.release()
+    assert owner_file.exists()
+    assert json.loads(owner_file.read_text(encoding="utf-8"))["token"] == "foreign-token-999"
+
+    owner_file.unlink()
