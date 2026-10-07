@@ -28,6 +28,14 @@ python scripts/acceptance.py
 
 Runtime state lives in `.stagemesh/stagemesh.sqlite3` by default.
 
+## Founder Hands-Off
+
+StageMesh is being extended so a founder can give only `Implement objective X.` and have branches, CI, review cycles, stacked PRs,
+base movement and recovery handled by deterministic, typed, evidence-backed policy instead of operator instructions. The gate, the
+capabilities, the incident scenarios enforced by tests, the remaining gaps and the ten-task streak live in one canonical document:
+[docs/founder-hands-off.md](docs/founder-hands-off.md). The supervisor is opt-in per project (`.stagemesh/autonomy.json`) and is
+inspected with `stagemesh autonomy isolation | trace | streak | readiness`.
+
 ## Provider pools and task isolation
 
 StageMesh picks providers at run time instead of one fixed provider per stage. Each stage (`IMPLEMENT`, `REVIEW`) has a pool

@@ -102,6 +102,25 @@ def _content_hash(path: Path) -> str:
         return "unreadable"
 
 
+def unexpected_embedded_repositories(path: Path) -> list[str]:
+    """Descendant directories that are their own Git repository, including under ignored paths.
+
+    The worktree's own `.git` (directory, file, or worktree link) is the task workspace and is not reported.
+    A nested `.git` directory or a nested `.git` gitdir file is. Ignored files in general are not fingerprinted.
+    """
+    root = Path(path).resolve()
+    found: list[str] = []
+    for current, dirnames, filenames in os.walk(root):
+        here = Path(current).resolve()
+        if here == root:
+            dirnames[:] = [name for name in dirnames if name != ".git"]
+            continue
+        if ".git" in dirnames or ".git" in filenames or (here / ".git").is_symlink():
+            found.append(here.relative_to(root).as_posix())
+            dirnames[:] = []
+    return sorted(found)
+
+
 class UndecodableGitOutput(GitError):
     """git wrote output that could not be decoded as UTF-8, so a path or id in it cannot be trusted."""
 
@@ -645,6 +664,11 @@ def acquire_workspace(store: Store, project: Path, task_id: str, kind: str, *, c
     GitWorkspace(root).init_if_needed()  # as prepare_task_workspace does first: the project may not exist yet, and the config read below needs it
     existed = (task_workspace(root, task_id) / ".git").exists()
     path = prepare_task_workspace(root, task_id)
+    # The supervisor quarantines and restores an idle mutation before this lease compares the ledger. Doing it afterwards
+    # turns a restorable stray file into a blocked task, because the difference check below runs first.
+    from .autonomy.hooks import workspace_handed_to_execution
+
+    workspace_handed_to_execution(store, task_id, path)
     try:
         gitdir = _gitdir(path)
     except UndecodableGitOutput as exc:
@@ -758,6 +782,54 @@ def _fail_execution(lease: WorkspaceLease) -> None:
 
 
 # --- stage boundaries (no lease: validation, review and integration never write the implementation worktree) ----------------
+
+
+def record_supervised_move(
+    project: Path, task_id: str, previous_head: str, new_head: str, candidate_sha: str | None, *, require_same_dirty: bool = True
+) -> bool:
+    """Record a checkout StageMesh itself just made on an idle task worktree.
+
+    Returns whether that checkout is authorized. The ledger is updated only when it still names `previous_head` and the
+    worktree is exactly `new_head`. A refresh keeps an already-sealed dirty tree only when its digest is unchanged.
+    A reconstruct passes `require_same_dirty=False` after it has preserved and cleaned the worktree itself.
+    That path still refuses leftover dirt, and it refuses an embedded repository `git clean` left behind,
+    including one under an ignored path. That residual stays on disk; it is not resealed as authorized.
+    No ledger means there is nothing to contradict, so the caller may record a clean move in its own ownership row.
+    """
+    root = Path(project).resolve()
+    if not root.is_dir():
+        return False
+    target = task_workspace(root, task_id)
+    if not (target / ".git").exists():
+        return False
+    gitdir = _gitdir(target)
+    try:
+        ledger, _raw = _load_ledger(gitdir)
+    except ValueError:
+        return False
+    seen = observe(target)
+    if seen["head"] != new_head:
+        return False
+    if not require_same_dirty and (seen["dirty_count"] or unexpected_embedded_repositories(target)):
+        return False
+    if ledger is None:
+        return True
+    if ledger.get("head") != previous_head:
+        return False
+    if require_same_dirty and seen["dirty_digest"] != ledger.get("dirty_digest"):
+        return False
+    _atomic_write(
+        gitdir / LEDGER_FILE,
+        {
+            **ledger,
+            "head": seen["head"],
+            "dirty": seen["dirty"],
+            "dirty_count": seen["dirty_count"],
+            "dirty_digest": seen["dirty_digest"],
+            "candidate": candidate_sha if candidate_sha is not None else ledger.get("candidate"),
+        },
+    )
+    return True
 
 
 def pin_candidate(project: Path, task_id: str, candidate_sha: str) -> None:
