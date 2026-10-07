@@ -15,6 +15,7 @@ from .domain import EvidenceKind, Stage, TaskStatus
 from .observability import health
 from .operator_actions import recover_stale, task_details
 from .git import GitWorkspace
+from .objective_roots import objective_root_reason
 from .persistence import MAX_CANONICAL_CONTRACT_CHARS, Store
 from .config import TaskSelectionConfig
 from .scheduling import Scheduler
@@ -81,6 +82,20 @@ def _recover_dead(store: Store, task_id: str) -> list[dict[str, Any]]:
     ]
 
 
+def _require_runnable_task(store: Store, task_id: str) -> None:
+    task = store.get_task(task_id)
+    if task is None:
+        raise RunReadyRefusal("task_not_found", f"task does not exist: {task_id}")
+    objective_reason = objective_root_reason(store, task)
+    if objective_reason:
+        raise RunReadyRefusal(
+            "objective_root_not_runnable",
+            f"task {task_id} is a GitHub objective root ({objective_reason}); run objective planning/decomposition instead",
+            task_id=task_id,
+            objective_root_reason=objective_reason,
+        )
+
+
 def choose_task(
     store: Store,
     project: Path,
@@ -89,9 +104,9 @@ def choose_task(
     auto_plan: bool,
     chooser: Callable[[list[Candidate]], str | None] | None,
 ) -> Selection:
-    """--task bypasses the policy; otherwise rank the eligible tasks (see task_selection) and pick or refuse."""
+    """--task bypasses ranking only; objective-root/history safety still applies."""
     if requested is not None:
-        select_task(store, requested)  # existence check
+        _require_runnable_task(store, requested)
         return Selection("explicit", requested, "explicit --task (selection policy bypassed)")
     try:
         return select_next_task(store, project, policy, auto_plan=auto_plan, chooser=chooser)
@@ -112,8 +127,7 @@ def _log_selection(selection: Selection, log: Callable[[str], None] | None) -> N
 
 def select_task(store: Store, requested: str | None) -> str:
     if requested is not None:
-        if store.get_task(requested) is None:
-            raise RunReadyRefusal("task_not_found", f"task does not exist: {requested}")
+        _require_runnable_task(store, requested)
         return requested
     scheduler = Scheduler(store)
     eligible = [
