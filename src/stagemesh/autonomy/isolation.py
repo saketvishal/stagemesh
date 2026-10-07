@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import tempfile
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -230,11 +231,23 @@ def _check_running_code(project: Path, report: IsolationReport, expected_checkou
         )
 
 
+def _is_stagemesh_candidate_worktree(path: Path | str) -> bool:
+    """Short-lived provider validation worktrees are owned by this run, even though Git records them outside the checkout."""
+    resolved = Path(os.path.realpath(str(path)))
+    if resolved.name != "checkout":
+        return False
+    parent = resolved.parent
+    if not parent.name.startswith("stagemesh-candidate-"):
+        return False
+    return _inside(parent, tempfile.gettempdir())
+
+
 def _check_git_store(project: Path, report: IsolationReport) -> None:
     git = GitWorkspace(project)
     try:
         toplevel = git.run("rev-parse", "--show-toplevel").stdout.strip()
         common = git.run("rev-parse", "--path-format=absolute", "--git-common-dir").stdout.strip()
+        git.run("worktree", "prune", check=False)
         listing = git.run("worktree", "list", "--porcelain").stdout
     except (GitError, OSError) as exc:
         report.findings.append(IsolationFinding("NOT_A_GIT_CHECKOUT", f"cannot inspect git state of {project}: {exc}"))
@@ -252,6 +265,8 @@ def _check_git_store(project: Path, report: IsolationReport) -> None:
             continue
         entry = line[len("worktree ") :].strip()
         if not _inside(entry, project):
+            if _is_stagemesh_candidate_worktree(entry):
+                continue
             report.findings.append(
                 IsolationFinding("FOREIGN_WORKTREE", f"git worktree {entry} is registered in this checkout's git store but lives outside it", entry)
             )
