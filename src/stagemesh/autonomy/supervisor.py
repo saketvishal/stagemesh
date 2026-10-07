@@ -232,7 +232,9 @@ class Supervisor:
         if tracked_fingerprint(worktree) != ownership.tracked_fingerprint:
             return False
         facts.git.run("checkout", "-q", "--detach", sha)
-        if not record_supervised_move(self.project, task_id, ownership.expected_head, sha, sha):
+        if not record_supervised_move(self.project, task_id, ownership.expected_head, sha, sha) and not record_supervised_move(
+            self.project, task_id, sha, sha, sha
+        ):
             return False
         save_ownership(self.store, replace(ownership, expected_head=sha, tracked_fingerprint=tracked_fingerprint(worktree)))
         record_audit(
