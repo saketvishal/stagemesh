@@ -59,7 +59,7 @@ def test_explicit_historical_objective_root_is_refused_before_auto_plan(tmp_path
         assert summary.started is False
         assert summary.stop_reason == "REFUSED:objective_root_not_runnable"
         assert summary.auto_plan["occurred"] is False
-        assert summary.steps_run == 0
+        assert len(summary.steps) == 0
     finally:
         store.close()
 
