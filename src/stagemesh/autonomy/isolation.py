@@ -247,7 +247,6 @@ def _check_git_store(project: Path, report: IsolationReport) -> None:
     try:
         toplevel = git.run("rev-parse", "--show-toplevel").stdout.strip()
         common = git.run("rev-parse", "--path-format=absolute", "--git-common-dir").stdout.strip()
-        git.run("worktree", "prune", check=False)
         listing = git.run("worktree", "list", "--porcelain").stdout
     except (GitError, OSError) as exc:
         report.findings.append(IsolationFinding("NOT_A_GIT_CHECKOUT", f"cannot inspect git state of {project}: {exc}"))
