@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 import time
 import urllib.error
@@ -12,6 +13,7 @@ from .audit import record_audit
 from .config import StageMeshConfig
 from .domain import TaskStatus
 from .github import GitHubClient, parse_retry_after
+from .objective_roots import DIRECT_EXECUTION_LABELS, folded_labels, objective_payload, source_issue_is_objective
 from .persistence import Store
 from .retry import RetryRegistry
 
@@ -257,16 +259,29 @@ def _github_issue_to_task(issue: dict[str, object]) -> DiscoveredTask:
     state = issue.get("state", "OPEN")
     if not isinstance(state, str):
         raise TaskSourceValidationError(f"github issue {number} state must be a string")
+    body = issue.get("body") if isinstance(issue.get("body"), str) else ""
+    objective_root = source_issue_is_objective(tuple(label_names))
+    blocked = {"stagemesh:deferred", "stagemesh:blocked"}.intersection(label_names)
     return DiscoveredTask(
         source=GitHubIssueSource.name,
         source_id=str(number),
         title=title,
-        eligible=not {"stagemesh:deferred", "stagemesh:blocked"}.intersection(label_names) and state.lower() == "open",
+        eligible=not blocked and not objective_root and state.lower() == "open",
         state="OPEN" if state.lower() == "open" else state.upper(),
         labels=tuple(label_names),
-        body=issue.get("body") if isinstance(issue.get("body"), str) else "",
+        body=body,
+        dependencies=_github_dependencies(body),
         created_at=issue.get("created_at") if isinstance(issue.get("created_at"), str) else "",
-        )
+    )
+
+
+def _github_dependencies(body: str) -> tuple[str, ...]:
+    dependencies: list[str] = []
+    for line in body.splitlines():
+        if not re.match(r"^\s*(depends on|blocked by|requires)\s*:", line, re.IGNORECASE):
+            continue
+        dependencies.extend(match.group(1) for match in re.finditer(r"#(\d+)", line))
+    return tuple(dict.fromkeys(dependencies))
 
 
 def _validate_source_name(value: str) -> str:
@@ -297,34 +312,45 @@ def sync_source(store: Store, tasks: list[DiscoveredTask]) -> list[str]:
     ids: list[str] = []
     for task in tasks:
         state = _normalized_state(task.state)
+        is_github = task.source == GitHubIssueSource.name
+        direct_execution = bool(folded_labels(task.labels) & DIRECT_EXECUTION_LABELS)
+        source_objective = is_github and source_issue_is_objective(task.labels)
+        historical_objective = is_github and not direct_execution and _objective_exists(store, task.source_id)
         cached: dict[str, object] = {"eligible": task.eligible, "state": state}
-        previous_source_state = (
-            store.source_state(task.source, task.source_id)
-            if task.source == GitHubIssueSource.name
-            else {}
-        )
+        if source_objective or historical_objective:
+            cached["objective_root"] = True
+        previous_source_state = store.source_state(task.source, task.source_id) if is_github else {}
         retirement_reason = _retirement_reason(task, state)
-        if retirement_reason is not None and task.source == GitHubIssueSource.name:
+        if source_objective or historical_objective:
+            retirement_reason = "source objective root"
+            store.save_objective(
+                task.source_id,
+                task.title,
+                objective_payload(task.source_id, task.labels, task.body, task.dependencies),
+            )
+        if retirement_reason is not None and is_github:
             cached["retirement_reason"] = retirement_reason
-        if task.labels or task.source == GitHubIssueSource.name:
+        if task.labels or is_github:
             cached["labels"] = list(task.labels)
         if task.created_at:
             cached["created_at"] = task.created_at
         if task.body:
             # Lets auto-planning build a contract from the issue text.
             cached["objective"] = task.body[:6000]
+        if task.dependencies:
+            cached["dependencies"] = list(task.dependencies)
         store.cache_source(task.source, task.source_id, cached, state)
-        if retirement_reason is not None and task.source == GitHubIssueSource.name:
+        if retirement_reason is not None and is_github:
             store.retire_source_task(
                 task.source,
                 task.source_id,
                 retirement_reason,
-                {"source_state": state, "eligible": task.eligible},
+                {"source_state": state, "eligible": task.eligible, "objective_root": bool(source_objective or historical_objective)},
             )
         elif task.eligible and state == "OPEN":
             task_id = store.upsert_task(task.title, task.source, task.source_id)
             previous_retirement_reason = previous_source_state.get("retirement_reason")
-            if task.source == GitHubIssueSource.name and isinstance(previous_retirement_reason, str):
+            if is_github and isinstance(previous_retirement_reason, str):
                 store.restore_source_task(
                     task.source,
                     task.source_id,
@@ -333,8 +359,13 @@ def sync_source(store: Store, tasks: list[DiscoveredTask]) -> list[str]:
                 )
             ids.append(task_id)
             for dependency in task.dependencies:
-                store.add_dependency(task.source_id, dependency)
+                if store.get_task(dependency) is not None:
+                    store.add_dependency(task.source_id, dependency)
     return ids
+
+
+def _objective_exists(store: Store, source_id: str) -> bool:
+    return store.conn.execute("SELECT 1 FROM objectives WHERE id IN (?, ?) LIMIT 1", (source_id, f"github:{source_id}")).fetchone() is not None
 
 
 def _normalized_state(state: str) -> str:
@@ -382,8 +413,7 @@ class GitHubOutboundSync(OutboundSync):
                 {"candidate_sha": candidate_sha, "next_attempt_at": decision.next_attempt_at},
             )
         comment = self.client.comment_issue(
-            issue_number, f"StageMesh integrated candidate `{candidate_sha}`."
-        )
+            issue_number, f"StageMesh integrated candidate `{candidate_sha}`.")
         close = self.client.close_issue(issue_number) if comment.status == "OK" else comment
         status = "OK" if comment.status == "OK" and close.status == "OK" else close.status
         if status == "OK":
