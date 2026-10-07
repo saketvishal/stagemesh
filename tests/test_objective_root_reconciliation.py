@@ -5,6 +5,7 @@ from pathlib import Path
 from stagemesh.config import TaskSelectionConfig
 from stagemesh.domain import TaskStatus
 from stagemesh.persistence import Store
+from stagemesh.run_ready import run_ready
 from stagemesh.scheduling import Scheduler
 from stagemesh.task_selection import select_next_task
 from stagemesh.task_sources import DiscoveredTask, sync_source
@@ -36,6 +37,29 @@ def test_historical_github_objective_root_is_not_selected(tmp_path: Path) -> Non
 
         assert selection.task_id == "160"
         assert {"task_id": "71", "reason": "historical source objective root"} in selection.skipped
+    finally:
+        store.close()
+
+
+def test_explicit_historical_objective_root_is_refused_before_auto_plan(tmp_path: Path) -> None:
+    project = _project(tmp_path, ["160"], contracts=["160"])
+    store = _synced(project)
+    try:
+        store.upsert_task("historical broad objective", source="github", source_id="71")
+        store.cache_source(
+            "github",
+            "71",
+            {"eligible": True, "state": "OPEN", "labels": ["priority:p0"], "objective": "broad architecture objective"},
+            "OPEN",
+        )
+        store.save_objective("71", "historical broad objective", {"source": "github", "source_id": "71"})
+
+        summary = run_ready(store, project, lambda target: (_ for _ in ()).throw(AssertionError("should not start")), task_id="71")
+
+        assert summary.started is False
+        assert summary.stop_reason == "REFUSED:objective_root_not_runnable"
+        assert summary.auto_plan["occurred"] is False
+        assert summary.steps_run == 0
     finally:
         store.close()
 
