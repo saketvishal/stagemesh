@@ -20,7 +20,7 @@ from .ci_diagnosis import Conclusion, GateOutcome, HostedCIRun
 from .decisions import Escalation, EscalationReason
 from .dependencies import CIRollup, MergeOutcome, PRState, PullRequest
 
-_FAILED_TEST = re.compile(r"^FAILED\s+(\S+)", re.MULTILINE)
+_FAILED_TEST = re.compile(r"^[ \t]*FAILED\s+(\S+)", re.MULTILINE)
 _CONCLUSIONS = {
     "success": Conclusion.SUCCESS,
     "failure": Conclusion.FAILURE,
@@ -200,6 +200,7 @@ class GitHubHostedCI(GitHubClientBase):
 
     def run_for(self, sha: str) -> HostedCIRun | None:
         runs: list[dict] = []
+        truncated = False
         for page in range(1, 11):  # a gate beyond the first page must not silently disappear
             status, payload = self._request("GET", f"/commits/{quote(sha)}/check-runs?per_page=100&page={page}", missing_ok=True)
             if status == 404 and page == 1:
@@ -209,9 +210,15 @@ class GitHubHostedCI(GitHubClientBase):
             batch = payload.get("check_runs") or []
             runs.extend(batch)
             total = payload.get("total_count")
-            # A missing total_count must not end pagination: a full page can hide a later failure.
-            if len(batch) < 100 or (isinstance(total, int) and not isinstance(total, bool) and len(runs) >= total):
+            more = isinstance(total, int) and not isinstance(total, bool) and len(runs) < total
+            # A short page is not the end when the host still reports unseen checks. Stopping at the page cap
+            # must leave the run incomplete so an unseen failure cannot be classified as green.
+            if page == 10 and (more or len(batch) >= 100):
+                truncated = True
                 break
+            if more or len(batch) >= 100:
+                continue
+            break
         # Re-runs of a check are further check runs of the SAME check suite and name: within a suite the newest decides and earlier ones
         # are attempts. Same-named checks from DIFFERENT suites (other workflows or apps) are independent gates: the worst verdict wins,
         # so a later green can never hide an earlier red.
@@ -232,7 +239,7 @@ class GitHubHostedCI(GitHubClientBase):
             outcome = _worst_gate(outcomes, severity)
             complete = complete and not any(o.conclusion is Conclusion.PENDING for o in outcomes)
             gates[name] = outcome
-        return HostedCIRun(sha, gates, complete=complete and bool(runs), environment="github-actions")
+        return HostedCIRun(sha, gates, complete=complete and bool(runs) and not truncated, environment="github-actions")
 
     def rerun(self, sha: str, gates) -> bool:
         """Ask the host to rerun the failed jobs behind these gates (an Actions job id is its check run id). False if any request fails."""

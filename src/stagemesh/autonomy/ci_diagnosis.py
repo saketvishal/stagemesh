@@ -83,7 +83,7 @@ _UNSUPPORTED = re.compile(
 )
 _NO_DETAIL = "log:"  # the signature of a failure that exposes no log lines and no test names (hosted check runs carry no logs)
 _FAILED_LINE = re.compile(r"^\s*FAILED\s+\S+")
-_LINE_COL = re.compile(r"\b(\d+):(\d+)\b")
+_LINE_COL = re.compile(r"\b\d+:\d+\b|\(\d+\)")
 
 
 def _normalize_detail(line: str) -> str:
