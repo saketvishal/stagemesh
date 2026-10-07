@@ -593,7 +593,8 @@ def record_supervised_move(
     Returns whether that checkout is authorized. The ledger is updated only when it still names `previous_head` and the
     worktree is exactly `new_head`. A refresh keeps an already-sealed dirty tree only when its digest is unchanged.
     A reconstruct passes `require_same_dirty=False` after it has preserved and cleaned the worktree itself.
-    No ledger means there is nothing to contradict, so the caller may record the move in its own ownership row.
+    That path still refuses any leftover dirt (`git clean` does not remove an embedded repository). No ledger means
+    there is nothing to contradict, so the caller may record a clean move in its own ownership row.
     """
     root = Path(project).resolve()
     if not root.is_dir():
@@ -606,12 +607,14 @@ def record_supervised_move(
         ledger, _raw = _load_ledger(gitdir)
     except ValueError:
         return False
+    seen = observe(target)
+    if seen["head"] != new_head:
+        return False
+    if not require_same_dirty and seen["dirty_count"]:
+        return False
     if ledger is None:
         return True
     if ledger.get("head") != previous_head:
-        return False
-    seen = observe(target)
-    if seen["head"] != new_head:
         return False
     if require_same_dirty and seen["dirty_digest"] != ledger.get("dirty_digest"):
         return False
