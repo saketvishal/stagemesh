@@ -493,9 +493,11 @@ class Supervisor:
         work.git.run("clean", "-fdq", check=False)
         if work.resolve("HEAD") == target:
             previous = ownership.expected_head
-            save_ownership(self.store, replace(ownership, expected_head=target, tracked_fingerprint=tracked_fingerprint(worktree)))
             latest = self.store.latest_candidate(task_id)
-            record_supervised_move(self.project, task_id, previous, target, None if latest is None else str(latest["sha"]))
+            if record_supervised_move(
+                self.project, task_id, previous, target, None if latest is None else str(latest["sha"]), require_same_dirty=False
+            ):
+                save_ownership(self.store, replace(ownership, expected_head=target, tracked_fingerprint=tracked_fingerprint(worktree)))
 
     def _rebind_ownership(self, task_id: str, replacement: str) -> None:
         """After a refresh, move the task's idle worktree onto the replacement so the guard sees StageMesh's own change, not a mutation.
@@ -515,8 +517,10 @@ class Supervisor:
         if work.git.run("checkout", "--detach", "--quiet", replacement, check=False).returncode != 0:
             return
         previous = ownership.expected_head
+        if not record_supervised_move(self.project, task_id, previous, replacement, replacement):
+            work.git.run("checkout", "--detach", "--quiet", previous, check=False)
+            return
         save_ownership(self.store, replace(ownership, expected_head=replacement, tracked_fingerprint=tracked_fingerprint(worktree)))
-        record_supervised_move(self.project, task_id, previous, replacement, replacement)
 
     # --- capability 5: PR dependencies ---------------------------------------------------------------------------------------------
 

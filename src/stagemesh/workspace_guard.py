@@ -482,6 +482,11 @@ def acquire_workspace(store: Store, project: Path, task_id: str, kind: str, *, c
     GitWorkspace(root).init_if_needed()  # as prepare_task_workspace does first: the project may not exist yet, and the config read below needs it
     existed = (task_workspace(root, task_id) / ".git").exists()
     path = prepare_task_workspace(root, task_id)
+    # The supervisor quarantines and restores an idle mutation before this lease compares the ledger. Doing it afterwards
+    # turns a restorable stray file into a blocked task, because the difference check below runs first.
+    from .autonomy.hooks import workspace_handed_to_execution
+
+    workspace_handed_to_execution(store, task_id, path)
     gitdir = _gitdir(path)
     token = uuid.uuid4().hex
     recovered = _claim(store, task_id, kind, path, gitdir, token, claim_id)
@@ -580,29 +585,36 @@ def _fail_execution(lease: WorkspaceLease) -> None:
 # --- stage boundaries (no lease: validation, review and integration never write the implementation worktree) ----------------
 
 
-def record_supervised_move(project: Path, task_id: str, previous_head: str, new_head: str, candidate_sha: str | None) -> None:
+def record_supervised_move(
+    project: Path, task_id: str, previous_head: str, new_head: str, candidate_sha: str | None, *, require_same_dirty: bool = True
+) -> bool:
     """Record a checkout StageMesh itself just made on an idle task worktree.
 
-    The workspace ledger otherwise still names the pre-move HEAD, and the next lifecycle check treats StageMesh's own
-    refresh or reconstruct as an external mutation. The write happens only when the ledger still names `previous_head`
-    and the worktree is now exactly `new_head` with nothing uncommitted.
+    Returns whether that checkout is authorized. The ledger is updated only when it still names `previous_head` and the
+    worktree is exactly `new_head`. A refresh keeps an already-sealed dirty tree only when its digest is unchanged.
+    A reconstruct passes `require_same_dirty=False` after it has preserved and cleaned the worktree itself.
+    No ledger means there is nothing to contradict, so the caller may record the move in its own ownership row.
     """
     root = Path(project).resolve()
     if not root.is_dir():
-        return
+        return False
     target = task_workspace(root, task_id)
     if not (target / ".git").exists():
-        return
+        return False
     gitdir = _gitdir(target)
     try:
         ledger, _raw = _load_ledger(gitdir)
     except ValueError:
-        return
-    if ledger is None or ledger.get("head") != previous_head:
-        return
+        return False
+    if ledger is None:
+        return True
+    if ledger.get("head") != previous_head:
+        return False
     seen = observe(target)
-    if seen["head"] != new_head or seen["dirty_count"]:
-        return
+    if seen["head"] != new_head:
+        return False
+    if require_same_dirty and seen["dirty_digest"] != ledger.get("dirty_digest"):
+        return False
     _atomic_write(
         gitdir / LEDGER_FILE,
         {
@@ -614,6 +626,7 @@ def record_supervised_move(project: Path, task_id: str, previous_head: str, new_
             "candidate": candidate_sha if candidate_sha is not None else ledger.get("candidate"),
         },
     )
+    return True
 
 
 def pin_candidate(project: Path, task_id: str, candidate_sha: str) -> None:
