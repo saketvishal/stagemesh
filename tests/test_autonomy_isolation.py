@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -134,6 +135,30 @@ def test_git_worktrees_registered_outside_the_checkout_are_foreign(tmp_path: Pat
     mine = _checkout(tmp_path / "mine")
     git(mine, "worktree", "add", "--detach", str(tmp_path / "stray"))
     assert "FOREIGN_WORKTREE" in _codes(check_isolation(mine))
+
+
+def test_stagemesh_temp_candidate_worktrees_are_allowed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    mine = _checkout(tmp_path / "mine")
+    candidate = tmp_path / "stagemesh-candidate-owned" / "checkout"
+
+    class FakeGitWorkspace:
+        def __init__(self, project: Path) -> None:
+            self.project = project
+
+        def run(self, *args: str, **_: object):
+            stdout_by_command = {
+                ("rev-parse", "--show-toplevel"): f"{mine}\n",
+                ("rev-parse", "--path-format=absolute", "--git-common-dir"): f"{mine / '.git'}\n",
+                ("worktree", "prune"): "",
+                ("worktree", "list", "--porcelain"): f"worktree {mine}\n\nworktree {candidate}\n",
+            }
+            return type("GitResult", (), {"stdout": stdout_by_command[args]})()
+
+    monkeypatch.setattr("stagemesh.autonomy.isolation.GitWorkspace", FakeGitWorkspace)
+
+    report = check_isolation(mine)
+    assert "FOREIGN_WORKTREE" not in _codes(report)
 
 
 def test_project_must_be_its_own_repository_root(tmp_path: Path) -> None:
