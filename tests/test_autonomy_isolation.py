@@ -141,12 +141,24 @@ def test_stagemesh_temp_candidate_worktrees_are_allowed(tmp_path: Path, monkeypa
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
     mine = _checkout(tmp_path / "mine")
     candidate = tmp_path / "stagemesh-candidate-owned" / "checkout"
-    git(mine, "worktree", "add", "--detach", str(candidate))
-    try:
-        report = check_isolation(mine)
-        assert "FOREIGN_WORKTREE" not in _codes(report)
-    finally:
-        git(mine, "worktree", "remove", "--force", str(candidate), check=False)
+
+    class FakeGitWorkspace:
+        def __init__(self, project: Path) -> None:
+            self.project = project
+
+        def run(self, *args: str, **_: object):
+            stdout_by_command = {
+                ("rev-parse", "--show-toplevel"): f"{mine}\n",
+                ("rev-parse", "--path-format=absolute", "--git-common-dir"): f"{mine / '.git'}\n",
+                ("worktree", "prune"): "",
+                ("worktree", "list", "--porcelain"): f"worktree {mine}\n\nworktree {candidate}\n",
+            }
+            return type("GitResult", (), {"stdout": stdout_by_command[args]})()
+
+    monkeypatch.setattr("stagemesh.autonomy.isolation.GitWorkspace", FakeGitWorkspace)
+
+    report = check_isolation(mine)
+    assert "FOREIGN_WORKTREE" not in _codes(report)
 
 
 def test_project_must_be_its_own_repository_root(tmp_path: Path) -> None:
