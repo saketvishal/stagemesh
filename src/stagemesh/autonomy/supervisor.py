@@ -28,11 +28,13 @@ from . import base_state as base
 from .ci_diagnosis import (
     CIClass,
     CIDiagnosis,
+    Conclusion,
     HostedCI,
     TestObservation,
     diagnose_ci,
     observations_from_log,
     plan_ci_response,
+    unresolved_ci_escalation,
 )
 from .decisions import (
     DECISION_EVENT,
@@ -510,13 +512,20 @@ class Supervisor:
             for gate in candidate_run.gates.values():
                 found.extend(observations_from_log(gate.log))
         diagnosis = diagnose_ci(candidate_run, base_run, dependency=dependency_run, candidate_sha=candidate_sha, observations=found)
-        decision = plan_ci_response(diagnosis, task_id=task_id, scope=scope, reruns_left=reruns_left)
+        requester = getattr(self.hosted_ci, "rerun", None)
+        decision = plan_ci_response(diagnosis, task_id=task_id, scope=scope, reruns_left=reruns_left, rerun_supported=callable(requester))
         for gate in diagnosis.gates:
             if gate.klass is CIClass.BASELINE_FAILURE:  # recorded as deferred work; never "fixed" as part of this task
                 record_deferred(self.store, task_id, DeferredItem(f"gate {gate.gate} already fails on base {base_sha[:7]}", "ci", None, candidate_sha))
         self.last_ci_diagnosis = diagnosis
         if decision.action is Action.RERUN_CI:
-            record_audit(self.store, CI_RERUN_EVENT, {"task_id": task_id, "candidate_sha": candidate_sha})
+            retry = [g for g in (candidate_run.gates.values() if candidate_run else ()) if g.conclusion.failed or g.conclusion is Conclusion.TIMED_OUT]
+            if callable(requester) and requester(candidate_sha, retry):
+                record_audit(self.store, CI_RERUN_EVENT, {"task_id": task_id, "candidate_sha": candidate_sha})  # only real requests spend the budget
+            else:  # the host refused or cannot rerun: say so, do not pretend a retry happened
+                decision = unresolved_ci_escalation(
+                    diagnosis, diagnosis.overall, decision.condition, task_id, decision.shas, decision.observed, decision.detail, retried=False
+                )
         return self.record(decision)
 
     # --- capability 8: review -------------------------------------------------------------------------------------------------------

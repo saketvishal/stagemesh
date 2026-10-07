@@ -113,6 +113,7 @@ class EscalationReason(StrEnum):
     SCOPE_EXTENSION_REQUIRED_BY_ACCEPTANCE_CRITERION = "SCOPE_EXTENSION_REQUIRED_BY_ACCEPTANCE_CRITERION"
     REMEDIATION_BUDGET_EXHAUSTED = "REMEDIATION_BUDGET_EXHAUSTED"
     CI_FAILURE_UNRESOLVED = "CI_FAILURE_UNRESOLVED"
+    MERGED_CONTENT_NOT_VERIFIED = "MERGED_CONTENT_NOT_VERIFIED"
 
 
 # Questions StageMesh must never put to the founder; a smallest-decision that reduces to one of these is rejected at construction.

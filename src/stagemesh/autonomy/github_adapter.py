@@ -195,10 +195,22 @@ class GitHubHostedCI(GitHubClientBase):
             attempts.sort(key=lambda r: (str(r.get("started_at") or ""), int(r.get("id") or 0)), reverse=True)
             latest = self._gate(attempts[0])
             earlier = tuple(self._gate(r).conclusion for r in attempts[1:] if r.get("status") == "completed")
-            outcome = GateOutcome(latest.name, latest.conclusion, latest.log, latest.failing_tests, earlier)
+            outcome = GateOutcome(latest.name, latest.conclusion, latest.log, latest.failing_tests, earlier, latest.ref)
             complete = complete and outcome.conclusion is not Conclusion.PENDING
             gates[outcome.name] = outcome
         return HostedCIRun(sha, gates, complete=complete and bool(runs), environment="github-actions")
+
+    def rerun(self, sha: str, gates) -> bool:
+        """Ask the host to rerun the failed jobs behind these gates (an Actions job id is its check run id). False if any request fails."""
+        requested = False
+        for gate in gates:
+            if gate.ref is None:
+                return False
+            status, _ = self._request("POST", f"/actions/jobs/{quote(gate.ref)}/rerun")
+            if status not in {201, 200}:
+                return False
+            requested = True
+        return requested
 
     def rollup(self, sha: str) -> CIRollup:
         run = self.run_for(sha)
@@ -216,4 +228,5 @@ class GitHubHostedCI(GitHubClientBase):
         output = run.get("output") or {}
         text = "\n".join(str(output.get(key) or "") for key in ("title", "summary", "text") if output.get(key))
         conclusion = _CONCLUSIONS.get(str(run.get("conclusion")), Conclusion.FAILURE)
-        return GateOutcome(name, conclusion, text, tuple(dict.fromkeys(_FAILED_TEST.findall(text))))
+        ref = str(run["id"]) if run.get("id") is not None else None
+        return GateOutcome(name, conclusion, text, tuple(dict.fromkeys(_FAILED_TEST.findall(text))), ref=ref)

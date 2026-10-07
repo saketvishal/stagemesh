@@ -207,7 +207,7 @@ def test_content_that_did_not_land_is_not_done(tmp_path: Path) -> None:
     )
     assert not verdict.verified and "src/widget.py" in verdict.missing_content and "README.md" in verdict.missing_content
     assert ran == []  # no point running post-merge checks on content that is not there
-    assert verdict.decision.action is Action.REFRESH_CANDIDATE and verdict.decision.detail["task_not_done"] is True
+    assert verdict.decision.action is Action.ESCALATE_TO_FOUNDER and verdict.decision.detail["task_not_done"] is True
 
 
 def test_failing_post_merge_check_keeps_the_task_open(tmp_path: Path) -> None:

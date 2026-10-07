@@ -121,6 +121,12 @@ class GitFacts:
         """
         return self.git.run("fetch", "--quiet", remote, f"+refs/heads/{branch}:refs/remotes/{remote}/{branch}", check=False)
 
+    def merge_trees(self, base: str, ours: str, theirs: str) -> str | None:
+        """Tree of a clean three-way merge of `theirs` into `ours` with `base` as merge base, or None on conflict."""
+        result = self.git.run("merge-tree", "--write-tree", "--no-messages", f"--merge-base={base}", ours, theirs, check=False)
+        lines = [line for line in result.stdout.splitlines() if line.strip()]
+        return lines[0] if result.returncode == 0 and lines and _SHA.match(lines[0]) else None
+
     def ref_exists(self, ref: str) -> bool:
         return self.git.run("show-ref", "--verify", "--quiet", ref, check=False).returncode == 0
 

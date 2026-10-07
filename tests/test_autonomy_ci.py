@@ -133,7 +133,7 @@ def test_candidate_is_never_called_broken_without_base_evidence(tmp_path: Path) 
 
 
 def test_infrastructure_failure_is_rerun_not_remediated() -> None:
-    candidate = _run(CAND, unit=GateOutcome("unit", Conclusion.CANCELLED, "The operation was canceled."))
+    candidate = _run(CAND, unit=GateOutcome("unit", Conclusion.CANCELLED, "The runner has received a shutdown signal."))
     base = _run(BASE, unit=Conclusion.SUCCESS)
     diagnosis = diagnose_ci(candidate, base)
     assert diagnosis.overall is CIClass.INFRASTRUCTURE_FAILURE
@@ -159,17 +159,13 @@ def test_unsupported_environment_without_base_evidence_is_classified_but_never_t
     assert diagnosis.merge_blockers()  # the candidate may have caused it (e.g. by raising requires-python): not tolerable without base proof
 
 
-def test_unsupported_environment_is_tolerated_only_when_base_fails_the_same_environmental_way() -> None:
+def test_an_environment_error_never_makes_a_changed_failure_tolerable() -> None:
     env_error = "ERROR: Unsupported Python 3.8; requires python >=3.11"
     base = _run(BASE, macos=_failed("macos", env_error + " (runner image 20240101)"))
-    diagnosis = diagnose_ci(_run(CAND, macos=_failed("macos", "ERROR: Unsupported Python 3.8; requires python >=3.11 (runner image 20240202)")), base)
-    # identical failure on both sides is a baseline failure; an environment error on both sides with differing text is confirmed-by-base
-    assert diagnosis.gates[0].klass in {CIClass.BASELINE_FAILURE, CIClass.UNSUPPORTED_ENVIRONMENT}
-    assert diagnosis.merge_blockers() == []
-    different_text = diagnose_ci(_run(CAND, macos=_failed("macos", "requires python >=3.12 not satisfied")), base)
-    (gate,) = different_text.gates
-    assert gate.klass is CIClass.UNSUPPORTED_ENVIRONMENT and gate.evidence == "BASE_CONFIRMED"
-    assert different_text.merge_blockers() == []
+    same = diagnose_ci(_run(CAND, macos=_failed("macos", env_error + " (runner image 20240202)")), base)
+    assert same.gates[0].klass is CIClass.BASELINE_FAILURE and same.merge_blockers() == []  # identical once timings and ids are normalized
+    changed = diagnose_ci(_run(CAND, macos=_failed("macos", "requires python >=3.12 not satisfied")), base)
+    assert changed.gates[0].klass is CIClass.CANDIDATE_REGRESSION and changed.merge_blockers()
 
 
 def test_candidate_that_turns_an_already_red_gate_into_an_environment_error_is_a_regression() -> None:

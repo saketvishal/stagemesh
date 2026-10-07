@@ -41,6 +41,19 @@ from stagemesh.execution import SubprocessExecutor
 CAND, BASE = "c" * 40, "b" * 40
 
 
+class _RerunnableCI:
+    """A host that can rerun failed jobs; each request is recorded."""
+
+    def __new__(cls, runs):
+        from stagemesh.autonomy.ci_diagnosis import FakeHostedCI
+
+        class _Fake(FakeHostedCI):
+            def rerun(self, sha, gates) -> bool:
+                return True
+
+        return _Fake(runs)
+
+
 def _repo_with_worktree(tmp_path: Path):
     repo = init_repo(tmp_path / "repo")
     base = commit(repo, {"src/app.py": "VALUE = 1\n"}, "base")
@@ -251,7 +264,7 @@ def test_the_rerun_budget_is_durable_across_observations(tmp_path: Path) -> None
 
     store = new_store(tmp_path)
     store.upsert_task("t", source_id=TASK)
-    ci = FakeHostedCI([_run(CAND, unit=GateOutcome("unit", Conclusion.FAILURE, "502 Bad Gateway")), _run(BASE, unit=GateOutcome("unit", Conclusion.SUCCESS))])
+    ci = _RerunnableCI([_run(CAND, unit=GateOutcome("unit", Conclusion.FAILURE, "502 Bad Gateway")), _run(BASE, unit=GateOutcome("unit", Conclusion.SUCCESS))])
     supervisor = Supervisor(store, tmp_path, integration_ref="main", hosted_ci=ci)
     assert supervisor.assess_ci(TASK, CAND, BASE).action is Action.RERUN_CI
     second = supervisor.assess_ci(TASK, CAND, BASE)
@@ -472,7 +485,7 @@ def test_the_rerun_budget_counts_requests_not_distinct_decisions(tmp_path: Path)
 
     store = new_store(tmp_path)
     store.upsert_task("t", source_id=TASK)
-    ci = FakeHostedCI([_run(CAND, unit=GateOutcome("unit", Conclusion.FAILURE, "502 Bad Gateway")), _run(BASE, unit=GateOutcome("unit", Conclusion.SUCCESS))])
+    ci = _RerunnableCI([_run(CAND, unit=GateOutcome("unit", Conclusion.FAILURE, "502 Bad Gateway")), _run(BASE, unit=GateOutcome("unit", Conclusion.SUCCESS))])
     supervisor = Supervisor(store, tmp_path, integration_ref="main", hosted_ci=ci)
     actions = [supervisor.assess_ci(TASK, CAND, BASE, reruns_left=3).action for _ in range(5)]
     assert actions == [Action.RERUN_CI] * 3 + [Action.ESCALATE_TO_FOUNDER] * 2  # identical consecutive decisions no longer hide the spend

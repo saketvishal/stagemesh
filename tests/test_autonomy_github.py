@@ -72,7 +72,7 @@ class RecordedTransport:
 
 
 def _checks(sha: str) -> str:
-    return f"{ROOT}/commits/{sha}/check-runs?per_page=100"
+    return f"{ROOT}/commits/{sha}/check-runs?per_page=100&page=1"
 
 
 def _client(routes) -> tuple[GitHubPullRequests, RecordedTransport]:
@@ -312,7 +312,7 @@ def test_head_that_moves_between_the_check_and_the_merge_is_refused_by_the_host(
 def test_landing_that_dropped_content_is_not_done(tmp_path: Path) -> None:
     _repo, store, _prs, supervisor, _base, _candidate, ci = _merge_rig(tmp_path, lossy=True)
     decision = supervisor.merge_when_ready(TASK, 5, ci=ci)
-    assert decision.condition is Condition.POST_MERGE_VERIFICATION_FAILED and decision.action is Action.REFRESH_CANDIDATE
+    assert decision.condition is Condition.POST_MERGE_VERIFICATION_FAILED and decision.action is Action.ESCALATE_TO_FOUNDER
     assert store.get_task(TASK)["stage"] == Stage.INTEGRATE and load_provenance(store, TASK).integration_sha is None
 
 

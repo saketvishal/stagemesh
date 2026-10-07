@@ -90,7 +90,10 @@ def _github_token() -> str | None:
     token = os.environ.get("STAGEMESH_GITHUB_TOKEN") or os.environ.get("GITHUB_TOKEN")
     if token:
         return token
-    result = subprocess.run(["gh", "auth", "token"], capture_output=True, text=True, check=False)
+    try:
+        result = subprocess.run(["gh", "auth", "token"], capture_output=True, text=True, check=False)
+    except OSError:  # gh is not installed: no token is a typed authorization problem later, not a crash here
+        return None
     return (result.stdout.strip() or None) if result.returncode == 0 else None
 
 

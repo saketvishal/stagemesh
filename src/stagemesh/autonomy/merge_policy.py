@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 
 from .base_state import BaseState
 from .ci_diagnosis import CIDiagnosis, condition_for, plan_ci_response
-from .decisions import Action, AutonomyDecision, Condition
+from .decisions import Action, AutonomyDecision, Condition, Escalation, EscalationReason
 from .dependencies import DependencyAssessment
 from .gitfacts import GitFacts
 from .provenance import CandidateProvenance, Mutation
@@ -251,8 +251,16 @@ def verify_integration(
     reachable = landed_at == main_sha or facts.is_ancestor(landed_at, main_sha)
     missing: list[str] = []
     if baseline_sha and facts.exists(baseline_sha):
+        expected_tree: str | None = None
         for path in facts.changed_paths(baseline_sha, candidate_sha):
-            if facts.blob_at(candidate_sha, path) != facts.blob_at(landed_at, path):
+            if facts.blob_at(candidate_sha, path) == facts.blob_at(landed_at, path):
+                continue
+            # The blob may differ legitimately: other work touched the same file and merged cleanly. Recompute what a clean landing of the
+            # candidate on the commit's first parent must contain and compare against that.
+            if expected_tree is None:
+                parent = facts.resolve(f"{landed_at}^")
+                expected_tree = (facts.merge_trees(baseline_sha, parent, candidate_sha) or "") if parent else ""
+            if not expected_tree or facts.blob_at(expected_tree, path) != facts.blob_at(landed_at, path):
                 missing.append(path)
     elif not facts.is_ancestor(candidate_sha, landed_at):
         missing.append("<candidate not contained and no baseline to compare content>")
@@ -269,13 +277,29 @@ def verify_integration(
         )
     else:
         failed_content = bool(missing) or not reachable
+        observed = {"integration_ref": integration_ref, "failed": ",".join(c.name for c in checks if not c.passed)}
+        escalation = None
+        if failed_content:
+            # The work already landed (or the host says it did): building a replacement would duplicate it, and the evidence that the
+            # landing differs from the validated candidate needs a human, so the question is specific.
+            where = ", ".join(missing[:5]) or f"{landed_at[:7]} is not reachable from {integration_ref}"
+            escalation = Escalation(
+                EscalationReason.MERGED_CONTENT_NOT_VERIFIED,
+                attempted=(
+                    "compared the validated candidate's content with the commit that landed it",
+                    "recomputed a clean landing of the candidate on that commit's parent to allow for concurrent changes",
+                ),
+                why_undeterminable=f"the landed commit {landed_at[:7]} differs from the validated candidate {candidate_sha[:7]} in: {where}",
+                smallest_decision=f"Is the landed content of {where} the intended result, or should it be reverted and the work redone?",
+            )
         verdict.decision = AutonomyDecision(
             Condition.POST_MERGE_VERIFICATION_FAILED,
             POLICY,
-            Action.REFRESH_CANDIDATE if failed_content else Action.REMEDIATE_CANDIDATE,
+            Action.ESCALATE_TO_FOUNDER if failed_content else Action.REMEDIATE_CANDIDATE,
             task_id,
-            {"integration_ref": integration_ref, "failed": ",".join(c.name for c in checks if not c.passed)},
+            observed,
             shas,
             {**detail, "task_not_done": True},
+            escalation,
         )
     return verdict

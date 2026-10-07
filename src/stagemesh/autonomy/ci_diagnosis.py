@@ -92,6 +92,7 @@ class GateOutcome:
     log: str = ""
     failing_tests: tuple[str, ...] = ()
     rerun_conclusions: tuple[Conclusion, ...] = ()  # reruns of the very same SHA
+    ref: str | None = None  # the host's identifier of this check run (what a rerun request needs)
 
     @property
     def signature(self) -> str:
@@ -325,17 +326,8 @@ def diagnose_gate(
             )
         if candidate.infrastructure:
             return GateDiagnosis(name, CIClass.INFRASTRUCTURE_FAILURE, "failure differs from base and matches an infrastructure signature", signature, base_signature)
-        if candidate.unsupported_environment and base.unsupported_environment:
-            return GateDiagnosis(
-                name,
-                CIClass.UNSUPPORTED_ENVIRONMENT,
-                "base fails this gate with the same kind of unsupported-environment error",
-                signature,
-                base_signature,
-                evidence="BASE_CONFIRMED",
-            )
-        # An environment-looking error on a gate that was red for another reason is a change in how the candidate fails, not proof the
-        # environment is at fault (a candidate can raise requires-python): it falls through to a regression.
+        # A failure that differs from base's is a change in how the gate fails. Even if both sides mention an environment error, the
+        # difference may be the candidate's (a new failure line, a raised requires-python): it is a regression, never tolerated.
         new_tests = tuple(sorted(set(candidate.failing_tests) - set(base.failing_tests)))
         return GateDiagnosis(
             name, CIClass.CANDIDATE_REGRESSION, "the gate fails on base and the candidate fails it differently (new failures)", signature, base_signature, new_tests
@@ -459,8 +451,16 @@ def diagnose_ci(
     return CIDiagnosis(sha, base.sha if base is not None else None, tuple(diagnoses), tuple(notes))
 
 
-def _unresolved_ci_escalation(
-    diagnosis: CIDiagnosis, klass: CIClass, condition: Condition, task_id: str | None, shas: dict[str, str], observed: dict[str, str], detail: dict[str, object]
+def unresolved_ci_escalation(
+    diagnosis: CIDiagnosis,
+    klass: CIClass,
+    condition: Condition,
+    task_id: str | None,
+    shas: dict[str, str],
+    observed: dict[str, str],
+    detail: dict[str, object],
+    *,
+    retried: bool,
 ) -> AutonomyDecision:
     """Bounded retries are spent and CI still cannot be attributed: that is a real policy question, so it is asked specifically."""
     gates = ", ".join(g.gate for g in diagnosis.by_class(klass))
@@ -474,7 +474,11 @@ def _unresolved_ci_escalation(
         detail,
         Escalation(
             EscalationReason.CI_FAILURE_UNRESOLVED,
-            attempted=("compared the candidate's CI with base CI", "re-observed the gate after a bounded retry", "ruled out a failure introduced by the candidate's own changes"),
+            attempted=(
+                "compared the candidate's CI with base CI",
+                *(("requested a rerun of the failed job on the same SHA and observed it fail again",) if retried else ()),
+                "checked that the failure carries no sign of being caused by the candidate's own changes",
+            ),
             why_undeterminable=f"gate(s) {gates} keep failing as {klass.value.lower().replace('_', ' ')} and cannot be attributed to the candidate or cleared by retrying",
             smallest_decision=f"May this candidate merge on its local validation and review evidence while hosted gate(s) {gates} stay unresolved?",
         ),
@@ -487,6 +491,7 @@ def plan_ci_response(
     task_id: str | None,
     scope: TaskScope | None = None,
     reruns_left: int = 1,
+    rerun_supported: bool = True,
 ) -> AutonomyDecision:
     """Pure policy mapping a CI diagnosis to the single next action. Never an action that edits unrelated code."""
     overall = diagnosis.overall
@@ -517,20 +522,20 @@ def plan_ci_response(
             action = Action.RERUN_CI if reruns_left > 0 else Action.RECORD_AND_DEFER
     elif overall is CIClass.INFRASTRUCTURE_FAILURE:
         detail["reruns_left"] = reruns_left
-        if reruns_left > 0:
+        if reruns_left > 0 and rerun_supported:
             action = Action.RERUN_CI
         else:
-            return _unresolved_ci_escalation(diagnosis, CIClass.INFRASTRUCTURE_FAILURE, condition, task_id, shas, observed, detail)
+            return unresolved_ci_escalation(diagnosis, CIClass.INFRASTRUCTURE_FAILURE, condition, task_id, shas, observed, detail, retried=rerun_supported)
     elif overall is CIClass.DEPENDENCY_BASE_PR_FAILURE:
         action = Action.BLOCK_ON_DEPENDENCY
     elif overall is CIClass.GENUINE_UNKNOWN:
         mismatch = any(g.evidence == "ENVIRONMENT_MISMATCH" for g in diagnosis.gates)
         if diagnosis.base_sha is None or mismatch:
             action = Action.REQUEST_BASE_CI
-        elif reruns_left > 0:
+        elif reruns_left > 0 and rerun_supported:
             action = Action.RERUN_CI
         else:
-            return _unresolved_ci_escalation(diagnosis, CIClass.GENUINE_UNKNOWN, condition, task_id, shas, observed, detail)
+            return unresolved_ci_escalation(diagnosis, CIClass.GENUINE_UNKNOWN, condition, task_id, shas, observed, detail, retried=rerun_supported)
     elif overall is CIClass.UNSUPPORTED_ENVIRONMENT:
         unconfirmed = [g.gate for g in diagnosis.by_class(CIClass.UNSUPPORTED_ENVIRONMENT) if g.evidence != "BASE_CONFIRMED"]
         action = Action.REQUEST_BASE_CI if unconfirmed else Action.RECORD_AND_DEFER
