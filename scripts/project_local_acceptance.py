@@ -83,7 +83,9 @@ def assert_objective_root_refusal(project: Path) -> None:
     setup = (
         "from stagemesh.persistence import Store; "
         f"s=Store(r'{store_db}'); s.migrate(); "
-        "task=s.upsert_task('objective root', source='github', source_id='71', metadata={'labels':['stagemesh:objective']}); "
+        "task=s.upsert_task('objective root', source='github', source_id='71'); "
+        "s.cache_source('github','71',{'eligible':True,'state':'OPEN','labels':['stagemesh:objective'],'objective_root':True},'OPEN'); "
+        "s.save_objective('71','objective root',{'source':'github','source_id':'71'}); "
         "s.close(); print(task)"
     )
     task_id = run([sys.executable, "-c", setup], ROOT).strip()
