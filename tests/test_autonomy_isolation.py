@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -134,6 +135,18 @@ def test_git_worktrees_registered_outside_the_checkout_are_foreign(tmp_path: Pat
     mine = _checkout(tmp_path / "mine")
     git(mine, "worktree", "add", "--detach", str(tmp_path / "stray"))
     assert "FOREIGN_WORKTREE" in _codes(check_isolation(mine))
+
+
+def test_stagemesh_temp_candidate_worktrees_are_allowed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    mine = _checkout(tmp_path / "mine")
+    candidate = tmp_path / "stagemesh-candidate-owned" / "checkout"
+    git(mine, "worktree", "add", "--detach", str(candidate))
+    try:
+        report = check_isolation(mine)
+        assert "FOREIGN_WORKTREE" not in _codes(report)
+    finally:
+        git(mine, "worktree", "remove", "--force", str(candidate), check=False)
 
 
 def test_project_must_be_its_own_repository_root(tmp_path: Path) -> None:
