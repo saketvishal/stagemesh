@@ -214,8 +214,8 @@ def _check_running_code(project: Path, report: IsolationReport, expected_checkou
     """The StageMesh code executing must come from the expected checkout or this project's owned tool runtime.
 
     By default, a StageMesh-shaped project may run either from its source tree or from its project-local bootstrap install under
-    `.stagemesh/tooling/venv`. Ordinary projects may use any installed StageMesh. When `expected_checkout` is supplied, only that
-    checkout is accepted as the tool source.
+    `.stagemesh/tooling/venv`. Ordinary projects may use any installed StageMesh. When `expected_checkout` is a different checkout,
+    only that checkout is accepted as the tool source.
     """
     own_package = (expected_checkout or project) / "src" / "stagemesh"
     if expected_checkout is None and not own_package.is_dir():
@@ -225,10 +225,11 @@ def _check_running_code(project: Path, report: IsolationReport, expected_checkou
     running = Path(os.path.realpath(stagemesh.__file__)).parent
     if _inside(running, own_package):
         return
-    if expected_checkout is None and _inside(running, _project_local_install_root(project)):
+    allow_project_local = expected_checkout is None or _norm(expected_checkout) == _norm(project)
+    if allow_project_local and _inside(running, _project_local_install_root(project)):
         return
     expected = f"{own_package}"
-    if expected_checkout is None:
+    if allow_project_local:
         expected += f" or {_project_local_install_root(project)}"
     report.findings.append(
         IsolationFinding(
