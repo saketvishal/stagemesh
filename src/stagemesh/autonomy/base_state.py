@@ -53,6 +53,10 @@ def classify_base(
         return _unrecoverable(old_base, new_base, candidate)
     stale = not facts.is_ancestor(new_base, candidate)
     if old_base == new_base:
+        if stale:  # the base did not move, but the candidate was not built on it (e.g. after a reconstruct): it still needs rebuilding onto it
+            return BaseState(
+                Condition.BASE_ADVANCED, old_base, new_base, candidate, candidate_stale=True, detail="the candidate does not descend from the base it is recorded against"
+            )
         return BaseState(Condition.BASE_UNCHANGED, old_base, new_base, candidate, candidate_stale=False)
     if facts.is_ancestor(old_base, new_base):
         return BaseState(Condition.BASE_ADVANCED, old_base, new_base, candidate, candidate_stale=stale)

@@ -324,7 +324,8 @@ def _deliver_pass(
     while current.mergeable is None and clock() < mergeable_deadline:  # hosts compute mergeability lazily
         sleep(poll_seconds)
         current = pulls.get(pr.number) or current
-    verdict = supervisor.evaluate_merge(task_id, ci=diagnosis, mergeable=current.mergeable)
+    dependencies = supervisor.assess_dependencies(task_id, pr.number, apply=False)  # a PR whose dependency has not landed is never recommended
+    verdict = supervisor.evaluate_merge(task_id, ci=diagnosis, dependencies=dependencies, mergeable=current.mergeable)
     report.unsatisfied = [f"{c.name}: {c.reason}" for c in verdict.unsatisfied]
     if not verdict.may_merge:
         return finish("PUBLISHED_NOT_READY", "merge policy not satisfied: " + "; ".join(report.unsatisfied))

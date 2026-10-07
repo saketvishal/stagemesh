@@ -187,7 +187,9 @@ class Supervisor:
         check = check_ownership(
             ownership,
             fetch=fetch,
-            recorded_candidate=str(candidate["sha"]) if candidate is not None else None,
+            # The worktree must match the latest candidate only while that candidate is pending (validate/review/integrate); at IMPLEMENT
+            # (a remediation or reconstruct under way) a new attempt legitimately starts from somewhere else.
+            recorded_candidate=str(candidate["sha"]) if candidate is not None and self._candidate_pending(task_id) else None,
             execution_running=running,
         )
         if check.clean:
@@ -228,6 +230,10 @@ class Supervisor:
         if not (worktree / ".git").exists() or GitFacts(worktree).resolve("HEAD") != sha:
             return
         save_ownership(self.store, replace(ownership, expected_head=sha, tracked_fingerprint=tracked_fingerprint(worktree)))
+
+    def _candidate_pending(self, task_id: str) -> bool:
+        task = self.store.get_task(task_id)
+        return task is not None and str(task["stage"]) in {"VALIDATE", "REVIEW", "INTEGRATE"}
 
     def require_clean_workspace(self, task_id: str, *, fetch: bool = False) -> None:
         decision = self.check_workspace(task_id, fetch=fetch)
@@ -465,6 +471,21 @@ class Supervisor:
         self.store.add_task_remediation(task_id, "INTEGRATE", candidate)
         self.store.rebaseline_task(task_id, new_base, None)
         self.store.advance_task(task_id, Stage.IMPLEMENT)
+        self._reset_idle_worktree(task_id, new_base)  # the fresh attempt must start from the new base, not on top of the old candidate
+
+    def _reset_idle_worktree(self, task_id: str, target: str) -> None:
+        """Put the task's idle worktree exactly on `target` (the old state is preserved in refs by the callers) and register the move."""
+        ownership = load_ownership(self.store, task_id)
+        if ownership is None or self._execution_running(task_id):
+            return
+        worktree = Path(ownership.worktree)
+        if not (worktree / ".git").exists():
+            return
+        work = GitFacts(worktree)
+        work.git.run("reset", "--hard", target, check=False)
+        work.git.run("clean", "-fdq", check=False)
+        if work.resolve("HEAD") == target:
+            save_ownership(self.store, replace(ownership, expected_head=target, tracked_fingerprint=tracked_fingerprint(worktree)))
 
     def _rebind_ownership(self, task_id: str, replacement: str) -> None:
         """After a refresh, move the task's idle worktree onto the replacement so the guard sees StageMesh's own change, not a mutation.
@@ -479,8 +500,8 @@ class Supervisor:
         if self._execution_running(task_id) or not (worktree / ".git").exists():
             return
         work = GitFacts(worktree)
-        if work.git.run("status", "--porcelain", "--untracked-files=no", check=False).stdout.strip():
-            return
+        if tracked_fingerprint(worktree) != ownership.tracked_fingerprint:
+            return  # anything that is not what was recorded (tracked edits, a new untracked file) is never adopted by a refresh
         if work.git.run("checkout", "--detach", "--quiet", replacement, check=False).returncode != 0:
             return
         save_ownership(self.store, replace(ownership, expected_head=replacement, tracked_fingerprint=tracked_fingerprint(worktree)))
@@ -743,9 +764,34 @@ class Supervisor:
         existing = self.pull_requests.get(pr_number)
         if existing is not None and existing.state is PRState.MERGED:
             # Already merged (a retry after the host merged but the landing was not yet observable): verify, never merge or refresh again.
-            candidate = self.provenance(task_id).candidate_sha
+            known = self.provenance(task_id)
+            candidate = known.candidate_sha
             if candidate is None or (existing.head_sha and existing.head_sha != candidate):
                 return self.record(self._pr_head_moved(task_id, pr_number, candidate or "none", existing.head_sha))
+            if existing.base_ref != self._integration_branch():
+                return self.record(
+                    AutonomyDecision(
+                        Condition.MERGE_POLICY_UNSATISFIED,
+                        POLICY,
+                        Action.WAIT,
+                        task_id,
+                        {"pr": str(pr_number), "base_mismatch": f"{existing.base_ref} != {self._integration_branch()}"},
+                        {"candidate": candidate},
+                        {"merged": True, "note": "merged into another branch: it has not landed on the integration branch"},
+                    )
+                )
+            if known.evidence_problems():  # a merge nobody validated or reviewed is not a completion
+                return self.record(
+                    AutonomyDecision(
+                        Condition.EVIDENCE_NOT_BOUND_TO_CANDIDATE,
+                        POLICY,
+                        Action.REVOKE_EVIDENCE_REQUIRE_REVALIDATION,
+                        task_id,
+                        {"pr": str(pr_number), "problems": "; ".join(known.evidence_problems())[:300]},
+                        {"candidate": candidate},
+                        {"merged": True, "task_not_done": True},
+                    )
+                )
             return self._finalize_landing(task_id, candidate, pr_number, existing.merge_commit_sha, method, remote)
         if remote:  # judge against the base as it is now, not as it was when this clone last looked
             fetched = self.facts.fetch_branch(remote, self._integration_branch())
