@@ -231,6 +231,9 @@ class Supervisor:
             return
         save_ownership(self.store, replace(ownership, expected_head=sha, tracked_fingerprint=tracked_fingerprint(worktree)))
 
+    def candidate_pending(self, task_id: str) -> bool:
+        return self._candidate_pending(task_id)
+
     def _candidate_pending(self, task_id: str) -> bool:
         task = self.store.get_task(task_id)
         return task is not None and str(task["stage"]) in {"VALIDATE", "REVIEW", "INTEGRATE"}
@@ -368,8 +371,8 @@ class Supervisor:
         validation and independent review are rerun on the exact replacement.
         """
         candidate_row = self.store.latest_candidate(task_id)
-        if candidate_row is None:
-            return None
+        if candidate_row is None or not self._candidate_pending(task_id):
+            return None  # nothing is awaiting integration (a remediation or reconstruct is in flight): there is nothing to decide again
         candidate = str(candidate_row["sha"])
         binding = self.store.contract_binding(task_id, candidate)
         old_base = str(binding["baseline_sha"]) if binding is not None and binding["baseline_sha"] else self.store.task_baseline(task_id)
@@ -482,6 +485,9 @@ class Supervisor:
         if not (worktree / ".git").exists():
             return
         work = GitFacts(worktree)
+        snapshot = work.snapshot_worktree(worktree, f"StageMesh: state of {task_id}'s worktree before it was reset onto {target[:7]}")
+        if snapshot:  # preserved first: a reset never destroys anything nobody recorded
+            self.facts.ensure_ref(f"refs/stagemesh/quarantine/{_task_key(task_id)}/{snapshot[:12]}", snapshot)
         work.git.run("reset", "--hard", target, check=False)
         work.git.run("clean", "-fdq", check=False)
         if work.resolve("HEAD") == target:
@@ -1075,6 +1081,8 @@ class Supervisor:
         """The implementation agent is told exactly which gates to fix and which already-red gates it must leave alone."""
         from ..remediation import finding_identity
 
+        if not self._candidate_pending(task_id):
+            return  # already sent back for this candidate: a repeated pass must not spend the budget again
         fix = [g for g in diagnosis.gates if g.klass in {CIClass.CANDIDATE_REGRESSION, CIClass.BROKEN_FRAGILE_TEST}]
         leave = [g.gate for g in diagnosis.gates if g.klass is CIClass.BASELINE_FAILURE]
         used = self.store.task_remediation_count(task_id, "INTEGRATE")

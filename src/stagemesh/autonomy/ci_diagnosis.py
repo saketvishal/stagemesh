@@ -82,6 +82,7 @@ _UNSUPPORTED = re.compile(
     re.IGNORECASE,
 )
 _NO_DETAIL = "log:"  # the signature of a failure that exposes no log lines and no test names (hosted check runs carry no logs)
+_FAILED_LINE = re.compile(r"^\s*FAILED\s+\S+")
 _KEY_LINE = re.compile(r"(fail|error|assert|exception|traceback|expected|denied|not found)", re.IGNORECASE)
 
 
@@ -95,10 +96,19 @@ class GateOutcome:
     ref: str | None = None  # the host's identifier of this check run (what a rerun request needs)
 
     @property
+    def extra_lines(self) -> frozenset[str]:
+        """Normalized failure lines other than the `FAILED <test>` lines: collection errors, import errors, lint and build failures."""
+        return frozenset(
+            normalize(line) for line in self.log.splitlines() if _KEY_LINE.search(line) and not _FAILED_LINE.match(line)
+        )
+
+    @property
     def signature(self) -> str:
-        """Failure identity that survives SHAs, timings and temp paths: failing tests when known, else the key error lines."""
+        """Failure identity that survives SHAs, timings and temp paths: the failing tests AND every other failure line."""
         if self.failing_tests:
-            return "tests:" + ",".join(sorted(self.failing_tests))
+            extra = sorted(self.extra_lines)
+            tail = f"|extra:{hashlib.sha256(chr(10).join(extra).encode('utf-8')).hexdigest()[:16]}" if extra else ""
+            return "tests:" + ",".join(sorted(self.failing_tests)) + tail
         lines = sorted({normalize(line) for line in self.log.splitlines() if _KEY_LINE.search(line)})
         if not lines:
             return _NO_DETAIL
@@ -316,7 +326,8 @@ def diagnose_gate(
         return GateDiagnosis(name, CIClass.CANDIDATE_REGRESSION, "the gate passes on base and fails on the candidate", signature, new_failing_tests=candidate.failing_tests)
 
     if base_failed and base is not None:
-        if signature == base_signature or (candidate.failing_tests and set(candidate.failing_tests) <= set(base.failing_tests)):
+        subset = bool(candidate.failing_tests) and set(candidate.failing_tests) <= set(base.failing_tests) and candidate.extra_lines <= base.extra_lines
+        if signature == base_signature or subset:
             strength = "TEST_SET" if candidate.failing_tests else ("GATE_LEVEL" if signature == _NO_DETAIL else "SIGNATURE")
             return GateDiagnosis(
                 name,

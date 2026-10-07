@@ -122,6 +122,12 @@ def test_scenario_b_conflict_is_reconstructed_once_then_escalates_with_a_specifi
     assert store.get_task(TASK)["stage"] == Stage.IMPLEMENT  # a fresh attempt on the new base, with the conflict as its context
     assert store.open_findings_for_candidate(TASK, candidate)
 
+    # The rebuild has not produced a candidate yet. Another pass must not spend the budget or escalate.
+    assert supervisor.reconcile_base(TASK) is None
+    assert store.get_task(TASK)["stage"] == Stage.IMPLEMENT
+    assert sum(1 for d in decisions(store, TASK) if d.get("action") == Action.RECONSTRUCT_ON_NEW_BASE.value) == 1
+
+    store.advance_task(TASK, Stage.REVIEW)  # the attempt returned the same conflicting candidate
     second = supervisor.reconcile_base(TASK)
     assert second is not None and second.action is Action.ESCALATE_TO_FOUNDER
     escalation = second.escalation

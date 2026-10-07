@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -243,6 +244,9 @@ def _deliver_pass(
         report.decisions = [d["trace"] for d in supervisor.trace_after(task_id, marker)]
         return report
 
+    if not supervisor.candidate_pending(task_id):  # remediation or reconstruct is in flight: nothing can be delivered, and nothing is spent
+        report.candidate_sha = (supervisor.provenance(task_id).candidate_sha) or None
+        return finish("AWAITING_REMEDIATION", "the task is being remediated or rebuilt; deliver again once it has a new validated, reviewed candidate")
     prov = supervisor.provenance(task_id)
     report.candidate_sha = prov.candidate_sha
     problems = prov.evidence_problems()
@@ -266,7 +270,20 @@ def _deliver_pass(
 
     branch = branch_name(task_id, sha)
     report.branch = branch
-    push = facts.git.run("push", "--quiet", remote, f"{sha}:refs/heads/{branch}", check=False)  # never --force: an existing branch must already be this SHA
+    # Create-only: an existing branch is never moved, not even by a fast-forward. Look first; the lease makes the push itself refuse
+    # if the branch appears in between (an empty expected value means "this ref must not exist").
+    listing = facts.git.run("ls-remote", "--heads", remote, f"refs/heads/{branch}", check=False)
+    if listing.returncode != 0:
+        if _PUSH_DENIED.search(listing.stderr):
+            raise PushDenied(listing.stderr.strip()[:300])
+        raise BaseUnobservable(f"could not list {remote}: {listing.stderr.strip()[:200]}")
+    remote_tip = listing.stdout.split()[0] if listing.stdout.strip() else None
+    if remote_tip == sha:
+        push = subprocess.CompletedProcess([], 0, "", "")  # already published at exactly this commit: nothing to do
+    elif remote_tip is not None:
+        push = subprocess.CompletedProcess([], 1, "", "[rejected] already exists at a different commit")
+    else:
+        push = facts.git.run("push", "--quiet", f"--force-with-lease=refs/heads/{branch}:", remote, f"{sha}:refs/heads/{branch}", check=False)
     if push.returncode != 0 and _PUSH_DENIED.search(push.stderr):
         raise PushDenied(push.stderr.strip()[:300])
     if push.returncode != 0 and not re.search(_PUSH_CONFLICT, push.stderr, re.IGNORECASE):
