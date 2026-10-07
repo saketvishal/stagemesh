@@ -1406,3 +1406,48 @@ def test_safe_cleanup_created_owner_raises_when_unlink_permanently_fails(tmp_pat
     finally:
         handle.close()
         owner_file.unlink()
+
+
+def test_acquire_workspace_fails_closed_when_cleanup_mutex_times_out(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    project, store = _setup(tmp_path)
+    monkeypatch.setattr(guard, "_establish", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("establish_failed")))
+
+    orig_mutex = guard._owner_mutex
+    call_count = [0]
+
+    from contextlib import contextmanager
+
+    @contextmanager
+    def fake_mutex(gitdir, timeout=10.0):
+        call_count[0] += 1
+        if call_count[0] == 1:
+            with orig_mutex(gitdir, timeout=timeout) as locked:
+                yield locked
+        else:
+            yield False
+
+    monkeypatch.setattr(guard, "_owner_mutex", fake_mutex)
+
+    with pytest.raises(guard.WorkspaceReleaseError) as raised:
+        acquire_workspace(store, project, TASK, ExecutionKind.IMPLEMENTATION)
+
+    assert raised.value.reason == "owner_mutex_timeout"
+
+
+def test_safe_cleanup_created_owner_captures_unreadable_file_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    project, _store = _setup(tmp_path)
+    prepare_task_workspace(project, TASK)
+    gitdir = gitdir_of(project)
+    owner_file = gitdir / OWNER_FILE
+    owner_file.write_text("corrupt-json", encoding="utf-8")
+
+    def failing_unlink(path):
+        raise PermissionError("sharing_violation_simulated")
+
+    monkeypatch.setattr(guard.os, "unlink", failing_unlink)
+
+    with pytest.raises(guard.WorkspaceReleaseError) as raised:
+        guard._safe_cleanup_created_owner(owner_file, "my-token")
+
+    assert raised.value.reason == "owner_file_cleanup_failed"
+    assert "sharing_violation_simulated" in str(raised.value.detail.get("error"))

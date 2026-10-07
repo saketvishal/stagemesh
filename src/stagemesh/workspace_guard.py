@@ -524,22 +524,21 @@ def _safe_cleanup_created_owner(target: Path, token: str) -> None:
     """Safely unlink an owner file created during a failed acquisition attempt.
 
     Never deletes another claimant's valid owner file:
-    - If target is empty or unreadable corrupt JSON created by us before write,
-      unlinking is safe because this is called while holding the workspace owner mutex.
-    - If target has content, it is unlinked only if its token matches our token.
-    - If the file belongs to another token or process, it is preserved.
+    - If target does not exist, returns immediately.
+    - If target has valid content belonging to another token, it is preserved.
+    - If target is empty, corrupt from this failed write, or matches our token, it is unlinked.
     - If cleanup fails after retries, raises WorkspaceReleaseError fail-closed.
     """
-    last_error: OSError | None = None
+    last_error: Exception | None = None
     for attempt in range(5):
         if not target.exists():
             return
         try:
             data = _read_json(target)
-            if data is not None and data.get("token") != token:
+            if isinstance(data, dict) and data.get("token") != token:
                 return  # foreign owner record, do not delete
-        except ValueError:
-            pass
+        except ValueError as exc:
+            last_error = exc
         try:
             os.unlink(target)
             return
@@ -648,7 +647,14 @@ def acquire_workspace(store: Store, project: Path, task_id: str, kind: str, *, c
         if lease is not None:
             lease.release()
         else:
-            with _owner_mutex(gitdir):
+            with _owner_mutex(gitdir) as locked:
+                if not locked:
+                    raise WorkspaceReleaseError({
+                        "task_id": task_id,
+                        "workspace": str(path),
+                        "token": token,
+                        "reason": "owner_mutex_timeout",
+                    })
                 _safe_cleanup_created_owner(gitdir / OWNER_FILE, token)
         raise
 def _establish(lease: WorkspaceLease, existed: bool) -> None:
