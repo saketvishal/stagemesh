@@ -21,8 +21,6 @@ from .decisions import Action
 from .review_policy import ReviewFindingInput, ReviewReport
 from .scope import TaskScope, deferred_items, record_deferred
 
-_NON_BLOCKING_SEVERITIES = frozenset({"minor", "nit", "nitpick", "info", "suggestion", "style", "low", "warning", "note", "trivial"})
-
 
 def findings_from_response(raw: Any) -> list[ReviewFindingInput]:
     out: list[ReviewFindingInput] = []
@@ -35,7 +33,7 @@ def findings_from_response(raw: Any) -> list[ReviewFindingInput]:
                     message=str(item.get("message") or "independent review failed"),
                     severity=severity,
                     path=str(item["path"]) if item.get("path") else None,
-                    blocking=explicit if isinstance(explicit, bool) else (False if severity.casefold() in _NON_BLOCKING_SEVERITIES else None),
+                    blocking=explicit if isinstance(explicit, bool) else None,  # unlabelled: ReviewFindingInput decides, and unknown labels block
                     acceptance_criterion=str(item["acceptance_criterion"]) if item.get("acceptance_criterion") else None,
                     category=str(item["category"]) if item.get("category") else None,
                 )

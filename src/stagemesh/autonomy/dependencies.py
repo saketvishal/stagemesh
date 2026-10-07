@@ -240,8 +240,10 @@ def evaluate_dependencies(
         dep = prs.get(number)
         if dep is None:
             blocked_on.append(number)  # unknown is not resolved: fail closed
-        elif dep.state is PRState.MERGED:
+        elif dep.state is PRState.MERGED and dep.base_ref == integration_ref:
             landed.append(number)
+        elif dep.state is PRState.MERGED:
+            blocked_on.append(number)  # merged into some other branch: it has not landed on the integration branch yet
         elif dep.state is PRState.CLOSED:
             return DependencyAssessment(pr_number, _closed_decision(pr_number, number, task_id, shas), blocked_on=[number])
         else:

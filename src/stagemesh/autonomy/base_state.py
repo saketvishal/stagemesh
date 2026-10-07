@@ -133,6 +133,7 @@ class RetargetResult:
     transplanted: tuple[str, ...] = ()
     reason: str = ""
     refs: dict[str, str] = field(default_factory=dict)
+    already_on_base: bool = False  # every change of the candidate is already present on the new base
 
 
 def _ref_key(task_key: str, sha: str) -> str:
@@ -169,7 +170,7 @@ def build_replacement_candidate(
         tip = facts.commit_tree(result.tree, tip, message, author=info)
         transplanted.append(sha)
     if tip == new_base:
-        return RetargetResult(False, dropped_commits=tuple(dropped), reason="every commit of the candidate is already on the new base")
+        return RetargetResult(False, dropped_commits=tuple(dropped), reason="every commit of the candidate is already on the new base", already_on_base=True)
 
     preserved_ref = f"refs/stagemesh/preserved/{_ref_key(task_key, candidate)}"
     replacement_ref = f"refs/stagemesh/candidates/{_ref_key(task_key, tip)}"

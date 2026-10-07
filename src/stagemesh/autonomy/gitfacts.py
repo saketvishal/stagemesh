@@ -98,7 +98,7 @@ class GitFacts:
         )
 
     def changed_paths(self, base: str, tip: str) -> list[str]:
-        out = self.git.run("diff", "--name-only", "-M", base, tip).stdout
+        out = self.git.run("diff", "--name-only", "--no-renames", base, tip).stdout  # both names of a rename: the old one must be gone too
         return sorted(line.replace("\\", "/") for line in out.splitlines() if line.strip())
 
     def patch_id(self, base: str, tip: str) -> str | None:

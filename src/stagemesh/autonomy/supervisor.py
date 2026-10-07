@@ -89,14 +89,13 @@ from .recovery_policy import (
     decide_execution_recovery,
     decide_git_operation,
 )
-from .review_policy import ReviewAssessment, ReviewReport, assess_review
+from .review_policy import ReviewAssessment, ReviewReport, assess_review, severity_blocks
 from .scope import DeferredItem, TaskScope, deferred_items, record_deferred
 
 POLICY = "supervisor/v1"
 DEPENDENCY_EVENT = "autonomy.pr_dependency"
 INTEGRATED_EVENT = "autonomy.integrated"
 CI_RERUN_EVENT = "autonomy.ci_rerun_requested"
-_BLOCKING_SEVERITIES = frozenset({"blocker", "critical", "high", "major", "error"})
 
 
 class ExternalWorkspaceMutation(RuntimeError):
@@ -343,6 +342,18 @@ class Supervisor:
         result = base.build_replacement_candidate(
             self.facts, task_key=key, candidate=candidate, old_base=old_base, new_base=new_base, reason=state.condition.value
         )
+        if result.already_on_base:  # the same change landed independently: nothing to refresh and nothing to ask anybody
+            return self.record(
+                AutonomyDecision(
+                    Condition.CANDIDATE_ALREADY_INTEGRATED,
+                    base.POLICY,
+                    Action.PROCEED,
+                    task_id,
+                    state.observed(),
+                    {"candidate": candidate},
+                    {"content_already_on_base": True, "dropped_commits": list(result.dropped_commits)},
+                )
+            )
         proof_ok = result.ok and result.proof is not None and (result.proof.proven or not state.tree_equivalent)
         if not result.ok or not proof_ok:
             if result.ok and result.proof is not None:
@@ -579,7 +590,7 @@ class Supervisor:
             )
         open_findings = [
             row for row in self.store.open_findings_for_candidate(task_id, prov.candidate_sha or "")
-            if str(row["severity"]).casefold() in _BLOCKING_SEVERITIES
+            if severity_blocks(str(row["severity"]))
         ] if prov.candidate_sha else []
         facts = MergeFacts(
             provenance=prov,

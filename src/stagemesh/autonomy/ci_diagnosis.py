@@ -293,7 +293,7 @@ def diagnose_gate(
     base_passed = base is not None and base.conclusion is Conclusion.SUCCESS
     base_signature = base.signature if base is not None and base_failed else ""
 
-    if base is not None and not same_environment and base_failed and signature != base_signature:
+    if base is not None and not same_environment and base_failed:
         # Different failures in different environments prove nothing about the candidate: base must be rerun where the candidate ran.
         return GateDiagnosis(
             name,

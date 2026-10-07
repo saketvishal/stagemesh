@@ -26,7 +26,12 @@ from ..domain import EvidenceKind, EvidenceStatus
 from .ci_diagnosis import HostedCI
 from .decisions import Action, AutonomyDecision, Condition
 from .dependencies import PullRequestAdapter, PullRequestPublisher
-from .github_adapter import GitHubAuthorizationError, GitHubRateLimited, authorization_escalation
+from .github_adapter import (
+    GitHubAdapterError,
+    GitHubAuthorizationError,
+    GitHubRateLimited,
+    authorization_escalation,
+)
 from .supervisor import Supervisor
 
 REMEDIATION_ACTIONS = {Action.REMEDIATE_CANDIDATE, Action.FIX_TEST_FIXTURE}
@@ -181,6 +186,16 @@ def deliver(
             report.status = "ESCALATED"
             report.recommendation = f"escalated: {decision.escalation.reason.value}"  # type: ignore[union-attr]
         supervisor.record(decision)
+        report.decisions = [d["trace"] for d in supervisor.trace_after(task_id, marker)]
+        return report
+    except GitHubAdapterError as error:  # not authorization, not rate limit (handled below): a 422 or a 5xx from the host
+        supervisor.record(
+            AutonomyDecision(
+                Condition.CI_PENDING, "delivery/v1", Action.WAIT, task_id, {"reason": "host_error", "status": str(error.status)}, {}, {"error": str(error)[:200]}
+            )
+        )
+        report.status = "PUBLISHED_WAITING" if report.pr_number else "NOT_PUBLISHED"
+        report.recommendation = f"the host answered {error}; delivery will be retried"
         report.decisions = [d["trace"] for d in supervisor.trace_after(task_id, marker)]
         return report
 

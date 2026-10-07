@@ -21,7 +21,13 @@ from .decisions import Action, AutonomyDecision, Condition, Escalation, Escalati
 from .scope import DeferredItem, TaskScope
 
 POLICY = "review/v1"
-_BLOCKING_SEVERITIES = frozenset({"blocker", "critical", "high", "major", "error"})
+# Only these labels may defer a finding. Any other label ("medium", "p0", "severe", ...) is treated as blocking: a reviewer's FAIL is never
+# turned into a PASS because StageMesh did not recognise a word.
+NON_BLOCKING_SEVERITIES = frozenset({"minor", "nit", "nitpick", "info", "suggestion", "style", "low", "warning", "note", "trivial"})
+
+
+def severity_blocks(severity: str) -> bool:
+    return severity.strip().casefold() not in NON_BLOCKING_SEVERITIES
 
 
 class FindingClass(StrEnum):
@@ -45,7 +51,7 @@ class ReviewFindingInput:
     def is_blocking(self) -> bool:
         if self.blocking is not None:
             return self.blocking
-        return self.severity.casefold() in _BLOCKING_SEVERITIES
+        return severity_blocks(self.severity)
 
 
 @dataclass(frozen=True)
@@ -91,9 +97,12 @@ def classify_finding(finding: ReviewFindingInput, scope: TaskScope, candidate_ch
     changed = {path.replace("\\", "/") for path in candidate_changed_files}
     # A file the candidate itself changed is the candidate's responsibility whatever the contract says about it.
     in_scope = finding.path is None or scope.permits(finding.path) or finding.path.replace("\\", "/") in changed
+    explicitly_blocking = finding.blocking is True  # an explicit verdict wins over a category label
     if finding.category == "test_defect":
+        if explicitly_blocking and not in_scope:
+            return ClassifiedFinding(finding, FindingClass.BLOCKING_OUT_OF_SCOPE, f"a blocking test defect in {finding.path}, outside this task's scope")
         return ClassifiedFinding(finding, FindingClass.TEST_DEFECT, "reviewer identified a test problem, not a production defect")
-    if finding.category == "suggestion":
+    if finding.category == "suggestion" and not explicitly_blocking:
         return ClassifiedFinding(finding, FindingClass.UNRELATED_SUGGESTION, "reviewer suggestion, not a defect in the objective")
     if finding.is_blocking:
         if in_scope:
