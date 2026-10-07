@@ -316,9 +316,20 @@ def check_ownership(
     facts = GitFacts(worktree)
     head = facts.resolve("HEAD")
     if head != ownership.expected_head:
-        result.mutations.extend(_head_mutations(facts, ownership, head))
-        if not result.mutations:
+        if (
+            recorded_candidate
+            and head == recorded_candidate
+            and facts.exists(ownership.expected_head)
+            and facts.is_ancestor(ownership.expected_head, head)
+        ):
+            # A prior StageMesh pass may have durably recorded the candidate before it refreshed the ownership row
+            # (for example after orphan recovery). The candidate row is the registration; reconcile that exact
+            # pending candidate instead of quarantining StageMesh's own handoff as a foreign writer.
             result.adopted_owner_advance = head
+        else:
+            result.mutations.extend(_head_mutations(facts, ownership, head))
+            if not result.mutations:
+                result.adopted_owner_advance = head
     if ownership.candidate_ref and ownership.expected_ref_tip:
         tip = facts.resolve(ownership.candidate_ref)
         if tip != ownership.expected_ref_tip:

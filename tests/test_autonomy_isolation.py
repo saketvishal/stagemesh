@@ -42,7 +42,7 @@ def _link_dir(link: Path, target: Path) -> None:
     """A directory junction on Windows (no privilege needed), a symlink elsewhere."""
     link.parent.mkdir(parents=True, exist_ok=True)
     if sys.platform == "win32":
-        result = subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(target)], capture_output=True, text=True)
+        result = subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(target)], capture_output=True, text=True, check=False)
         if result.returncode != 0:
             pytest.skip(f"cannot create a junction: {result.stderr}")
     else:
@@ -249,7 +249,7 @@ def test_running_stagemesh_code_from_another_checkout_is_refused(tmp_path: Path)
     report = check_isolation(mine, check_running_code=True)
     assert "RUNNING_CODE_FROM_OTHER_CHECKOUT" in _codes(report) and not report.isolated
     finding = next(f for f in report.findings if f.code == "RUNNING_CODE_FROM_OTHER_CHECKOUT")
-    assert str(Path(stagemesh.__file__).parent.resolve()) in finding.message and "PYTHONPATH=src" in finding.message
+    assert str(Path(stagemesh.__file__).parent.resolve()) in finding.message and "project-local StageMesh install" in finding.message
     assert "RUNNING_CODE_FROM_OTHER_CHECKOUT" not in _codes(check_isolation(mine))  # opt-in check
 
     repo_root = Path(stagemesh.__file__).resolve().parents[2]  # this checkout, whose src/stagemesh is the code under test
