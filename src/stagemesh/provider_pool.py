@@ -109,14 +109,15 @@ def default_pools(
 
     pools: dict[str, tuple[str, ...]] = {}
     for stage in (IMPLEMENT, REVIEW):
+        eligible_names = [n for n in names if capable is None or n in capable.get(stage, set(names))]
+        ordered = sorted(eligible_names, key=rank)
         if stage in explicit:
-            pools[stage] = explicit[stage]
+            preferred = [n for n in explicit[stage] if n in eligible_names]
+            pools[stage] = tuple(preferred + [n for n in ordered if n not in preferred])
         elif routing_mode == RoutingMode.SINGLE_AGENT and single_agent_provider:
             pools[stage] = (single_agent_provider,)
         else:
             routed = stage_routes.get(stage)
-            eligible_names = [n for n in names if capable is None or n in capable.get(stage, set(names))]
-            ordered = sorted(eligible_names, key=rank)
             pools[stage] = tuple(([routed] if routed else []) + [n for n in ordered if n != routed])
     return pools
 

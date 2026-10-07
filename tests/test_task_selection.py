@@ -152,7 +152,7 @@ def test_stale_failed_tasks_are_skipped_unless_explicitly_retried(tmp_path: Path
     selection = select_next_task(store, project, TaskSelectionConfig())
     assert selection.task_id == "T-2"
     skip = next(s for s in selection.skipped if s["task_id"] == "T-1")
-    assert "remediation pending after failed VALIDATE" in skip["reason"] and "--task T-1" in skip["reason"]
+    assert "remediation pending after failed VALIDATE" in skip["reason"] and "--task" not in skip["reason"]
     assert choose_task(store, project, "T-1", TaskSelectionConfig(), True, None).mode == "explicit"
 
     store.conn.execute("UPDATE task_remediations SET cleared=1")  # what retry-task does
@@ -178,8 +178,25 @@ def test_recent_provider_pool_exhaustion_is_temporarily_skipped(tmp_path: Path) 
     assert selection.task_id == "T-2"
     skip = next(s for s in selection.skipped if s["task_id"] == "T-1")
     assert "recent provider pool exhaustion" in skip["reason"]
-    assert "retry automatically after provider cooldown" in skip["reason"]
+    assert "continuing with other eligible tasks until provider/task cooldown clears" in skip["reason"]
     assert "--task" not in skip["reason"]
+    store.close()
+
+
+def test_provider_pool_exhaustion_skip_survives_short_provider_cooldown_window(tmp_path: Path) -> None:
+    project = _project(tmp_path, ["T-1", "T-2"], labels={"T-1": ["priority:p0"]})
+    store = _synced(project)
+    store.add_audit_event(
+        "task.implementation_unsuccessful",
+        {"task_id": "T-1", "reason": "all_implementation_providers_no_progress: claude: no_implementation_change"},
+    )
+    store.conn.execute("UPDATE audit_events SET created_at=created_at-1200 WHERE event_type='task.implementation_unsuccessful'")
+    store.conn.commit()
+
+    selection = select_next_task(store, project, TaskSelectionConfig())
+
+    assert selection.task_id == "T-2"
+    assert any(s["task_id"] == "T-1" and "provider pool exhaustion" in s["reason"] for s in selection.skipped)
     store.close()
 
 
