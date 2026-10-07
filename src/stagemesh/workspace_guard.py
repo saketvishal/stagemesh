@@ -85,6 +85,25 @@ def _content_hash(path: Path) -> str:
         return "unreadable"
 
 
+def unexpected_embedded_repositories(path: Path) -> list[str]:
+    """Descendant directories that are their own Git repository, including under ignored paths.
+
+    The worktree's own `.git` (directory, file, or worktree link) is the task workspace and is not reported.
+    A nested `.git` directory or a nested `.git` gitdir file is. Ignored files in general are not fingerprinted.
+    """
+    root = Path(path).resolve()
+    found: list[str] = []
+    for current, dirnames, filenames in os.walk(root):
+        here = Path(current).resolve()
+        if here == root:
+            dirnames[:] = [name for name in dirnames if name != ".git"]
+            continue
+        if ".git" in dirnames or ".git" in filenames or (here / ".git").is_symlink():
+            found.append(here.relative_to(root).as_posix())
+            dirnames[:] = []
+    return sorted(found)
+
+
 def observe(path: Path) -> dict[str, Any]:
     """HEAD plus a fingerprint of every uncommitted path (modified, staged, deleted and untracked) in a worktree."""
     git = GitWorkspace(path)
@@ -593,8 +612,9 @@ def record_supervised_move(
     Returns whether that checkout is authorized. The ledger is updated only when it still names `previous_head` and the
     worktree is exactly `new_head`. A refresh keeps an already-sealed dirty tree only when its digest is unchanged.
     A reconstruct passes `require_same_dirty=False` after it has preserved and cleaned the worktree itself.
-    That path still refuses any leftover dirt (`git clean` does not remove an embedded repository). No ledger means
-    there is nothing to contradict, so the caller may record a clean move in its own ownership row.
+    That path still refuses leftover dirt, and it refuses an embedded repository `git clean` left behind,
+    including one under an ignored path. That residual stays on disk; it is not resealed as authorized.
+    No ledger means there is nothing to contradict, so the caller may record a clean move in its own ownership row.
     """
     root = Path(project).resolve()
     if not root.is_dir():
@@ -610,7 +630,7 @@ def record_supervised_move(
     seen = observe(target)
     if seen["head"] != new_head:
         return False
-    if not require_same_dirty and seen["dirty_count"]:
+    if not require_same_dirty and (seen["dirty_count"] or unexpected_embedded_repositories(target)):
         return False
     if ledger is None:
         return True
