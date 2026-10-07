@@ -2,7 +2,7 @@
 
 Order of precedence (lower is better): priority label, preferred (prep/governance/readiness) label, valid contract over one that
 needs auto-planning, then the configured tie-breaker. Tasks that are blocked, excluded, waiting on dependencies, in a stale failed
-state, or unplannable are never auto-selected; `--task <id>` bypasses selection entirely and is how a stale task is retried.
+state, objective roots, or unplannable are never auto-selected; `--task <id>` bypasses selection entirely and is how a stale task is retried.
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ from .auto_plan import plannable, task_labels
 from .config import TaskSelectionConfig
 from .contracts import ContractError, canonical_contract_json, parse_contract, task_contract_path
 from .domain import EvidenceKind, EvidenceStatus, Stage, TaskStatus
+from .objective_roots import objective_root_reason
 from .persistence import MAX_CANONICAL_CONTRACT_CHARS, Store
 from .scheduling import Scheduler
 
@@ -159,6 +160,10 @@ def _collect(
     for task in store.tasks():
         task_id = str(task["id"])
         if task["status"] != TaskStatus.OPEN or task["stage"] == Stage.DONE:
+            continue
+        objective_reason = objective_root_reason(store, task)
+        if objective_reason is not None:
+            skipped.append({"task_id": task_id, "reason": objective_reason})
             continue
         decision = scheduler.decision(task_id)
         if not decision.eligible:
