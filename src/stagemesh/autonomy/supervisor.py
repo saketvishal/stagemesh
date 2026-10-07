@@ -23,6 +23,7 @@ from ..persistence import Store
 from ..process_identity import classify_process, process_identity
 from ..review import independent_review_verified
 from ..serialized_integration import REBASED_EVENT
+from ..workspace_guard import record_supervised_move
 from ..workspaces import _WORKTREE_CREATION, _task_key, advance_worktree_generation, task_workspace
 from . import base_state as base
 from .ci_diagnosis import (
@@ -491,7 +492,10 @@ class Supervisor:
         work.git.run("reset", "--hard", target, check=False)
         work.git.run("clean", "-fdq", check=False)
         if work.resolve("HEAD") == target:
+            previous = ownership.expected_head
             save_ownership(self.store, replace(ownership, expected_head=target, tracked_fingerprint=tracked_fingerprint(worktree)))
+            latest = self.store.latest_candidate(task_id)
+            record_supervised_move(self.project, task_id, previous, target, None if latest is None else str(latest["sha"]))
 
     def _rebind_ownership(self, task_id: str, replacement: str) -> None:
         """After a refresh, move the task's idle worktree onto the replacement so the guard sees StageMesh's own change, not a mutation.
@@ -510,7 +514,9 @@ class Supervisor:
             return  # anything that is not what was recorded (tracked edits, a new untracked file) is never adopted by a refresh
         if work.git.run("checkout", "--detach", "--quiet", replacement, check=False).returncode != 0:
             return
+        previous = ownership.expected_head
         save_ownership(self.store, replace(ownership, expected_head=replacement, tracked_fingerprint=tracked_fingerprint(worktree)))
+        record_supervised_move(self.project, task_id, previous, replacement, replacement)
 
     # --- capability 5: PR dependencies ---------------------------------------------------------------------------------------------
 

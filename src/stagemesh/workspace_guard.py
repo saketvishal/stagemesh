@@ -580,6 +580,42 @@ def _fail_execution(lease: WorkspaceLease) -> None:
 # --- stage boundaries (no lease: validation, review and integration never write the implementation worktree) ----------------
 
 
+def record_supervised_move(project: Path, task_id: str, previous_head: str, new_head: str, candidate_sha: str | None) -> None:
+    """Record a checkout StageMesh itself just made on an idle task worktree.
+
+    The workspace ledger otherwise still names the pre-move HEAD, and the next lifecycle check treats StageMesh's own
+    refresh or reconstruct as an external mutation. The write happens only when the ledger still names `previous_head`
+    and the worktree is now exactly `new_head` with nothing uncommitted.
+    """
+    root = Path(project).resolve()
+    if not root.is_dir():
+        return
+    target = task_workspace(root, task_id)
+    if not (target / ".git").exists():
+        return
+    gitdir = _gitdir(target)
+    try:
+        ledger, _raw = _load_ledger(gitdir)
+    except ValueError:
+        return
+    if ledger is None or ledger.get("head") != previous_head:
+        return
+    seen = observe(target)
+    if seen["head"] != new_head or seen["dirty_count"]:
+        return
+    _atomic_write(
+        gitdir / LEDGER_FILE,
+        {
+            **ledger,
+            "head": seen["head"],
+            "dirty": seen["dirty"],
+            "dirty_count": seen["dirty_count"],
+            "dirty_digest": seen["dirty_digest"],
+            "candidate": candidate_sha if candidate_sha is not None else ledger.get("candidate"),
+        },
+    )
+
+
 def pin_candidate(project: Path, task_id: str, candidate_sha: str) -> None:
     """An operator action registered `candidate_sha`; record it in the ledger so it is the candidate every later check expects."""
     root = Path(project).resolve()
