@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from stagemesh.config import TaskSelectionConfig, load_config
+from stagemesh.config import TaskSelectionConfig
 from stagemesh.domain import TaskStatus
 from stagemesh.persistence import Store
 from stagemesh.scheduling import Scheduler
