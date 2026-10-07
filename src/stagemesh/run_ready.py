@@ -11,7 +11,7 @@ from .auto_plan import AutoPlanError, create_contract
 from .diagnosis import format_findings
 from .contracts import ContractError, canonical_contract_json, parse_contract, task_contract_path
 from .coordinator import Coordinator, TargetSelection, TargetSelectionError
-from .domain import EvidenceKind, Stage, TaskStatus
+from .domain import EvidenceKind, ExecutionKind, Stage, TaskStatus
 from .observability import health
 from .operator_actions import recover_stale, task_details
 from .git import GitWorkspace
@@ -75,11 +75,41 @@ def current_problems(store: Store) -> tuple[str, ...]:
 
 
 def _recover_dead(store: Store, task_id: str) -> list[dict[str, Any]]:
-    return [
+    recovered = [
         {"task_id": task_id, **action.to_dict()}
         for action in recover_stale(store, task_id)
         if action.action == "RELEASED"
     ]
+    recovered.extend(_recover_detached_builtin_executions(store, task_id))
+    return recovered
+
+
+def _recover_detached_builtin_executions(store: Store, task_id: str) -> list[dict[str, Any]]:
+    """Terminalize orphaned built-in stage executions from a previous `continue` invocation.
+
+    Provider implementation executions carry process identity and claims; those still go through the conservative stale-process
+    path. Built-in validation/review/integration runs execute inside the prior StageMesh process and have no child pid to inspect,
+    so a RUNNING row at the start of a fresh command is stale bookkeeping, not work we can wait on.
+    """
+    recovered: list[dict[str, Any]] = []
+    for execution in [row for row in store.running_executions() if row["task_id"] == task_id]:
+        kind = str(execution["kind"])
+        if kind == ExecutionKind.IMPLEMENTATION or execution["pid"] is not None:
+            continue
+        reason = "ORPHANED_BUILTIN_STAGE_EXECUTION"
+        if store.mark_orphan_running_execution_failed(str(execution["id"]), reason):
+            recovered.append(
+                {
+                    "task_id": task_id,
+                    "execution_id": str(execution["id"]),
+                    "kind": kind,
+                    "pid": None,
+                    "process_state": "DETACHED_BUILTIN",
+                    "action": "RELEASED",
+                    "reason": reason,
+                }
+            )
+    return recovered
 
 
 def _require_runnable_task(store: Store, task_id: str) -> None:

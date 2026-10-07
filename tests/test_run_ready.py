@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 import stagemesh.cli as cli_module
+from stagemesh.domain import ExecutionKind
 from stagemesh.git import GitWorkspace
 from stagemesh.persistence import Store
 
@@ -416,6 +417,22 @@ def test_stale_running_execution_remains_fatal_for_current_problems(tmp_path: Pa
     store.conn.commit()
     assert current_problems(store) == ("stale_running_executions",)
     store.close()
+
+
+def test_continue_recovers_orphaned_builtin_validation_execution(tmp_path: Path) -> None:
+    project = _project(tmp_path, ["T-1"])
+    store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+    store.migrate()
+    config = cli_module.load_config(project)
+    cli_module._sync_all_sources(store, project, config, None)
+    execution_id = store.start_execution(task_id="T-1", claim_id=None, kind=ExecutionKind.VALIDATION, actor="stagemesh-validator")
+    store.close()
+
+    code, result = _continue(project, "--max-steps", "1")
+
+    assert code == 1, result
+    assert result["stop_reason"] == "MAX_STEPS"
+    assert any(item["execution_id"] == execution_id and item["reason"] == "ORPHANED_BUILTIN_STAGE_EXECUTION" for item in result["recovered"])
 
 
 def test_unrelated_unknown_execution_still_refuses_run(tmp_path: Path) -> None:
