@@ -25,8 +25,9 @@ jobs:
       - name: autonomy regressions
         shell: bash
         run: |
+          TESTS="tests/test_autonomy_*.py tests/test_objective_root_reconciliation.py tests/test_hands_off_provider_recovery.py"
           if [ "$RUNNER_OS" = "Windows" ]; then
-            .stagemesh/tooling/venv/Scripts/python.exe -m pytest tests/test_autonomy_*.py -q
+            .stagemesh/tooling/venv/Scripts/python.exe -m pytest $TESTS -q
           else
-            .stagemesh/tooling/venv/bin/python -m pytest tests/test_autonomy_*.py -q
+            .stagemesh/tooling/venv/bin/python -m pytest $TESTS -q
           fi
