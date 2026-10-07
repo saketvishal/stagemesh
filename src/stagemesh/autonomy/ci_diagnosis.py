@@ -421,9 +421,17 @@ def diagnose_ci(
     dependency: HostedCIRun | None = None,
     candidate_sha: str | None = None,
     observations: Iterable[TestObservation] = (),
+    candidate_changed_files: Iterable[str] | None = None,
 ) -> CIDiagnosis:
     sha = candidate.sha if candidate is not None else (candidate_sha or "")
-    defects = [d for d in (detect_test_defect(o) for o in observations) if d is not None]
+    changed = None if candidate_changed_files is None else {path.replace("\\", "/") for path in candidate_changed_files}
+    # A marker in the candidate's own CI output claims "production is correct, the test is wrong". That is credible only when the candidate
+    # left the production files that own the behavior alone; if it changed them (or we cannot tell) the claim proves nothing.
+    defects = [
+        d
+        for d in (detect_test_defect(o) for o in observations)
+        if d is not None and changed is not None and not changed & set(d.invariant.owner_paths)
+    ]
     base_gates = base.gates if base is not None and base.complete else {}
     dep_gates = dependency.gates if dependency is not None else {}
     names = sorted(set(candidate.gates if candidate else ()) | set(base.gates if base else ()))

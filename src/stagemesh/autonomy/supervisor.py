@@ -269,8 +269,10 @@ class Supervisor:
             self.facts.ensure_ref(replacement_branch, str(candidate["sha"]))
             refs["replacement_branch"] = replacement_branch
         tainted = self._candidate_tainted(ownership)
+        recovery: str | None = None
         if tainted and candidate is not None:
-            revoke_evidence(self.store, task_id, str(candidate["sha"]), "candidate contains commits by an untrusted committer")
+            revoke_evidence(self.store, task_id, str(candidate["sha"]), "candidate contains commits StageMesh did not make")
+            recovery = self._rebuild_from_baseline(task_id, ownership, str(candidate["sha"]), restore)
         first = mutations[0]
         foreign = sorted({sha for m in mutations for sha in m.foreign_commits})
         head_now = GitFacts(worktree).resolve("HEAD") if (worktree / ".git").exists() else None
@@ -292,10 +294,46 @@ class Supervisor:
                 "workspace_restored_to_recorded_head": restored,
                 "head_after": head_now,
                 "candidate_tainted": tainted,
+                "recovery": recovery,
                 "evidence_for_mutated_state_authorizes_integration": False,
                 "published_replacement_required": replacement_branch is not None,
             },
         )
+
+    def _rebuild_from_baseline(self, task_id: str, ownership: WorkspaceOwnership, candidate: str, restore: bool) -> str | None:
+        """A tainted candidate can never be integrated and revalidating the same SHA cannot help: rebuild the work from the baseline."""
+        from ..remediation import finding_identity
+
+        baseline = self.store.task_baseline(task_id)
+        self.facts.ensure_ref(f"refs/stagemesh/preserved/{_task_key(task_id)}/{candidate[:12]}", candidate)  # nothing is lost
+        worktree = Path(ownership.worktree)
+        if not restore or baseline is None or not (worktree / ".git").exists():
+            return None  # an execution may be writing there: the next hand-over performs the rebuild
+        work = GitFacts(worktree)
+        work.git.run("reset", "--hard", baseline, check=False)
+        work.git.run("clean", "-fdq", check=False)
+        message = f"candidate {candidate[:7]} contained commits StageMesh did not make; rebuild the objective from the baseline {baseline[:7]}"
+        self.store.upsert_finding(finding_identity(candidate, message), task_id, candidate, "error", message)
+        self.store.add_task_remediation(task_id, "INTEGRATE", candidate)
+        self.store.advance_task(task_id, Stage.IMPLEMENT)
+        save_ownership(self.store, replace(ownership, expected_head=baseline, tracked_fingerprint=tracked_fingerprint(worktree)))
+        return "REBUILD_FROM_BASELINE"
+
+    def content_already_landed(self, candidate_sha: str) -> bool:
+        """True when a recorded decision found every change of this candidate already on the base, and the base still has that content."""
+        rows = self.store.conn.execute(
+            "SELECT payload FROM audit_events WHERE event_type=? AND json_extract(payload, '$.shas.candidate')=? ORDER BY created_at DESC, rowid DESC",
+            (DECISION_EVENT, candidate_sha),
+        ).fetchall()
+        if not any(json.loads(row["payload"]).get("detail", {}).get("content_already_on_base") for row in rows):
+            return False
+        task = self.store.conn.execute("SELECT task_id FROM candidates WHERE sha=? LIMIT 1", (candidate_sha,)).fetchone()
+        binding = self.store.contract_binding(str(task["task_id"]), candidate_sha) if task is not None else None
+        baseline = str(binding["baseline_sha"]) if binding is not None and binding["baseline_sha"] else None
+        tip = self.facts.resolve(self.integration_ref)
+        if baseline is None or tip is None:
+            return False
+        return all(self.facts.blob_at(candidate_sha, path) == self.facts.blob_at(tip, path) for path in self.facts.changed_paths(baseline, candidate_sha))
 
     def _candidate_tainted(self, ownership: WorkspaceOwnership) -> bool:
         """True when the latest candidate's own range contains a commit that is neither registered with StageMesh nor by a trusted provider."""
@@ -354,7 +392,7 @@ class Supervisor:
                     {"content_already_on_base": True, "dropped_commits": list(result.dropped_commits)},
                 )
             )
-        proof_ok = result.ok and result.proof is not None and (result.proof.proven or not state.tree_equivalent)
+        proof_ok = result.ok and result.proof is not None and result.proof.proven  # the proof is required in every case
         if not result.ok or not proof_ok:
             if result.ok and result.proof is not None:
                 result.reason = "equivalence could not be proven for the transplanted candidate"
@@ -508,6 +546,7 @@ class Supervisor:
         scope: TaskScope | None = None,
         observations: Iterable[TestObservation] = (),
         reruns_left: int = 1,
+        candidate_changed_files: Iterable[str] | None = None,
     ) -> AutonomyDecision:
         if self.hosted_ci is None:
             raise RuntimeError("a HostedCI adapter is required to diagnose CI")
@@ -524,7 +563,11 @@ class Supervisor:
         if candidate_run is not None:
             for gate in candidate_run.gates.values():
                 found.extend(observations_from_log(gate.log))
-        diagnosis = diagnose_ci(candidate_run, base_run, dependency=dependency_run, candidate_sha=candidate_sha, observations=found)
+        if candidate_changed_files is None:
+            candidate_changed_files = self._changed_by(candidate_sha, base_sha)
+        diagnosis = diagnose_ci(
+            candidate_run, base_run, dependency=dependency_run, candidate_sha=candidate_sha, observations=found, candidate_changed_files=candidate_changed_files
+        )
         requester = getattr(self.hosted_ci, "rerun", None)
         decision = plan_ci_response(diagnosis, task_id=task_id, scope=scope, reruns_left=reruns_left, rerun_supported=callable(requester))
         for gate in diagnosis.gates:
@@ -540,6 +583,16 @@ class Supervisor:
                     diagnosis, diagnosis.overall, decision.condition, task_id, decision.shas, decision.observed, decision.detail, retried=False
                 )
         return self.record(decision)
+
+    def _changed_by(self, candidate_sha: str, base_sha: str) -> list[str] | None:
+        """Paths the candidate itself changed (against its merge base with `base_sha`), or None when git cannot say."""
+        try:
+            if not (self.facts.exists(candidate_sha) and self.facts.exists(base_sha)):
+                return None
+            origin = self.facts.merge_base(base_sha, candidate_sha)
+            return self.facts.changed_paths(origin, candidate_sha) if origin else None
+        except GitError:
+            return None
 
     # --- capability 8: review -------------------------------------------------------------------------------------------------------
 

@@ -95,7 +95,7 @@ class EquivalenceProof:
     candidate_trees_identical: bool  # replacement tree == original candidate tree (strongest proof; needs identical base trees)
     original_changed_paths: tuple[str, ...]
     replacement_changed_paths: tuple[str, ...]
-    scope_preserved: bool  # same set of paths changed relative to each one's own base
+    scope_preserved: bool  # the replacement changes only paths the candidate changed (it may change fewer: some may already be on the base)
     patch_id_equal: bool | None  # same diff content relative to each one's own base
 
     @property
@@ -203,7 +203,7 @@ def prove_equivalence(facts: GitFacts, *, candidate: str, old_base: str, replace
         candidate_trees_identical=candidate_tree is not None and candidate_tree == replacement_tree,
         original_changed_paths=original_paths,
         replacement_changed_paths=replacement_paths,
-        scope_preserved=original_paths == replacement_paths,
+        scope_preserved=bool(replacement_paths) and set(replacement_paths) <= set(original_paths),
         patch_id_equal=_patch_ids_equal(facts, old_base, candidate, new_base, replacement),
     )
 

@@ -210,6 +210,8 @@ def _sync_base(supervisor: Supervisor, report: DeliveryReport, remote: str, base
     base_sha = supervisor.facts.resolve(supervisor.integration_ref)
     report.base_sha = base_sha
     refresh = supervisor.reconcile_base(report.task_id)
+    if refresh is not None and refresh.detail.get("content_already_on_base"):
+        return base_sha, ("ALREADY_LANDED", f"every change of the candidate is already on {base}; there is nothing to publish")
     if refresh is not None and refresh.action in {Action.REFRESH_CANDIDATE, Action.CREATE_RETARGETED_CANDIDATE, Action.RECONSTRUCT_ON_NEW_BASE}:
         report.candidate_sha = str(supervisor.store.latest_candidate(report.task_id)["sha"])
         return base_sha, ("NEEDS_REVALIDATION", f"{base} advanced; the candidate was refreshed to a new SHA that must be validated and reviewed again")

@@ -237,7 +237,7 @@ def test_scenario_g_fixture_expecting_success_from_a_noop_provider_is_diagnosed_
     supervisor = Supervisor(store, tmp_path, integration_ref="main", hosted_ci=ci)
     scope = TaskScope("durability", allowed_files=("tests/**",), forbidden_files=())
 
-    decision = supervisor.assess_ci(TASK, CAND, BASE, scope=scope)
+    decision = supervisor.assess_ci(TASK, CAND, BASE, scope=scope, candidate_changed_files=(test_path,))
 
     assert decision.condition is Condition.CI_BROKEN_FRAGILE_TEST  # diagnosed as a test problem, not a production defect
     assert decision.action is Action.FIX_TEST_FIXTURE
@@ -273,7 +273,7 @@ def test_scenario_g_a_test_that_correctly_expects_failure_is_not_a_defect() -> N
 def test_scenario_g_defect_outside_the_task_scope_is_deferred_not_fixed() -> None:
     log = _observation_log("tests/test_other.py::test_noop", "tests/test_other.py")
     candidate = _run(CAND, unit=_failed("unit", log, ("tests/test_other.py::test_noop",)))
-    diagnosis = diagnose_ci(candidate, _run(BASE, unit=Conclusion.SUCCESS), observations=observations_from_log(log))
+    diagnosis = diagnose_ci(candidate, _run(BASE, unit=Conclusion.SUCCESS), observations=observations_from_log(log), candidate_changed_files=("tests/test_other.py",))
     in_scope = plan_ci_response(diagnosis, task_id=TASK, scope=TaskScope("o", allowed_files=("tests/**",)))
     out_of_scope = plan_ci_response(diagnosis, task_id=TASK, scope=TaskScope("o", allowed_files=("src/widget/**",)))
     assert in_scope.action is Action.FIX_TEST_FIXTURE
