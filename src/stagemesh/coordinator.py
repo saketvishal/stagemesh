@@ -3,23 +3,36 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from .audit import record_audit
 from .contract_binding import contract_for_candidate
-from .diagnosis import DIAGNOSIS_EVENT, DIAGNOSIS_STOP_EVENT, PROVIDER_NO_PROGRESS, STALE_BASELINE, Diagnosis, DiagnosisPolicy, diagnose
+from .diagnosis import (
+    DIAGNOSIS_EVENT,
+    DIAGNOSIS_STOP_EVENT,
+    PROVIDER_NO_PROGRESS,
+    STALE_BASELINE,
+    Diagnosis,
+    DiagnosisPolicy,
+    diagnose,
+)
 from .domain import EvidenceKind, EvidenceStatus, ExecutionStatus, Stage, TaskStatus
 from .execution import Executor, FakeExecutor
 from .integration import Integrator
 from .lifecycle import evidence_allows_advance
 from .persistence import Store
 from .process_identity import classify_process, process_identity
+from .provider_pool import pool_exhaustion_evidence
 from .remediation import RemediationPolicy
 from .review import Reviewer, independent_review_verified
 from .scheduling import Scheduler
 from .serialized_integration import REBASE_CONFLICT, STALE_BASE
 from .validation import Validator
-from .workspace_guard import EXTERNAL_WORKSPACE_MUTATION, WorkspaceMutation, verify_candidate_workspace
-
+from .workspace_guard import (
+    EXTERNAL_WORKSPACE_MUTATION,
+    WorkspaceMutation,
+    verify_candidate_workspace,
+)
 
 _REF_STATE_CODES = frozenset({REBASE_CONFLICT, STALE_BASE})
 
@@ -47,7 +60,9 @@ class Coordinator:
         require_independent_review: bool = False,
         worker_id: str = "local-worker",
         diagnosis_policy: DiagnosisPolicy | None = None,
+        guard: Any | None = None,
     ):
+        self.guard = guard  # optional autonomy supervisor: allow(), integration_verified(), recover_unknown(), execution_finished(), candidate_committed()
         self.worker_id = worker_id
         self.diagnosis_policy = diagnosis_policy or DiagnosisPolicy()
         self.store = store
@@ -170,11 +185,30 @@ class Coordinator:
                 )
                 self._block_on_mutation(task_id, "IMPLEMENT")
                 return 1
+            if result.already_satisfied:
+                self.store.release_claim(claim_id)
+                if self.guard is not None:
+                    self.guard.execution_finished(task_id)
+                self.store.advance_task(task_id, Stage.DONE)
+                record_audit(
+                    self.store,
+                    "task.already_satisfied",
+                    {
+                        "task_id": task_id,
+                        "claim_id": claim_id,
+                        "executor": self.executor.name,
+                        "candidate_sha": None,
+                        **(result.satisfaction or {}),
+                    },
+                )
+                return 1
             if result.capacity_failure:
                 # Provider is unavailable (not-found, rate-limit, capacity exhausted).
                 # Release the claim immediately so the task can be re-dispatched rather
                 # than being stranded until lease TTL expires.
                 self.store.release_claim(claim_id)
+                if self.guard is not None:
+                    self.guard.execution_finished(task_id)  # whatever the provider left behind is the owner's, not a second writer's
                 record_audit(
                     self.store,
                     "task.capacity_failure",
@@ -183,10 +217,13 @@ class Coordinator:
                         "claim_id": claim_id,
                         "executor": self.executor.name,
                         "reason": result.failure_reason or "unknown_capacity_failure",
+                        **pool_exhaustion_evidence(result.failure_reason, result.provider_attempts),
                     },
                 )
                 return 0
             if result.status is ExecutionStatus.SUCCEEDED and result.candidate_sha and result.durable_handoff:
+                if self.guard is not None:
+                    self.guard.candidate_committed(task_id, result.candidate_sha)  # StageMesh's own commit is registered, not inferred
                 self.store.advance_task(task_id, Stage.VALIDATE)
                 record_audit(
                     self.store,
@@ -206,12 +243,15 @@ class Coordinator:
                 reason=reason,
                 candidate_sha=result.candidate_sha,
                 durable_handoff=result.durable_handoff,
+                provider_attempts=result.provider_attempts,
             )
             return 0
         candidate = self.store.latest_candidate(task_id)
         if candidate is None or not candidate["durable_handoff"]:
             return 0
         sha = str(candidate["sha"])
+        if self.guard is not None and not self.guard.allow(stage, task_id, sha):
+            return 0  # fail closed: the supervisor recorded why (external mutation, evidence not bound to this candidate, ...)
         if stage is Stage.VALIDATE:
             if not self._workspace_intact(task_id, sha, "VALIDATE:before_validation"):
                 return 1
@@ -270,9 +310,12 @@ class Coordinator:
             if execution["task_id"] != task_id or execution["kind"] != "IMPLEMENTATION":
                 continue
             saved = self.store.execution_process_identity(execution["id"])
-            if classify_process(saved, process_identity(saved.pid)) == "DEAD":
+            state = classify_process(saved, process_identity(saved.pid))
+            if state == "DEAD":
                 self.store.mark_orphan_running_execution_failed(execution["id"], "DEAD_PROCESS_IDENTITY")
                 continue
+            if state == "UNKNOWN" and self.guard is not None and self.guard.recover_unknown(task_id, str(execution["id"])):
+                continue  # fenced under the explicit recovery policy (never declared dead): the task continues on a replacement worktree
             return True
         return False
 
@@ -285,12 +328,15 @@ class Coordinator:
         reason: str,
         candidate_sha: str | None,
         durable_handoff: bool,
+        provider_attempts: list | None = None,
     ) -> None:
         execution = self.store.latest_execution_for_claim(claim_id)
         if execution is not None and execution["status"] == ExecutionStatus.RUNNING:
             # The executor call has returned or raised, so its provider is no longer ours to wait on.
             self.store.finish_execution(execution["id"], ExecutionStatus.FAILED, result="executor_aborted")
         self.store.release_claim(claim_id)
+        if self.guard is not None:
+            self.guard.execution_finished(task_id)  # the owner's leftovers are not an external mutation
         record_audit(
             self.store,
             "task.implementation_unsuccessful",
@@ -304,6 +350,7 @@ class Coordinator:
                 "reason": reason,
                 "candidate_sha": candidate_sha,
                 "durable_handoff": durable_handoff,
+                **pool_exhaustion_evidence(reason, provider_attempts),
             },
         )
 
@@ -358,7 +405,8 @@ class Coordinator:
         if self.integrator.integration_ref is None:
             return True  # synthetic evidence-only integrator (no durable ref configured)
         if self.integrator.ref_contains(self.project, sha):
-            return True
+            # DONE only after integration is verified: expected content landed and post-merge checks passed.
+            return self.guard is None or bool(self.guard.integration_verified(task_id, sha))
         record_audit(
             self.store,
             "integration.ref_missing_candidate",

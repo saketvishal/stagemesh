@@ -79,6 +79,12 @@ from .work_transport import (
     write_packet_envelope,
 )
 from .workspaces import legacy_worktree_roots, worktree_root
+from .autonomy.cli import register_autonomy_commands
+from .autonomy.integration import SupervisedIntegrator
+from .autonomy.isolation import check_isolation
+from .autonomy.review_adapter import supervise_reviewer
+from .autonomy.supervisor import Supervisor
+from .autonomy.wiring import SUPERVISED_MIN_REFRESH_ATTEMPTS, load_settings
 from .workers import WorkerValidationError, heartbeat_worker, register_worker
 
 
@@ -210,8 +216,20 @@ def _build_coordinator(
     independent_review_configured = False
     require_independent_review = False
     integrator = None
+    guard = None
     integration_ref = None
     info_extra: dict[str, object] = {}
+    try:
+        autonomy = load_settings(runtime_dir(project))
+    except (OSError, ValueError) as exc:
+        print(f"autonomy config error: {exc}", file=sys.stderr)  # fail closed: never silently run unsupervised
+        raise _SetupError(2)
+    if autonomy.enabled:  # supervised runs fail closed if any runtime path resolves into another StageMesh checkout
+        isolation = check_isolation(project, check_running_code=True, expected_code_checkout=autonomy.code_checkout)
+        if not isolation.isolated:
+            for finding in isolation.findings:
+                print(f"isolation violation [{finding.code}]: {finding.message}", file=sys.stderr)
+            raise _SetupError(2)
     if not getattr(args, "dry_run", False):
         require_independent_review = config.require_independent_review
         try:
@@ -300,6 +318,25 @@ def _build_coordinator(
                 max_rebases=config.parallel.integration_rebase_attempts,
             )
         )
+        if autonomy.enabled:
+            guard = Supervisor(
+                store,
+                project,
+                integration_ref=integration_ref,
+                integration_policy=autonomy.integration_policy(),
+                recovery_policy=autonomy.recovery_policy(),
+                max_reconstructs=autonomy.max_reconstructs,
+            )
+            if reviewer is not None:
+                supervise_reviewer(reviewer, guard)  # only blocking in-scope findings can fail a candidate
+            integrator = SupervisedIntegrator(
+                guard,
+                integration_ref,
+                require_independent_review,
+                parallel.lock if parallel else IntegrationLock(runtime_dir(project) / "integration.lock"),
+                max_rebases=max(config.parallel.integration_rebase_attempts, SUPERVISED_MIN_REFRESH_ATTEMPTS),
+                on_event=parallel.on_integration_event if parallel else None,
+            )
     elif parallel:  # --dry-run: evidence-only integration, still behind the lock
         integrator = SerializedIntegrator(None, False, parallel.lock)
     coord = Coordinator(
@@ -311,6 +348,7 @@ def _build_coordinator(
         target=target,
         require_independent_review=require_independent_review,
         diagnosis_policy=_diagnosis_policy(config, project, {} if getattr(args, "dry_run", False) else adapter_by_name),
+        guard=guard,
         **({"worker_id": worker_id_for(target.task_id)} if parallel and target else {}),
     )
     info = {
@@ -2278,6 +2316,7 @@ def build_parser() -> argparse.ArgumentParser:
     ci_wait.add_argument("--max-seconds", type=float, default=1800)
     ci_wait.add_argument("--json", action="store_true")
     ci_wait.set_defaults(func=command_ci_wait)
+    register_autonomy_commands(sub)
     return parser
 
 

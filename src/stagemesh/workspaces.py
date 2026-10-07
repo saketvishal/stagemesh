@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import shutil
 import threading
 from pathlib import Path
@@ -11,6 +12,8 @@ from .config import load_config
 from .git import GitError, GitWorkspace
 from .persistence import Store
 
+
+_GENERATION_DIR = re.compile(r"^[0-9a-f]{12}-g\d+$")
 
 # `git worktree add` and the config writes that follow it touch shared repository files; parallel tasks take turns.
 _WORKTREE_CREATION = threading.Lock()
@@ -27,7 +30,29 @@ def worktree_root(project: Path) -> Path:
 
 
 def task_workspace(project: Path, task_id: str, root: Path | None = None) -> Path:
-    return (Path(root).resolve() if root is not None else worktree_root(project)) / _task_key(task_id)
+    base = Path(root).resolve() if root is not None else worktree_root(project)
+    key = _task_key(task_id)
+    generation = worktree_generation(base, key)
+    return base / (f"{key}-g{generation}" if generation else key)
+
+
+def worktree_generation(root: Path, key: str) -> int:
+    """The active worktree generation of a task: 0 normally, higher after a fence replaced an execution of unknown identity."""
+    try:
+        return max(0, int((Path(root) / f"{key}.generation").read_text(encoding="utf-8").strip()))
+    except (OSError, ValueError):
+        return 0
+
+
+def advance_worktree_generation(project: Path, task_id: str) -> tuple[Path, Path]:
+    """Point the task at a fresh worktree path; the previous one is left exactly as it is. Returns (old, new) paths."""
+    root = worktree_root(project)
+    key = _task_key(task_id)
+    old = task_workspace(project, task_id, root)
+    generation = worktree_generation(root, key) + 1
+    root.mkdir(parents=True, exist_ok=True)
+    (root / f"{key}.generation").write_text(str(generation), encoding="utf-8")
+    return old, root / f"{key}-g{generation}"
 
 
 def prepare_task_workspace(project: Path, task_id: str) -> Path:
@@ -87,7 +112,7 @@ def sweep_task_worktrees(project: Path, store: Store) -> list[dict[str, str]]:
     for entry in sorted(root.iterdir()):
         if not entry.is_dir():
             continue
-        row = tasks.get(entry.name)
+        row = tasks.get(entry.name.split("-g", 1)[0] if _GENERATION_DIR.match(entry.name) else entry.name)
         if row is None:
             reason, task_id = "no task owns this worktree", None
         elif row["status"] == "DONE" or row["stage"] == "DONE":
@@ -166,6 +191,9 @@ NO_IMPLEMENTATION_CHANGE = "no_implementation_change"
 
 def record_task_baseline(store: Store, task_id: str, run_path: Path) -> str:
     """Capture the task's starting SHA before the first provider run; it never changes afterwards."""
+    from .autonomy.hooks import workspace_handed_to_execution  # opt-in supervisor; a no-op unless the project enabled it
+
+    workspace_handed_to_execution(store, task_id, run_path)
     existing = store.task_baseline(task_id)
     if existing is not None:
         return existing
@@ -181,6 +209,9 @@ def commit_implementation_candidate(
     attribution: GitAttribution | None = None,
 ) -> str | None:
     """Commit the worktree and return the candidate SHA, or None when it is not a real new change."""
+    from .autonomy.hooks import before_candidate_commit  # opt-in supervisor; a no-op unless the project enabled it
+
+    before_candidate_commit(store, task_id, run_path)  # a second writer's commit is never adopted into the candidate
     workspace = GitWorkspace(run_path)
     sha = workspace.commit_all(message, attribution=attribution)
     if sha.startswith("synthetic-") or sha == baseline_sha:

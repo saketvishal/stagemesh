@@ -15,14 +15,17 @@ from typing import Any
 from .capacity import CapacityKind
 from .concurrency import ProviderLimiter
 from .config import BUILTIN_PROVIDERS, SELECTION_POLICIES
-from .execution import PROVIDER_TIMEOUT, ExecutionResult, Executor
+from .contract_binding import bound_contract_from_record
+from .contracts import candidate_workspace, run_gate
 from .domain import ExecutionKind, ExecutionStatus
+from .execution import PROVIDER_TIMEOUT, ExecutionResult, Executor
+from .git import GitError
 from .persistence import Store
 from .providers import RuntimeCommandAdapter
 from .review import INFRASTRUCTURE_FAILURE
 from .routing import RoutingMode
 from .workspace_guard import EXTERNAL_WORKSPACE_MUTATION, WorkspaceMutation, owned_workspace
-from .workspaces import task_workspace
+from .workspaces import NO_IMPLEMENTATION_CHANGE, task_workspace
 
 IMPLEMENT = "IMPLEMENT"
 REVIEW = "REVIEW"
@@ -33,6 +36,25 @@ DEFAULT_FAILURE_COOLDOWN_SECONDS = 900.0
 PROVIDER_FAILURE_EVENT = "provider.failure"
 PROVIDER_SELECTION_EVENT = "provider.selection"
 PROVIDER_USED_EVENT = "provider.used"
+PROVIDER_NO_PROGRESS_EVENT = "provider.no_progress"
+ALL_IMPLEMENTATION_PROVIDERS_NO_PROGRESS = "all_implementation_providers_no_progress"
+ALL_IMPLEMENTATION_PROVIDERS_EXHAUSTED = "all_implementation_providers_exhausted"
+ALL_IMPLEMENTATION_PROVIDERS_FAILED = "all_implementation_providers_failed"
+POOL_EXHAUSTED_REASONS = (
+    ALL_IMPLEMENTATION_PROVIDERS_NO_PROGRESS,
+    ALL_IMPLEMENTATION_PROVIDERS_EXHAUSTED,
+    ALL_IMPLEMENTATION_PROVIDERS_FAILED,
+)
+_CAPACITY_OUTCOMES = frozenset(
+    {
+        "quota_rate_limit",
+        "provider_unavailable",
+        "authentication_failure",
+        "transient_provider_failure",
+        "provider_failure",
+    }
+)
+TASK_ALREADY_SATISFIED = "task_already_satisfied"
 
 
 @dataclass(frozen=True)
@@ -174,9 +196,50 @@ class ProviderPool:
                 return f"recent_failure: {payload.get('reason')} {age}s ago (cooldown {int(self.cooldown_seconds)}s)"
         return None
 
-    def record_failure(self, store: Store, stage: str, task_id: str, provider: str, reason: str) -> None:
+    def record_failure(
+        self,
+        store: Store,
+        stage: str,
+        task_id: str,
+        provider: str,
+        reason: str,
+        *,
+        provider_output: str | None = None,
+        retry_after: str | None = None,
+        next_provider: str | None = None,
+    ) -> None:
+        payload: dict[str, object] = {"task_id": task_id, "stage": stage, "provider": provider, "reason": reason[:300]}
+        if provider_output:
+            payload["provider_output"] = provider_output[:500]
+        if retry_after:
+            payload["retry_after"] = retry_after[:120]
+        if next_provider:
+            payload["next_provider"] = next_provider
+        store.add_audit_event(PROVIDER_FAILURE_EVENT, payload)
+
+    def record_no_progress(
+        self,
+        store: Store,
+        stage: str,
+        task_id: str,
+        provider: str,
+        *,
+        next_provider: str | None,
+        sequence: list[str],
+    ) -> None:
+        """A successful invocation that changed nothing while the task is still unproven. Not a failure cooldown."""
         store.add_audit_event(
-            PROVIDER_FAILURE_EVENT, {"task_id": task_id, "stage": stage, "provider": provider, "reason": reason[:300]}
+            PROVIDER_NO_PROGRESS_EVENT,
+            {
+                "task_id": task_id,
+                "stage": stage,
+                "provider": provider,
+                "result": NO_IMPLEMENTATION_CHANGE,
+                "classification": "no_progress",
+                "task_unresolved": True,
+                "next_provider": next_provider,
+                "sequence": list(sequence),
+            },
         )
 
     def kind(self, name: str) -> str:
@@ -392,8 +455,19 @@ class FallbackReviewAdapter:
                 self.pool.log(f"  final review provider: {adapter.name} ({self.pool.kind(adapter.name)})")
                 self.pool.record_use(self.store, REVIEW, self.task_id, adapter.name, "ANSWERED")
                 return response
+            evidence = _infrastructure_evidence(response)
+            upcoming = next((item.name for item in self.adapters if item.name not in {a["provider"] for a in self.attempts} and item.name != adapter.name), None)
             self.attempts.append({"provider": adapter.name, "reason": reason})
-            self.pool.record_failure(self.store, REVIEW, self.task_id, adapter.name, reason)
+            self.pool.record_failure(
+                self.store,
+                REVIEW,
+                self.task_id,
+                adapter.name,
+                reason,
+                provider_output=evidence.get("provider_output"),
+                retry_after=evidence.get("retry_after"),
+                next_provider=upcoming,
+            )
             if limiter is not None:  # an unavailable reviewer is unavailable for every task, not just this one
                 limiter.cool_down(adapter.name, self.pool.cooldown_seconds, reason)
             previous = adapter.name
@@ -401,14 +475,31 @@ class FallbackReviewAdapter:
         return response
 
 
-def _infrastructure_reason(response: str) -> str | None:
+def _infrastructure_payload(response: str) -> dict | None:
     try:
         parsed = json.loads(response)
     except (TypeError, ValueError):
         return None
     if isinstance(parsed, dict) and parsed.get("decision") == INFRASTRUCTURE_FAILURE:
-        return str(parsed.get("reason") or "review_provider_failure")
+        return parsed
     return None
+
+
+def _infrastructure_reason(response: str) -> str | None:
+    parsed = _infrastructure_payload(response)
+    if parsed is None:
+        return None
+    return str(parsed.get("reason") or "review_provider_failure")
+
+
+def _infrastructure_evidence(response: str) -> dict[str, str]:
+    parsed = _infrastructure_payload(response) or {}
+    evidence: dict[str, str] = {}
+    for key in ("provider_output", "retry_after"):
+        value = parsed.get(key)
+        if isinstance(value, str) and value:
+            evidence[key] = value
+    return evidence
 
 
 class PooledExecutor(Executor):
@@ -434,7 +525,9 @@ class PooledExecutor(Executor):
                 failure_reason="no_implementation_provider_available: " + describe_verdicts(verdicts),
             )
         failures: list[str] = []
+        no_progress: list[str] = []
         reasons: list[str] = []
+        walk: list[dict[str, str]] = []
         limiter = self.pool.limiter
         remaining = list(eligible)
         index = 0
@@ -455,7 +548,8 @@ class PooledExecutor(Executor):
                     log(f"  provider {remaining[0].name} is at capacity -> using {adapter.name}")
             remaining.remove(adapter)
             if index:
-                log(f"  fallback: {previous_name} failed ({reasons[-1]}) -> trying {adapter.name}")
+                verb = "made no progress" if reasons[-1].startswith(NO_IMPLEMENTATION_CHANGE) else "failed"
+                log(f"  fallback: {previous_name} {verb} ({reasons[-1]}) -> trying {adapter.name}")
             log(
                 f"  selected implementation provider {adapter.name} ({self.pool.kind(adapter.name)}): "
                 f"{self.pool.why(IMPLEMENT, adapter.name, index == 0)}"
@@ -479,9 +573,55 @@ class PooledExecutor(Executor):
                 reason = result.failure_reason or "provider_failure"
                 reasons.append(reason)
                 failures.append(f"{adapter.name}: {reason}")
-                self.pool.record_failure(store, IMPLEMENT, task_id, adapter.name, reason)
+                classification = "timeout" if result.failure_reason == PROVIDER_TIMEOUT else "capacity"
+                walk.append({"provider": adapter.name, "outcome": reason, "classification": classification})
+                nxt = remaining[0].name if remaining else None
+                self.pool.record_failure(
+                    store,
+                    IMPLEMENT,
+                    task_id,
+                    adapter.name,
+                    reason,
+                    provider_output=result.provider_output,
+                    retry_after=result.retry_after,
+                    next_provider=nxt,
+                )
                 if limiter is not None and result.capacity_failure:
                     limiter.cool_down(adapter.name, self.pool.cooldown_seconds, reason)
+                try:
+                    _reset_worktree(store, project, task_id, claim_id)
+                except WorkspaceMutation:
+                    return ExecutionResult(ExecutionStatus.FAILED, failure_reason=EXTERNAL_WORKSPACE_MUTATION)
+                continue
+            if result.failure_reason == NO_IMPLEMENTATION_CHANGE and result.status is ExecutionStatus.FAILED:
+                proof = prove_task_already_satisfied(store, project, task_id)
+                if proof is not None:
+                    self.pool.record_use(store, IMPLEMENT, task_id, adapter.name, TASK_ALREADY_SATISFIED)
+                    log(
+                        f"  task already satisfied on {proof['baseline_sha'][:12]} by acceptance gates "
+                        f"{', '.join(proof['acceptance_criteria'])}; provider {adapter.name} changed nothing"
+                    )
+                    return ExecutionResult(
+                        ExecutionStatus.SUCCEEDED,
+                        failure_reason=TASK_ALREADY_SATISFIED,
+                        already_satisfied=True,
+                        satisfaction={**proof, "provider": adapter.name, "task_id": task_id},
+                    )
+                nxt = remaining[0].name if remaining else None
+                sequence = [item["provider"] for item in walk] + [adapter.name]
+                self.pool.record_no_progress(
+                    store, IMPLEMENT, task_id, adapter.name, next_provider=nxt, sequence=sequence
+                )
+                reason = f"{NO_IMPLEMENTATION_CHANGE}; task unresolved"
+                reasons.append(reason)
+                no_progress.append(f"{adapter.name}: {NO_IMPLEMENTATION_CHANGE}")
+                walk.append(
+                    {
+                        "provider": adapter.name,
+                        "outcome": NO_IMPLEMENTATION_CHANGE,
+                        "classification": "no_progress",
+                    }
+                )
                 try:
                     _reset_worktree(store, project, task_id, claim_id)
                 except WorkspaceMutation:
@@ -490,12 +630,112 @@ class PooledExecutor(Executor):
             self.pool.record_use(store, IMPLEMENT, task_id, adapter.name, str(result.status))
             log(f"  final implementation provider: {adapter.name} ({self.pool.kind(adapter.name)}); candidate {result.candidate_sha or '-'}; result {result.status}")
             return result
-        log("  REFUSED: every eligible implementation provider failed: " + "; ".join(failures))
+        ordered = [f"{item['provider']}: {item['outcome']}" for item in walk]
+        if no_progress and not failures:
+            log("  REFUSED: every eligible implementation provider made no progress: " + "; ".join(ordered))
+            return ExecutionResult(
+                ExecutionStatus.FAILED,
+                failure_reason=ALL_IMPLEMENTATION_PROVIDERS_NO_PROGRESS + ": " + "; ".join(ordered),
+                provider_attempts=walk,
+            )
+        if no_progress and failures:
+            log("  REFUSED: every eligible implementation provider stopped without a candidate: " + "; ".join(ordered))
+            return ExecutionResult(
+                ExecutionStatus.FAILED,
+                failure_reason=ALL_IMPLEMENTATION_PROVIDERS_EXHAUSTED + ": " + "; ".join(ordered),
+                provider_attempts=walk,
+            )
+        log("  REFUSED: every eligible implementation provider failed: " + "; ".join(ordered))
         return ExecutionResult(
             ExecutionStatus.FAILED,
             capacity_failure=True,
-            failure_reason="all_implementation_providers_failed: " + "; ".join(failures),
+            failure_reason=ALL_IMPLEMENTATION_PROVIDERS_FAILED + ": " + "; ".join(ordered),
+            provider_attempts=walk,
         )
+
+
+def _classification(outcome: str) -> str:
+    if outcome == PROVIDER_TIMEOUT:
+        return "timeout"
+    if outcome == NO_IMPLEMENTATION_CHANGE:
+        return "no_progress"
+    if outcome in _CAPACITY_OUTCOMES:
+        return "capacity"
+    return outcome or "unknown"
+
+
+def pool_exhaustion_evidence(reason: str | None, attempts: list | None = None) -> dict[str, object]:
+    """Structured audit for a pass that tried every eligible implementation provider and produced no candidate."""
+    text = reason or ""
+    prefix = next((item for item in POOL_EXHAUSTED_REASONS if text == item or text.startswith(item + ":")), None)
+    if prefix is None and not attempts:
+        return {}
+    if attempts:
+        outcomes = [
+            {
+                "provider": str(item.get("provider") or ""),
+                "outcome": str(item.get("outcome") or ""),
+                "classification": str(item.get("classification") or _classification(str(item.get("outcome") or ""))),
+            }
+            for item in attempts
+        ]
+    else:
+        body = text[len(prefix) + 2 :] if prefix and text.startswith(prefix + ": ") else ""
+        outcomes = []
+        for part in [piece.strip() for piece in body.split(";") if piece.strip()]:
+            provider, separator, outcome = part.partition(":")
+            outcome = outcome.strip() if separator else part
+            provider = provider.strip() if separator else ""
+            outcomes.append(
+                {"provider": provider, "outcome": outcome, "classification": _classification(outcome)}
+            )
+    return {
+        "pool_exhausted": True,
+        "candidate_produced": False,
+        "provider_sequence": [item["provider"] for item in outcomes if item["provider"]],
+        "provider_outcomes": outcomes,
+        "no_further_provider": "every eligible configured implementation provider was exhausted",
+    }
+
+
+def prove_task_already_satisfied(store: Store, project: Path, task_id: str) -> dict[str, object] | None:
+    """Proof that the frozen baseline already meets every acceptance criterion via its named required test.
+
+    Fail closed when the contract has no executable criterion, a criterion is not exactly a required-test name,
+    or any of those gates fails. Provider text, exit code, and an empty diff are not proof.
+    """
+    row = store.task_contract(task_id)
+    if row is None:
+        return None
+    try:
+        bound = bound_contract_from_record(dict(row))
+    except (TypeError, ValueError):
+        return None
+    contract = bound.contract
+    criteria = contract.acceptance_criteria
+    baseline = bound.baseline_sha
+    if not contract.explicit or not criteria or not baseline or len(set(criteria)) != len(criteria):
+        return None
+    by_name = {gate.name: gate for gate in contract.required_tests}
+    gates = []
+    for criterion in criteria:
+        gate = by_name.get(criterion)
+        if gate is None:
+            return None
+        gates.append(gate)
+    try:
+        with candidate_workspace(project, baseline) as checkout:
+            results = [run_gate(checkout, gate) for gate in gates]
+    except (GitError, OSError):
+        return None
+    if not results or any(result.status != "PASSED" for result in results):
+        return None
+    return {
+        "baseline_sha": baseline,
+        "contract_hash": bound.digest,
+        "acceptance_criteria": list(criteria),
+        "gates": [{"name": result.name, "status": result.status, "returncode": result.returncode} for result in results],
+    }
 
 
 def _reset_worktree(store: Store, project: Path, task_id: str, claim_id: str | None) -> None:
