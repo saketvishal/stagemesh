@@ -190,19 +190,26 @@ class GitHubHostedCI(GitHubClientBase):
             runs.extend(batch)
             if len(batch) < 100 or len(runs) >= int(payload.get("total_count") or 0):
                 break
-        by_name: dict[str, list[dict]] = {}
+        # Re-runs of a check are further check runs of the SAME check suite and name: within a suite the newest decides and earlier ones
+        # are attempts. Same-named checks from DIFFERENT suites (other workflows or apps) are independent gates: the worst verdict wins,
+        # so a later green can never hide an earlier red.
+        suites: dict[tuple[str, str], list[dict]] = {}
         for run in runs:
-            by_name.setdefault(str(run.get("name") or "unnamed"), []).append(run)
-        gates: dict[str, GateOutcome] = {}
-        complete = True
-        for attempts in by_name.values():
-            # Re-runs of a check appear as further check runs with the same name: the newest is the verdict, earlier ones are attempts.
+            suite = str((run.get("check_suite") or {}).get("id") or "")
+            suites.setdefault((suite, str(run.get("name") or "unnamed")), []).append(run)
+        per_name: dict[str, list[GateOutcome]] = {}
+        for (_suite, name), attempts in suites.items():
             attempts.sort(key=lambda r: (str(r.get("started_at") or ""), int(r.get("id") or 0)), reverse=True)
             latest = self._gate(attempts[0])
             earlier = tuple(self._gate(r).conclusion for r in attempts[1:] if r.get("status") == "completed")
-            outcome = GateOutcome(latest.name, latest.conclusion, latest.log, latest.failing_tests, earlier, latest.ref)
-            complete = complete and outcome.conclusion is not Conclusion.PENDING
-            gates[outcome.name] = outcome
+            per_name.setdefault(name, []).append(GateOutcome(latest.name, latest.conclusion, latest.log, latest.failing_tests, earlier, latest.ref))
+        severity = {Conclusion.PENDING: 3, Conclusion.FAILURE: 2, Conclusion.TIMED_OUT: 2, Conclusion.CANCELLED: 2}
+        gates: dict[str, GateOutcome] = {}
+        complete = True
+        for name, outcomes in per_name.items():
+            outcome = max(outcomes, key=lambda o: severity.get(o.conclusion, 0))
+            complete = complete and not any(o.conclusion is Conclusion.PENDING for o in outcomes)
+            gates[name] = outcome
         return HostedCIRun(sha, gates, complete=complete and bool(runs), environment="github-actions")
 
     def rerun(self, sha: str, gates) -> bool:

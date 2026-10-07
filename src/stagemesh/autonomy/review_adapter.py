@@ -26,7 +26,7 @@ def findings_from_response(raw: Any) -> list[ReviewFindingInput]:
     out: list[ReviewFindingInput] = []
     for item in raw if isinstance(raw, list) else []:
         if isinstance(item, dict):
-            severity = str(item.get("severity") or "error")
+            severity = str(item.get("severity") or "")  # absent stays absent: ReviewFindingInput then treats an unlabelled finding as blocking
             explicit = item.get("blocking")
             out.append(
                 ReviewFindingInput(

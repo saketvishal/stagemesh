@@ -145,7 +145,9 @@ def implicit_dependencies(prs: Mapping[int, PullRequest]) -> set[PRDependency]:
 
     A dependency that has merged still counts until the downstream PR is retargeted off its branch, so the landing is observed.
     """
-    heads = {pr.head_ref: pr.number for pr in prs.values() if pr.state in {PRState.OPEN, PRState.MERGED}}
+    heads: dict[str, int] = {}
+    for pr in sorted(prs.values(), key=lambda p: p.number):  # the newest PR that owns a head branch is its parent, whatever its state
+        heads[pr.head_ref] = pr.number
     return {PRDependency(pr.number, heads[pr.base_ref]) for pr in prs.values() if pr.state is PRState.OPEN and pr.base_ref in heads and heads[pr.base_ref] != pr.number}
 
 

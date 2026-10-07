@@ -102,7 +102,8 @@ def classify_finding(finding: ReviewFindingInput, scope: TaskScope, candidate_ch
         if explicitly_blocking and not in_scope:
             return ClassifiedFinding(finding, FindingClass.BLOCKING_OUT_OF_SCOPE, f"a blocking test defect in {finding.path}, outside this task's scope")
         return ClassifiedFinding(finding, FindingClass.TEST_DEFECT, "reviewer identified a test problem, not a production defect")
-    if finding.category == "suggestion" and not explicitly_blocking:
+    severity_defers = finding.severity.strip() == "" or not severity_blocks(finding.severity)  # no label at all, or a known mild one
+    if finding.category == "suggestion" and not explicitly_blocking and (finding.blocking is False or severity_defers):
         return ClassifiedFinding(finding, FindingClass.UNRELATED_SUGGESTION, "reviewer suggestion, not a defect in the objective")
     if finding.is_blocking:
         if in_scope:

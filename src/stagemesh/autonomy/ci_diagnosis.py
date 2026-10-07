@@ -276,11 +276,13 @@ def diagnose_gate(
         return GateDiagnosis(name, CIClass.PASSED, f"gate {candidate.conclusion.value}")
 
     signature = candidate.signature
-    if candidate.ambiguous_abort and base is not None and base.conclusion is Conclusion.SUCCESS:
-        if any(c.failed for c in candidate.rerun_conclusions):
-            return GateDiagnosis(name, CIClass.CANDIDATE_REGRESSION, "the gate was cancelled or timed out again on a rerun of the identical SHA: the candidate hangs", signature)
-        if Conclusion.SUCCESS not in candidate.rerun_conclusions:
-            return GateDiagnosis(
+    repeated = any(c.failed for c in candidate.rerun_conclusions)
+    if (candidate.ambiguous_abort or candidate.infrastructure) and base is not None and base.conclusion is Conclusion.SUCCESS and same_environment and repeated:
+        return GateDiagnosis(
+            name, CIClass.CANDIDATE_REGRESSION, "the gate failed again on a rerun of the identical SHA while base is green: that is the candidate", signature
+        )
+    if candidate.ambiguous_abort and base is not None and base.conclusion is Conclusion.SUCCESS and Conclusion.SUCCESS not in candidate.rerun_conclusions:
+        return GateDiagnosis(
                 name, CIClass.GENUINE_UNKNOWN, "cancelled or timed out with no infrastructure signature: rerun once before judging", signature, evidence="ABORT_UNCONFIRMED"
             )
     defect = next((d for d in defects if d.test_id in candidate.failing_tests), None)
@@ -293,7 +295,7 @@ def diagnose_gate(
     base_passed = base is not None and base.conclusion is Conclusion.SUCCESS
     base_signature = base.signature if base is not None and base_failed else ""
 
-    if base is not None and not same_environment and base_failed:
+    if base is not None and not same_environment and (base_failed or base_passed):
         # Different failures in different environments prove nothing about the candidate: base must be rerun where the candidate ran.
         return GateDiagnosis(
             name,
