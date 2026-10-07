@@ -516,10 +516,13 @@ def plan_ci_response(
             action = Action.FIX_TEST_FIXTURE
             detail["fix_tests"] = sorted({d.test_path for d in defects})
         elif defects:
-            action = Action.RECORD_AND_DEFER
+            # A real test defect this task may not touch still blocks the merge: ask the one specific question instead of stalling.
             detail["deferred_because"] = "the broken test is outside this task's allowed files"
+            return unresolved_ci_escalation(diagnosis, CIClass.BROKEN_FRAGILE_TEST, condition, task_id, shas, observed, detail, retried=False)
+        elif reruns_left > 0 and rerun_supported:
+            action = Action.RERUN_CI
         else:
-            action = Action.RERUN_CI if reruns_left > 0 else Action.RECORD_AND_DEFER
+            return unresolved_ci_escalation(diagnosis, CIClass.BROKEN_FRAGILE_TEST, condition, task_id, shas, observed, detail, retried=rerun_supported)
     elif overall is CIClass.INFRASTRUCTURE_FAILURE:
         detail["reruns_left"] = reruns_left
         if reruns_left > 0 and rerun_supported:

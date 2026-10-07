@@ -52,7 +52,9 @@ from .decisions import (
 )
 from .dependencies import (
     DependencyAssessment,
+    MergeOutcome,
     PRDependency,
+    PRState,
     PullRequest,
     PullRequestAdapter,
     evaluate_dependencies,
@@ -457,7 +459,7 @@ class Supervisor:
         previous = [d for d in decision_trace(self.store, task_id) if d.get("condition", "").startswith("DEPENDENCY_") or d.get("action") == Action.BLOCK_ON_DEPENDENCY.value]
         was_blocked = bool(previous) and previous[-1].get("action") == Action.BLOCK_ON_DEPENDENCY.value
         assessment = evaluate_dependencies(
-            pr_number, prs, edges, integration_ref=self.integration_ref.removeprefix("refs/heads/"), was_blocked=was_blocked, task_id=task_id
+            pr_number, prs, edges, integration_ref=self._integration_branch(), was_blocked=was_blocked, task_id=task_id
         )
         self.record(assessment.decision)
         if apply and assessment.refresh_required:  # landed dependencies: refresh even if this PR was never seen blocked
@@ -674,6 +676,13 @@ class Supervisor:
 
     def _merge_when_ready(self, task_id: str, pr_number: int, ci: CIDiagnosis | None, method: str, remote: str | None) -> AutonomyDecision:
         assert self.pull_requests is not None
+        existing = self.pull_requests.get(pr_number)
+        if existing is not None and existing.state is PRState.MERGED:
+            # Already merged (a retry after the host merged but the landing was not yet observable): verify, never merge or refresh again.
+            candidate = self.provenance(task_id).candidate_sha
+            if candidate is None or (existing.head_sha and existing.head_sha != candidate):
+                return self.record(self._pr_head_moved(task_id, pr_number, candidate or "none", existing.head_sha))
+            return self._finalize_landing(task_id, candidate, pr_number, existing.merge_commit_sha, method, remote)
         if remote:  # judge against the base as it is now, not as it was when this clone last looked
             fetched = self.facts.fetch_branch(remote, self._integration_branch())
             if fetched.returncode != 0:
@@ -732,15 +741,33 @@ class Supervisor:
                     Condition.MERGE_POLICY_UNSATISFIED, POLICY, Action.WAIT, task_id, {"pr": str(pr_number), "merge_refused": result.reason[:120]}, {"candidate": prov.candidate_sha}
                 )
             )
+        return self._finalize_landing(task_id, prov.candidate_sha, pr_number, result.sha, method, remote)
+
+    def _finalize_landing(self, task_id: str, candidate_sha: str, pr_number: int, merge_sha: str | None, method: str, remote: str | None) -> AutonomyDecision:
+        """The host merged `candidate_sha`: observe the landing, verify its content, and only then record integration and DONE."""
+
+        result = MergeOutcome(True, merge_sha)
         if remote:
-            self.facts.fetch_branch(remote, self._integration_branch())
-        post = self.verify_integration(task_id, prov.candidate_sha, merge_sha=result.sha)
+            fetched = self.facts.fetch_branch(remote, self._integration_branch())
+            if fetched.returncode != 0:
+                return self.record(
+                    AutonomyDecision(
+                        Condition.POST_MERGE_VERIFICATION_FAILED,
+                        POLICY,
+                        Action.WAIT,
+                        task_id,
+                        {"pr": str(pr_number), "reason": "base_unobservable_after_merge"},
+                        {"candidate": candidate_sha},
+                        {"fetch_error": fetched.stderr.strip()[:200], "merged": True, "retry": "run again: the PR is merged and will only be verified"},
+                    )
+                )
+        post = self.verify_integration(task_id, candidate_sha, merge_sha=result.sha)
         if not post.verified:
             return post.decision  # type: ignore[return-value]
-        bound = contract_for_candidate(self.store, task_id, prov.candidate_sha, self.project)
+        bound = contract_for_candidate(self.store, task_id, candidate_sha, self.project)
         self.store.add_evidence(
             task_id,
-            prov.candidate_sha,
+            candidate_sha,
             EvidenceKind.INTEGRATION,
             EvidenceStatus.PASSED,
             {
@@ -761,7 +788,7 @@ class Supervisor:
                 Action.MERGE,
                 task_id,
                 {"pr": str(pr_number), "method": method},
-                {"candidate": prov.candidate_sha, "merge": result.sha or "none", "integration": post.integration_sha or "unknown"},
+                {"candidate": candidate_sha, "merge": result.sha or "none", "integration": post.integration_sha or "unknown"},
                 {"verified": True, "task_stage": "DONE", "head_pinned": True},
             )
         )

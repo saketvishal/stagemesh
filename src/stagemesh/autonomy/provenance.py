@@ -10,7 +10,9 @@ ref or remote ref change that StageMesh did not register is an `EXTERNAL_WORKSPA
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -220,10 +222,29 @@ class OwnershipCheck:
 
 
 def tracked_fingerprint(worktree: Path) -> str:
-    """Digest of tracked content: HEAD tree plus the status of tracked files (untracked files are the agent's own working set)."""
+    """Digest of the worktree's content: HEAD tree, the status of tracked files, and every untracked file (name and content).
+
+    Untracked files matter: `git add -A` would sweep a second writer's file into the next candidate. The fingerprint is refreshed when
+    an owned execution ends, so whatever the owner itself left behind is part of the expectation and anything that changes later,
+    while the worktree is idle, is external.
+    """
     git = GitWorkspace(worktree)
     status = git.run("status", "--porcelain", "--untracked-files=no", check=False).stdout
-    return f"{git.run('rev-parse', 'HEAD^{tree}', check=False).stdout.strip()}|{status.strip()}"
+    untracked = [name for name in git.run("ls-files", "--others", "--exclude-standard", "-z", check=False).stdout.split("\0") if name]
+    digest = hashlib.sha256()
+    for name in sorted(untracked):
+        path = Path(worktree) / name
+        digest.update(name.encode("utf-8", "replace") + b"\0")
+        try:
+            if path.is_symlink():
+                digest.update(os.readlink(path).encode("utf-8", "replace"))
+            elif path.is_file():
+                with path.open("rb") as handle:
+                    for chunk in iter(lambda: handle.read(1 << 20), b""):
+                        digest.update(chunk)
+        except OSError:
+            digest.update(b"<unreadable>")
+    return f"{git.run('rev-parse', 'HEAD^{tree}', check=False).stdout.strip()}|{status.strip()}|{digest.hexdigest()[:24]}"
 
 
 def claim_workspace(

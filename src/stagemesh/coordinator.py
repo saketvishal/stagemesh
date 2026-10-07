@@ -169,6 +169,8 @@ class Coordinator:
                 # Release the claim immediately so the task can be re-dispatched rather
                 # than being stranded until lease TTL expires.
                 self.store.release_claim(claim_id)
+                if self.guard is not None:
+                    self.guard.execution_finished(task_id)  # whatever the provider left behind is the owner's, not a second writer's
                 record_audit(
                     self.store,
                     "task.capacity_failure",

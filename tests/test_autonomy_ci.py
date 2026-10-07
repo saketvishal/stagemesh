@@ -277,7 +277,8 @@ def test_scenario_g_defect_outside_the_task_scope_is_deferred_not_fixed() -> Non
     in_scope = plan_ci_response(diagnosis, task_id=TASK, scope=TaskScope("o", allowed_files=("tests/**",)))
     out_of_scope = plan_ci_response(diagnosis, task_id=TASK, scope=TaskScope("o", allowed_files=("src/widget/**",)))
     assert in_scope.action is Action.FIX_TEST_FIXTURE
-    assert out_of_scope.action is Action.RECORD_AND_DEFER
+    assert out_of_scope.action is Action.ESCALATE_TO_FOUNDER  # not fixed here, and not a silent dead end either: one specific question
+    assert out_of_scope.escalation.reason.value == "CI_FAILURE_UNRESOLVED"
     assert out_of_scope.detail["deferred_because"] == "the broken test is outside this task's allowed files"
 
 

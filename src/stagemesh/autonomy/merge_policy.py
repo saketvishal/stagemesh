@@ -247,6 +247,18 @@ def verify_integration(
             Condition.POST_MERGE_VERIFICATION_FAILED, POLICY, Action.WAIT, task_id, {"reason": "integration ref does not resolve"}, shas
         )
         return verdict
+    if merge_sha and not facts.exists(merge_sha):
+        verdict = PostMergeVerdict(False, integration_ref, main_sha)
+        verdict.decision = AutonomyDecision(
+            Condition.POST_MERGE_VERIFICATION_FAILED,
+            POLICY,
+            Action.WAIT,
+            task_id,
+            {"reason": "the landed commit is not observable locally yet"},
+            shas,
+            {"task_not_done": True, "retry": "verify again once the integration ref has been fetched"},
+        )
+        return verdict  # not evidence of anything wrong with the content: nobody is asked whether to revert
     landed_at = merge_sha or main_sha
     reachable = landed_at == main_sha or facts.is_ancestor(landed_at, main_sha)
     missing: list[str] = []

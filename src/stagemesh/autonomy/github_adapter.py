@@ -141,7 +141,12 @@ class GitHubPullRequests(GitHubClientBase):
         if status == 200 and isinstance(payload, dict) and payload.get("merged"):
             return MergeOutcome(True, str(payload.get("sha") or "") or None)
         if status == 409:
-            return MergeOutcome(False, None, "head_sha_mismatch")  # the head moved after validation: someone else wrote to the PR branch
+            lowered = message.casefold()
+            if "base branch was modified" in lowered:
+                return MergeOutcome(False, None, "base_modified")  # the base moved, not the head: the next pass refreshes against it
+            if "head branch was modified" in lowered:
+                return MergeOutcome(False, None, "head_sha_mismatch")  # the head moved after validation: someone else wrote to the PR branch
+            return MergeOutcome(False, None, f"409: {message}")
         if status == 405:
             return MergeOutcome(False, None, f"not_mergeable: {message}")
         return MergeOutcome(False, None, f"{status}: {message}")

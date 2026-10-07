@@ -294,9 +294,13 @@ def test_head_that_moves_between_the_check_and_the_merge_is_refused_by_the_host(
     repo, store, prs, supervisor, base, candidate, ci = _merge_rig(tmp_path)
 
     class Racy(FakePullRequests):
-        def get(self, number):  # the head moves right after StageMesh looked at it
+        looks = 0
+
+        def get(self, number):  # the head moves right after StageMesh took the look its decision is based on (the second one)
             pr = super().get(number)
-            self.prs[number] = PullRequest(number, "e" * 40, pr.head_ref, pr.base_ref, pr.state, pr.ci, pr.mergeable)
+            self.looks += 1
+            if self.looks >= 2:
+                self.prs[number] = PullRequest(number, "e" * 40, pr.head_ref, pr.base_ref, pr.state, pr.ci, pr.mergeable)
             return pr
 
     racy = Racy(prs.prs.values(), on_merge=prs.on_merge)
