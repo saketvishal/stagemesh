@@ -53,6 +53,7 @@ from .diagnosis import DiagnosisPolicy, diagnose, format_findings, make_adapter_
 from .parallel import ParallelRunner, ParallelSummary, SetupRefused, worker_id_for
 from .queue_run import QueueRunner
 from .recovery import RecoveryRefusal, format_doctor, rebaseline_task, rebind_contract, task_doctor
+from .run_report import build_run_report, format_run_report
 from .timing import format_task_timing, task_timing
 from .run_ready import RunSummary, format_step_update, format_stop, run_ready
 from .serialized_integration import SerializedIntegrator
@@ -1304,7 +1305,37 @@ def command_work(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_report_latest(args: argparse.Namespace) -> int:
+    """Structured report of the latest run (or `--task`): to stdout, and to `--output` (JSON for --json or a .json path, else text)."""
+    project = Path(args.project).resolve()
+    store = Store(db_path(project))
+    store.migrate()
+    try:
+        data = build_run_report(store, project, args.task)
+    except RecoveryRefusal as exc:
+        print(json.dumps(exc.to_dict(), indent=2, sort_keys=True) if args.json else f"refused ({exc.code}): {exc}", file=None if args.json else sys.stderr)
+        return 2
+    finally:
+        store.close()
+    as_json = args.json or bool(args.output and args.output.lower().endswith(".json"))
+    rendered = json.dumps(data, indent=2, sort_keys=True, default=str) if as_json else format_run_report(data)
+    if args.output:
+        output_path = WorkspaceBoundary(project).require_inside((project / args.output).resolve())  # relative to --project
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(rendered + "\n", encoding="utf-8")
+        if not args.json:
+            print(f"run report: {output_path}")
+            return 0
+    print(rendered)
+    return 0
+
+
 def command_report(args: argparse.Namespace) -> int:
+    if args.target == "latest":
+        return command_report_latest(args)
+    if args.task:
+        print("report: --task applies only to `report latest`", file=sys.stderr)
+        return 2
     project = Path(args.project).resolve()
     store = Store(db_path(project))
     store.migrate()
@@ -2135,7 +2166,9 @@ def build_parser() -> argparse.ArgumentParser:
     registry.add_argument("--registry", default=str(Path.home() / ".stagemesh" / "registry.json"))
     registry.add_argument("--json", action="store_true")
     registry.set_defaults(func=command_registry)
-    report = sub.add_parser("report")
+    report = sub.add_parser("report", help="Final vNext release report; `report latest` emits a structured report of the latest run")
+    report.add_argument("target", nargs="?", choices=["latest"])
+    report.add_argument("--task", help="with `latest`: report this task instead of the most recently active one")
     report.add_argument("--output")
     report.add_argument("--json", action="store_true")
     report.set_defaults(func=command_report)

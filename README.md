@@ -192,6 +192,11 @@ findings, evidence or audit events, and write an audit event (`task.contract_reb
 
 * `stagemesh task-doctor --task <id> [--json]` (read-only): stage/status, claims and executions, latest candidate, baseline (and
   whether it is stale), contract digest/version, latest validation failures and review findings, diagnosis, and the next command.
+* `stagemesh report latest [--task <id>] [--output <path>] [--json]` (read-only) emits a structured report of the latest run (the most
+  recently active task, or `--task`): branch, candidate commit SHA, task id, verdict and stage/status, files changed, validation
+  gates run with pass/fail counts, known-failures policy gates, review findings, next recommended action, and a PR URL when one is
+  recorded as external evidence for the candidate or in the task's source events. Counts are validation-gate counts; raw test-runner
+  output is not stored. `--output` writes text, or JSON for `--json` or a `.json` path (relative paths resolve against `--project`).
 * `stagemesh rebind-contract --task <id> [--validate] [--force] [--reason TEXT] [--json]` re-reads
   `.stagemesh/contracts/<id>.json`, canonicalizes it and replaces the frozen contract. The stored version is always this build's
   supported version, never copied from the old row (this repairs `unsupported bound contract version: 2`). It refuses when passed
