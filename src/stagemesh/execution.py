@@ -35,6 +35,7 @@ class ExecutionResult:
     retry_after: str | None = None
     already_satisfied: bool = False
     satisfaction: dict | None = None
+    provider_attempts: list | None = None
 
 
 _QUOTA = re.compile(

@@ -45,11 +45,15 @@ POOL_EXHAUSTED_REASONS = (
     ALL_IMPLEMENTATION_PROVIDERS_EXHAUSTED,
     ALL_IMPLEMENTATION_PROVIDERS_FAILED,
 )
-_OUTCOME_CLASS = {
-    "quota_rate_limit": "capacity",
-    "provider_timeout": "timeout",
-    "no_implementation_change": "no_progress",
-}
+_CAPACITY_OUTCOMES = frozenset(
+    {
+        "quota_rate_limit",
+        "provider_unavailable",
+        "authentication_failure",
+        "transient_provider_failure",
+        "provider_failure",
+    }
+)
 TASK_ALREADY_SATISFIED = "task_already_satisfied"
 
 
@@ -523,6 +527,7 @@ class PooledExecutor(Executor):
         failures: list[str] = []
         no_progress: list[str] = []
         reasons: list[str] = []
+        walk: list[dict[str, str]] = []
         limiter = self.pool.limiter
         remaining = list(eligible)
         index = 0
@@ -568,6 +573,8 @@ class PooledExecutor(Executor):
                 reason = result.failure_reason or "provider_failure"
                 reasons.append(reason)
                 failures.append(f"{adapter.name}: {reason}")
+                classification = "timeout" if result.failure_reason == PROVIDER_TIMEOUT else "capacity"
+                walk.append({"provider": adapter.name, "outcome": reason, "classification": classification})
                 nxt = remaining[0].name if remaining else None
                 self.pool.record_failure(
                     store,
@@ -601,13 +608,20 @@ class PooledExecutor(Executor):
                         satisfaction={**proof, "provider": adapter.name, "task_id": task_id},
                     )
                 nxt = remaining[0].name if remaining else None
-                sequence = [part.split(":", 1)[0] for part in no_progress] + [adapter.name]
+                sequence = [item["provider"] for item in walk] + [adapter.name]
                 self.pool.record_no_progress(
                     store, IMPLEMENT, task_id, adapter.name, next_provider=nxt, sequence=sequence
                 )
                 reason = f"{NO_IMPLEMENTATION_CHANGE}; task unresolved"
                 reasons.append(reason)
                 no_progress.append(f"{adapter.name}: {NO_IMPLEMENTATION_CHANGE}")
+                walk.append(
+                    {
+                        "provider": adapter.name,
+                        "outcome": NO_IMPLEMENTATION_CHANGE,
+                        "classification": "no_progress",
+                    }
+                )
                 try:
                     _reset_worktree(store, project, task_id, claim_id)
                 except WorkspaceMutation:
@@ -616,46 +630,65 @@ class PooledExecutor(Executor):
             self.pool.record_use(store, IMPLEMENT, task_id, adapter.name, str(result.status))
             log(f"  final implementation provider: {adapter.name} ({self.pool.kind(adapter.name)}); candidate {result.candidate_sha or '-'}; result {result.status}")
             return result
+        ordered = [f"{item['provider']}: {item['outcome']}" for item in walk]
         if no_progress and not failures:
-            log("  REFUSED: every eligible implementation provider made no progress: " + "; ".join(no_progress))
+            log("  REFUSED: every eligible implementation provider made no progress: " + "; ".join(ordered))
             return ExecutionResult(
                 ExecutionStatus.FAILED,
-                failure_reason=ALL_IMPLEMENTATION_PROVIDERS_NO_PROGRESS + ": " + "; ".join(no_progress),
+                failure_reason=ALL_IMPLEMENTATION_PROVIDERS_NO_PROGRESS + ": " + "; ".join(ordered),
+                provider_attempts=walk,
             )
         if no_progress and failures:
-            exhausted = failures + no_progress
-            log("  REFUSED: every eligible implementation provider stopped without a candidate: " + "; ".join(exhausted))
+            log("  REFUSED: every eligible implementation provider stopped without a candidate: " + "; ".join(ordered))
             return ExecutionResult(
                 ExecutionStatus.FAILED,
-                failure_reason=ALL_IMPLEMENTATION_PROVIDERS_EXHAUSTED + ": " + "; ".join(exhausted),
+                failure_reason=ALL_IMPLEMENTATION_PROVIDERS_EXHAUSTED + ": " + "; ".join(ordered),
+                provider_attempts=walk,
             )
-        log("  REFUSED: every eligible implementation provider failed: " + "; ".join(failures))
+        log("  REFUSED: every eligible implementation provider failed: " + "; ".join(ordered))
         return ExecutionResult(
             ExecutionStatus.FAILED,
             capacity_failure=True,
-            failure_reason=ALL_IMPLEMENTATION_PROVIDERS_FAILED + ": " + "; ".join(failures),
+            failure_reason=ALL_IMPLEMENTATION_PROVIDERS_FAILED + ": " + "; ".join(ordered),
+            provider_attempts=walk,
         )
 
 
-def pool_exhaustion_evidence(reason: str | None) -> dict[str, object]:
+def _classification(outcome: str) -> str:
+    if outcome == PROVIDER_TIMEOUT:
+        return "timeout"
+    if outcome == NO_IMPLEMENTATION_CHANGE:
+        return "no_progress"
+    if outcome in _CAPACITY_OUTCOMES:
+        return "capacity"
+    return outcome or "unknown"
+
+
+def pool_exhaustion_evidence(reason: str | None, attempts: list | None = None) -> dict[str, object]:
     """Structured audit for a pass that tried every eligible implementation provider and produced no candidate."""
     text = reason or ""
     prefix = next((item for item in POOL_EXHAUSTED_REASONS if text == item or text.startswith(item + ":")), None)
-    if prefix is None:
+    if prefix is None and not attempts:
         return {}
-    body = text[len(prefix) + 2 :] if text.startswith(prefix + ": ") else ""
-    outcomes: list[dict[str, str]] = []
-    for part in [piece.strip() for piece in body.split(";") if piece.strip()]:
-        provider, separator, outcome = part.partition(":")
-        outcome = outcome.strip() if separator else part
-        provider = provider.strip() if separator else ""
-        outcomes.append(
+    if attempts:
+        outcomes = [
             {
-                "provider": provider,
-                "outcome": outcome,
-                "classification": _OUTCOME_CLASS.get(outcome, outcome or "unknown"),
+                "provider": str(item.get("provider") or ""),
+                "outcome": str(item.get("outcome") or ""),
+                "classification": str(item.get("classification") or _classification(str(item.get("outcome") or ""))),
             }
-        )
+            for item in attempts
+        ]
+    else:
+        body = text[len(prefix) + 2 :] if prefix and text.startswith(prefix + ": ") else ""
+        outcomes = []
+        for part in [piece.strip() for piece in body.split(";") if piece.strip()]:
+            provider, separator, outcome = part.partition(":")
+            outcome = outcome.strip() if separator else part
+            provider = provider.strip() if separator else ""
+            outcomes.append(
+                {"provider": provider, "outcome": outcome, "classification": _classification(outcome)}
+            )
     return {
         "pool_exhausted": True,
         "candidate_produced": False,

@@ -585,7 +585,14 @@ def test_no_progress_then_timeout_exhausts_without_asking_for_a_provider(tmp_pat
 
     reason = _unsuccessful_reason(rig)
     assert reason.startswith("all_implementation_providers_exhausted")
-    assert "provider-b: provider_timeout" in reason and "provider-a: no_implementation_change" in reason
+    assert reason.index("provider-a: no_implementation_change") < reason.index("provider-b: provider_timeout")
+    payload = json.loads(
+        rig.store.conn.execute(
+            "SELECT payload FROM audit_events WHERE event_type='task.implementation_unsuccessful'"
+        ).fetchone()["payload"]
+    )
+    assert payload["provider_sequence"] == ["provider-a", "provider-b"]
+    assert [item["classification"] for item in payload["provider_outcomes"]] == ["no_progress", "timeout"]
     diagnosis = diagnose(rig.store, TASK, rig.project)
     assert diagnosis is not None
     assert "--provider" not in diagnosis.recommendation
@@ -636,6 +643,17 @@ def test_all_capacity_exhaustion_does_not_ask_for_a_provider(tmp_path: Path) -> 
     assert reason.startswith("all_implementation_providers_failed")
     diagnosis = diagnose(rig.store, TASK, rig.project)
     assert "--provider" not in diagnosis.recommendation
+
+
+def test_authentication_exhaustion_is_classified_as_capacity(tmp_path: Path) -> None:
+    rig = Rig(tmp_path, {"provider-a": "auth-fail", "provider-b": "weekly-limit"})
+    rig.coordinator.tick()
+    rig.coordinator.tick()
+    payload = json.loads(
+        rig.store.conn.execute("SELECT payload FROM audit_events WHERE event_type='task.capacity_failure'").fetchone()["payload"]
+    )
+    assert payload["provider_sequence"] == ["provider-a", "provider-b"]
+    assert [item["classification"] for item in payload["provider_outcomes"]] == ["capacity", "capacity"]
 
 
 def test_a_remaining_provider_is_still_attempted(tmp_path: Path) -> None:
