@@ -173,6 +173,23 @@ class Coordinator:
                 )
                 self._block_on_mutation(task_id, "IMPLEMENT")
                 return 1
+            if result.already_satisfied:
+                self.store.release_claim(claim_id)
+                if self.guard is not None:
+                    self.guard.execution_finished(task_id)
+                self.store.advance_task(task_id, Stage.DONE)
+                record_audit(
+                    self.store,
+                    "task.already_satisfied",
+                    {
+                        "task_id": task_id,
+                        "claim_id": claim_id,
+                        "executor": self.executor.name,
+                        "candidate_sha": None,
+                        **(result.satisfaction or {}),
+                    },
+                )
+                return 1
             if result.capacity_failure:
                 # Provider is unavailable (not-found, rate-limit, capacity exhausted).
                 # Release the claim immediately so the task can be re-dispatched rather

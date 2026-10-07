@@ -15,14 +15,17 @@ from typing import Any
 from .capacity import CapacityKind
 from .concurrency import ProviderLimiter
 from .config import BUILTIN_PROVIDERS, SELECTION_POLICIES
-from .execution import PROVIDER_TIMEOUT, ExecutionResult, Executor
+from .contract_binding import bound_contract_from_record
+from .contracts import candidate_workspace, run_gate
 from .domain import ExecutionKind, ExecutionStatus
+from .execution import PROVIDER_TIMEOUT, ExecutionResult, Executor
+from .git import GitError
 from .persistence import Store
 from .providers import RuntimeCommandAdapter
 from .review import INFRASTRUCTURE_FAILURE
 from .routing import RoutingMode
 from .workspace_guard import EXTERNAL_WORKSPACE_MUTATION, WorkspaceMutation, owned_workspace
-from .workspaces import task_workspace
+from .workspaces import NO_IMPLEMENTATION_CHANGE, task_workspace
 
 IMPLEMENT = "IMPLEMENT"
 REVIEW = "REVIEW"
@@ -33,6 +36,9 @@ DEFAULT_FAILURE_COOLDOWN_SECONDS = 900.0
 PROVIDER_FAILURE_EVENT = "provider.failure"
 PROVIDER_SELECTION_EVENT = "provider.selection"
 PROVIDER_USED_EVENT = "provider.used"
+PROVIDER_NO_PROGRESS_EVENT = "provider.no_progress"
+ALL_IMPLEMENTATION_PROVIDERS_NO_PROGRESS = "all_implementation_providers_no_progress"
+TASK_ALREADY_SATISFIED = "task_already_satisfied"
 
 
 @dataclass(frozen=True)
@@ -194,6 +200,31 @@ class ProviderPool:
         if next_provider:
             payload["next_provider"] = next_provider
         store.add_audit_event(PROVIDER_FAILURE_EVENT, payload)
+
+    def record_no_progress(
+        self,
+        store: Store,
+        stage: str,
+        task_id: str,
+        provider: str,
+        *,
+        next_provider: str | None,
+        sequence: list[str],
+    ) -> None:
+        """A successful invocation that changed nothing while the task is still unproven. Not a failure cooldown."""
+        store.add_audit_event(
+            PROVIDER_NO_PROGRESS_EVENT,
+            {
+                "task_id": task_id,
+                "stage": stage,
+                "provider": provider,
+                "result": NO_IMPLEMENTATION_CHANGE,
+                "classification": "no_progress",
+                "task_unresolved": True,
+                "next_provider": next_provider,
+                "sequence": list(sequence),
+            },
+        )
 
     def kind(self, name: str) -> str:
         return "built-in default provider" if name in BUILTIN_PROVIDERS else "custom provider"
@@ -478,6 +509,7 @@ class PooledExecutor(Executor):
                 failure_reason="no_implementation_provider_available: " + describe_verdicts(verdicts),
             )
         failures: list[str] = []
+        no_progress: list[str] = []
         reasons: list[str] = []
         limiter = self.pool.limiter
         remaining = list(eligible)
@@ -499,7 +531,8 @@ class PooledExecutor(Executor):
                     log(f"  provider {remaining[0].name} is at capacity -> using {adapter.name}")
             remaining.remove(adapter)
             if index:
-                log(f"  fallback: {previous_name} failed ({reasons[-1]}) -> trying {adapter.name}")
+                verb = "made no progress" if reasons[-1].startswith(NO_IMPLEMENTATION_CHANGE) else "failed"
+                log(f"  fallback: {previous_name} {verb} ({reasons[-1]}) -> trying {adapter.name}")
             log(
                 f"  selected implementation provider {adapter.name} ({self.pool.kind(adapter.name)}): "
                 f"{self.pool.why(IMPLEMENT, adapter.name, index == 0)}"
@@ -541,15 +574,95 @@ class PooledExecutor(Executor):
                 except WorkspaceMutation:
                     return ExecutionResult(ExecutionStatus.FAILED, failure_reason=EXTERNAL_WORKSPACE_MUTATION)
                 continue
+            if result.failure_reason == NO_IMPLEMENTATION_CHANGE and result.status is ExecutionStatus.FAILED:
+                proof = prove_task_already_satisfied(store, project, task_id)
+                if proof is not None:
+                    self.pool.record_use(store, IMPLEMENT, task_id, adapter.name, TASK_ALREADY_SATISFIED)
+                    log(
+                        f"  task already satisfied on {proof['baseline_sha'][:12]} by acceptance gates "
+                        f"{', '.join(proof['acceptance_criteria'])}; provider {adapter.name} changed nothing"
+                    )
+                    return ExecutionResult(
+                        ExecutionStatus.SUCCEEDED,
+                        failure_reason=TASK_ALREADY_SATISFIED,
+                        already_satisfied=True,
+                        satisfaction={**proof, "provider": adapter.name, "task_id": task_id},
+                    )
+                nxt = remaining[0].name if remaining else None
+                sequence = [part.split(":", 1)[0] for part in no_progress] + [adapter.name]
+                self.pool.record_no_progress(
+                    store, IMPLEMENT, task_id, adapter.name, next_provider=nxt, sequence=sequence
+                )
+                reason = f"{NO_IMPLEMENTATION_CHANGE}; task unresolved"
+                reasons.append(reason)
+                no_progress.append(f"{adapter.name}: {NO_IMPLEMENTATION_CHANGE}")
+                try:
+                    _reset_worktree(store, project, task_id, claim_id)
+                except WorkspaceMutation:
+                    return ExecutionResult(ExecutionStatus.FAILED, failure_reason=EXTERNAL_WORKSPACE_MUTATION)
+                continue
             self.pool.record_use(store, IMPLEMENT, task_id, adapter.name, str(result.status))
             log(f"  final implementation provider: {adapter.name} ({self.pool.kind(adapter.name)}); candidate {result.candidate_sha or '-'}; result {result.status}")
             return result
+        if no_progress and not failures:
+            log("  REFUSED: every eligible implementation provider made no progress: " + "; ".join(no_progress))
+            return ExecutionResult(
+                ExecutionStatus.FAILED,
+                failure_reason=ALL_IMPLEMENTATION_PROVIDERS_NO_PROGRESS + ": " + "; ".join(no_progress),
+            )
+        if no_progress and failures:
+            exhausted = failures + no_progress
+            log("  REFUSED: every eligible implementation provider stopped without a candidate: " + "; ".join(exhausted))
+            return ExecutionResult(
+                ExecutionStatus.FAILED,
+                failure_reason="all_implementation_providers_exhausted: " + "; ".join(exhausted),
+            )
         log("  REFUSED: every eligible implementation provider failed: " + "; ".join(failures))
         return ExecutionResult(
             ExecutionStatus.FAILED,
             capacity_failure=True,
             failure_reason="all_implementation_providers_failed: " + "; ".join(failures),
         )
+
+
+def prove_task_already_satisfied(store: Store, project: Path, task_id: str) -> dict[str, object] | None:
+    """Proof that the frozen baseline already meets every acceptance criterion via its named required test.
+
+    Fail closed when the contract has no executable criterion, a criterion is not exactly a required-test name,
+    or any of those gates fails. Provider text, exit code, and an empty diff are not proof.
+    """
+    row = store.task_contract(task_id)
+    if row is None:
+        return None
+    try:
+        bound = bound_contract_from_record(dict(row))
+    except (TypeError, ValueError):
+        return None
+    contract = bound.contract
+    criteria = contract.acceptance_criteria
+    baseline = bound.baseline_sha
+    if not contract.explicit or not criteria or not baseline or len(set(criteria)) != len(criteria):
+        return None
+    by_name = {gate.name: gate for gate in contract.required_tests}
+    gates = []
+    for criterion in criteria:
+        gate = by_name.get(criterion)
+        if gate is None:
+            return None
+        gates.append(gate)
+    try:
+        with candidate_workspace(project, baseline) as checkout:
+            results = [run_gate(checkout, gate) for gate in gates]
+    except (GitError, OSError):
+        return None
+    if not results or any(result.status != "PASSED" for result in results):
+        return None
+    return {
+        "baseline_sha": baseline,
+        "contract_hash": bound.digest,
+        "acceptance_criteria": list(criteria),
+        "gates": [{"name": result.name, "status": result.status, "returncode": result.returncode} for result in results],
+    }
 
 
 def _reset_worktree(store: Store, project: Path, task_id: str, claim_id: str | None) -> None:

@@ -41,13 +41,20 @@ SCRIPT = (
     "    sys.stderr.write(\"You've hit your weekly limit \\u00b7 resets 1am (America/Chicago)\"); sys.exit(1)\n"
     "if mode == 'impl-error':\n"
     "    sys.stderr.write('AssertionError: expected the capacity line once'); sys.exit(1)\n"
+    "if mode == 'noop':\n"
+    "    sys.exit(0)\n"
     "pathlib.Path('docs/a.md').write_text('by ' + mode + ' ' + (sys.argv[2] if len(sys.argv) > 2 else '') + '\\n')\n"
 )
 
 
 class Rig:
     def __init__(
-        self, tmp_path: Path, modes: dict[str, str | None], pools: dict[str, tuple[str, ...]] | None = None, **pool_kwargs
+        self,
+        tmp_path: Path,
+        modes: dict[str, str | None],
+        pools: dict[str, tuple[str, ...]] | None = None,
+        contract: dict | None = None,
+        **pool_kwargs,
     ):
         """modes: provider name -> behavior ('ok', 'auth-fail', 'review-rate-limit') or None for a missing CLI."""
         self.project = tmp_path / "repo"
@@ -64,7 +71,8 @@ class Rig:
         contracts.mkdir(parents=True)
         (contracts / f"{TASK}.json").write_text(
             json.dumps(
-                {
+                contract
+                or {
                     "objective": "docs only",
                     "allowed_files": ["docs/**"],
                     "required_tests": [{"name": "docs-static", "command": [sys.executable, "-c", "pass"]}],
@@ -419,3 +427,145 @@ def test_cli_refuses_at_startup_when_only_the_implementer_is_available(tmp_path:
         assert provider in err
     assert "cli_not_installed" in err
     assert Store(rig.project / ".stagemesh" / "stagemesh.sqlite3").latest_candidate(TASK) is None  # nothing ran
+
+
+def _no_progress_events(rig: Rig) -> list[dict]:
+    return [
+        json.loads(row["payload"])
+        for row in rig.store.conn.execute("SELECT payload FROM audit_events WHERE event_type='provider.no_progress' ORDER BY created_at, rowid")
+    ]
+
+
+def test_noop_provider_falls_through_when_the_task_is_still_unresolved(tmp_path: Path) -> None:
+    """Real Task #158 shape: provider A exits 0 with no diff and the objective is not proven satisfied."""
+    rig = Rig(
+        tmp_path,
+        {"provider-a": "noop", "provider-b": "ok"},
+        pools={IMPLEMENT: ("provider-a", "provider-b"), REVIEW: ("provider-b",)},
+    )
+
+    rig.tick(2)
+
+    candidate = rig.store.latest_candidate(TASK)
+    assert candidate is not None and candidate["produced_by"] == "provider-b"
+    assert "final implementation provider: provider-a" not in rig.text()
+    assert "made no progress (no_implementation_change; task unresolved) -> trying provider-b" in rig.text()
+    events = _no_progress_events(rig)
+    assert events[0]["provider"] == "provider-a"
+    assert events[0]["result"] == "no_implementation_change"
+    assert events[0]["task_unresolved"] is True
+    assert events[0]["next_provider"] == "provider-b"
+    assert events[0]["task_id"] == TASK
+    assert rig.store.task_remediation_count(TASK, "IMPLEMENT") == 0
+    assert "--provider" not in rig.text()
+
+
+def test_noop_completes_when_acceptance_gates_already_pass_on_the_baseline(tmp_path: Path) -> None:
+    gate = [sys.executable, "-c", "from pathlib import Path; assert Path('docs/a.md').read_text(encoding='utf-8')=='done\\n'"]
+    rig = Rig(
+        tmp_path,
+        {"provider-a": "noop", "provider-b": "ok"},
+        pools={IMPLEMENT: ("provider-a", "provider-b"), REVIEW: ("provider-b",)},
+        contract={
+            "objective": "docs already say done",
+            "allowed_files": ["docs/**"],
+            "acceptance_criteria": ["docs-already-done"],
+            "required_tests": [{"name": "docs-already-done", "command": gate}],
+        },
+    )
+    (rig.project / "docs" / "a.md").write_text("done\n", encoding="utf-8")
+    rig.git.commit_all("objective already present")
+
+    rig.tick(2)
+
+    task = rig.store.get_task(TASK)
+    assert task["stage"] == Stage.DONE and task["status"] == "DONE"
+    assert rig.store.latest_candidate(TASK) is None
+    assert _no_progress_events(rig) == []
+    assert "trying provider-b" not in rig.text()
+    proof = json.loads(rig.store.conn.execute("SELECT payload FROM audit_events WHERE event_type='task.already_satisfied'").fetchone()["payload"])
+    assert proof["provider"] == "provider-a"
+    assert proof["gates"][0]["name"] == "docs-already-done" and proof["gates"][0]["status"] == "PASSED"
+    assert rig.store.task_remediation_count(TASK, "IMPLEMENT") == 0
+
+
+def test_every_provider_no_progress_is_one_bounded_unresolved_result(tmp_path: Path) -> None:
+    from stagemesh.diagnosis import diagnose
+
+    rig = Rig(tmp_path, {"provider-a": "noop", "provider-b": "noop"})
+
+    assert rig.coordinator.tick() == 1  # plan
+    assert rig.coordinator.tick() == 0
+    assert rig.store.latest_candidate(TASK) is None
+    assert rig.stage == Stage.IMPLEMENT
+    assert rig.store.conn.execute("SELECT COUNT(*) FROM executions").fetchone()[0] == 2
+    reason = json.loads(
+        rig.store.conn.execute("SELECT payload FROM audit_events WHERE event_type='task.implementation_unsuccessful'").fetchone()["payload"]
+    )["reason"]
+    assert reason.startswith("all_implementation_providers_no_progress")
+    assert "provider-a: no_implementation_change" in reason and "provider-b: no_implementation_change" in reason
+    diagnosis = diagnose(rig.store, TASK, rig.project)
+    assert diagnosis is not None
+    assert "--provider" not in diagnosis.recommendation
+    assert rig.store.task_remediation_count(TASK, "IMPLEMENT") == 0
+    assert not rig.store.conn.execute("SELECT 1 FROM evidence").fetchone()
+
+
+def test_capacity_then_no_progress_then_success_walks_the_pool(tmp_path: Path) -> None:
+    rig = Rig(
+        tmp_path,
+        {"provider-a": "weekly-limit", "provider-b": "noop", "provider-c": "ok"},
+        pools={IMPLEMENT: ("provider-a", "provider-b", "provider-c"), REVIEW: ("provider-c",)},
+    )
+
+    rig.tick(2)
+
+    assert rig.store.latest_candidate(TASK)["produced_by"] == "provider-c"
+    text = rig.text()
+    assert "fallback: provider-a failed (quota_rate_limit) -> trying provider-b" in text
+    assert "fallback: provider-b made no progress (no_implementation_change; task unresolved) -> trying provider-c" in text
+
+
+def test_no_progress_then_capacity_then_success_walks_the_pool(tmp_path: Path) -> None:
+    rig = Rig(
+        tmp_path,
+        {"provider-a": "noop", "provider-b": "weekly-limit", "provider-c": "ok"},
+        pools={IMPLEMENT: ("provider-a", "provider-b", "provider-c"), REVIEW: ("provider-c",)},
+    )
+
+    rig.tick(2)
+
+    assert rig.store.latest_candidate(TASK)["produced_by"] == "provider-c"
+    text = rig.text()
+    assert "fallback: provider-a made no progress (no_implementation_change; task unresolved) -> trying provider-b" in text
+    assert "fallback: provider-b failed (quota_rate_limit) -> trying provider-c" in text
+
+
+def test_no_progress_does_not_consume_remediation_budget(tmp_path: Path) -> None:
+    rig = Rig(
+        tmp_path,
+        {"provider-a": "noop", "provider-b": "ok"},
+        pools={IMPLEMENT: ("provider-a", "provider-b"), REVIEW: ("provider-b",)},
+    )
+    before = rig.store.task_remediation_count(TASK, "IMPLEMENT")
+
+    rig.tick(2)
+
+    assert rig.store.latest_candidate(TASK)["produced_by"] == "provider-b"
+    assert rig.store.task_remediation_count(TASK, "IMPLEMENT") == before
+    assert not rig.store.conn.execute("SELECT 1 FROM audit_events WHERE event_type='task.remediation_queued'").fetchone()
+    assert not rig.store.conn.execute("SELECT 1 FROM evidence").fetchone()
+
+
+def test_no_progress_fallback_does_not_depend_on_provider_names(tmp_path: Path) -> None:
+    rig = Rig(
+        tmp_path,
+        {"north": "noop", "south": "ok"},
+        pools={IMPLEMENT: ("north", "south"), REVIEW: ("south",)},
+    )
+
+    rig.tick(2)
+
+    assert rig.store.latest_candidate(TASK)["produced_by"] == "south"
+    assert _no_progress_events(rig)[0]["provider"] == "north"
+    assert "trying south" in rig.text()

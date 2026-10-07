@@ -33,6 +33,8 @@ class ExecutionResult:
     failure_reason: str | None = None
     provider_output: str | None = None
     retry_after: str | None = None
+    already_satisfied: bool = False
+    satisfaction: dict | None = None
 
 
 _QUOTA = re.compile(
