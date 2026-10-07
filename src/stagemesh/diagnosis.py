@@ -481,9 +481,14 @@ def diagnose(
         elif latest.messages:
             summary += f". First finding: {latest.messages[0][:240]}"
     focus = latest
+    exhausted_markers = (
+        "all_implementation_providers_no_progress",
+        "all_implementation_providers_exhausted",
+        "all_implementation_providers_failed",
+    )
     exhausted = bool(
         no_progress
-        and any("all_implementation_providers_no_progress" in str(reason) for reason in no_progress["reasons"])
+        and any(marker in str(reason) for reason in no_progress["reasons"] for marker in exhausted_markers)
     )
     template = _RECOMMENDATIONS[category]
     recommendation = template.format(
@@ -495,9 +500,11 @@ def diagnose(
     if exhausted:
         attempted = ", ".join(str(reason) for reason in no_progress["reasons"][-5:])
         recommendation = (
-            f"Every eligible implementation provider made no progress ({attempted}) and task {task_id} is still unresolved. "
-            "No candidate was produced. No further configured provider remains in this pass. "
-            f"Inspect the task objective, then `stagemesh retry-task --task {task_id}` only after the contract or pool changes."
+            f"Every eligible configured implementation provider was exhausted ({attempted}). "
+            f"No candidate was produced for task {task_id}. "
+            "Each listed outcome is capacity, timeout, or no-progress. "
+            "No further automatic provider remains in this pass. "
+            f"`stagemesh retry-task --task {task_id}` only after provider availability or the task contract changes."
         )
     if category == REVIEW_FINDING and focus and focus.messages:
         recommendation += " Finding: " + focus.messages[0][:300]

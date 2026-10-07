@@ -7,20 +7,32 @@ from typing import Any
 
 from .audit import record_audit
 from .contract_binding import contract_for_candidate
-from .diagnosis import DIAGNOSIS_EVENT, DIAGNOSIS_STOP_EVENT, PROVIDER_NO_PROGRESS, STALE_BASELINE, Diagnosis, DiagnosisPolicy, diagnose
+from .diagnosis import (
+    DIAGNOSIS_EVENT,
+    DIAGNOSIS_STOP_EVENT,
+    PROVIDER_NO_PROGRESS,
+    STALE_BASELINE,
+    Diagnosis,
+    DiagnosisPolicy,
+    diagnose,
+)
 from .domain import EvidenceKind, EvidenceStatus, ExecutionStatus, Stage, TaskStatus
 from .execution import Executor, FakeExecutor
 from .integration import Integrator
 from .lifecycle import evidence_allows_advance
 from .persistence import Store
 from .process_identity import classify_process, process_identity
+from .provider_pool import pool_exhaustion_evidence
 from .remediation import RemediationPolicy
 from .review import Reviewer, independent_review_verified
 from .scheduling import Scheduler
 from .serialized_integration import REBASE_CONFLICT, STALE_BASE
 from .validation import Validator
-from .workspace_guard import EXTERNAL_WORKSPACE_MUTATION, WorkspaceMutation, verify_candidate_workspace
-
+from .workspace_guard import (
+    EXTERNAL_WORKSPACE_MUTATION,
+    WorkspaceMutation,
+    verify_candidate_workspace,
+)
 
 _REF_STATE_CODES = frozenset({REBASE_CONFLICT, STALE_BASE})
 
@@ -205,6 +217,7 @@ class Coordinator:
                         "claim_id": claim_id,
                         "executor": self.executor.name,
                         "reason": result.failure_reason or "unknown_capacity_failure",
+                        **pool_exhaustion_evidence(result.failure_reason),
                     },
                 )
                 return 0
@@ -335,6 +348,7 @@ class Coordinator:
                 "reason": reason,
                 "candidate_sha": candidate_sha,
                 "durable_handoff": durable_handoff,
+                **pool_exhaustion_evidence(reason),
             },
         )
 

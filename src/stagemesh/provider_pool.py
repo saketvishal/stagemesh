@@ -38,6 +38,18 @@ PROVIDER_SELECTION_EVENT = "provider.selection"
 PROVIDER_USED_EVENT = "provider.used"
 PROVIDER_NO_PROGRESS_EVENT = "provider.no_progress"
 ALL_IMPLEMENTATION_PROVIDERS_NO_PROGRESS = "all_implementation_providers_no_progress"
+ALL_IMPLEMENTATION_PROVIDERS_EXHAUSTED = "all_implementation_providers_exhausted"
+ALL_IMPLEMENTATION_PROVIDERS_FAILED = "all_implementation_providers_failed"
+POOL_EXHAUSTED_REASONS = (
+    ALL_IMPLEMENTATION_PROVIDERS_NO_PROGRESS,
+    ALL_IMPLEMENTATION_PROVIDERS_EXHAUSTED,
+    ALL_IMPLEMENTATION_PROVIDERS_FAILED,
+)
+_OUTCOME_CLASS = {
+    "quota_rate_limit": "capacity",
+    "provider_timeout": "timeout",
+    "no_implementation_change": "no_progress",
+}
 TASK_ALREADY_SATISFIED = "task_already_satisfied"
 
 
@@ -615,14 +627,42 @@ class PooledExecutor(Executor):
             log("  REFUSED: every eligible implementation provider stopped without a candidate: " + "; ".join(exhausted))
             return ExecutionResult(
                 ExecutionStatus.FAILED,
-                failure_reason="all_implementation_providers_exhausted: " + "; ".join(exhausted),
+                failure_reason=ALL_IMPLEMENTATION_PROVIDERS_EXHAUSTED + ": " + "; ".join(exhausted),
             )
         log("  REFUSED: every eligible implementation provider failed: " + "; ".join(failures))
         return ExecutionResult(
             ExecutionStatus.FAILED,
             capacity_failure=True,
-            failure_reason="all_implementation_providers_failed: " + "; ".join(failures),
+            failure_reason=ALL_IMPLEMENTATION_PROVIDERS_FAILED + ": " + "; ".join(failures),
         )
+
+
+def pool_exhaustion_evidence(reason: str | None) -> dict[str, object]:
+    """Structured audit for a pass that tried every eligible implementation provider and produced no candidate."""
+    text = reason or ""
+    prefix = next((item for item in POOL_EXHAUSTED_REASONS if text == item or text.startswith(item + ":")), None)
+    if prefix is None:
+        return {}
+    body = text[len(prefix) + 2 :] if text.startswith(prefix + ": ") else ""
+    outcomes: list[dict[str, str]] = []
+    for part in [piece.strip() for piece in body.split(";") if piece.strip()]:
+        provider, separator, outcome = part.partition(":")
+        outcome = outcome.strip() if separator else part
+        provider = provider.strip() if separator else ""
+        outcomes.append(
+            {
+                "provider": provider,
+                "outcome": outcome,
+                "classification": _OUTCOME_CLASS.get(outcome, outcome or "unknown"),
+            }
+        )
+    return {
+        "pool_exhausted": True,
+        "candidate_produced": False,
+        "provider_sequence": [item["provider"] for item in outcomes if item["provider"]],
+        "provider_outcomes": outcomes,
+        "no_further_provider": "every eligible configured implementation provider was exhausted",
+    }
 
 
 def prove_task_already_satisfied(store: Store, project: Path, task_id: str) -> dict[str, object] | None:
