@@ -230,6 +230,7 @@ class Supervisor:
         worktree = Path(ownership.worktree)
         if not (worktree / ".git").exists() or GitFacts(worktree).resolve("HEAD") != sha:
             return
+        record_supervised_move(self.project, task_id, ownership.expected_head, sha, sha)
         save_ownership(self.store, replace(ownership, expected_head=sha, tracked_fingerprint=tracked_fingerprint(worktree)))
 
     def candidate_pending(self, task_id: str) -> bool:
