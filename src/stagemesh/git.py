@@ -41,7 +41,7 @@ class GitWorkspace:
         self.path = Path(path).resolve()
 
     def run(
-        self, *args: str, check: bool = True, env: dict[str, str] | None = None
+        self, *args: str, check: bool = True, env: dict[str, str] | None = None, encoding: str | None = None
     ) -> subprocess.CompletedProcess[str]:
         if not args:
             raise GitValidationError("git command must include at least one argument")
@@ -60,6 +60,7 @@ class GitWorkspace:
                 ["git", *validated_args],
                 cwd=self.path,
                 text=True,
+                encoding=encoding,  # None keeps the process locale; callers that need exact paths pass "utf-8" (git writes UTF-8)
                 capture_output=True,
                 check=False,
                 env=merged_env,

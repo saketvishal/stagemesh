@@ -6,6 +6,7 @@ changing a task worktree that StageMesh sealed, without holding the workspace le
 
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 import sys
@@ -15,6 +16,14 @@ from pathlib import Path
 import pytest
 from test_bounded_execution import TASK
 from test_bounded_execution import _setup as _base_setup
+from test_parallel import Rig, ScriptedExecutor
+from test_single_task_stale_rebase import TASK as REBASE_TASK
+from test_single_task_stale_rebase import (
+    _advance_until,
+    _land_on_main,
+    _single_task_coordinator,
+    _tip,
+)
 
 import stagemesh.workspace_guard as guard
 from stagemesh.contracts import evaluate_contract, parse_contract
@@ -28,7 +37,7 @@ from stagemesh.domain import (
     TaskStatus,
 )
 from stagemesh.execution import EXTERNAL_WORKSPACE_MUTATION, FakeExecutor, SubprocessExecutor
-from stagemesh.git import GitWorkspace
+from stagemesh.git import GitError, GitWorkspace
 from stagemesh.integration import Integrator
 from stagemesh.persistence import Store
 from stagemesh.process_identity import popen_identity
@@ -88,12 +97,12 @@ def worktree(project: Path, task_id: str = TASK) -> Path:
 
 
 def ledger_of(project: Path, task_id: str = TASK) -> dict:
-    gitdir = Path(GitWorkspace(worktree(project, task_id)).run("rev-parse", "--absolute-git-dir").stdout.strip())
-    return json.loads((gitdir / LEDGER_FILE).read_text(encoding="utf-8"))
+    return json.loads((gitdir_of(project, task_id) / LEDGER_FILE).read_text(encoding="utf-8"))
 
 
 def gitdir_of(project: Path, task_id: str = TASK) -> Path:
-    return Path(GitWorkspace(worktree(project, task_id)).run("rev-parse", "--absolute-git-dir").stdout.strip())
+    # explicit UTF-8: git writes paths as UTF-8, and the locale codec would garble a non-ASCII project path
+    return Path(GitWorkspace(worktree(project, task_id)).run("rev-parse", "--absolute-git-dir", encoding="utf-8").stdout.strip())
 
 
 def run_implementation(store: Store, executor, project: Path, task_id: str = TASK):
@@ -873,3 +882,331 @@ def test_boundary_checks_skip_a_project_directory_that_does_not_exist(tmp_path: 
 
     assert not project.exists() and mutation_events(store) == []
     store.close()
+
+
+# --- lease release is guaranteed, whatever fails after the lease was taken ----------------------------------------------------
+
+
+def _fresh_claim_succeeds(store: Store, project: Path) -> None:
+    """A legitimate claimant in this same process (whose pid the owner file would name) must not be refused by a leaked lease."""
+    assert not (gitdir_of(project) / OWNER_FILE).exists()
+    acquire_workspace(store, project, TASK, ExecutionKind.IMPLEMENTATION).release()
+
+
+def test_sealing_that_raises_does_not_leak_the_lease(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    project, store = _setup(tmp_path)
+    run_implementation(store, provider(tmp_path, WRITE_DOC), project)
+
+    def broken_seal(lease):
+        raise RuntimeError("sealing failed")
+
+    monkeypatch.setattr(guard, "_seal_or_fail", broken_seal)
+    with pytest.raises(RuntimeError, match="sealing failed"), guard.owned_workspace(store, project, TASK, ExecutionKind.IMPLEMENTATION):
+        pass  # the block itself succeeds; only the seal at the end fails
+    monkeypatch.undo()
+
+    _fresh_claim_succeeds(store, project)
+    assert mutation_events(store) == []
+
+
+def test_sealing_that_raises_while_handling_an_interrupt_leaks_nothing_and_keeps_the_original_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    project, store = _setup(tmp_path)
+    run_implementation(store, provider(tmp_path, WRITE_DOC), project)
+
+    class Interrupted(Exception):
+        pass
+
+    def broken_seal(lease):
+        raise OSError("disk went away")
+
+    monkeypatch.setattr(guard, "_seal_or_fail", broken_seal)
+    with pytest.raises(Interrupted), guard.owned_workspace(store, project, TASK, ExecutionKind.IMPLEMENTATION) as lease:
+        lease.check("before_agent")
+        raise Interrupted
+    monkeypatch.undo()
+
+    _fresh_claim_succeeds(store, project)  # the interrupt's own error surfaced, and the lease is gone
+
+
+def test_failure_recording_a_mutation_does_not_leak_the_lease(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    project, store = _setup(tmp_path)
+    run_implementation(store, provider(tmp_path, WRITE_DOC), project)
+
+    def broken_fail_execution(lease):
+        raise RuntimeError("could not finish the execution row")
+
+    monkeypatch.setattr(guard, "_fail_execution", broken_fail_execution)
+    with pytest.raises(RuntimeError, match="could not finish"), guard.owned_workspace(store, project, TASK, ExecutionKind.IMPLEMENTATION) as lease:
+        (lease.path / "docs" / "a.md").write_text("changed under the lease\n", encoding="utf-8")
+        lease.check("before_agent")  # a real mutation: the tree no longer matches the seal
+    monkeypatch.undo()
+
+    assert mutation_events(store)  # the integrity failure was still recorded
+    assert not (gitdir_of(project) / OWNER_FILE).exists()  # and the failure did not strand the lease
+
+
+def test_git_failing_inside_the_lease_leaves_no_lease_behind(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    project, store = _setup(tmp_path)
+    run_implementation(store, provider(tmp_path, WRITE_DOC), project)
+    real_observe, calls = guard.observe, {"n": 0}
+
+    def flaky_observe(path):
+        calls["n"] += 1
+        if calls["n"] == 2:  # the first call is the acquire-time check; the second is lease.check inside the block
+            raise GitError("fatal: unable to read the index")
+        return real_observe(path)
+
+    monkeypatch.setattr(guard, "observe", flaky_observe)
+    with pytest.raises(GitError), guard.owned_workspace(store, project, TASK, ExecutionKind.IMPLEMENTATION) as lease:
+        lease.check("before_agent")
+    monkeypatch.undo()
+
+    _fresh_claim_succeeds(store, project)
+
+
+def test_git_failing_during_acquire_leaves_no_lease_behind(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    project, store = _setup(tmp_path)
+    run_implementation(store, provider(tmp_path, WRITE_DOC), project)
+
+    def broken_observe(path):
+        raise GitError("fatal: not a git repository")
+
+    monkeypatch.setattr(guard, "observe", broken_observe)
+    with pytest.raises(GitError):
+        acquire_workspace(store, project, TASK, ExecutionKind.IMPLEMENTATION)
+    monkeypatch.undo()
+
+    _fresh_claim_succeeds(store, project)
+
+
+# --- git output is decoded as UTF-8 whatever the process locale is ------------------------------------------------------------
+
+NON_ASCII = "docs/Ёж-éè.md"  # U+0401 encodes to bytes d0 81, and 0x81 is undefined in the Windows cp1252 locale codec
+WRITE_NON_ASCII = (
+    "import pathlib\n"
+    "pathlib.Path('docs/\\u0401\\u0436-\\u00e9\\u00e8.md').write_text('agent wrote this\\n', encoding='utf-8')\n"
+)
+
+
+def test_non_ascii_tracked_file_is_sealed_and_a_later_edit_is_detected(tmp_path: Path) -> None:
+    project, store = _setup(tmp_path)
+    first = run_implementation(store, provider(tmp_path, WRITE_NON_ASCII), project)
+    assert first.status is ExecutionStatus.SUCCEEDED  # sealing succeeded with a non-ASCII path in the candidate
+    assert GitWorkspace(worktree(project)).run("ls-files", "-z", "--", "docs", encoding="utf-8").stdout.split("\0").count(NON_ASCII) == 1
+    assert ledger_of(project)["dirty_count"] == 0
+
+    (worktree(project) / NON_ASCII).write_text("changed by someone else\n", encoding="utf-8")
+    with pytest.raises(WorkspaceMutation) as raised:
+        acquire_workspace(store, project, TASK, ExecutionKind.IMPLEMENTATION)
+
+    assert raised.value.reason == "working_tree_modified"
+    (event,) = mutation_events(store)
+    assert event["changed_paths"] == [NON_ASCII]  # the exact path, not mojibake
+    assert not (gitdir_of(project) / OWNER_FILE).exists()
+
+
+def test_non_ascii_file_dirty_at_seal_time_is_fingerprinted_by_content_and_a_later_edit_is_detected(tmp_path: Path) -> None:
+    project, store = _setup(tmp_path)
+    run_implementation(store, provider(tmp_path, WRITE_DOC), project)
+    path = worktree(project) / NON_ASCII
+    with guard.owned_workspace(store, project, TASK, ExecutionKind.IMPLEMENTATION) as lease:
+        lease.check("before_agent")
+        path.write_text("agent output not yet committed\n", encoding="utf-8")
+        lease.after_agent()
+        lease.seal()  # sealed while dirty: the fingerprint now holds this untracked non-ASCII file
+
+    expected = hashlib.sha256(path.read_bytes()).hexdigest()  # the bytes actually on disk (Windows text mode writes CRLF)
+    assert ledger_of(project)["dirty"] == {NON_ASCII: expected}  # keyed by the real path, hashed by real content, never "absent"
+    assert expected != hashlib.sha256(b"").hexdigest() and "absent" not in ledger_of(project)["dirty"].values()
+    path.write_text("edited after the seal\n", encoding="utf-8")
+
+    with pytest.raises(WorkspaceMutation) as raised:
+        acquire_workspace(store, project, TASK, ExecutionKind.IMPLEMENTATION)
+    assert raised.value.reason == "working_tree_modified" and mutation_events(store)[0]["changed_paths"] == [NON_ASCII]
+
+
+def test_non_ascii_tracked_path_is_reported_by_legacy_adoption(tmp_path: Path) -> None:
+    project, store = _setup(tmp_path)
+    wt = prepare_task_workspace(project, TASK)  # no ledger
+    (wt / NON_ASCII).write_text("legacy output\n", encoding="utf-8")
+    sha = GitWorkspace(wt).commit_all("legacy candidate")
+    store.add_candidate(TASK, sha, "legacy", durable_handoff=True)
+    (wt / NON_ASCII).write_text("edited and never sealed\n", encoding="utf-8")
+
+    with pytest.raises(WorkspaceMutation) as raised:
+        verify_candidate_workspace(store, project, TASK, sha, "VALIDATE:before_validation")
+
+    assert raised.value.reason == "legacy_workspace_has_uncommitted_changes" and mutation_events(store)[0]["changed_paths"] == [NON_ASCII]
+
+
+def test_project_directory_with_non_ascii_characters_works(tmp_path: Path) -> None:
+    base = tmp_path / "prøjЁ-é"  # the git dir path itself is non-ASCII, so rev-parse output must decode as UTF-8
+    base.mkdir()
+    project, store = _setup(base)
+    result = run_implementation(store, provider(base, WRITE_DOC), project)
+    assert result.status is ExecutionStatus.SUCCEEDED
+    assert ledger_of(project)["candidate"] == result.candidate_sha and mutation_events(store) == []
+    assert gitdir_of(project).exists() and "Ё" in str(gitdir_of(project))
+
+
+def test_undecodable_git_output_fails_closed_and_leaks_no_lease(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    project, store = _setup(tmp_path)
+    run_implementation(store, provider(tmp_path, WRITE_DOC), project)
+    real_run = guard.GitWorkspace.run
+
+    def undecodable_status(self, *args, **kwargs):
+        result = real_run(self, *args, **kwargs)
+        if "status" in args:  # what subprocess hands back on Windows when the output cannot be decoded: stdout is None, return code 0
+            return subprocess.CompletedProcess(result.args, 0, stdout=None, stderr="")
+        return result
+
+    monkeypatch.setattr(guard.GitWorkspace, "run", undecodable_status)
+    with pytest.raises(WorkspaceMutation) as raised:
+        acquire_workspace(store, project, TASK, ExecutionKind.IMPLEMENTATION)
+    monkeypatch.undo()
+
+    assert raised.value.reason == "git_output_undecodable"  # a block with a truthful reason, not an AttributeError
+    _fresh_claim_succeeds(store, project)
+
+
+# --- the interrupt path and the acquire-time anchor each verify HEAD on their own ---------------------------------------------
+
+
+def test_interrupt_after_the_agent_window_opens_refuses_to_seal_a_head_that_left_the_sealed_history(tmp_path: Path) -> None:
+    project, store = _setup(tmp_path)
+    run_implementation(store, provider(tmp_path, WRITE_DOC), project)
+    sealed = ledger_of(project)["head"]
+
+    class Interrupted(Exception):
+        pass
+
+    with pytest.raises(WorkspaceMutation) as raised, guard.owned_workspace(store, project, TASK, ExecutionKind.IMPLEMENTATION) as lease:
+        lease.check("before_agent")  # the agent window is open, so the interrupt path may seal the agent's own descendants...
+        git = GitWorkspace(lease.path)
+        git.run("checkout", "-q", "--orphan", "elsewhere")
+        git.run("commit", "-q", "--allow-empty", "-m", "unrelated history")  # ...but not a HEAD outside the sealed history
+        raise Interrupted
+
+    assert raised.value.reason == "head_changed"
+    assert ledger_of(project)["head"] == sealed  # the unrelated commit was not sealed as authorized
+    assert mutation_events(store)[0]["stage"] == "IMPLEMENTATION:release"
+    assert not (gitdir_of(project) / OWNER_FILE).exists()
+    with pytest.raises(WorkspaceMutation):
+        acquire_workspace(store, project, TASK, ExecutionKind.IMPLEMENTATION)  # and the next claim still refuses it
+
+
+def test_interrupt_after_the_agent_window_opens_still_seals_a_linear_descendant(tmp_path: Path) -> None:
+    project, store = _setup(tmp_path)
+    run_implementation(store, provider(tmp_path, WRITE_DOC), project)
+
+    class Interrupted(Exception):
+        pass
+
+    with pytest.raises(Interrupted), guard.owned_workspace(store, project, TASK, ExecutionKind.IMPLEMENTATION) as lease:
+        lease.check("before_agent")
+        (lease.path / "docs" / "b.md").write_text("agent commit before the interrupt\n", encoding="utf-8")
+        newer = GitWorkspace(lease.path).commit_all("agent commit")
+        raise Interrupted
+
+    assert ledger_of(project)["head"] == newer  # legitimate agent output is still sealed
+    acquire_workspace(store, project, TASK, ExecutionKind.IMPLEMENTATION).release()
+
+
+def test_acquire_refuses_a_worktree_without_a_ledger_whose_head_is_not_the_recorded_candidate(tmp_path: Path) -> None:
+    project, store = _setup(tmp_path)
+    wt = prepare_task_workspace(project, TASK)  # no ledger: how every pre-ownership worktree looks
+    (wt / "docs" / "a.md").write_text("legacy agent output\n", encoding="utf-8")
+    sha = GitWorkspace(wt).commit_all("legacy candidate")
+    store.add_candidate(TASK, sha, "legacy", durable_handoff=True)
+    foreign = external_commit(project)  # HEAD moved past the candidate; tracked files are clean
+
+    with pytest.raises(WorkspaceMutation) as raised:
+        acquire_workspace(store, project, TASK, ExecutionKind.IMPLEMENTATION)
+
+    assert raised.value.reason == "no_ownership_record_and_head_differs"
+    (event,) = mutation_events(store)
+    assert event["expected_sha"] == sha and event["observed_sha"] == foreign
+    assert not (gitdir_of(project) / LEDGER_FILE).exists() and not (gitdir_of(project) / OWNER_FILE).exists()  # nothing sealed or held
+
+
+# --- the rebase path takes the workspace lease -------------------------------------------------------------------------------
+
+
+def _rebase_rig(tmp_path: Path):
+    """A task at INTEGRATE whose candidate is stale: another task landed on the integration ref first."""
+    rig = Rig(tmp_path, [REBASE_TASK])
+    coord = _single_task_coordinator(rig, ScriptedExecutor(rig.files))
+    _advance_until(rig, coord, Stage.INTEGRATE)
+    candidate = str(rig.store.latest_candidate(REBASE_TASK)["sha"])
+    _land_on_main(rig, "other/landed.txt", "another task\n")
+    return rig, coord, candidate
+
+
+def _candidates(rig) -> int:
+    return rig.store.conn.execute("SELECT COUNT(*) FROM candidates WHERE task_id=?", (REBASE_TASK,)).fetchone()[0]
+
+
+def test_rebase_refuses_a_worktree_owned_by_another_execution(tmp_path: Path) -> None:
+    rig, coord, candidate = _rebase_rig(tmp_path)
+    tip = _tip(rig)
+    other = acquire_workspace(rig.store, rig.project, REBASE_TASK, ExecutionKind.IMPLEMENTATION, claim_id="someone-else")
+
+    with pytest.raises(WorkspaceMutation) as raised:
+        coord.integrator.integrate(rig.store, REBASE_TASK, candidate, rig.project)
+
+    assert raised.value.reason == "workspace_owned_by_another_execution"
+    assert _candidates(rig) == 1 and _tip(rig) == tip  # nothing was rebased, and the ref did not move
+    other.check("still_mine")
+    other.release()
+    with rig.lock.hold("lock-released-after-the-failure"):  # the integration lock was not left held either
+        pass
+
+
+def test_coordinator_blocks_a_task_at_integration_when_its_workspace_is_owned_by_another_execution(tmp_path: Path) -> None:
+    rig, coord, candidate = _rebase_rig(tmp_path)
+    other = acquire_workspace(rig.store, rig.project, REBASE_TASK, ExecutionKind.IMPLEMENTATION, claim_id="someone-else")
+
+    coord.tick()
+
+    assert rig.store.get_task(REBASE_TASK)["status"] == TaskStatus.BLOCKED
+    assert str(rig.store.latest_candidate(REBASE_TASK)["sha"]) == candidate
+    other.release()
+
+
+def test_rebase_releases_ownership_after_success_and_after_a_conflict(tmp_path: Path) -> None:
+    rig, coord, candidate = _rebase_rig(tmp_path)
+    coord.tick()  # stale candidate: rebased under the lease, sent back to VALIDATE
+    assert _candidates(rig) == 2 and rig.store.get_task(REBASE_TASK)["stage"] == Stage.VALIDATE
+    assert not (gitdir_of(rig.project, REBASE_TASK) / OWNER_FILE).exists()
+    rebased = ledger_of(rig.project, REBASE_TASK)
+    assert rebased["candidate"] == str(rig.store.latest_candidate(REBASE_TASK)["sha"]) != candidate  # the new candidate is the sealed one
+    acquire_workspace(rig.store, rig.project, REBASE_TASK, ExecutionKind.INTEGRATION).release()
+
+    (tmp_path / "conflict").mkdir()
+    conflict = Rig(tmp_path / "conflict", [REBASE_TASK])
+    c_coord = _single_task_coordinator(conflict, ScriptedExecutor(conflict.files))
+    _advance_until(conflict, c_coord, Stage.INTEGRATE)
+    c_candidate = str(conflict.store.latest_candidate(REBASE_TASK)["sha"])
+    _land_on_main(conflict, f"out/{REBASE_TASK}.txt", "someone else wrote the same file\n")  # the rebase will conflict
+    c_coord.tick()
+    assert not (gitdir_of(conflict.project, REBASE_TASK) / OWNER_FILE).exists()  # released although the rebase failed
+    assert ledger_of(conflict.project, REBASE_TASK)["candidate"] == c_candidate  # and the worktree is sealed back at the candidate
+    acquire_workspace(conflict.store, conflict.project, REBASE_TASK, ExecutionKind.INTEGRATION).release()
+
+
+def test_rebase_fails_closed_on_a_workspace_changed_since_it_was_sealed(tmp_path: Path) -> None:
+    rig, coord, candidate = _rebase_rig(tmp_path)
+    acquire_workspace(rig.store, rig.project, REBASE_TASK, ExecutionKind.INTEGRATION).release()  # seal the legacy worktree first
+    tampered = task_workspace(rig.project, REBASE_TASK) / "out" / f"{REBASE_TASK}.txt"
+    tampered.write_text("edited by someone else after the seal\n", encoding="utf-8")
+    tip = _tip(rig)
+
+    with pytest.raises(WorkspaceMutation) as raised:
+        coord.integrator.integrate(rig.store, REBASE_TASK, candidate, rig.project)
+
+    assert raised.value.reason == "working_tree_modified"
+    assert tampered.read_text(encoding="utf-8") == "edited by someone else after the seal\n"  # not reset, not rebased over
+    assert _candidates(rig) == 1 and _tip(rig) == tip
+    assert mutation_events(rig.store)[-1]["stage"] == "INTEGRATION:acquire"
+    coord.tick()
+    assert rig.store.get_task(REBASE_TASK)["status"] == TaskStatus.BLOCKED  # and the coordinator blocks it

@@ -85,11 +85,30 @@ def _content_hash(path: Path) -> str:
         return "unreadable"
 
 
+class UndecodableGitOutput(GitError):
+    """git wrote output that could not be decoded as UTF-8, so a path or id in it cannot be trusted."""
+
+
+def _run(path: Path, *args: str, check: bool = True) -> Any:
+    """Run git decoding its output as UTF-8 whatever the process locale is.
+
+    git writes paths as UTF-8, so the locale codec (cp1252 on many Windows installs) turns a non-ASCII path into mojibake or, worse,
+    makes subprocess return stdout=None with exit code 0. Both would let a changed file be fingerprinted under the wrong name or not at
+    all, so output that does not decode, or comes back as None, is an error here and never an empty or lossy result.
+    """
+    try:
+        result = GitWorkspace(path).run(*args, check=check, encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        raise UndecodableGitOutput(f"git {args[0]} output is not valid UTF-8: {exc}") from exc
+    if result.stdout is None or result.stderr is None:
+        raise UndecodableGitOutput(f"git {args[0]} output could not be decoded as UTF-8")
+    return result
+
+
 def observe(path: Path) -> dict[str, Any]:
     """HEAD plus a fingerprint of every uncommitted path (modified, staged, deleted and untracked) in a worktree."""
-    git = GitWorkspace(path)
-    head = git.run("rev-parse", "HEAD").stdout.strip()
-    status = git.run("--no-optional-locks", "status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames").stdout
+    head = _run(path, "rev-parse", "HEAD").stdout.strip()
+    status = _run(path, "--no-optional-locks", "status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames").stdout
     entries = [entry for entry in status.split("\0") if len(entry) > 3]
     dirty = {entry[3:]: _content_hash(path / entry[3:]) for entry in entries}
     tracked_dirty = sorted(entry[3:] for entry in entries if not entry.startswith("??"))  # modified, staged or deleted tracked paths
@@ -120,7 +139,7 @@ def _difference(ledger: dict[str, Any], seen: dict[str, Any]) -> tuple[str, list
 
 
 def _gitdir(path: Path) -> Path:
-    return Path(GitWorkspace(path).run("rev-parse", "--absolute-git-dir").stdout.strip())
+    return Path(_run(path, "rev-parse", "--absolute-git-dir").stdout.strip())
 
 
 def _atomic_write(target: Path, payload: dict[str, Any]) -> None:
@@ -180,10 +199,10 @@ def _self_owner(token: str, task_id: str, kind: str, claim_id: str | None) -> di
 def _paths_between(workspace: Path, expected_sha: str, observed_sha: str) -> list[str]:
     """Files that differ between the sealed commit and the commit now at HEAD, for the audit record (best effort)."""
     try:
-        result = GitWorkspace(workspace).run("diff", "--name-only", expected_sha, observed_sha, check=False)
+        result = _run(workspace, "diff", "--name-only", "-z", expected_sha, observed_sha, check=False)
     except (GitError, OSError):
         return []
-    return sorted(line for line in result.stdout.splitlines() if line)[:MAX_REPORTED_PATHS]
+    return sorted(name for name in result.stdout.split("\0") if name)[:MAX_REPORTED_PATHS]
 
 
 # --- reporting -----------------------------------------------------------------------------------------------------------
@@ -243,6 +262,7 @@ class WorkspaceLease:
         self._ledger_bytes = b""
         self._agent_ran = False
         self._window_open = False
+        self._seal_error: Exception | None = None
         self._sealed = False
         self._released = False
 
@@ -293,9 +313,15 @@ class WorkspaceLease:
         if ledger_bytes != self._ledger_bytes:
             raise self._fail(stage, "ownership_ledger_changed", observed=observed_head)
 
+    def _observe(self, stage: str) -> dict[str, Any]:
+        try:
+            return observe(self.path)
+        except UndecodableGitOutput as exc:
+            raise self._fail(stage, "git_output_undecodable", observed=None, detail=str(exc)) from exc
+
     def check(self, stage: str) -> None:
         """The worktree is exactly what was sealed (HEAD and every uncommitted path) and this lease still owns it."""
-        seen = observe(self.path)
+        seen = self._observe(stage)
         self._check_ownership(stage, seen["head"])
         difference = _difference(self._ledger, seen)
         if difference is not None:
@@ -306,17 +332,17 @@ class WorkspaceLease:
     def after_agent(self) -> None:
         """The agent has exited: its output is authorized if HEAD is the sealed HEAD or a linear descendant of it and the lease held."""
         self._agent_ran = True
-        seen = observe(self.path)
+        seen = self._observe("after_agent")
         self._check_ownership("after_agent", seen["head"])
         sealed = self._ledger["head"]
-        if seen["head"] != sealed and GitWorkspace(self.path).run("merge-base", "--is-ancestor", sealed, seen["head"], check=False).returncode != 0:
+        if seen["head"] != sealed and _run(self.path, "merge-base", "--is-ancestor", sealed, seen["head"], check=False).returncode != 0:
             raise self._fail("after_agent", "head_not_descendant", observed=seen["head"], detail="HEAD was moved off the sealed commit's history")
 
     # -- sealing --------------------------------------------------------------------------------------------------------
 
     def seal(self, candidate_sha: str | None = None) -> None:
         """Record the current worktree as the authorized result of this execution, and `candidate_sha` as the candidate it produced."""
-        seen = observe(self.path)
+        seen = self._observe("seal")
         candidate = candidate_sha if candidate_sha is not None else self._ledger.get("candidate")
         self._write_ledger(seen, candidate)
         self._sealed = True
@@ -397,8 +423,9 @@ def _unlock(handle: Any) -> None:
 def _owner_mutex(gitdir: Path, timeout: float = OWNER_MUTEX_TIMEOUT) -> Iterator[bool]:
     """Serializes every claim (and so every dead-owner takeover) of one workspace, across threads and processes.
 
-    An OS file lock, so the kernel releases it if the holder dies: there is no stale mutex to recover from, and no decision depends on
-    timing. Yields False when the lock could not be had within `timeout`; the caller then refuses rather than guess.
+    An OS file lock, so the kernel releases it if the holder dies: there is no stale mutex to recover from, and who wins a takeover is
+    decided by the lock, not by timing. Yields False when the lock could not be had within `timeout` (a claim that waits that long is
+    refused, which is fail-closed but does depend on the clock); the caller then refuses rather than guess.
     """
     handle = open(gitdir / OWNER_MUTEX_FILE, "a+b")  # noqa: SIM115 - closed in the finally below
     try:
@@ -482,7 +509,10 @@ def acquire_workspace(store: Store, project: Path, task_id: str, kind: str, *, c
     GitWorkspace(root).init_if_needed()  # as prepare_task_workspace does first: the project may not exist yet, and the config read below needs it
     existed = (task_workspace(root, task_id) / ".git").exists()
     path = prepare_task_workspace(root, task_id)
-    gitdir = _gitdir(path)
+    try:
+        gitdir = _gitdir(path)
+    except UndecodableGitOutput as exc:
+        raise _mutation(store, task_id=task_id, stage=f"{kind}:acquire", reason="git_output_undecodable", workspace=path, expected_sha=None, observed_sha=None, claim_id=claim_id, detail=str(exc)) from exc
     token = uuid.uuid4().hex
     recovered = _claim(store, task_id, kind, path, gitdir, token, claim_id)
     lease = WorkspaceLease(store, task_id, kind, path, gitdir, token, claim_id, recovered)
@@ -500,7 +530,7 @@ def _establish(lease: WorkspaceLease, existed: bool) -> None:
         ledger, raw = _load_ledger(lease._gitdir)
     except ValueError as exc:
         raise lease._fail("acquire", "ownership_record_unreadable", observed=None, detail=str(exc)) from exc
-    seen = observe(lease.path)
+    seen = lease._observe("acquire")
     latest = _latest_candidate_sha(store, task_id)
     if ledger is None:
         anchor = _anchor_sha(store, task_id)
@@ -528,38 +558,42 @@ def _establish(lease: WorkspaceLease, existed: bool) -> None:
 
 @contextmanager
 def owned_workspace(store: Store, project: Path, task_id: str, kind: str, *, claim_id: str | None = None) -> Iterator[WorkspaceLease]:
-    """`with owned_workspace(...) as lease:` holds the lease for the block. A mutation fails the execution; any other exit keeps state honest."""
+    """`with owned_workspace(...) as lease:` holds the lease for the block. A mutation fails the execution; any other exit keeps state honest.
+
+    Once the lease is taken it is released by `finally`, so no exit path (success, an error in the block, a failing seal, a failing audit
+    write, Ctrl+C) can leave the workspace owned by a process that is no longer using it.
+    """
     lease = acquire_workspace(store, project, task_id, kind, claim_id=claim_id)
     try:
-        yield lease
-        if not lease._sealed:
-            _seal_or_fail(lease)
-    except WorkspaceMutation:
-        _fail_execution(lease)
-        lease.release()
-        raise
-    except BaseException:
-        # After the before-agent check, an exception or Ctrl+C seals what this execution left.
-        # Before that check, a difference is not the agent's output and must not be sealed as authorized.
-        if lease._window_open:
-            lease._agent_ran = True
         try:
-            _seal_or_fail(lease)
+            yield lease
+            if not lease._sealed:
+                _seal_or_fail(lease)
         except WorkspaceMutation:
             _fail_execution(lease)
-            lease.release()
             raise
-        lease.release()
-        raise
-    else:
+        except BaseException:
+            # After the before-agent check, an exception or Ctrl+C seals what this execution left.
+            # Before that check, a difference is not the agent's output and must not be sealed as authorized.
+            if lease._window_open:
+                lease._agent_ran = True
+            try:
+                _seal_or_fail(lease)
+            except WorkspaceMutation:
+                _fail_execution(lease)
+                raise
+            except Exception as exc:  # noqa: BLE001 - sealing failed for a non-integrity reason; the caller needs the original error, and the
+                lease._seal_error = exc  # unsealed ledger makes the next claim compare against the old seal and fail closed if anything changed
+            raise
+    finally:
         lease.release()
 
 
 def _seal_or_fail(lease: WorkspaceLease) -> None:
     """The block ended without sealing (a failed or empty attempt): the state must still be explained by this execution."""
-    seen = observe(lease.path)
+    seen = lease._observe("release")
     lease._check_ownership("release", seen["head"])
-    descends = lease._agent_ran and GitWorkspace(lease.path).run("merge-base", "--is-ancestor", lease._ledger["head"], seen["head"], check=False).returncode == 0
+    descends = lease._agent_ran and _run(lease.path, "merge-base", "--is-ancestor", lease._ledger["head"], seen["head"], check=False).returncode == 0
     if seen["head"] != lease._ledger["head"] and not descends:
         raise lease._fail("release", "head_changed", observed=seen["head"])
     if not lease._agent_ran:
@@ -629,13 +663,19 @@ def verify_candidate_workspace(
         )
 
     if owned:
-        gitdir = _gitdir(target)
+        try:
+            gitdir = _gitdir(target)
+        except UndecodableGitOutput as exc:
+            raise fail("git_output_undecodable", expected=None, observed=None, detail=str(exc)) from exc
         try:
             ledger, _raw = _load_ledger(gitdir)
             owner = _read_json(gitdir / OWNER_FILE)
         except ValueError as exc:
             raise fail("ownership_record_unreadable", expected=None, observed=None, detail=str(exc)) from exc
-        seen = observe(target)
+        try:
+            seen = observe(target)
+        except UndecodableGitOutput as exc:
+            raise fail("git_output_undecodable", expected=None, observed=None, detail=str(exc)) from exc
         if owner is not None and _owner_is_active(owner):
             raise fail("workspace_owned_by_another_execution", expected=(ledger or {}).get("head"), observed=seen["head"], detail=f"{owner.get('kind')} execution {owner.get('execution_id') or owner.get('claim_id')} holds the lease")
         if ledger is None:
