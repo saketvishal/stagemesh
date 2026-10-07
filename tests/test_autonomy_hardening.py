@@ -108,6 +108,31 @@ def test_pending_candidate_row_reconciles_interrupted_ownership_refresh(tmp_path
     assert load_ownership(store, TASK).expected_head == mine
     assert decisions(store, TASK) == []
 
+def test_pending_candidate_row_restores_worktree_from_recorded_baseline(tmp_path: Path) -> None:
+    from stagemesh.domain import ExecutionKind
+    from stagemesh.workspace_guard import owned_workspace
+
+    repo = init_repo(tmp_path / "repo")
+    base = commit(repo, {"src/app.py": "VALUE = 1\n"}, "base")
+    store = new_store(tmp_path)
+    store.upsert_task("t", source_id=TASK)
+    store.advance_task(TASK, Stage.IMPLEMENT)
+    supervisor = Supervisor(store, repo, integration_ref="main")
+    with owned_workspace(store, repo, TASK, ExecutionKind.IMPLEMENTATION) as lease:
+        worktree = lease.path
+        supervisor.claim_workspace(TASK, worktree)
+        mine = commit(worktree, {"src/widget.py": "W = 1\n"}, "StageMesh candidate", who=STAGEMESH)
+        store.add_candidate(TASK, mine, "fake", durable_handoff=True)
+        lease.seal(mine)
+    store.advance_task(TASK, Stage.VALIDATE)
+    git(worktree, "checkout", "-q", "--detach", base)
+
+    assert supervisor.check_workspace(TASK) is None
+    assert git(worktree, "rev-parse", "HEAD") == mine
+    assert load_ownership(store, TASK).expected_head == mine
+    events = [row["event_type"] for row in store.conn.execute("SELECT event_type FROM audit_events ORDER BY rowid")]
+    assert events[-1] == "candidate.ownership_reconciled"
+    assert "EXTERNAL_WORKSPACE_MUTATION" not in events
 def test_registration_requires_the_worktree_to_actually_be_at_that_commit(tmp_path: Path) -> None:
     repo, worktree, base = _repo_with_worktree(tmp_path)
     store = new_store(tmp_path)
