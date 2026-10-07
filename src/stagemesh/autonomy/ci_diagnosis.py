@@ -83,7 +83,7 @@ _UNSUPPORTED = re.compile(
 )
 _NO_DETAIL = "log:"  # the signature of a failure that exposes no log lines and no test names (hosted check runs carry no logs)
 _FAILED_LINE = re.compile(r"^\s*FAILED\s+\S+")
-_LINE_COL = re.compile(r"\b\d+:\d+\b|\(\d+\)")
+_LINE_COL = re.compile(r":\d+:|\b\d+:\d+\b|\(\d+(?:,\d+)?\)")
 
 
 def _normalize_detail(line: str) -> str:
@@ -473,6 +473,8 @@ def diagnose_ci(
     elif not base.complete:
         notes.append("base CI is still running")
     diagnoses = []
+    if candidate is not None and not candidate.complete:
+        diagnoses.append(GateDiagnosis("check-runs", CIClass.PENDING, "the host has not returned every check run for this SHA"))
     for name in names:
         outcome = candidate.gates.get(name) if candidate else None
         if outcome is None and candidate is not None and candidate.complete:
