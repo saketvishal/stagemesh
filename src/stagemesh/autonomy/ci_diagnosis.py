@@ -97,9 +97,12 @@ class GateOutcome:
 
     @property
     def extra_lines(self) -> frozenset[str]:
-        """Normalized failure lines other than the `FAILED <test>` lines: collection errors, import errors, lint and build failures."""
+        """Every non-empty log line that is not a `FAILED <test>` line.
+
+        Keyword filters hide lint and link failures that do not say "error". Normalized so timings and temp paths still compare equal.
+        """
         return frozenset(
-            normalize(line) for line in self.log.splitlines() if _KEY_LINE.search(line) and not _FAILED_LINE.match(line)
+            normalize(line) for line in self.log.splitlines() if line.strip() and not _FAILED_LINE.match(line)
         )
 
     @property

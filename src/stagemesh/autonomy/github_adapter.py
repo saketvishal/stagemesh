@@ -175,6 +175,26 @@ class GitHubPullRequests(GitHubClientBase):
         )
 
 
+def _worst_gate(outcomes: list[GateOutcome], severity: dict[Conclusion, int]) -> GateOutcome:
+    """Keep the worst conclusion, and every failure detail that shares that rank.
+
+    Two suites can both fail under the same check name. Picking one log would let a known red suite hide a new test.
+    """
+    worst = max(severity.get(outcome.conclusion, 0) for outcome in outcomes)
+    tied = [outcome for outcome in outcomes if severity.get(outcome.conclusion, 0) == worst]
+    if len(tied) == 1:
+        return tied[0]
+    tests: list[str] = []
+    for outcome in tied:
+        for test in outcome.failing_tests:
+            if test not in tests:
+                tests.append(test)
+    log = "\n".join(outcome.log for outcome in tied if outcome.log)
+    earlier = tuple(conclusion for outcome in tied for conclusion in outcome.rerun_conclusions)
+    conclusion = Conclusion.FAILURE if any(outcome.conclusion is Conclusion.FAILURE for outcome in tied) else tied[0].conclusion
+    return GateOutcome(tied[0].name, conclusion, log, tuple(tests), earlier, tied[0].ref)
+
+
 class GitHubHostedCI(GitHubClientBase):
     """`HostedCI` over check runs. Check-run payloads carry no logs, so failure identity is gate-level unless output text lists tests."""
 
@@ -188,7 +208,9 @@ class GitHubHostedCI(GitHubClientBase):
                 raise GitHubAdapterError(status, f"unexpected check-runs response for {sha}")
             batch = payload.get("check_runs") or []
             runs.extend(batch)
-            if len(batch) < 100 or len(runs) >= int(payload.get("total_count") or 0):
+            total = payload.get("total_count")
+            # A missing total_count must not end pagination: a full page can hide a later failure.
+            if len(batch) < 100 or (isinstance(total, int) and not isinstance(total, bool) and len(runs) >= total):
                 break
         # Re-runs of a check are further check runs of the SAME check suite and name: within a suite the newest decides and earlier ones
         # are attempts. Same-named checks from DIFFERENT suites (other workflows or apps) are independent gates: the worst verdict wins,
@@ -207,7 +229,7 @@ class GitHubHostedCI(GitHubClientBase):
         gates: dict[str, GateOutcome] = {}
         complete = True
         for name, outcomes in per_name.items():
-            outcome = max(outcomes, key=lambda o: severity.get(o.conclusion, 0))
+            outcome = _worst_gate(outcomes, severity)
             complete = complete and not any(o.conclusion is Conclusion.PENDING for o in outcomes)
             gates[name] = outcome
         return HostedCIRun(sha, gates, complete=complete and bool(runs), environment="github-actions")
