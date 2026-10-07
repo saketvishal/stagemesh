@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -472,11 +473,8 @@ def candidate_workspace(project: Path, candidate_sha: str) -> Iterator[Path]:
 
 def run_gate(project: Path, gate: GateCommand) -> GateResult:
     run_dir = project / gate.cwd if gate.cwd else project
-    command = list(gate.command)
-    resolved = shutil.which(command[0])  # lets "npm" find npm.cmd on Windows without a shell
-    if resolved:
-        command[0] = resolved
-    environment = {**os.environ, **dict(gate.env)} if gate.env else None
+    command = _gate_runtime_command(list(gate.command))
+    environment = _gate_environment(run_dir, gate)
     try:
         result = subprocess.run(
             command,
@@ -508,6 +506,28 @@ def run_gate(project: Path, gate: GateCommand) -> GateResult:
         _gate_output_text(result.stdout),
         _gate_output_text(result.stderr),
     )
+
+
+def _gate_runtime_command(command: list[str]) -> list[str]:
+    if not command:
+        return command
+    executable = Path(command[0]).name.casefold()
+    if executable in {"python", "python.exe", "python3", "python3.exe"}:
+        command[0] = sys.executable
+        return command
+    resolved = shutil.which(command[0])  # lets "npm" find npm.cmd on Windows without a shell
+    if resolved:
+        command[0] = resolved
+    return command
+
+
+def _gate_environment(run_dir: Path, gate: GateCommand) -> dict[str, str] | None:
+    environment = {**os.environ, **dict(gate.env)}
+    src = run_dir / "src"
+    if src.is_dir():
+        existing = environment.get("PYTHONPATH")
+        environment["PYTHONPATH"] = str(src) if not existing else str(src) + os.pathsep + existing
+    return environment if gate.env or src.is_dir() else None
 
 
 def _matches(path: str, patterns: tuple[str, ...]) -> bool:

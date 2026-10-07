@@ -92,12 +92,12 @@ def classify_failure(
     return False, "implementation_failure"
 
 
-DEFAULT_PROVIDER_TIMEOUT_SECONDS = 3600.0
+DEFAULT_PROVIDER_TIMEOUT_SECONDS = 900.0
 PROVIDER_TIMEOUT = "provider_timeout"
 
 
 def provider_timeout_seconds(configured: float | None = None) -> float:
-    """Wall-clock limit for one provider subprocess: explicit value, STAGEMESH_PROVIDER_TIMEOUT_SECONDS, or 1h."""
+    """Wall-clock limit for one provider subprocess: explicit value, STAGEMESH_PROVIDER_TIMEOUT_SECONDS, or 15m."""
     if configured is not None and configured > 0:
         return float(configured)
     try:
