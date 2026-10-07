@@ -204,7 +204,43 @@ class Supervisor:
                     ),
                 )
             return None
+        if self._restore_pending_candidate(task_id, ownership, check.mutations, candidate):
+            return None
         return self.record(self._quarantine(task_id, ownership, check.mutations, (not running) if restore is None else restore))
+
+    def _restore_pending_candidate(
+        self, task_id: str, ownership: WorkspaceOwnership, mutations: list[Mutation], candidate: object | None
+    ) -> bool:
+        """Repair a pending candidate worktree that was restored to its pre-candidate head after an interrupted handoff."""
+        if candidate is None or not self._candidate_pending(task_id):
+            return False
+        if len(mutations) != 1 or mutations[0].kind != "CANDIDATE_PROVENANCE_MISMATCH":
+            return False
+        sha = str(candidate["sha"])
+        worktree = Path(ownership.worktree)
+        if mutations[0].expected != sha or mutations[0].observed != ownership.expected_head:
+            return False
+        if not (worktree / ".git").exists():
+            return False
+        facts = GitFacts(worktree)
+        if not (
+            facts.exists(sha)
+            and facts.exists(ownership.expected_head)
+            and facts.is_ancestor(ownership.expected_head, sha)
+        ):
+            return False
+        if tracked_fingerprint(worktree) != ownership.tracked_fingerprint:
+            return False
+        facts.git.run("checkout", "-q", "--detach", sha)
+        if not record_supervised_move(self.project, task_id, ownership.expected_head, sha, sha):
+            return False
+        save_ownership(self.store, replace(ownership, expected_head=sha, tracked_fingerprint=tracked_fingerprint(worktree)))
+        record_audit(
+            self.store,
+            "candidate.ownership_reconciled",
+            {"task_id": task_id, "candidate_sha": sha, "previous_head": ownership.expected_head, "worktree": str(worktree)},
+        )
+        return True
 
     def execution_finished(self, task_id: str) -> None:
         """An owned execution ended (successfully or not): what it left in the worktree is the owner's, not a second writer's.
