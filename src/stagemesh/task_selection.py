@@ -8,6 +8,7 @@ state, objective roots, or unplannable are never auto-selected; `--task <id>` by
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -100,8 +101,19 @@ def _excluded(labels: tuple[str, ...], excluded: tuple[str, ...]) -> str | None:
     return next((label for label in excluded if label.casefold() in folded), None)
 
 
+POOL_EXHAUSTION_MARKERS = (
+    "all_implementation_providers_no_progress",
+    "all_implementation_providers_exhausted",
+    "all_implementation_providers_failed",
+)
+POOL_EXHAUSTION_SKIP_SECONDS = 900.0
+
+
 def stale_failure(store: Store, task: Any) -> str | None:
-    """A previous attempt left this task failed: failed integration, or remediation still pending."""
+    """A previous attempt left this task failed, stale, or temporarily exhausted for autonomous selection."""
+    exhausted = recent_provider_pool_exhaustion(store, str(task["id"]))
+    if exhausted is not None:
+        return exhausted
     candidate = store.latest_candidate(task["id"])
     if candidate is not None:
         row = store.conn.execute(
@@ -115,6 +127,28 @@ def stale_failure(store: Store, task: Any) -> str | None:
     ).fetchone()
     if pending is not None and task["stage"] == Stage.IMPLEMENT:
         return f"remediation pending after failed {pending['stage']}"
+    return None
+
+
+def recent_provider_pool_exhaustion(store: Store, task_id: str) -> str | None:
+    rows = store.conn.execute(
+        "SELECT payload, created_at FROM audit_events WHERE event_type=? ORDER BY created_at DESC, rowid DESC LIMIT 20",
+        ("task.implementation_unsuccessful",),
+    ).fetchall()
+    now = time.time()
+    for row in rows:
+        age = now - float(row["created_at"])
+        if age > POOL_EXHAUSTION_SKIP_SECONDS:
+            continue
+        try:
+            payload = json.loads(row["payload"])
+        except (TypeError, ValueError):
+            continue
+        if str(payload.get("task_id")) != task_id:
+            continue
+        reason = str(payload.get("reason") or "")
+        if any(reason.startswith(marker) for marker in POOL_EXHAUSTION_MARKERS):
+            return f"recent provider pool exhaustion ({reason[:160]}); will retry automatically after provider cooldown"
     return None
 
 
@@ -176,7 +210,8 @@ def _collect(
             continue
         stale = stale_failure(store, task)
         if stale is not None:
-            skipped.append({"task_id": task_id, "reason": f"stale failed state ({stale}); retry explicitly with --task {task_id}"})
+            reason = stale if stale.startswith("recent provider pool exhaustion") else f"stale failed state ({stale}); retry explicitly with --task {task_id}"
+            skipped.append({"task_id": task_id, "reason": reason})
             continue
         priority_rank, priority_label = _first_match(labels, policy.priority_labels)
         preferred_rank, preferred_label = _first_match(labels, policy.preferred_labels)

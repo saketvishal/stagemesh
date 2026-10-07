@@ -502,9 +502,9 @@ def diagnose(
         recommendation = (
             f"Every eligible configured implementation provider was exhausted ({attempted}). "
             f"No candidate was produced for task {task_id}. "
-            "Each listed outcome is capacity, timeout, or no-progress. "
-            "No further automatic provider remains in this pass. "
-            f"`stagemesh retry-task --task {task_id}` only after provider availability or the task contract changes."
+            "StageMesh will temporarily skip this task during provider cooldown and continue with other eligible work. "
+            "After provider availability/capacity or the task contract changes, run `stagemesh continue`; "
+            "no manual provider choice, diagnostic detour, SQLite edit, or retry command is required for normal recovery."
         )
     if category == REVIEW_FINDING and focus and focus.messages:
         recommendation += " Finding: " + focus.messages[0][:300]

@@ -32,7 +32,7 @@ def main() -> int:
         _run(sys.executable, "-m", "venv", str(VENV))
     py = _venv_python()
     _run(str(py), "-m", "pip", "install", "--upgrade", "pip")
-    _run(str(py), "-m", "pip", "install", str(ROOT))
+    _run(str(py), "-m", "pip", "install", f"{ROOT}[dev]")
     installed = py.parent / _script_name()
     if not installed.exists():
         raise SystemExit(f"installed stagemesh entry point not found: {installed}")

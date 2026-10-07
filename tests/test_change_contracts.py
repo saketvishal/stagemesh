@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 from stagemesh.contract_binding import contract_for_candidate
-from stagemesh.contracts import ChangeContract, GateCommand, evaluate_contract, parse_contract
+from stagemesh.contracts import ChangeContract, GateCommand, evaluate_contract, parse_contract, run_gate
 from stagemesh.coordinator import Coordinator
 from stagemesh.domain import EvidenceKind, EvidenceStatus, ExecutionStatus, Stage, TaskStatus
 from stagemesh.execution import ExecutionResult, Executor, SubprocessExecutor
@@ -68,6 +68,29 @@ class RecordingReviewAdapter:
         self.calls += 1
         self.prompts.append(prompt)
         return self.response
+
+
+def test_python_gate_uses_current_runtime_and_candidate_src(tmp_path: Path) -> None:
+    project = tmp_path / "repo"
+    (project / "src").mkdir(parents=True)
+    (project / "src" / "probe_runtime.py").write_text('VALUE = "candidate-src"\n', encoding="utf-8")
+
+    gate = run_gate(
+        project,
+        GateCommand(
+            "python-runtime",
+            [
+                "python",
+                "-c",
+                "import probe_runtime, sys; print(sys.executable); print(probe_runtime.VALUE)",
+            ],
+            timeout_seconds=5,
+        ),
+    )
+
+    assert gate.status == "PASSED", gate.stderr
+    assert Path(sys.executable).resolve() == Path(gate.stdout.splitlines()[0]).resolve()
+    assert "candidate-src" in gate.stdout
 
 
 def test_contract_rejects_forbidden_and_out_of_scope_files(tmp_path: Path) -> None:

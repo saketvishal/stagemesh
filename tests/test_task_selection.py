@@ -162,6 +162,27 @@ def test_stale_failed_tasks_are_skipped_unless_explicitly_retried(tmp_path: Path
     store.close()
 
 
+def test_recent_provider_pool_exhaustion_is_temporarily_skipped(tmp_path: Path) -> None:
+    project = _project(tmp_path, ["T-1", "T-2"], labels={"T-1": ["priority:p0"]})
+    store = _synced(project)
+    store.add_audit_event(
+        "task.implementation_unsuccessful",
+        {
+            "task_id": "T-1",
+            "reason": "all_implementation_providers_exhausted: claude: no_implementation_change; grok: quota_rate_limit",
+        },
+    )
+
+    selection = select_next_task(store, project, TaskSelectionConfig())
+
+    assert selection.task_id == "T-2"
+    skip = next(s for s in selection.skipped if s["task_id"] == "T-1")
+    assert "recent provider pool exhaustion" in skip["reason"]
+    assert "retry automatically after provider cooldown" in skip["reason"]
+    assert "--task" not in skip["reason"]
+    store.close()
+
+
 def test_integration_failure_marks_a_task_stale(tmp_path: Path) -> None:
     project = _project(tmp_path, ["T-1", "T-2"])
     store = _synced(project)
