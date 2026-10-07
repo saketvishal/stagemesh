@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -30,6 +31,25 @@ class ExecutionResult:
     durable_handoff: bool = False
     capacity_failure: bool = False
     failure_reason: str | None = None
+    provider_output: str | None = None
+    retry_after: str | None = None
+
+
+_QUOTA = re.compile(
+    r"weekly limit|usage limit|usage cap|plan limit|capacity exhausted|"
+    r"rate[_ ]limit|quota exceeded|exceeded your current quota|too many requests|"
+    r"\b429\b|insufficient_quota|overloaded_error|rate_limit_error",
+    re.IGNORECASE,
+)
+_SECRET = re.compile(r"(?i)(bearer\s+)\S+|(\bgh[pousr]_|sk-|xai-)[A-Za-z0-9_\-]+")
+_RETRY = re.compile(r"(?i)(?:resets\s+[^\n]{1,80}|retry[- ]after[:\s]+[^\n]{1,40})")
+
+
+def capacity_evidence(stdout: str, stderr: str) -> tuple[str, str | None]:
+    """Redacted provider text and an observable reset hint. No tokens."""
+    text = _SECRET.sub(lambda m: (m.group(1) or "") + "[redacted]", f"{stdout}\n{stderr}").strip()
+    retry = _RETRY.search(text)
+    return text[:500], (retry.group(0).strip()[:120] if retry else None)
 
 
 def classify_failure(
@@ -57,11 +77,7 @@ def classify_failure(
     ]):
         return True, "authentication_failure"
 
-    if any(m in combined for m in [
-        "rate limit", "rate_limit", "quota", "too many requests", "429",
-        "exceeded your current quota", "capacity exhausted", "overloaded_error",
-        "rate_limit_error", "insufficient_quota"
-    ]):
+    if _QUOTA.search(combined):
         return True, "quota_rate_limit"
 
     if any(m in combined for m in [

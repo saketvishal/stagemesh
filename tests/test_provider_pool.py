@@ -32,9 +32,15 @@ SCRIPT = (
     "if 'Review candidate' in prompt:\n"
     "    if mode == 'review-rate-limit':\n"
     "        sys.stderr.write('rate limit exceeded'); sys.exit(1)\n"
+    "    if mode == 'weekly-limit':\n"
+    "        sys.stderr.write(\"You've hit your weekly limit \\u00b7 resets 1am (America/Chicago)\"); sys.exit(1)\n"
     "    print('{\"decision\":\"PASS\"}'); sys.exit(0)\n"
     "if mode == 'auth-fail':\n"
     "    sys.stderr.write('authentication_error: not logged in'); sys.exit(1)\n"
+    "if mode == 'weekly-limit':\n"
+    "    sys.stderr.write(\"You've hit your weekly limit \\u00b7 resets 1am (America/Chicago)\"); sys.exit(1)\n"
+    "if mode == 'impl-error':\n"
+    "    sys.stderr.write('AssertionError: expected the capacity line once'); sys.exit(1)\n"
     "pathlib.Path('docs/a.md').write_text('by ' + mode + ' ' + (sys.argv[2] if len(sys.argv) > 2 else '') + '\\n')\n"
 )
 
@@ -114,6 +120,82 @@ class Rig:
             "SELECT payload FROM evidence WHERE kind=? ORDER BY created_at DESC", (EvidenceKind.REVIEW,)
         ).fetchone()
         return json.loads(row["payload"])
+
+
+WEEKLY = "You've hit your weekly limit · resets 1am (America/Chicago)"
+
+
+def test_weekly_limit_phrase_is_quota_not_an_implementation_defect() -> None:
+    from stagemesh.execution import classify_failure
+
+    is_cap, reason = classify_failure(1, stderr=WEEKLY)
+    assert is_cap is True and reason == "quota_rate_limit"
+    is_cap, reason = classify_failure(1, stderr="AssertionError: expected the capacity line once")
+    assert is_cap is False and reason == "implementation_failure"
+    is_cap, reason = classify_failure(1, stderr="the diff hit the file limit")
+    assert is_cap is False and reason == "implementation_failure"
+
+
+def test_weekly_limit_falls_through_to_the_next_provider_without_naming_it(tmp_path: Path) -> None:
+    rig = Rig(tmp_path, {"provider-a": "weekly-limit", "provider-b": "ok"}, pools={IMPLEMENT: ("provider-a", "provider-b"), REVIEW: ("provider-b",)})
+
+    rig.tick(2)
+
+    candidate = rig.store.latest_candidate(TASK)
+    assert candidate["produced_by"] == "provider-b"
+    assert "fallback: provider-a failed (quota_rate_limit) -> trying provider-b" in rig.text()
+    failure = json.loads(rig.store.conn.execute("SELECT payload FROM audit_events WHERE event_type='provider.failure'").fetchone()["payload"])
+    assert failure["provider"] == "provider-a" and failure["reason"] == "quota_rate_limit"
+    assert "You've hit your weekly limit" in failure["provider_output"]
+    assert "resets 1am" in failure["provider_output"]
+    assert "resets 1am" in failure["retry_after"]
+    assert failure["next_provider"] == "provider-b"
+    assert rig.store.task_remediation_count(TASK, "IMPLEMENT") == 0
+    assert rig.store.latest_candidate(TASK)["sha"]
+
+
+def test_every_provider_weekly_limit_is_one_capacity_result(tmp_path: Path) -> None:
+    rig = Rig(tmp_path, {"provider-a": "weekly-limit", "provider-b": "weekly-limit"})
+
+    progressed = rig.coordinator.tick()
+    assert progressed == 1  # plan
+    progressed = rig.coordinator.tick()
+    assert progressed == 0
+    assert rig.store.latest_candidate(TASK) is None
+    assert rig.stage == Stage.IMPLEMENT
+    events = [json.loads(r["payload"]) for r in rig.store.conn.execute("SELECT payload FROM audit_events WHERE event_type='task.capacity_failure'")]
+    assert len(events) == 1
+    assert events[0]["reason"].startswith("all_implementation_providers_failed")
+    assert "provider-a" in events[0]["reason"] and "provider-b" in events[0]["reason"]
+    assert rig.store.task_remediation_count(TASK, "IMPLEMENT") == 0
+    # cooled down: another tick does not call them again
+    rig.coordinator.tick()
+    assert rig.store.conn.execute("SELECT COUNT(*) FROM executions").fetchone()[0] == 2
+
+
+def test_ordinary_implementation_error_does_not_skip_to_the_next_provider(tmp_path: Path) -> None:
+    rig = Rig(tmp_path, {"provider-a": "impl-error", "provider-b": "ok"})
+
+    rig.tick(2)
+
+    assert rig.store.latest_candidate(TASK) is None
+    assert "trying provider-b" not in rig.text()
+    assert "final implementation provider: provider-a" in rig.text()
+    assert not rig.store.conn.execute("SELECT 1 FROM audit_events WHERE event_type='task.capacity_failure'").fetchone()
+
+
+def test_review_weekly_limit_falls_through_to_the_next_reviewer(tmp_path: Path) -> None:
+    rig = Rig(
+        tmp_path,
+        {"provider-a": "ok", "provider-b": "weekly-limit", "provider-c": "ok"},
+        pools={IMPLEMENT: ("provider-a",), REVIEW: ("provider-b", "provider-c")},
+    )
+
+    rig.tick(4)
+
+    payload = rig.review_payload()
+    assert payload["review_provider"] == "provider-c"
+    assert "fallback: provider-b failed (quota_rate_limit) -> trying provider-c" in rig.text()
 
 
 def test_implementation_falls_back_through_the_pool_automatically(tmp_path: Path) -> None:

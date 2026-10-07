@@ -17,6 +17,7 @@ from .domain import ExecutionKind, ExecutionStatus
 from .execution import (
     PROVIDER_TIMEOUT,
     ExecutionResult,
+    capacity_evidence,
     classify_failure,
     communicate_bounded,
     popen_session_kwargs,
@@ -127,7 +128,14 @@ class RuntimeCommandAdapter:
         if proc.returncode != 0:
             is_cap, reason = classify_failure(proc.returncode, stdout, stderr)
             store.finish_execution(execution_id, ExecutionStatus.FAILED, result=reason)
-            return ExecutionResult(ExecutionStatus.FAILED, capacity_failure=is_cap, failure_reason=reason)
+            output, retry_after = capacity_evidence(stdout, stderr) if is_cap else (None, None)
+            return ExecutionResult(
+                ExecutionStatus.FAILED,
+                capacity_failure=is_cap,
+                failure_reason=reason,
+                provider_output=output,
+                retry_after=retry_after,
+            )
         sha = commit_implementation_candidate(
             store,
             task_id,
@@ -194,7 +202,10 @@ class RuntimeCommandAdapter:
             if after_head != before_head or tracked_dirty:
                 return _review_failure("review execution mutated candidate workspace")
             if proc.returncode != 0:
-                _, reason = classify_failure(proc.returncode, stdout, stderr)
+                is_cap, reason = classify_failure(proc.returncode, stdout, stderr)
+                if is_cap:
+                    output, retry_after = capacity_evidence(stdout, stderr)
+                    return _review_infrastructure_failure(reason, output, retry_after)
                 return _review_infrastructure_failure(reason)
             return stdout.strip()
 
@@ -369,10 +380,15 @@ def _tracked_content_changed(path: Path) -> bool:
     return unstaged.returncode != 0 or staged.returncode != 0
 
 
-def _review_infrastructure_failure(reason: str) -> str:
+def _review_infrastructure_failure(reason: str, output: str | None = None, retry_after: str | None = None) -> str:
     import json
 
-    return json.dumps({"decision": "INFRASTRUCTURE_FAILURE", "reason": reason})
+    payload: dict[str, str] = {"decision": "INFRASTRUCTURE_FAILURE", "reason": reason}
+    if output:
+        payload["provider_output"] = output[:500]
+    if retry_after:
+        payload["retry_after"] = retry_after[:120]
+    return json.dumps(payload)
 
 
 def _review_failure(message: str) -> str:

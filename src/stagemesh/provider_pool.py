@@ -174,10 +174,26 @@ class ProviderPool:
                 return f"recent_failure: {payload.get('reason')} {age}s ago (cooldown {int(self.cooldown_seconds)}s)"
         return None
 
-    def record_failure(self, store: Store, stage: str, task_id: str, provider: str, reason: str) -> None:
-        store.add_audit_event(
-            PROVIDER_FAILURE_EVENT, {"task_id": task_id, "stage": stage, "provider": provider, "reason": reason[:300]}
-        )
+    def record_failure(
+        self,
+        store: Store,
+        stage: str,
+        task_id: str,
+        provider: str,
+        reason: str,
+        *,
+        provider_output: str | None = None,
+        retry_after: str | None = None,
+        next_provider: str | None = None,
+    ) -> None:
+        payload: dict[str, object] = {"task_id": task_id, "stage": stage, "provider": provider, "reason": reason[:300]}
+        if provider_output:
+            payload["provider_output"] = provider_output[:500]
+        if retry_after:
+            payload["retry_after"] = retry_after[:120]
+        if next_provider:
+            payload["next_provider"] = next_provider
+        store.add_audit_event(PROVIDER_FAILURE_EVENT, payload)
 
     def kind(self, name: str) -> str:
         return "built-in default provider" if name in BUILTIN_PROVIDERS else "custom provider"
@@ -392,8 +408,19 @@ class FallbackReviewAdapter:
                 self.pool.log(f"  final review provider: {adapter.name} ({self.pool.kind(adapter.name)})")
                 self.pool.record_use(self.store, REVIEW, self.task_id, adapter.name, "ANSWERED")
                 return response
+            evidence = _infrastructure_evidence(response)
+            upcoming = next((item.name for item in self.adapters if item.name not in {a["provider"] for a in self.attempts} and item.name != adapter.name), None)
             self.attempts.append({"provider": adapter.name, "reason": reason})
-            self.pool.record_failure(self.store, REVIEW, self.task_id, adapter.name, reason)
+            self.pool.record_failure(
+                self.store,
+                REVIEW,
+                self.task_id,
+                adapter.name,
+                reason,
+                provider_output=evidence.get("provider_output"),
+                retry_after=evidence.get("retry_after"),
+                next_provider=upcoming,
+            )
             if limiter is not None:  # an unavailable reviewer is unavailable for every task, not just this one
                 limiter.cool_down(adapter.name, self.pool.cooldown_seconds, reason)
             previous = adapter.name
@@ -401,14 +428,31 @@ class FallbackReviewAdapter:
         return response
 
 
-def _infrastructure_reason(response: str) -> str | None:
+def _infrastructure_payload(response: str) -> dict | None:
     try:
         parsed = json.loads(response)
     except (TypeError, ValueError):
         return None
     if isinstance(parsed, dict) and parsed.get("decision") == INFRASTRUCTURE_FAILURE:
-        return str(parsed.get("reason") or "review_provider_failure")
+        return parsed
     return None
+
+
+def _infrastructure_reason(response: str) -> str | None:
+    parsed = _infrastructure_payload(response)
+    if parsed is None:
+        return None
+    return str(parsed.get("reason") or "review_provider_failure")
+
+
+def _infrastructure_evidence(response: str) -> dict[str, str]:
+    parsed = _infrastructure_payload(response) or {}
+    evidence: dict[str, str] = {}
+    for key in ("provider_output", "retry_after"):
+        value = parsed.get(key)
+        if isinstance(value, str) and value:
+            evidence[key] = value
+    return evidence
 
 
 class PooledExecutor(Executor):
@@ -479,7 +523,17 @@ class PooledExecutor(Executor):
                 reason = result.failure_reason or "provider_failure"
                 reasons.append(reason)
                 failures.append(f"{adapter.name}: {reason}")
-                self.pool.record_failure(store, IMPLEMENT, task_id, adapter.name, reason)
+                nxt = remaining[0].name if remaining else None
+                self.pool.record_failure(
+                    store,
+                    IMPLEMENT,
+                    task_id,
+                    adapter.name,
+                    reason,
+                    provider_output=result.provider_output,
+                    retry_after=result.retry_after,
+                    next_provider=nxt,
+                )
                 if limiter is not None and result.capacity_failure:
                     limiter.cool_down(adapter.name, self.pool.cooldown_seconds, reason)
                 try:
