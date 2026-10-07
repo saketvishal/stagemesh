@@ -83,7 +83,22 @@ _UNSUPPORTED = re.compile(
 )
 _NO_DETAIL = "log:"  # the signature of a failure that exposes no log lines and no test names (hosted check runs carry no logs)
 _FAILED_LINE = re.compile(r"^\s*FAILED\s+\S+")
-_KEY_LINE = re.compile(r"(fail|error|assert|exception|traceback|expected|denied|not found)", re.IGNORECASE)
+_LINE_COL = re.compile(r"\b(\d+):(\d+)\b")
+
+
+def _normalize_detail(line: str) -> str:
+    """Normalize a failure line but keep `line:column` so a second lint hit is not the same failure."""
+    saved: list[str] = []
+
+    def keep(match: re.Match[str]) -> str:
+        saved.append(match.group(0))
+        # Letters only: normalize() replaces every digit, which would collapse the placeholders.
+        return f"__lc{chr(ord('a') + len(saved) - 1)}__"
+
+    normalized = normalize(_LINE_COL.sub(keep, line))
+    for index, raw in enumerate(saved):
+        normalized = normalized.replace(f"__lc{chr(ord('a') + index)}__", raw)
+    return normalized
 
 
 @dataclass(frozen=True)
@@ -102,7 +117,7 @@ class GateOutcome:
         Keyword filters hide lint and link failures that do not say "error". Normalized so timings and temp paths still compare equal.
         """
         return frozenset(
-            normalize(line) for line in self.log.splitlines() if line.strip() and not _FAILED_LINE.match(line)
+            _normalize_detail(line) for line in self.log.splitlines() if line.strip() and not _FAILED_LINE.match(line)
         )
 
     @property
@@ -112,7 +127,7 @@ class GateOutcome:
             extra = sorted(self.extra_lines)
             tail = f"|extra:{hashlib.sha256(chr(10).join(extra).encode('utf-8')).hexdigest()[:16]}" if extra else ""
             return "tests:" + ",".join(sorted(self.failing_tests)) + tail
-        lines = sorted({normalize(line) for line in self.log.splitlines() if _KEY_LINE.search(line)})
+        lines = sorted(self.extra_lines)
         if not lines:
             return _NO_DETAIL
         # every distinct failure line takes part: truncating would let a new failure that sorts last hide behind an old red gate

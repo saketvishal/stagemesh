@@ -190,9 +190,9 @@ def _worst_gate(outcomes: list[GateOutcome], severity: dict[Conclusion, int]) ->
             if test not in tests:
                 tests.append(test)
     log = "\n".join(outcome.log for outcome in tied if outcome.log)
-    earlier = tuple(conclusion for outcome in tied for conclusion in outcome.rerun_conclusions)
+    # A rerun belongs to one suite. Copying a pass from suite A onto suite B's new failure would call that failure flaky.
     conclusion = Conclusion.FAILURE if any(outcome.conclusion is Conclusion.FAILURE for outcome in tied) else tied[0].conclusion
-    return GateOutcome(tied[0].name, conclusion, log, tuple(tests), earlier, tied[0].ref)
+    return GateOutcome(tied[0].name, conclusion, log, tuple(tests), (), tied[0].ref)
 
 
 class GitHubHostedCI(GitHubClientBase):
