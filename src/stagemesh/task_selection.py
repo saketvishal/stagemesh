@@ -106,7 +106,7 @@ POOL_EXHAUSTION_MARKERS = (
     "all_implementation_providers_exhausted",
     "all_implementation_providers_failed",
 )
-POOL_EXHAUSTION_SKIP_SECONDS = 900.0
+POOL_EXHAUSTION_SKIP_SECONDS = 21600.0
 
 
 def stale_failure(store: Store, task: Any) -> str | None:
@@ -148,7 +148,7 @@ def recent_provider_pool_exhaustion(store: Store, task_id: str) -> str | None:
             continue
         reason = str(payload.get("reason") or "")
         if any(reason.startswith(marker) for marker in POOL_EXHAUSTION_MARKERS):
-            return f"recent provider pool exhaustion ({reason[:160]}); will retry automatically after provider cooldown"
+            return f"recent provider pool exhaustion ({reason[:160]}); continuing with other eligible tasks until provider/task cooldown clears"
     return None
 
 
@@ -210,7 +210,7 @@ def _collect(
             continue
         stale = stale_failure(store, task)
         if stale is not None:
-            reason = stale if stale.startswith("recent provider pool exhaustion") else f"stale failed state ({stale}); retry explicitly with --task {task_id}"
+            reason = stale if stale.startswith("recent provider pool exhaustion") else f"stale failed state ({stale}); continuing with other eligible tasks"
             skipped.append({"task_id": task_id, "reason": reason})
             continue
         priority_rank, priority_label = _first_match(labels, policy.priority_labels)
