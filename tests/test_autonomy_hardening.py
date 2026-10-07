@@ -92,6 +92,22 @@ def test_a_registered_candidate_commit_is_not_a_mutation(tmp_path: Path) -> None
     assert supervisor.check_workspace(TASK) is None and load_ownership(store, TASK).expected_head == mine
 
 
+
+def test_pending_candidate_row_reconciles_interrupted_ownership_refresh(tmp_path: Path) -> None:
+    repo, worktree, _base = _repo_with_worktree(tmp_path)
+    store = new_store(tmp_path)
+    store.upsert_task("t", source_id=TASK)
+    store.advance_task(TASK, Stage.IMPLEMENT)
+    supervisor = Supervisor(store, repo, integration_ref="main")
+    supervisor.claim_workspace(TASK, worktree)
+    mine = commit(worktree, {"src/widget.py": "W = 1\n"}, "StageMesh candidate", who=STAGEMESH)
+    store.add_candidate(TASK, mine, "fake", durable_handoff=True)
+    store.advance_task(TASK, Stage.VALIDATE)
+
+    assert supervisor.check_workspace(TASK) is None
+    assert load_ownership(store, TASK).expected_head == mine
+    assert decisions(store, TASK) == []
+
 def test_registration_requires_the_worktree_to_actually_be_at_that_commit(tmp_path: Path) -> None:
     repo, worktree, base = _repo_with_worktree(tmp_path)
     store = new_store(tmp_path)
