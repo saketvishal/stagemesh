@@ -15,14 +15,14 @@ from .persistence import Store
 from .process_identity import classify_process, process_identity
 
 STOP_STATES = {"stopping", "stopped"}
-CYCLE_BOUNDARY_STATES = {"resumed", "paused"}
+CYCLE_BOUNDARY_STATES = {"resumed", "paused", "running"}  # `running`: a new queue run started after a completed stop
 
 
 def _stop_reason(store: Store, state: str) -> str | None:
     """Operator reason for the current stopping/stopped cycle.
 
     A later runner 'stopped' event only says the stop finished.
-    Look back for the 'stopping' request. Never scan past a resume or pause.
+    Look back for the 'stopping' request. Never scan past a resume, pause, or new run start.
     A stop with no request in this cycle uses the latest event's own reason.
     """
     if state not in STOP_STATES:

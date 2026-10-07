@@ -16,12 +16,13 @@ from .capacity import CapacityKind
 from .concurrency import ProviderLimiter
 from .config import BUILTIN_PROVIDERS, SELECTION_POLICIES
 from .execution import PROVIDER_TIMEOUT, ExecutionResult, Executor
-from .domain import ExecutionStatus
+from .domain import ExecutionKind, ExecutionStatus
 from .persistence import Store
 from .providers import RuntimeCommandAdapter
 from .review import INFRASTRUCTURE_FAILURE
 from .routing import RoutingMode
-from .workspaces import prepare_task_workspace, task_workspace
+from .workspace_guard import EXTERNAL_WORKSPACE_MUTATION, WorkspaceMutation, owned_workspace
+from .workspaces import task_workspace
 
 IMPLEMENT = "IMPLEMENT"
 REVIEW = "REVIEW"
@@ -470,6 +471,10 @@ class PooledExecutor(Executor):
                     limiter.release(held)
             previous_name = adapter.name
             index += 1
+            if result.failure_reason == EXTERNAL_WORKSPACE_MUTATION:
+                # Not a provider problem: another provider would run in the same tampered workspace. Stop and let the task block.
+                log(f"  REFUSED: {adapter.name} stopped because the task workspace was changed outside StageMesh")
+                return result
             if result.capacity_failure or result.failure_reason == PROVIDER_TIMEOUT:
                 reason = result.failure_reason or "provider_failure"
                 reasons.append(reason)
@@ -477,7 +482,10 @@ class PooledExecutor(Executor):
                 self.pool.record_failure(store, IMPLEMENT, task_id, adapter.name, reason)
                 if limiter is not None and result.capacity_failure:
                     limiter.cool_down(adapter.name, self.pool.cooldown_seconds, reason)
-                _reset_worktree(project, task_id)
+                try:
+                    _reset_worktree(store, project, task_id, claim_id)
+                except WorkspaceMutation:
+                    return ExecutionResult(ExecutionStatus.FAILED, failure_reason=EXTERNAL_WORKSPACE_MUTATION)
                 continue
             self.pool.record_use(store, IMPLEMENT, task_id, adapter.name, str(result.status))
             log(f"  final implementation provider: {adapter.name} ({self.pool.kind(adapter.name)}); candidate {result.candidate_sha or '-'}; result {result.status}")
@@ -490,8 +498,9 @@ class PooledExecutor(Executor):
         )
 
 
-def _reset_worktree(project: Path, task_id: str) -> None:
-    """Discard a failed provider's partial edits so the next provider starts from the last commit."""
-    path = prepare_task_workspace(project, task_id)
-    for args in (["reset", "--hard", "HEAD"], ["clean", "-fdq"]):
-        subprocess.run(["git", *args], cwd=path, capture_output=True, check=False)
+def _reset_worktree(store: Store, project: Path, task_id: str, claim_id: str | None) -> None:
+    """Discard a failed provider's partial edits so the next provider starts from the last commit, and seal that as the workspace state."""
+    with owned_workspace(store, project, task_id, ExecutionKind.IMPLEMENTATION, claim_id=claim_id) as lease:
+        for args in (["reset", "--hard", "HEAD"], ["clean", "-fdq"]):
+            subprocess.run(["git", *args], cwd=lease.path, capture_output=True, check=False)
+        lease.seal()

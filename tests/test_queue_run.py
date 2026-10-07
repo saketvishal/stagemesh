@@ -22,6 +22,7 @@ from stagemesh.domain import ExecutionKind, ExecutionStatus
 from stagemesh.execution import ExecutionResult, communicate_bounded
 from stagemesh.git import GitWorkspace
 from stagemesh.parallel import queue_control_state, recover_orphaned_claims, request_queue_control, worker_id_for
+from stagemesh.process_identity import boot_id
 from stagemesh.queue_run import QueueRunner, dirty_in_scope, dirty_paths, preflight, write_scope_overlap
 from stagemesh.review import Reviewer
 from stagemesh.serialized_integration import SerializedIntegrator
@@ -413,6 +414,78 @@ def test_stop_during_review_kills_tracked_provider_and_fails_execution(tmp_path:
     assert any(e["kind"] == "REVIEW" for e in failed)
     assert queue_control_state(rig.store)["state"] == "stopped"
     assert outcomes(queue(rig, ScriptedExecutor(rig.files), concurrency=1).run()) == {"A": "DONE"}
+
+
+def test_dead_runner_does_not_lose_the_protection_of_an_unknown_identity_execution(tmp_path: Path) -> None:
+    """The protection must outlive the runner process: a LATER run (different process) may not release the claim either."""
+    rig = Rig(tmp_path, ["A"])
+    gone = subprocess.Popen([sys.executable, "-c", "pass"])
+    gone.wait()  # the runner that owned the claim is really dead, so startup recovery considers the claim abandoned
+    claim = rig.store.acquire_claim("A", f"parallel-{gone.pid}-A")
+    unknown = rig.store.start_execution(  # a recorded pid with no create time: identity can never be proven
+        task_id="A", claim_id=claim, kind=ExecutionKind.IMPLEMENTATION, pid=os.getpid()
+    )
+    partial = prepare_task_workspace(rig.project, "A") / "half-done.txt"
+    partial.write_text("partial\n", encoding="utf-8")
+
+    assert recover_orphaned_claims(rig.store, rig.project) == []
+    assert rig.store.conn.execute("SELECT status FROM executions WHERE id=?", (unknown,)).fetchone()["status"] == "RUNNING"
+    assert rig.store.conn.execute("SELECT active FROM claims WHERE id=?", (claim,)).fetchone()["active"] == 1
+    assert partial.exists()  # the possibly-live provider's edits are not discarded
+    protected = [
+        json.loads(r["payload"])
+        for r in rig.store.conn.execute("SELECT payload FROM audit_events WHERE event_type='recovery.parallel_claim_protected_unknown'")
+    ]
+    assert protected == [
+        {
+            "task_id": "A",
+            "claim_id": claim,
+            "execution_id": unknown,
+            "pid": os.getpid(),
+            "worker_id": f"parallel-{gone.pid}-A",
+            "reason": "unknown_process_identity",
+            "action": "RECOVERY_DEFERRED",
+        }
+    ]
+
+    again = queue(rig, ScriptedExecutor(rig.files), concurrency=1).run()  # startup recovery runs again, still protected
+    assert "DONE" not in outcomes(again).values() and not [r for r in again.recovered if r.get("action") == "RELEASED"]
+    assert rig.store.conn.execute("SELECT active FROM claims WHERE id=?", (claim,)).fetchone()["active"] == 1
+
+    code, out, _ = run_stagemesh_cli(
+        rig.project, "recover-stale", "--task", "A", "--release-unknown", "--execution", unknown, "--reason", "operator verified no provider is running"
+    )
+    assert code == 0 and "RELEASED_BY_OPERATOR" in out  # the explicit override still works
+    assert not list(rig.store.running_executions())
+    assert rig.store.conn.execute("SELECT active FROM claims WHERE id=?", (claim,)).fetchone()["active"] == 0
+
+
+def test_dead_runner_with_provably_dead_execution_is_still_recovered(tmp_path: Path) -> None:
+    rig = Rig(tmp_path, ["A"])
+    gone = subprocess.Popen([PY, "-c", "pass"])
+    gone.wait()
+    claim = rig.store.acquire_claim("A", f"parallel-{gone.pid}-A")
+    execution = rig.store.start_execution(  # saved identity is complete and the process no longer exists: provably DEAD
+        task_id="A", claim_id=claim, kind=ExecutionKind.IMPLEMENTATION, pid=gone.pid, process_create_time=1.0, boot_id=boot_id()
+    )
+    partial = prepare_task_workspace(rig.project, "A") / "half-done.txt"
+    partial.write_text("partial\n", encoding="utf-8")
+
+    released = recover_orphaned_claims(rig.store, rig.project)
+    assert [r["task_id"] for r in released] == ["A"]
+    assert rig.store.conn.execute("SELECT status FROM executions WHERE id=?", (execution,)).fetchone()["status"] != "RUNNING"
+    assert rig.store.conn.execute("SELECT active FROM claims WHERE id=?", (claim,)).fetchone()["active"] == 0
+    assert not partial.exists()
+    assert not rig.store.conn.execute("SELECT 1 FROM audit_events WHERE event_type='recovery.parallel_claim_protected_unknown'").fetchall()
+
+
+def test_claim_of_a_live_runner_is_never_recovered_even_with_unknown_execution(tmp_path: Path) -> None:
+    rig = Rig(tmp_path, ["A"])
+    claim = rig.store.acquire_claim("A", f"parallel-{os.getpid()}-A")  # owner (this process) is provably alive
+    rig.store.start_execution(task_id="A", claim_id=claim, kind=ExecutionKind.IMPLEMENTATION, pid=os.getpid())
+    assert recover_orphaned_claims(rig.store, rig.project) == []
+    assert rig.store.conn.execute("SELECT active FROM claims WHERE id=?", (claim,)).fetchone()["active"] == 1
+    assert not rig.store.conn.execute("SELECT 1 FROM audit_events WHERE event_type='recovery.parallel_claim_protected_unknown'").fetchall()
 
 
 def surfaced_queue_control(project: Path) -> dict[str, dict]:
