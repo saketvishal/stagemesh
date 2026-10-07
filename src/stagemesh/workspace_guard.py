@@ -402,20 +402,21 @@ class WorkspaceLease:
                 raise WorkspaceReleaseError(detail)
 
             for attempt in range(_RELEASE_RETRIES):
-                if not target.exists():
-                    self._released = True
-                    return
-
                 try:
                     owner = _read_json(target)
                 except ValueError:
                     owner = {"token": self._token}  # corrupt record on disk; attempt removal
                 except OSError as exc:
                     last_error = exc
-                    time.sleep(_RELEASE_RETRY_INTERVAL)
+                    if attempt < _RELEASE_RETRIES - 1:
+                        time.sleep(_RELEASE_RETRY_INTERVAL)
                     continue
 
-                if owner is not None and owner.get("token") != self._token:
+                if owner is None:
+                    self._released = True
+                    return
+
+                if isinstance(owner, dict) and owner.get("token") != self._token:
                     # Foreign owner: do not delete another claimant's record
                     self._released = True
                     return
@@ -531,14 +532,21 @@ def _safe_cleanup_created_owner(target: Path, token: str) -> None:
     """
     last_error: Exception | None = None
     for attempt in range(5):
-        if not target.exists():
-            return
         try:
             data = _read_json(target)
-            if isinstance(data, dict) and data.get("token") != token:
-                return  # foreign owner record, do not delete
         except ValueError as exc:
+            data = {"token": token}
             last_error = exc
+        except OSError as exc:
+            data = {"token": token}
+            last_error = exc
+
+        if data is None:
+            return
+
+        if isinstance(data, dict) and data.get("token") != token:
+            return  # foreign owner record, do not delete
+
         try:
             os.unlink(target)
             return
@@ -548,7 +556,12 @@ def _safe_cleanup_created_owner(target: Path, token: str) -> None:
             last_error = exc
             if attempt < 4:
                 time.sleep(0.02)
-    if target.exists():
+
+    try:
+        exists = target.exists()
+    except OSError:
+        exists = True
+    if exists:
         raise WorkspaceReleaseError({
             "workspace": str(target.parent),
             "token": token,
