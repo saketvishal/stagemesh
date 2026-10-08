@@ -329,8 +329,7 @@ def _runtime(data_project: Path, data: dict[str, object]) -> RuntimeConfig:
     if not isinstance(allow_unsafe, bool):
         raise ConfigValidationError("runtime.allow_unsafe_worktree_root must be a boolean")
     resolved = root.resolve()
-    if not allow_unsafe:
-        _validate_worktree_root(data_project, resolved)
+    _validate_worktree_root(data_project, resolved, allow_unsafe=allow_unsafe)
     return RuntimeConfig(
         worktree_root=_project_scoped_worktree_root(data_project, resolved),
         allow_unsafe_worktree_root=allow_unsafe,
@@ -347,27 +346,27 @@ def _project_scoped_worktree_root(project: Path, root: Path) -> Path:
     return root / f"{name}-{digest}"
 
 
-def _validate_worktree_root(project: Path, root: Path) -> None:
+def _validate_worktree_root(project: Path, root: Path, *, allow_unsafe: bool = False) -> None:
     project = project.resolve()
     if root == project:
         raise ConfigValidationError("runtime.worktree_root must not be the project checkout")
-    if _is_broad_root(root):
+    if not allow_unsafe and _is_broad_root(root):
         raise ConfigValidationError(
             "runtime.worktree_root is too broad; choose a project-owned directory such as "
             ".stagemesh/worktrees "
             "or set runtime.allow_unsafe_worktree_root=true after explicit operator review"
         )
-    if root == Path.home().resolve():
+    if not allow_unsafe and root == Path.home().resolve():
         raise ConfigValidationError(
             "runtime.worktree_root must not be the home directory; choose a project-owned directory "
             "such as .stagemesh/worktrees"
         )
-    if _is_shared_root(root):
+    if not allow_unsafe and _is_shared_root(root):
         raise ConfigValidationError(
             "runtime.worktree_root must not be a broad shared directory; choose a dedicated "
             "project-owned directory such as .stagemesh/worktrees"
         )
-    if root == project.parent.resolve():
+    if not allow_unsafe and root == project.parent.resolve():
         raise ConfigValidationError(
             "runtime.worktree_root must not be the project parent directory; choose a "
             "project-owned directory such as .stagemesh/worktrees"

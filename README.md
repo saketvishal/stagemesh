@@ -119,8 +119,9 @@ the dependency is DONE.
 * **Worktree root.** Configure `runtime.worktree_root` in `.stagemesh/config.json` to move task worktrees to another reviewed
   location. When that location is outside the project runtime directory, StageMesh creates a project-specific child below it so
   cleanup cannot cross into another project's task worktrees. StageMesh refuses broad roots such as the filesystem root, drive root,
-  home directory or project parent, and project paths outside `.stagemesh`, unless `runtime.allow_unsafe_worktree_root` is explicitly
-  set after operator review. `stagemesh doctor` shows the effective worktree root and any legacy roots it can see.
+  home directory, or project parent unless `runtime.allow_unsafe_worktree_root` is explicitly set after operator review.
+  Paths inside the project but outside `.stagemesh`, including product source and `.git`, stay refused even with that escape hatch.
+  `stagemesh doctor` shows the effective worktree root and any legacy roots it can see.
   Older worktrees from the legacy global `.sm-wt` layout are never deleted automatically; inspect and remove them manually once no
   interrupted task needs them:
 

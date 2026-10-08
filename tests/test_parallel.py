@@ -208,6 +208,20 @@ def test_unsafe_worktree_roots_are_refused_unless_explicitly_allowed(tmp_path: P
     )
     assert load_config(project).runtime.worktree_root.parent == shared_root
 
+    (project / ".stagemesh" / "config.json").write_text(
+        json.dumps(
+            {
+                "runtime": {
+                    "worktree_root": str(project / "src" / "worktrees"),
+                    "allow_unsafe_worktree_root": True,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigValidationError, match="product source"):
+        load_config(project)
+
 
 def test_configured_worktree_root_accepts_windows_style_paths(tmp_path: Path) -> None:
     configured = tmp_path / "windows-worktrees"
