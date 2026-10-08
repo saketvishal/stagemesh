@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from stagemesh.providers import _command_and_input
+from stagemesh.providers import _command_and_input, approved_default_adapters
 
 
 def test_grok_provider_prompt_is_passed_as_single_turn_argument() -> None:
@@ -15,6 +15,12 @@ def test_grok_provider_existing_single_flag_gets_prompt_before_options() -> None
 
     assert command == ["grok", "-p", "do the task", "--permission-mode", "acceptEdits"]
     assert stdin == ""
+
+
+def test_grok_default_command_auto_approves_edits() -> None:
+    adapters = {adapter.name: adapter.command for adapter in approved_default_adapters()}
+
+    assert "--always-approve" in adapters["grok"]
 
 
 def test_non_grok_provider_keeps_stdin_prompt() -> None:
