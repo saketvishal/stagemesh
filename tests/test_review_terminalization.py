@@ -128,6 +128,25 @@ def test_builtin_review_execution_terminalizes_exception_and_timeout_as_capacity
     assert execution["result"] == reason
     assert payload["review_infrastructure_failure"] == reason
 
+def test_builtin_malformed_review_output_terminalizes_as_capacity(tmp_path: Path) -> None:
+    project, store, candidate = _project_with_candidate(tmp_path)
+
+    status = Reviewer(adapter=JsonReviewAdapter("PASS"), require_independent=True).review(store, TASK, candidate, project)
+
+    execution = _review_execution(store)
+    evidence = store.conn.execute(
+        "SELECT payload FROM evidence WHERE kind=? AND status=? ORDER BY created_at DESC LIMIT 1",
+        (EvidenceKind.REVIEW, EvidenceStatus.CAPACITY),
+    ).fetchone()
+    payload = json.loads(evidence["payload"])
+    assert status == EvidenceStatus.CAPACITY
+    assert execution["pid"] is None
+    assert execution["status"] == ExecutionStatus.FAILED
+    assert execution["result"] == "malformed_review_output"
+    assert payload["review_infrastructure_failure"] == "malformed_review_output"
+    assert store.open_findings_for_candidate(TASK, candidate) == []
+
+
 
 def test_builtin_review_execution_terminalizes_before_interrupt_bubbles(tmp_path: Path) -> None:
     project, store, candidate = _project_with_candidate(tmp_path)

@@ -188,13 +188,7 @@ class Reviewer:
                     if isinstance(parsed, dict) and parsed.get("decision") == INFRASTRUCTURE_FAILURE:
                         infrastructure_failure = str(parsed.get("reason") or "review_provider_failure")
                     elif not isinstance(parsed, dict) or parsed.get("decision") not in {"PASS", "FAIL"}:
-                        findings.append(
-                            ReviewFinding(
-                                finding_identity(candidate_sha, "malformed independent review output"),
-                                "error",
-                                "independent review output must be JSON with decision PASS or FAIL",
-                            )
-                        )
+                        infrastructure_failure = "malformed_review_output"
                     elif parsed["decision"] == "FAIL":
                         raw_findings = parsed.get("findings")
                         if isinstance(raw_findings, list) and raw_findings:

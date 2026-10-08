@@ -6,7 +6,13 @@ import sys
 from pathlib import Path
 
 from stagemesh.contract_binding import contract_for_candidate
-from stagemesh.contracts import ChangeContract, GateCommand, evaluate_contract, parse_contract, run_gate
+from stagemesh.contracts import (
+    ChangeContract,
+    GateCommand,
+    evaluate_contract,
+    parse_contract,
+    run_gate,
+)
 from stagemesh.coordinator import Coordinator
 from stagemesh.domain import EvidenceKind, EvidenceStatus, ExecutionStatus, Stage, TaskStatus
 from stagemesh.execution import ExecutionResult, Executor, SubprocessExecutor
@@ -428,7 +434,7 @@ def test_reviewer_adapter_matching_implementer_is_rejected(tmp_path: Path) -> No
     store.close()
 
 
-def test_malformed_independent_review_output_fails_closed(tmp_path: Path) -> None:
+def test_malformed_independent_review_output_is_review_capacity_not_candidate_finding(tmp_path: Path) -> None:
     workspace = _repo(tmp_path / "repo")
     project = workspace.path
     (project / "src" / "app.py").write_text("VALUE = 12\n", encoding="utf-8")
@@ -439,9 +445,12 @@ def test_malformed_independent_review_output_fails_closed(tmp_path: Path) -> Non
     store.add_candidate(task_id, sha, "implementer", True)
     adapter = RecordingReviewAdapter(name="reviewer", response="PASS")
 
-    assert Reviewer(adapter=adapter).review(store, task_id, sha, project) is EvidenceStatus.FAILED
-    findings = store.open_findings_for_candidate(task_id, sha)
-    assert any("JSON with decision PASS or FAIL" in row["message"] for row in findings)
+    assert Reviewer(adapter=adapter).review(store, task_id, sha, project) is EvidenceStatus.CAPACITY
+    assert store.open_findings_for_candidate(task_id, sha) == []
+    payload = json.loads(
+        store.conn.execute("SELECT payload FROM evidence WHERE kind=?", (EvidenceKind.REVIEW,)).fetchone()["payload"]
+    )
+    assert payload["review_infrastructure_failure"] == "malformed_review_output"
     store.close()
 
 
