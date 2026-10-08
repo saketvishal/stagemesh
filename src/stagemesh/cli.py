@@ -773,10 +773,17 @@ def command_run_ready(args: argparse.Namespace) -> int:
             notices = provider_log.lines[provider_notice_index:]
             provider_notice_index = len(provider_log.lines)
             print(format_step_update(step, notices=notices), flush=True)
+            if getattr(args, "verbose", False):
+                for notice in notices:
+                    print(f"    trace: {notice.strip()}", flush=True)
             print(flush=True)
+
+    compact_timeline = getattr(args, "command", None) == "continue" and not getattr(args, "verbose", False)
 
     def on_start(message: str) -> None:
         if not args.json:
+            if compact_timeline and not (message.startswith("StageMesh run") or message.startswith("[")):
+                return
             print(message, flush=True)
 
     provider_notice_index = 0
@@ -2157,6 +2164,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run up to N independent eligible tasks at once, each in its own worktree, with serialized integration",
     )
     cont.add_argument("--json", action="store_true")
+    cont.add_argument("--verbose", action="store_true", help="Show provider selection and setup trace lines")
     cont.add_argument("--provider", help="Provider name to use for implementation (e.g. claude, codex)")
     cont.add_argument("--dry-run", action="store_true", help="Use FakeExecutor instead of a real provider")
     cont.add_argument("--task", dest="task", help="Run exactly one selected task id")
@@ -2183,6 +2191,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_ready_cmd.add_argument("--choose", "--interactive", dest="choose", action="store_true", help="Pick among eligible tasks interactively")
     run_ready_cmd.add_argument("--no-auto-plan", action="store_true", help="Refuse instead of generating a missing change contract")
     run_ready_cmd.add_argument("--json", action="store_true")
+    run_ready_cmd.add_argument("--verbose", action="store_true", help="Show provider selection and setup trace lines")
     run_ready_cmd.set_defaults(func=command_run_ready)
     smoke_cmd = sub.add_parser(
         "project-smoke", help="Check this project's profile is safe and usable by this StageMesh version (no implementation runs)"

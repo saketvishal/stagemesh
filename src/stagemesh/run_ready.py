@@ -437,6 +437,8 @@ def format_step(step: dict[str, Any], notices: list[str] | None = None) -> str:
     stage = str(previous["stage"])
     actor = _stage_actor(stage, new, step.get("executions") or [])
     lines = [_stage_header(int(step["step"]), stage, actor)]
+    if actor:
+        lines.append(f"    actor: {actor}")
     result = _stage_result(stage, new, step.get("progressed", 0), step.get("executions") or [])
     lines.append(f"    result: {result}")
     for detail in _stage_details(stage, previous, new):
@@ -450,8 +452,9 @@ def format_step_update(step: dict[str, Any], notices: list[str] | None = None) -
     update = lines[1:]
     header = lines[0] if lines else ""
     parts = header.split("  ", 1)
-    if len(parts) == 2 and parts[1].strip():
-        update.insert(0, f"    actor: {parts[1].strip()}")
+    actor_line = f"    actor: {parts[1].strip()}" if len(parts) == 2 and parts[1].strip() else ""
+    if actor_line and actor_line not in update:
+        update.insert(0, actor_line)
     return "\n".join(update)
 
 
