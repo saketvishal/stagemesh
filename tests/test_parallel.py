@@ -13,9 +13,15 @@ import time
 from pathlib import Path
 
 import pytest
+from test_run_ready import _project
 
 import stagemesh.cli as cli_module
-from stagemesh.concurrency import IntegrationLock, ProviderLimiter, contract_conflict, patterns_overlap
+from stagemesh.concurrency import (
+    IntegrationLock,
+    ProviderLimiter,
+    contract_conflict,
+    patterns_overlap,
+)
 from stagemesh.config import ConfigValidationError, load_config
 from stagemesh.contracts import parse_contract
 from stagemesh.coordinator import Coordinator
@@ -25,9 +31,12 @@ from stagemesh.git import GitWorkspace
 from stagemesh.parallel import ParallelRunner, recover_orphaned_claims, worker_id_for
 from stagemesh.persistence import Store
 from stagemesh.serialized_integration import SerializedIntegrator
-from stagemesh.workspaces import prepare_task_workspace, sweep_task_worktrees, task_workspace, worktree_root
-
-from test_run_ready import _project
+from stagemesh.workspaces import (
+    prepare_task_workspace,
+    sweep_task_worktrees,
+    task_workspace,
+    worktree_root,
+)
 
 
 def contract_for(path: str, **extra: object) -> dict:
@@ -674,6 +683,7 @@ def test_review_providers_honour_shared_cooldown_and_cool_down_on_failure(tmp_pa
             return self.answer
 
     down = json.dumps({"decision": INFRASTRUCTURE_FAILURE, "reason": "quota_rate_limit"})
+    malformed = "PASS"
     ok = json.dumps({"decision": "PASS"})
     limiter = ProviderLimiter()
     pool = ProviderPool([], {}, log=ProviderLog(echo=False), limiter=limiter, cooldown_seconds=60)
@@ -687,7 +697,9 @@ def test_review_providers_honour_shared_cooldown_and_cool_down_on_failure(tmp_pa
     assert calls == ["codex", "grok", "grok"]  # T-2 never sent codex a request while it was cooling
     third = FallbackReviewAdapter(pool, store, "T-3", [Reviewer("codex", ok)])
     assert json.loads(third.review_candidate("p", tmp_path, "sha"))["decision"] == INFRASTRUCTURE_FAILURE
-    assert calls == ["codex", "grok", "grok"] and limiter.active("codex") == 0
+    malformed_first = FallbackReviewAdapter(pool, store, "T-4", [Reviewer("claude", malformed), Reviewer("grok", ok)])
+    assert malformed_first.review_candidate("p", tmp_path, "sha") == ok
+    assert calls == ["codex", "grok", "grok", "claude", "grok"] and limiter.active("codex") == 0
 
 
 def test_interrupt_kills_review_style_provider_processes_without_a_recorded_pid() -> None:

@@ -528,9 +528,15 @@ def _infrastructure_payload(response: str) -> dict | None:
 
 def _infrastructure_reason(response: str) -> str | None:
     parsed = _infrastructure_payload(response)
-    if parsed is None:
-        return None
-    return str(parsed.get("reason") or "review_provider_failure")
+    if parsed is not None:
+        return str(parsed.get("reason") or "review_provider_failure")
+    try:
+        decoded = json.loads(response)
+    except (TypeError, ValueError):
+        return "malformed_review_output"
+    if not isinstance(decoded, dict) or decoded.get("decision") not in {"PASS", "FAIL"}:
+        return "malformed_review_output"
+    return None
 
 
 def _infrastructure_evidence(response: str) -> dict[str, str]:
@@ -540,6 +546,8 @@ def _infrastructure_evidence(response: str) -> dict[str, str]:
         value = parsed.get(key)
         if isinstance(value, str) and value:
             evidence[key] = value
+    if "provider_output" not in evidence and response:
+        evidence["provider_output"] = response[:500]
     return evidence
 
 
