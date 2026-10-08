@@ -108,6 +108,32 @@ def test_default_policy_is_round_robin_and_stage_routes_still_load(tmp_path: Pat
     config = load_config(_config(tmp_path, {"routing": {"stage_routes": {"IMPLEMENT": "codex", "REVIEW": "claude"}}}))
     assert config.provider_selection_policy == "round_robin" and config.stage_routes == {"IMPLEMENT": "codex", "REVIEW": "claude"}
 
+def test_legacy_builtin_priority_config_is_normalized_to_round_robin(tmp_path: Path) -> None:
+    project = _config(
+        tmp_path,
+        {
+            "providers": {
+                "codex": {"command": "codex exec", "capabilities": ["IMPLEMENT", "REVIEW"], "priority": 10},
+                "claude": {"command": "claude -p", "capabilities": ["IMPLEMENT", "REVIEW"], "priority": 20},
+                "grok": {"command": "grok", "capabilities": ["IMPLEMENT", "REVIEW"], "priority": 30},
+            },
+            "routing": {
+                "provider_selection_policy": "priority",
+                "pools": {
+                    "IMPLEMENT": ["codex", "claude", "grok"],
+                    "REVIEW": ["claude", "grok", "codex"],
+                },
+            },
+        },
+    )
+
+    config = load_config(project)
+
+    assert config.provider_selection_policy == "round_robin"
+    assert config.provider_pools[IMPLEMENT] == ("codex", "claude", "grok")
+    assert config.provider_pools[REVIEW] == ("claude", "grok", "codex")
+    assert all(spec.priority is None for spec in config.provider_specs.values())
+
 def test_config_json_shows_effective_default_providers_and_rotation_policy(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

@@ -172,6 +172,16 @@ def load_config(project: Path, config_path: Path | None = None) -> StageMeshConf
     unknown_weights = [n for n in provider_weights if n not in known]
     if unknown_weights:
         raise ConfigValidationError(f"routing.provider_weights references unknown provider: {', '.join(unknown_weights)}")
+    if _is_legacy_builtin_priority_routing(policy, provider_pools, provider_specs):
+        policy = "round_robin"
+        provider_specs = {
+            name: ProviderSpec(
+                capabilities=spec.capabilities,
+                weight=spec.weight,
+                max_concurrency=spec.max_concurrency,
+            )
+            for name, spec in provider_specs.items()
+        }
     integration_ref = _string(data.get("integration_ref"))
     if integration_ref and not integration_ref.startswith("refs/"):
         integration_ref = f"refs/heads/{integration_ref}"
@@ -255,6 +265,23 @@ def _provider_capabilities(name: str, value: object) -> frozenset[str]:
     return frozenset(stages)
 
 
+def _is_legacy_builtin_priority_routing(
+    policy: object,
+    provider_pools: dict[str, tuple[str, ...]],
+    provider_specs: dict[str, ProviderSpec],
+) -> bool:
+    """Normalize the old generated Codex-first config to the current pool-rotation default."""
+    legacy_priorities = {"codex": 10, "claude": 20, "grok": 30}
+    legacy_pools = {
+        "IMPLEMENT": ("codex", "claude", "grok"),
+        "REVIEW": ("claude", "grok", "codex"),
+    }
+    return (
+        policy == "priority"
+        and provider_pools == legacy_pools
+        and set(provider_specs) == set(legacy_priorities)
+        and all(provider_specs[name].priority == priority for name, priority in legacy_priorities.items())
+    )
 def _diagnosis(data: dict[str, object], known_providers: set[str]) -> DiagnosisConfig:
     unknown = set(data) - {"repeat_threshold", "stop_on_repeat", "provider", "dispatch"}
     if unknown:
