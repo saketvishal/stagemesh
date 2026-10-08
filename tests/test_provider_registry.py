@@ -6,14 +6,13 @@ from argparse import Namespace
 from pathlib import Path
 
 import pytest
+from test_provider_pool import TASK, Rig
 
 import stagemesh.cli as cli_module
 from stagemesh.config import ConfigValidationError, load_config
 from stagemesh.domain import Stage
 from stagemesh.provider_pool import IMPLEMENT, REVIEW
 from stagemesh.providers import RuntimeCommandAdapter, adapters_from_config
-
-from test_provider_pool import TASK, Rig
 
 
 def _config(tmp_path: Path, data: dict) -> Path:
@@ -304,6 +303,37 @@ def test_cli_wiring_reports_the_policy_selected_provider(tmp_path: Path) -> None
     assert coord.executor.pool.pool(IMPLEMENT) == ("alpha", "beta")
     assert info["provider"] == "beta"
     assert info["review_provider"] == "dynamic-pool:beta,gamma"
+
+
+def test_cli_review_setup_ignores_implementation_provider_backoff(tmp_path: Path) -> None:
+    rig = Rig(tmp_path, {"alpha": "ok", "beta": "ok", "gamma": "ok"})
+    for provider in ("alpha", "beta", "gamma"):
+        rig.pool.record_failure(rig.store, IMPLEMENT, TASK, provider, "provider_timeout")
+    rig.store.add_candidate(TASK, "abc123", "gamma", durable_handoff=True)
+    rig.store.advance_task(TASK, Stage.REVIEW)
+    commands = {
+        name: f'"{sys.executable}" "{tmp_path / "provider.py"}" ok {name}'
+        for name in ("alpha", "beta", "gamma")
+    }
+    providers = {name: {"command": cmd, "capabilities": ["IMPLEMENT", "REVIEW"]} for name, cmd in commands.items()}
+    (rig.project / ".stagemesh" / "config.json").write_text(
+        json.dumps({"providers": providers, "routing": {"pools": {"IMPLEMENT": ["alpha", "beta", "gamma"], "REVIEW": ["alpha", "beta", "gamma"]}}}),
+        encoding="utf-8",
+    )
+
+    _, info = cli_module._build_coordinator(
+        Namespace(dry_run=False, provider=None),
+        rig.project,
+        load_config(rig.project),
+        rig.store,
+        cli_module.TargetSelection(TASK),
+        rig.log,
+    )
+
+    assert info["provider"] == "deferred"
+    assert info["review_provider"].startswith("dynamic-pool:")
+    assert "gamma" not in info["review_provider"]
+    assert len(info["implementation_skipped"]) == 3
 
 
 def test_single_agent_mode_stays_single_provider_under_any_policy(tmp_path: Path) -> None:

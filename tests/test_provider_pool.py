@@ -379,6 +379,19 @@ def test_capacity_failure_cools_provider_across_tasks_for_the_same_stage(tmp_pat
     assert all(v.eligible for v in rig.pool.evaluate(rig.store, REVIEW, TASK))
 
 
+def test_review_stage_preflight_ignores_implementation_cooldown(tmp_path: Path) -> None:
+    rig = Rig(tmp_path, {"codex": "ok", "claude": "ok", "grok": "ok"})
+    for provider in ("codex", "claude", "grok"):
+        rig.pool.record_failure(rig.store, IMPLEMENT, TASK, provider, "provider_timeout")
+
+    ok, diagnostic, impl, review = rig.pool.preflight_stage(rig.store, REVIEW, TASK, implementer="grok")
+
+    assert rig.pool.preflight(rig.store, TASK)[0] is False
+    assert ok is True and diagnostic == ""
+    assert not any(verdict.eligible for verdict in impl)
+    assert any(verdict.provider != "grok" and verdict.eligible for verdict in review)
+
+
 def test_default_pools_try_routed_provider_first_then_every_other_provider() -> None:
     pools = default_pools(["claude", "codex", "grok"], {"IMPLEMENT": "claude"}, {})
     assert pools == {"IMPLEMENT": ("claude", "codex", "grok"), "REVIEW": ("codex", "claude", "grok")}
