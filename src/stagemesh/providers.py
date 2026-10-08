@@ -92,10 +92,11 @@ class RuntimeCommandAdapter:
         task_prompt = _build_task_prompt(
             task_id, task, run_path, contract=bound.contract, remediation=remediation_context(store, task_id)
         )
+        command, provider_input = _command_and_input(self.command, task_prompt)
         lease.check("before_agent")
         try:
             proc = subprocess.Popen(
-                list(self.command),
+                command,
                 cwd=run_path,
                 text=True,
                 encoding="utf-8",
@@ -121,7 +122,7 @@ class RuntimeCommandAdapter:
         )
         lease.bind_execution(execution_id)
         try:
-            stdout, stderr, timed_out = communicate_bounded(proc, task_prompt, provider_timeout_seconds(self.timeout_seconds))
+            stdout, stderr, timed_out = communicate_bounded(proc, provider_input, provider_timeout_seconds(self.timeout_seconds))
             lease.after_agent()
             if timed_out:
                 store.finish_execution(execution_id, ExecutionStatus.FAILED, result=PROVIDER_TIMEOUT)
@@ -189,9 +190,10 @@ class RuntimeCommandAdapter:
             before_head = _git_output(review_path, "rev-parse", "HEAD")
             if before_head != candidate_sha:
                 return _review_infrastructure_failure("review workspace did not checkout exact candidate")
+            command, provider_input = _command_and_input(self.command, prompt)
             try:
                 proc = subprocess.Popen(
-                    list(self.command),
+                    command,
                     cwd=review_path,
                     text=True,
                     encoding="utf-8",
@@ -203,7 +205,7 @@ class RuntimeCommandAdapter:
                 )
             except FileNotFoundError:
                 return _review_infrastructure_failure("provider_unavailable")
-            stdout, stderr, timed_out = communicate_bounded(proc, prompt, provider_timeout_seconds(self.timeout_seconds))
+            stdout, stderr, timed_out = communicate_bounded(proc, provider_input, provider_timeout_seconds(self.timeout_seconds))
             if timed_out:
                 return _review_infrastructure_failure(PROVIDER_TIMEOUT)
             after_head = _git_output(review_path, "rev-parse", "HEAD")
@@ -231,6 +233,21 @@ class RuntimeReviewAdapter:
 
     def review(self, prompt: str) -> str:
         return self.runtime.review_candidate(prompt, self.project, self.candidate_sha)
+
+
+def _command_and_input(command: tuple[str, ...], prompt: str) -> tuple[list[str], str]:
+    args = list(command)
+    executable = Path(args[0]).name.lower() if args else ""
+    if executable not in {"grok", "grok.exe"}:
+        return args, prompt
+
+    for flag in ("-p", "--single"):
+        if flag in args:
+            index = args.index(flag)
+            if index == len(args) - 1 or args[index + 1].startswith("-"):
+                return [*args[: index + 1], prompt, *args[index + 1 :]], ""
+            return args, ""
+    return [args[0], "-p", prompt, *args[1:]], ""
 
 
 WRITE_CAPABLE_DEFAULT_COMMANDS = {
