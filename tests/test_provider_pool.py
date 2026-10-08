@@ -43,6 +43,10 @@ SCRIPT = (
     "    sys.stderr.write('AssertionError: expected the capacity line once'); sys.exit(1)\n"
     "if mode == 'noop':\n"
     "    sys.exit(0)\n"
+    "if mode == 'noop-output':\n"
+    "    sys.stdout.write('provider says the requested change is already present\\n')\n"
+    "    sys.stderr.write('no candidate diff produced\\n')\n"
+    "    sys.exit(0)\n"
     "if mode == 'sleep':\n"
     "    import time; time.sleep(30); sys.exit(0)\n"
     "pathlib.Path('docs/a.md').write_text('by ' + mode + ' ' + (sys.argv[2] if len(sys.argv) > 2 else '') + '\\n')\n"
@@ -500,6 +504,25 @@ def test_noop_completes_when_acceptance_gates_already_pass_on_the_baseline(tmp_p
     assert proof["gates"][0]["name"] == "docs-already-done" and proof["gates"][0]["status"] == "PASSED"
     assert rig.store.task_remediation_count(TASK, "IMPLEMENT") == 0
 
+
+def test_no_progress_preserves_redacted_provider_output_for_diagnosis(tmp_path: Path) -> None:
+    rig = Rig(tmp_path, {"provider-a": "noop-output", "provider-b": "noop-output"})
+
+    assert rig.coordinator.tick() == 1
+    assert rig.coordinator.tick() == 0
+
+    events = _no_progress_events(rig)
+    assert len(events) == 2
+    assert "provider says the requested change is already present" in events[0]["provider_output"]
+    assert "no candidate diff produced" in events[0]["provider_output"]
+    unsuccessful = json.loads(
+        rig.store.conn.execute(
+            "SELECT payload FROM audit_events WHERE event_type='task.implementation_unsuccessful'"
+        ).fetchone()["payload"]
+    )
+    outputs = [item.get("provider_output", "") for item in unsuccessful["provider_outcomes"]]
+    assert any("provider says the requested change is already present" in output for output in outputs)
+    assert unsuccessful["pool_exhausted"] is True
 
 def test_every_provider_no_progress_is_one_bounded_unresolved_result(tmp_path: Path) -> None:
     from stagemesh.diagnosis import diagnose

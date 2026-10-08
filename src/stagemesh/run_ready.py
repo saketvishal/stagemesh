@@ -245,7 +245,27 @@ def _latest_failure(store: Store, task_id: str, since: float) -> dict[str, Any] 
         except (TypeError, ValueError):
             continue
         if payload.get("task_id") == task_id:
-            return {"event": row["event_type"], **{k: v for k, v in payload.items() if k in {"reason", "executor", "result_status", "execution_id", "candidate_sha", "integration_ref", "providers"}}}
+            return {
+                "event": row["event_type"],
+                **{
+                    k: v
+                    for k, v in payload.items()
+                    if k
+                    in {
+                        "reason",
+                        "executor",
+                        "result_status",
+                        "execution_id",
+                        "candidate_sha",
+                        "integration_ref",
+                        "providers",
+                        "pool_exhausted",
+                        "provider_sequence",
+                        "provider_outcomes",
+                        "no_further_provider",
+                    }
+                },
+            }
     return None
 
 

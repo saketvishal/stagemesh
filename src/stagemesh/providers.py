@@ -120,37 +120,46 @@ class RuntimeCommandAdapter:
             executable=identity.executable,
         )
         lease.bind_execution(execution_id)
-        stdout, stderr, timed_out = communicate_bounded(proc, task_prompt, provider_timeout_seconds(self.timeout_seconds))
-        lease.after_agent()
-        if timed_out:
-            store.finish_execution(execution_id, ExecutionStatus.FAILED, result=PROVIDER_TIMEOUT)
-            return ExecutionResult(ExecutionStatus.FAILED, failure_reason=PROVIDER_TIMEOUT)
-        if proc.returncode != 0:
-            is_cap, reason = classify_failure(proc.returncode, stdout, stderr)
-            store.finish_execution(execution_id, ExecutionStatus.FAILED, result=reason)
-            output, retry_after = capacity_evidence(stdout, stderr) if is_cap else (None, None)
-            return ExecutionResult(
-                ExecutionStatus.FAILED,
-                capacity_failure=is_cap,
-                failure_reason=reason,
-                provider_output=output,
-                retry_after=retry_after,
+        try:
+            stdout, stderr, timed_out = communicate_bounded(proc, task_prompt, provider_timeout_seconds(self.timeout_seconds))
+            lease.after_agent()
+            if timed_out:
+                store.finish_execution(execution_id, ExecutionStatus.FAILED, result=PROVIDER_TIMEOUT)
+                return ExecutionResult(ExecutionStatus.FAILED, failure_reason=PROVIDER_TIMEOUT)
+            if proc.returncode != 0:
+                is_cap, reason = classify_failure(proc.returncode, stdout, stderr)
+                store.finish_execution(execution_id, ExecutionStatus.FAILED, result=reason)
+                output, retry_after = capacity_evidence(stdout, stderr) if is_cap else (None, None)
+                return ExecutionResult(
+                    ExecutionStatus.FAILED,
+                    capacity_failure=is_cap,
+                    failure_reason=reason,
+                    provider_output=output,
+                    retry_after=retry_after,
+                )
+            sha = commit_implementation_candidate(
+                store,
+                task_id,
+                run_path,
+                baseline_sha,
+                f"StageMesh implementation for {task_id}",
+                attribution=attribution_for_worker("local-worker", self.name),
             )
-        sha = commit_implementation_candidate(
-            store,
-            task_id,
-            run_path,
-            baseline_sha,
-            f"StageMesh implementation for {task_id}",
-            attribution=attribution_for_worker("local-worker", self.name),
-        )
-        if sha is None:
-            store.finish_execution(execution_id, ExecutionStatus.FAILED, result=NO_IMPLEMENTATION_CHANGE)
-            return ExecutionResult(ExecutionStatus.FAILED, failure_reason=NO_IMPLEMENTATION_CHANGE)
-        store.add_candidate(task_id, sha, self.name, durable_handoff=True)
-        lease.seal(sha)
-        store.finish_execution(execution_id, ExecutionStatus.SUCCEEDED, sha)
-        return ExecutionResult(ExecutionStatus.SUCCEEDED, sha, durable_handoff=True)
+            if sha is None:
+                output, _ = capacity_evidence(stdout, stderr)
+                store.finish_execution(execution_id, ExecutionStatus.FAILED, result=NO_IMPLEMENTATION_CHANGE)
+                return ExecutionResult(
+                    ExecutionStatus.FAILED,
+                    failure_reason=NO_IMPLEMENTATION_CHANGE,
+                    provider_output=output or None,
+                )
+            store.add_candidate(task_id, sha, self.name, durable_handoff=True)
+            lease.seal(sha)
+            store.finish_execution(execution_id, ExecutionStatus.SUCCEEDED, sha)
+            return ExecutionResult(ExecutionStatus.SUCCEEDED, sha, durable_handoff=True)
+        except Exception as exc:
+            store.finish_execution(execution_id, ExecutionStatus.FAILED, result=f"{type(exc).__name__}: {exc}"[:300])
+            raise
 
     def run(self, store: Store, task_id: str, claim_id: str | None, project: Path) -> ExecutionResult:
         return self.execute(store, task_id, claim_id, project)
@@ -224,20 +233,49 @@ class RuntimeReviewAdapter:
         return self.runtime.review_candidate(prompt, self.project, self.candidate_sha)
 
 
+WRITE_CAPABLE_DEFAULT_COMMANDS = {
+    "codex": "codex exec --sandbox workspace-write",
+    "claude": (
+        "claude -p --permission-mode acceptEdits --permission-prompts none "
+        "--allowedTools 'Edit,Write,MultiEdit,Bash(git *),Bash(python *),Bash(pytest *),Bash(ruff *)'"
+    ),
+    "grok": (
+        "grok --permission-mode acceptEdits "
+        "--allow Edit --allow Write --allow MultiEdit --allow 'Bash(git *)' "
+        "--allow 'Bash(python *)' --allow 'Bash(pytest *)' --allow 'Bash(ruff *)'"
+    ),
+}
+
+LEGACY_DEFAULT_COMMANDS = {
+    "codex": "codex exec",
+    "claude": "claude -p",
+    "grok": "grok",
+}
+
+PROVIDER_COMMAND_ENVS = {
+    "codex": "STAGEMESH_CODEX_CMD",
+    "claude": "STAGEMESH_CLAUDE_CMD",
+    "grok": "STAGEMESH_GROK_CMD",
+}
+
+
 def approved_default_adapters() -> list[RuntimeCommandAdapter]:
-    commands: dict[str, str] = {}
-    for name, env_name, fallback in [
-        ("codex", "STAGEMESH_CODEX_CMD", "codex exec"),
-        ("claude", "STAGEMESH_CLAUDE_CMD", "claude -p"),
-        ("grok", "STAGEMESH_GROK_CMD", "grok"),
-    ]:
-        commands[name] = os.environ.get(env_name) or fallback
+    commands = {
+        name: os.environ.get(PROVIDER_COMMAND_ENVS[name]) or command
+        for name, command in WRITE_CAPABLE_DEFAULT_COMMANDS.items()
+    }
     return adapters_from_commands(commands)
+
+
+def _write_capable_command(name: str, command: str) -> str:
+    if name in LEGACY_DEFAULT_COMMANDS and shlex.split(command) == shlex.split(LEGACY_DEFAULT_COMMANDS[name]):
+        return WRITE_CAPABLE_DEFAULT_COMMANDS[name]
+    return command
 
 
 def adapters_from_config(config: StageMeshConfig) -> list[RuntimeCommandAdapter]:
     commands = {adapter.name: shlex.join(adapter.command) for adapter in approved_default_adapters()}
-    commands.update(config.provider_commands)
+    commands.update({name: _write_capable_command(name, command) for name, command in config.provider_commands.items()})
     adapters = adapters_from_commands(commands)
     # Object-form entries declare which stages a provider serves; plain strings and built-ins serve both.
     stage_caps = {"IMPLEMENT": "code", "REVIEW": "review"}

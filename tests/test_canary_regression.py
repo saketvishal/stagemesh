@@ -311,9 +311,69 @@ def test_default_runtime_provider_commands_are_non_interactive(monkeypatch: pyte
 
     adapters = {adapter.name: adapter.command for adapter in approved_default_adapters()}
 
-    assert adapters["codex"] == ("codex", "exec")
-    assert adapters["claude"] == ("claude", "-p")
+    assert adapters["codex"] == ("codex", "exec", "--sandbox", "workspace-write")
+    assert adapters["claude"][:4] == ("claude", "-p", "--permission-mode", "acceptEdits")
+    assert any("Edit,Write,MultiEdit" in part for part in adapters["claude"])
+    assert any("Bash(git *)" in part for part in adapters["claude"])
 
+
+def test_legacy_builtin_provider_commands_are_upgraded_to_write_capable(tmp_path: Path) -> None:
+    from stagemesh.config import load_config
+    from stagemesh.providers import adapters_from_config
+
+    project = tmp_path / "repo"
+    project.mkdir()
+    runtime = project / ".stagemesh"
+    runtime.mkdir()
+    (runtime / "config.json").write_text(
+        json.dumps(
+            {
+                "providers": {
+                    "codex": "codex exec",
+                    "claude": "claude -p",
+                    "grok": "grok",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    adapters = {adapter.name: adapter.command for adapter in adapters_from_config(load_config(project))}
+
+    assert adapters["codex"] == ("codex", "exec", "--sandbox", "workspace-write")
+    assert adapters["claude"][:4] == ("claude", "-p", "--permission-mode", "acceptEdits")
+    assert any("Bash(git *)" in part for part in adapters["claude"])
+    assert adapters["grok"][:3] == ("grok", "--permission-mode", "acceptEdits")
+
+def test_runtime_provider_terminalizes_execution_when_post_start_exception_occurs(
+    store: Store,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from stagemesh.providers import RuntimeCommandAdapter
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    workspace = GitWorkspace(project)
+    workspace.init_if_needed()
+    (project / "src.txt").write_text("unchanged\n", encoding="utf-8")
+    workspace.commit_all("initial")
+    task_id = store.upsert_task("provider cleanup")
+    _write_contract(project, task_id)
+
+    def explode(*args, **kwargs):
+        raise RuntimeError("provider post-start failure")
+
+    monkeypatch.setattr("stagemesh.providers.communicate_bounded", explode)
+    adapter = RuntimeCommandAdapter("codex", (sys.executable, "-c", "pass"))
+
+    with pytest.raises(RuntimeError, match="provider post-start failure"):
+        adapter.execute(store, task_id, None, project)
+
+    rows = store.conn.execute("SELECT status, result FROM executions WHERE task_id=?", (task_id,)).fetchall()
+    assert len(rows) == 1
+    assert rows[0]["status"] == ExecutionStatus.FAILED
+    assert "provider post-start failure" in rows[0]["result"]
 
 def test_subprocess_executor_decodes_provider_output_as_utf8_with_replacement(
     store: Store,
