@@ -108,6 +108,20 @@ def test_default_policy_is_round_robin_and_stage_routes_still_load(tmp_path: Pat
     config = load_config(_config(tmp_path, {"routing": {"stage_routes": {"IMPLEMENT": "codex", "REVIEW": "claude"}}}))
     assert config.provider_selection_policy == "round_robin" and config.stage_routes == {"IMPLEMENT": "codex", "REVIEW": "claude"}
 
+def test_config_json_shows_effective_default_providers_and_rotation_policy(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    project = _config(tmp_path, {})
+
+    code = cli_module.main(["--project", str(project), "config", "--json"])
+
+    assert code == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["routing"]["provider_selection_policy"] == "round_robin"
+    assert data["routing"]["pools"][IMPLEMENT] == ["codex", "claude", "grok"]
+    assert data["routing"]["pools"][REVIEW] == ["codex", "claude", "grok"]
+    assert {"codex", "claude", "grok"} <= set(data["providers"])
+
 def test_default_builtin_policy_rotates_across_all_three_providers(tmp_path: Path) -> None:
     rig = Rig(tmp_path, {"codex": "ok", "claude": "ok", "grok": "ok"})
 
