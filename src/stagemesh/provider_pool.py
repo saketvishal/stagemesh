@@ -406,6 +406,28 @@ class ProviderPool:
             )
         return True, "", impl, review
 
+    def preflight_stage(
+        self,
+        store: Store,
+        stage: str,
+        task_id: str | None = None,
+        *,
+        implementer: str | None = None,
+    ) -> tuple[bool, str, list[Verdict], list[Verdict]]:
+        """Check only the provider pool needed by the task's current stage."""
+        impl = self.evaluate(store, IMPLEMENT, task_id)
+        review = self.evaluate(store, REVIEW, task_id, implementer if stage == REVIEW else None)
+        if stage in {IMPLEMENT, "PLAN"}:
+            return self.preflight(store, task_id)
+        if stage == REVIEW:
+            reviewers = [self.adapters[v.provider] for v in review if v.eligible]
+            if self.require_independent and implementer:
+                reviewers = [adapter for adapter in reviewers if adapter.name != implementer]
+            if not reviewers:
+                suffix = f" for implementer {implementer}" if implementer and self.require_independent else ""
+                return False, f"no review provider is available{suffix}. REVIEW pool: {describe_verdicts(review)}", impl, review
+        return True, "", impl, review
+
     def review_adapter(
         self, store: Store, task_id: str, candidate_sha: str, implementer: str | None
     ) -> tuple[FallbackReviewAdapter | None, list[Verdict]]:

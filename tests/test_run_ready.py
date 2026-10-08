@@ -7,6 +7,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
 from test_bounded_execution import SLEEPER, TASK, _running_execution, _setup
 
 import stagemesh.cli as cli_module
@@ -568,6 +569,35 @@ def test_continue_defaults_to_supervised_run_to_completion(tmp_path: Path) -> No
     code, result = _continue(_project(tmp_path, ["T-1"]))
     assert code == 0 and result["stop_reason"] == "DONE" and result["final"]["stage"] == "DONE"
     assert result["steps_run"] >= 5
+
+
+@pytest.mark.parametrize(
+    ("max_steps", "checkpoint_stage"),
+    [
+        (1, "IMPLEMENT"),
+        (2, "VALIDATE"),
+        (3, "REVIEW"),
+        (4, "INTEGRATE"),
+    ],
+)
+def test_continue_runtime_resume_matrix_reaches_done_from_each_stage(
+    tmp_path: Path, max_steps: int, checkpoint_stage: str
+) -> None:
+    project = _project(tmp_path, ["T-1"])
+
+    code, checkpoint = _continue(project, "--task", "T-1", "--max-steps", str(max_steps))
+
+    assert code == 1, checkpoint
+    assert checkpoint["stop_reason"] == "MAX_STEPS"
+    assert checkpoint["final"]["stage"] == checkpoint_stage
+
+    code, final = _continue(project, "--task", "T-1")
+
+    assert code == 0, final
+    assert final["stop_reason"] == "DONE"
+    assert final["final"]["stage"] == "DONE"
+    assert final["final"]["latest_validation"] == "PASSED"
+    assert final["final"]["latest_review"] == "PASSED"
 
 
 def test_continue_task_supervises_only_that_task_to_done(tmp_path: Path) -> None:

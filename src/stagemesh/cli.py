@@ -13,14 +13,22 @@ from . import __version__
 from .acceptance import AcceptanceValidationError, local_acceptance_report
 from .acceptance_matrix import AcceptanceMatrixValidationError, acceptance_matrix
 from .audit import AuditValidationError, export_audit_jsonl
+from .autonomy.cli import register_autonomy_commands
+from .autonomy.integration import SupervisedIntegrator
+from .autonomy.isolation import check_isolation
+from .autonomy.review_adapter import supervise_reviewer
+from .autonomy.supervisor import Supervisor
+from .autonomy.wiring import SUPERVISED_MIN_REFRESH_ATTEMPTS, load_settings
 from .capacity import CapacityKind, CapacityRegistry, CapacityValidationError
 from .ci import CIValidationError, broken_future_feature_gate, default_gates
 from .ci_wait import decide_ci_wait
 from .completion_audit import CompletionAuditValidationError, completion_audit
+from .concurrency import IntegrationLock, ProviderLimiter
 from .config import ConfigValidationError, load_config
 from .coordinator import Coordinator, TargetSelection, TargetSelectionError
 from .dashboard import dashboard_summary, render_dashboard
 from .demo import DemoValidationError, create_demo_project
+from .diagnosis import DiagnosisPolicy, diagnose, format_findings, make_adapter_analyst
 from .distributed import WorkQueue, WorkQueueError
 from .e2e_acceptance import EndToEndAcceptanceValidationError, end_to_end_acceptance
 from .external_evidence import (
@@ -30,19 +38,43 @@ from .external_evidence import (
 )
 from .final_report import FinalReportValidationError, candidate_sha, render_final_report
 from .git import GitWorkspace
-from .handoff import HandoffError, build_handoff, write_handoff
 from .github_acceptance import run_github_acceptance
+from .handoff import HandoffError, build_handoff, write_handoff
 from .objectives import ObjectivePlanner, ObjectiveValidationError
 from .observability import health
 from .operator import operator_report
-from .operator_actions import OperatorActionError, adopt_candidate, recover_stale, release_unknown_execution, task_details
+from .operator_actions import (
+    OperatorActionError,
+    adopt_candidate,
+    recover_stale,
+    release_unknown_execution,
+    task_details,
+)
+from .parallel import (
+    ParallelRunner,
+    ParallelSummary,
+    SetupRefused,
+    request_queue_control,
+    worker_id_for,
+)
 from .persistence import Store, StoreValidationError
 from .persistence_backends import probe_backend
 from .postgres_store import PostgresStore, PostgresUnavailable, postgres_schema_contract
 from .process_identity import current_process_identity
-from .queue_visibility import format_queue_control, queue_control_report
 from .provider_acceptance import run_provider_acceptance
+from .provider_pool import (
+    IMPLEMENT,
+    REVIEW,
+    PooledExecutor,
+    ProviderLog,
+    ProviderPool,
+    default_pools,
+    describe_verdicts,
+)
 from .providers import ProviderValidationError, adapters_from_config
+from .queue_run import QueueRunner
+from .queue_visibility import format_queue_control, queue_control_report
+from .recovery import RecoveryRefusal, format_doctor, rebaseline_task, rebind_contract, task_doctor
 from .redaction import redact_command_secrets, redact_url_credentials
 from .registry import (
     GlobalRegistry,
@@ -50,27 +82,21 @@ from .registry import (
     RegistryConflictError,
     RegistryValidationError,
 )
-from .concurrency import IntegrationLock, ProviderLimiter
-from .diagnosis import DiagnosisPolicy, diagnose, format_findings, make_adapter_analyst
-from .parallel import ParallelRunner, ParallelSummary, SetupRefused, request_queue_control, worker_id_for
-from .queue_run import QueueRunner
-from .recovery import RecoveryRefusal, format_doctor, rebaseline_task, rebind_contract, task_doctor
-from .timing import format_task_timing, task_timing
-from .run_ready import RunSummary, format_step_update, format_stop, run_ready
-from .serialized_integration import SerializedIntegrator
-from .provider_pool import IMPLEMENT, REVIEW, PooledExecutor, ProviderLog, ProviderPool, default_pools, describe_verdicts
 from .release import ReleaseValidationError, build_release_artifact
 from .release_readiness import ReleaseReadinessValidationError, release_readiness
 from .retry import RetryRegistry, RetryValidationError
 from .review import Reviewer
 from .routing import RoutingMode
+from .run_ready import RunSummary, format_step_update, format_stop, run_ready
 from .security import SecurityBoundaryError, WorkspaceBoundary
+from .serialized_integration import SerializedIntegrator
 from .task_sources import (
     LocalBacklogSource,
     TaskSourceValidationError,
     sync_source,
     task_sources_from_config,
 )
+from .timing import format_task_timing, task_timing
 from .validation_plan import derive_validation_plan
 from .work_transport import (
     WorkTransportError,
@@ -78,14 +104,8 @@ from .work_transport import (
     write_ack_envelope,
     write_packet_envelope,
 )
-from .workspaces import legacy_worktree_roots, worktree_root
-from .autonomy.cli import register_autonomy_commands
-from .autonomy.integration import SupervisedIntegrator
-from .autonomy.isolation import check_isolation
-from .autonomy.review_adapter import supervise_reviewer
-from .autonomy.supervisor import Supervisor
-from .autonomy.wiring import SUPERVISED_MIN_REFRESH_ATTEMPTS, load_settings
 from .workers import WorkerValidationError, heartbeat_worker, register_worker
+from .workspaces import legacy_worktree_roots, worktree_root
 
 
 def runtime_dir(project: Path) -> Path:
@@ -272,7 +292,19 @@ def _build_coordinator(
             limiter=parallel.limiter if parallel else None,
         )
         staged = config.routing_mode == RoutingMode.STAGED
-        ok, diagnostic, impl_verdicts, review_verdicts = pool.preflight(store, target.task_id if target else None)
+        task_stage = None
+        implementer = None
+        if target:
+            task_row = store.get_task(target.task_id)
+            task_stage = str(task_row["stage"]) if task_row is not None else None
+            latest_candidate = store.latest_candidate(target.task_id)
+            implementer = str(latest_candidate["produced_by"]) if latest_candidate is not None else None
+        ok, diagnostic, impl_verdicts, review_verdicts = pool.preflight_stage(
+            store,
+            task_stage or IMPLEMENT,
+            target.task_id if target else None,
+            implementer=implementer,
+        )
         if not staged:
             ok = any(v.eligible for v in impl_verdicts)
             diagnostic = f"no implementation provider is available. IMPLEMENT pool: {describe_verdicts(impl_verdicts)}"
@@ -282,7 +314,7 @@ def _build_coordinator(
         executor = PooledExecutor(pool)
         impl_eligible = [adapter_by_name[v.provider] for v in impl_verdicts if v.eligible]
         review_eligible = [adapter_by_name[v.provider] for v in review_verdicts if v.eligible]
-        chosen_provider = pool.order(store, IMPLEMENT, impl_eligible)[0][0].name
+        chosen_provider = pool.order(store, IMPLEMENT, impl_eligible)[0][0].name if impl_eligible else "deferred"
         if staged:
             reviewer = Reviewer(require_independent=require_independent_review, review_pool=pool)
             ordered_reviewers = [a.name for a in pool.order(store, REVIEW, review_eligible)[0]]
@@ -889,8 +921,10 @@ def command_run_parallel(args: argparse.Namespace, *, queue: bool = False) -> in
         "run",
         "\n".join(
             [
-                f"StageMesh {'queue-run' if queue else 'continue'}: up to {args.parallel} "
-                "tasks in parallel, one worktree per task",
+                (
+                    f"StageMesh {'queue-run' if queue else 'continue'}: up to {args.parallel} "
+                    "tasks in parallel, one worktree per task"
+                ),
                 f"project checkout: {project}",
                 f"worktree root: {config.runtime.worktree_root if config.runtime else worktree_root(project)}",
             ]
