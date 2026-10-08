@@ -26,7 +26,7 @@ from stagemesh.workspace_guard import (
     WorkspaceMutation,
     owned_workspace,
 )
-from stagemesh.workspaces import record_task_baseline
+from stagemesh.workspaces import NO_IMPLEMENTATION_CHANGE, record_task_baseline
 
 FAKE_CONTRACT = {
     "objective": "fake task",
@@ -663,6 +663,58 @@ def test_failed_review_runtime_path_reimplements_and_reaches_done(tmp_path: Path
     assert reviewer.calls == 2
     assert summary.final["latest_review"] == "PASSED"
     assert store.task_remediation_count("T-1", Stage.REVIEW) == 1
+
+
+def test_noop_after_failed_review_rechecks_existing_candidate(tmp_path: Path) -> None:
+    project = _project(tmp_path, ["T-1"])
+    store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+    store.migrate()
+    cli_module._sync_all_sources(store, project, cli_module.load_config(project), "T-1")
+
+    class FailOnceReviewer:
+        calls = 0
+
+        def review(self, store: Store, task_id: str, candidate_sha: str, project: Path):
+            self.calls += 1
+            if self.calls == 1:
+                return Reviewer(
+                    findings=[
+                        ReviewFinding(
+                            identity=f"{candidate_sha}:first-review-failed",
+                            severity="error",
+                            message="first review failed",
+                        )
+                    ]
+                ).review(store, task_id, candidate_sha, project)
+            return Reviewer().review(store, task_id, candidate_sha, project)
+
+    class NoChangeExecutor(Executor):
+        name = "fake"
+
+        def run(self, store: Store, task_id: str, claim_id: str | None, project: Path) -> ExecutionResult:
+            return ExecutionResult(ExecutionStatus.FAILED, failure_reason=NO_IMPLEMENTATION_CHANGE)
+
+    reviewer = FailOnceReviewer()
+    first = run_ready(
+        store,
+        project,
+        lambda target: cli_module.Coordinator(store, project, reviewer=reviewer, target=target),
+        task_id="T-1",
+        max_steps=4,
+    )
+    assert first.stop_reason == "MAX_STEPS" and first.final["stage"] == "IMPLEMENT", first.to_dict()
+
+    second = run_ready(
+        store,
+        project,
+        lambda target: cli_module.Coordinator(store, project, executor=NoChangeExecutor(), reviewer=reviewer, target=target),
+        task_id="T-1",
+        max_steps=6,
+    )
+
+    assert second.stop_reason == "DONE", second.to_dict()
+    assert second.final["latest_review"] == "PASSED"
+    assert any(event["event_type"] == "task.recheck_existing_candidate" for event in store.audit_events())
 
 
 def test_unrelated_unknown_execution_still_refuses_run(tmp_path: Path) -> None:

@@ -33,6 +33,7 @@ from .workspace_guard import (
     WorkspaceMutation,
     verify_candidate_workspace,
 )
+from .workspaces import NO_IMPLEMENTATION_CHANGE
 
 _REF_STATE_CODES = frozenset({REBASE_CONFLICT, STALE_BASE})
 
@@ -271,11 +272,13 @@ class Coordinator:
                 self.reviewer.review(self.store, task_id, sha, self.project)
                 if not self._workspace_intact(task_id, sha, "REVIEW:after_review", require=(EvidenceKind.VALIDATION,)):
                     return 1
+            if self._review_satisfied(task_id, sha, bound.digest):
+                return self._advance_with_evidence(task_id, stage, sha, EvidenceKind.REVIEW, bound.digest)
             if self.store.has_bound_evidence(task_id, sha, EvidenceKind.REVIEW, bound.digest, EvidenceStatus.FAILED):
                 return self._remediate_or_block(task_id, sha, Stage.REVIEW)
             if not self._review_satisfied(task_id, sha, bound.digest):
                 return 0  # review infrastructure failure or unsatisfied independence: stay in REVIEW, no remediation
-            return self._advance_with_evidence(task_id, stage, sha, EvidenceKind.REVIEW, bound.digest)
+            return 0
         if stage is Stage.INTEGRATE:
             if not self._workspace_intact(task_id, sha, "INTEGRATE:before_integration", require=(EvidenceKind.VALIDATION, EvidenceKind.REVIEW)):
                 return 1
@@ -337,6 +340,21 @@ class Coordinator:
         self.store.release_claim(claim_id)
         if self.guard is not None:
             self.guard.execution_finished(task_id)  # the owner's leftovers are not an external mutation
+        if self._should_recheck_existing_candidate_after_noop(task_id, reason):
+            candidate = self.store.latest_candidate(task_id)
+            sha = str(candidate["sha"]) if candidate is not None else None
+            self.store.advance_task(task_id, Stage.REVIEW)
+            record_audit(
+                self.store,
+                "task.recheck_existing_candidate",
+                {
+                    "task_id": task_id,
+                    "candidate_sha": sha,
+                    "from_stage": "IMPLEMENT",
+                    "to_stage": "REVIEW",
+                    "reason": reason,
+                },
+            )
         record_audit(
             self.store,
             "task.implementation_unsuccessful",
@@ -352,6 +370,32 @@ class Coordinator:
                 "durable_handoff": durable_handoff,
                 **pool_exhaustion_evidence(reason, provider_attempts),
             },
+        )
+
+    def _should_recheck_existing_candidate_after_noop(self, task_id: str, reason: str) -> bool:
+        """A no-op remediation after REVIEW failure means re-check the candidate, not force an artificial diff."""
+        if NO_IMPLEMENTATION_CHANGE not in reason:
+            return False
+        candidate = self.store.latest_candidate(task_id)
+        if candidate is None or not candidate["durable_handoff"]:
+            return False
+        sha = str(candidate["sha"])
+        try:
+            bound = contract_for_candidate(self.store, task_id, sha, self.project)
+        except Exception:  # noqa: BLE001 - ordinary failure handling will diagnose invalid contract/candidate state.
+            return False
+        return self.store.has_bound_evidence(
+            task_id,
+            sha,
+            EvidenceKind.VALIDATION,
+            bound.digest,
+            EvidenceStatus.PASSED,
+        ) and self.store.has_bound_evidence(
+            task_id,
+            sha,
+            EvidenceKind.REVIEW,
+            bound.digest,
+            EvidenceStatus.FAILED,
         )
 
     def _diagnose(self, task_id: str, sha: str) -> Diagnosis | None:
