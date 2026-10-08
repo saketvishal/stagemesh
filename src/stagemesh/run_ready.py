@@ -84,6 +84,13 @@ def _recover_dead(store: Store, task_id: str) -> list[dict[str, Any]]:
     return recovered
 
 
+def _recover_all_dead(store: Store) -> list[dict[str, Any]]:
+    recovered: list[dict[str, Any]] = []
+    for row in store.tasks():
+        recovered.extend(_recover_dead(store, str(row["id"])))
+    return recovered
+
+
 def _recover_detached_builtin_executions(store: Store, task_id: str) -> list[dict[str, Any]]:
     """Terminalize orphaned built-in stage executions from a previous `continue` invocation.
 
@@ -564,8 +571,7 @@ def run_ready(
             on_start(message)
 
     try:
-        for row in store.tasks():  # provably dead claims/executions only; live/unknown are never touched
-            recovered.extend(_recover_dead(store, str(row["id"])))
+        recovered.extend(_recover_all_dead(store))  # provably dead claims/executions only; live/unknown are never touched
         selection = choose_task(store, project, task_id, policy or TaskSelectionConfig(), auto_plan, chooser)
         selection_info.update(selection.to_dict())
         _log_selection(selection, on_start)
@@ -670,6 +676,7 @@ def drive_task(
             _attach_diagnosis(summary, store, project, selected, coordinator)
             break
         if global_health:
+            summary.recovered.extend(_recover_all_dead(store))
             problems = current_problems(store)
             if problems:
                 summary.stop_reason, summary.message = "CURRENT_PROBLEM", ", ".join(problems)

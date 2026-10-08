@@ -7,12 +7,16 @@ import subprocess
 import sys
 from pathlib import Path
 
+from test_bounded_execution import SLEEPER, TASK, _running_execution, _setup
+
 import stagemesh.cli as cli_module
-from stagemesh.domain import ExecutionKind
+from stagemesh.coordinator import TargetSelection
+from stagemesh.diagnosis import DiagnosisPolicy
+from stagemesh.domain import ExecutionKind, Stage
 from stagemesh.git import GitWorkspace
 from stagemesh.persistence import Store
-
-from test_bounded_execution import SLEEPER, TASK, _running_execution, _setup
+from stagemesh.process_identity import popen_identity
+from stagemesh.run_ready import run_ready
 
 FAKE_CONTRACT = {
     "objective": "fake task",
@@ -418,7 +422,7 @@ def test_current_failed_executions_remain_nonfatal_but_global_hazards_fatal(tmp_
     from stagemesh.observability import health
     from stagemesh.run_ready import current_problems
 
-    project, store = _setup(tmp_path, FAKE_CONTRACT)
+    _project, store = _setup(tmp_path, FAKE_CONTRACT)
     store.conn.execute("UPDATE tasks SET status='BLOCKED' WHERE id=?", (TASK,))
     store.conn.commit()
     assert "blocked_tasks" in health(store).current_problems
@@ -442,7 +446,7 @@ def test_current_failed_executions_remain_nonfatal_but_global_hazards_fatal(tmp_
 def test_stale_running_execution_remains_fatal_for_current_problems(tmp_path: Path) -> None:
     from stagemesh.run_ready import current_problems
 
-    project, store = _setup(tmp_path, FAKE_CONTRACT)
+    _project, store = _setup(tmp_path, FAKE_CONTRACT)
     proc = subprocess.Popen(SLEEPER)
     _running_execution(store, proc)
     proc.kill()
@@ -467,6 +471,74 @@ def test_continue_recovers_orphaned_builtin_validation_execution(tmp_path: Path)
     assert code == 1, result
     assert result["stop_reason"] == "MAX_STEPS"
     assert any(item["execution_id"] == execution_id and item["reason"] == "ORPHANED_BUILTIN_STAGE_EXECUTION" for item in result["recovered"])
+
+
+def test_continue_recovers_orphaned_builtin_review_execution(tmp_path: Path) -> None:
+    project = _project(tmp_path, ["T-1"])
+    store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+    store.migrate()
+    config = cli_module.load_config(project)
+    cli_module._sync_all_sources(store, project, config, None)
+    execution_id = store.start_execution(
+        task_id="T-1",
+        claim_id=None,
+        kind=ExecutionKind.REVIEW,
+        actor="builtin-deterministic-fallback",
+    )
+    store.close()
+
+    code, result = _continue(project, "--max-steps", "1")
+
+    assert code == 1, result
+    assert result["stop_reason"] == "MAX_STEPS"
+    assert any(item["execution_id"] == execution_id and item["reason"] == "ORPHANED_BUILTIN_STAGE_EXECUTION" for item in result["recovered"])
+
+
+def test_run_ready_recovers_dead_execution_created_during_tick_before_health_stop(tmp_path: Path) -> None:
+    project = _project(tmp_path, ["A-1", "B-1"])
+    store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+    store.migrate()
+    store.upsert_task("task A", source="local-backlog", source_id="A-1")
+    store.upsert_task("task B", source="local-backlog", source_id="B-1")
+
+    class CreatesDeadExecution:
+        diagnosis_policy = DiagnosisPolicy()
+
+        def __init__(self, target: TargetSelection) -> None:
+            self.target = target
+
+        def validate_target(self) -> None:
+            assert self.target.task_id == "A-1"
+
+        def tick(self) -> int:
+            proc = subprocess.Popen(SLEEPER)
+            identity = popen_identity(proc)
+            execution_id = store.start_execution(
+                task_id="B-1",
+                claim_id=None,
+                kind=ExecutionKind.IMPLEMENTATION,
+                pid=identity.pid,
+                process_create_time=identity.create_time,
+                boot_id=identity.boot_id,
+                executable=identity.executable,
+            )
+            proc.kill()
+            proc.wait()
+            store.advance_task("A-1", Stage.IMPLEMENT)
+            assert store.conn.execute("SELECT status FROM executions WHERE id=?", (execution_id,)).fetchone()[0] == "RUNNING"
+            return 1
+
+    summary = run_ready(store, project, lambda target: CreatesDeadExecution(target), task_id="A-1", max_steps=1)
+
+    assert summary.stop_reason == "MAX_STEPS", summary.to_dict()
+    assert any(
+        item["task_id"] == "B-1"
+        and item["kind"] == ExecutionKind.IMPLEMENTATION
+        and item["action"] == "RELEASED"
+        and item["process_state"] == "DEAD"
+        for item in summary.recovered
+    )
+    assert not any(item == "stale_running_executions" for item in summary.detail.get("problems", []))
 
 
 def test_unrelated_unknown_execution_still_refuses_run(tmp_path: Path) -> None:
