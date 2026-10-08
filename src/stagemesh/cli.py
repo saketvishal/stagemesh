@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import platform
+import shlex
 import sys
 import threading
 from collections.abc import Callable
@@ -782,7 +783,7 @@ def command_run_ready(args: argparse.Namespace) -> int:
 
     def on_start(message: str) -> None:
         if not args.json:
-            if compact_timeline and not (message.startswith("StageMesh run") or message.startswith("[")):
+            if compact_timeline and not (message.startswith(("StageMesh run", "["))):
                 return
             print(message, flush=True)
 
@@ -1594,8 +1595,26 @@ def command_capacity(args: argparse.Namespace) -> int:
 def command_config(args: argparse.Namespace) -> int:
     config = load_config(Path(args.project).resolve(), Path(args.config).resolve() if args.config else None)
     display_database_url = redact_url_credentials(config.database_url) or "sqlite://default"
-    display_provider_commands = {
+    provider_overrides = {
         name: redact_command_secrets(command) for name, command in sorted(config.provider_commands.items())
+    }
+    adapters = adapters_from_config(config)
+    adapter_by_name = {adapter.name: adapter for adapter in adapters}
+    stage_caps = {IMPLEMENT: "code", REVIEW: "review"}
+    capable = {stage: {a.name for a in adapters if capability in a.capabilities} for stage, capability in stage_caps.items()}
+    priorities = {name: spec.priority for name, spec in config.provider_specs.items() if spec.priority is not None}
+    pools = default_pools(
+        sorted(adapter_by_name),
+        config.stage_routes,
+        config.provider_pools,
+        config.single_agent_provider,
+        config.routing_mode,
+        capable=capable,
+        priorities=priorities,
+    )
+    effective_provider_commands = {
+        adapter.name: redact_command_secrets(shlex.join(adapter.command))
+        for adapter in sorted(adapters, key=lambda item: item.name)
     }
     if args.json:
         print(
@@ -1612,8 +1631,11 @@ def command_config(args: argparse.Namespace) -> int:
                         "mode": config.routing_mode,
                         "single_agent_provider": config.single_agent_provider,
                         "stage_routes": dict(sorted(config.stage_routes.items())),
+                        "provider_selection_policy": config.provider_selection_policy,
+                        "pools": {stage: list(names) for stage, names in sorted(pools.items())},
                     },
-                    "providers": display_provider_commands,
+                    "providers": effective_provider_commands,
+                    "provider_overrides": provider_overrides,
                     "task_sources": [
                         {"name": source.name, "type": source.kind, "path": str(source.path)}
                         for source in config.task_sources
@@ -1631,10 +1653,15 @@ def command_config(args: argparse.Namespace) -> int:
     print(f"database_url: {display_database_url}")
     print(f"routing.mode: {config.routing_mode}")
     print(f"routing.single_agent_provider: {config.single_agent_provider or ''}")
+    print(f"routing.provider_selection_policy: {config.provider_selection_policy}")
     for stage, provider in sorted(config.stage_routes.items()):
         print(f"routing.stage.{stage}: {provider}")
-    for name, command in display_provider_commands.items():
+    for stage, names in sorted(pools.items()):
+        print(f"routing.pool.{stage}: {', '.join(names)}")
+    for name, command in effective_provider_commands.items():
         print(f"provider.{name}: {command}")
+    for name, command in provider_overrides.items():
+        print(f"provider_override.{name}: {command}")
     for source in config.task_sources:
         print(f"task_source.{source.name}: {source.kind} {source.path}")
     return 0
