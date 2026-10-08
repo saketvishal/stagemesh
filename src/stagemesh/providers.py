@@ -38,6 +38,8 @@ from .workspaces import (
     record_task_baseline,
 )
 
+MAX_EXECUTION_RESULT_CHARS = 200
+
 
 class ProviderValidationError(ValueError):
     pass
@@ -159,7 +161,9 @@ class RuntimeCommandAdapter:
             store.finish_execution(execution_id, ExecutionStatus.SUCCEEDED, sha)
             return ExecutionResult(ExecutionStatus.SUCCEEDED, sha, durable_handoff=True)
         except Exception as exc:
-            store.finish_execution(execution_id, ExecutionStatus.FAILED, result=f"{type(exc).__name__}: {exc}"[:300])
+            store.finish_execution(execution_id, ExecutionStatus.FAILED, result=_execution_result(exc))
+            if _is_external_workspace_mutation(exc):
+                return ExecutionResult(ExecutionStatus.FAILED, failure_reason=EXTERNAL_WORKSPACE_MUTATION)
             raise
 
     def run(self, store: Store, task_id: str, claim_id: str | None, project: Path) -> ExecutionResult:
@@ -248,6 +252,14 @@ def _command_and_input(command: tuple[str, ...], prompt: str) -> tuple[list[str]
                 return [*args[: index + 1], prompt, *args[index + 1 :]], ""
             return args, ""
     return [args[0], "-p", prompt, *args[1:]], ""
+
+
+def _execution_result(exc: Exception) -> str:
+    return f"{type(exc).__name__}: {exc}"[:MAX_EXECUTION_RESULT_CHARS]
+
+
+def _is_external_workspace_mutation(exc: Exception) -> bool:
+    return getattr(exc, "code", None) == EXTERNAL_WORKSPACE_MUTATION
 
 
 WRITE_CAPABLE_DEFAULT_COMMANDS = {

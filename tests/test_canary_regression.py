@@ -374,6 +374,47 @@ def test_runtime_provider_terminalizes_execution_when_post_start_exception_occur
     assert len(rows) == 1
     assert rows[0]["status"] == ExecutionStatus.FAILED
     assert "provider post-start failure" in rows[0]["result"]
+    assert len(rows[0]["result"]) <= 200
+
+def test_runtime_provider_returns_typed_workspace_mutation_without_long_result_crash(
+    store: Store,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from stagemesh.providers import RuntimeCommandAdapter
+    from stagemesh.workspace_guard import EXTERNAL_WORKSPACE_MUTATION
+
+    class SupervisorMutation(RuntimeError):
+        code = EXTERNAL_WORKSPACE_MUTATION
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    workspace = GitWorkspace(project)
+    workspace.init_if_needed()
+    (project / "src.txt").write_text("unchanged\n", encoding="utf-8")
+    workspace.commit_all("initial")
+    task_id = store.upsert_task("provider mutation")
+    _write_contract(project, task_id)
+
+    def provider_succeeds(proc, *args, **kwargs):
+        proc.returncode = 0
+        return "", "", False
+
+    monkeypatch.setattr("stagemesh.providers.communicate_bounded", provider_succeeds)
+
+    def mutated(*args, **kwargs):
+        raise SupervisorMutation("EXTERNAL_WORKSPACE_MUTATION: " + "x" * 500)
+
+    monkeypatch.setattr("stagemesh.providers.commit_implementation_candidate", mutated)
+    adapter = RuntimeCommandAdapter("codex", (sys.executable, "-c", "pass"))
+
+    result = adapter.execute(store, task_id, None, project)
+
+    row = store.conn.execute("SELECT status, result FROM executions WHERE task_id=?", (task_id,)).fetchone()
+    assert result.status == ExecutionStatus.FAILED
+    assert result.failure_reason == EXTERNAL_WORKSPACE_MUTATION
+    assert row["status"] == ExecutionStatus.FAILED
+    assert len(row["result"]) <= 200
 
 def test_subprocess_executor_decodes_provider_output_as_utf8_with_replacement(
     store: Store,
