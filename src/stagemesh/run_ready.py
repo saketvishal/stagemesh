@@ -348,6 +348,14 @@ def _snapshot(store: Store, task_id: str) -> dict[str, Any]:
     }
 
 
+def _task_heading(store: Store, task_id: str) -> dict[str, str]:
+    task = store.get_task(task_id)
+    if task is None:
+        return {"id": task_id}
+    title = str(task["title"] or "").strip()
+    return {"id": task_id, **({"title": title} if title else {})}
+
+
 def _latest_claimed_agent(store: Store, task_id: str) -> str | None:
     rows = store.conn.execute(
         "SELECT payload FROM audit_events WHERE event_type=? ORDER BY created_at DESC, rowid DESC LIMIT 50",
@@ -365,21 +373,24 @@ def _latest_claimed_agent(store: Store, task_id: str) -> str | None:
 
 
 def format_running(step_number: int, task_id: str, snapshot: dict[str, Any]) -> str:
-    stage = _stage_label(snapshot["stage"])
-    return "\n".join([f"{stage} #{step_number}", f"  task: {task_id}", "  status: running"])
+    header = _stage_header(step_number, str(snapshot["stage"]), _stage_actor(str(snapshot["stage"]), snapshot))
+    return "\n".join([header, "    status: running"])
 
 
 def format_start(summary: RunSummary) -> str:
     workspace = summary.detail.get("workspace", {})
-    lines = [f"StageMesh continue: task {summary.task_id}"]
-    if workspace.get("project_checkout"):
-        lines.append(f"  project checkout: {workspace['project_checkout']}")
-    if workspace.get("worktree_root"):
-        lines.append(f"  worktree root: {workspace['worktree_root']}")
+    task = summary.detail.get("task", {})
+    task_id = task.get("id") or summary.task_id
+    task_text = str(task_id)
+    if task.get("title"):
+        task_text += f"  {task['title']}"
+    lines = ["StageMesh run", f"task: {task_text}"]
+    if summary.detail.get("run_id"):
+        lines.append(f"run: {summary.detail['run_id']}")
     if workspace.get("worktree"):
-        lines.append(f"  task worktree: {workspace['worktree']}")
-    if workspace.get("checkout"):
-        lines.append(f"  integration checkout: {workspace['checkout']}")
+        lines.append(f"workspace: {workspace['worktree']}")
+    if workspace.get("project_checkout"):
+        lines.append("protected: main checkout is not edited")
     return "\n".join(lines)
 
 
@@ -406,7 +417,7 @@ def _attach_diagnosis(summary: RunSummary, store: Store, project: Path, task_id:
 
 def format_stop(summary: RunSummary) -> str:
     reason = _human_stop_reason(summary.stop_reason)
-    lines = [f"Run stopped: {reason}"]
+    lines = [f"stopped: {reason}"]
     if summary.message:
         lines.append(f"  reason: {summary.message}")
     diagnosis = summary.detail.get("diagnosis")
@@ -421,45 +432,56 @@ def format_stop(summary: RunSummary) -> str:
 
 
 def format_step(step: dict[str, Any], notices: list[str] | None = None) -> str:
-    notices = _operator_notices(notices or [])
     previous = step["previous"]
     new = step["new"]
     stage = str(previous["stage"])
-    lines = [_stage_label(stage) + f" #{step['step']}", f"  task: {step['task_id']}"]
-    status = _stage_status(stage, new, step.get("progressed", 0))
-    lines.append(f"  status: {status}")
-    actor = _stage_actor(stage, new)
-    if actor:
-        lines.append(f"  actor: {actor}")
+    actor = _stage_actor(stage, new, step.get("executions") or [])
+    lines = [_stage_header(int(step["step"]), stage, actor)]
+    result = _stage_result(stage, new, step.get("progressed", 0), step.get("executions") or [])
+    lines.append(f"    result: {result}")
     for detail in _stage_details(stage, previous, new):
-        lines.append(f"  {detail}")
-    if step.get("duration_seconds") is not None:
-        lines.append(f"  duration: {format_duration(step['duration_seconds'])}")
-    for notice in notices:
-        lines.append(f"  note: {notice}")
+        lines.append(f"    {detail}")
+    lines.extend(f"    {notice}" for notice in _operator_notices(notices or []))
     return "\n".join(lines)
 
 
 def format_step_update(step: dict[str, Any], notices: list[str] | None = None) -> str:
     lines = format_step(step, notices).splitlines()
-    update = lines[2:]
-    if update and update[0].startswith("  status: "):
-        update[0] = "  result: " + update[0].split(": ", 1)[1]
+    update = lines[1:]
+    header = lines[0] if lines else ""
+    parts = header.split("  ", 1)
+    if len(parts) == 2 and parts[1].strip():
+        update.insert(0, f"    actor: {parts[1].strip()}")
     return "\n".join(update)
 
 
 def _stage_label(stage: str) -> str:
     return {
-        "PLAN": "Plan",
-        "IMPLEMENT": "Implementation",
-        "VALIDATE": "Validation",
-        "REVIEW": "Review",
-        "INTEGRATE": "Integration",
-        "DONE": "Done",
-    }.get(stage, stage.title())
+        "PLAN": "PLAN",
+        "IMPLEMENT": "IMPLEMENT",
+        "VALIDATE": "VALIDATE",
+        "REVIEW": "REVIEW",
+        "INTEGRATE": "INTEGRATE",
+        "DONE": "DONE",
+    }.get(stage, stage.upper())
 
 
-def _stage_status(stage: str, new: dict[str, Any], progressed: int) -> str:
+def _stage_header(step_number: int, stage: str, actor: str | None) -> str:
+    suffix = f"  {actor}" if actor else ""
+    return f"[{step_number}] {_stage_label(stage)}{suffix}"
+
+
+def _stage_result(
+    stage: str, new: dict[str, Any], progressed: int, executions: list[dict[str, Any]]
+) -> str:
+    execution = _execution_for_stage(stage, executions)
+    if execution:
+        result = _execution_result(stage, execution)
+        if execution.get("reason"):
+            result += f" ({execution['reason']})"
+        if execution.get("duration_seconds") is not None:
+            result += f" in {format_duration(execution['duration_seconds'])}"
+        return result
     if stage == "PLAN":
         return "advanced" if progressed else "waiting"
     evidence = _evidence_for_stage(stage, new)
@@ -472,7 +494,32 @@ def _stage_status(stage: str, new: dict[str, Any], progressed: int) -> str:
     return "no progress"
 
 
-def _stage_actor(stage: str, new: dict[str, Any]) -> str | None:
+def _stage_status(stage: str, new: dict[str, Any], progressed: int) -> str:
+    return _stage_result(stage, new, progressed, [])
+
+
+def _execution_for_stage(stage: str, executions: list[dict[str, Any]]) -> dict[str, Any] | None:
+    matches = [rec for rec in executions if rec.get("stage") == _stage_label(stage)]
+    return matches[-1] if matches else None
+
+
+def _execution_result(stage: str, execution: dict[str, Any]) -> str:
+    status = str(execution.get("status") or "").upper()
+    if status == "SUCCEEDED":
+        return "succeeded" if stage == "IMPLEMENT" else "passed"
+    if status == "FAILED":
+        return "failed"
+    if status == "RUNNING":
+        return "running"
+    if status == "UNKNOWN":
+        return "unknown"
+    return str(execution.get("result") or status).lower()
+
+
+def _stage_actor(stage: str, new: dict[str, Any], executions: list[dict[str, Any]] | None = None) -> str | None:
+    execution = _execution_for_stage(stage, executions or [])
+    if execution and execution.get("actor"):
+        return _display_actor(str(execution["actor"]))
     evidence = _evidence_for_stage(stage, new)
     payload = evidence.get("payload", {}) if evidence else {}
     if stage == "IMPLEMENT":
@@ -485,6 +532,13 @@ def _stage_actor(stage: str, new: dict[str, Any]) -> str | None:
     if stage == "INTEGRATE":
         return str(payload.get("integrator") or "builtin integrator")
     return None
+
+
+def _display_actor(actor: str) -> str:
+    return {
+        "stagemesh-validator": "builtin-validator",
+        "stagemesh-integrator": "builtin-integrator",
+    }.get(actor, actor)
 
 
 def _stage_details(stage: str, previous: dict[str, Any], new: dict[str, Any]) -> list[str]:
@@ -503,6 +557,8 @@ def _stage_details(stage: str, previous: dict[str, Any], new: dict[str, Any]) ->
     if stage == "REVIEW":
         evidence = _evidence_for_stage(stage, new)
         payload = ((evidence or {}).get("payload") or {})
+        if payload.get("finding_count") is not None:
+            details.append(f"findings: {payload['finding_count']}")
         if payload.get("independent_review_required") is not None:
             verified = payload.get("independent_reviewer") or payload.get("independent_review_verified")
             details.append(f"independent: {bool(verified)}")
@@ -526,8 +582,37 @@ def _evidence_for_stage(stage: str, snapshot: dict[str, Any]) -> dict[str, Any] 
 
 
 def _operator_notices(lines: list[str]) -> list[str]:
-    interesting = ("fallback:", "skipped ", "REFUSED", "no review provider eligible", "all eligible")
-    return [line.strip() for line in lines if any(marker in line for marker in interesting)]
+    raw = [line.strip() for line in lines]
+    explain = any(
+        any(marker in line for marker in ("fallback:", "skipped ", "REFUSED", "no review provider eligible", "all eligible"))
+        for line in raw
+    )
+    notices: list[str] = []
+    for line in raw:
+        if explain and line.startswith("provider pool considered:"):
+            notices.append("pool: " + line.split(":", 1)[1].strip())
+        elif line.startswith("skipped "):
+            provider, _, reason = line[len("skipped ") :].partition(":")
+            notices.append(f"{provider}: skipped, {_human_provider_reason(reason.strip())}")
+        elif line.startswith("fallback:"):
+            notices.append(line)
+        elif line.startswith("REFUSED:"):
+            notices.append("reason: " + line[len("REFUSED:") :].strip())
+        elif "no review provider eligible" in line or "all eligible" in line:
+            notices.append(line)
+    return notices
+
+
+def _human_provider_reason(reason: str) -> str:
+    if reason.startswith("cli_not_installed:"):
+        return "not authenticated or unavailable"
+    if reason.startswith("not_independent:"):
+        return "same provider as implementer"
+    if reason.startswith("provider_cooldown:"):
+        return reason.replace("_", " ")
+    if reason.startswith("recent_failure:"):
+        return reason.replace("_", " ")
+    return reason.replace("_", " ")
 
 
 def _human_stop_reason(reason: str) -> str:
@@ -645,6 +730,7 @@ def drive_task(
     one, so only this task's own progress decides when it stops.
     """
     summary.detail["workspace"] = workspace_info(project, selected, worktree_root_path)
+    summary.detail["task"] = _task_heading(store, selected)
     if on_start is not None:
         on_start(format_start(summary))
     for number in range(1, max_steps + 1):
