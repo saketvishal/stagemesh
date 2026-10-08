@@ -8,18 +8,14 @@ Run the bootstrap from the repository root:
 python scripts/bootstrap_stagemesh.py
 ```
 
-The bootstrap creates `.stagemesh/tooling/venv`, installs the current StageMesh package into that project-owned environment as a normal package, and writes a shim in `.stagemesh/bin`.
+The bootstrap creates `.stagemesh/tooling/venv`, installs the current StageMesh package into that project-owned environment as a normal package, writes a project shim in `.stagemesh/bin`, and installs a tiny user-level dispatcher named `stagemesh` on `PATH`.
 
-After bootstrap, use the project-owned shim:
+After bootstrap, run StageMesh from the project folder with the normal command:
 
 ```bash
-./.stagemesh/bin/stagemesh continue
+stagemesh continue
 ```
 
-On Windows:
-
-```powershell
-.stagemesh\bin\stagemesh.cmd continue
-```
+The dispatcher walks upward from the current directory and invokes the nearest project-owned `.stagemesh/bin/stagemesh` or `.stagemesh\bin\stagemesh.cmd`, so different repositories can use different local StageMesh versions.
 
 Acceptance gates must use this installed runtime path. They must not depend on `PYTHONPATH=src`, an editable install, a developer checkout outside the project, or a stale `code_checkout` value.
