@@ -7,17 +7,17 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .auto_plan import AutoPlanError, create_contract
-from .diagnosis import format_findings
+from .auto_plan import AutoPlanError, create_contract, refresh_stale_generated_contract
+from .config import TaskSelectionConfig
 from .contracts import ContractError, canonical_contract_json, parse_contract, task_contract_path
 from .coordinator import Coordinator, TargetSelection, TargetSelectionError
+from .diagnosis import format_findings
 from .domain import EvidenceKind, ExecutionKind, Stage, TaskStatus
-from .observability import health
-from .operator_actions import recover_stale, task_details
 from .git import GitWorkspace
 from .objective_roots import objective_root_reason
+from .observability import health
+from .operator_actions import recover_stale, task_details
 from .persistence import MAX_CANONICAL_CONTRACT_CHARS, Store
-from .config import TaskSelectionConfig
 from .scheduling import Scheduler
 from .task_selection import Candidate, Selection, SelectionRefusal, select_next_task
 from .timing import execution_timings, format_duration, step_duration
@@ -179,6 +179,10 @@ def select_task(store: Store, requested: str | None) -> str:
 def _ensure_contract(
     store: Store, project: Path, task_id: str, auto_plan: bool, plan_info: dict[str, Any], note: Callable[[str], None]
 ) -> None:
+    refreshed = refresh_stale_generated_contract(store, project, task_id)
+    if refreshed is not None:
+        plan_info.update(occurred=True, refreshed_existing=True, **refreshed.to_dict())
+        note(f"task {task_id}: refreshed generated contract at {refreshed.path} (gates: {', '.join(refreshed.gates)})")
     if store.task_contract(task_id) is not None:
         plan_info["reused_existing"] = True
         return  # already frozen for this task

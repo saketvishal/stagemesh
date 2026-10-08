@@ -10,7 +10,10 @@ import pytest
 
 import stagemesh.auto_plan as auto_plan_module
 import stagemesh.cli as cli_module
+from stagemesh.contracts import canonical_contract_json, parse_contract
+from stagemesh.domain import EvidenceKind, EvidenceStatus
 from stagemesh.git import GitWorkspace
+from stagemesh.persistence import Store
 
 GATE = {"name": "project-acceptance-fake", "command": [sys.executable, "-c", "pass"], "timeout_seconds": 60}
 
@@ -54,7 +57,7 @@ def test_missing_contract_is_generated_and_the_task_continues(tmp_path: Path, fa
 
     code, result = _continue(project)
 
-    assert code == 0 and result["stop_reason"] == "DONE"
+    assert code == 0 and result["stop_reason"] == "DONE", result
     plan = result["auto_plan"]
     assert plan["occurred"] is True and plan["reused_existing"] is False
     assert plan["path"] == str(_contract(project)) and plan["gates"] == ["project-acceptance-fake"]
@@ -82,9 +85,104 @@ def test_existing_contract_is_reused_untouched(tmp_path: Path, fake_gates: None)
 
     code, result = _continue(project)
 
-    assert code == 0 and result["stop_reason"] == "DONE"
+    assert code == 0 and result["stop_reason"] == "DONE", result
     assert result["auto_plan"]["occurred"] is False and result["auto_plan"]["reused_existing"] is True
     assert _contract(project).read_text(encoding="utf-8") == before
+
+
+def _stagemesh_project(tmp_path: Path) -> Path:
+    project = _project(tmp_path)
+    (project / "pyproject.toml").write_text(
+        "[project]\nname = \"stagemesh\"\n\n[tool.pytest.ini_options]\ntestpaths = [\"tests\"]\n",
+        encoding="utf-8",
+    )
+    tests = project / "tests"
+    tests.mkdir()
+    for name in ("test_run_ready.py", "test_provider_pool.py", "test_canary_regression.py"):
+        (tests / name).write_text("def test_placeholder():\n    pass\n", encoding="utf-8")
+    GitWorkspace(project).commit_all("add stagemesh smoke harness")
+    return project
+
+
+def _legacy_generated_contract(project: Path) -> dict:
+    payload = {
+        "objective": "Widget endpoint",
+        "explicit": True,
+        "validation_classification": "CORE_LIFECYCLE_OR_SCHEMA_SECURITY",
+        "validation_escalation_reasons": ["auto-generated contract has no file scope; full project validation required"],
+        "acceptance_criteria": ["The change fulfils the task objective and nothing else."],
+        "allowed_files": ["**"],
+        "forbidden_files": [".stagemesh/**"],
+        "required_tests": [
+            {"name": "project-acceptance-pytest", "command": ["python", "-m", "pytest", "-q"], "timeout_seconds": 1800}
+        ],
+        "max_changed_files": 60,
+        "max_diff_lines": 6000,
+        "generated_by": "stagemesh-auto-plan",
+        "source_task": "T-1",
+    }
+    _contract(project).write_text(json.dumps(payload), encoding="utf-8")
+    return payload
+
+
+def test_existing_legacy_generated_stagemesh_contract_refreshes_to_bounded_smoke(tmp_path: Path) -> None:
+    project = _stagemesh_project(tmp_path)
+    _legacy_generated_contract(project)
+
+    code, result = _continue(project)
+
+    assert code == 0 and result["stop_reason"] == "DONE", result
+    plan = result["auto_plan"]
+    assert plan["occurred"] is True and plan["refreshed_existing"] is True
+    assert plan["gates"] == ["stagemesh-lifecycle-smoke"]
+    refreshed = json.loads(_contract(project).read_text(encoding="utf-8"))
+    assert refreshed["generated_by"] == "stagemesh-auto-plan"
+    assert refreshed["required_tests"][0]["name"] == "stagemesh-lifecycle-smoke"
+    assert refreshed["required_tests"][0]["command"] == [
+        "python",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/test_run_ready.py",
+        "tests/test_provider_pool.py",
+        "tests/test_canary_regression.py",
+    ]
+
+
+def test_frozen_legacy_generated_contract_refreshes_when_no_evidence_exists(tmp_path: Path) -> None:
+    project = _stagemesh_project(tmp_path)
+    legacy = _legacy_generated_contract(project)
+    store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+    store.migrate()
+    store.upsert_task("Widget endpoint", source="local-backlog", source_id="T-1")
+    store.cache_source("local-backlog", "T-1", {"objective": "Add the widget endpoint."}, "OPEN")
+    baseline = GitWorkspace(project).head()
+    store.bind_task_contract("T-1", baseline, 1, "0" * 64, canonical_contract_json(parse_contract(legacy)))
+    store.add_candidate("T-1", "abc123", "codex", True)
+
+    refreshed = auto_plan_module.refresh_stale_generated_contract(store, project, "T-1")
+
+    assert refreshed is not None and refreshed.gates == ("stagemesh-lifecycle-smoke",)
+    frozen = json.loads(store.task_contract("T-1")["canonical_json"])
+    bound = json.loads(store.contract_binding("T-1", "abc123")["canonical_json"])
+    assert frozen["required_tests"][0]["name"] == "stagemesh-lifecycle-smoke"
+    assert bound["required_tests"][0]["name"] == "stagemesh-lifecycle-smoke"
+
+
+def test_frozen_legacy_generated_contract_with_evidence_preserves_history(tmp_path: Path) -> None:
+    project = _stagemesh_project(tmp_path)
+    legacy = _legacy_generated_contract(project)
+    store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+    store.migrate()
+    store.upsert_task("Widget endpoint", source="local-backlog", source_id="T-1")
+    store.cache_source("local-backlog", "T-1", {"objective": "Add the widget endpoint."}, "OPEN")
+    baseline = GitWorkspace(project).head()
+    store.bind_task_contract("T-1", baseline, 1, "0" * 64, canonical_contract_json(parse_contract(legacy)))
+    store.add_candidate("T-1", "abc123", "codex", True)
+    store.add_evidence("T-1", "abc123", EvidenceKind.VALIDATION, EvidenceStatus.PASSED, {"contract_hash": "0" * 64})
+
+    assert auto_plan_module.refresh_stale_generated_contract(store, project, "T-1") is None
+    assert json.loads(store.task_contract("T-1")["canonical_json"])["required_tests"][0]["name"] == "project-acceptance-pytest"
 
 
 def test_no_auto_plan_keeps_the_missing_contract_refusal(tmp_path: Path, fake_gates: None) -> None:

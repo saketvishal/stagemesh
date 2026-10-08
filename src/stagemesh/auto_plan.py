@@ -7,6 +7,7 @@ round-trip through the contract parser, generation fails closed and the operator
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sys
@@ -15,11 +16,23 @@ from pathlib import Path
 from typing import Any
 
 from .audit import record_audit
-from .contracts import ContractError, canonical_contract_json, parse_contract
+from .contracts import (
+    CONTRACT_VERSION,
+    ContractError,
+    canonical_contract_json,
+    parse_contract,
+    task_contract_path,
+)
 from .persistence import MAX_CANONICAL_CONTRACT_CHARS, Store
-from .profile import Profile, ProfileError, TypeDecision, build_contract as build_profile_contract, load_profile, resolve_type
+from .profile import ProfileError, load_profile, resolve_type
+from .profile import build_contract as build_profile_contract
 
 GENERATED_BY = "stagemesh-auto-plan"
+LEGACY_PYTEST_GATE = {
+    "name": "project-acceptance-pytest",
+    "command": ["python", "-m", "pytest", "-q"],
+    "timeout_seconds": 1800,
+}
 MAX_OBJECTIVE_CHARS = 4000
 FORBIDDEN_FILES = (
     ".stagemesh/**",
@@ -220,6 +233,87 @@ def validate_generated(payload: dict[str, Any]) -> int:
             "shorten the task description or write the contract by hand",
         )
     return size
+
+
+def _gate_signature(gate: Any) -> dict[str, Any]:
+    return {
+        "name": gate.get("name"),
+        "command": gate.get("command"),
+        "timeout_seconds": gate.get("timeout_seconds"),
+    } if isinstance(gate, dict) else {}
+
+
+def _is_refreshable_generated_contract(payload: dict[str, Any], replacement_gates: list[dict[str, Any]]) -> bool:
+    if payload.get("generated_by") != GENERATED_BY:
+        return False
+    if [_gate_signature(gate) for gate in payload.get("required_tests", [])] != [LEGACY_PYTEST_GATE]:
+        return False
+    return any(gate.get("name") == "stagemesh-lifecycle-smoke" for gate in replacement_gates)
+
+
+def _task_has_evidence(store: Store, task_id: str) -> bool:
+    return store.conn.execute("SELECT 1 FROM evidence WHERE task_id=? LIMIT 1", (task_id,)).fetchone() is not None
+
+
+def refresh_stale_generated_contract(store: Store, project: Path, task_id: str) -> AutoPlanResult | None:
+    """Replace old generated broad-pytest contracts with the current project-owned smoke gate.
+
+    This is intentionally narrow. Handwritten contracts are never touched, and generated contracts with recorded evidence are
+    left alone so historical proof remains tied to the exact contract it satisfied.
+    """
+    gates = detect_gates(project)
+    if not any(gate.get("name") == "stagemesh-lifecycle-smoke" for gate in gates):
+        return None
+    path = task_contract_path(project, task_id)
+    frozen = store.task_contract(task_id)
+    if path is None and frozen is None:
+        return None
+    try:
+        existing = json.loads(path.read_text(encoding="utf-8")) if path is not None else json.loads(str(frozen["canonical_json"]))
+    except (OSError, ValueError, TypeError):
+        return None
+    if not isinstance(existing, dict) or not _is_refreshable_generated_contract(existing, gates):
+        return None
+    if frozen is not None and _task_has_evidence(store, task_id):
+        return None
+
+    payload = build_contract(store, project, task_id, gates)
+    size = validate_generated(payload)
+    contract = parse_contract(payload)
+    canonical_json = canonical_contract_json(contract)
+    digest = hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
+    names = tuple(str(gate["name"]) for gate in gates)
+
+    if path is not None:
+        temp = path.with_suffix(".json.tmp")
+        temp.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        os.replace(temp, path)
+    if frozen is not None:
+        candidate = store.latest_candidate(task_id)
+        candidate_sha = str(candidate["sha"]) if candidate is not None else None
+        baseline_sha = str(frozen["baseline_sha"]) if frozen["baseline_sha"] is not None else None
+        store.rebind_task_contract(
+            task_id,
+            CONTRACT_VERSION,
+            digest,
+            canonical_json,
+            candidate_sha,
+        )
+        if candidate_sha is not None and store.contract_binding(task_id, candidate_sha) is None:
+            store.bind_contract(task_id, candidate_sha, baseline_sha, CONTRACT_VERSION, digest, canonical_json)
+    record_audit(
+        store,
+        "contract.auto_refreshed",
+        {
+            "task_id": task_id,
+            "path": str(path) if path is not None else None,
+            "from_gates": [LEGACY_PYTEST_GATE["name"]],
+            "gates": list(names),
+            "canonical_chars": size,
+            "frozen": frozen is not None,
+        },
+    )
+    return AutoPlanResult(path or project / ".stagemesh" / "contracts" / f"{task_id}.json", names, size)
 
 
 def profile_payload(store: Store, project: Path, task_id: str) -> tuple[dict[str, Any], dict[str, Any]] | None:

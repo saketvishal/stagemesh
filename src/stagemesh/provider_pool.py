@@ -6,7 +6,6 @@ import json
 import subprocess
 import sys
 import time
-from collections.abc import Callable
 from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
@@ -96,7 +95,7 @@ def default_pools(
     capable: dict[str, set[str]] | None = None,
     priorities: dict[str, int] | None = None,
 ) -> dict[str, tuple[str, ...]]:
-    """Explicit pools win. Otherwise a routed provider is merely tried first and every other provider is a fallback.
+    """Explicit pools are exact. Otherwise a routed provider is tried first and every other provider is a fallback.
 
     Default order is (priority, built-in rank, name), so with no priorities it is codex, claude, grok, then custom providers
     alphabetically. `capable` (stage -> provider names) keeps providers out of stages they do not serve.
@@ -112,8 +111,7 @@ def default_pools(
         eligible_names = [n for n in names if capable is None or n in capable.get(stage, set(names))]
         ordered = sorted(eligible_names, key=rank)
         if stage in explicit:
-            preferred = [n for n in explicit[stage] if n in eligible_names]
-            pools[stage] = tuple(preferred + [n for n in ordered if n not in preferred])
+            pools[stage] = tuple(n for n in explicit[stage] if n in eligible_names)
         elif routing_mode == RoutingMode.SINGLE_AGENT and single_agent_provider:
             pools[stage] = (single_agent_provider,)
         else:
@@ -373,8 +371,8 @@ class ProviderPool:
         counts: dict[str, int] = {}
         for name, _ in uses:
             counts[name] = counts.get(name, 0) + 1
-        weight = lambda a: max(1, self.weights.get(a.name, 1))  # noqa: E731
-        score = lambda a: Fraction(counts.get(a.name, 0) + 1, weight(a))  # noqa: E731
+        weight = lambda a: max(1, self.weights.get(a.name, 1))
+        score = lambda a: Fraction(counts.get(a.name, 0) + 1, weight(a))
         ordered = sorted(base, key=score)  # stable: ties keep priority/pool order
         for a in ordered:
             reasons[a.name] = (
@@ -393,13 +391,16 @@ class ProviderPool:
         if self.require_independent and not any(
             r.name != i.name and r.command != i.command for i in implementers for r in reviewers
         ):
-            names = lambda items: ", ".join(a.name for a in items) or "none"  # noqa: E731
-            return (
-                False,
+            names = lambda items: ", ".join(a.name for a in items) or "none"
+            message = (
                 "independent review is required but cannot be satisfied: no eligible reviewer is distinct from any "
                 f"eligible implementer (not_independent). Eligible implementers: {names(implementers)}; eligible reviewers: "
                 f"{names(reviewers)}. IMPLEMENT pool: {describe_verdicts(impl)}. REVIEW pool: {describe_verdicts(review)}. "
-                "Install/authenticate another provider or set routing.require_independent_review to false for diagnostics.",
+                "Install/authenticate another provider or set routing.require_independent_review to false for diagnostics."
+            )
+            return (
+                False,
+                message,
                 impl,
                 review,
             )
@@ -407,7 +408,7 @@ class ProviderPool:
 
     def review_adapter(
         self, store: Store, task_id: str, candidate_sha: str, implementer: str | None
-    ) -> tuple["FallbackReviewAdapter | None", list[Verdict]]:
+    ) -> tuple[FallbackReviewAdapter | None, list[Verdict]]:
         verdicts = self.evaluate(store, REVIEW, task_id, implementer)
         eligible = self.announce(store, REVIEW, task_id, verdicts, f" (candidate {candidate_sha[:10]}, implementer {implementer})")
         if not self.require_independent and implementer:
