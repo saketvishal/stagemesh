@@ -175,7 +175,7 @@ def _tie_value(store: Store, task: Any, how: str) -> tuple[Any, ...]:
         created = _cached_state(store, task).get("created_at")
         if isinstance(created, str) and created:
             try:
-                return (datetime.fromisoformat(created.replace("Z", "+00:00")).timestamp(),)
+                return (datetime.fromisoformat(created).timestamp(),)
             except ValueError:
                 pass
         return (float(task["created_at"]),)
@@ -255,6 +255,17 @@ def select_next_task(
         skipped.extend({"task_id": c.task_id, "reason": c.contract.split(":", 1)[1]} for c in unplannable)
     policy_info = _policy_info(policy)
     if not pool:
+        provider_exhausted = [item for item in skipped if item["reason"].startswith("recent provider pool exhaustion")]
+        if provider_exhausted:
+            recovered = provider_exhausted[0]
+            return Selection(
+                "auto_recovery",
+                recovered["task_id"],
+                "all otherwise eligible tasks are waiting on recent provider pool exhaustion; retrying one bounded task automatically",
+                [],
+                skipped,
+                policy_info,
+            )
         raise SelectionRefusal(
             "no_eligible_task", "no eligible OPEN task" + _skipped_text(skipped), skipped=skipped, policy=policy_info
         )
