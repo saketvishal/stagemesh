@@ -6,14 +6,13 @@ import json
 from pathlib import Path
 
 import pytest
+from test_run_ready import _project
 
 import stagemesh.cli as cli_module
 from stagemesh.config import ConfigValidationError, TaskSelectionConfig, load_config
 from stagemesh.persistence import Store
-from stagemesh.run_ready import choose_task, run_ready
+from stagemesh.run_ready import choose_task
 from stagemesh.task_selection import SelectionRefusal, select_next_task
-
-from test_run_ready import _project
 
 
 def _continue(project: Path, *argv: str) -> tuple[int, dict]:
@@ -110,7 +109,7 @@ def test_explicit_task_bypasses_the_policy(tmp_path: Path) -> None:
 
 def test_preferred_labels_then_valid_contracts_break_priority_ties(tmp_path: Path) -> None:
     project = _project(tmp_path / "a", ["T-1", "T-2"], labels={"T-1": ["priority:p1"], "T-2": ["priority:p1", "stagemesh:prep"]})
-    code, result = _continue(project)
+    _code, result = _continue(project)
     assert result["task_id"] == "T-2" and "preferred label" in result["selection"]["reason"]
 
     # T-1 has no contract but gates are detectable, so it needs auto-planning; T-2 has a valid contract and wins the tie.
@@ -200,6 +199,24 @@ def test_provider_pool_exhaustion_skip_survives_short_provider_cooldown_window(t
     store.close()
 
 
+def test_provider_pool_exhaustion_recovers_one_task_when_everything_else_is_waiting(tmp_path: Path) -> None:
+    project = _project(tmp_path, ["T-1", "T-2"])
+    store = _synced(project)
+    for task_id in ("T-1", "T-2"):
+        store.add_audit_event(
+            "task.implementation_unsuccessful",
+            {"task_id": task_id, "reason": "all_implementation_providers_no_progress: claude: no_implementation_change"},
+        )
+
+    selection = select_next_task(store, project, TaskSelectionConfig())
+
+    assert selection.mode == "auto_recovery"
+    assert selection.task_id == "T-1"
+    assert "retrying one bounded task automatically" in selection.reason
+    assert all("provider pool exhaustion" in item["reason"] for item in selection.skipped)
+    store.close()
+
+
 def test_integration_failure_marks_a_task_stale(tmp_path: Path) -> None:
     project = _project(tmp_path, ["T-1", "T-2"])
     store = _synced(project)
@@ -212,7 +229,7 @@ def test_integration_failure_marks_a_task_stale(tmp_path: Path) -> None:
 
 def test_dependencies_are_respected(tmp_path: Path) -> None:
     project = _project(tmp_path, ["T-1", "T-2"], labels={"T-2": ["priority:p0"]}, dependencies={"T-2": ["T-1"]})
-    code, result = _continue(project, "--max-steps", "1")
+    _code, result = _continue(project, "--max-steps", "1")
     assert result["task_id"] == "T-1"  # the p0 task waits for its dependency
     assert any(s["task_id"] == "T-2" and "waiting for T-1" in s["reason"] for s in result["selection"]["skipped"])
 
