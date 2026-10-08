@@ -60,6 +60,49 @@ def _shell(command: str) -> list[str]:
 
 # Gate names contain "acceptance" on purpose: validation planning treats that as a broad gate, which the CORE tier below
 # requires (it always plans a broad check, and an unscoped contract must really run the project test suite).
+
+def _project_name(pyproject: Path) -> str | None:
+    if not pyproject.is_file():
+        return None
+    try:
+        text = pyproject.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    in_project = False
+    for raw in text.splitlines():
+        line = raw.strip()
+        if line == "[project]":
+            in_project = True
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            in_project = False
+        if in_project and line.startswith("name") and "=" in line:
+            return line.split("=", 1)[1].strip().strip('"\'') or None
+    return None
+
+
+def _stagemesh_smoke_gate(project: Path) -> dict[str, Any] | None:
+    required = [
+        project / "tests" / "test_run_ready.py",
+        project / "tests" / "test_provider_pool.py",
+        project / "tests" / "test_canary_regression.py",
+    ]
+    if not all(path.is_file() for path in required):
+        return None
+    return {
+        "name": "stagemesh-lifecycle-smoke",
+        "command": [
+            "python",
+            "-m",
+            "pytest",
+            "-q",
+            "tests/test_run_ready.py",
+            "tests/test_provider_pool.py",
+            "tests/test_canary_regression.py",
+        ],
+        "timeout_seconds": 360,
+    }
+
 def detect_gates(project: Path) -> list[dict[str, Any]]:
     """Validation gates inferred from conventional project files; empty when nothing conventional is found."""
     gates: list[dict[str, Any]] = []
@@ -74,10 +117,15 @@ def detect_gates(project: Path) -> list[dict[str, Any]]:
             gates.append({"name": "project-acceptance-npm", "command": _shell("npm test"), "timeout_seconds": 1800})
     has_pytest_config = any((project / name).is_file() for name in ("pytest.ini", "tox.ini", "setup.cfg"))
     pyproject = project / "pyproject.toml"
-    if pyproject.is_file() and "pytest" in pyproject.read_text(encoding="utf-8", errors="replace"):
+    pyproject_text = pyproject.read_text(encoding="utf-8", errors="replace") if pyproject.is_file() else ""
+    if pyproject.is_file() and "pytest" in pyproject_text:
         has_pytest_config = True
     if has_pytest_config or (pyproject.is_file() and (project / "tests").is_dir()):
-        gates.append({"name": "project-acceptance-pytest", "command": ["python", "-m", "pytest", "-q"], "timeout_seconds": 1800})
+        smoke = _stagemesh_smoke_gate(project) if _project_name(pyproject) == "stagemesh" else None
+        gates.append(
+            smoke
+            or {"name": "project-acceptance-pytest", "command": ["python", "-m", "pytest", "-q"], "timeout_seconds": 1800}
+        )
     if (project / "Cargo.toml").is_file():
         gates.append({"name": "project-acceptance-cargo", "command": ["cargo", "test"], "timeout_seconds": 1800})
     if (project / "go.mod").is_file():
@@ -126,10 +174,10 @@ def build_contract(store: Store, project: Path, task_id: str, gates: list[dict[s
         "explicit": True,
         # Scope is unknown, so use the highest validation tier: broad gates are allowed to run.
         "validation_classification": "CORE_LIFECYCLE_OR_SCHEMA_SECURITY",
-        "validation_escalation_reasons": ["auto-generated contract has no file scope; full project validation required"],
+        "validation_escalation_reasons": ["auto-generated contract has no file scope; bounded project smoke required before merge-readiness checks"],
         "acceptance_criteria": [
             "The change fulfils the task objective and nothing else.",
-            "Every detected project test gate passes.",
+            "Every generated local smoke gate passes; full-suite/hosted CI remains a separate merge-readiness check.",
         ],
         "allowed_files": ["**"],
         "forbidden_files": list(FORBIDDEN_FILES),

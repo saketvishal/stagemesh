@@ -242,6 +242,7 @@ class ProviderPool:
         *,
         next_provider: str | None,
         sequence: list[str],
+        provider_output: str | None = None,
     ) -> None:
         """A successful invocation that changed nothing while the task is still unproven. Not a failure cooldown."""
         store.add_audit_event(
@@ -255,6 +256,7 @@ class ProviderPool:
                 "task_unresolved": True,
                 "next_provider": next_provider,
                 "sequence": list(sequence),
+                **({"provider_output": provider_output[:500]} if provider_output else {}),
             },
         )
 
@@ -626,7 +628,13 @@ class PooledExecutor(Executor):
                 nxt = remaining[0].name if remaining else None
                 sequence = [item["provider"] for item in walk] + [adapter.name]
                 self.pool.record_no_progress(
-                    store, IMPLEMENT, task_id, adapter.name, next_provider=nxt, sequence=sequence
+                    store,
+                    IMPLEMENT,
+                    task_id,
+                    adapter.name,
+                    next_provider=nxt,
+                    sequence=sequence,
+                    provider_output=result.provider_output,
                 )
                 reason = f"{NO_IMPLEMENTATION_CHANGE}; task unresolved"
                 reasons.append(reason)
@@ -636,6 +644,7 @@ class PooledExecutor(Executor):
                         "provider": adapter.name,
                         "outcome": NO_IMPLEMENTATION_CHANGE,
                         "classification": "no_progress",
+                        **({"provider_output": result.provider_output[:500]} if result.provider_output else {}),
                     }
                 )
                 try:
@@ -692,6 +701,7 @@ def pool_exhaustion_evidence(reason: str | None, attempts: list | None = None) -
                 "provider": str(item.get("provider") or ""),
                 "outcome": str(item.get("outcome") or ""),
                 "classification": str(item.get("classification") or _classification(str(item.get("outcome") or ""))),
+                **({"provider_output": str(item.get("provider_output"))[:500]} if item.get("provider_output") else {}),
             }
             for item in attempts
         ]

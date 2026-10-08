@@ -128,6 +128,34 @@ def test_run_ready_without_json_flag_reports_progress_lines(tmp_path: Path, fake
         assert fragment in err
 
 
+def test_stage_mesh_project_uses_bounded_lifecycle_smoke_instead_of_full_pytest(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname = \"stagemesh\"\n\n[tool.pytest.ini_options]\ntestpaths = [\"tests\"]\n",
+        encoding="utf-8",
+    )
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    for name in ("test_run_ready.py", "test_provider_pool.py", "test_canary_regression.py"):
+        (tests / name).write_text("def test_placeholder():\n    pass\n", encoding="utf-8")
+
+    gates = auto_plan_module.detect_gates(tmp_path)
+
+    assert gates == [
+        {
+            "name": "stagemesh-lifecycle-smoke",
+            "command": [
+                "python",
+                "-m",
+                "pytest",
+                "-q",
+                "tests/test_run_ready.py",
+                "tests/test_provider_pool.py",
+                "tests/test_canary_regression.py",
+            ],
+            "timeout_seconds": 360,
+        }
+    ]
+
 def test_detect_gates_reads_conventional_project_files(tmp_path: Path) -> None:
     assert auto_plan_module.detect_gates(tmp_path) == []
     (tmp_path / "package.json").write_text(json.dumps({"scripts": {"test": "vitest run"}}), encoding="utf-8")

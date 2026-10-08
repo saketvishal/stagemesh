@@ -749,20 +749,55 @@ def command_run_ready(args: argparse.Namespace) -> int:
 
     provider_notice_index = 0
 
+    exhausted_tasks: list[dict[str, object]] = []
+    seen_exhausted: set[str] = set()
     try:
-        summary = run_ready(
-            store, project, make_coordinator, task_id=requested, max_steps=getattr(args, "max_steps", 50), on_step=on_step, on_start=on_start,
-            auto_plan=not getattr(args, "no_auto_plan", False),
-            policy=config.task_selection,
-            chooser=_interactive_chooser if getattr(args, "choose", False) else None,
-            worktree_root_path=config.runtime.worktree_root if config.runtime else None,
-        )
+        while True:
+            summary = run_ready(
+                store, project, make_coordinator, task_id=requested, max_steps=getattr(args, "max_steps", 50), on_step=on_step, on_start=on_start,
+                auto_plan=not getattr(args, "no_auto_plan", False),
+                policy=config.task_selection,
+                chooser=_interactive_chooser if getattr(args, "choose", False) else None,
+                worktree_root_path=config.runtime.worktree_root if config.runtime else None,
+            )
+            if exhausted_tasks:
+                summary.detail.setdefault("continued_after_provider_exhaustion", list(exhausted_tasks))
+            if not _continue_after_provider_exhaustion(summary, requested):
+                break
+            task = str(summary.task_id or "")
+            if task in seen_exhausted:
+                summary.message = (summary.message + "; " if summary.message else "") + "queue walk stopped because task selection repeated an exhausted task"
+                break
+            seen_exhausted.add(task)
+            failure = summary.detail.get("failure", {}) if isinstance(summary.detail, dict) else {}
+            exhausted_tasks.append(
+                {
+                    "task_id": task,
+                    "reason": str(failure.get("reason") or summary.message),
+                    "provider_sequence": list(failure.get("provider_sequence") or []),
+                }
+            )
+            if not args.json:
+                print(f"task {task}: implementation providers exhausted; continuing with the next eligible task", flush=True)
+                print(flush=True)
     except _SetupError as exc:
         store.close()
         return exc.code
     store.close()
     info["provider_events"] = provider_log.lines
     return _report_run_ready(summary, info, as_json=args.json)
+
+
+def _continue_after_provider_exhaustion(summary: RunSummary, requested: str | None) -> bool:
+    if requested is not None or summary.stop_reason != "NO_PROGRESS":
+        return False
+    failure = summary.detail.get("failure") if isinstance(summary.detail, dict) else None
+    if not isinstance(failure, dict):
+        return False
+    if failure.get("event") not in {"task.implementation_unsuccessful", "task.capacity_failure"}:
+        return False
+    reason = str(failure.get("reason") or "")
+    return failure.get("pool_exhausted") is True or reason.startswith("all_implementation_providers_")
 
 
 def command_queue_run(args: argparse.Namespace) -> int:

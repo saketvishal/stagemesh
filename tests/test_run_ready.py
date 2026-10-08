@@ -113,6 +113,40 @@ def test_continue_human_output_is_operator_timeline(tmp_path: Path) -> None:
     assert "Run stopped: done" in text
 
 
+def test_auto_continue_walks_to_next_task_after_provider_pool_exhaustion(tmp_path: Path, monkeypatch) -> None:
+    project = _project(tmp_path, ["A-1", "B-1"])
+    calls = []
+
+    def fake_run_ready(*args, **kwargs):
+        calls.append(kwargs.get("task_id"))
+        if len(calls) == 1:
+            return cli_module.RunSummary(
+                True,
+                "NO_PROGRESS",
+                task_id="A-1",
+                detail={
+                    "failure": {
+                        "event": "task.implementation_unsuccessful",
+                        "reason": "all_implementation_providers_no_progress: claude: no_implementation_change",
+                        "pool_exhausted": True,
+                        "provider_sequence": ["claude"],
+                    }
+                },
+            )
+        return cli_module.RunSummary(True, "DONE", task_id="B-1", final={"stage": "DONE"})
+
+    monkeypatch.setattr(cli_module, "run_ready", fake_run_ready)
+    out = io.StringIO()
+
+    with contextlib.redirect_stdout(out):
+        code = cli_module.main(["--project", str(project), "continue", "--dry-run", "--json"])
+
+    data = json.loads(out.getvalue())
+    assert code == 0
+    assert len(calls) == 2
+    assert data["task_id"] == "B-1" and data["stop_reason"] == "DONE"
+    assert data["detail"]["continued_after_provider_exhaustion"][0]["task_id"] == "A-1"
+
 def test_json_continue_keeps_human_timeline_off_stdout(tmp_path: Path) -> None:
     out = io.StringIO()
 
