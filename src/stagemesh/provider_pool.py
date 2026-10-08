@@ -11,6 +11,7 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
+from .audit import record_audit
 from .capacity import CapacityKind
 from .concurrency import ProviderLimiter
 from .config import BUILTIN_PROVIDERS, SELECTION_POLICIES
@@ -18,13 +19,18 @@ from .contract_binding import bound_contract_from_record
 from .contracts import candidate_workspace, run_gate
 from .domain import ExecutionKind, ExecutionStatus
 from .execution import PROVIDER_TIMEOUT, ExecutionResult, Executor
-from .git import GitError
+from .git import GitError, GitWorkspace
 from .persistence import Store
 from .providers import RuntimeCommandAdapter
 from .review import INFRASTRUCTURE_FAILURE
 from .routing import RoutingMode
 from .workspace_guard import EXTERNAL_WORKSPACE_MUTATION, WorkspaceMutation, owned_workspace
-from .workspaces import NO_IMPLEMENTATION_CHANGE, task_workspace
+from .workspaces import (
+    NO_IMPLEMENTATION_CHANGE,
+    prepare_task_workspace,
+    remove_task_workspace,
+    task_workspace,
+)
 
 IMPLEMENT = "IMPLEMENT"
 REVIEW = "REVIEW"
@@ -615,9 +621,22 @@ class PooledExecutor(Executor):
             previous_name = adapter.name
             index += 1
             if result.failure_reason == EXTERNAL_WORKSPACE_MUTATION:
-                # Not a provider problem: another provider would run in the same tampered workspace. Stop and let the task block.
-                log(f"  REFUSED: {adapter.name} stopped because the task workspace was changed outside StageMesh")
-                return result
+                reason = EXTERNAL_WORKSPACE_MUTATION
+                reasons.append(reason)
+                failures.append(f"{adapter.name}: {reason}")
+                walk.append({"provider": adapter.name, "outcome": reason, "classification": "workspace_mutation"})
+                self.pool.record_failure(store, IMPLEMENT, task_id, adapter.name, reason, next_provider=remaining[0].name if remaining else None)
+                log(f"  quarantined {adapter.name}: task workspace changed outside StageMesh; trying a clean workspace")
+                try:
+                    _quarantine_mutated_worktree(store, project, task_id, adapter.name)
+                except (GitError, OSError) as exc:
+                    log(f"  REFUSED: could not quarantine mutated workspace after {adapter.name}: {type(exc).__name__}: {exc}")
+                    return ExecutionResult(
+                        ExecutionStatus.FAILED,
+                        failure_reason=ALL_IMPLEMENTATION_PROVIDERS_EXHAUSTED + ": " + "; ".join(f"{item['provider']}: {item['outcome']}" for item in walk),
+                        provider_attempts=walk,
+                    )
+                continue
             if result.capacity_failure or result.failure_reason == PROVIDER_TIMEOUT:
                 reason = result.failure_reason or "provider_failure"
                 reasons.append(reason)
@@ -801,3 +820,25 @@ def _reset_worktree(store: Store, project: Path, task_id: str, claim_id: str | N
         for args in (["reset", "--hard", "HEAD"], ["clean", "-fdq"]):
             subprocess.run(["git", *args], cwd=lease.path, capture_output=True, check=False)
         lease.seal()
+
+
+def _quarantine_mutated_worktree(store: Store, project: Path, task_id: str, provider: str) -> None:
+    """Replace a provider-mutated task worktree so the next provider starts from trusted state."""
+    old = task_workspace(project, task_id)
+    baseline = store.task_baseline(task_id)
+    remove_task_workspace(project, task_id)
+    clean = prepare_task_workspace(project, task_id)
+    if baseline:
+        GitWorkspace(clean).run("reset", "--hard", baseline)
+    record_audit(
+        store,
+        "provider.workspace_quarantined",
+        {
+            "task_id": task_id,
+            "provider": provider,
+            "reason": EXTERNAL_WORKSPACE_MUTATION,
+            "old_workspace": str(old),
+            "replacement_workspace": str(clean),
+            "baseline_sha": baseline or "",
+        },
+    )
