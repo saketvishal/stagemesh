@@ -21,6 +21,7 @@ from .persistence import MAX_CANONICAL_CONTRACT_CHARS, Store
 from .scheduling import Scheduler
 from .task_selection import Candidate, Selection, SelectionRefusal, select_next_task
 from .timing import execution_timings, format_duration, step_duration
+from .workspace_guard import EXTERNAL_WORKSPACE_MUTATION
 from .workspaces import task_workspace, worktree_root
 
 # Task-local backlog problems: another task's failed execution or BLOCKED status says nothing about the selected task.
@@ -373,9 +374,44 @@ def _latest_claimed_agent(store: Store, task_id: str) -> str | None:
 
 
 def format_running(step_number: int, task_id: str, snapshot: dict[str, Any]) -> str:
-    header = _stage_header(step_number, str(snapshot["stage"]), _stage_actor(str(snapshot["stage"]), snapshot))
-    return "\n".join([header, "    status: running"])
+    stage = str(snapshot["stage"])
+    actor = _running_stage_actor(stage, snapshot)
+    header = _stage_header(step_number, stage, actor)
+    return f"{header}\n    status: running"
 
+
+
+def _running_stage_actor(stage: str, snapshot: dict[str, Any]) -> str | None:
+    active = snapshot.get("active_claim") or {}
+    if stage == "IMPLEMENT":
+        # Before the tick starts, the next provider is not known. Do not show the stale
+        # producer of the previous candidate as the actor for a remediation attempt.
+        actor = active.get("agent") if active.get("stage") == stage else None
+        return _display_actor(str(actor)) if actor else None
+    return _stage_actor(stage, snapshot)
+
+
+def _latest_blocked_reason(store: Store, task_id: str) -> dict[str, Any] | None:
+    rows = store.conn.execute(
+        "SELECT payload FROM audit_events WHERE event_type=? ORDER BY created_at DESC, rowid DESC LIMIT 20",
+        ("task.blocked",),
+    ).fetchall()
+    for row in rows:
+        try:
+            payload = json.loads(row["payload"])
+        except (TypeError, ValueError):
+            continue
+        if payload.get("task_id") == task_id:
+            return payload
+    return None
+
+
+def _blocked_message(store: Store, task_id: str) -> str:
+    blocked = _latest_blocked_reason(store, task_id)
+    if blocked and blocked.get("reason") == EXTERNAL_WORKSPACE_MUTATION:
+        stage = blocked.get("stage") or "the task workspace"
+        return f"workspace integrity failed at {stage}; StageMesh blocked the task instead of adopting untrusted provider output"
+    return "task exhausted its remediation budget; use retry-task after review"
 
 def format_start(summary: RunSummary) -> str:
     workspace = summary.detail.get("workspace", {})
@@ -761,7 +797,7 @@ def drive_task(
             summary.stop_reason = "DONE"
             break
         if new["status"] == TaskStatus.BLOCKED:
-            summary.stop_reason, summary.message = "BLOCKED", "task exhausted its remediation budget; use retry-task after review"
+            summary.stop_reason, summary.message = "BLOCKED", _blocked_message(store, selected)
             _attach_diagnosis(summary, store, project, selected, coordinator)
             break
         if global_health:

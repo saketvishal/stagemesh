@@ -291,6 +291,65 @@ def test_timeline_uses_stage_actor_not_stale_implementation_provider() -> None:
     assert "[5] INTEGRATE  builtin" in integration and "INTEGRATE  codex" not in integration
 
 
+def test_running_implementation_header_does_not_show_stale_candidate_provider() -> None:
+    from stagemesh.run_ready import format_running
+
+    text = format_running(
+        3,
+        "T-1",
+        {
+            "stage": "IMPLEMENT",
+            "latest_candidate_provider": "codex",
+            "latest_agent": "codex",
+            "active_claim": None,
+        },
+    )
+
+    assert text.splitlines()[0] == "[3] IMPLEMENT"
+    assert "codex" not in text
+
+
+def test_running_implementation_header_uses_active_claim_actor() -> None:
+    from stagemesh.run_ready import format_running
+
+    text = format_running(
+        3,
+        "T-1",
+        {
+            "stage": "IMPLEMENT",
+            "latest_candidate_provider": "codex",
+            "latest_agent": "codex",
+            "active_claim": {"stage": "IMPLEMENT", "agent": "claude"},
+        },
+    )
+
+    assert text.splitlines()[0] == "[3] IMPLEMENT  claude"
+
+
+def test_workspace_mutation_block_reports_integrity_failure_not_retry_budget(tmp_path: Path) -> None:
+    project = _project(tmp_path, ["T-1"])
+    store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+    store.migrate()
+    cli_module._sync_all_sources(store, project, cli_module.load_config(project), "T-1")
+
+    class MutationExecutor(Executor):
+        name = "claude"
+
+        def run(self, store: Store, task_id: str, claim_id: str | None, project: Path) -> ExecutionResult:
+            return ExecutionResult(ExecutionStatus.FAILED, failure_reason=EXTERNAL_WORKSPACE_MUTATION)
+
+    summary = run_ready(
+        store,
+        project,
+        lambda target: cli_module.Coordinator(store, project, executor=MutationExecutor(), target=target),
+        task_id="T-1",
+        max_steps=3,
+    )
+
+    assert summary.stop_reason == "BLOCKED"
+    assert "workspace integrity failed at IMPLEMENT" in summary.message
+    assert "retry-task after review" not in summary.message
+
 def test_no_progress_stop_reason_is_human_readable() -> None:
     from stagemesh.run_ready import RunSummary, format_stop
 
