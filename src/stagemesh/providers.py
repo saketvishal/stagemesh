@@ -257,7 +257,7 @@ WRITE_CAPABLE_DEFAULT_COMMANDS = {
         "--allowedTools 'Edit,Write,MultiEdit,Bash(git *),Bash(python *),Bash(pytest *),Bash(ruff *)'"
     ),
     "grok": (
-        "grok --permission-mode acceptEdits "
+        "grok --permission-mode acceptEdits --always-approve "
         "--allow Edit --allow Write --allow MultiEdit --allow 'Bash(git *)' "
         "--allow 'Bash(python *)' --allow 'Bash(pytest *)' --allow 'Bash(ruff *)'"
     ),
