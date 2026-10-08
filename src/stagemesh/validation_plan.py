@@ -87,7 +87,7 @@ def derive_validation_plan(contract: ChangeContract, changed_files: tuple[str, .
             classification,
             "HIGH",
             _gate_names(contract.gates) or ("focused-tests",),
-            _broad_gate_names(contract) or ("broader-regression",),
+            _broad_gate_names(contract),
             reasons or ("core lifecycle/state-machine, schema, or security boundary",),
         )
     if classification == CONFIG_OR_PROVIDER_COMMAND:

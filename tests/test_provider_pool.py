@@ -382,14 +382,14 @@ def test_capacity_failure_cools_provider_across_tasks_for_the_same_stage(tmp_pat
 def test_default_pools_try_routed_provider_first_then_every_other_provider() -> None:
     pools = default_pools(["claude", "codex", "grok"], {"IMPLEMENT": "claude"}, {})
     assert pools == {"IMPLEMENT": ("claude", "codex", "grok"), "REVIEW": ("codex", "claude", "grok")}
-    assert default_pools(["claude", "codex", "grok"], {"REVIEW": "codex"}, {"IMPLEMENT": ("grok",)})["IMPLEMENT"] == ("grok", "codex", "claude")
+    assert default_pools(["claude", "codex", "grok"], {"REVIEW": "codex"}, {"IMPLEMENT": ("grok",)})["IMPLEMENT"] == ("grok",)
 
 
-def test_explicit_pools_are_preferences_not_exclusive_provider_lists() -> None:
+def test_explicit_pools_are_exact_provider_lists() -> None:
     pools = default_pools(["claude", "codex", "grok"], {}, {IMPLEMENT: ("claude", "grok"), REVIEW: ("grok", "claude")})
 
-    assert pools[IMPLEMENT] == ("claude", "grok", "codex")
-    assert pools[REVIEW] == ("grok", "claude", "codex")
+    assert pools[IMPLEMENT] == ("claude", "grok")
+    assert pools[REVIEW] == ("grok", "claude")
 
 
 def test_routing_pools_config_is_validated(tmp_path: Path) -> None:
