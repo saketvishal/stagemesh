@@ -676,6 +676,27 @@ def test_review_checks_out_the_exact_candidate_in_its_own_workspace(tmp_path: Pa
     assert worktree(project) not in review_dir.parents and not review_dir.exists()  # a throwaway clone, gone afterwards
 
 
+def test_review_workspace_disables_autocrlf_before_checkout(tmp_path: Path) -> None:
+    project, _store, _coord, sha = advance_to(Stage.REVIEW, tmp_path)
+    seen = tmp_path / "review-eol.json"
+    script = tmp_path / "reviewer-eol.py"
+    script.write_text(
+        "import json, pathlib, subprocess, sys\n"
+        "autocrlf = subprocess.run(['git', 'config', '--get', 'core.autocrlf'], capture_output=True, text=True).stdout.strip()\n"
+        f"out = pathlib.Path({str(seen)!r})\n"
+        "out.write_text(json.dumps({'autocrlf': autocrlf, 'bytes': pathlib.Path('docs/a.md').read_bytes().decode('ascii')}))\n"
+        "sys.stdin.read()\n"
+        "print(json.dumps({'decision': 'PASS'}))\n",
+        encoding="utf-8",
+    )
+
+    response = RuntimeCommandAdapter("claude", (PY, str(script))).review_candidate("review it", project, sha)
+
+    observed = json.loads(seen.read_text(encoding="utf-8"))
+    assert json.loads(response) == {"decision": "PASS"}
+    assert observed == {"autocrlf": "false", "bytes": "agent change\n"}
+
+
 def test_review_agent_that_moves_head_in_its_clone_is_rejected(tmp_path: Path) -> None:
     project, _store, _coord, sha = advance_to(Stage.REVIEW, tmp_path)
     script = tmp_path / "bad-reviewer.py"

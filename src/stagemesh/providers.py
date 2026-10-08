@@ -182,6 +182,15 @@ class RuntimeCommandAdapter:
             )
             if clone.returncode != 0:
                 return _review_infrastructure_failure("review workspace clone failed")
+            # Reviewers must inspect the committed candidate bytes, not a platform-normalized
+            # checkout shaped by the machine's global Git config.
+            subprocess.run(
+                ["git", "config", "core.autocrlf", "false"],
+                cwd=review_path,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
             checkout = subprocess.run(
                 ["git", "checkout", "--quiet", "--detach", candidate_sha],
                 cwd=review_path,
