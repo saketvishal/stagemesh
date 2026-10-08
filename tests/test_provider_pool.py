@@ -6,9 +6,11 @@ from pathlib import Path
 
 import pytest
 
+from stagemesh.capacity import CapacityKind
 from stagemesh.config import ConfigValidationError, load_config
 from stagemesh.coordinator import Coordinator
 from stagemesh.domain import EvidenceKind, EvidenceStatus, ExecutionStatus, Stage
+from stagemesh.execution import ExecutionResult
 from stagemesh.git import GitWorkspace
 from stagemesh.integration import Integrator
 from stagemesh.persistence import Store
@@ -587,6 +589,39 @@ def test_no_progress_then_capacity_then_success_walks_the_pool(tmp_path: Path) -
     text = rig.text()
     assert "fallback: provider-a made no progress (no_implementation_change; task unresolved) -> trying provider-b" in text
     assert "fallback: provider-b failed (quota_rate_limit) -> trying provider-c" in text
+
+
+def test_workspace_mutation_is_quarantined_and_next_provider_runs(tmp_path: Path) -> None:
+    class MutatingAdapter:
+        name = "provider-a"
+        command = ("provider-a",)
+        capabilities = frozenset({"code", "review", "validate"})
+
+        def check_capacity(self) -> str:
+            return CapacityKind.AVAILABLE
+
+        def execute(self, store: Store, task_id: str, claim_id: str | None, project: Path) -> ExecutionResult:
+            return ExecutionResult(ExecutionStatus.FAILED, failure_reason="EXTERNAL_WORKSPACE_MUTATION")
+
+    rig = Rig(tmp_path, {"provider-b": "ok"}, pools={IMPLEMENT: ("provider-a", "provider-b"), REVIEW: ("provider-b",)})
+    rig.pool.adapters["provider-a"] = MutatingAdapter()
+
+    rig.tick(2)
+
+    candidate = rig.store.latest_candidate(TASK)
+    assert candidate["produced_by"] == "provider-b"
+    assert rig.stage == Stage.VALIDATE
+    assert rig.store.get_task(TASK)["status"] != "BLOCKED"
+    text = rig.text()
+    assert "quarantined provider-a: task workspace changed outside StageMesh" in text
+    assert "fallback: provider-a failed (EXTERNAL_WORKSPACE_MUTATION) -> trying provider-b" in text
+    event = json.loads(
+        rig.store.conn.execute(
+            "SELECT payload FROM audit_events WHERE event_type='provider.workspace_quarantined'"
+        ).fetchone()["payload"]
+    )
+    assert event["task_id"] == TASK and event["provider"] == "provider-a"
+    assert event["reason"] == "EXTERNAL_WORKSPACE_MUTATION"
 
 
 def test_no_progress_does_not_consume_remediation_budget(tmp_path: Path) -> None:
