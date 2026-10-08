@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import json
 import hashlib
+import json
 import os
 import re
 from dataclasses import dataclass, field
@@ -101,7 +101,7 @@ class StageMeshConfig:
     provider_pools: dict[str, tuple[str, ...]] = field(default_factory=dict)
     provider_failure_cooldown_seconds: float = 900.0
     provider_specs: dict[str, ProviderSpec] = field(default_factory=dict)
-    provider_selection_policy: str = "priority"
+    provider_selection_policy: str = "round_robin"
     provider_weights: dict[str, int] = field(default_factory=dict)
     task_selection: TaskSelectionConfig = field(default_factory=TaskSelectionConfig)
     parallel: ParallelConfig = field(default_factory=ParallelConfig)
@@ -157,7 +157,7 @@ def load_config(project: Path, config_path: Path | None = None) -> StageMeshConf
     cooldown = routing_data.get("provider_failure_cooldown_seconds", 900.0)
     if isinstance(cooldown, bool) or not isinstance(cooldown, (int, float)) or cooldown < 0:
         raise ConfigValidationError("routing.provider_failure_cooldown_seconds must be a non-negative number")
-    policy = os.environ.get("STAGEMESH_PROVIDER_SELECTION_POLICY") or routing_data.get("provider_selection_policy", "priority")
+    policy = os.environ.get("STAGEMESH_PROVIDER_SELECTION_POLICY") or routing_data.get("provider_selection_policy", "round_robin")
     if policy not in SELECTION_POLICIES:
         raise ConfigValidationError(
             f"routing.provider_selection_policy must be one of: {', '.join(SELECTION_POLICIES)}"

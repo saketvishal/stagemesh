@@ -135,7 +135,7 @@ class ProviderPool:
         require_independent: bool = True,
         cooldown_seconds: float = DEFAULT_FAILURE_COOLDOWN_SECONDS,
         log: ProviderLog | None = None,
-        policy: str = "priority",
+        policy: str = "round_robin",
         weights: dict[str, int] | None = None,
         priorities: dict[str, int] | None = None,
         limiter: ProviderLimiter | None = None,

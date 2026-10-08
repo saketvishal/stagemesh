@@ -116,15 +116,18 @@ def test_continue_human_output_is_operator_timeline(tmp_path: Path) -> None:
 
     text = out.getvalue()
     assert code == 0
-    assert text.count("StageMesh continue: task T-1") == 1
-    assert "Implementation #2" in text and "status: running" in text
+    assert text.count("StageMesh run") == 1
+    assert "task: T-1  task T-1" in text
+    assert "workspace:" in text
+    assert "protected: main checkout is not edited" in text
+    assert "[2] IMPLEMENT" in text and "status: running" in text
     assert "actor: fake" in text
     assert "candidate:" in text
     assert text.count("actor: fake") == 1
-    assert "Validation #" in text and "actor: contract" in text
-    assert "Review #" in text and "actor: builtin-deterministic-fallback" in text
-    assert "Integration #" in text and "actor: builtin" in text
-    assert "Run stopped: done" in text
+    assert "actor: builtin-validator" in text
+    assert "actor: builtin-deterministic-fallback" in text
+    assert "actor: builtin-integrator" in text
+    assert "stopped: done" in text
 
 
 def test_auto_continue_walks_to_next_task_after_provider_pool_exhaustion(tmp_path: Path, monkeypatch) -> None:
@@ -169,8 +172,8 @@ def test_json_continue_keeps_human_timeline_off_stdout(tmp_path: Path) -> None:
 
     data = json.loads(out.getvalue())
     assert code == 0 and data["stop_reason"] == "DONE"
-    assert "StageMesh continue" not in out.getvalue()
-    assert "Run stopped" not in out.getvalue()
+    assert "StageMesh run" not in out.getvalue()
+    assert "stopped:" not in out.getvalue()
 
 
 def test_timeline_notices_only_show_fallback_skip_or_refusal() -> None:
@@ -201,11 +204,11 @@ def test_timeline_notices_only_show_fallback_skip_or_refusal() -> None:
         ],
     )
 
-    assert "actor: claude" in text
+    assert "[2] IMPLEMENT  claude" in text
     assert "selected implementation provider" not in text
     assert "final implementation provider" not in text
-    assert "note: fallback: codex failed (provider_timeout) -> trying claude" in text
-    assert "note: skipped grok:" in text
+    assert "fallback: codex failed (provider_timeout) -> trying claude" in text
+    assert "grok: skipped, not authenticated or unavailable" in text
 
 
 def test_timeline_shows_independent_review_refusal_only_as_notice() -> None:
@@ -242,10 +245,10 @@ def test_timeline_shows_independent_review_refusal_only_as_notice() -> None:
         ],
     )
 
-    assert "status: capacity" in text
-    assert "actor: dynamic-pool:" in text
+    assert "result: capacity" in text
+    assert "[4] REVIEW  dynamic-pool:" in text
     assert "provider pool considered" not in text
-    assert "note: REFUSED: independent review cannot be satisfied" in text
+    assert "reason: independent review cannot be satisfied" in text
 
 
 def test_timeline_uses_stage_actor_not_stale_implementation_provider() -> None:
@@ -283,9 +286,9 @@ def test_timeline_uses_stage_actor_not_stale_implementation_provider() -> None:
     review = format_step({**base, "step": 4, "previous": {**base["previous"], "stage": "REVIEW"}, "new": {**base["new"], "stage": "IMPLEMENT"}})
     integration = format_step({**base, "step": 5, "previous": {**base["previous"], "stage": "INTEGRATE"}, "new": {**base["new"], "stage": "IMPLEMENT"}})
 
-    assert "actor: contract" in validation and "actor: codex" not in validation
-    assert "actor: claude" in review and "actor: codex" not in review
-    assert "actor: builtin" in integration and "actor: codex" not in integration
+    assert "[3] VALIDATE  contract" in validation and "VALIDATE  codex" not in validation
+    assert "[4] REVIEW  claude" in review and "REVIEW  codex" not in review
+    assert "[5] INTEGRATE  builtin" in integration and "INTEGRATE  codex" not in integration
 
 
 def test_no_progress_stop_reason_is_human_readable() -> None:
@@ -300,7 +303,7 @@ def test_no_progress_stop_reason_is_human_readable() -> None:
     )
 
     text = format_stop(summary)
-    assert "Run stopped: no progress" in text
+    assert "stopped: no progress" in text
     assert "reason: task.implementation_unsuccessful: provider_timeout" in text
 
 
