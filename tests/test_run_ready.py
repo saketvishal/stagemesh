@@ -11,13 +11,22 @@ import pytest
 from test_bounded_execution import SLEEPER, TASK, _running_execution, _setup
 
 import stagemesh.cli as cli_module
+from stagemesh.attribution import attribution_for_worker
 from stagemesh.coordinator import TargetSelection
 from stagemesh.diagnosis import DiagnosisPolicy
-from stagemesh.domain import ExecutionKind, Stage
+from stagemesh.domain import ExecutionKind, ExecutionStatus, Stage
+from stagemesh.execution import ExecutionResult, Executor
 from stagemesh.git import GitWorkspace
 from stagemesh.persistence import Store
 from stagemesh.process_identity import popen_identity
+from stagemesh.review import Reviewer, ReviewFinding
 from stagemesh.run_ready import run_ready
+from stagemesh.workspace_guard import (
+    EXTERNAL_WORKSPACE_MUTATION,
+    WorkspaceMutation,
+    owned_workspace,
+)
+from stagemesh.workspaces import record_task_baseline
 
 FAKE_CONTRACT = {
     "objective": "fake task",
@@ -473,6 +482,11 @@ def test_continue_recovers_orphaned_builtin_validation_execution(tmp_path: Path)
     assert result["stop_reason"] == "MAX_STEPS"
     assert any(item["execution_id"] == execution_id and item["reason"] == "ORPHANED_BUILTIN_STAGE_EXECUTION" for item in result["recovered"])
 
+    code, final = _continue(project, "--task", "T-1")
+
+    assert code == 0, final
+    assert final["stop_reason"] == "DONE"
+
 
 def test_continue_recovers_orphaned_builtin_review_execution(tmp_path: Path) -> None:
     project = _project(tmp_path, ["T-1"])
@@ -493,6 +507,37 @@ def test_continue_recovers_orphaned_builtin_review_execution(tmp_path: Path) -> 
     assert code == 1, result
     assert result["stop_reason"] == "MAX_STEPS"
     assert any(item["execution_id"] == execution_id and item["reason"] == "ORPHANED_BUILTIN_STAGE_EXECUTION" for item in result["recovered"])
+
+    code, final = _continue(project, "--task", "T-1")
+
+    assert code == 0, final
+    assert final["stop_reason"] == "DONE"
+
+
+def test_continue_recovers_orphaned_builtin_integration_execution(tmp_path: Path) -> None:
+    project = _project(tmp_path, ["T-1"])
+    store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+    store.migrate()
+    config = cli_module.load_config(project)
+    cli_module._sync_all_sources(store, project, config, None)
+    execution_id = store.start_execution(
+        task_id="T-1",
+        claim_id=None,
+        kind=ExecutionKind.INTEGRATION,
+        actor="stagemesh-integrator",
+    )
+    store.close()
+
+    code, result = _continue(project, "--max-steps", "1")
+
+    assert code == 1, result
+    assert result["stop_reason"] == "MAX_STEPS"
+    assert any(item["execution_id"] == execution_id and item["reason"] == "ORPHANED_BUILTIN_STAGE_EXECUTION" for item in result["recovered"])
+
+    code, final = _continue(project, "--task", "T-1")
+
+    assert code == 0, final
+    assert final["stop_reason"] == "DONE"
 
 
 def test_run_ready_recovers_dead_execution_created_during_tick_before_health_stop(tmp_path: Path) -> None:
@@ -540,6 +585,84 @@ def test_run_ready_recovers_dead_execution_created_during_tick_before_health_sto
         for item in summary.recovered
     )
     assert not any(item == "stale_running_executions" for item in summary.detail.get("problems", []))
+
+
+def test_failed_review_runtime_path_reimplements_and_reaches_done(tmp_path: Path) -> None:
+    project = _project(tmp_path, ["T-1"])
+    store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+    store.migrate()
+    cli_module._sync_all_sources(store, project, cli_module.load_config(project), "T-1")
+
+    class FailOnceReviewer:
+        calls = 0
+
+        def review(self, store: Store, task_id: str, candidate_sha: str, project: Path):
+            self.calls += 1
+            if self.calls == 1:
+                return Reviewer(
+                    findings=[
+                        ReviewFinding(
+                            identity=f"{candidate_sha}:first-review-failed",
+                            severity="error",
+                            message="first review failed",
+                        )
+                    ]
+                ).review(store, task_id, candidate_sha, project)
+            return Reviewer().review(store, task_id, candidate_sha, project)
+
+    class UniqueExecutor(Executor):
+        name = "fake"
+
+        def __init__(self) -> None:
+            self.runs = 0
+
+        def run(self, store: Store, task_id: str, claim_id: str | None, project: Path) -> ExecutionResult:
+            self.runs += 1
+            try:
+                with owned_workspace(store, project, task_id, ExecutionKind.IMPLEMENTATION, claim_id=claim_id) as lease:
+                    execution_id = store.start_execution(
+                        task_id=task_id,
+                        claim_id=claim_id,
+                        kind=ExecutionKind.IMPLEMENTATION,
+                        actor=self.name,
+                    )
+                    lease.bind_execution(execution_id)
+                    run_path = lease.path
+                    record_task_baseline(store, task_id, run_path)
+                    workspace = GitWorkspace(run_path)
+                    workspace.init_if_needed()
+                    lease.check("before_agent")
+                    (run_path / f"stagemesh-task-{task_id}.txt").write_text(
+                        f"implemented {task_id} attempt {self.runs}\n",
+                        encoding="utf-8",
+                    )
+                    lease.after_agent()
+                    sha = workspace.commit_all(
+                        f"StageMesh implementation for {task_id} attempt {self.runs}",
+                        attribution=attribution_for_worker("local-worker", self.name),
+                    )
+                    store.add_candidate(task_id, sha, self.name, durable_handoff=True)
+                    lease.seal(sha)
+                    store.finish_execution(execution_id, ExecutionStatus.SUCCEEDED, sha)
+                    return ExecutionResult(ExecutionStatus.SUCCEEDED, sha, durable_handoff=True)
+            except WorkspaceMutation:
+                return ExecutionResult(ExecutionStatus.FAILED, failure_reason=EXTERNAL_WORKSPACE_MUTATION)
+
+    reviewer = FailOnceReviewer()
+    executor = UniqueExecutor()
+    summary = run_ready(
+        store,
+        project,
+        lambda target: cli_module.Coordinator(store, project, executor=executor, reviewer=reviewer, target=target),
+        task_id="T-1",
+        max_steps=12,
+    )
+
+    assert summary.stop_reason == "DONE", summary.to_dict()
+    assert executor.runs == 2
+    assert reviewer.calls == 2
+    assert summary.final["latest_review"] == "PASSED"
+    assert store.task_remediation_count("T-1", Stage.REVIEW) == 1
 
 
 def test_unrelated_unknown_execution_still_refuses_run(tmp_path: Path) -> None:
