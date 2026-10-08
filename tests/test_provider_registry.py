@@ -104,10 +104,19 @@ def test_env_command_overrides_work_for_builtins_and_custom_providers(tmp_path: 
     assert commands["codex"] == "codex --override" and commands["my-agent"] == "other-agent go"
 
 
-def test_default_policy_is_priority_and_stage_routes_still_load(tmp_path: Path) -> None:
+def test_default_policy_is_round_robin_and_stage_routes_still_load(tmp_path: Path) -> None:
     config = load_config(_config(tmp_path, {"routing": {"stage_routes": {"IMPLEMENT": "codex", "REVIEW": "claude"}}}))
-    assert config.provider_selection_policy == "priority" and config.stage_routes == {"IMPLEMENT": "codex", "REVIEW": "claude"}
+    assert config.provider_selection_policy == "round_robin" and config.stage_routes == {"IMPLEMENT": "codex", "REVIEW": "claude"}
 
+def test_default_builtin_policy_rotates_across_all_three_providers(tmp_path: Path) -> None:
+    rig = Rig(tmp_path, {"codex": "ok", "claude": "ok", "grok": "ok"})
+
+    assert rig.pool.policy == "round_robin"
+    assert _picks(rig, IMPLEMENT, 6) == ["codex", "claude", "grok", "codex", "claude", "grok"]
+    assert _picks(rig, REVIEW, 4, implementer="codex") == ["claude", "grok", "claude", "grok"]
+    text = rig.text()
+    assert "selection policy: round_robin" in text
+    assert "skipped codex: not_independent: produced the candidate" in text
 
 # --- custom providers, selection policies ----------------------------------------------------------
 
@@ -123,7 +132,7 @@ def test_custom_providers_implement_and_review_with_clear_logging(tmp_path: Path
     assert rig.review_payload()["review_provider"] == "reviewer-bot"
     text = rig.text()
     assert "provider registry:" in text and "my-agent (custom;" in text and "reviewer-bot (custom;" in text
-    assert "selection policy: priority" in text
+    assert "selection policy: round_robin" in text
     assert "selected implementation provider my-agent (custom provider)" in text
     assert "selected review provider reviewer-bot (custom provider)" in text
     assert "final implementation provider: my-agent (custom provider)" in text
@@ -146,11 +155,11 @@ def test_provider_without_the_stage_capability_is_skipped(tmp_path: Path) -> Non
     assert rig.pool.evaluate(rig.store, REVIEW, TASK)[0].eligible
 
 
-def test_priority_policy_keeps_pool_order_unless_priorities_are_declared(tmp_path: Path) -> None:
+def test_explicit_priority_policy_keeps_pool_order_unless_priorities_are_declared(tmp_path: Path) -> None:
     pools = {IMPLEMENT: ("alpha", "beta", "gamma"), REVIEW: ("alpha",)}
-    rig = Rig(tmp_path / "a", {"alpha": "ok", "beta": "ok", "gamma": "ok"}, pools=pools)
+    rig = Rig(tmp_path / "a", {"alpha": "ok", "beta": "ok", "gamma": "ok"}, pools=pools, policy="priority")
     assert _picks(rig, IMPLEMENT, 3) == ["alpha", "alpha", "alpha"]
-    ranked = Rig(tmp_path / "b", {"alpha": "ok", "beta": "ok", "gamma": "ok"}, pools=pools, priorities={"gamma": 1, "beta": 50})
+    ranked = Rig(tmp_path / "b", {"alpha": "ok", "beta": "ok", "gamma": "ok"}, pools=pools, policy="priority", priorities={"gamma": 1, "beta": 50})
     assert _picks(ranked, IMPLEMENT, 2) == ["gamma", "gamma"]
     assert [a.name for a in ranked.pool.order(ranked.store, IMPLEMENT, list(ranked.pool.adapters.values()))[0]] == ["gamma", "beta", "alpha"]
 
