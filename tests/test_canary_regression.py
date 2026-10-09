@@ -20,7 +20,11 @@ from stagemesh.domain import ExecutionKind, ExecutionStatus, ProcessIdentity, St
 from stagemesh.execution import ExecutionResult, FakeExecutor, SubprocessExecutor, classify_failure
 from stagemesh.git import GitWorkspace
 from stagemesh.persistence import Store
-from stagemesh.providers import _build_task_prompt, approved_default_adapters
+from stagemesh.providers import (
+    PROVIDER_PERMISSION_DENIED,
+    _build_task_prompt,
+    approved_default_adapters,
+)
 from stagemesh.workspaces import task_workspace
 
 
@@ -386,6 +390,44 @@ def test_runtime_provider_terminalizes_execution_when_post_start_exception_occur
     assert rows[0]["status"] == ExecutionStatus.FAILED
     assert "provider post-start failure" in rows[0]["result"]
     assert len(rows[0]["result"]) <= 200
+
+
+def test_runtime_provider_reports_headless_permission_denial_instead_of_no_change(
+    store: Store,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from stagemesh.providers import RuntimeCommandAdapter
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    workspace = GitWorkspace(project)
+    workspace.init_if_needed()
+    (project / "src.txt").write_text("unchanged\n", encoding="utf-8")
+    workspace.commit_all("initial")
+    task_id = store.upsert_task("provider permission")
+    _write_contract(project, task_id)
+
+    def permission_denied(proc, *args, **kwargs):
+        proc.returncode = 0
+        output = (
+            "jetski: no output produced - a tool required the command permission "
+            "that headless mode cannot prompt for, so it was auto-denied."
+        )
+        return output, "", False
+
+    monkeypatch.setattr("stagemesh.providers.communicate_bounded", permission_denied)
+    adapter = RuntimeCommandAdapter("agy", (sys.executable, "-c", "pass"))
+
+    result = adapter.execute(store, task_id, None, project)
+
+    row = store.conn.execute("SELECT status, result FROM executions WHERE task_id=?", (task_id,)).fetchone()
+    assert result.status == ExecutionStatus.FAILED
+    assert result.failure_reason == PROVIDER_PERMISSION_DENIED
+    assert "auto-denied" in (result.provider_output or "")
+    assert row["status"] == ExecutionStatus.FAILED
+    assert row["result"] == PROVIDER_PERMISSION_DENIED
+
 
 def test_runtime_provider_returns_typed_workspace_mutation_without_long_result_crash(
     store: Store,

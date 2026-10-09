@@ -42,6 +42,7 @@ from .workspaces import (
 )
 
 MAX_EXECUTION_RESULT_CHARS = 200
+PROVIDER_PERMISSION_DENIED = "provider_permission_denied"
 
 
 class ProviderValidationError(ValueError):
@@ -153,10 +154,11 @@ class RuntimeCommandAdapter:
             )
             if sha is None:
                 output, _ = capacity_evidence(stdout, stderr)
-                store.finish_execution(execution_id, ExecutionStatus.FAILED, result=NO_IMPLEMENTATION_CHANGE)
+                failure_reason = _provider_permission_denial(stdout, stderr) or NO_IMPLEMENTATION_CHANGE
+                store.finish_execution(execution_id, ExecutionStatus.FAILED, result=failure_reason)
                 return ExecutionResult(
                     ExecutionStatus.FAILED,
-                    failure_reason=NO_IMPLEMENTATION_CHANGE,
+                    failure_reason=failure_reason,
                     provider_output=output or None,
                 )
             store.add_candidate(task_id, sha, self.name, durable_handoff=True)
@@ -322,6 +324,15 @@ def _provider_text_response(stdout: str) -> str:
     if isinstance(payload, dict) and isinstance(payload.get("structured_output"), dict):
         return json.dumps(payload["structured_output"], separators=(",", ":"))
     return text
+
+
+def _provider_permission_denial(stdout: str, stderr: str) -> str | None:
+    text = f"{stdout}\n{stderr}".lower()
+    if "headless mode cannot prompt" in text and "auto-denied" in text:
+        return PROVIDER_PERMISSION_DENIED
+    if "tool required" in text and "permission" in text and "auto-denied" in text:
+        return PROVIDER_PERMISSION_DENIED
+    return None
 
 
 def _cleanup_review_workspace(path: Path) -> None:
