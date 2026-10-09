@@ -13,7 +13,12 @@ from .audit import record_audit
 from .config import StageMeshConfig
 from .domain import TaskStatus
 from .github import GitHubClient, parse_retry_after
-from .objective_roots import DIRECT_EXECUTION_LABELS, folded_labels, objective_payload, source_issue_is_objective
+from .objective_roots import (
+    DIRECT_EXECUTION_LABELS,
+    folded_labels,
+    objective_payload,
+    source_issue_is_objective,
+)
 from .persistence import Store
 from .retry import RetryRegistry
 
@@ -123,6 +128,7 @@ def task_sources_from_config(config: StageMeshConfig) -> list[object]:
                     config.github.repo,
                     config.github.token,
                     labels=source.labels,
+                    excluded_labels=source.excluded_labels,
                     name=source.name,
                 )
             )
@@ -201,10 +207,12 @@ class ConfiguredGitHubTaskSource:
         token: str | None,
         *,
         labels: tuple[str, ...] = (),
+        excluded_labels: tuple[str, ...] = (),
         name: str = "github",
     ):
         self.name = _validate_source_name(name)
         self.labels = labels
+        self.excluded_labels = excluded_labels
         self.source = GitHubApiIssueSource(owner, repo, token)
 
     def discover(self) -> list[DiscoveredTask]:
@@ -217,12 +225,14 @@ class ConfiguredGitHubTaskSource:
                 file=sys.stderr,
             )
             return []
-        if not self.labels:
+        if not self.labels and not self.excluded_labels:
             return tasks
-        required = set(self.labels)
+        required = {label.casefold() for label in self.labels}
+        excluded = {label.casefold() for label in self.excluded_labels}
         discovered: list[DiscoveredTask] = []
         for task in tasks:
-            matches = required.issubset(set(task.labels))
+            labels = {label.casefold() for label in task.labels}
+            matches = required.issubset(labels) and not bool(excluded & labels)
             discovered.append(
                 DiscoveredTask(
                     task.source,
@@ -261,7 +271,12 @@ def _github_issue_to_task(issue: dict[str, object]) -> DiscoveredTask:
         raise TaskSourceValidationError(f"github issue {number} state must be a string")
     body = issue.get("body") if isinstance(issue.get("body"), str) else ""
     objective_root = source_issue_is_objective(tuple(label_names))
-    blocked = {"stagemesh:deferred", "stagemesh:blocked"}.intersection(label_names)
+    blocked = {
+        "stagemesh:deferred",
+        "stagemesh:blocked",
+        "status:blocked",
+        "status:remediating",
+    }.intersection(label.casefold() for label in label_names)
     return DiscoveredTask(
         source=GitHubIssueSource.name,
         source_id=str(number),

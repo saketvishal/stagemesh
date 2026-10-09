@@ -61,7 +61,7 @@ _INTEGRATION_CODES = {
 }
 _ENVIRONMENT_HINTS = (
     "not found", "no such file", "is not recognized", "cannot find", "timed out", "timeout", "permission denied",
-    "command not found", "executable file", "winerror 2",
+    "command not found", "executable file", "winerror 2", "modulenotfounderror", "no module named",
 )
 _STAGE_OF_KIND = {EvidenceKind.VALIDATION: "VALIDATE", EvidenceKind.REVIEW: "REVIEW", EvidenceKind.INTEGRATION: "INTEGRATE"}
 _KEY_LINE = re.compile(r"(fail|error|assert|exception|traceback|expected|denied|not found)", re.IGNORECASE)

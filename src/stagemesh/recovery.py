@@ -23,7 +23,7 @@ from .contracts import (
     parse_contract,
     task_contract_path,
 )
-from .diagnosis import STALE_BASELINE, diagnose, format_findings
+from .diagnosis import STALE_BASELINE, VALIDATION_GATE, diagnose, format_findings
 from .domain import EvidenceKind, EvidenceStatus, Stage, TaskStatus
 from .git import GitError, GitWorkspace
 from .lifecycle import evidence_allows_advance
@@ -265,6 +265,148 @@ def auto_rebaseline_blocked_stale_baselines(
         if len(recovered) >= limit:
             break
     return recovered
+
+
+def auto_rebind_blocked_missing_validation_gates(
+    store: Store,
+    project: Path,
+    *,
+    task_id: str | None = None,
+    limit: int = 1,
+) -> list[dict[str, Any]]:
+    """Recover blocked tasks when a stale frozen contract has no executable validation gate.
+
+    This is intentionally narrower than the operator repair command: it only runs for a BLOCKED task whose diagnosis is the
+    specific missing-planned-check validation gate failure, and only when the task now has an explicit contract file with gates.
+    Passed evidence remains protected by rebind_contract's normal history checks.
+    """
+    if limit < 1:
+        return []
+    recovered: list[dict[str, Any]] = []
+    for task in store.tasks():
+        current_id = str(task["id"])
+        if task_id is not None and current_id != task_id:
+            continue
+        if task["status"] != TaskStatus.BLOCKED:
+            continue
+        diagnosis = diagnose(store, current_id, project)
+        if diagnosis is None:
+            continue
+        latest = diagnosis.failing_evidence[-1] if diagnosis.failing_evidence else {}
+        codes = set(latest.get("codes") or ())
+        if "planned_check_missing_command" not in codes:
+            continue
+        path = task_contract_path(project, current_id)
+        if path is None:
+            continue
+        try:
+            contract = parse_contract(json.loads(path.read_text(encoding="utf-8")))
+        except (OSError, ValueError, ContractError) as exc:
+            record_audit(
+                store,
+                "task.auto_rebind_refused",
+                {"task_id": current_id, "code": "invalid_contract", "message": str(exc)[:300]},
+            )
+            continue
+        if not contract.explicit or not contract.gates:
+            continue
+        try:
+            report = rebind_contract(
+                store,
+                project,
+                current_id,
+                validate=True,
+                reason="automatic missing validation gate recovery",
+            )
+        except RecoveryRefusal as exc:
+            record_audit(
+                store,
+                "task.auto_rebind_refused",
+                {"task_id": current_id, "code": exc.code, "message": str(exc)[:300]},
+            )
+            continue
+        report["auto_recovery"] = "missing_validation_gate"
+        recovered.append(report)
+        if len(recovered) >= limit:
+            break
+    return recovered
+
+
+def auto_revalidate_blocked_validation_gates(
+    store: Store,
+    project: Path,
+    *,
+    task_id: str | None = None,
+    limit: int = 1,
+) -> list[dict[str, Any]]:
+    """Re-run a blocked validation candidate once after an environment/gate setup failure.
+
+    This is for normal recovery after the validation runtime changes (for example a project Python path is now available).
+    It does not grant a fresh implementation budget or alter the candidate; it only reruns the bound validation gate once per
+    latest failed evidence row.
+    """
+    if limit < 1:
+        return []
+    recovered: list[dict[str, Any]] = []
+    for task in store.tasks():
+        current_id = str(task["id"])
+        if task_id is not None and current_id != task_id:
+            continue
+        if task["status"] != TaskStatus.BLOCKED or task["stage"] != Stage.VALIDATE:
+            continue
+        if store.has_active_claim(current_id) or any(row["task_id"] == current_id for row in store.running_executions()):
+            continue
+        diagnosis = diagnose(store, current_id, project)
+        if diagnosis is None or diagnosis.category != VALIDATION_GATE:
+            continue
+        candidate = store.latest_candidate(current_id)
+        if candidate is None:
+            continue
+        candidate_sha = str(candidate["sha"])
+        evidence = store.conn.execute(
+            "SELECT id, created_at FROM evidence WHERE task_id=? AND candidate_sha=? AND kind=? AND status=? "
+            "ORDER BY created_at DESC, rowid DESC LIMIT 1",
+            (current_id, candidate_sha, EvidenceKind.VALIDATION, EvidenceStatus.FAILED),
+        ).fetchone()
+        if evidence is None:
+            continue
+        evidence_id = str(evidence["id"])
+        if _auto_revalidation_already_tried(store, current_id, candidate_sha, evidence_id, float(evidence["created_at"])):
+            continue
+        report = _revalidate(store, project, current_id)
+        payload = {
+            "task_id": current_id,
+            "candidate_sha": candidate_sha,
+            "evidence_id": evidence_id,
+            "reason": "automatic blocked validation gate recheck",
+            "validation": report,
+        }
+        record_audit(store, "task.auto_revalidated_blocked_validation", payload)
+        recovered.append({"task_id": current_id, "auto_recovery": "blocked_validation_recheck", **payload})
+        if len(recovered) >= limit:
+            break
+    return recovered
+
+
+def _auto_revalidation_already_tried(
+    store: Store, task_id: str, candidate_sha: str, evidence_id: str, evidence_created_at: float
+) -> bool:
+    rows = store.conn.execute(
+        "SELECT payload, created_at FROM audit_events WHERE event_type=? AND created_at>=? ORDER BY created_at DESC, rowid DESC LIMIT 20",
+        ("task.auto_revalidated_blocked_validation", evidence_created_at),
+    ).fetchall()
+    for row in rows:
+        try:
+            payload = json.loads(row["payload"])
+        except (TypeError, ValueError):
+            continue
+        if (
+            payload.get("task_id") == task_id
+            and payload.get("candidate_sha") == candidate_sha
+            and payload.get("evidence_id") == evidence_id
+        ):
+            return True
+    return False
 
 
 def _force_analysis(project: Path, analysis: BaselineAnalysis) -> BaselineAnalysis:

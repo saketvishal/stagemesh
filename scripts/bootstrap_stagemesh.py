@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import argparse
+import json
 import os
 import subprocess
 import sys
@@ -11,6 +13,20 @@ RUNTIME = ROOT / ".stagemesh" / "tooling"
 VENV = RUNTIME / "venv"
 BIN = ROOT / ".stagemesh" / "bin"
 USER_BIN = Path(os.environ.get("STAGEMESH_USER_BIN", Path.home() / ".stagemesh" / "bin"))
+BUILTIN_PROVIDERS = ("codex", "claude", "grok", "agy")
+DEFAULT_COMMANDS = {
+    "codex": "codex exec",
+    "claude": "claude -p",
+    "grok": "grok",
+    "agy": "agy --mode accept-edits",
+}
+DEFAULT_QUEUE_LABELS = ("status:QUEUED",)
+DEFAULT_EXCLUDED_QUEUE_LABELS = (
+    "stagemesh:blocked",
+    "stagemesh:deferred",
+    "status:BLOCKED",
+    "status:REMEDIATING",
+)
 
 
 def _venv_python() -> Path:
@@ -117,7 +133,70 @@ def _install_user_dispatcher() -> Path:
     return dispatcher
 
 
-def main() -> int:
+def _selected_providers(raw: str | None) -> list[str] | None:
+    if raw is None:
+        return None
+    selected = [item.strip() for item in raw.split(",") if item.strip()]
+    unknown = sorted(set(selected) - set(BUILTIN_PROVIDERS))
+    if unknown:
+        raise SystemExit(f"unknown provider(s): {', '.join(unknown)}; choose from {', '.join(BUILTIN_PROVIDERS)}")
+    if not selected:
+        raise SystemExit("--providers must name at least one provider")
+    return selected
+
+
+def _configure_providers(selected: list[str] | None) -> None:
+    if selected is None:
+        return
+    path = ROOT / ".stagemesh" / "config.json"
+    data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    providers = data.setdefault("providers", {})
+    for name in selected:
+        providers.setdefault(name, {"command": DEFAULT_COMMANDS[name], "capabilities": ["IMPLEMENT", "REVIEW"]})
+    pools = data.setdefault("routing", {}).setdefault("pools", {})
+    pools["IMPLEMENT"] = selected
+    pools["REVIEW"] = [name for name in ("claude", "grok", "agy", "codex") if name in selected]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    print(f"providers: {', '.join(selected)}")
+    print(f"config: {path}")
+
+
+def _configure_queue_source() -> None:
+    path = ROOT / ".stagemesh" / "config.json"
+    if not path.exists():
+        return
+    data = json.loads(path.read_text(encoding="utf-8"))
+    sources = data.get("task_sources")
+    if not isinstance(sources, list):
+        return
+    changed = False
+    for source in sources:
+        if not isinstance(source, dict) or source.get("type") != "github":
+            continue
+        if source.get("labels") == ["stagemesh:ready"]:
+            source["labels"] = list(DEFAULT_QUEUE_LABELS)
+            changed = True
+        if "excluded_labels" not in source:
+            source["excluded_labels"] = list(DEFAULT_EXCLUDED_QUEUE_LABELS)
+            changed = True
+    if changed:
+        path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        print("queue source: status:QUEUED excluding blocked/remediating labels")
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--providers",
+        help="Comma-separated project provider pool from codex,claude,grok,agy; omitted leaves config unchanged.",
+    )
+    parser.add_argument(
+        "--no-queue-config",
+        action="store_true",
+        help="Leave existing GitHub task-source label filters unchanged.",
+    )
+    args = parser.parse_args(argv)
     RUNTIME.mkdir(parents=True, exist_ok=True)
     BIN.mkdir(parents=True, exist_ok=True)
     if not _venv_python().exists():
@@ -136,6 +215,9 @@ def main() -> int:
         shim.write_text(f"#!/usr/bin/env sh\nexec \"{installed}\" \"$@\"\n", encoding="utf-8")
         shim.chmod(0o755)
     dispatcher = _install_user_dispatcher()
+    _configure_providers(_selected_providers(args.providers))
+    if not args.no_queue_config:
+        _configure_queue_source()
     print(shim)
     print(f"dispatcher: {dispatcher}")
     return 0

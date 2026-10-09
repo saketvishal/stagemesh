@@ -18,7 +18,11 @@ from .objective_roots import objective_root_reason
 from .observability import health
 from .operator_actions import recover_stale, task_details
 from .persistence import MAX_CANONICAL_CONTRACT_CHARS, Store
-from .recovery import auto_rebaseline_blocked_stale_baselines
+from .recovery import (
+    auto_rebaseline_blocked_stale_baselines,
+    auto_rebind_blocked_missing_validation_gates,
+    auto_revalidate_blocked_validation_gates,
+)
 from .scheduling import Scheduler
 from .task_selection import Candidate, Selection, SelectionRefusal, select_next_task
 from .timing import execution_timings, format_duration, step_duration
@@ -707,6 +711,8 @@ def run_ready(
     try:
         recovered.extend(_recover_all_dead(store))  # provably dead claims/executions only; live/unknown are never touched
         recovered.extend(auto_rebaseline_blocked_stale_baselines(store, project, task_id=task_id))
+        recovered.extend(auto_rebind_blocked_missing_validation_gates(store, project, task_id=task_id))
+        recovered.extend(auto_revalidate_blocked_validation_gates(store, project, task_id=task_id))
         selection = choose_task(store, project, task_id, policy or TaskSelectionConfig(), auto_plan, chooser)
         selection_info.update(selection.to_dict())
         _log_selection(selection, on_start)

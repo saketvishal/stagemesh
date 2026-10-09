@@ -9,6 +9,7 @@ from stagemesh.contract_binding import contract_for_candidate
 from stagemesh.contracts import (
     ChangeContract,
     GateCommand,
+    _gate_runtime_command,
     evaluate_contract,
     parse_contract,
     run_gate,
@@ -97,6 +98,17 @@ def test_python_gate_uses_current_runtime_and_candidate_src(tmp_path: Path) -> N
     assert gate.status == "PASSED", gate.stderr
     assert Path(sys.executable).resolve() == Path(gate.stdout.splitlines()[0]).resolve()
     assert "candidate-src" in gate.stdout
+
+
+def test_python_gate_resolves_from_path_not_stagemesh_runtime(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "stagemesh.contracts.shutil.which",
+        lambda command: "C:/project/.venv/Scripts/python.exe" if command == "python" else None,
+    )
+
+    command = _gate_runtime_command(["python", "-m", "pytest"])
+
+    assert command == ["C:/project/.venv/Scripts/python.exe", "-m", "pytest"]
 
 
 def test_contract_rejects_forbidden_and_out_of_scope_files(tmp_path: Path) -> None:
