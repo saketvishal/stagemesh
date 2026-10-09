@@ -101,6 +101,16 @@ def test_validation_failure_is_remediated_automatically(tmp_path: Path) -> None:
     r.assert_hands_off()
 
 
+def test_repeated_validation_failure_blocks_without_operator_retry_instruction(tmp_path: Path) -> None:
+    m = _matrix(tmp_path, ["T-1"], {"codex": {"implement": ["bad-1", "bad-2"]}}, implement_pool=("codex",))
+
+    r = m.continue_()
+
+    assert r.stop == "BLOCKED" and not m.integrated("T-1"), r.brief
+    assert "stagemesh continue" in r.text
+    r.assert_hands_off()
+
+
 def test_review_failure_is_remediated_automatically(tmp_path: Path) -> None:
     m = _matrix(tmp_path, ["T-1"], {"grok": {"review": ["fail", "pass"]}}, implement_pool=("codex",))
 

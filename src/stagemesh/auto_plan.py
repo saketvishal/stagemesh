@@ -251,8 +251,8 @@ def _is_refreshable_generated_contract(payload: dict[str, Any], replacement_gate
     return any(gate.get("name") == "stagemesh-lifecycle-smoke" for gate in replacement_gates)
 
 
-def _task_has_evidence(store: Store, task_id: str) -> bool:
-    return store.conn.execute("SELECT 1 FROM evidence WHERE task_id=? LIMIT 1", (task_id,)).fetchone() is not None
+def _task_has_passed_evidence(store: Store, task_id: str) -> bool:
+    return store.conn.execute("SELECT 1 FROM evidence WHERE task_id=? AND status='PASSED' LIMIT 1", (task_id,)).fetchone() is not None
 
 
 def refresh_stale_generated_contract(store: Store, project: Path, task_id: str) -> AutoPlanResult | None:
@@ -274,7 +274,7 @@ def refresh_stale_generated_contract(store: Store, project: Path, task_id: str) 
         return None
     if not isinstance(existing, dict) or not _is_refreshable_generated_contract(existing, gates):
         return None
-    if frozen is not None and _task_has_evidence(store, task_id):
+    if frozen is not None and _task_has_passed_evidence(store, task_id):
         return None
 
     payload = build_contract(store, project, task_id, gates)
