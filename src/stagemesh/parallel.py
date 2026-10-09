@@ -317,6 +317,7 @@ class ParallelRunner:
         emit: Callable[[str, str], None] | None = None,
         interrupt_grace_seconds: float = 20.0,
         poll_seconds: float = 0.2,
+        wait_for_providers: bool = False,
     ):
         if concurrency < 1:
             raise ValueError("concurrency must be at least 1")
@@ -331,6 +332,8 @@ class ParallelRunner:
         self.emit = emit
         self.interrupt_grace_seconds = interrupt_grace_seconds
         self.poll_seconds = poll_seconds
+        self.wait_for_providers = wait_for_providers
+        self._provider_waits: dict[str, float] = {}
         self.stop = threading.Event()
         self._admission_paused = threading.Event()
         self._admission_stopped = threading.Event()
@@ -531,6 +534,7 @@ class ParallelRunner:
                     pass
                 continue
             free = self.concurrency - len(running)
+            self._resume_provider_waits(attempted)
             self._deferred_this_round = False
             if free > 0:
                 for task_id in self._select_batch(summary, free, running, attempted):
@@ -538,6 +542,11 @@ class ParallelRunner:
                     self._start(task_id)
             running = [task_id for task_id, thread in self._threads.items() if thread.is_alive()]
             if not running:
+                if self._provider_waits:
+                    deadline = min(self._provider_waits.values())
+                    self._refresh_control_state()
+                    self.stop.wait(min(30.0, max(0.05, self.poll_seconds), max(0.05, deadline - time.time())))
+                    continue
                 if self._deferred_this_round:
                     continue  # a task was held back for a blocker that has since finished: select again instead of dropping it
                 break
@@ -557,6 +566,30 @@ class ParallelRunner:
         elif not self.stop.is_set():
             for task_id, thread in list(self._threads.items()):
                 thread.join()
+
+    def _resume_provider_waits(self, attempted: set[str]) -> None:
+        with self._lock:
+            waits = list(self._provider_waits.items())
+        for task_id, deadline in waits:
+            thread = self._threads.get(task_id)
+            if thread is not None and thread.is_alive():
+                continue
+            task = self.store.get_task(task_id)
+            if task is None or task["status"] != "OPEN":
+                with self._lock:
+                    self._provider_waits.pop(task_id, None)
+                continue
+            if time.time() < deadline:
+                continue
+            with self._lock:
+                self._provider_waits.pop(task_id, None)
+            attempted.discard(task_id)
+            self.note(task_id, "provider_retry_ready")
+            self._say(task_id, "provider cooldown ended; resuming automatic selection")
+        with self._lock:
+            self.summary.control["waiting_for_providers"] = [
+                {"task_id": task_id, "retry_at": deadline} for task_id, deadline in self._provider_waits.items()
+            ]
 
     def _select_batch(self, summary: ParallelSummary, free: int, running: list[str], attempted: set[str]) -> list[str]:
         # Give candidates already in the validation/review/integration pipeline priority over
@@ -640,11 +673,18 @@ class ParallelRunner:
 
     def _start(self, task_id: str) -> None:
         selection, plan_info = self._pending_selection.pop(task_id)
-        lifecycle = TaskLifecycle(task_id)
+        lifecycle = self._lifecycles.get(task_id) or TaskLifecycle(task_id)
+        previous = lifecycle.summary
         lifecycle.summary = RunSummary(True, "UNSET", task_id=task_id, selection={"mode": "parallel", **selection}, auto_plan=plan_info)
+        if previous is not None:
+            lifecycle.summary.detail["provider_wait_history"] = [
+                *previous.detail.get("provider_wait_history", []),
+                {"stop_reason": previous.stop_reason, "failure": previous.detail.get("failure")},
+            ]
         with self._lock:
             self._lifecycles[task_id] = lifecycle
-            self.summary.tasks.append(lifecycle)
+            if lifecycle not in self.summary.tasks:
+                self.summary.tasks.append(lifecycle)
         self.note(task_id, "selected", priority=selection.get("priority"), contract=selection.get("contract"))
         self._say(task_id, f"selected (up to {self.concurrency} tasks run concurrently)")
         for message in plan_info.get("events", []):
@@ -699,6 +739,20 @@ class ParallelRunner:
                 max_steps=self.max_steps, on_step=on_step, on_start=on_start, global_health=False, should_stop=self.stop.is_set,
                 worktree_root_path=self.runtime.worktree_root,
             )
+            if self.wait_for_providers and summary.stop_reason == "NO_PROGRESS":
+                stage = str(store.get_task(task_id)["stage"])
+                pool = getattr(coordinator.executor, "pool", None) if stage == "IMPLEMENT" else getattr(coordinator.reviewer, "review_pool", None)
+                failure = summary.detail.get("failure", {})
+                if pool is not None and failure.get("event") in {"task.capacity_failure", "review.infrastructure_failure"}:
+                    candidate = store.latest_candidate(task_id)
+                    implementer = str(candidate["produced_by"]) if candidate is not None else None
+                    deadline = pool.next_retry_at(store, stage, task_id, implementer)
+                    if deadline is not None:
+                        with self._lock:
+                            self._provider_waits[task_id] = deadline
+                        record_audit(store, "queue.provider_wait", {"task_id": task_id, "stage": stage, "retry_at": deadline})
+                        self.note(task_id, "waiting_for_provider", retry_at=deadline)
+                        self._say(task_id, "waiting for temporary provider capacity; automatic recovery is scheduled")
             if summary.stop_reason == "DONE":
                 remove_task_workspace(self.project, task_id)
                 self.note(task_id, "worktree_removed")

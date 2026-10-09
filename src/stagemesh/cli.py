@@ -309,7 +309,11 @@ def _build_coordinator(
         if not staged:
             ok = any(v.eligible for v in impl_verdicts)
             diagnostic = f"no implementation provider is available. IMPLEMENT pool: {describe_verdicts(impl_verdicts)}"
-        if not ok:
+        temporary_queue_wait = (
+            hasattr(args, "no_wait_for_providers") and not args.no_wait_for_providers
+            and pool.next_retry_at(store, task_stage or IMPLEMENT, target.task_id if target else "", implementer) is not None
+        )
+        if not ok and not temporary_queue_wait:
             print(diagnostic, file=sys.stderr)
             raise _SetupError(2)
         executor = PooledExecutor(pool)
@@ -942,6 +946,7 @@ def command_run_parallel(args: argparse.Namespace, *, queue: bool = False) -> in
         max_steps=getattr(args, "max_steps", 50),
         limiter=limiter,
         emit=emit,
+        wait_for_providers=queue and not getattr(args, "no_wait_for_providers", False),
     )
     wiring.on_integration_event = lambda task_id, event, detail: runner.note(task_id, event, **detail)
     emit(
@@ -2170,6 +2175,7 @@ def build_parser() -> argparse.ArgumentParser:
     queue_cmd.add_argument("--concurrency", type=int, required=True, metavar="N", help="Maximum tasks running at once")
     queue_cmd.add_argument("--max-steps", type=int, default=50, help="Step budget for each task")
     queue_cmd.add_argument("--no-auto-plan", action="store_true", help="Refuse tasks without a contract instead of auto-planning one")
+    queue_cmd.add_argument("--no-wait-for-providers", action="store_true", help="Exit after temporary provider exhaustion instead of waiting for cooldown recovery")
     queue_cmd.add_argument("--json", action="store_true")
     queue_cmd.add_argument("--provider", help="Provider name to use for implementation (e.g. claude, codex)")
     queue_cmd.add_argument("--dry-run", action="store_true", help="Use FakeExecutor instead of a real provider")

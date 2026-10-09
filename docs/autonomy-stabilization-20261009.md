@@ -34,8 +34,10 @@ No full repository test suite was run.
 
 Live external-provider acceptance is **not proven**. The synthetic CLI-provider matrix also cannot complete its independent review stage in this Work session: Git clone launches an MSYS shell that the Windows sandbox rejects with `NtCreateDirectoryObject ... 0xC0000022`. Native Git network transport also fails with `getaddrinfo() thread failed to start`. Python and native Git operations that do not require that shell were usable for scoped verification.
 
-Keep this PR in draft until the independent-review/provider matrix and five real tasks with two or three concurrent providers complete in an execution environment that permits the required subprocesses. Preserve normal checks; do not replace independent review with the synthetic reviewer for live acceptance.
+The hosted synthetic independent-review/provider matrix passed on Linux and Windows. Keep this PR in draft until five real tasks with two or three concurrent providers and live outage recovery complete in an execution environment that permits the required subprocesses. Preserve normal checks; do not replace independent review with the synthetic reviewer for live acceptance.
 
-This change prevents capacity polling from permanently blocking tasks. It does not establish proof that an all-provider outage is recovered within one continuously running live session. That remains part of the live acceptance gate.
+Queue runs now wait through recorded temporary provider outages and retry automatically at the cooldown deadline. Implementation and independent review recovery are covered by scoped tests, including an outage already recorded before startup, exact cooldown expiry, and operator pause/stop. Review recovery retains the same candidate SHA and does not reimplement. Authentication, missing tools, and coding no-progress do not enter an indefinite capacity wait. queue-run --no-wait-for-providers retains finite exhaustion behavior. Live-provider outage recovery remains unproven in this sandbox.
+
+The initial Linux/Windows hosted stabilization matrix passed on PR #259 at caee016. The local outage recovery checks passed (12 cases), and four focused queue-control/CLI/provider-preflight compatibility checks passed. No full suite was run.
 
 Admission priority trades some pipeline throughput for bounded integration progress. External actors can still advance the integration ref; the configured rebase limit continues to protect against unbounded retries.
