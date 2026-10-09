@@ -54,13 +54,14 @@ _SCOPE_CODES = {
 _GATE_SETUP_CODES = {
     "planned_check_missing_command", "acceptance_criteria_without_executable_gate", "candidate_unavailable",
     "candidate_workspace_unavailable", "missing_required_bound_evidence", "invalid_contract",
+    "integration_rebase_unavailable",
 }
 _INTEGRATION_CODES = {
     "integration_non_fast_forward", "integration_stale_base", "integration_rebase_conflict", "integration_ref_missing",
     "integration_ref_update_failed", "integration_ref_not_updated",
 }
 _ENVIRONMENT_HINTS = (
-    "not found", "no such file", "is not recognized", "cannot find", "timed out", "timeout", "permission denied",
+    "is not recognized", "executable file not found", "permission denied",
     "command not found", "executable file", "winerror 2", "modulenotfounderror", "no module named",
 )
 _STAGE_OF_KIND = {EvidenceKind.VALIDATION: "VALIDATE", EvidenceKind.REVIEW: "REVIEW", EvidenceKind.INTEGRATION: "INTEGRATE"}
@@ -255,7 +256,7 @@ def _classify(stage: str, codes: set[str], gate_findings: list[dict[str, Any]]) 
     if "gate_failed" in codes:
         for finding in gate_findings:
             output = _gate_output(finding).casefold()
-            if finding.get("returncode") in (None, 126, 127) or any(hint in output for hint in _ENVIRONMENT_HINTS):
+            if finding.get("failure_kind") in ("environment", "timeout") or finding.get("returncode") in (None, 126, 127) or any(hint in output for hint in _ENVIRONMENT_HINTS):
                 return VALIDATION_GATE
         return IMPLEMENTATION_DEFECT
     if stage == EvidenceKind.REVIEW:
@@ -347,16 +348,24 @@ def _no_progress(store: Store, task_id: str, since: float, project: Path | None,
         (since, "task.implementation_unsuccessful", "task.capacity_failure", "candidate.produced"),
     ).fetchall()
     attempts: list[str] = []
+    capacity_reasons: list[str] = []
     for row in rows:
         payload = _loads(row["payload"])
         if payload.get("task_id") != task_id:
             continue
         if row["event_type"] == "candidate.produced":
             attempts.clear()
+            capacity_reasons.clear()
+        elif row["event_type"] == "task.capacity_failure":
+            # Quota/capacity waits are not failed coding attempts. Provider cooldown owns retries;
+            # repeated polling must not permanently block a task before the provider recovers.
+            capacity_reasons.append(str(payload.get("reason") or "provider_capacity_unavailable"))
         else:
             attempts.append(str(payload.get("reason") or payload.get("result_status") or "implementation_failed"))
     identical = _identical_trees(store, task_id, project)
     if not attempts and identical is None:
+        if capacity_reasons:
+            return {"attempts": 0, "reasons": capacity_reasons[-5:], "identical_trees": None, "repeated": False, "capacity_wait": True}
         return None
     repeated = bool(identical) or (len(attempts) >= threshold and len(set(attempts[-threshold:])) == 1)
     return {"attempts": len(attempts), "reasons": attempts[-5:], "identical_trees": identical, "repeated": repeated}

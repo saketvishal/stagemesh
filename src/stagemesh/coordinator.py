@@ -28,7 +28,7 @@ from .recovery import RecoveryRefusal, rebaseline_task
 from .remediation import RemediationPolicy
 from .review import Reviewer, independent_review_verified
 from .scheduling import Scheduler
-from .serialized_integration import REBASE_CONFLICT, STALE_BASE
+from .serialized_integration import REBASE_CONFLICT, REBASE_UNAVAILABLE, STALE_BASE
 from .validation import Validator
 from .workspace_guard import (
     EXTERNAL_WORKSPACE_MUTATION,
@@ -37,7 +37,7 @@ from .workspace_guard import (
 )
 from .workspaces import NO_IMPLEMENTATION_CHANGE
 
-_REF_STATE_CODES = frozenset({REBASE_CONFLICT, STALE_BASE})
+_REF_STATE_CODES = frozenset({REBASE_CONFLICT, REBASE_UNAVAILABLE, STALE_BASE})
 
 
 def _is_workspace_mutation_reason(reason: str | None) -> bool:

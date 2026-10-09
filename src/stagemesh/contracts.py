@@ -100,6 +100,7 @@ class GateResult:
     returncode: int | None = None
     stdout: str = ""
     stderr: str = ""
+    failure_kind: str | None = None
 
 
 def _gate_output_text(value: str | bytes | None) -> str:
@@ -360,6 +361,7 @@ def evaluate_contract(
                     "message": f"{gate.name} failed",
                     "command": list(gate.command),
                     "returncode": gate.returncode,
+                    "failure_kind": gate.failure_kind,
                     "stdout": gate.stdout[-2000:],
                     "stderr": gate.stderr[-2000:],
                 }
@@ -486,8 +488,8 @@ def run_gate(project: Path, gate: GateCommand) -> GateResult:
             check=False,
             timeout=gate.timeout_seconds,
         )
-    except FileNotFoundError as exc:
-        return GateResult(gate.name, "FAILED", tuple(gate.command), None, "", str(exc))
+    except OSError as exc:
+        return GateResult(gate.name, "FAILED", tuple(gate.command), None, "", str(exc), "environment")
     except subprocess.TimeoutExpired as exc:
         return GateResult(
             gate.name,
@@ -496,6 +498,7 @@ def run_gate(project: Path, gate: GateCommand) -> GateResult:
             None,
             _gate_output_text(exc.stdout),
             f"timed out after {gate.timeout_seconds}s\n{_gate_output_text(exc.stderr)}",
+            "timeout",
         )
     return GateResult(
         gate.name,

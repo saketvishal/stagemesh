@@ -80,6 +80,7 @@ class Validator:
                         "status": gate.status,
                         "command": list(gate.command),
                         "returncode": gate.returncode,
+                        "failure_kind": gate.failure_kind,
                     }
                     for gate in evaluation.gates
                 ],

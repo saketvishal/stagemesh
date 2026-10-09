@@ -187,7 +187,8 @@ class RuntimeCommandAdapter:
                 check=False,
             )
             if clone.returncode != 0:
-                return _review_infrastructure_failure("review workspace clone failed")
+                detail = (clone.stderr or clone.stdout).strip()[:1000]
+                return _review_infrastructure_failure("review workspace clone failed: " + detail)
             # Reviewers must inspect the committed candidate bytes, not a platform-normalized
             # checkout shaped by the machine's global Git config.
             subprocess.run(

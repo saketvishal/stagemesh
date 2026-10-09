@@ -19,6 +19,7 @@ from .workspace_guard import owned_workspace
 REBASED_EVENT = "integration.rebased"
 STALE_BASE = "integration_stale_base"  # the ref advanced and the rebase budget is spent
 REBASE_CONFLICT = "integration_rebase_conflict"  # the ref advanced and the candidate no longer applies cleanly
+REBASE_UNAVAILABLE = "integration_rebase_unavailable"  # git/runtime failed without a content conflict
 
 
 class SerializedIntegrator(Integrator):
@@ -112,13 +113,14 @@ class SerializedIntegrator(Integrator):
                     git.run("rebase", "--abort", check=False)
                     git.run("checkout", "--detach", candidate_sha, check=False)
                     lease.seal(candidate_sha)
+                    failure_code = REBASE_CONFLICT if conflicts else REBASE_UNAVAILABLE
                     self._typed_failure = (
-                        REBASE_CONFLICT,
-                        f"{self.integration_ref} advanced to {tip} and candidate {candidate_sha} conflicts with it"
-                        + (f" in {', '.join(conflicts[:10])}" if conflicts else "")
+                        failure_code,
+                        f"{self.integration_ref} advanced to {tip}; candidate {candidate_sha}"
+                        + (f" conflicts in {', '.join(conflicts[:10])}" if conflicts else f" could not be rebased: {(result.stderr or result.stdout).strip()[-1000:]}")
                         + "; ref left unchanged",
                     )
-                    self._emit(task_id, REBASE_CONFLICT, {"ref_tip": tip, "conflicts": conflicts[:10]})
+                    self._emit(task_id, failure_code, {"ref_tip": tip, "conflicts": conflicts[:10]})
                     return False
                 rebased = git.head()
                 previous = store.latest_candidate(task_id)
@@ -126,8 +128,8 @@ class SerializedIntegrator(Integrator):
                 store.add_candidate(task_id, rebased, producer, durable_handoff=True)
                 lease.seal(rebased)
         except (GitError, ContractError, OSError) as exc:
-            self._typed_failure = (REBASE_CONFLICT, f"could not rebase candidate {candidate_sha} onto {tip}: {exc}")
-            self._emit(task_id, REBASE_CONFLICT, {"ref_tip": tip, "error": str(exc)[:200]})
+            self._typed_failure = (REBASE_UNAVAILABLE, f"could not rebase candidate {candidate_sha} onto {tip}: {exc}")
+            self._emit(task_id, REBASE_UNAVAILABLE, {"ref_tip": tip, "error": str(exc)[:200]})
             return False
         store.bind_contract(task_id, rebased, tip, bound.version, bound.digest, bound.canonical_json)
         store.advance_task(task_id, Stage.VALIDATE)

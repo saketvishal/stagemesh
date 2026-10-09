@@ -28,13 +28,18 @@ from .concurrency import IntegrationLockTimeout, ProviderLimiter, contract_confl
 from .config import RuntimeConfig, TaskSelectionConfig, load_config
 from .contracts import ChangeContract, ContractError, parse_contract, task_contract_path
 from .coordinator import Coordinator, TargetSelection, TargetSelectionError
-from .domain import ExecutionKind
+from .domain import ExecutionKind, Stage
 from .execution import kill_active_provider_processes
 from .git import GitWorkspace
 from .persistence import Store
 from .process_identity import classify_process, process_identity
 from .provider_pool import ProviderLog
-from .recovery import auto_rebaseline_blocked_stale_baselines
+from .recovery import (
+    auto_rebaseline_blocked_stale_baselines,
+    auto_rebind_blocked_missing_validation_gates,
+    auto_revalidate_blocked_validation_gates,
+    auto_reintegrate_blocked_runtime_failures,
+)
 from .run_ready import (
     RunReadyRefusal,
     RunSummary,
@@ -554,7 +559,17 @@ class ParallelRunner:
                 thread.join()
 
     def _select_batch(self, summary: ParallelSummary, free: int, running: list[str], attempted: set[str]) -> list[str]:
+        # Give candidates already in the validation/review/integration pipeline priority over
+        # fresh admissions. Otherwise short new tasks can repeatedly advance the ref while an
+        # older candidate revalidates, exhausting its bounded rebase budget through starvation.
+        for current_id in running:
+            task = self.store.get_task(current_id)
+            if task is not None and task["stage"] in (Stage.VALIDATE, Stage.REVIEW, Stage.INTEGRATE):
+                return []
         summary.recovered.extend(auto_rebaseline_blocked_stale_baselines(self.store, self.project, limit=free))
+        summary.recovered.extend(auto_rebind_blocked_missing_validation_gates(self.store, self.project, limit=free))
+        summary.recovered.extend(auto_revalidate_blocked_validation_gates(self.store, self.project, limit=free))
+        summary.recovered.extend(auto_reintegrate_blocked_runtime_failures(self.store, self.project, limit=free))
         ranked, skipped, _ = rank_batch_candidates(self.store, self.project, self.policy, auto_plan=self.auto_plan)
         self._refuse_unrunnable(summary, skipped, attempted)
         summary.skipped = [s for s in skipped if s["task_id"] not in attempted and s["task_id"] not in running]
