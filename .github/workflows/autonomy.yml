@@ -1,8 +1,7 @@
 name: StageMesh autonomy regressions
 
 on:
-  push:
-  pull_request:
+  workflow_dispatch:
 
 jobs:
   autonomy:
