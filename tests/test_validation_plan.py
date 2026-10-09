@@ -89,6 +89,34 @@ def test_localized_code_schedules_focused_checks_only() -> None:
     ]
 
 
+def test_ci_inside_a_focused_test_path_does_not_make_gate_broad() -> None:
+    contract = ChangeContract(
+        objective="Focused API regression",
+        allowed_files=("apps/api/tests/integration/test_trial_review_tenant_isolation.py",),
+        required_tests=(
+            GateCommand(
+                "trial-review-tenant-isolation",
+                [
+                    sys.executable,
+                    "-m",
+                    "pytest",
+                    "tests/integration/test_trial_review_tenant_isolation.py",
+                    "tests/integration/test_authorization.py",
+                    "tests/integration/test_auth_atomicity.py",
+                    "-q",
+                ],
+                cwd="apps/api",
+            ),
+        ),
+    )
+
+    plan = derive_validation_plan(contract, ("apps/api/tests/integration/test_trial_review_tenant_isolation.py",))
+    scoped = planned_contract(contract, plan)
+
+    assert plan.debug_checks == ("trial-review-tenant-isolation",)
+    assert [gate.name for gate in scoped.gates] == ["trial-review-tenant-isolation"]
+
+
 def test_core_lifecycle_schema_security_records_escalation_reason() -> None:
     contract = ChangeContract(
         objective="Change lifecycle state machine",

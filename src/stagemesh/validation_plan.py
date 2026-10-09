@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import fnmatch
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -19,6 +20,7 @@ _CLASSIFICATIONS = {
 }
 
 _BROAD_GATE_TOKENS = ("full pytest", "invariant", "clean acceptance", "acceptance", "full ci", "ci")
+_TOKEN_SPLIT = re.compile(r"[^a-z0-9]+")
 _DOC_PATTERNS = ("README*", "docs/**", "*.md", "**/*.md", "*.rst", "**/*.rst")
 _DEPENDENCY_PATTERNS = (
     "pyproject.toml",
@@ -203,7 +205,9 @@ def _gate_names(gates: tuple[GateCommand, ...]) -> tuple[str, ...]:
 
 def _is_broad_gate(value: str) -> bool:
     folded = value.casefold()
-    return any(token in folded for token in _BROAD_GATE_TOKENS)
+    if any(token != "ci" and token in folded for token in _BROAD_GATE_TOKENS):
+        return True
+    return "ci" in {part for part in _TOKEN_SPLIT.split(folded) if part}
 
 
 def _is_broad_command(command: tuple[str, ...]) -> bool:
