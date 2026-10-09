@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from .external_evidence import external_evidence_records
 from .observability import health
 from .persistence import Store
+from .process_identity import classify_process, process_identity
 
 
 @dataclass(frozen=True)
@@ -31,6 +32,7 @@ def operator_report(store: Store) -> OperatorReport:
     retries = store.retry_states()
     external_evidence = external_evidence_records(store)
     provider_selections = _provider_selection_rows(store)
+    active_executions = _active_execution_rows(store)
     stage_counts = Counter(str(task["stage"]) for task in tasks)
     status_counts = Counter(str(task["status"]) for task in tasks)
     attention_rows = []
@@ -52,6 +54,7 @@ def operator_report(store: Store) -> OperatorReport:
         f"recent_source_events={len(events)}",
         f"retry_states={len(retries)}",
         f"external_evidence={len(external_evidence)}",
+        f"active_executions={len(active_executions)}",
     ]
     for task in tasks:
         lines.append(f"task {task['id']} stage={task['stage']} status={task['status']} title={task['title']}")
@@ -69,7 +72,15 @@ def operator_report(store: Store) -> OperatorReport:
             f"task={selection['task_id'] or ''} stage={selection['stage']} "
             f"policy={selection['policy']} order={selection['order']}"
         )
+    for execution in active_executions:
+        lines.append(
+            "active_execution "
+            f"task={execution['task_id']} stage={execution['stage']} "
+            f"provider={execution['provider']} pid={execution['pid_label']} "
+            f"process={execution['process_state']} stale={execution['stale']}"
+        )
     sections = (
+        OperatorSection("Active Executions", tuple(active_executions)),
         OperatorSection(
             "Stage Summary",
             tuple({"stage": stage, "count": count} for stage, count in sorted(stage_counts.items())),
@@ -143,6 +154,30 @@ def operator_report(store: Store) -> OperatorReport:
         OperatorSection("Provider Selections", tuple(provider_selections)),
     )
     return OperatorReport(summary="ok" if h.ok else "degraded", lines=tuple(lines), sections=sections)
+
+
+def _active_execution_rows(store: Store) -> list[Mapping[str, object]]:
+    rows: list[Mapping[str, object]] = []
+    for execution in store.running_executions():
+        pid = execution["pid"]
+        process_state = classify_process(
+            store.execution_process_identity(execution["id"]),
+            process_identity(pid),
+        )
+        provider = execution["actor"] or "unknown"
+        rows.append(
+            {
+                "id": execution["id"],
+                "task_id": execution["task_id"],
+                "stage": execution["kind"],
+                "provider": provider,
+                "pid": pid,
+                "pid_label": str(pid) if pid is not None else "no pid recorded",
+                "process_state": process_state,
+                "stale": process_state == "DEAD",
+            }
+        )
+    return rows
 
 
 def _provider_selection_rows(store: Store) -> list[Mapping[str, object]]:

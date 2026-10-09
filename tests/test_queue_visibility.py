@@ -110,6 +110,31 @@ def test_json_surfaces_expose_state_event_reason_and_process(tmp_path: Path) -> 
         live = by_id[ids["LIVE"]]
         assert live["task_id"] == "T-1" and live["pid"] == os.getpid(), name
 
+    code, out, _ = run_stagemesh_cli(project, "operator", "--json")
+    assert code == 0
+    operator = json.loads(out)
+    active_section = next(
+        section for section in operator["sections"] if section["name"] == "Active Executions"
+    )
+    active_rows = {row["id"]: row for row in active_section["rows"]}
+    assert active_rows[ids["LIVE"]]["provider"] == "unknown"
+    assert active_rows[ids["LIVE"]]["pid"] == os.getpid()
+    assert active_rows[ids["LIVE"]]["pid_label"] == str(os.getpid())
+    assert active_rows[ids["DEAD"]]["stale"] is True
+    assert active_rows[ids["DEAD"]]["process_state"] == "DEAD"
+    assert active_rows[ids["UNKNOWN"]]["stage"] == "VALIDATION"
+
+    dashboard = project / "dashboard.html"
+    code, out, _ = run_stagemesh_cli(project, "dashboard", "--output", str(dashboard), "--json")
+    assert code == 0
+    dashboard_data = json.loads(out)
+    dashboard_rows = {row["id"]: row for row in dashboard_data["active_executions"]}
+    assert dashboard_rows[ids["LIVE"]]["pid"] == os.getpid()
+    assert dashboard_rows[ids["DEAD"]]["stale"] is True
+    dashboard_text = dashboard.read_text(encoding="utf-8")
+    assert "<h2>Active Executions</h2>" in dashboard_text
+    assert str(os.getpid()) in dashboard_text and "DEAD" in dashboard_text
+
 
 def test_text_status_health_and_task_doctor_show_operator_fields(tmp_path: Path) -> None:
     project, ids = _project_with_executions(tmp_path)
@@ -133,6 +158,17 @@ def test_text_status_health_and_task_doctor_show_operator_fields(tmp_path: Path)
         assert code == 0, argv
         for fragment in expected:
             assert fragment in out, (argv, fragment, out)
+
+    code, out, _ = run_stagemesh_cli(project, "operator")
+    assert code == 0
+    assert (
+        f"active_execution task=T-1 stage=REVIEW provider=unknown pid={pid} process=LIVE stale=False"
+        in out
+    )
+    assert (
+        f"active_execution task=T-2 stage=IMPLEMENTATION provider=unknown pid={pid} process=DEAD stale=True"
+        in out
+    )
 
     code, out, _ = run_stagemesh_cli(project, "queue-control", "status")
     assert code == 0
@@ -248,7 +284,7 @@ def test_execution_without_a_pid_is_unknown_not_stale_and_prints_cleanly(tmp_pat
     store = _store(project)
     cli_module._sync_all_sources(store, project, load_config(project), None)
     execution_id = store.start_execution(
-        task_id="T-1", claim_id=None, kind=ExecutionKind.IMPLEMENTATION
+        task_id="T-1", claim_id=None, kind=ExecutionKind.REVIEW, actor="claude"
     )
     store.close()
 
@@ -267,7 +303,7 @@ def test_execution_without_a_pid_is_unknown_not_stale_and_prints_cleanly(tmp_pat
         ("queue-control", "status"),
         ("health",),
     )
-    marker = f"execution {execution_id}: task T-1 IMPLEMENTATION pid unknown process UNKNOWN"
+    marker = f"execution {execution_id}: task T-1 REVIEW pid unknown process UNKNOWN"
     for argv in surfaces:
         code, out, _ = run_stagemesh_cli(project, *argv)
         assert code == 0, argv
@@ -275,6 +311,29 @@ def test_execution_without_a_pid_is_unknown_not_stale_and_prints_cleanly(tmp_pat
         assert "tasks: T-1; pids: none known" in out, (argv, out)
         assert f"unknown process identity: {execution_id}" in out, (argv, out)
         assert "stale (process gone)" not in out, (argv, out)
+
+    code, out, _ = run_stagemesh_cli(project, "operator")
+    assert code == 0
+    assert (
+        "stage=REVIEW provider=claude pid=no pid recorded process=UNKNOWN stale=False"
+        in out
+    )
+
+    code, out, _ = run_stagemesh_cli(project, "operator", "--json")
+    assert code == 0
+    data = json.loads(out)
+    row = next(
+        row
+        for section in data["sections"]
+        if section["name"] == "Active Executions"
+        for row in section["rows"]
+    )
+    assert row["pid"] is None
+    assert row["pid_label"] == "no pid recorded"
+    assert row["provider"] == "claude"
+    assert row["stage"] == "REVIEW"
+    assert row["process_state"] == "UNKNOWN"
+    assert row["stale"] is False
 
 
 def _history(store: Store, *events: tuple[str, str, str]) -> dict:

@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..git import GitError, GitWorkspace
+from ..git_identity import project_identity, sanitize_commit_message
 
 STAGEMESH_COMMITTER = ("StageMesh", "stagemesh@stagemesh.invalid")
 # No committer identity is trusted by default: the worktree's own configured identity is self-declared, so a second writer committing
@@ -176,8 +177,12 @@ class GitFacts:
         message: str,
         *,
         author: CommitInfo | None = None,
-        committer: tuple[str, str] = STAGEMESH_COMMITTER,
+        committer: tuple[str, str] | None = None,
     ) -> str:
+        if committer is None:  # StageMesh-made commits are committed as the project identity, not as a fabricated contributor
+            identity = project_identity(self.path)
+            committer = (identity.name, identity.email)
+        message = sanitize_commit_message(message)
         env = {"GIT_COMMITTER_NAME": committer[0], "GIT_COMMITTER_EMAIL": committer[1]}
         if author is not None:
             env.update(

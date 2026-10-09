@@ -44,6 +44,10 @@ SCRIPT = (
     "        print('{\"text\":\"```json\\\\n{\\\\\"decision\\\\\":\\\\\"PASS\\\\\"}\\\\n```\"}'); sys.exit(0)\n"
     "    if mode == 'structured-wrapper-review':\n"
     "        print('{\"structured_output\":{\"decision\":\"PASS\",\"findings\":[]}}'); sys.exit(0)\n"
+    "    if mode == 'progress-review':\n"
+    "        print('Review in progress. I will inspect the candidate now.'); sys.exit(0)\n"
+    "    if mode == 'fail-no-findings-review':\n"
+    "        print('{\"decision\":\"FAIL\"}'); sys.exit(0)\n"
     "    if mode == 'malformed-review':\n"
     "        print('looks fine to me, approved'); sys.exit(0)\n"
     "    print('{\"decision\":\"PASS\"}'); sys.exit(0)\n"
@@ -522,7 +526,7 @@ def test_cli_refuses_at_startup_when_only_the_implementer_is_available(tmp_path:
     only = f'"{sys.executable}" "{script}" ok claude'
     missing = "stagemesh-no-such-cli-xyz"
     (rig.project / ".stagemesh" / "config.json").write_text(
-        json.dumps({"providers": {"codex": missing, "claude": only, "grok": missing}, "routing": {"mode": "STAGED"}}),
+        json.dumps({"providers": {"codex": missing, "claude": only, "grok": missing, "agy": missing}, "routing": {"mode": "STAGED"}}),
         encoding="utf-8",
     )
 
@@ -531,7 +535,7 @@ def test_cli_refuses_at_startup_when_only_the_implementer_is_available(tmp_path:
     err = capsys.readouterr().err
     assert code == 2
     assert "independent review is required but cannot be satisfied" in err
-    for provider in ("codex", "claude", "grok"):
+    for provider in ("codex", "claude", "grok", "agy"):
         assert provider in err
     assert "cli_not_installed" in err
     assert Store(rig.project / ".stagemesh" / "stagemesh.sqlite3").latest_candidate(TASK) is None  # nothing ran
@@ -699,6 +703,16 @@ def test_workspace_mutation_is_quarantined_and_next_provider_runs(tmp_path: Path
     )
     assert event["task_id"] == TASK and event["provider"] == "provider-a"
     assert event["reason"] == "EXTERNAL_WORKSPACE_MUTATION"
+    assert event["quarantine_ref"] is None
+    integrity = json.loads(
+        rig.store.conn.execute(
+            "SELECT payload FROM audit_events WHERE event_type='provider.workspace_integrity_failure'"
+        ).fetchone()["payload"]
+    )
+    assert integrity["task_id"] == TASK and integrity["provider"] == "provider-a"
+    assert integrity["classification"] == "workspace_integrity"
+    assert integrity["candidate_produced"] is False
+    assert integrity["next_provider"] == "provider-b"
     assert not rig.store.conn.execute(
         "SELECT 1 FROM audit_events WHERE event_type='provider.failure' AND payload LIKE '%EXTERNAL_WORKSPACE_MUTATION%'"
     ).fetchone()
@@ -730,6 +744,12 @@ def test_verbose_workspace_mutation_is_quarantined_without_provider_cooldown(tmp
 
     assert rig.store.latest_candidate(TASK)["produced_by"] == "provider-b"
     assert "fallback: provider-a failed (EXTERNAL_WORKSPACE_MUTATION) -> trying provider-b" in rig.text()
+    integrity = json.loads(
+        rig.store.conn.execute(
+            "SELECT payload FROM audit_events WHERE event_type='provider.workspace_integrity_failure'"
+        ).fetchone()["payload"]
+    )
+    assert integrity["provider"] == "provider-a" and integrity["classification"] == "workspace_integrity"
     assert not rig.store.conn.execute(
         "SELECT 1 FROM audit_events WHERE event_type='provider.failure' AND payload LIKE '%EXTERNAL_WORKSPACE_MUTATION%'"
     ).fetchone()

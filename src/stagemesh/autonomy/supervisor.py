@@ -1051,8 +1051,7 @@ class Supervisor:
         old, new = advance_worktree_generation(self.project, task_id)
         with _WORKTREE_CREATION:
             self.facts.git.run("worktree", "add", "--detach", str(new), start)
-            GitFacts(new).git.run("config", "user.email", "stagemesh@example.invalid")
-            GitFacts(new).git.run("config", "user.name", "StageMesh")
+            # no `git config user.*`: worktrees share the repository config (see git_identity)
         self.claim_workspace(task_id, new)
         return {
             "fenced_execution_status": "UNKNOWN",

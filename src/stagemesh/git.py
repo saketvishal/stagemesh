@@ -7,9 +7,31 @@ import time
 from pathlib import Path
 
 from .attribution import GitAttribution
+from .git_identity import identity_env_for, sanitize_commit_message
 
 
 _TRANSIENT_RETRIES = 4
+
+# Subcommands that create commits (and so need an author/committer). Their identity is supplied per command through the environment
+# by the project identity policy (see git_identity); StageMesh never writes user.name / user.email into any git config.
+_HISTORY_WRITING = frozenset({"commit", "rebase", "merge", "cherry-pick", "revert", "am", "stash", "pull", "tag"})
+
+
+def _subcommand(args: tuple[str, ...]) -> str | None:
+    """The git subcommand in `args`, skipping global options such as `-c key=value` and `-C path`."""
+    skip = False
+    for arg in args:
+        if skip:
+            skip = False
+        elif arg in {"-c", "-C", "--git-dir", "--work-tree"}:
+            skip = True
+        elif not arg.startswith("-"):
+            return arg
+    return None
+
+
+def _sets_identity_inline(args: tuple[str, ...]) -> bool:
+    return any(a == "-c" and i + 1 < len(args) and args[i + 1].startswith(("user.name=", "user.email=")) for i, a in enumerate(args))
 
 
 def _transient_file_error(stderr: str) -> bool:
@@ -55,6 +77,8 @@ class GitWorkspace:
                 _validate_non_empty_string(value, f"git environment value for {key}", 1000)
         merged_env = os.environ.copy()
         merged_env.update(env or {})
+        if _subcommand(validated_args) in _HISTORY_WRITING and not _sets_identity_inline(validated_args):
+            merged_env.update(identity_env_for(self.path, merged_env))  # fills only what is unset; raises on a placeholder identity
         for attempt in range(_TRANSIENT_RETRIES + 1):
             result = subprocess.run(
                 ["git", *validated_args],
@@ -75,25 +99,20 @@ class GitWorkspace:
     def init_if_needed(self) -> None:
         self.path.mkdir(parents=True, exist_ok=True)
         if not (self.path / ".git").exists():
-            self.run("init")
-            self.run("config", "user.email", "stagemesh@example.invalid")
-            self.run("config", "user.name", "StageMesh")
+            self.run("init")  # no identity is written: commits resolve it per command (git_identity)
 
     def commit_all(self, message: str, attribution: GitAttribution | None = None) -> str:
-        message = _validate_non_empty_string(message, "commit message", 200)
+        """Commit everything as the project identity (the repository owner), never as the provider that produced the change.
+
+        `attribution` names the producing worker for StageMesh's own execution metadata; it is deliberately not turned into a commit
+        author, because a fabricated author or Co-authored-by shows up on GitHub as a contributor.
+        """
+        message = sanitize_commit_message(_validate_non_empty_string(message, "commit message", 200))
         self.run("add", "-A")
         diff = self.run("diff", "--cached", "--quiet", check=False)
         if diff.returncode == 0:
             return self.head_or_synthetic()
-        env = None
-        if attribution:
-            env = {
-                "GIT_AUTHOR_NAME": attribution.author_name,
-                "GIT_AUTHOR_EMAIL": attribution.author_email,
-                "GIT_COMMITTER_NAME": attribution.committer_name,
-                "GIT_COMMITTER_EMAIL": attribution.committer_email,
-            }
-        self.run("commit", "-m", message, env=env)
+        self.run("commit", "-m", message)
         return self.head()
 
     def head(self) -> str:

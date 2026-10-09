@@ -68,8 +68,8 @@ class ScopedReviewAdapter:
             parsed = json.loads(response)
         except (TypeError, ValueError):
             return response
-        if not isinstance(parsed, dict) or parsed.get("decision") not in {"PASS", "FAIL"}:
-            return response  # malformed / infrastructure verdicts are the Reviewer's to handle
+        if not isinstance(parsed, dict) or parsed.get("decision") not in {"FAIL", "FAIL_WITH_FINDINGS"}:
+            return response  # PASS (any shape), malformed and infrastructure verdicts are the Reviewer's to classify
         store: Store = self.supervisor.store
         task_id = _task_for_candidate(store, candidate_sha)
         if task_id is None:

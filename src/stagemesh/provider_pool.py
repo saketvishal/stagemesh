@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from .audit import record_audit
+from .autonomy.gitfacts import GitFacts
 from .capacity import CapacityKind
 from .concurrency import ProviderLimiter
 from .config import BUILTIN_PROVIDERS, SELECTION_POLICIES
@@ -22,11 +23,12 @@ from .execution import PROVIDER_TIMEOUT, ExecutionResult, Executor
 from .git import GitError, GitWorkspace
 from .persistence import Store
 from .providers import RuntimeCommandAdapter
-from .review import INFRASTRUCTURE_FAILURE, parse_review_response
+from .review import INFRASTRUCTURE_FAILURE, VERDICT_REVIEW_INCOMPLETE, classify_review_response, parse_review_response
 from .routing import RoutingMode
 from .workspace_guard import EXTERNAL_WORKSPACE_MUTATION, WorkspaceMutation, owned_workspace
 from .workspaces import (
     NO_IMPLEMENTATION_CHANGE,
+    _task_key,
     prepare_task_workspace,
     remove_task_workspace,
     task_workspace,
@@ -43,6 +45,7 @@ PROVIDER_FAILURE_EVENT = "provider.failure"
 PROVIDER_SELECTION_EVENT = "provider.selection"
 PROVIDER_USED_EVENT = "provider.used"
 PROVIDER_NO_PROGRESS_EVENT = "provider.no_progress"
+PROVIDER_WORKSPACE_INTEGRITY_EVENT = "provider.workspace_integrity_failure"
 ALL_IMPLEMENTATION_PROVIDERS_NO_PROGRESS = "all_implementation_providers_no_progress"
 ALL_IMPLEMENTATION_PROVIDERS_EXHAUSTED = "all_implementation_providers_exhausted"
 ALL_IMPLEMENTATION_PROVIDERS_FAILED = "all_implementation_providers_failed"
@@ -272,6 +275,29 @@ class ProviderPool:
             },
         )
 
+    def record_workspace_integrity_failure(
+        self,
+        store: Store,
+        stage: str,
+        task_id: str,
+        provider: str,
+        *,
+        next_provider: str | None,
+    ) -> None:
+        """Attribute a provider HEAD rewrite without entering the provider cooldown stream."""
+        store.add_audit_event(
+            PROVIDER_WORKSPACE_INTEGRITY_EVENT,
+            {
+                "task_id": task_id,
+                "stage": stage,
+                "provider": provider,
+                "reason": EXTERNAL_WORKSPACE_MUTATION,
+                "classification": "workspace_integrity",
+                "candidate_produced": False,
+                "next_provider": next_provider,
+            },
+        )
+
     def kind(self, name: str) -> str:
         return "built-in default provider" if name in BUILTIN_PROVIDERS else "custom provider"
 
@@ -478,12 +504,16 @@ class FallbackReviewAdapter:
         self.adapters = adapters
         self.name = adapters[0].name
         self.attempts: list[dict[str, str]] = []
+        self.outages: set[str] = set()  # providers that reported infrastructure trouble; not asked again by outer retries
+        self.last_response: str | None = None
 
     def review_candidate(self, prompt: str, project: Path, candidate_sha: str) -> str:
         previous: str | None = None
         limiter = self.pool.limiter
-        response = json.dumps({"decision": INFRASTRUCTURE_FAILURE, "reason": "no_review_provider_available"})
+        response = self.last_response or json.dumps({"decision": INFRASTRUCTURE_FAILURE, "reason": "no_review_provider_available"})
         for adapter in self.adapters:
+            if adapter.name in self.outages:
+                continue
             held: str | None = None
             if limiter is not None:
                 held = limiter.acquire([adapter.name])  # waits for a free slot; None means the provider is cooling down
@@ -510,6 +540,9 @@ class FallbackReviewAdapter:
                 self.pool.log(f"  final review provider: {adapter.name} ({self.pool.kind(adapter.name)})")
                 self.pool.record_use(self.store, REVIEW, self.task_id, adapter.name, "ANSWERED")
                 return response
+            self.last_response = response
+            if _infrastructure_payload(response) is not None:
+                self.outages.add(adapter.name)
             evidence = _infrastructure_evidence(response)
             upcoming = next((item.name for item in self.adapters if item.name not in {a["provider"] for a in self.attempts} and item.name != adapter.name), None)
             self.attempts.append({"provider": adapter.name, "reason": reason})
@@ -541,10 +574,8 @@ def _infrastructure_reason(response: str) -> str | None:
     parsed = _infrastructure_payload(response)
     if parsed is not None:
         return str(parsed.get("reason") or "review_provider_failure")
-    decoded = parse_review_response(response)
-    if not isinstance(decoded, dict) or decoded.get("decision") not in {"PASS", "FAIL"}:
-        return "malformed_review_output"
-    return None
+    verdict = classify_review_response(response)  # an incomplete or findings-free "FAIL" answer is as unusable as garbage
+    return verdict.reason if verdict.kind == VERDICT_REVIEW_INCOMPLETE else None
 
 
 def _infrastructure_evidence(response: str) -> dict[str, str]:
@@ -629,9 +660,23 @@ class PooledExecutor(Executor):
             index += 1
             if _is_workspace_mutation_reason(result.failure_reason):
                 reason = EXTERNAL_WORKSPACE_MUTATION
+                nxt = remaining[0].name if remaining else None
                 reasons.append(reason)
                 failures.append(f"{adapter.name}: {reason}")
-                walk.append({"provider": adapter.name, "outcome": reason, "classification": "workspace_mutation"})
+                walk.append(
+                    {
+                        "provider": adapter.name,
+                        "outcome": reason,
+                        "classification": "workspace_integrity",
+                    }
+                )
+                self.pool.record_workspace_integrity_failure(
+                    store,
+                    IMPLEMENT,
+                    task_id,
+                    adapter.name,
+                    next_provider=nxt,
+                )
                 log(f"  quarantined {adapter.name}: task workspace changed outside StageMesh; trying a clean workspace")
                 try:
                     _quarantine_mutated_worktree(store, project, task_id, adapter.name)
@@ -737,7 +782,7 @@ class PooledExecutor(Executor):
 
 def _classification(outcome: str) -> str:
     if _is_workspace_mutation_reason(outcome):
-        return "workspace_mutation"
+        return "workspace_integrity"
     if outcome == PROVIDER_TIMEOUT:
         return "timeout"
     if outcome == NO_IMPLEMENTATION_CHANGE:
@@ -834,6 +879,15 @@ def _quarantine_mutated_worktree(store: Store, project: Path, task_id: str, prov
     """Replace a provider-mutated task worktree so the next provider starts from trusted state."""
     old = task_workspace(project, task_id)
     baseline = store.task_baseline(task_id)
+    quarantine_ref: str | None = None
+    if (old / ".git").exists():
+        snapshot = GitFacts(old).snapshot_worktree(
+            old,
+            f"StageMesh quarantine of {task_id}: provider {provider} rewrote the task worktree",
+        )
+        if snapshot:
+            quarantine_ref = f"refs/stagemesh/quarantine/{_task_key(task_id)}/{snapshot[:12]}"
+            GitFacts(project).ensure_ref(quarantine_ref, snapshot)
     remove_task_workspace(project, task_id)
     clean = prepare_task_workspace(project, task_id)
     if baseline:
@@ -845,8 +899,11 @@ def _quarantine_mutated_worktree(store: Store, project: Path, task_id: str, prov
             "task_id": task_id,
             "provider": provider,
             "reason": EXTERNAL_WORKSPACE_MUTATION,
+            "classification": "workspace_integrity",
+            "candidate_produced": False,
             "old_workspace": str(old),
             "replacement_workspace": str(clean),
             "baseline_sha": baseline or "",
+            "quarantine_ref": quarantine_ref,
         },
     )

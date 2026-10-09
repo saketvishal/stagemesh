@@ -28,7 +28,7 @@ def test_grok_review_uses_json_schema_single_turn_mode() -> None:
 
     assert command[:3] == ["grok", "-p", "review it"]
     schema = json.loads(command[command.index("--json-schema") + 1])
-    assert schema["properties"]["decision"]["enum"] == ["PASS", "FAIL"]
+    assert schema["properties"]["decision"]["enum"] == ["PASS", "FAIL_WITH_FINDINGS", "REVIEW_INCOMPLETE"]
     assert stdin == ""
 
 

@@ -253,6 +253,30 @@ def test_relabelled_github_issue_restores_source_retired_task(tmp_path):
         store.close()
 
 
+def test_ready_label_drift_is_recorded_and_reconciled(tmp_path):
+    store = _store(tmp_path)
+    try:
+        ready = ("stagemesh:ready",)
+        task_id = store.upsert_task("ready", source="github", source_id="1")
+        sync_source(store, [DiscoveredTask("github", "1", "ready", labels=ready)])
+        sync_source(store, [DiscoveredTask("github", "1", "ready", eligible=False, labels=())])
+
+        assert store.get_task(task_id)["status"] == TaskStatus.BLOCKED
+        ids = sync_source(store, [DiscoveredTask("github", "1", "ready", labels=ready)])
+
+        assert ids == [task_id]
+        assert store.get_task(task_id)["status"] == TaskStatus.OPEN
+        statuses = [
+            row["status"]
+            for row in store.conn.execute(
+                "SELECT status FROM source_events WHERE source='github' AND source_id='1' ORDER BY rowid"
+            )
+        ]
+        assert [s for s in statuses if s.startswith("READY_")] == ["READY_REMOVED", "READY_RESTORED"]
+    finally:
+        store.close()
+
+
 def test_task_source_label_filter_change_retires_previously_matching_issue(tmp_path):
     store = _store(tmp_path)
     try:
