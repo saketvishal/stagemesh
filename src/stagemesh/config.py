@@ -18,7 +18,7 @@ class ConfigValidationError(ValueError):
 
 
 # Default registry entries (their commands live in providers.approved_default_adapters). They are not the only providers allowed.
-BUILTIN_PROVIDERS = ("codex", "claude", "grok")
+BUILTIN_PROVIDERS = ("codex", "claude", "grok", "agy")
 PROVIDER_STAGES = ("IMPLEMENT", "REVIEW")
 SELECTION_POLICIES = ("priority", "round_robin", "least_recently_used", "weighted")
 _LEGACY_CAPABILITIES = {"code": "IMPLEMENT", "review": "REVIEW"}
@@ -115,6 +115,7 @@ class TaskSourceConfig:
     kind: str
     path: Path | None = None
     labels: tuple[str, ...] = ()
+    excluded_labels: tuple[str, ...] = ()
 
 
 def load_config(project: Path, config_path: Path | None = None) -> StageMeshConfig:
@@ -535,7 +536,8 @@ def _task_sources(project: Path, value: object) -> tuple[TaskSourceConfig, ...]:
             raise ConfigValidationError(f"unsupported task source type for {name}: {kind}")
         if kind == "github":
             labels = _labels(item.get("labels", item.get("label", ())))
-            sources.append(TaskSourceConfig(name=name, kind=kind, labels=labels))
+            excluded_labels = _labels(item.get("excluded_labels", item.get("exclude_labels", ())))
+            sources.append(TaskSourceConfig(name=name, kind=kind, labels=labels, excluded_labels=excluded_labels))
             seen.add(name)
             continue
         raw_path = _string(item.get("path"))

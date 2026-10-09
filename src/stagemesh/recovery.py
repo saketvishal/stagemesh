@@ -267,6 +267,71 @@ def auto_rebaseline_blocked_stale_baselines(
     return recovered
 
 
+def auto_rebind_blocked_missing_validation_gates(
+    store: Store,
+    project: Path,
+    *,
+    task_id: str | None = None,
+    limit: int = 1,
+) -> list[dict[str, Any]]:
+    """Recover blocked tasks when a stale frozen contract has no executable validation gate.
+
+    This is intentionally narrower than the operator repair command: it only runs for a BLOCKED task whose diagnosis is the
+    specific missing-planned-check validation gate failure, and only when the task now has an explicit contract file with gates.
+    Passed evidence remains protected by rebind_contract's normal history checks.
+    """
+    if limit < 1:
+        return []
+    recovered: list[dict[str, Any]] = []
+    for task in store.tasks():
+        current_id = str(task["id"])
+        if task_id is not None and current_id != task_id:
+            continue
+        if task["status"] != TaskStatus.BLOCKED:
+            continue
+        diagnosis = diagnose(store, current_id, project)
+        if diagnosis is None:
+            continue
+        latest = diagnosis.failing_evidence[-1] if diagnosis.failing_evidence else {}
+        codes = set(latest.get("codes") or ())
+        if "planned_check_missing_command" not in codes:
+            continue
+        path = task_contract_path(project, current_id)
+        if path is None:
+            continue
+        try:
+            contract = parse_contract(json.loads(path.read_text(encoding="utf-8")))
+        except (OSError, ValueError, ContractError) as exc:
+            record_audit(
+                store,
+                "task.auto_rebind_refused",
+                {"task_id": current_id, "code": "invalid_contract", "message": str(exc)[:300]},
+            )
+            continue
+        if not contract.explicit or not contract.gates:
+            continue
+        try:
+            report = rebind_contract(
+                store,
+                project,
+                current_id,
+                validate=True,
+                reason="automatic missing validation gate recovery",
+            )
+        except RecoveryRefusal as exc:
+            record_audit(
+                store,
+                "task.auto_rebind_refused",
+                {"task_id": current_id, "code": exc.code, "message": str(exc)[:300]},
+            )
+            continue
+        report["auto_recovery"] = "missing_validation_gate"
+        recovered.append(report)
+        if len(recovered) >= limit:
+            break
+    return recovered
+
+
 def _force_analysis(project: Path, analysis: BaselineAnalysis) -> BaselineAnalysis:
     git = GitWorkspace(project)
     try:

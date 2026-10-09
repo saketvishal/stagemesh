@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import shlex
 import shutil
@@ -203,7 +204,7 @@ class RuntimeCommandAdapter:
             before_head = _git_output(review_path, "rev-parse", "HEAD")
             if before_head != candidate_sha:
                 return _review_infrastructure_failure("review workspace did not checkout exact candidate")
-            command, provider_input = _command_and_input(self.command, prompt)
+            command, provider_input = _command_and_input(self.command, prompt, structured_review=True)
             try:
                 proc = subprocess.Popen(
                     command,
@@ -231,7 +232,7 @@ class RuntimeCommandAdapter:
                     output, retry_after = capacity_evidence(stdout, stderr)
                     return _review_infrastructure_failure(reason, output, retry_after)
                 return _review_infrastructure_failure(reason)
-            return stdout.strip()
+            return _provider_text_response(stdout)
 
 
 @dataclass(frozen=True)
@@ -248,19 +249,74 @@ class RuntimeReviewAdapter:
         return self.runtime.review_candidate(prompt, self.project, self.candidate_sha)
 
 
-def _command_and_input(command: tuple[str, ...], prompt: str) -> tuple[list[str], str]:
+REVIEW_JSON_SCHEMA = json.dumps(
+    {
+        "type": "object",
+        "properties": {
+            "decision": {"type": "string", "enum": ["PASS", "FAIL"]},
+            "findings": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "severity": {"type": "string"},
+                        "message": {"type": "string"},
+                        "path": {"type": "string"},
+                    },
+                    "required": ["severity", "message"],
+                    "additionalProperties": True,
+                },
+            },
+        },
+        "required": ["decision"],
+        "additionalProperties": True,
+    },
+    separators=(",", ":"),
+)
+
+
+def _command_and_input(command: tuple[str, ...], prompt: str, *, structured_review: bool = False) -> tuple[list[str], str]:
     args = list(command)
     executable = Path(args[0]).name.lower() if args else ""
-    if executable not in {"grok", "grok.exe"}:
-        return args, prompt
+    if executable in {"grok", "grok.exe"}:
+        args = _ensure_arg(args, "--json-schema", REVIEW_JSON_SCHEMA) if structured_review else args
+        for flag in ("-p", "--single"):
+            if flag in args:
+                index = args.index(flag)
+                if index == len(args) - 1 or args[index + 1].startswith("-"):
+                    return [*args[: index + 1], prompt, *args[index + 1 :]], ""
+                return args, ""
+        return [args[0], "-p", prompt, *args[1:]], ""
+    if executable in {"agy", "agy.exe"}:
+        if structured_review:
+            args = _ensure_arg(_ensure_arg(args, "--output-format", "json"), "--json-schema", REVIEW_JSON_SCHEMA)
+        for flag in ("-p", "--print", "--prompt"):
+            if flag in args:
+                index = args.index(flag)
+                if index == len(args) - 1 or args[index + 1].startswith("-"):
+                    return [*args[: index + 1], prompt, *args[index + 1 :]], ""
+                return args, ""
+        return [args[0], "--print", prompt, *args[1:]], ""
+    return args, prompt
 
-    for flag in ("-p", "--single"):
-        if flag in args:
-            index = args.index(flag)
-            if index == len(args) - 1 or args[index + 1].startswith("-"):
-                return [*args[: index + 1], prompt, *args[index + 1 :]], ""
-            return args, ""
-    return [args[0], "-p", prompt, *args[1:]], ""
+
+def _ensure_arg(args: list[str], flag: str, value: str) -> list[str]:
+    if flag in args:
+        return args
+    return [*args, flag, value]
+
+
+def _provider_text_response(stdout: str) -> str:
+    text = stdout.strip()
+    try:
+        payload = json.loads(text)
+    except (TypeError, json.JSONDecodeError):
+        return text
+    if isinstance(payload, dict) and isinstance(payload.get("text"), str):
+        return payload["text"].strip()
+    if isinstance(payload, dict) and isinstance(payload.get("structured_output"), dict):
+        return json.dumps(payload["structured_output"], separators=(",", ":"))
+    return text
 
 
 def _execution_result(exc: Exception) -> str:
@@ -286,18 +342,21 @@ WRITE_CAPABLE_DEFAULT_COMMANDS = {
         "--allow 'Bash(git show*)' --allow 'Bash(git rev-parse*)' "
         "--allow 'Bash(python *)' --allow 'Bash(pytest *)' --allow 'Bash(ruff *)'"
     ),
+    "agy": "agy --mode accept-edits",
 }
 
 LEGACY_DEFAULT_COMMANDS = {
     "codex": "codex exec",
     "claude": "claude -p",
     "grok": "grok",
+    "agy": "agy",
 }
 
 PROVIDER_COMMAND_ENVS = {
     "codex": "STAGEMESH_CODEX_CMD",
     "claude": "STAGEMESH_CLAUDE_CMD",
     "grok": "STAGEMESH_GROK_CMD",
+    "agy": "STAGEMESH_AGY_CMD",
 }
 
 

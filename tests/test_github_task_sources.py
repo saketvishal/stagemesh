@@ -23,7 +23,12 @@ def test_configured_github_task_source_is_loaded_from_config(tmp_path):
             {
                 "github": {"owner": "example", "repo": "repo"},
                 "task_sources": [
-                    {"name": "github-ready", "type": "github", "labels": ["stagemesh:ready"]}
+                    {
+                        "name": "github-ready",
+                        "type": "github",
+                        "labels": ["status:QUEUED"],
+                        "excluded_labels": ["stagemesh:blocked"],
+                    }
                 ],
             }
         ),
@@ -36,21 +41,35 @@ def test_configured_github_task_source_is_loaded_from_config(tmp_path):
     assert len(sources) == 1
     assert isinstance(sources[0], ConfiguredGitHubTaskSource)
     assert sources[0].name == "github-ready"
-    assert sources[0].labels == ("stagemesh:ready",)
+    assert sources[0].labels == ("status:QUEUED",)
+    assert sources[0].excluded_labels == ("stagemesh:blocked",)
 
 
 def test_github_task_source_filters_to_required_labels():
-    source = ConfiguredGitHubTaskSource("example", "repo", None, labels=("stagemesh:ready",))
+    source = ConfiguredGitHubTaskSource(
+        "example",
+        "repo",
+        None,
+        labels=("status:QUEUED",),
+        excluded_labels=("stagemesh:blocked", "status:REMEDIATING"),
+    )
     source.source = _FakeIssueSource(
         [
-            DiscoveredTask("github", "1", "ready", labels=("stagemesh:ready",)),
+            DiscoveredTask("github", "1", "ready", labels=("status:QUEUED",)),
             DiscoveredTask("github", "2", "other", labels=("bug",)),
+            DiscoveredTask("github", "3", "blocked", labels=("status:QUEUED", "stagemesh:blocked")),
+            DiscoveredTask("github", "4", "remediating", labels=("status:QUEUED", "status:REMEDIATING")),
         ]
     )
 
     tasks = source.discover()
 
-    assert [(task.source_id, task.eligible) for task in tasks] == [("1", True), ("2", False)]
+    assert [(task.source_id, task.eligible) for task in tasks] == [
+        ("1", True),
+        ("2", False),
+        ("3", False),
+        ("4", False),
+    ]
 
 
 def test_github_issue_source_blocks_deferred_and_blocked_labels():
@@ -59,6 +78,8 @@ def test_github_issue_source_blocks_deferred_and_blocked_labels():
             {"number": 1, "title": "ready", "labels": [{"name": "stagemesh:ready"}]},
             {"number": 2, "title": "blocked", "labels": [{"name": "stagemesh:blocked"}]},
             {"number": 3, "title": "deferred", "labels": [{"name": "stagemesh:deferred"}]},
+            {"number": 4, "title": "status blocked", "labels": [{"name": "status:BLOCKED"}]},
+            {"number": 5, "title": "remediating", "labels": [{"name": "status:REMEDIATING"}]},
         ]
     ).discover()
 
@@ -67,6 +88,8 @@ def test_github_issue_source_blocks_deferred_and_blocked_labels():
         ("1", True, ("stagemesh:ready",)),
         ("2", False, ("stagemesh:blocked",)),
         ("3", False, ("stagemesh:deferred",)),
+        ("4", False, ("status:BLOCKED",)),
+        ("5", False, ("status:REMEDIATING",)),
     ]
 
 

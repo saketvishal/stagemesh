@@ -44,11 +44,17 @@ inspected with `stagemesh autonomy isolation | trace | streak | readiness`.
 ## Provider pools and task isolation
 
 StageMesh picks providers at run time instead of one fixed provider per stage. Each stage (`IMPLEMENT`, `REVIEW`) has a pool
-(default `codex, claude, grok`; a `routing.stage_routes` entry is simply tried first). Set `routing.pools` to pin an explicit list:
+(default `codex, claude, grok, agy`; a `routing.stage_routes` entry is simply tried first). Set `routing.pools` to pin an explicit list:
 
 ```json
-{ "routing": { "pools": { "IMPLEMENT": ["codex", "claude", "grok"], "REVIEW": ["claude", "grok", "codex"] },
+{ "routing": { "pools": { "IMPLEMENT": ["codex", "claude", "grok", "agy"], "REVIEW": ["claude", "grok", "agy", "codex"] },
               "provider_failure_cooldown_seconds": 900 } }
+```
+
+During project-local installation, choose the project-owned provider pool with:
+
+```powershell
+python scripts/bootstrap_stagemesh.py --providers codex,claude,grok,agy
 ```
 
 A provider is skipped (with the reason logged to stderr) when its CLI is not callable, it lacks the stage capability, it failed for
@@ -59,7 +65,7 @@ isolated git worktree and the integration ref only advances after validation, in
 
 ### Provider registry and selection policies
 
-`codex`, `claude` and `grok` are built-in registry entries; any other name can be added under `providers`, as a plain command string
+`codex`, `claude`, `grok` and `agy` are built-in registry entries; any other name can be added under `providers`, as a plain command string
 or an object with `command`, `capabilities` (`IMPLEMENT`, `REVIEW`), optional `priority` (lower first) and `weight`:
 
 ```json

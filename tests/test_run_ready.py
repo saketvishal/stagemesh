@@ -12,15 +12,17 @@ from test_bounded_execution import SLEEPER, TASK, _running_execution, _setup
 
 import stagemesh.cli as cli_module
 from stagemesh.attribution import attribution_for_worker
+from stagemesh.contract_binding import bind_task_contract
 from stagemesh.coordinator import TargetSelection
 from stagemesh.diagnosis import DiagnosisPolicy
-from stagemesh.domain import ExecutionKind, ExecutionStatus, Stage
+from stagemesh.domain import EvidenceStatus, ExecutionKind, ExecutionStatus, Stage
 from stagemesh.execution import ExecutionResult, Executor
 from stagemesh.git import GitWorkspace
 from stagemesh.persistence import Store
 from stagemesh.process_identity import popen_identity
 from stagemesh.review import Reviewer, ReviewFinding
 from stagemesh.run_ready import run_ready
+from stagemesh.validation import Validator
 from stagemesh.workspace_guard import (
     EXTERNAL_WORKSPACE_MUTATION,
     WorkspaceMutation,
@@ -835,6 +837,38 @@ def test_continue_runtime_resume_matrix_reaches_done_from_each_stage(
     assert final["final"]["stage"] == "DONE"
     assert final["final"]["latest_validation"] == "PASSED"
     assert final["final"]["latest_review"] == "PASSED"
+
+
+def test_continue_auto_rebinds_blocked_missing_validation_gate_when_contract_file_has_gate(tmp_path: Path) -> None:
+    project = _project(tmp_path, ["T-1"])
+    store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+    store.migrate()
+    cli_module._sync_all_sources(store, project, cli_module.load_config(project), "T-1")
+    workspace = GitWorkspace(project)
+    baseline = workspace.head()
+    store.set_task_baseline("T-1", baseline)
+    stale_contract = {"objective": "fake task", "allowed_files": ["stagemesh-task-*.txt", ".stagemesh/**"]}
+    (project / ".stagemesh" / "contracts" / "T-1.json").write_text(json.dumps(stale_contract), encoding="utf-8")
+    bind_task_contract(store, project, "T-1", baseline)
+    (project / "stagemesh-task-T-1.txt").write_text("implemented before better contract existed\n", encoding="utf-8")
+    workspace.run("add", "stagemesh-task-T-1.txt")
+    workspace.run("commit", "-m", "candidate")
+    candidate = workspace.head()
+    store.add_candidate("T-1", candidate, "fake", True)
+    store.advance_task("T-1", Stage.VALIDATE)
+
+    assert Validator().validate(store, "T-1", candidate, project) is EvidenceStatus.FAILED
+    store.add_task_remediation("T-1", Stage.VALIDATE, candidate)
+    store.block_task("T-1")
+    (project / ".stagemesh" / "contracts" / "T-1.json").write_text(json.dumps(FAKE_CONTRACT), encoding="utf-8")
+    store.close()
+
+    code, result = _continue(project, "--task", "T-1")
+
+    assert code == 0, result
+    assert result["stop_reason"] == "DONE"
+    assert result["final"]["latest_validation"] == "PASSED"
+    assert any(item.get("auto_recovery") == "missing_validation_gate" for item in result["recovered"])
 
 
 def test_continue_task_supervises_only_that_task_to_done(tmp_path: Path) -> None:

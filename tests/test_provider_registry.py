@@ -144,16 +144,16 @@ def test_config_json_shows_effective_default_providers_and_rotation_policy(
     assert code == 0
     data = json.loads(capsys.readouterr().out)
     assert data["routing"]["provider_selection_policy"] == "round_robin"
-    assert data["routing"]["pools"][IMPLEMENT] == ["codex", "claude", "grok"]
-    assert data["routing"]["pools"][REVIEW] == ["codex", "claude", "grok"]
-    assert {"codex", "claude", "grok"} <= set(data["providers"])
+    assert data["routing"]["pools"][IMPLEMENT] == ["codex", "claude", "grok", "agy"]
+    assert data["routing"]["pools"][REVIEW] == ["codex", "claude", "grok", "agy"]
+    assert {"codex", "claude", "grok", "agy"} <= set(data["providers"])
 
-def test_default_builtin_policy_rotates_across_all_three_providers(tmp_path: Path) -> None:
-    rig = Rig(tmp_path, {"codex": "ok", "claude": "ok", "grok": "ok"})
+def test_default_builtin_policy_rotates_across_all_four_providers(tmp_path: Path) -> None:
+    rig = Rig(tmp_path, {"codex": "ok", "claude": "ok", "grok": "ok", "agy": "ok"})
 
     assert rig.pool.policy == "round_robin"
-    assert _picks(rig, IMPLEMENT, 6) == ["codex", "claude", "grok", "codex", "claude", "grok"]
-    assert _picks(rig, REVIEW, 4, implementer="codex") == ["claude", "grok", "claude", "grok"]
+    assert _picks(rig, IMPLEMENT, 8) == ["codex", "claude", "grok", "agy", "codex", "claude", "grok", "agy"]
+    assert _picks(rig, REVIEW, 6, implementer="codex") == ["claude", "grok", "agy", "claude", "grok", "agy"]
     text = rig.text()
     assert "selection policy: round_robin" in text
     assert "skipped codex: not_independent: produced the candidate" in text
