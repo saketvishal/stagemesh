@@ -63,6 +63,10 @@ _CAPACITY_OUTCOMES = frozenset(
 TASK_ALREADY_SATISFIED = "task_already_satisfied"
 
 
+def _is_workspace_mutation_reason(reason: str | None) -> bool:
+    return bool(reason) and EXTERNAL_WORKSPACE_MUTATION in str(reason)
+
+
 @dataclass(frozen=True)
 class Verdict:
     provider: str
@@ -127,6 +131,8 @@ def default_pools(
 
 
 def _failure_cooldown_seconds(reason: str, configured: float) -> float:
+    if _is_workspace_mutation_reason(reason):
+        return 0.0
     if reason == "quota_rate_limit":
         return max(configured, DEFAULT_QUOTA_COOLDOWN_SECONDS)
     return configured
@@ -614,18 +620,22 @@ class PooledExecutor(Executor):
                 try:
                     result = adapter.execute(store, task_id, claim_id, project)
                 except Exception as exc:  # noqa: BLE001 - one provider crashing must not stop the fallback chain
-                    result = ExecutionResult(ExecutionStatus.FAILED, capacity_failure=True, failure_reason=f"{type(exc).__name__}: {exc}")
+                    reason = f"{type(exc).__name__}: {exc}"
+                    result = ExecutionResult(
+                        ExecutionStatus.FAILED,
+                        capacity_failure=not _is_workspace_mutation_reason(reason),
+                        failure_reason=reason,
+                    )
             finally:
                 if held is not None and limiter is not None:
                     limiter.release(held)
             previous_name = adapter.name
             index += 1
-            if result.failure_reason == EXTERNAL_WORKSPACE_MUTATION:
+            if _is_workspace_mutation_reason(result.failure_reason):
                 reason = EXTERNAL_WORKSPACE_MUTATION
                 reasons.append(reason)
                 failures.append(f"{adapter.name}: {reason}")
                 walk.append({"provider": adapter.name, "outcome": reason, "classification": "workspace_mutation"})
-                self.pool.record_failure(store, IMPLEMENT, task_id, adapter.name, reason, next_provider=remaining[0].name if remaining else None)
                 log(f"  quarantined {adapter.name}: task workspace changed outside StageMesh; trying a clean workspace")
                 try:
                     _quarantine_mutated_worktree(store, project, task_id, adapter.name)
@@ -730,6 +740,8 @@ class PooledExecutor(Executor):
 
 
 def _classification(outcome: str) -> str:
+    if _is_workspace_mutation_reason(outcome):
+        return "workspace_mutation"
     if outcome == PROVIDER_TIMEOUT:
         return "timeout"
     if outcome == NO_IMPLEMENTATION_CHANGE:

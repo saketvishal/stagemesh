@@ -271,15 +271,19 @@ def _is_external_workspace_mutation(exc: Exception) -> bool:
     return getattr(exc, "code", None) == EXTERNAL_WORKSPACE_MUTATION
 
 
+READ_ONLY_GIT_TOOLS = "Bash(git status*),Bash(git diff*),Bash(git log*),Bash(git show*),Bash(git rev-parse*)"
+
 WRITE_CAPABLE_DEFAULT_COMMANDS = {
     "codex": "codex exec --sandbox workspace-write",
     "claude": (
         "claude -p --permission-mode acceptEdits --permission-prompts none "
-        "--allowedTools 'Edit,Write,MultiEdit,Bash(git *),Bash(python *),Bash(pytest *),Bash(ruff *)'"
+        f"--allowedTools 'Edit,Write,MultiEdit,{READ_ONLY_GIT_TOOLS},Bash(python *),Bash(pytest *),Bash(ruff *)'"
     ),
     "grok": (
         "grok --permission-mode acceptEdits --always-approve "
-        "--allow Edit --allow Write --allow MultiEdit --allow 'Bash(git *)' "
+        "--allow Edit --allow Write --allow MultiEdit "
+        "--allow 'Bash(git status*)' --allow 'Bash(git diff*)' --allow 'Bash(git log*)' "
+        "--allow 'Bash(git show*)' --allow 'Bash(git rev-parse*)' "
         "--allow 'Bash(python *)' --allow 'Bash(pytest *)' --allow 'Bash(ruff *)'"
     ),
 }
@@ -389,8 +393,8 @@ def _build_task_prompt(
 ) -> str:
     """Build the prompt string sent via stdin to a provider CLI.
 
-    The prompt gives the agent its task title and a reminder to commit any
-    changes via git so StageMesh can capture the resulting SHA for evidence.
+    The prompt gives the agent its task title and keeps Git ownership with
+    StageMesh so candidate commits remain trustworthy.
     """
     import sqlite3 as _sqlite3
 
@@ -411,9 +415,14 @@ def _build_task_prompt(
         f"StageMesh task: {title}\n\n"
         f"{contract_text}"
         f"{remediation_text}"
-        "Please implement the changes described above. "
-        "When you are done, commit all changes to git with a descriptive commit message "
-        "so StageMesh can record the resulting commit SHA as the implementation candidate.\n"
+        "Please implement the changes described above.\n\n"
+        "Workspace rules:\n"
+        "- Edit files only. Do not run git commit, checkout, switch, reset, rebase, merge, cherry-pick, branch, tag, "
+        "amend, or any command that moves HEAD or rewrites history.\n"
+        "- You may use read-only git commands such as status, diff, log, show, and rev-parse.\n"
+        "- Leave the finished changes in the working tree. StageMesh owns all Git commits and will create the "
+        "implementation candidate itself.\n"
+        "- If no code change is needed, explain why and leave the tree unchanged.\n"
     )
 
 

@@ -38,6 +38,10 @@ from .workspaces import NO_IMPLEMENTATION_CHANGE
 _REF_STATE_CODES = frozenset({REBASE_CONFLICT, STALE_BASE})
 
 
+def _is_workspace_mutation_reason(reason: str | None) -> bool:
+    return bool(reason) and EXTERNAL_WORKSPACE_MUTATION in str(reason)
+
+
 @dataclass(frozen=True)
 class TargetSelection:
     task_id: str
@@ -178,7 +182,7 @@ class Coordinator:
                     durable_handoff=False,
                 )
                 return 0
-            if result.failure_reason == EXTERNAL_WORKSPACE_MUTATION:
+            if _is_workspace_mutation_reason(result.failure_reason):
                 # The execution's workspace was changed outside StageMesh. Another attempt would run on the same tampered state, so the
                 # task stops (blocked) until an operator restores or removes the workspace; nothing from it is adopted.
                 self._release_unsuccessful_implementation(

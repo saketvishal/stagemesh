@@ -20,7 +20,7 @@ from stagemesh.domain import ExecutionKind, ExecutionStatus, ProcessIdentity, St
 from stagemesh.execution import ExecutionResult, FakeExecutor, SubprocessExecutor, classify_failure
 from stagemesh.git import GitWorkspace
 from stagemesh.persistence import Store
-from stagemesh.providers import approved_default_adapters
+from stagemesh.providers import _build_task_prompt, approved_default_adapters
 from stagemesh.workspaces import task_workspace
 
 
@@ -314,7 +314,8 @@ def test_default_runtime_provider_commands_are_non_interactive(monkeypatch: pyte
     assert adapters["codex"] == ("codex", "exec", "--sandbox", "workspace-write")
     assert adapters["claude"][:4] == ("claude", "-p", "--permission-mode", "acceptEdits")
     assert any("Edit,Write,MultiEdit" in part for part in adapters["claude"])
-    assert any("Bash(git *)" in part for part in adapters["claude"])
+    assert not any("Bash(git *)" in part for part in adapters["claude"])
+    assert any("Bash(git status*)" in part for part in adapters["claude"])
 
 
 def test_legacy_builtin_provider_commands_are_upgraded_to_write_capable(tmp_path: Path) -> None:
@@ -342,8 +343,18 @@ def test_legacy_builtin_provider_commands_are_upgraded_to_write_capable(tmp_path
 
     assert adapters["codex"] == ("codex", "exec", "--sandbox", "workspace-write")
     assert adapters["claude"][:4] == ("claude", "-p", "--permission-mode", "acceptEdits")
-    assert any("Bash(git *)" in part for part in adapters["claude"])
+    assert not any("Bash(git *)" in part for part in adapters["claude"])
+    assert any("Bash(git status*)" in part for part in adapters["claude"])
     assert adapters["grok"][:3] == ("grok", "--permission-mode", "acceptEdits")
+
+
+def test_runtime_provider_prompt_leaves_git_commits_to_stagemesh() -> None:
+    prompt = _build_task_prompt("task-1", {"title": "change app"})
+
+    assert "Do not run git commit" in prompt
+    assert "StageMesh owns all Git commits" in prompt
+    assert "commit all changes to git" not in prompt
+
 
 def test_runtime_provider_terminalizes_execution_when_post_start_exception_occurs(
     store: Store,

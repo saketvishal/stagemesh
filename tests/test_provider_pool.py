@@ -622,6 +622,40 @@ def test_workspace_mutation_is_quarantined_and_next_provider_runs(tmp_path: Path
     )
     assert event["task_id"] == TASK and event["provider"] == "provider-a"
     assert event["reason"] == "EXTERNAL_WORKSPACE_MUTATION"
+    assert not rig.store.conn.execute(
+        "SELECT 1 FROM audit_events WHERE event_type='provider.failure' AND payload LIKE '%EXTERNAL_WORKSPACE_MUTATION%'"
+    ).fetchone()
+
+
+def test_verbose_workspace_mutation_is_quarantined_without_provider_cooldown(tmp_path: Path) -> None:
+    class MutatingAdapter:
+        name = "provider-a"
+        command = ("provider-a",)
+        capabilities = frozenset({"code", "review", "validate"})
+
+        def check_capacity(self) -> str:
+            return CapacityKind.AVAILABLE
+
+        def execute(self, store: Store, task_id: str, claim_id: str | None, project: Path) -> ExecutionResult:
+            return ExecutionResult(
+                ExecutionStatus.FAILED,
+                capacity_failure=True,
+                failure_reason=(
+                    "ExternalWorkspaceMutation: EXTERNAL_WORKSPACE_MUTATION: "
+                    "mutation=HEAD_REWRITTEN expected_head=abc observed_head=def"
+                ),
+            )
+
+    rig = Rig(tmp_path, {"provider-b": "ok"}, pools={IMPLEMENT: ("provider-a", "provider-b"), REVIEW: ("provider-b",)})
+    rig.pool.adapters["provider-a"] = MutatingAdapter()
+
+    rig.tick(2)
+
+    assert rig.store.latest_candidate(TASK)["produced_by"] == "provider-b"
+    assert "fallback: provider-a failed (EXTERNAL_WORKSPACE_MUTATION) -> trying provider-b" in rig.text()
+    assert not rig.store.conn.execute(
+        "SELECT 1 FROM audit_events WHERE event_type='provider.failure' AND payload LIKE '%EXTERNAL_WORKSPACE_MUTATION%'"
+    ).fetchone()
 
 
 def test_no_progress_does_not_consume_remediation_budget(tmp_path: Path) -> None:
