@@ -14,7 +14,7 @@ jobs:
         with:
           python-version: "3.11"
       - run: python scripts/bootstrap_stagemesh.py
-      - run: .stagemesh\bin\stagemesh.cmd --version
+      - run: .stagemesh\tooling\venv\Scripts\python.exe -c "import stagemesh; print(stagemesh.__version__)"
       - run: .stagemesh\tooling\venv\Scripts\python.exe -m pytest tests/test_provider_pool.py::test_verbose_workspace_mutation_is_quarantined_without_provider_cooldown -q
 
   linux:
@@ -25,5 +25,5 @@ jobs:
         with:
           python-version: "3.11"
       - run: python scripts/bootstrap_stagemesh.py
-      - run: ./.stagemesh/bin/stagemesh --version
+      - run: .stagemesh/tooling/venv/bin/python -c "import stagemesh; print(stagemesh.__version__)"
       - run: .stagemesh/tooling/venv/bin/python -m pytest tests/test_provider_pool.py::test_verbose_workspace_mutation_is_quarantined_without_provider_cooldown -q
