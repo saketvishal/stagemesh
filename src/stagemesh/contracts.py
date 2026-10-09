@@ -6,7 +6,6 @@ import json
 import os
 import shutil
 import subprocess
-import sys
 import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -510,10 +509,6 @@ def run_gate(project: Path, gate: GateCommand) -> GateResult:
 
 def _gate_runtime_command(command: list[str]) -> list[str]:
     if not command:
-        return command
-    executable = Path(command[0]).name.casefold()
-    if executable in {"python", "python.exe", "python3", "python3.exe"}:
-        command[0] = sys.executable
         return command
     resolved = shutil.which(command[0])  # lets "npm" find npm.cmd on Windows without a shell
     if resolved:
