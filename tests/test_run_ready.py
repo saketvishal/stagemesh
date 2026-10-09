@@ -871,6 +871,55 @@ def test_continue_auto_rebinds_blocked_missing_validation_gate_when_contract_fil
     assert any(item.get("auto_recovery") == "missing_validation_gate" for item in result["recovered"])
 
 
+def test_continue_auto_rechecks_blocked_validation_gate_once_after_environment_changes(tmp_path: Path) -> None:
+    project = _project(tmp_path, ["T-1"], contracts=[])
+    marker = tmp_path / "dependency-ready.marker"
+    contract = {
+        "objective": "fake task",
+        "allowed_files": ["stagemesh-task-*.txt", ".stagemesh/**"],
+        "required_tests": [
+            {
+                "name": "env-sensitive-gate",
+                "command": [
+                    sys.executable,
+                    "-c",
+                    (
+                        "from pathlib import Path\n"
+                        f"if not Path({str(marker)!r}).exists():\n"
+                        "    raise ModuleNotFoundError(\"No module named 'psycopg'\")\n"
+                    ),
+                ],
+            }
+        ],
+    }
+    (project / ".stagemesh" / "contracts" / "T-1.json").write_text(json.dumps(contract), encoding="utf-8")
+    store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+    store.migrate()
+    cli_module._sync_all_sources(store, project, cli_module.load_config(project), "T-1")
+    workspace = GitWorkspace(project)
+    baseline = workspace.head()
+    store.set_task_baseline("T-1", baseline)
+    bind_task_contract(store, project, "T-1", baseline)
+    (project / "stagemesh-task-T-1.txt").write_text("implemented before environment was ready\n", encoding="utf-8")
+    workspace.run("add", "stagemesh-task-T-1.txt")
+    workspace.run("commit", "-m", "candidate")
+    candidate = workspace.head()
+    store.add_candidate("T-1", candidate, "fake", True)
+    store.advance_task("T-1", Stage.VALIDATE)
+
+    assert Validator().validate(store, "T-1", candidate, project) is EvidenceStatus.FAILED
+    store.block_task("T-1")
+    marker.write_text("ready\n", encoding="utf-8")
+    store.close()
+
+    code, result = _continue(project, "--task", "T-1")
+
+    assert code == 0, result
+    assert result["stop_reason"] == "DONE"
+    assert result["final"]["latest_validation"] == "PASSED"
+    assert any(item.get("auto_recovery") == "blocked_validation_recheck" for item in result["recovered"])
+
+
 def test_continue_task_supervises_only_that_task_to_done(tmp_path: Path) -> None:
     project = _project(tmp_path, ["A-1", "B-1"])
     code, result = _continue(project, "--task", "A-1")
