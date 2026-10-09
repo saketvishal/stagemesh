@@ -36,6 +36,8 @@ SCRIPT = (
     "        sys.stderr.write('rate limit exceeded'); sys.exit(1)\n"
     "    if mode == 'weekly-limit':\n"
     "        sys.stderr.write(\"You've hit your weekly limit \\u00b7 resets 1am (America/Chicago)\"); sys.exit(1)\n"
+    "    if mode == 'fenced-review':\n"
+    "        print('```json\\n{\"decision\":\"PASS\"}\\n```'); sys.exit(0)\n"
     "    print('{\"decision\":\"PASS\"}'); sys.exit(0)\n"
     "if mode == 'auth-fail':\n"
     "    sys.stderr.write('authentication_error: not logged in'); sys.exit(1)\n"
@@ -304,6 +306,23 @@ def test_grok_can_be_selected_as_an_independent_reviewer(tmp_path: Path) -> None
     assert "selected review provider grok" in rig.text()
 
 
+def test_fenced_json_review_output_is_accepted_without_fallback(tmp_path: Path) -> None:
+    rig = Rig(
+        tmp_path,
+        {"codex": "ok", "claude": "fenced-review", "grok": "ok"},
+        pools={IMPLEMENT: ("codex",), REVIEW: ("claude", "grok")},
+    )
+
+    rig.tick(4)  # plan, implement, validate, review
+
+    payload = rig.review_payload()
+    assert payload["review_provider"] == "claude"
+    assert payload["independent_reviewer"] is True
+    assert payload["review_response"].startswith("```json")
+    assert "final review provider: claude" in rig.text()
+    assert "fallback: claude failed (malformed_review_output)" not in rig.text()
+
+
 def test_operator_json_exposes_provider_selection_timeline(tmp_path: Path) -> None:
     import contextlib
     import io
@@ -392,6 +411,17 @@ def test_review_stage_preflight_ignores_implementation_cooldown(tmp_path: Path) 
     assert ok is True and diagnostic == ""
     assert not any(verdict.eligible for verdict in impl)
     assert any(verdict.provider != "grok" and verdict.eligible for verdict in review)
+
+
+def test_malformed_review_output_does_not_cool_provider(tmp_path: Path) -> None:
+    rig = Rig(tmp_path, {"codex": "ok", "claude": "ok", "grok": "ok"})
+    rig.pool.record_failure(rig.store, REVIEW, TASK, "claude", "malformed_review_output")
+
+    same = {v.provider: v for v in rig.pool.evaluate(rig.store, REVIEW, TASK, implementer="codex")}
+    other = {v.provider: v for v in rig.pool.evaluate(rig.store, REVIEW, "OTHER-TASK", implementer="codex")}
+
+    assert same["claude"].eligible
+    assert other["claude"].eligible
 
 
 def test_default_pools_try_routed_provider_first_then_every_other_provider() -> None:

@@ -23,7 +23,7 @@ from .contracts import (
     parse_contract,
     task_contract_path,
 )
-from .diagnosis import diagnose, format_findings
+from .diagnosis import STALE_BASELINE, diagnose, format_findings
 from .domain import EvidenceKind, EvidenceStatus, Stage, TaskStatus
 from .git import GitError, GitWorkspace
 from .lifecycle import evidence_allows_advance
@@ -221,6 +221,50 @@ def rebaseline_task(
     current = store.get_task(task_id)
     report["stage"], report["status"] = current["stage"], current["status"]
     return report
+
+
+def auto_rebaseline_blocked_stale_baselines(
+    store: Store,
+    project: Path,
+    *,
+    integration_ref: str | None = None,
+    task_id: str | None = None,
+    limit: int = 1,
+) -> list[dict[str, Any]]:
+    """Recover blocked stale-baseline tasks without requiring an operator command."""
+    ref = integration_ref or resolve_integration_ref(project)
+    if not ref or limit < 1:
+        return []
+    recovered: list[dict[str, Any]] = []
+    for task in store.tasks():
+        current_id = str(task["id"])
+        if task_id is not None and current_id != task_id:
+            continue
+        if task["status"] != TaskStatus.BLOCKED:
+            continue
+        diagnosis = diagnose(store, current_id, project)
+        if diagnosis is None or diagnosis.category != STALE_BASELINE:
+            continue
+        try:
+            report = rebaseline_task(
+                store,
+                project,
+                current_id,
+                ref,
+                validate=True,
+                reason="automatic stale baseline recovery",
+            )
+        except RecoveryRefusal as exc:
+            record_audit(
+                store,
+                "task.auto_rebaseline_refused",
+                {"task_id": current_id, "code": exc.code, "message": str(exc)[:300]},
+            )
+            continue
+        recovered.append(report)
+        if len(recovered) >= limit:
+            break
+    return recovered
 
 
 def _force_analysis(project: Path, analysis: BaselineAnalysis) -> BaselineAnalysis:

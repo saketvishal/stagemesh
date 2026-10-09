@@ -22,7 +22,7 @@ from .execution import PROVIDER_TIMEOUT, ExecutionResult, Executor
 from .git import GitError, GitWorkspace
 from .persistence import Store
 from .providers import RuntimeCommandAdapter
-from .review import INFRASTRUCTURE_FAILURE
+from .review import INFRASTRUCTURE_FAILURE, parse_review_response
 from .routing import RoutingMode
 from .workspace_guard import EXTERNAL_WORKSPACE_MUTATION, WorkspaceMutation, owned_workspace
 from .workspaces import (
@@ -131,7 +131,7 @@ def default_pools(
 
 
 def _failure_cooldown_seconds(reason: str, configured: float) -> float:
-    if _is_workspace_mutation_reason(reason):
+    if _is_workspace_mutation_reason(reason) or reason == "malformed_review_output":
         return 0.0
     if reason == "quota_rate_limit":
         return max(configured, DEFAULT_QUOTA_COOLDOWN_SECONDS)
@@ -214,6 +214,8 @@ class ProviderPool:
             reason = str(payload.get("reason") or "provider_failure")
             age = int(now - row["created_at"])
             cooldown = _failure_cooldown_seconds(reason, self.cooldown_seconds)
+            if cooldown <= 0:
+                continue
             if age > cooldown:
                 continue
             if reason in _CAPACITY_OUTCOMES:
@@ -521,7 +523,7 @@ class FallbackReviewAdapter:
                 retry_after=evidence.get("retry_after"),
                 next_provider=upcoming,
             )
-            if limiter is not None:  # an unavailable reviewer is unavailable for every task, not just this one
+            if limiter is not None and _failure_cooldown_seconds(reason, self.pool.cooldown_seconds) > 0:
                 limiter.cool_down(adapter.name, self.pool.cooldown_seconds, reason)
             previous = adapter.name
         self.pool.log("  all eligible review providers failed: " + "; ".join(f"{a['provider']}: {a['reason']}" for a in self.attempts))
@@ -529,10 +531,7 @@ class FallbackReviewAdapter:
 
 
 def _infrastructure_payload(response: str) -> dict | None:
-    try:
-        parsed = json.loads(response)
-    except (TypeError, ValueError):
-        return None
+    parsed = parse_review_response(response)
     if isinstance(parsed, dict) and parsed.get("decision") == INFRASTRUCTURE_FAILURE:
         return parsed
     return None
@@ -542,10 +541,7 @@ def _infrastructure_reason(response: str) -> str | None:
     parsed = _infrastructure_payload(response)
     if parsed is not None:
         return str(parsed.get("reason") or "review_provider_failure")
-    try:
-        decoded = json.loads(response)
-    except (TypeError, ValueError):
-        return "malformed_review_output"
+    decoded = parse_review_response(response)
     if not isinstance(decoded, dict) or decoded.get("decision") not in {"PASS", "FAIL"}:
         return "malformed_review_output"
     return None

@@ -18,6 +18,7 @@ from .objective_roots import objective_root_reason
 from .observability import health
 from .operator_actions import recover_stale, task_details
 from .persistence import MAX_CANONICAL_CONTRACT_CHARS, Store
+from .recovery import auto_rebaseline_blocked_stale_baselines
 from .scheduling import Scheduler
 from .task_selection import Candidate, Selection, SelectionRefusal, select_next_task
 from .timing import execution_timings, format_duration, step_duration
@@ -443,7 +444,16 @@ def _attach_diagnosis(summary: RunSummary, store: Store, project: Path, task_id:
         rows = store.conn.execute(
             "SELECT payload FROM audit_events WHERE event_type=? ORDER BY created_at DESC, rowid DESC LIMIT 20", (DIAGNOSIS_STOP_EVENT,)
         ).fetchall()
-        early = next((p for p in (json.loads(r["payload"]) for r in rows) if p.get("task_id") == task_id), None)
+        early = next(
+            (
+                p
+                for p in (json.loads(r["payload"]) for r in rows)
+                if p.get("task_id") == task_id
+                and p.get("category") == diagnosis.category
+                and p.get("candidate_sha") == diagnosis.candidate_sha
+            ),
+            None,
+        )
         if summary.stop_reason == "BLOCKED" and early is not None:
             summary.detail["stopped_early"] = True
             summary.message = f"stopped early, {early['category']} ({early['repeat_count']} identical failures): {early['recommendation']}"
@@ -696,6 +706,7 @@ def run_ready(
 
     try:
         recovered.extend(_recover_all_dead(store))  # provably dead claims/executions only; live/unknown are never touched
+        recovered.extend(auto_rebaseline_blocked_stale_baselines(store, project, task_id=task_id))
         selection = choose_task(store, project, task_id, policy or TaskSelectionConfig(), auto_plan, chooser)
         selection_info.update(selection.to_dict())
         _log_selection(selection, on_start)

@@ -19,7 +19,7 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +34,7 @@ from .git import GitWorkspace
 from .persistence import Store
 from .process_identity import classify_process, process_identity
 from .provider_pool import ProviderLog
+from .recovery import auto_rebaseline_blocked_stale_baselines
 from .run_ready import (
     RunReadyRefusal,
     RunSummary,
@@ -64,7 +65,7 @@ def worker_id_for(task_id: str) -> str:
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+    return datetime.now(UTC).isoformat(timespec="milliseconds")
 
 
 def _active_execution_rows(store: Store) -> list[dict[str, Any]]:
@@ -553,6 +554,7 @@ class ParallelRunner:
                 thread.join()
 
     def _select_batch(self, summary: ParallelSummary, free: int, running: list[str], attempted: set[str]) -> list[str]:
+        summary.recovered.extend(auto_rebaseline_blocked_stale_baselines(self.store, self.project, limit=free))
         ranked, skipped, _ = rank_batch_candidates(self.store, self.project, self.policy, auto_plan=self.auto_plan)
         self._refuse_unrunnable(summary, skipped, attempted)
         summary.skipped = [s for s in skipped if s["task_id"] not in attempted and s["task_id"] not in running]
@@ -601,7 +603,7 @@ class ParallelRunner:
                 self._say("run", f"deferring task {item['task_id']}: conflicts with running task {item['blocked_by']} ({item['reason']})")
         return chosen
 
-    def _conflict(self, contract: ChangeContract, other: ChangeContract):  # noqa: ANN202 - ConflictReason | None
+    def _conflict(self, contract: ChangeContract, other: ChangeContract):
         """Why two tasks may not run together (subclasses can add rules)."""
         return contract_conflict(contract, other)
 
