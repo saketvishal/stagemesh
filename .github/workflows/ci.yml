@@ -15,7 +15,7 @@ jobs:
           python-version: "3.11"
       - run: python scripts/bootstrap_stagemesh.py
       - run: .stagemesh\tooling\venv\Scripts\python.exe -c "import stagemesh; print(stagemesh.__version__)"
-      - run: .stagemesh\tooling\venv\Scripts\python.exe -m pytest tests/test_provider_pool.py::test_verbose_workspace_mutation_is_quarantined_without_provider_cooldown -q
+      - run: .stagemesh\tooling\venv\Scripts\python.exe scripts/stabilization_gate.py
 
   linux:
     runs-on: ubuntu-latest
@@ -26,4 +26,4 @@ jobs:
           python-version: "3.11"
       - run: python scripts/bootstrap_stagemesh.py
       - run: .stagemesh/tooling/venv/bin/python -c "import stagemesh; print(stagemesh.__version__)"
-      - run: .stagemesh/tooling/venv/bin/python -m pytest tests/test_provider_pool.py::test_verbose_workspace_mutation_is_quarantined_without_provider_cooldown -q
+      - run: .stagemesh/tooling/venv/bin/python scripts/stabilization_gate.py

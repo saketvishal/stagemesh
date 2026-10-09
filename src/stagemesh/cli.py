@@ -783,7 +783,7 @@ def command_run_ready(args: argparse.Namespace) -> int:
 
     def on_start(message: str) -> None:
         if not args.json:
-            if compact_timeline and not (message.startswith(("StageMesh run", "["))):
+            if compact_timeline and not (message.startswith(("StageMesh run", "task selection", "["))):
                 return
             print(message, flush=True)
 
@@ -791,6 +791,7 @@ def command_run_ready(args: argparse.Namespace) -> int:
 
     exhausted_tasks: list[dict[str, object]] = []
     seen_exhausted: set[str] = set()
+    blocked_tasks: list[RunSummary] = []
     try:
         while True:
             summary = run_ready(
@@ -800,8 +801,21 @@ def command_run_ready(args: argparse.Namespace) -> int:
                 chooser=_interactive_chooser if getattr(args, "choose", False) else None,
                 worktree_root_path=config.runtime.worktree_root if config.runtime else None,
             )
+            if blocked_tasks and summary.stop_reason == "REFUSED:no_eligible_task":
+                summary = blocked_tasks.pop()  # nothing else could run, so the task block is the real stop
+            elif _continue_after_task_block(summary, requested) and str(summary.task_id) not in seen_exhausted:
+                seen_exhausted.add(str(summary.task_id))
+                blocked_tasks.append(summary)
+                if not args.json:
+                    print(f"task {summary.task_id}: blocked ({summary.message}); continuing with the next eligible task", flush=True)
+                    print(flush=True)
+                continue
             if exhausted_tasks:
                 summary.detail.setdefault("continued_after_provider_exhaustion", list(exhausted_tasks))
+            if blocked_tasks:
+                summary.detail.setdefault(
+                    "continued_after_task_block", [{"task_id": item.task_id, "reason": item.message} for item in blocked_tasks]
+                )
             if not _continue_after_provider_exhaustion(summary, requested):
                 break
             task = str(summary.task_id or "")
@@ -826,6 +840,11 @@ def command_run_ready(args: argparse.Namespace) -> int:
     store.close()
     info["provider_events"] = provider_log.lines
     return _report_run_ready(summary, info, as_json=args.json)
+
+
+def _continue_after_task_block(summary: RunSummary, requested: str | None) -> bool:
+    """A blocked task keeps its evidence and stays blocked; it must not stop unrelated eligible work."""
+    return requested is None and summary.stop_reason == "BLOCKED" and bool(summary.task_id)
 
 
 def _continue_after_provider_exhaustion(summary: RunSummary, requested: str | None) -> bool:
