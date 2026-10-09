@@ -60,7 +60,7 @@ if mode == "mutate":
     sys.exit(0)
 out = pathlib.Path("out")
 out.mkdir(exist_ok=True)
-(out / f"{task}.txt").write_text("bad\n" if mode == "bad" else "done\n", encoding="utf-8")
+(out / f"{task}.txt").write_text((mode + "\n") if str(mode).startswith("bad") else "done\n", encoding="utf-8")
 '''
 
 # Operator detours that normal recovery must never ask for.

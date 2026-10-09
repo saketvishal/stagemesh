@@ -411,7 +411,7 @@ def _blocked_message(store: Store, task_id: str) -> str:
     if blocked and blocked.get("reason") == EXTERNAL_WORKSPACE_MUTATION:
         stage = blocked.get("stage") or "the task workspace"
         return f"workspace integrity failed at {stage}; StageMesh blocked the task instead of adopting untrusted provider output"
-    return "task exhausted its remediation budget; use retry-task after review"
+    return "task exhausted its remediation budget; StageMesh will keep other eligible work moving. After the task or environment changes, run `stagemesh continue`."
 
 def format_start(summary: RunSummary) -> str:
     workspace = summary.detail.get("workspace", {})

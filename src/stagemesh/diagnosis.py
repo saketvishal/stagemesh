@@ -384,30 +384,29 @@ _RECOMMENDATIONS = {
     ),
     VALIDATION_GATE: (
         "A validation gate cannot run or is misconfigured ({gates}); that is an environment or contract problem, not a code "
-        "defect. Fix the gate tooling and `stagemesh retry-task --task {task}`, or correct the contract's required_tests and "
-        "`stagemesh rebind-contract --task {task} --validate`."
+        "defect. Fix the gate tooling or correct the contract's required_tests with "
+        "`stagemesh rebind-contract --task {task} --validate`; then run `stagemesh continue`."
     ),
     REVIEW_FINDING: (
         "The independent reviewer keeps raising the same concern. Read the finding below and either address it yourself, correct "
-        "the task's acceptance criteria if the reviewer is wrong, or add the missing guidance to the task, then "
-        "`stagemesh retry-task --task {task}`."
+        "the task's acceptance criteria if the reviewer is wrong, or add the missing guidance to the task; then run "
+        "`stagemesh continue`."
     ),
     IMPLEMENTATION_DEFECT: (
         "Gate {gates} fails on the code the same way after each attempt. Read the output excerpt, fix or clarify the "
-        "requirement (a failing test may be wrong), then `stagemesh retry-task --task {task}`."
+        "requirement (a failing test may be wrong); then run `stagemesh continue`."
     ),
     PROVIDER_NO_PROGRESS: (
-        "The provider is not producing a usable change (nothing committed, or the same tree again). Check provider "
-        "availability/credentials and that the task text is actionable (`stagemesh task-doctor --task {task}`), try a different "
-        "provider (`--provider`), then `stagemesh retry-task --task {task}`."
+        "The provider pool is not producing a usable change (nothing committed, or the same tree again). Check provider "
+        "availability/credentials and that the task text is actionable; then run `stagemesh continue`."
     ),
     STALE_BASELINE: (
         "The task baseline is behind the integration ref: files integrated by other work appear in this task's diff{paths}. "
         "Run `stagemesh rebaseline-task --task {task} --to {ref_hint}`; no code change is needed."
     ),
     INTEGRATION_CONFLICT: (
-        "The integration ref moved and the candidate no longer lands cleanly. Rebase or re-implement on the current "
-        "{ref_hint}, then `stagemesh retry-task --task {task}`."
+        "The integration ref moved and the candidate no longer lands cleanly. Refresh the task against the current "
+        "{ref_hint}; then run `stagemesh continue`."
     ),
 }
 

@@ -185,6 +185,24 @@ def test_frozen_legacy_generated_contract_with_evidence_preserves_history(tmp_pa
     assert json.loads(store.task_contract("T-1")["canonical_json"])["required_tests"][0]["name"] == "project-acceptance-pytest"
 
 
+def test_frozen_legacy_generated_contract_with_failed_evidence_refreshes(tmp_path: Path) -> None:
+    project = _stagemesh_project(tmp_path)
+    legacy = _legacy_generated_contract(project)
+    store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+    store.migrate()
+    store.upsert_task("Widget endpoint", source="local-backlog", source_id="T-1")
+    store.cache_source("local-backlog", "T-1", {"objective": "Add the widget endpoint."}, "OPEN")
+    baseline = GitWorkspace(project).head()
+    store.bind_task_contract("T-1", baseline, 1, "0" * 64, canonical_contract_json(parse_contract(legacy)))
+    store.add_candidate("T-1", "abc123", "codex", True)
+    store.add_evidence("T-1", "abc123", EvidenceKind.VALIDATION, EvidenceStatus.FAILED, {"contract_hash": "0" * 64})
+
+    refreshed = auto_plan_module.refresh_stale_generated_contract(store, project, "T-1")
+
+    assert refreshed is not None and refreshed.gates == ("stagemesh-lifecycle-smoke",)
+    assert json.loads(store.task_contract("T-1")["canonical_json"])["required_tests"][0]["name"] == "stagemesh-lifecycle-smoke"
+
+
 def test_no_auto_plan_keeps_the_missing_contract_refusal(tmp_path: Path, fake_gates: None) -> None:
     project = _project(tmp_path)
 
