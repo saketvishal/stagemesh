@@ -33,6 +33,24 @@ remediation without any operator step. Add a scenario to `tests/test_stabilizati
 
 Runtime state lives in `.stagemesh/stagemesh.sqlite3` by default.
 
+## Founder Operator Loop
+
+For StageMesh development, keep the daily loop short and founder-driven:
+
+```bash
+python scripts/bootstrap_stagemesh.py --providers codex,claude,grok,agy
+stagemesh continue
+stagemesh status
+python scripts/stabilization_gate.py
+```
+
+Bootstrap once per checkout, then repeat `continue`, `status` and the stabilization gate while work is moving. The stabilization gate
+is the fast local confidence check for the development loop; broad CI, full acceptance and hosted checks are separate merge-readiness
+checks, not the normal daily loop.
+
+Do not task-doctor every stuck task one by one during the founder loop. Let `status` show blocked work, keep moving on eligible tasks,
+and batch-clean blocked tasks when they accumulate or before a merge-readiness pass.
+
 ## Founder Hands-Off
 
 StageMesh is being extended so a founder can give only `Implement objective X.` and have branches, CI, review cycles, stacked PRs,
