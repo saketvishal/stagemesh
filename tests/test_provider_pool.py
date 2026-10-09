@@ -38,6 +38,14 @@ SCRIPT = (
     "        sys.stderr.write(\"You've hit your weekly limit \\u00b7 resets 1am (America/Chicago)\"); sys.exit(1)\n"
     "    if mode == 'fenced-review':\n"
     "        print('```json\\n{\"decision\":\"PASS\"}\\n```'); sys.exit(0)\n"
+    "    if mode == 'prose-review':\n"
+    "        print('Review complete.\\n{\"decision\":\"PASS\",\"findings\":[]}\\nDone.'); sys.exit(0)\n"
+    "    if mode == 'text-wrapper-review':\n"
+    "        print('{\"text\":\"```json\\\\n{\\\\\"decision\\\\\":\\\\\"PASS\\\\\"}\\\\n```\"}'); sys.exit(0)\n"
+    "    if mode == 'structured-wrapper-review':\n"
+    "        print('{\"structured_output\":{\"decision\":\"PASS\",\"findings\":[]}}'); sys.exit(0)\n"
+    "    if mode == 'malformed-review':\n"
+    "        print('looks fine to me, approved'); sys.exit(0)\n"
     "    print('{\"decision\":\"PASS\"}'); sys.exit(0)\n"
     "if mode == 'auth-fail':\n"
     "    sys.stderr.write('authentication_error: not logged in'); sys.exit(1)\n"
@@ -321,6 +329,45 @@ def test_fenced_json_review_output_is_accepted_without_fallback(tmp_path: Path) 
     assert payload["review_response"].startswith("```json")
     assert "final review provider: claude" in rig.text()
     assert "fallback: claude failed (malformed_review_output)" not in rig.text()
+
+
+@pytest.mark.parametrize("mode", ["prose-review", "text-wrapper-review", "structured-wrapper-review"])
+def test_wrapped_json_review_output_is_accepted_without_fallback(tmp_path: Path, mode: str) -> None:
+    rig = Rig(
+        tmp_path,
+        {"codex": "ok", "grok": mode, "claude": "ok"},
+        pools={IMPLEMENT: ("codex",), REVIEW: ("grok", "claude")},
+    )
+
+    rig.tick(4)  # plan, implement, validate, review
+
+    payload = rig.review_payload()
+    assert payload["review_provider"] == "grok"
+    assert payload["independent_reviewer"] is True
+    assert "final review provider: grok" in rig.text()
+    assert "fallback: grok failed (malformed_review_output)" not in rig.text()
+
+
+def test_malformed_review_output_records_excerpt_and_falls_back(tmp_path: Path) -> None:
+    rig = Rig(
+        tmp_path,
+        {"codex": "ok", "grok": "malformed-review", "claude": "ok"},
+        pools={IMPLEMENT: ("codex",), REVIEW: ("grok", "claude")},
+    )
+
+    rig.tick(4)  # plan, implement, validate, review
+
+    payload = rig.review_payload()
+    assert payload["review_provider"] == "claude"
+    assert "fallback: grok failed (malformed_review_output) -> trying claude" in rig.text()
+    failure = json.loads(
+        rig.store.conn.execute(
+            "SELECT payload FROM audit_events WHERE event_type='provider.failure' AND payload LIKE '%malformed_review_output%'"
+        ).fetchone()["payload"]
+    )
+    assert failure["provider"] == "grok"
+    assert failure["reason"] == "malformed_review_output"
+    assert "looks fine to me" in failure["provider_output"]
 
 
 def test_operator_json_exposes_provider_selection_timeline(tmp_path: Path) -> None:
