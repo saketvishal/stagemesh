@@ -161,6 +161,22 @@ def test_stale_failed_tasks_are_skipped_unless_explicitly_retried(tmp_path: Path
     store.close()
 
 
+def test_stale_failed_task_recovers_when_no_fresh_work_is_available(tmp_path: Path) -> None:
+    project = _project(tmp_path, ["T-1"])
+    store = _synced(project)
+    store.advance_task("T-1", "IMPLEMENT")
+    store.add_candidate("T-1", "a" * 40, "codex", True)
+    store.add_task_remediation("T-1", "VALIDATE", "a" * 40)
+
+    selection = select_next_task(store, project, TaskSelectionConfig())
+
+    assert selection.mode == "auto_recovery"
+    assert selection.task_id == "T-1"
+    assert "retrying one bounded task automatically" in selection.reason
+    assert any("remediation pending after failed VALIDATE" in s["reason"] for s in selection.skipped)
+    store.close()
+
+
 def test_recent_provider_pool_exhaustion_is_temporarily_skipped(tmp_path: Path) -> None:
     project = _project(tmp_path, ["T-1", "T-2"], labels={"T-1": ["priority:p0"]})
     store = _synced(project)

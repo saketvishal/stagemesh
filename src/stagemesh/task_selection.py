@@ -2,7 +2,8 @@
 
 Order of precedence (lower is better): priority label, preferred (prep/governance/readiness) label, valid contract over one that
 needs auto-planning, then the configured tie-breaker. Tasks that are blocked, excluded, waiting on dependencies, in a stale failed
-state, objective roots, or unplannable are never auto-selected; `--task <id>` bypasses selection entirely and is how a stale task is retried.
+state, objective roots, or unplannable are passed over while fresh work is available. When every otherwise eligible task is waiting
+on provider backoff or remediation state, the selector chooses one bounded recovery task so `continue` can keep moving.
 """
 
 from __future__ import annotations
@@ -239,6 +240,10 @@ def _policy_info(policy: TaskSelectionConfig) -> dict[str, Any]:
     }
 
 
+def _recoverable_stale(skipped: list[dict[str, str]], marker: str) -> list[dict[str, str]]:
+    return [item for item in skipped if marker in item["reason"]]
+
+
 def select_next_task(
     store: Store,
     project: Path,
@@ -255,6 +260,17 @@ def select_next_task(
         skipped.extend({"task_id": c.task_id, "reason": c.contract.split(":", 1)[1]} for c in unplannable)
     policy_info = _policy_info(policy)
     if not pool:
+        remediation_pending = _recoverable_stale(skipped, "remediation pending after failed")
+        if remediation_pending:
+            recovered = remediation_pending[0]
+            return Selection(
+                "auto_recovery",
+                recovered["task_id"],
+                "all otherwise eligible tasks are waiting on remediation; retrying one bounded task automatically",
+                [],
+                skipped,
+                policy_info,
+            )
         provider_exhausted = [item for item in skipped if item["reason"].startswith("recent provider pool exhaustion")]
         if provider_exhausted:
             recovered = provider_exhausted[0]
