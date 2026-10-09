@@ -336,6 +336,8 @@ def sync_source(store: Store, tasks: list[DiscoveredTask]) -> list[str]:
             cached["objective_root"] = True
         previous_source_state = store.source_state(task.source, task.source_id) if is_github else {}
         retirement_reason = _retirement_reason(task, state)
+        if is_github:
+            _record_ready_label_drift(store, task, previous_source_state)
         if source_objective or historical_objective:
             retirement_reason = "source objective root"
             store.save_objective(
@@ -377,6 +379,24 @@ def sync_source(store: Store, tasks: list[DiscoveredTask]) -> list[str]:
                 if store.get_task(dependency) is not None:
                     store.add_dependency(task.source_id, dependency)
     return ids
+
+
+READY_LABEL = "stagemesh:ready"
+
+
+def _record_ready_label_drift(store: Store, task: DiscoveredTask, previous_state: dict[str, object]) -> None:
+    """Record (as evidence) when the issue's ready label was added or removed since the last sync."""
+    previous_labels = previous_state.get("labels")
+    if not isinstance(previous_labels, list) or not all(isinstance(label, str) for label in previous_labels):
+        return
+    was_ready = READY_LABEL in folded_labels(tuple(previous_labels))
+    is_ready = READY_LABEL in folded_labels(task.labels)
+    if was_ready == is_ready:
+        return
+    status = "READY_RESTORED" if is_ready else "READY_REMOVED"
+    payload = {"label": READY_LABEL, "previous_labels": previous_labels, "labels": list(task.labels)}
+    store.add_source_event(task.source, task.source_id, "inbound", status, payload)
+    record_audit(store, "source.ready_label_drift", {"source": task.source, "source_id": task.source_id, "status": status})
 
 
 def _objective_exists(store: Store, source_id: str) -> bool:
