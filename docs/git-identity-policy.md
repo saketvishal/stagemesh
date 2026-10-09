@@ -29,7 +29,7 @@ repository's contributor list. This document records how that happened here and 
 5. **No tool trailers.** `Co-authored-by` lines naming AI providers, `*.invalid` addresses, `+local-worker` addresses or placeholder ids
    are stripped from messages StageMesh writes. Trailers for real people are kept. A coding agent that commits directly (not through
    StageMesh) adds its own trailer unless its tooling is configured not to; for Claude Code that is the `attribution` setting
-   (`{"commit": "", "pr": "", "sessionUrl": false}`) in the user's or project's settings. This repository does not manage that file.
+   (`{"commit": "", "pr": "", "sessionUrl": false}`) in the user's or project's settings. This repository sets it in `.claude/settings.json`.
    `scripts/attribution_tool.py audit` detects any such trailer before it is published.
 6. Genuine third-party authorship is never rewritten: rebases keep the original author.
 
