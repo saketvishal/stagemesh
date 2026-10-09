@@ -24,14 +24,19 @@ def folded_labels(labels: tuple[str, ...] | list[str]) -> frozenset[str]:
     return frozenset(str(label).casefold() for label in labels)
 
 
+def _has_objective_label(labels: frozenset[str]) -> bool:
+    return bool(labels & OBJECTIVE_LABELS) or any(label.endswith(":objective") for label in labels)
+
+
 def source_issue_is_objective(labels: tuple[str, ...]) -> bool:
     """True only for source issues explicitly classified as planning/objective roots.
 
     StageMesh must not infer this from a broad-looking title/body; ordinary implementation tasks can also contain sections named
-    "Objective". A source can opt a root back into direct implementation with a direct-execution label.
+    "Objective". Namespaced labels such as ``caventra:objective`` are explicit source classification, and a source can opt a
+    root back into direct implementation with a direct-execution label.
     """
     folded = folded_labels(labels)
-    return bool(folded & OBJECTIVE_LABELS) and not bool(folded & DIRECT_EXECUTION_LABELS)
+    return _has_objective_label(folded) and not bool(folded & DIRECT_EXECUTION_LABELS)
 
 
 def task_source_state(store: Any, task: Any) -> dict[str, Any]:
@@ -64,7 +69,7 @@ def objective_root_reason(store: Any, task: Any) -> str | None:
     folded = folded_labels(labels)
     if folded & DIRECT_EXECUTION_LABELS:
         return None
-    if folded & OBJECTIVE_LABELS or state.get("objective_root") is True:
+    if _has_objective_label(folded) or state.get("objective_root") is True:
         return "source objective root"
     source_id = str(task["source_id"])
     row = store.conn.execute("SELECT 1 FROM objectives WHERE id IN (?, ?) LIMIT 1", (source_id, f"github:{source_id}")).fetchone()

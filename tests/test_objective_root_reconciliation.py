@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from test_run_ready import _project
+
 from stagemesh.config import TaskSelectionConfig
 from stagemesh.domain import TaskStatus
 from stagemesh.persistence import Store
@@ -9,8 +11,6 @@ from stagemesh.run_ready import run_ready
 from stagemesh.scheduling import Scheduler
 from stagemesh.task_selection import select_next_task
 from stagemesh.task_sources import DiscoveredTask, sync_source
-
-from test_run_ready import _project
 
 
 def _synced(project: Path) -> Store:
@@ -93,6 +93,35 @@ def test_sync_retires_objective_root_without_erasing_history(tmp_path: Path) -> 
         assert store.source_state("github", "71")["objective_root"] is True
         objective = store.conn.execute("SELECT payload FROM objectives WHERE id='71'").fetchone()
         assert objective is not None
+    finally:
+        store.close()
+
+
+def test_namespaced_objective_label_is_not_selected(tmp_path: Path) -> None:
+    project = _project(tmp_path, ["160"], contracts=["160"], labels={"160": ["priority:p1"]})
+    store = _synced(project)
+    try:
+        store.upsert_task("Objective: broad program root", source="github", source_id="40")
+        sync_source(
+            store,
+            [
+                DiscoveredTask(
+                    "github",
+                    "40",
+                    "Objective: broad program root",
+                    labels=("caventra:objective", "status:QUEUED"),
+                    body="## Objective\nBroad program work",
+                ),
+                DiscoveredTask("github", "160", "ordinary ready task", labels=("priority:p1",)),
+            ],
+        )
+
+        selection = select_next_task(store, project, TaskSelectionConfig())
+
+        assert selection.task_id == "160"
+        assert store.get_task("40")["status"] == TaskStatus.BLOCKED
+        assert Scheduler(store).decision("40").reason == "source objective root"
+        assert store.source_state("github", "40")["objective_root"] is True
     finally:
         store.close()
 
