@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 from pathlib import Path
 
@@ -67,3 +68,27 @@ def test_user_dispatcher_falls_back_to_stagemesh_user_bin(tmp_path: Path, monkey
     bootstrap.USER_BIN = fallback
 
     assert bootstrap._user_owned_path_dir() == fallback
+
+
+def test_agy_unattended_is_explicit_project_local_opt_in(tmp_path: Path) -> None:
+    bootstrap = _load_bootstrap()
+    bootstrap.ROOT = tmp_path
+
+    bootstrap._configure_providers(["codex", "agy"], agy_unattended=True)
+
+    data = json.loads((tmp_path / ".stagemesh" / "config.json").read_text(encoding="utf-8"))
+    assert data["providers"]["agy"]["command"] == bootstrap.AGY_UNATTENDED_COMMAND
+    assert data["providers"]["codex"]["command"] == bootstrap.DEFAULT_COMMANDS["codex"]
+    assert data["routing"]["pools"]["IMPLEMENT"] == ["codex", "agy"]
+
+
+def test_agy_unattended_requires_agy_provider(tmp_path: Path) -> None:
+    bootstrap = _load_bootstrap()
+    bootstrap.ROOT = tmp_path
+
+    try:
+        bootstrap._configure_providers(["codex"], agy_unattended=True)
+    except SystemExit as exc:
+        assert "--agy-unattended requires --providers including agy" in str(exc)
+    else:
+        raise AssertionError("expected --agy-unattended without agy to fail")

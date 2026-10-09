@@ -20,6 +20,7 @@ DEFAULT_COMMANDS = {
     "grok": "grok",
     "agy": "agy --mode accept-edits",
 }
+AGY_UNATTENDED_COMMAND = "agy --mode accept-edits --dangerously-skip-permissions"
 DEFAULT_QUEUE_LABELS = ("status:QUEUED",)
 DEFAULT_EXCLUDED_QUEUE_LABELS = (
     "stagemesh:blocked",
@@ -145,14 +146,19 @@ def _selected_providers(raw: str | None) -> list[str] | None:
     return selected
 
 
-def _configure_providers(selected: list[str] | None) -> None:
+def _configure_providers(selected: list[str] | None, *, agy_unattended: bool = False) -> None:
+    if agy_unattended and (selected is None or "agy" not in selected):
+        raise SystemExit("--agy-unattended requires --providers including agy")
     if selected is None:
         return
     path = ROOT / ".stagemesh" / "config.json"
     data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
     providers = data.setdefault("providers", {})
     for name in selected:
-        providers.setdefault(name, {"command": DEFAULT_COMMANDS[name], "capabilities": ["IMPLEMENT", "REVIEW"]})
+        command = AGY_UNATTENDED_COMMAND if name == "agy" and agy_unattended else DEFAULT_COMMANDS[name]
+        provider = providers.setdefault(name, {"command": command, "capabilities": ["IMPLEMENT", "REVIEW"]})
+        if name == "agy" and agy_unattended and isinstance(provider, dict):
+            provider["command"] = command
     pools = data.setdefault("routing", {}).setdefault("pools", {})
     pools["IMPLEMENT"] = selected
     pools["REVIEW"] = [name for name in ("claude", "grok", "agy", "codex") if name in selected]
@@ -192,6 +198,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Comma-separated project provider pool from codex,claude,grok,agy; omitted leaves config unchanged.",
     )
     parser.add_argument(
+        "--agy-unattended",
+        action="store_true",
+        help="Persist Agy with --dangerously-skip-permissions for this project-local runtime.",
+    )
+    parser.add_argument(
         "--no-queue-config",
         action="store_true",
         help="Leave existing GitHub task-source label filters unchanged.",
@@ -215,7 +226,7 @@ def main(argv: list[str] | None = None) -> int:
         shim.write_text(f"#!/usr/bin/env sh\nexec \"{installed}\" \"$@\"\n", encoding="utf-8")
         shim.chmod(0o755)
     dispatcher = _install_user_dispatcher()
-    _configure_providers(_selected_providers(args.providers))
+    _configure_providers(_selected_providers(args.providers), agy_unattended=args.agy_unattended)
     if not args.no_queue_config:
         _configure_queue_source()
     print(shim)
