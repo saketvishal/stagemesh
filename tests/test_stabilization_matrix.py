@@ -82,6 +82,16 @@ def test_workspace_mutation_is_quarantined_and_falls_through_without_cooldown(tm
     assert r.implementers("T-1") == ["codex", "claude"]
     (quarantine,) = m.audit("provider.workspace_quarantined")
     assert quarantine["task_id"] == "T-1" and quarantine["provider"] == "codex"
+    (integrity,) = m.audit("provider.workspace_integrity_failure")
+    assert integrity == {
+        "task_id": "T-1",
+        "stage": "IMPLEMENT",
+        "provider": "codex",
+        "reason": "EXTERNAL_WORKSPACE_MUTATION",
+        "classification": "workspace_integrity",
+        "candidate_produced": False,
+        "next_provider": "claude",
+    }
     assert not m.audit("provider.failure")  # integrity failure is not a provider failure
     assert r.implementers("T-2")[0] == "codex"
     assert m.git.run("rev-parse", "HEAD").stdout.strip() == head_before  # the project checkout never moved
@@ -180,6 +190,9 @@ def test_every_provider_mutating_one_task_blocks_it_and_moves_on_in_the_same_run
     assert not m.integrated("T-1") and m.task("T-1")["status"] == "BLOCKED"  # unsafe output is never adopted
     assert [item["task_id"] for item in r.data["detail"]["continued_after_task_block"]] == ["T-1"]
     assert {e["provider"] for e in m.audit("provider.workspace_quarantined")} == {"codex", "claude"}
+    integrity = m.audit("provider.workspace_integrity_failure")
+    assert [e["provider"] for e in integrity] == ["codex", "claude"]
+    assert all(e["classification"] == "workspace_integrity" and e["candidate_produced"] is False for e in integrity)
     assert not m.audit("provider.failure")  # integrity failures never cool a provider
     r.assert_hands_off()
 

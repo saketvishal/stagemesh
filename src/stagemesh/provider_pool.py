@@ -43,6 +43,7 @@ PROVIDER_FAILURE_EVENT = "provider.failure"
 PROVIDER_SELECTION_EVENT = "provider.selection"
 PROVIDER_USED_EVENT = "provider.used"
 PROVIDER_NO_PROGRESS_EVENT = "provider.no_progress"
+PROVIDER_WORKSPACE_INTEGRITY_EVENT = "provider.workspace_integrity_failure"
 ALL_IMPLEMENTATION_PROVIDERS_NO_PROGRESS = "all_implementation_providers_no_progress"
 ALL_IMPLEMENTATION_PROVIDERS_EXHAUSTED = "all_implementation_providers_exhausted"
 ALL_IMPLEMENTATION_PROVIDERS_FAILED = "all_implementation_providers_failed"
@@ -269,6 +270,29 @@ class ProviderPool:
                 "next_provider": next_provider,
                 "sequence": list(sequence),
                 **({"provider_output": provider_output[:500]} if provider_output else {}),
+            },
+        )
+
+    def record_workspace_integrity_failure(
+        self,
+        store: Store,
+        stage: str,
+        task_id: str,
+        provider: str,
+        *,
+        next_provider: str | None,
+    ) -> None:
+        """Attribute a provider HEAD rewrite without entering the provider cooldown stream."""
+        store.add_audit_event(
+            PROVIDER_WORKSPACE_INTEGRITY_EVENT,
+            {
+                "task_id": task_id,
+                "stage": stage,
+                "provider": provider,
+                "reason": EXTERNAL_WORKSPACE_MUTATION,
+                "classification": "workspace_integrity",
+                "candidate_produced": False,
+                "next_provider": next_provider,
             },
         )
 
@@ -629,9 +653,23 @@ class PooledExecutor(Executor):
             index += 1
             if _is_workspace_mutation_reason(result.failure_reason):
                 reason = EXTERNAL_WORKSPACE_MUTATION
+                nxt = remaining[0].name if remaining else None
                 reasons.append(reason)
                 failures.append(f"{adapter.name}: {reason}")
-                walk.append({"provider": adapter.name, "outcome": reason, "classification": "workspace_mutation"})
+                walk.append(
+                    {
+                        "provider": adapter.name,
+                        "outcome": reason,
+                        "classification": "workspace_integrity",
+                    }
+                )
+                self.pool.record_workspace_integrity_failure(
+                    store,
+                    IMPLEMENT,
+                    task_id,
+                    adapter.name,
+                    next_provider=nxt,
+                )
                 log(f"  quarantined {adapter.name}: task workspace changed outside StageMesh; trying a clean workspace")
                 try:
                     _quarantine_mutated_worktree(store, project, task_id, adapter.name)
@@ -737,7 +775,7 @@ class PooledExecutor(Executor):
 
 def _classification(outcome: str) -> str:
     if _is_workspace_mutation_reason(outcome):
-        return "workspace_mutation"
+        return "workspace_integrity"
     if outcome == PROVIDER_TIMEOUT:
         return "timeout"
     if outcome == NO_IMPLEMENTATION_CHANGE:
@@ -845,6 +883,8 @@ def _quarantine_mutated_worktree(store: Store, project: Path, task_id: str, prov
             "task_id": task_id,
             "provider": provider,
             "reason": EXTERNAL_WORKSPACE_MUTATION,
+            "classification": "workspace_integrity",
+            "candidate_produced": False,
             "old_workspace": str(old),
             "replacement_workspace": str(clean),
             "baseline_sha": baseline or "",
