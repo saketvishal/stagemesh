@@ -133,8 +133,14 @@ def test_a_linked_worktree_of_another_repository_shares_its_git_store(tmp_path: 
 
 def test_git_worktrees_registered_outside_the_checkout_are_foreign(tmp_path: Path) -> None:
     mine = _checkout(tmp_path / "mine")
-    git(mine, "worktree", "add", "--detach", str(tmp_path / "stray"))
+    git(mine, "worktree", "add", "-b", "stray-branch", str(tmp_path / "stray"))
     assert "FOREIGN_WORKTREE" in _codes(check_isolation(mine))
+
+
+def test_detached_external_worktrees_do_not_block_isolation(tmp_path: Path) -> None:
+    mine = _checkout(tmp_path / "mine")
+    git(mine, "worktree", "add", "--detach", str(tmp_path / "stray"))
+    assert "FOREIGN_WORKTREE" not in _codes(check_isolation(mine))
 
 
 def test_stagemesh_temp_candidate_worktrees_are_allowed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
