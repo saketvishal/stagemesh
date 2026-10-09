@@ -269,12 +269,15 @@ def _check_git_store(project: Path, report: IsolationReport) -> None:
         report.findings.append(
             IsolationFinding("SHARED_GIT_STORE", f"git object store {common} is outside this checkout; it is shared with another checkout", common)
         )
-    for line in listing.splitlines():
-        if not line.startswith("worktree "):
+    for block in listing.split("\n\n"):
+        lines = block.splitlines()
+        if not lines or not lines[0].startswith("worktree "):
             continue
-        entry = line[len("worktree ") :].strip()
+        entry = lines[0][len("worktree ") :].strip()
         if not _inside(entry, project):
             if _is_stagemesh_candidate_worktree(entry):
+                continue
+            if not any(line.startswith("branch ") for line in lines):
                 continue
             report.findings.append(
                 IsolationFinding("FOREIGN_WORKTREE", f"git worktree {entry} is registered in this checkout's git store but lives outside it", entry)
