@@ -78,7 +78,14 @@ def _review_execution(store: Store):
     ("response", "evidence_status", "execution_status", "result"),
     [
         ('{"decision":"PASS"}', EvidenceStatus.PASSED, ExecutionStatus.SUCCEEDED, None),
+        ('```json\n{"decision":"PASS"}\n```', EvidenceStatus.PASSED, ExecutionStatus.SUCCEEDED, None),
         ('{"decision":"FAIL","findings":[{"severity":"error","message":"needs work"}]}', EvidenceStatus.FAILED, ExecutionStatus.FAILED, "findings"),
+        (
+            '```json\n{"decision":"FAIL","findings":[{"severity":"error","message":"needs work"}]}\n```',
+            EvidenceStatus.FAILED,
+            ExecutionStatus.FAILED,
+            "findings",
+        ),
     ],
 )
 def test_builtin_review_execution_terminalizes_on_pass_and_fail(

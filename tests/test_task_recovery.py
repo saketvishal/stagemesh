@@ -297,7 +297,7 @@ def test_rebaseline_cli(tmp_path: Path) -> None:
 # --- 3. diagnosis: stale_baseline and repeated non-code failures stop before the provider is called again ---------------------------
 
 
-def test_stale_baseline_is_diagnosed_and_stops_before_spending_a_remediation_attempt(tmp_path: Path) -> None:
+def test_stale_baseline_is_diagnosed_and_auto_rebaselined_before_spending_a_remediation_attempt(tmp_path: Path) -> None:
     project, store = _setup(tmp_path, DOCS_CONTRACT)
     store.set_task_baseline(TASK, head(project))
     (project / "web-v2").mkdir()
@@ -305,16 +305,18 @@ def test_stale_baseline_is_diagnosed_and_stops_before_spending_a_remediation_att
     GitWorkspace(project).commit_all("another task integrated")
     executor = Attempts(path="docs/a.md")  # the provider's work is fine; the baseline is what is wrong
     drive(project, store, executor)
-    assert executor.calls == 1 and store.get_task(TASK)["status"] == TaskStatus.BLOCKED
+    assert executor.calls == 1 and store.get_task(TASK)["status"] == TaskStatus.DONE
     assert store.task_remediation_count(TASK, "VALIDATE") == 0
-    (stop,) = events(store, "task.diagnosis_stop")
-    assert stop["category"] == STALE_BASELINE and "rebaseline-task" in stop["recommendation"] and TASK in stop["recommendation"]
-    assert events(store, "task.remediation_exhausted")[-1]["reason"] == "stale_baseline_diagnosed"
+    (rebaseline,) = events(store, "task.rebaselined")
+    assert rebaseline["reason"] == "automatic stale baseline recovery"
+    assert store.has_evidence(TASK, rebaseline["candidate_sha"], EvidenceKind.VALIDATION, EvidenceStatus.PASSED)
+    assert not events(store, "task.diagnosis_stop")
+    assert not events(store, "task.remediation_exhausted")
     diagnosis = diagnose(store, TASK, project)
-    assert diagnosis.category == STALE_BASELINE and diagnosis.stops_remediation and diagnosis.baseline["unrelated_files"] == ["web-v2/page.tsx"]
+    assert diagnosis is None
 
 
-def test_full_recovery_of_the_stale_baseline_stop_without_touching_sqlite(tmp_path: Path) -> None:
+def test_stale_baseline_is_recovered_without_operator_rebaseline_or_sqlite_edit(tmp_path: Path) -> None:
     project, store = _setup(tmp_path, DOCS_CONTRACT)
     store.set_task_baseline(TASK, head(project))
     (project / "web-v2").mkdir()
@@ -323,11 +325,24 @@ def test_full_recovery_of_the_stale_baseline_stop_without_touching_sqlite(tmp_pa
     drive(project, store, Attempts(path="docs/a.md"))
     store.close()
     code, out, _ = cli(project, "task-doctor", "--task", TASK, "--json")
-    assert json.loads(out)["recommended_command"] == f"stagemesh rebaseline-task --task {TASK} --to {ref_of(project)}"
-    assert cli(project, "rebaseline-task", "--task", TASK, "--to", ref_of(project), "--validate")[0] == 0
-    code, out, _ = cli(project, "task-doctor", "--task", TASK, "--json")
     doctor = json.loads(out)
-    assert (doctor["stage"], doctor["status"]) == ("REVIEW", "OPEN") and doctor["baseline"]["stale"] is False
+    assert code == 0
+    assert (doctor["stage"], doctor["status"]) == ("DONE", "DONE") and doctor["baseline"]["stale"] is False
+    assert doctor["recommended_command"] == ""
+
+
+def test_continue_recovers_previously_blocked_stale_baseline_without_operator_command(tmp_path: Path) -> None:
+    project, store, _, _, sha = stale_baseline_task(tmp_path)
+    assert Validator().validate(store, TASK, sha, project) is EvidenceStatus.FAILED
+    store.block_task(TASK)
+    store.close()
+
+    code, out, _ = cli(project, "continue", "--dry-run", "--json", "--task", TASK)
+    result = json.loads(out)
+
+    assert code == 0 and result["stop_reason"] == "DONE"
+    assert result["recovered"][0]["reason"] == "automatic stale baseline recovery"
+    assert "rebaseline-task" not in json.dumps(result)
 
 
 def test_repeated_validation_gate_failures_stop_without_calling_the_provider_again(tmp_path: Path) -> None:

@@ -23,6 +23,25 @@ INFRASTRUCTURE_FAILURE = "INFRASTRUCTURE_FAILURE"
 MAX_REVIEW_EXECUTION_RESULT_CHARS = 200
 
 
+def parse_review_response(response: str) -> dict[str, object] | None:
+    """Parse strict or fenced JSON review output."""
+    try:
+        parsed = json.loads(response)
+    except (TypeError, json.JSONDecodeError):
+        text = response.strip() if isinstance(response, str) else ""
+        if not text.startswith("```"):
+            return None
+        lines = text.splitlines()
+        if len(lines) < 2 or not lines[-1].strip().startswith("```"):
+            return None
+        body = "\n".join(lines[1:-1]).strip()
+        try:
+            parsed = json.loads(body)
+        except (TypeError, json.JSONDecodeError):
+            return None
+    return parsed if isinstance(parsed, dict) else None
+
+
 def _review_execution_result(reason: str) -> str:
     return reason[:MAX_REVIEW_EXECUTION_RESULT_CHARS]
 
@@ -181,10 +200,7 @@ class Reviewer:
                         review_payload["review_provider"] = final_provider
                         review_payload["review_execution_provider"] = final_provider
                     review_payload["review_response"] = response
-                    try:
-                        parsed = json.loads(response)
-                    except json.JSONDecodeError:
-                        parsed = None
+                    parsed = parse_review_response(response)
                     if isinstance(parsed, dict) and parsed.get("decision") == INFRASTRUCTURE_FAILURE:
                         infrastructure_failure = str(parsed.get("reason") or "review_provider_failure")
                     elif not isinstance(parsed, dict) or parsed.get("decision") not in {"PASS", "FAIL"}:

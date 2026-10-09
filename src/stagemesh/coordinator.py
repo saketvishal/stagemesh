@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .audit import record_audit
+from .baseline import resolve_integration_ref
 from .contract_binding import contract_for_candidate
 from .diagnosis import (
     DIAGNOSIS_EVENT,
@@ -23,6 +24,7 @@ from .lifecycle import evidence_allows_advance
 from .persistence import Store
 from .process_identity import classify_process, process_identity
 from .provider_pool import pool_exhaustion_evidence
+from .recovery import RecoveryRefusal, rebaseline_task
 from .remediation import RemediationPolicy
 from .review import Reviewer, independent_review_verified
 from .scheduling import Scheduler
@@ -497,6 +499,30 @@ class Coordinator:
             return False
         return any(isinstance(f, dict) and f.get("code") in _REF_STATE_CODES for f in findings)
 
+    def _auto_rebaseline(self, task_id: str, diagnosis: Diagnosis) -> bool:
+        if diagnosis.category != STALE_BASELINE:
+            return False
+        integration_ref = self.integrator.integration_ref or resolve_integration_ref(self.project)
+        if not integration_ref:
+            return False
+        try:
+            rebaseline_task(
+                self.store,
+                self.project,
+                task_id,
+                integration_ref,
+                validate=True,
+                reason="automatic stale baseline recovery",
+            )
+        except RecoveryRefusal as exc:
+            record_audit(
+                self.store,
+                "task.auto_rebaseline_refused",
+                {"task_id": task_id, "code": exc.code, "message": str(exc)[:300]},
+            )
+            return False
+        return True
+
     def _remediate_or_block(self, task_id: str, sha: str, failed_stage: Stage) -> int:
         findings = self.store.open_findings_for_candidate(task_id, sha)
         if not findings:
@@ -519,6 +545,8 @@ class Coordinator:
             )
             return 1
         diagnosis = self._diagnose(task_id, sha)
+        if diagnosis is not None and self._auto_rebaseline(task_id, diagnosis):
+            return 1
         if diagnosis is not None and (diagnosis.repeated or diagnosis.stops_remediation) and self.diagnosis_policy.stop_on_repeat:
             # The same failure again (or one a provider cannot fix, like a stale baseline): another implementation attempt would only
             # repeat it. Stop with the diagnosis and the operator command that fixes it.
