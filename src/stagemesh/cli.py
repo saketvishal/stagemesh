@@ -1302,7 +1302,14 @@ def command_dashboard(args: argparse.Namespace) -> int:
     html = render_dashboard(store)
     output.write_text(html, encoding="utf-8")
     summary = dashboard_summary(store)
-    sections = ["Status Summary"] + [section.name for section in operator_report(store).sections]
+    report = operator_report(store)
+    sections = ["Status Summary"] + [section.name for section in report.sections]
+    active_executions = [
+        dict(row)
+        for section in report.sections
+        if section.name == "Active Executions"
+        for row in section.rows
+    ]
     store.close()
     if args.json:
         print(
@@ -1312,6 +1319,7 @@ def command_dashboard(args: argparse.Namespace) -> int:
                     "bytes": output.stat().st_size,
                     "summary": summary,
                     "sections": sections,
+                    "active_executions": active_executions,
                 },
                 indent=2,
                 sort_keys=True,

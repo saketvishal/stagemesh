@@ -57,6 +57,7 @@ def summary_pairs(lines: tuple[str, ...]) -> tuple[tuple[str, str], ...]:
             "recent_source_events",
             "retry_states",
             "external_evidence",
+            "active_executions",
         }:
             pairs.append((key.replace("_", " "), value))
     return tuple(pairs)
