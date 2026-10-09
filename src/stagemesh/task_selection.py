@@ -214,21 +214,27 @@ def _collect(
             reason = stale if stale.startswith("recent provider pool exhaustion") else f"stale failed state ({stale}); continuing with other eligible tasks"
             skipped.append({"task_id": task_id, "reason": reason})
             continue
-        priority_rank, priority_label = _first_match(labels, policy.priority_labels)
-        preferred_rank, preferred_label = _first_match(labels, policy.preferred_labels)
-        candidate = Candidate(
-            task_id=task_id,
-            title=str(task["title"]),
-            labels=labels,
-            priority_rank=priority_rank,
-            priority_label=priority_label,
-            preferred_rank=preferred_rank,
-            preferred_label=preferred_label,
-            contract=_contract_state(store, project, task_id, auto_plan),
-            tie_value=_tie_value(store, task, policy.tie_breaker),
-        )
+        candidate = _candidate_from_task(store, project, policy, auto_plan, task)
         (unplannable if candidate.contract.startswith("unplannable:") else candidates).append(candidate)
     return candidates, unplannable, skipped
+
+
+def _candidate_from_task(store: Store, project: Path, policy: TaskSelectionConfig, auto_plan: bool, task: Any) -> Candidate:
+    labels = task_labels(store, task)
+    priority_rank, priority_label = _first_match(labels, policy.priority_labels)
+    preferred_rank, preferred_label = _first_match(labels, policy.preferred_labels)
+    task_id = str(task["id"])
+    return Candidate(
+        task_id=task_id,
+        title=str(task["title"]),
+        labels=labels,
+        priority_rank=priority_rank,
+        priority_label=priority_label,
+        preferred_rank=preferred_rank,
+        preferred_label=preferred_label,
+        contract=_contract_state(store, project, task_id, auto_plan),
+        tie_value=_tie_value(store, task, policy.tie_breaker),
+    )
 
 
 def _policy_info(policy: TaskSelectionConfig) -> dict[str, Any]:
@@ -324,10 +330,17 @@ def rank_batch_candidates(
     store: Store, project: Path, policy: TaskSelectionConfig, *, auto_plan: bool = True
 ) -> tuple[list[Candidate], list[dict[str, str]], dict[str, Any]]:
     """Every task that may be started concurrently, best first. Blocked, excluded, stale-failed, dependency-blocked and
-    unplannable tasks are returned as skips and are never candidates, even when nothing else is runnable."""
+    unplannable tasks are returned as skips while fresh work is available. When every otherwise eligible task is stale
+    remediation, one bounded recovery task is returned so parallel continue behaves like single-task continue."""
     candidates, unplannable, skipped = _collect(store, project, policy, auto_plan)
     skipped.extend({"task_id": c.task_id, "reason": c.contract.split(":", 1)[1], "kind": "unplannable"} for c in unplannable)
     skipped.extend({"task_id": str(t["id"]), "reason": "blocked"} for t in store.tasks() if t["status"] == TaskStatus.BLOCKED)
+    if not candidates and not unplannable:
+        remediation_pending = _recoverable_stale(skipped, "remediation pending after failed")
+        if remediation_pending:
+            task = store.get_task(remediation_pending[0]["task_id"])
+            if task is not None:
+                candidates.append(_candidate_from_task(store, project, policy, auto_plan, task))
     return sorted(candidates, key=lambda c: (c.key, c.task_id)), skipped, _policy_info(policy)
 
 

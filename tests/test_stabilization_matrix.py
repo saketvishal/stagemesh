@@ -208,3 +208,15 @@ def test_stale_remediation_is_recovered_automatically_only_when_no_fresh_task_ex
     assert recovered.data["selection"]["mode"] == "auto_recovery"
     assert m.integrated("T-1") and m.integrated("T-2")
     recovered.assert_hands_off()
+
+
+def test_parallel_recovers_stale_remediation_when_no_fresh_task_exists(tmp_path: Path) -> None:
+    m = _matrix(tmp_path, ["T-1"], {"codex": {"implement:T-1": ["bad", "ok"]}}, implement_pool=("codex",))
+
+    interrupted = m.continue_("--task", "T-1", "--max-steps", "3")
+
+    assert interrupted.stop == "MAX_STEPS" and m.task("T-1")["stage"] == "IMPLEMENT", interrupted.brief
+    recovered = m.continue_("--parallel", "3")
+
+    assert recovered.stop == "DONE" and m.integrated("T-1"), recovered.brief
+    recovered.assert_hands_off()
