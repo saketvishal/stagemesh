@@ -21,10 +21,15 @@ stagemesh doctor
 stagemesh continue --once   # one coordinator pass; plain `continue` supervises one task to completion
 stagemesh continue --parallel 3   # up to three independent tasks at once, one worktree each
 stagemesh status
+python scripts/stabilization_gate.py   # default stabilization gate: synthetic runtime failure matrix, ~30s, no real providers
 pytest
 python scripts/invariants.py
 python scripts/acceptance.py
 ```
+
+The stabilization gate drives the real `stagemesh continue` against a fake provider CLI (`tests/stabilization_support.py`) and asserts
+recovery from provider no-change, timeout, quota, workspace mutation, validation and review failure, fallback, exhaustion and stale
+remediation without any operator step. Add a scenario to `tests/test_stabilization_matrix.py` for every new runtime failure mode.
 
 Runtime state lives in `.stagemesh/stagemesh.sqlite3` by default.
 
