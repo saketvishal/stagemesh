@@ -23,7 +23,7 @@ from .execution import PROVIDER_TIMEOUT, ExecutionResult, Executor
 from .git import GitError, GitWorkspace
 from .persistence import Store
 from .providers import RuntimeCommandAdapter
-from .review import INFRASTRUCTURE_FAILURE, parse_review_response
+from .review import INFRASTRUCTURE_FAILURE, VERDICT_REVIEW_INCOMPLETE, classify_review_response, parse_review_response
 from .routing import RoutingMode
 from .workspace_guard import EXTERNAL_WORKSPACE_MUTATION, WorkspaceMutation, owned_workspace
 from .workspaces import (
@@ -504,12 +504,16 @@ class FallbackReviewAdapter:
         self.adapters = adapters
         self.name = adapters[0].name
         self.attempts: list[dict[str, str]] = []
+        self.outages: set[str] = set()  # providers that reported infrastructure trouble; not asked again by outer retries
+        self.last_response: str | None = None
 
     def review_candidate(self, prompt: str, project: Path, candidate_sha: str) -> str:
         previous: str | None = None
         limiter = self.pool.limiter
-        response = json.dumps({"decision": INFRASTRUCTURE_FAILURE, "reason": "no_review_provider_available"})
+        response = self.last_response or json.dumps({"decision": INFRASTRUCTURE_FAILURE, "reason": "no_review_provider_available"})
         for adapter in self.adapters:
+            if adapter.name in self.outages:
+                continue
             held: str | None = None
             if limiter is not None:
                 held = limiter.acquire([adapter.name])  # waits for a free slot; None means the provider is cooling down
@@ -536,6 +540,9 @@ class FallbackReviewAdapter:
                 self.pool.log(f"  final review provider: {adapter.name} ({self.pool.kind(adapter.name)})")
                 self.pool.record_use(self.store, REVIEW, self.task_id, adapter.name, "ANSWERED")
                 return response
+            self.last_response = response
+            if _infrastructure_payload(response) is not None:
+                self.outages.add(adapter.name)
             evidence = _infrastructure_evidence(response)
             upcoming = next((item.name for item in self.adapters if item.name not in {a["provider"] for a in self.attempts} and item.name != adapter.name), None)
             self.attempts.append({"provider": adapter.name, "reason": reason})
@@ -567,10 +574,8 @@ def _infrastructure_reason(response: str) -> str | None:
     parsed = _infrastructure_payload(response)
     if parsed is not None:
         return str(parsed.get("reason") or "review_provider_failure")
-    decoded = parse_review_response(response)
-    if not isinstance(decoded, dict) or decoded.get("decision") not in {"PASS", "FAIL"}:
-        return "malformed_review_output"
-    return None
+    verdict = classify_review_response(response)  # an incomplete or findings-free "FAIL" answer is as unusable as garbage
+    return verdict.reason if verdict.kind == VERDICT_REVIEW_INCOMPLETE else None
 
 
 def _infrastructure_evidence(response: str) -> dict[str, str]:

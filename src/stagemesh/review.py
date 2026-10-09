@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -21,6 +22,189 @@ class ReviewFinding:
 
 INFRASTRUCTURE_FAILURE = "INFRASTRUCTURE_FAILURE"
 MAX_REVIEW_EXECUTION_RESULT_CHARS = 200
+
+# The strict final verdict vocabulary. "FAIL" is accepted as a legacy alias of FAIL_WITH_FINDINGS and is held to the same rules.
+VERDICT_PASS = "PASS"
+VERDICT_FAIL_WITH_FINDINGS = "FAIL_WITH_FINDINGS"
+VERDICT_REVIEW_INCOMPLETE = "REVIEW_INCOMPLETE"
+LEGACY_FAIL = "FAIL"
+REVIEW_INCOMPLETE_RETRIES = 2  # extra attempts after an incomplete answer
+MAX_RECORDED_REVIEW_RESPONSE_CHARS = 4000
+
+# Progress chatter is not a verdict. _PRELIMINARY finds it anywhere in a short answer; findings are judged only by how they START
+# (or by being a bare filler word) so a concrete defect that merely mentions "in progress" is never discarded.
+_PRELIMINARY_CORE = (
+    r"review\s+(is\s+)?(still\s+)?(in\s+progress|underway|ongoing|pending|started|starting)"
+    r"|i\s*(will|'ll|am\s+going\s+to|'m\s+going\s+to)\b|let\s+me\s+(inspect|review|examine|check|look|take|start|begin|see|read|go)\b"
+    r"|(starting|beginning|about\s+to)\b.{0,20}\breview|will\s+(now\s+)?(inspect|review|examine|check|look)\b"
+    r"|now\s+(inspecting|reviewing|examining|checking)\b|stand\s*by\b|work\s+in\s+progress\b"
+)
+_PRELIMINARY = re.compile(r"\b(" + _PRELIMINARY_CORE + r")", re.IGNORECASE)
+_PRELIMINARY_FINDING = re.compile(
+    r"\s*((" + _PRELIMINARY_CORE + r")|(in\s+progress|pending|placeholder|tbd|todo|n/?a|none|unknown)\s*[.!…]*\s*$)", re.IGNORECASE
+)
+_MAX_PRELIMINARY_CHARS = 200
+
+
+@dataclass(frozen=True)
+class ReviewVerdict:
+    """The classified final answer of a reviewer: PASS, FAIL_WITH_FINDINGS (with usable findings) or REVIEW_INCOMPLETE."""
+
+    kind: str
+    findings: tuple[dict[str, str], ...] = ()
+    reason: str | None = None
+    provider_failure: bool = False  # the provider itself reported infrastructure trouble; asking again cannot help
+
+
+def looks_preliminary(text: str) -> bool:
+    stripped = text.strip()
+    return bool(stripped) and len(stripped) <= _MAX_PRELIMINARY_CHARS and _PRELIMINARY.search(stripped) is not None
+
+
+def _placeholder_finding(message: str) -> bool:
+    stripped = message.strip()
+    return len(stripped) <= _MAX_PRELIMINARY_CHARS and _PRELIMINARY_FINDING.match(stripped) is not None
+
+
+def _actionable_findings(raw: object) -> tuple[dict[str, str], ...]:
+    """Findings that name a concrete problem. Empty, placeholder or non-text entries are dropped, never promoted to defects."""
+    if not isinstance(raw, list):
+        return ()
+    kept: list[dict[str, str]] = []
+    for item in raw:
+        if isinstance(item, dict):
+            message, severity, path = item.get("message"), item.get("severity"), item.get("path")
+        else:
+            message, severity, path = item, None, None
+        if not isinstance(message, str) or not message.strip() or _placeholder_finding(message):
+            continue
+        finding = {
+            "message": message.strip(),
+            "severity": severity.strip() if isinstance(severity, str) and severity.strip() else "error",
+        }
+        if isinstance(path, str) and path.strip():
+            finding["path"] = path.strip()
+        kept.append(finding)
+    return tuple(kept)
+
+
+def _decision_objects(text: str) -> list[dict[str, object]]:
+    decoder = json.JSONDecoder()
+    found: list[dict[str, object]] = []
+    index = 0
+    while True:
+        index = text.find("{", index)
+        if index < 0:
+            return found
+        try:
+            parsed, end = decoder.raw_decode(text[index:])
+        except json.JSONDecodeError:
+            index += 1
+            continue
+        if isinstance(parsed, dict) and "decision" in parsed:
+            found.append(parsed)
+        index += end
+
+
+def _whole_document(text: str) -> bool:
+    """True when the entire answer is one JSON document, or one fenced block whose content is itself one JSON document."""
+    candidates = [text]
+    inner = _fenced_inner(text)
+    if inner is not None:
+        candidates.append(inner)
+    for candidate in candidates:
+        try:
+            json.loads(candidate)
+            return True
+        except (TypeError, ValueError):
+            continue
+    return False
+
+
+def _fenced_inner(text: str) -> str | None:
+    lines = text.splitlines()
+    if text.startswith("```") and len(lines) >= 2 and lines[-1].strip().startswith("```"):
+        return "\n".join(lines[1:-1]).strip()
+    return None
+
+
+def _buried_in_chatter(text: str, verdict: dict[str, object]) -> bool:
+    return bool(_PRELIMINARY.search(text.replace(json.dumps(verdict), "")) or looks_preliminary(text))
+
+
+def _collect_decisions(text: str, depth: int = 0) -> list[dict[str, object]] | None:
+    """Every verdict object in `text` after unwrapping fences and provider envelopes; None when it is JSON but not a verdict object."""
+    inner = _fenced_inner(text.strip())
+    body = inner if inner is not None else text.strip()
+    try:
+        document = json.loads(body)
+    except (TypeError, ValueError):
+        objects = _decision_objects(body)
+        if objects and _buried_in_chatter(body, objects[0]):
+            return None  # a verdict echoed inside progress text ("I will inspect ... {"decision":"PASS"}") is not an answer
+        return objects
+    if not isinstance(document, dict):
+        return None
+    text_field, structured = document.get("text"), document.get("structured_output")
+    if isinstance(text_field, str) or isinstance(structured, dict):
+        found: list[dict[str, object]] = []
+        if isinstance(text_field, str):
+            nested = _collect_decisions(text_field, depth + 1) if depth < 3 else None
+            if nested is None:
+                return None
+            found.extend(nested)
+        if isinstance(structured, dict):
+            if isinstance(text_field, str):
+                # Two carriers must agree: the text must hold exactly one verdict and it must be the structured one.
+                if len(found) != 1 or json.dumps(found[0], sort_keys=True) != json.dumps(structured, sort_keys=True):
+                    return found + [structured] if found else None
+                return [structured]
+            found.append(structured)
+        return found
+    return [document] if "decision" in document else []
+
+
+def _incomplete(reason: str, provider: bool = False) -> ReviewVerdict:
+    return ReviewVerdict(VERDICT_REVIEW_INCOMPLETE, reason=reason, provider_failure=provider)
+
+
+def classify_review_response(response: object) -> ReviewVerdict:
+    """Classify a reviewer's answer at the protocol boundary.
+
+    Only a complete verdict counts. PASS needs an unambiguous PASS decision with no findings. FAIL_WITH_FINDINGS needs at least one
+    actionable finding. Everything else (empty, preliminary, truncated, malformed, ambiguous, provider error) is REVIEW_INCOMPLETE:
+    review infrastructure trouble, never an implementation defect.
+    """
+    if not isinstance(response, str) or not response.strip():
+        return _incomplete("empty_review_output")
+    text = response.strip()
+    objects = _collect_decisions(text)
+    if objects is None:  # a complete JSON document that is not a verdict object (a list, a scalar)
+        return _incomplete("malformed_review_output")
+    if not objects:
+        return _incomplete("preliminary_review_output" if looks_preliminary(text) else "malformed_review_output")
+    if len(objects) > 1:  # one final verdict only: conflicting or merely repeated verdict objects are both ambiguous
+        return _incomplete("ambiguous_review_output")
+    parsed = objects[0]
+    decision = parsed.get("decision")
+    if not isinstance(decision, str):
+        return _incomplete("malformed_review_output")
+    # The vocabulary is exact: case or whitespace variants (" pass ", "fail_with_findings") are not verdicts.
+    if decision == INFRASTRUCTURE_FAILURE:
+        return _incomplete(str(parsed.get("reason") or "review_provider_failure"), provider=True)
+    if decision == VERDICT_REVIEW_INCOMPLETE:
+        return _incomplete(str(parsed.get("reason") or "review_incomplete"))
+    raw_findings = parsed.get("findings")
+    if decision == VERDICT_PASS:
+        if raw_findings not in (None, []):  # any other findings value, of any shape, contradicts a PASS
+            return _incomplete("contradictory_review_verdict")
+        return ReviewVerdict(VERDICT_PASS)
+    if decision in {VERDICT_FAIL_WITH_FINDINGS, LEGACY_FAIL}:
+        findings = _actionable_findings(raw_findings)
+        if not findings:
+            return _incomplete("fail_without_actionable_findings")
+        return ReviewVerdict(VERDICT_FAIL_WITH_FINDINGS, findings=findings)
+    return _incomplete("unknown_review_decision")
 
 
 def parse_review_response(response: str) -> dict[str, object] | None:
@@ -106,7 +290,9 @@ class Reviewer:
         adapter: ReviewAdapter | None = None,
         require_independent: bool = False,
         review_pool: object | None = None,
+        max_incomplete_retries: int = REVIEW_INCOMPLETE_RETRIES,
     ):
+        self.max_incomplete_retries = max(0, max_incomplete_retries)
         self.review_pool = review_pool
         self.require_independent = require_independent
         self.fail_capacity = fail_capacity
@@ -205,44 +391,52 @@ class Reviewer:
                 if adapter is not None and not findings and not (same_provider and self.require_independent):
                     review_payload["review_execution_invoked"] = True
                     prompt = (
-                        f"Review candidate {candidate_sha} for task {task_id} under contract {bound.digest}.\n"
+                        f"Review candidate {candidate_sha} for task {task_id} under contract {bound.digest} (version {bound.version}).\n"
                         f"Objective: {contract.objective}\n"
-                        "Return JSON only: {\"decision\":\"PASS\"} or "
-                        "{\"decision\":\"FAIL\",\"findings\":[{\"severity\":\"error\",\"message\":\"...\"}]}."
+                        "Inspect the candidate, then reply with ONE final JSON verdict and nothing else (no progress text): "
+                        "{\"decision\":\"PASS\"}, or "
+                        "{\"decision\":\"FAIL_WITH_FINDINGS\",\"findings\":[{\"severity\":\"error\",\"message\":\"concrete defect\","
+                        "\"path\":\"file\"}]} with at least one concrete finding, or "
+                        "{\"decision\":\"REVIEW_INCOMPLETE\",\"reason\":\"why no verdict was reached\"}."
                     )
                     candidate_review = getattr(adapter, "review_candidate", None)
-                    if callable(candidate_review):
-                        response = candidate_review(prompt, project, candidate_sha)
-                    else:
-                        response = adapter.review(prompt)
-                    final_provider = getattr(adapter, "name", reviewer_provider)
-                    if final_provider != reviewer_provider:  # a fallback reviewer produced the answer
-                        reviewer_provider = final_provider
-                        review_payload["review_provider"] = final_provider
-                        review_payload["review_execution_provider"] = final_provider
-                    review_payload["review_response"] = response
-                    parsed = parse_review_response(response)
-                    if isinstance(parsed, dict) and parsed.get("decision") == INFRASTRUCTURE_FAILURE:
-                        infrastructure_failure = str(parsed.get("reason") or "review_provider_failure")
-                    elif not isinstance(parsed, dict) or parsed.get("decision") not in {"PASS", "FAIL"}:
-                        infrastructure_failure = "malformed_review_output"
-                    elif parsed["decision"] == "FAIL":
-                        raw_findings = parsed.get("findings")
-                        if isinstance(raw_findings, list) and raw_findings:
-                            for item in raw_findings:
-                                if isinstance(item, dict):
-                                    message = str(item.get("message") or "independent review failed")
-                                    severity = str(item.get("severity") or "error")
-                                else:
-                                    message = str(item)
-                                    severity = "error"
-                                findings.append(ReviewFinding(finding_identity(candidate_sha, message), severity, message))
+                    verdict = ReviewVerdict(VERDICT_REVIEW_INCOMPLETE, reason="review_not_attempted")
+                    for attempt in range(1 + self.max_incomplete_retries):
+                        if callable(candidate_review):
+                            response = candidate_review(prompt, project, candidate_sha)
                         else:
+                            response = adapter.review(prompt)
+                        final_provider = getattr(adapter, "name", reviewer_provider)
+                        if final_provider != reviewer_provider:  # a fallback reviewer produced the answer
+                            reviewer_provider = final_provider
+                            review_payload["review_provider"] = final_provider
+                            review_payload["review_execution_provider"] = final_provider
+                            same_provider = bool(implementer and _same_provider(final_provider, implementer))
+                            independent = bool(final_provider and implementer and not same_provider)
+                            review_payload["independent_reviewer"] = independent
+                        review_payload["review_response"] = str(response)[:MAX_RECORDED_REVIEW_RESPONSE_CHARS]
+                        review_payload["review_attempts"] = attempt + 1
+                        verdict = classify_review_response(response)
+                        if verdict.kind != VERDICT_REVIEW_INCOMPLETE or verdict.provider_failure:
+                            break  # a provider outage was already walked through every eligible reviewer
+                    review_payload["review_verdict"] = verdict.kind
+                    if self.require_independent and not independent:
+                        # The answering provider is (or fell back to) the implementer: its verdict, PASS or FAIL, is void.
+                        review_payload["review_verdict"] = VERDICT_REVIEW_INCOMPLETE
+                        infrastructure_failure = (
+                            "review_provider_same_as_implementer"
+                            if same_provider
+                            else "implementer_unknown"
+                            if not implementer
+                            else "independent_review_unavailable"
+                        )
+                    elif verdict.kind == VERDICT_REVIEW_INCOMPLETE:
+                        infrastructure_failure = verdict.reason or "review_incomplete"
+                    elif verdict.kind == VERDICT_FAIL_WITH_FINDINGS:
+                        for item in verdict.findings:
                             findings.append(
                                 ReviewFinding(
-                                    finding_identity(candidate_sha, "independent review failed"),
-                                    "error",
-                                    "independent review failed",
+                                    finding_identity(candidate_sha, item["message"], item.get("path")), item["severity"], item["message"]
                                 )
                             )
             except ContractError as exc:

@@ -260,7 +260,7 @@ REVIEW_JSON_SCHEMA = json.dumps(
     {
         "type": "object",
         "properties": {
-            "decision": {"type": "string", "enum": ["PASS", "FAIL"]},
+            "decision": {"type": "string", "enum": ["PASS", "FAIL_WITH_FINDINGS", "REVIEW_INCOMPLETE"]},
             "findings": {
                 "type": "array",
                 "items": {
@@ -577,4 +577,4 @@ def _review_infrastructure_failure(reason: str, output: str | None = None, retry
 def _review_failure(message: str) -> str:
     import json
 
-    return json.dumps({"decision": "FAIL", "findings": [{"severity": "error", "message": message}]})
+    return json.dumps({"decision": "FAIL_WITH_FINDINGS", "findings": [{"severity": "error", "message": message}]})
