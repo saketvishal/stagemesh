@@ -699,6 +699,7 @@ def test_workspace_mutation_is_quarantined_and_next_provider_runs(tmp_path: Path
     )
     assert event["task_id"] == TASK and event["provider"] == "provider-a"
     assert event["reason"] == "EXTERNAL_WORKSPACE_MUTATION"
+    assert event["quarantine_ref"] is None
     integrity = json.loads(
         rig.store.conn.execute(
             "SELECT payload FROM audit_events WHERE event_type='provider.workspace_integrity_failure'"

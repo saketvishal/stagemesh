@@ -82,6 +82,7 @@ def test_workspace_mutation_is_quarantined_and_falls_through_without_cooldown(tm
     assert r.implementers("T-1") == ["codex", "claude"]
     (quarantine,) = m.audit("provider.workspace_quarantined")
     assert quarantine["task_id"] == "T-1" and quarantine["provider"] == "codex"
+    assert m.git.run("rev-parse", quarantine["quarantine_ref"]).stdout.strip()
     (integrity,) = m.audit("provider.workspace_integrity_failure")
     assert integrity == {
         "task_id": "T-1",

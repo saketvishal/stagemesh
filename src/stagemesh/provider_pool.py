@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from .audit import record_audit
+from .autonomy.gitfacts import GitFacts
 from .capacity import CapacityKind
 from .concurrency import ProviderLimiter
 from .config import BUILTIN_PROVIDERS, SELECTION_POLICIES
@@ -27,6 +28,7 @@ from .routing import RoutingMode
 from .workspace_guard import EXTERNAL_WORKSPACE_MUTATION, WorkspaceMutation, owned_workspace
 from .workspaces import (
     NO_IMPLEMENTATION_CHANGE,
+    _task_key,
     prepare_task_workspace,
     remove_task_workspace,
     task_workspace,
@@ -872,6 +874,15 @@ def _quarantine_mutated_worktree(store: Store, project: Path, task_id: str, prov
     """Replace a provider-mutated task worktree so the next provider starts from trusted state."""
     old = task_workspace(project, task_id)
     baseline = store.task_baseline(task_id)
+    quarantine_ref: str | None = None
+    if (old / ".git").exists():
+        snapshot = GitFacts(old).snapshot_worktree(
+            old,
+            f"StageMesh quarantine of {task_id}: provider {provider} rewrote the task worktree",
+        )
+        if snapshot:
+            quarantine_ref = f"refs/stagemesh/quarantine/{_task_key(task_id)}/{snapshot[:12]}"
+            GitFacts(project).ensure_ref(quarantine_ref, snapshot)
     remove_task_workspace(project, task_id)
     clean = prepare_task_workspace(project, task_id)
     if baseline:
@@ -888,5 +899,6 @@ def _quarantine_mutated_worktree(store: Store, project: Path, task_id: str, prov
             "old_workspace": str(old),
             "replacement_workspace": str(clean),
             "baseline_sha": baseline or "",
+            "quarantine_ref": quarantine_ref,
         },
     )
