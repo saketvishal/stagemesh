@@ -697,6 +697,31 @@ def test_review_workspace_disables_autocrlf_before_checkout(tmp_path: Path) -> N
     assert observed == {"autocrlf": "false", "bytes": "agent change\n"}
 
 
+def test_review_cleanup_failure_does_not_replace_review_result(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from stagemesh import providers
+
+    project, _store, _coord, sha = advance_to(Stage.REVIEW, tmp_path)
+    script = tmp_path / "reviewer-cleanup.py"
+    script.write_text(
+        "import json, sys\n"
+        "sys.stdin.read()\n"
+        "print(json.dumps({'decision': 'PASS'}))\n",
+        encoding="utf-8",
+    )
+    calls: list[Path] = []
+
+    def locked_cache_cleanup(path: Path, *_args: object, **_kwargs: object) -> None:
+        calls.append(path)
+        raise PermissionError(5, "Access is denied", str(path / "candidate" / "apps" / "api" / ".uv-cache"))
+
+    monkeypatch.setattr(providers.shutil, "rmtree", locked_cache_cleanup)
+
+    response = RuntimeCommandAdapter("claude", (PY, str(script))).review_candidate("review it", project, sha)
+
+    assert json.loads(response) == {"decision": "PASS"}
+    assert calls and calls[0].name.startswith("stagemesh-review-")
+
+
 def test_review_agent_that_moves_head_in_its_clone_is_rejected(tmp_path: Path) -> None:
     project, _store, _coord, sha = advance_to(Stage.REVIEW, tmp_path)
     script = tmp_path / "bad-reviewer.py"

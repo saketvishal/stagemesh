@@ -4,8 +4,10 @@ import json
 import os
 import shlex
 import shutil
+import stat
 import subprocess
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -173,7 +175,8 @@ class RuntimeCommandAdapter:
     def review_candidate(self, prompt: str, project: Path, candidate_sha: str) -> str:
         if self.check_capacity() != CapacityKind.AVAILABLE:
             return _review_infrastructure_failure("provider_unavailable")
-        with tempfile.TemporaryDirectory(prefix="stagemesh-review-") as temp_dir:
+        temp_dir = tempfile.mkdtemp(prefix="stagemesh-review-")
+        try:
             review_path = Path(temp_dir) / "candidate"
             clone = subprocess.run(
                 ["git", "clone", "--quiet", "--no-checkout", str(Path(project).resolve()), str(review_path)],
@@ -233,6 +236,8 @@ class RuntimeCommandAdapter:
                     return _review_infrastructure_failure(reason, output, retry_after)
                 return _review_infrastructure_failure(reason)
             return _provider_text_response(stdout)
+        finally:
+            _cleanup_review_workspace(Path(temp_dir))
 
 
 @dataclass(frozen=True)
@@ -317,6 +322,29 @@ def _provider_text_response(stdout: str) -> str:
     if isinstance(payload, dict) and isinstance(payload.get("structured_output"), dict):
         return json.dumps(payload["structured_output"], separators=(",", ":"))
     return text
+
+
+def _cleanup_review_workspace(path: Path) -> None:
+    def retry_with_write_permission(function: object, cleanup_path: str, _exc_info: object) -> None:
+        try:
+            os.chmod(cleanup_path, stat.S_IREAD | stat.S_IWRITE)
+            function(cleanup_path)  # type: ignore[operator]
+        except OSError:
+            pass
+
+    for attempt in range(3):
+        try:
+            shutil.rmtree(path, onerror=retry_with_write_permission)
+            return
+        except OSError:
+            if attempt < 2:
+                time.sleep(0.1)
+    # Review workspaces are throwaway clones. On Windows, provider tooling can leave cache files briefly locked
+    # (for example .uv-cache), and that cleanup failure must not replace a completed review result.
+    try:
+        shutil.rmtree(path, ignore_errors=True)
+    except OSError:
+        pass
 
 
 def _execution_result(exc: Exception) -> str:
