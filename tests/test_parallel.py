@@ -643,8 +643,8 @@ def test_cli_parallel_output_is_grouped_by_task(tmp_path: Path) -> None:
     assert code == 0
     lines = [line for line in out.getvalue().splitlines() if line.strip()]
     assert all(line.startswith(("[T-1] ", "[T-2] ", "[run]", "Parallel run")) for line in lines), lines
-    assert any(line.startswith("[T-1]") and "Validation" in line for line in lines)
-    assert any(line.startswith("[T-2]") and "Integration" in line for line in lines)
+    assert any(line.startswith("[T-1]") and "VALIDATE" in line for line in lines)
+    assert any(line.startswith("[T-2]") and "INTEGRATE" in line for line in lines)
     assert "Parallel run stopped: done" in out.getvalue()
 
 

@@ -41,16 +41,18 @@ def _audit(store: Store) -> list[dict]:
     return [json.loads(r[0]) for r in rows]
 
 
-def test_normal_recovery_and_continue_leave_an_unknown_review_execution_alone(tmp_path: Path) -> None:
+def test_normal_recovery_skips_unknown_review_but_continue_fences_builtin_stage_execution(tmp_path: Path) -> None:
     project, store, execution_id = _review_state(tmp_path)
     (action,) = recover_stale(store, TASK)
     assert action.kind == "REVIEW" and action.process_state == "UNKNOWN" and action.action == "SKIPPED_UNKNOWN"
-    refused = _try_run(store, project)
-    assert not refused.started and refused.stop_reason == "REFUSED:active_execution"  # continue never recovers it silently
-    assert _status(store, execution_id) == "RUNNING" and _audit(store) == []
+    recovered = _try_run(store, project)
+    assert recovered.started and recovered.stop_reason == "BLOCKED"
+    assert recovered.recovered[0]["action"] == "RELEASED"
+    assert recovered.recovered[0]["reason"] == "ORPHANED_BUILTIN_STAGE_EXECUTION"
+    assert _status(store, execution_id) == "FAILED" and _audit(store) == []
     store.close()
-    code, out = _cli(project, "recover-stale", "--task", TASK, "--json")  # the plain CLI path behaves the same
-    assert code == 0 and json.loads(out)["actions"][0]["action"] == "SKIPPED_UNKNOWN"
+    code, out = _cli(project, "recover-stale", "--task", TASK, "--json")
+    assert code == 0 and json.loads(out)["actions"] == []
 
 
 def test_explicit_release_terminalizes_the_unknown_review_execution_and_audits_it(tmp_path: Path) -> None:
@@ -70,7 +72,6 @@ def test_explicit_release_terminalizes_the_unknown_review_execution_and_audits_i
 
 def test_task_becomes_runnable_after_explicit_recovery_via_the_cli(tmp_path: Path) -> None:
     project, store, execution_id = _review_state(tmp_path)
-    assert _try_run(store, project).stop_reason == "REFUSED:active_execution"
     store.close()
     code, out = _cli(project, "recover-stale", "--task", TASK, "--release-unknown", "--execution", execution_id, "--reason", REASON, "--json")
     payload = json.loads(out)
