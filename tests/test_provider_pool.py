@@ -522,7 +522,7 @@ def test_cli_refuses_at_startup_when_only_the_implementer_is_available(tmp_path:
     only = f'"{sys.executable}" "{script}" ok claude'
     missing = "stagemesh-no-such-cli-xyz"
     (rig.project / ".stagemesh" / "config.json").write_text(
-        json.dumps({"providers": {"codex": missing, "claude": only, "grok": missing}, "routing": {"mode": "STAGED"}}),
+        json.dumps({"providers": {"codex": missing, "claude": only, "grok": missing, "agy": missing}, "routing": {"mode": "STAGED"}}),
         encoding="utf-8",
     )
 
@@ -531,7 +531,7 @@ def test_cli_refuses_at_startup_when_only_the_implementer_is_available(tmp_path:
     err = capsys.readouterr().err
     assert code == 2
     assert "independent review is required but cannot be satisfied" in err
-    for provider in ("codex", "claude", "grok"):
+    for provider in ("codex", "claude", "grok", "agy"):
         assert provider in err
     assert "cli_not_installed" in err
     assert Store(rig.project / ".stagemesh" / "stagemesh.sqlite3").latest_candidate(TASK) is None  # nothing ran
