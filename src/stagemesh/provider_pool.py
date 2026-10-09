@@ -238,6 +238,17 @@ class ProviderPool:
         """
         deadlines: list[float] = []
         seen: set[str] = set()
+        shared: dict[str, float] = {}
+        if self.limiter is not None:
+            for name in self.pool(stage):
+                adapter = self.adapters.get(name)
+                if adapter is None or STAGE_CAPABILITY[stage] not in adapter.capabilities or adapter.check_capacity() != CapacityKind.AVAILABLE:
+                    continue
+                if stage == REVIEW and self.require_independent and implementer and _same(adapter, implementer, self.adapters.get(implementer)):
+                    continue
+                deadline = self.limiter.temporary_retry_at(name)
+                if deadline is not None:
+                    shared[name] = deadline
         rows = store.conn.execute(
             "SELECT payload, created_at FROM audit_events WHERE event_type=? ORDER BY created_at DESC, rowid DESC",
             (PROVIDER_FAILURE_EVENT,),
@@ -268,7 +279,8 @@ class ProviderPool:
                 continue
             deadline = payload.get("retry_at", float(row["created_at"]) + cooldown)
             if isinstance(deadline, (int, float)):
-                deadlines.append(float(deadline))
+                deadlines.append(max(float(deadline), shared.pop(name, 0.0)))
+        deadlines.extend(shared.values())
         return min(deadlines) if deadlines else None
 
     def record_failure(

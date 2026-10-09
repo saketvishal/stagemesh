@@ -44,6 +44,21 @@ def test_cooldown_ends_at_exact_deadline(tmp_path, monkeypatch):
     assert pool.evaluate(rig.store, IMPLEMENT, "A")[0].eligible
 
 
+def test_shared_capacity_wait_crosses_stages_without_breaking_independence(tmp_path):
+    from stagemesh.concurrency import ProviderLimiter
+    rig = Rig(tmp_path, ["A"])
+    pool = pool_for()
+    pool.limiter = ProviderLimiter()
+    pool.limiter.cool_down("scripted", 60, "transient_provider_failure")
+    assert pool.next_retry_at(rig.store, REVIEW, "A", "other") > time.time()
+    pool.record_failure(rig.store, REVIEW, "A", "scripted", "transient_provider_failure")
+    assert pool.next_retry_at(rig.store, REVIEW, "A", "other") == pool.limiter.temporary_retry_at("scripted")
+    assert pool.next_retry_at(rig.store, REVIEW, "A", "scripted") is None
+    pool.limiter.cool_down("scripted", 60, "authentication_failure")
+    pool.record_failure(rig.store, REVIEW, "A", "scripted", "authentication_failure")
+    assert pool.next_retry_at(rig.store, REVIEW, "A", "other") is None
+
+
 @pytest.mark.parametrize("control", ["recover", "existing", "pause", "stop", "finite"])
 def test_queue_recovers_or_honors_control_during_outage(tmp_path, monkeypatch, control):
     rig = Rig(tmp_path, ["A"])

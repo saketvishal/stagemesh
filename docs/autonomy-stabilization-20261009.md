@@ -38,6 +38,6 @@ The hosted synthetic independent-review/provider matrix passed on Linux and Wind
 
 Queue runs now wait through recorded temporary provider outages and retry automatically at the cooldown deadline. Implementation and independent review recovery are covered by scoped tests, including an outage already recorded before startup, exact cooldown expiry, and operator pause/stop. Review recovery retains the same candidate SHA and does not reimplement. Authentication, missing tools, and coding no-progress do not enter an indefinite capacity wait. queue-run --no-wait-for-providers retains finite exhaustion behavior. Live-provider outage recovery remains unproven in this sandbox.
 
-The initial Linux/Windows hosted stabilization matrix passed on PR #259 at caee016. The local outage recovery checks passed (12 cases), and four focused queue-control/CLI/provider-preflight compatibility checks passed. No full suite was run.
+The initial Linux/Windows hosted stabilization matrix passed on PR #259 at caee016. The local outage recovery checks passed (13 cases), including shared cross-stage capacity deadlines, and seven focused queue-control/CLI/provider-preflight compatibility checks passed. No full suite was run.
 
 Admission priority trades some pipeline throughput for bounded integration progress. External actors can still advance the integration ref; the configured rebase limit continues to protect against unbounded retries.
