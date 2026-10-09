@@ -24,22 +24,43 @@ MAX_REVIEW_EXECUTION_RESULT_CHARS = 200
 
 
 def parse_review_response(response: str) -> dict[str, object] | None:
-    """Parse strict or fenced JSON review output."""
+    """Parse strict, fenced, provider-wrapped, or prose-wrapped JSON review output."""
+    if not isinstance(response, str):
+        return None
+    text = response.strip()
     try:
-        parsed = json.loads(response)
+        parsed = json.loads(text)
     except (TypeError, json.JSONDecodeError):
-        text = response.strip() if isinstance(response, str) else ""
-        if not text.startswith("```"):
-            return None
-        lines = text.splitlines()
-        if len(lines) < 2 or not lines[-1].strip().startswith("```"):
-            return None
-        body = "\n".join(lines[1:-1]).strip()
-        try:
-            parsed = json.loads(body)
-        except (TypeError, json.JSONDecodeError):
-            return None
+        parsed = _extract_json_object(text)
+    if isinstance(parsed, dict) and isinstance(parsed.get("text"), str):
+        return parse_review_response(parsed["text"])
+    if isinstance(parsed, dict) and isinstance(parsed.get("structured_output"), dict):
+        return parsed["structured_output"]
     return parsed if isinstance(parsed, dict) else None
+
+
+def _extract_json_object(text: str) -> dict[str, object] | None:
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if len(lines) >= 2 and lines[-1].strip().startswith("```"):
+            fenced = "\n".join(lines[1:-1]).strip()
+            try:
+                parsed = json.loads(fenced)
+            except (TypeError, json.JSONDecodeError):
+                parsed = None
+            if isinstance(parsed, dict):
+                return parsed
+    decoder = json.JSONDecoder()
+    for index, char in enumerate(text):
+        if char != "{":
+            continue
+        try:
+            parsed, _end = decoder.raw_decode(text[index:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    return None
 
 
 def _review_execution_result(reason: str) -> str:
