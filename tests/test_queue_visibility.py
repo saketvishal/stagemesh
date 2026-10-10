@@ -68,6 +68,53 @@ def test_idle_queue_reports_no_event_stop_reason_or_executions(tmp_path: Path) -
     ]
 
 
+def test_running_queue_with_zero_active_executions_is_not_a_phantom_blocker(tmp_path: Path) -> None:
+    project = _smoke_project(tmp_path)
+    store = _store(project)
+    record_audit(
+        store,
+        QUEUE_CONTROL_EVENT,
+        {
+            "at": "2099-01-01T00:00:00.000+00:00",
+            "state": "running",
+            "reason": "previous queue run started",
+            "terminate_running": False,
+            "source": "runner",
+        },
+    )
+    report = queue_control_report(store)
+    store.close()
+
+    assert report["state"] == "running"
+    assert report["active_executions"] == []
+
+    code, out, _ = run_stagemesh_cli(project, "continue", "--dry-run", "--json", "--task", "T-1")
+    result = json.loads(out)
+    assert code == 0 and result["started"] is True
+
+
+def test_status_shows_compact_queue_counts_in_text_and_json(tmp_path: Path) -> None:
+    project, _ = _project_with_executions(tmp_path)
+    store = _store(project)
+    store.block_task("T-2")
+    store.close()
+
+    code, out, _ = run_stagemesh_cli(project, "status", "--json")
+    data = json.loads(out)
+    assert code == 0
+    assert data["task_count"] == 2
+    assert data["open_task_count"] == 1
+    assert data["eligible_open_task_count"] == 1
+    assert data["blocked_task_count"] == 1
+    assert data["running_count"] == 3
+    assert data["stale_execution_count"] == 1
+    assert data["source_ready_count"] == 2
+
+    code, out, _ = run_stagemesh_cli(project, "status")
+    assert code == 0
+    assert "counts: tracked=2 open=1 eligible_open=1 blocked=1 running=3 stale=1 source_ready=2" in out
+
+
 def test_json_surfaces_expose_state_event_reason_and_process(tmp_path: Path) -> None:
     project, ids = _project_with_executions(tmp_path)
     code, _, _ = run_stagemesh_cli(

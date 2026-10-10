@@ -7,14 +7,18 @@ from typing import Any
 from .domain import ExecutionStatus, Stage, TaskStatus
 from .persistence import Store
 from .process_identity import classify_process, process_identity
+from .scheduling import Scheduler
 
 
 @dataclass(frozen=True)
 class HealthReport:
     ok: bool
     task_count: int
+    open_task_count: int
+    eligible_open_task_count: int
     blocked_task_count: int
     running_count: int
+    source_ready_count: int
     done_count: int
     failed_execution_count: int
     unknown_execution_count: int
@@ -29,6 +33,8 @@ class HealthReport:
 def health(store: Store) -> HealthReport:
     tasks = store.tasks()
     running = list(store.running_executions())
+    scheduler = Scheduler(store)
+    open_tasks = [task for task in tasks if task["status"] == TaskStatus.OPEN and task["stage"] != Stage.DONE]
     done = [task for task in tasks if task["stage"] == Stage.DONE or task["status"] == "DONE"]
     blocked = [task for task in tasks if task["status"] == TaskStatus.BLOCKED]
     failed_execution_count = int(
@@ -64,8 +70,11 @@ def health(store: Store) -> HealthReport:
         # `ok` reflects current state only; failed_execution_count is a historical total kept for compatibility.
         ok=not problems,
         task_count=len(tasks),
+        open_task_count=len(open_tasks),
+        eligible_open_task_count=sum(1 for task in open_tasks if scheduler.decision(str(task["id"])).eligible),
         blocked_task_count=len(blocked),
         running_count=len(running),
+        source_ready_count=_source_ready_count(store, tasks),
         done_count=len(done),
         failed_execution_count=failed_execution_count,
         unknown_execution_count=unknown_execution_count,
@@ -76,6 +85,19 @@ def health(store: Store) -> HealthReport:
         stale_execution_count=stale,
         current_problems=problems,
     )
+
+
+def _source_ready_count(store: Store, tasks: list[Any]) -> int:
+    count = 0
+    for task in tasks:
+        source = task["source"]
+        source_id = task["source_id"]
+        if source is None or source_id is None:
+            continue
+        state = store.source_state(str(source), str(source_id))
+        if state.get("eligible") is True and str(state.get("state", "")).upper() == "OPEN":
+            count += 1
+    return count
 
 
 def _current_failed_execution_count(store: Store) -> int:

@@ -678,8 +678,11 @@ def command_status(args: argparse.Namespace) -> int:
                 {
                     "ok": report.ok,
                     "task_count": report.task_count,
+                    "open_task_count": report.open_task_count,
+                    "eligible_open_task_count": report.eligible_open_task_count,
                     "blocked_task_count": report.blocked_task_count,
                     "running_count": report.running_count,
+                    "source_ready_count": report.source_ready_count,
                     "done_count": report.done_count,
                     "failed_execution_count": report.failed_execution_count,
                     "unknown_execution_count": report.unknown_execution_count,
@@ -710,6 +713,17 @@ def command_status(args: argparse.Namespace) -> int:
         print("backlog: EMPTY")
     for line in format_queue_control(control):
         print(line)
+    report = health(store)
+    print(
+        "counts: "
+        f"tracked={report.task_count} "
+        f"open={report.open_task_count} "
+        f"eligible_open={report.eligible_open_task_count} "
+        f"blocked={report.blocked_task_count} "
+        f"running={report.running_count} "
+        f"stale={report.stale_execution_count} "
+        f"source_ready={report.source_ready_count}"
+    )
     for row in rows:
         print(f"{row['id']} {row['stage']} {row['status']} {row['title']}")
     store.close()
@@ -1230,8 +1244,11 @@ def command_health(args: argparse.Namespace) -> int:
                 {
                     "ok": report.ok,
                     "task_count": report.task_count,
+                    "open_task_count": report.open_task_count,
+                    "eligible_open_task_count": report.eligible_open_task_count,
                     "blocked_task_count": report.blocked_task_count,
                     "running_count": report.running_count,
+                    "source_ready_count": report.source_ready_count,
                     "done_count": report.done_count,
                     "failed_execution_count": report.failed_execution_count,
                     "unknown_execution_count": report.unknown_execution_count,
@@ -1250,8 +1267,11 @@ def command_health(args: argparse.Namespace) -> int:
     if report.current_problems:
         print(f"current_problems: {', '.join(report.current_problems)}")
     print(f"tasks: {report.task_count}")
+    print(f"open_tasks: {report.open_task_count}")
+    print(f"eligible_open_tasks: {report.eligible_open_task_count}")
     print(f"blocked_tasks: {report.blocked_task_count}")
     print(f"running: {report.running_count}")
+    print(f"source_ready_tasks: {report.source_ready_count}")
     print(f"done: {report.done_count}")
     print(f"failed_executions_historical: {report.historical_failed_execution_count}")
     print(f"failed_executions_current: {report.current_failed_execution_count}")
