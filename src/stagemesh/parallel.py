@@ -188,13 +188,15 @@ class ParallelSummary:
     control: dict[str, Any] = field(
         default_factory=lambda: {"state": "running", "events": [], "active_executions": []}
     )
+    focus: dict[str, str] | None = None
+    skipped_out_of_focus: list[dict[str, str]] = field(default_factory=list)
 
     @property
     def succeeded(self) -> bool:
         return self.stop_reason == "DONE"
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        data = {
             "mode": "parallel",
             "concurrency": self.concurrency,
             "stop_reason": self.stop_reason,
@@ -210,6 +212,10 @@ class ParallelSummary:
             "providers": self.providers,
             "control": self.control,
         }
+        if self.focus is not None:
+            data["focus"] = self.focus
+            data["skipped_out_of_focus"] = self.skipped_out_of_focus
+        return data
 
 
 def load_task_contract(store: Store, project: Path, task_id: str) -> ChangeContract:
@@ -617,6 +623,7 @@ class ParallelRunner:
                     self._exhaustion_said.add(task_key)
                     self._say(task_key, text)
         ranked, skipped, _ = rank_batch_candidates(self.store, self.project, self.policy, auto_plan=self.auto_plan)
+        ranked, skipped = self._filter_ranked_candidates(summary, ranked, skipped, running)
         self._refuse_unrunnable(summary, skipped, attempted)
         summary.skipped = [s for s in skipped if s["task_id"] not in attempted and s["task_id"] not in running]
         active = {task_id: self._contracts[task_id] for task_id in running if task_id in self._contracts}
@@ -663,6 +670,12 @@ class ParallelRunner:
                 summary.deferred.append(item)
                 self._say("run", f"deferring task {item['task_id']}: conflicts with running task {item['blocked_by']} ({item['reason']})")
         return chosen
+
+    def _filter_ranked_candidates(  # type: ignore[no-untyped-def]
+        self, summary: ParallelSummary, ranked, skipped, running: list[str]
+    ):
+        """Optionally narrow queue admissions before contract/admission checks."""
+        return ranked, skipped
 
     def _conflict(self, contract: ChangeContract, other: ChangeContract):
         """Why two tasks may not run together (subclasses can add rules)."""

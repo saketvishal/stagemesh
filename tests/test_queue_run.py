@@ -77,6 +77,56 @@ def test_conflicting_tasks_are_never_run_together(tmp_path: Path) -> None:
     assert any(d["reason"].startswith("allowed_paths") for d in summary.deferred)  # the overlap was reported, not hidden
 
 
+def test_focus_admits_only_matching_tasks(tmp_path: Path) -> None:
+    labels = {"W1-A": ["Week 1"], "W1-B": ["foundation"], "W2-A": ["Week 2"]}
+    rig = Rig(tmp_path, ["W1-A", "W1-B", "W2-A"], labels=labels)
+    summary = queue(rig, ScriptedExecutor(rig.files), concurrency=3, focus="Week 1").run()
+    assert outcomes(summary) == {"W1-A": "DONE"}
+    assert rig.store.get_task("W1-B")["status"] == "OPEN" and rig.store.get_task("W2-A")["status"] == "OPEN"
+    assert summary.focus == {"focus": "Week 1"}
+    assert summary.skipped_out_of_focus == [
+        {"task_id": "W1-B", "reason": "does not match active queue focus"},
+        {"task_id": "W2-A", "reason": "does not match active queue focus"},
+    ]
+
+
+def test_sprint_focus_normalizes_week_names(tmp_path: Path) -> None:
+    labels = {"A": ["Week 1"], "B": ["Week 2"]}
+    rig = Rig(tmp_path, ["A", "B"], labels=labels)
+    summary = queue(rig, ScriptedExecutor(rig.files), concurrency=2, sprint="week1").run()
+    assert outcomes(summary) == {"A": "DONE"}
+    assert summary.focus == {"sprint": "week1"}
+    assert [item["task_id"] for item in summary.skipped_out_of_focus] == ["B"]
+
+
+def test_focus_keeps_conflict_handling_inside_focused_set(tmp_path: Path) -> None:
+    files = {"W1-A": ("shared/a.txt", "a\n"), "W1-B": ("shared/b.txt", "b\n"), "W2-A": ("other/c.txt", "c\n")}
+    labels = {"W1-A": ["Week 1"], "W1-B": ["Week 1"], "W2-A": ["Week 2"]}
+    rig = Rig(tmp_path, ["W1-A", "W1-B", "W2-A"], files=files, labels=labels)
+    for task_id in ("W1-A", "W1-B"):
+        write_contract(rig, task_id, allowed_files=["shared/**"])
+    executor = ScriptedExecutor(files)
+    summary = queue(rig, executor, concurrency=3, focus="Week 1").run()
+    assert outcomes(summary) == {"W1-A": "DONE", "W1-B": "DONE"}
+    marks = {(kind, task): at for kind, task, at in executor.log}
+    assert marks[("end", "W1-A")] <= marks[("start", "W1-B")] or marks[("end", "W1-B")] <= marks[("start", "W1-A")]
+    assert [item["task_id"] for item in summary.skipped_out_of_focus] == ["W2-A"]
+    assert any(d["reason"].startswith("allowed_paths") for d in summary.deferred)
+
+
+def test_focus_stops_when_matching_tasks_are_blocked_instead_of_spilling_over(tmp_path: Path) -> None:
+    labels = {"W1-A": ["Week 1"], "W2-A": ["Week 2"]}
+    rig = Rig(tmp_path, ["W1-A", "W2-A"], labels=labels)
+    rig.store.block_task("W1-A")
+    summary = queue(rig, ScriptedExecutor(rig.files), concurrency=2, focus="Week 1").run()
+    assert outcomes(summary) == {}
+    assert summary.stop_reason == "REFUSED:no_eligible_task"
+    assert "matching active queue focus" in summary.message and "W1-A: blocked" in summary.message
+    assert summary.skipped == [{"task_id": "W1-A", "reason": "blocked"}]
+    assert summary.skipped_out_of_focus == [{"task_id": "W2-A", "reason": "does not match active queue focus"}]
+    assert rig.store.get_task("W2-A")["status"] == "OPEN" and "out/W2-A.txt" not in rig.tree()
+
+
 def test_missing_contract_is_refused_when_auto_planning_is_disabled(tmp_path: Path) -> None:
     rig = Rig(tmp_path, ["A", "B"])
     (rig.project / ".stagemesh" / "contracts" / "B.json").unlink()
@@ -565,10 +615,10 @@ def test_scope_overlap_rules() -> None:
     assert dirty_in_scope(contract, ["src/a.py", "src/secret/k.txt", "docs/x.md"]) == ["src/a.py"]
 
 
-def _smoke_project(tmp_path: Path) -> Path:
+def _smoke_project(tmp_path: Path, labels: dict[str, list[str]] | None = None) -> Path:
     from test_project_smoke import profile
 
-    project = _project(tmp_path, ["T-1", "T-2"], contracts=[])
+    project = _project(tmp_path, ["T-1", "T-2"], contracts=[], labels=labels)
     for task_id in ("T-1", "T-2"):
         (project / ".stagemesh" / "contracts" / f"{task_id}.json").write_text(
             json.dumps(contract_for(f"stagemesh-task-{task_id}.txt")), encoding="utf-8"
@@ -603,6 +653,15 @@ def test_cli_json_reports_per_task_progress_and_final_states(tmp_path: Path) -> 
         assert events[0] == "selected" and events[-1] == "finished" and "started" in events
         assert [e["stage"] for e in task["lifecycle"] if e["event"] == "stage"][:2] == ["PLAN", "IMPLEMENT"]
         assert task["final"]["stage"] == "DONE" and all(step["task_id"] == task["task_id"] for step in task["steps"])
+
+
+def test_cli_queue_run_reports_focus_in_json(tmp_path: Path) -> None:
+    project = _smoke_project(tmp_path, labels={"T-1": ["Week 1"], "T-2": ["Week 2"]})
+    code, out, _ = run_cli(project, "--concurrency", "2", "--dry-run", "--json", "--focus", "Week 1")
+    data = json.loads(out)
+    assert code == 0 and data["focus"] == {"focus": "Week 1"}
+    assert data["task_outcomes"] == {"T-1": "DONE"}
+    assert data["skipped_out_of_focus"] == [{"task_id": "T-2", "reason": "does not match active queue focus"}]
 
 
 def test_cli_queue_control_commands_and_status_surfaces(tmp_path: Path) -> None:
