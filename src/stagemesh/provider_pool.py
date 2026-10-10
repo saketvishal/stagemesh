@@ -22,6 +22,7 @@ from .domain import ExecutionKind, ExecutionStatus
 from .execution import PROVIDER_TIMEOUT, ExecutionResult, Executor
 from .git import GitError, GitWorkspace
 from .persistence import Store
+from .provider_cooldown import NO_PROGRESS_THRESHOLD, REPEATED_NO_PROGRESS, cleared_at, no_progress_streak
 from .providers import RuntimeCommandAdapter
 from .review import INFRASTRUCTURE_FAILURE, VERDICT_REVIEW_INCOMPLETE, classify_review_response, parse_review_response
 from .routing import RoutingMode
@@ -64,6 +65,11 @@ _CAPACITY_OUTCOMES = frozenset(
     }
 )
 TASK_ALREADY_SATISFIED = "task_already_satisfied"
+
+
+def provider_wide_outcomes() -> frozenset[str]:
+    """Failure reasons that rest the provider for every task, not just the task that hit them."""
+    return _CAPACITY_OUTCOMES | {REPEATED_NO_PROGRESS}
 
 
 def _is_workspace_mutation_reason(reason: str | None) -> bool:
@@ -213,9 +219,9 @@ class ProviderPool:
         return verdicts
 
     def _recent_failure(self, store: Store, stage: str, task_id: str | None, provider: str) -> str | None:
-        if task_id is None:
-            return None
         now = time.time()
+        cleared = cleared_at(store, provider)
+        wide = provider_wide_outcomes()
         rows = store.conn.execute(
             "SELECT payload, created_at FROM audit_events WHERE event_type=? AND created_at>=? ORDER BY created_at DESC",
             (PROVIDER_FAILURE_EVENT, now - max(self.cooldown_seconds, DEFAULT_QUOTA_COOLDOWN_SECONDS)),
@@ -225,7 +231,7 @@ class ProviderPool:
                 payload = json.loads(row["payload"])
             except (TypeError, ValueError):
                 continue
-            if payload.get("stage") != stage or payload.get("provider") != provider:
+            if payload.get("stage") != stage or payload.get("provider") != provider or row["created_at"] <= cleared:
                 continue
             reason = str(payload.get("reason") or "provider_failure")
             age = int(now - row["created_at"])
@@ -237,9 +243,12 @@ class ProviderPool:
                 retry_at = float(row["created_at"]) + cooldown
             if now >= retry_at:
                 continue
-            if reason in _CAPACITY_OUTCOMES:
-                return f"provider_cooldown: {reason} {age}s ago (cooldown {int(cooldown)}s)"
-            if payload.get("task_id") == task_id:
+            if reason in wide:
+                return (
+                    f"provider_cooldown: {reason} {age}s ago (cooldown {int(cooldown)}s, {max(0, int(retry_at - now))}s left; "
+                    f"clear: stagemesh cooldown clear --provider {provider})"
+                )
+            if task_id is not None and payload.get("task_id") == task_id:
                 return f"recent_failure: {reason} {age}s ago (cooldown {int(cooldown)}s)"
         return None
 
@@ -276,6 +285,8 @@ class ProviderPool:
             name = str(payload.get("provider", ""))
             reason = str(payload.get("reason", ""))
             if name in seen or name not in self.pool(stage):
+                continue
+            if row["created_at"] <= cleared_at(store, name):
                 continue
             if payload.get("task_id") != task_id and reason not in _CAPACITY_OUTCOMES:
                 continue
@@ -344,6 +355,12 @@ class ProviderPool:
                 **({"provider_output": provider_output[:500]} if provider_output else {}),
             },
         )
+        if no_progress_streak(store, provider) >= NO_PROGRESS_THRESHOLD:
+            # Rest the provider (not the task): selection skips it for the cooldown and the other providers keep working.
+            self.record_failure(
+                store, stage, task_id, provider, REPEATED_NO_PROGRESS,
+                provider_output=f"{NO_PROGRESS_THRESHOLD} consecutive invocations changed nothing",
+            )
 
     def record_workspace_integrity_failure(
         self,

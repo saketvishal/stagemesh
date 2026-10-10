@@ -42,7 +42,8 @@ class ExecutionResult:
 _QUOTA = re.compile(
     r"weekly limit|usage limit|usage cap|plan limit|capacity exhausted|"
     r"rate[_ ]limit|quota exceeded|exceeded your current quota|too many requests|"
-    r"\b429\b|insufficient_quota|overloaded_error|rate_limit_error",
+    r"\b429\b|insufficient_quota|overloaded_error|rate_limit_error|"
+    r"credit balance|out of credits|insufficient credits|resource_exhausted|quota exhausted|usage limit reached",
     re.IGNORECASE,
 )
 _SECRET = re.compile(r"(?i)(bearer\s+)\S+|(\bgh[pousr]_|sk-|xai-)[A-Za-z0-9_\-]+")
@@ -77,7 +78,9 @@ def classify_failure(
     if any(m in combined for m in [
         "unauthorized", "authentication", "not logged in", "login required",
         "invalid api key", "auth failure", "missing credentials", "authenticate",
-        "invalid_api_key", "authentication_error", "forbidden", "401", "403"
+        "invalid_api_key", "authentication_error", "forbidden", "401", "403",
+        "please log in", "please login", "please sign in", "log in again", "session has expired", "session expired",
+        "not authenticated", "please run /login",
     ]):
         return True, "authentication_failure"
 
