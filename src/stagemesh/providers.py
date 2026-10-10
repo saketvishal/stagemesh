@@ -138,7 +138,7 @@ class RuntimeCommandAdapter:
             if proc.returncode != 0:
                 is_cap, reason = classify_failure(proc.returncode, stdout, stderr)
                 store.finish_execution(execution_id, ExecutionStatus.FAILED, result=reason)
-                output, retry_after = capacity_evidence(stdout, stderr) if is_cap else (None, None)
+                output, retry_after = capacity_evidence(stdout, stderr)  # the operator sees why, capacity failure or not
                 return ExecutionResult(
                     ExecutionStatus.FAILED,
                     capacity_failure=is_cap,

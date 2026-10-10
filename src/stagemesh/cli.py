@@ -804,7 +804,9 @@ def command_cooldown(args: argparse.Namespace) -> int:
     store.migrate()
     try:
         if args.cooldown_command == "clear":
-            cleared = clear_cooldown(store, args.provider, config.provider_failure_cooldown_seconds)
+            cleared = clear_cooldown(
+                store, args.provider or getattr(args, "provider_name", None), config.provider_failure_cooldown_seconds
+            )
             if args.json:
                 print(json.dumps({"cleared": cleared}, sort_keys=True))
             elif cleared:
@@ -2489,7 +2491,8 @@ def build_parser() -> argparse.ArgumentParser:
     cooldown_list = cooldown_sub.add_parser("list", help="Show active provider cooldowns (default)")
     cooldown_list.add_argument("--json", action="store_true")
     cooldown_clear = cooldown_sub.add_parser("clear", help="End a cooldown now (after logging in or a quota reset)")
-    cooldown_clear.add_argument("--provider", help="Provider to clear; default: every provider in cooldown")
+    cooldown_clear.add_argument("provider_name", nargs="?", help="Provider to clear; default: every provider in cooldown")
+    cooldown_clear.add_argument("--provider", help="Same as the positional provider name")
     cooldown_clear.add_argument("--json", action="store_true")
     cooldown.add_argument("--json", action="store_true")
     cooldown.set_defaults(func=command_cooldown, cooldown_command="list", provider=None)

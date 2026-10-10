@@ -51,6 +51,8 @@ SCRIPT = (
     "    if mode == 'malformed-review':\n"
     "        print('looks fine to me, approved'); sys.exit(0)\n"
     "    print('{\"decision\":\"PASS\"}'); sys.exit(0)\n"
+    "if mode == 'payment-fail':\n"
+    "    sys.stderr.write('API error (status 402 Payment Required): Grok Build usage balance exhausted'); sys.exit(1)\n"
     "if mode == 'auth-fail':\n"
     "    sys.stderr.write('authentication_error: not logged in'); sys.exit(1)\n"
     "if mode == 'weekly-limit':\n"

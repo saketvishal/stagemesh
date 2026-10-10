@@ -45,6 +45,7 @@ def _cli(rig: Rig, *argv: str) -> tuple[int, str]:
         ("429 Too Many Requests: rate limit exceeded", "quota_rate_limit"),
         ("authentication_error: not logged in", "authentication_failure"),
         ("503 Service Unavailable", "transient_provider_failure"),
+        ("API error (status 402 Payment Required): Grok Build usage balance exhausted", "quota_rate_limit"),
     ],
 )
 def test_provider_level_failures_are_classified_for_cooldown(message: str, expected: str) -> None:
@@ -67,7 +68,7 @@ def test_auth_failure_enters_cooldown_with_a_full_record_and_the_other_provider_
     assert entry["provider"] == "provider-a" and entry["failure_class"] == "authentication_failure"
     assert entry["stages"] == ["IMPLEMENT"] and entry["first_seen"] >= before - 1 and entry["last_seen"] >= entry["first_seen"]
     assert "not logged in" in entry["last_error"] and entry["seconds_remaining"] > 0
-    assert "log in" in entry["action"] and entry["clear_command"] == "stagemesh cooldown clear --provider provider-a"
+    assert "log in" in entry["action"] and entry["clear_command"] == "stagemesh cooldown clear provider-a"
     assert rig.store.get_task(TASK)["status"] == TaskStatus.OPEN  # the task is not poisoned or blocked
     assert not any(v.eligible for v in rig.pool.evaluate(rig.store, IMPLEMENT, TASK) if v.provider == "provider-a")
 
@@ -130,7 +131,7 @@ def test_cooldown_is_visible_in_status_doctor_cooldown_command_and_run_banner(tm
 
     for text in (status_text, doctor_text, listing):
         assert "provider cooldown provider-a: authentication_failure" in text
-        assert "log in to the provider CLI" in text and "stagemesh cooldown clear --provider provider-a" in text
+        assert "log in to the provider CLI" in text and "stagemesh cooldown clear provider-a" in text
     for payload in (json.loads(status_json), json.loads(doctor_json), json.loads(listing_json)):
         assert payload["provider_cooldowns"][0]["provider"] == "provider-a"
     assert "provider cooldown provider-a" in "\n".join(format_cooldowns(active_cooldowns(rig.store, COOLDOWN)))
@@ -141,7 +142,7 @@ def test_cooldown_can_be_cleared_after_login_and_expires_on_its_own(tmp_path: Pa
     rig.tick(2)
     assert active_cooldowns(rig.store, COOLDOWN)
 
-    code, text = _cli(rig, "cooldown", "clear", "--provider", "provider-a")  # the operator logged in
+    code, text = _cli(rig, "cooldown", "clear", "provider-a")  # the operator logged in
 
     assert code == 0 and "cleared provider cooldown: provider-a" in text
     assert active_cooldowns(rig.store, COOLDOWN) == []
@@ -154,3 +155,29 @@ def test_cooldown_can_be_cleared_after_login_and_expires_on_its_own(tmp_path: Pa
     assert active_cooldowns(rig.store, COOLDOWN, now=time.time() + COOLDOWN + 1) == []  # deterministic expiry
     monkeypatch.setattr("stagemesh.provider_pool.time.time", lambda: time.time_ns() / 1e9 + COOLDOWN + 1)
     assert next(v for v in rig.pool.evaluate(rig.store, IMPLEMENT, TASK) if v.provider == "provider-a").eligible
+
+
+def test_grok_style_payment_required_rests_the_provider_and_the_next_provider_implements(tmp_path: Path) -> None:
+    """The real dogfood failure: Grok answered 402 'usage balance exhausted', which used to read as a task failure."""
+    rig = _rig(tmp_path, {"provider-a": "payment-fail", "provider-b": "ok"})
+
+    rig.tick(2)
+
+    candidate = rig.store.latest_candidate(TASK)
+    assert candidate is not None and candidate["produced_by"] == "provider-b"
+    (entry,) = active_cooldowns(rig.store, COOLDOWN)
+    assert entry["provider"] == "provider-a" and entry["failure_class"] == "quota_rate_limit"
+    assert "402 Payment Required" in entry["last_error"] and entry["seconds_remaining"] > 3600  # quota rests for hours
+    assert rig.store.get_task(TASK)["status"] == TaskStatus.OPEN
+
+
+def test_an_unclassified_provider_failure_keeps_its_error_text_for_the_operator(tmp_path: Path) -> None:
+    rig = _rig(tmp_path, {"provider-a": "impl-error"})
+
+    rig.tick(2)
+
+    event = next(
+        json.loads(r["payload"])
+        for r in rig.store.conn.execute("SELECT payload FROM audit_events WHERE event_type='task.implementation_unsuccessful'")
+    )
+    assert event["reason"] == "implementation_failure" and "AssertionError" in event["provider_output"]

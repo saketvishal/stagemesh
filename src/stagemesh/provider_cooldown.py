@@ -76,7 +76,7 @@ def active_cooldowns(store: Store, cooldown_seconds: float, now: float | None = 
         entry["seconds_remaining"] = max(0, int(entry["retry_at"] - now))
         reset = f" ({entry['reset_hint']})" if entry.get("reset_hint") else ""
         entry["action"] = _HINTS.get(entry["failure_class"], _HINTS["provider_failure"]).format(reset=reset)
-        entry["clear_command"] = f"stagemesh cooldown clear --provider {entry['provider']}"
+        entry["clear_command"] = f"stagemesh cooldown clear {entry['provider']}"
         result.append(entry)
     return result
 

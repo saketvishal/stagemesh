@@ -246,7 +246,7 @@ class ProviderPool:
             if reason in wide:
                 return (
                     f"provider_cooldown: {reason} {age}s ago (cooldown {int(cooldown)}s, {max(0, int(retry_at - now))}s left; "
-                    f"clear: stagemesh cooldown clear --provider {provider})"
+                    f"clear: stagemesh cooldown clear {provider})"
                 )
             if task_id is not None and payload.get("task_id") == task_id:
                 return f"recent_failure: {reason} {age}s ago (cooldown {int(cooldown)}s)"

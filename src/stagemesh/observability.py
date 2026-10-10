@@ -111,17 +111,23 @@ def _blocked_reason_buckets(store: Store, blocked: list[Any]) -> dict[str, int]:
 
 
 def _latest_blocked_reason(store: Store, task_id: str) -> str:
+    """Why the task is blocked, from the newest stop event: an explicit block, a diagnosis stop, or an exhausted remediation."""
     rows = store.conn.execute(
-        "SELECT payload FROM audit_events WHERE event_type=? ORDER BY created_at DESC, rowid DESC LIMIT 200",
-        ("task.blocked",),
+        "SELECT event_type, payload FROM audit_events WHERE event_type IN ('task.blocked', 'task.diagnosis_stop', 'task.remediation_exhausted') "
+        "ORDER BY created_at DESC, rowid DESC LIMIT 400"
     ).fetchall()
     for row in rows:
         try:
             payload = json.loads(row["payload"])
         except (TypeError, json.JSONDecodeError):
             continue
-        if str(payload.get("task_id") or "") == task_id:
+        if str(payload.get("task_id") or "") != task_id:
+            continue
+        if row["event_type"] == "task.blocked":
             return str(payload.get("reason") or "blocked")
+        if row["event_type"] == "task.diagnosis_stop":
+            return str(payload.get("category") or payload.get("reason") or "diagnosis_stop")
+        return str(payload.get("reason") or "remediation_exhausted")
     return "blocked"
 
 
