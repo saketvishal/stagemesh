@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -34,6 +35,14 @@ LEGACY_PYTEST_GATE = {
     "timeout_seconds": 1800,
 }
 MAX_OBJECTIVE_CHARS = 4000
+_PATH_TOKEN_RE = re.compile(r"`([^`\r\n]+)`")
+_SCOPE_HEADINGS = (
+    "allowed files",
+    "allowed paths",
+    "implementation scope",
+    "narrow implementation scope",
+    "suggested narrow implementation scope",
+)
 FORBIDDEN_FILES = (
     ".stagemesh/**",
     ".git/**",
@@ -181,18 +190,79 @@ def task_objective(store: Store, task_id: str) -> str:
     return objective
 
 
+def _heading_text(line: str) -> str:
+    text = line.strip().lstrip("#").strip().rstrip(":").strip()
+    return re.sub(r"\s+", " ", text).lower()
+
+
+def _scope_heading(line: str) -> bool:
+    heading = _heading_text(line)
+    return heading == "scope" or any(part in heading for part in _SCOPE_HEADINGS)
+
+
+def _clean_scope_token(token: str) -> str:
+    return token.strip().strip(".,;:()[]{}\"'")
+
+
+def _looks_like_file_scope(token: str) -> bool:
+    if not token or token == "**" or any(ch.isspace() for ch in token):
+        return False
+    if token.startswith("-") or token.startswith("--"):
+        return False
+    lowered = token.lower()
+    if lowered.startswith(("stagemesh ", "python ", "git ", "uv ", "npm ")):
+        return False
+    return "/" in token or "\\" in token or "*" in token or bool(re.search(r"\.[A-Za-z0-9][A-Za-z0-9_-]*(?:$|\*)", token))
+
+
+def _task_suggested_allowed_files(objective: str) -> list[str]:
+    """Extract explicit file/glob bullets from a task-provided scope section.
+
+    Auto-planning may fall back to a broad contract when the task has no scope, but if the source issue gives a concrete
+    implementation scope, the generated contract should honor it instead of admitting the whole repository.
+    """
+    allowed: list[str] = []
+    seen: set[str] = set()
+    in_scope = False
+    for raw in objective.splitlines():
+        stripped = raw.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("#"):
+            if _scope_heading(stripped):
+                in_scope = True
+                continue
+            if in_scope:
+                break
+        if not in_scope:
+            continue
+        for match in _PATH_TOKEN_RE.findall(stripped):
+            token = _clean_scope_token(match)
+            if _looks_like_file_scope(token) and token not in seen:
+                allowed.append(token)
+                seen.add(token)
+    return allowed
+
+
 def build_contract(store: Store, project: Path, task_id: str, gates: list[dict[str, Any]]) -> dict[str, Any]:
+    objective = task_objective(store, task_id)
+    allowed_files = _task_suggested_allowed_files(objective) or ["**"]
+    no_scope = allowed_files == ["**"]
     return {
-        "objective": task_objective(store, task_id),
+        "objective": objective,
         "explicit": True,
         # Scope is unknown, so use the highest validation tier: broad gates are allowed to run.
         "validation_classification": "CORE_LIFECYCLE_OR_SCHEMA_SECURITY",
-        "validation_escalation_reasons": ["auto-generated contract has no file scope; bounded project smoke required before merge-readiness checks"],
+        "validation_escalation_reasons": [
+            "auto-generated contract has no file scope; bounded project smoke required before merge-readiness checks"
+            if no_scope
+            else "auto-generated contract uses task-provided file scope; bounded project smoke required before merge-readiness checks"
+        ],
         "acceptance_criteria": [
             "The change fulfils the task objective and nothing else.",
             "Every generated local smoke gate passes; full-suite/hosted CI remains a separate merge-readiness check.",
         ],
-        "allowed_files": ["**"],
+        "allowed_files": allowed_files,
         "forbidden_files": list(FORBIDDEN_FILES),
         "required_tests": gates,
         "max_changed_files": 60,
