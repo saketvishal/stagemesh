@@ -1085,12 +1085,30 @@ def _interactive_chooser(candidates) -> str | None:
     return candidates[int(answer) - 1].task_id if answer.isdigit() and 1 <= int(answer) <= len(candidates) else None
 
 
+def _format_recovered(item: object) -> str:
+    """One line per recovery entry. Entries are not all stale executions: automatic recoveries (rebaseline, rebind, revalidate,
+    re-integrate) carry task/candidate keys and no execution id, and a detached built-in stage has no pid. Never raises."""
+    if not isinstance(item, dict):
+        return f"recovered: {item}"
+    task = item.get("task_id")
+    where = f" (task {task})" if task is not None else ""
+    if item.get("execution_id") is not None:
+        pid = item.get("pid")
+        state = f"pid {pid} dead" if pid is not None else str(item.get("process_state") or item.get("reason") or "no process")
+        return f"recovered stale execution {item['execution_id']} ({state}){where}"
+    if item.get("auto_recovery"):
+        sha = str(item.get("candidate_sha") or "")[:10]
+        return f"automatic recovery {item['auto_recovery']}{where}" + (f" candidate {sha}" if sha else "")
+    detail = item.get("action") or item.get("reason") or ", ".join(sorted(str(key) for key in item)) or "no details"
+    return f"recovered{where}: {detail}"
+
+
 def _report_run_ready(summary: RunSummary, info: dict[str, object], *, as_json: bool) -> int:
     if as_json:
         print(json.dumps({**summary.to_dict(), "providers": info}, indent=2, sort_keys=True))
     else:
         for item in summary.recovered:
-            print(f"recovered stale execution {item['execution_id']} (pid {item['pid']} dead)")
+            print(_format_recovered(item))
         print(format_stop(summary))
     if summary.succeeded:
         return 0
