@@ -235,3 +235,71 @@ def test_genuine_human_coauthors_and_message_bodies_are_preserved() -> None:
     message = "Subject\n\nBody mentions Co-authored-by: in prose.\n\nCo-authored-by: Ada Lovelace <ada@example.org>\n"
     assert sanitize_commit_message(message) == message
     assert not is_non_human_email("ada@example.org") and is_non_human_email("noreply@anthropic.com")
+
+
+# ---- precedence: the owner's identity beats StageMesh's placeholder, wherever it is configured ------------------------------------------
+
+LEGACY = ("StageMesh", "stagemesh@example.invalid")
+
+
+def test_project_config_identity_wins_over_a_legacy_synthetic_local_identity(tmp_path: Path, isolated_git_config: Path) -> None:
+    subprocess.run(["git", "config", "--file", str(isolated_git_config), "user.name", OWNER[0]], check=True)
+    subprocess.run(["git", "config", "--file", str(isolated_git_config), "user.email", OWNER[1]], check=True)
+    project = _project(tmp_path, ["T-1"])
+    _raw(project, "config", "user.name", LEGACY[0])  # what older StageMesh versions wrote over the owner's identity
+    _raw(project, "config", "user.email", LEGACY[1])
+    identity = project_identity(project)
+    assert (identity.name, identity.email, identity.source) == (*OWNER, "configured")
+
+
+def test_fallback_identity_is_used_only_when_no_approved_identity_exists(tmp_path: Path) -> None:
+    project = _project(tmp_path, ["T-1"])
+    _raw(project, "config", "--unset", "user.name")  # the helper presets a test identity
+    _raw(project, "config", "--unset", "user.email")
+    assert project_identity(project).source == "synthetic"
+    _raw(project, "config", "user.name", LEGACY[0])
+    _raw(project, "config", "user.email", LEGACY[1])
+    assert project_identity(project).source == "synthetic"  # a placeholder is not an approved identity
+    _raw(project, "config", "user.name", OWNER[0])
+    _raw(project, "config", "user.email", OWNER[1])
+    assert project_identity(project).source == "configured"
+
+
+def test_provider_environment_cannot_override_the_approved_identity(tmp_path: Path) -> None:
+    from stagemesh.git_identity import provider_environment
+
+    project = _owner_repo(tmp_path)
+    hostile = {"GIT_AUTHOR_NAME": "Codex", "GIT_AUTHOR_EMAIL": "codex@openai.com", "GIT_COMMITTER_NAME": "Claude", "GIT_COMMITTER_EMAIL": "x@anthropic.com"}
+    env = provider_environment(project, hostile)
+    assert (env["GIT_AUTHOR_NAME"], env["GIT_AUTHOR_EMAIL"]) == OWNER
+    assert (env["GIT_COMMITTER_NAME"], env["GIT_COMMITTER_EMAIL"]) == OWNER
+
+
+def test_doctor_reports_the_effective_identity(tmp_path: Path) -> None:
+    from stagemesh.git_identity import identity_report
+
+    project = _project(tmp_path, ["T-1"])
+    _raw(project, "config", "user.name", LEGACY[0])
+    _raw(project, "config", "user.email", LEGACY[1])
+    report = identity_report(project)
+    assert report["status"] == "synthetic" and report["email"] == "stagemesh@stagemesh.invalid" and "ignored placeholder" in report["problem"]
+    _raw(project, "config", "user.name", OWNER[0])
+    _raw(project, "config", "user.email", OWNER[1])
+    report = identity_report(project)
+    assert (report["status"], report["name"], report["email"], report["origin"]) == ("ok", *OWNER, "git config")
+    assert report["problem"] is None
+
+
+def test_candidate_commits_and_snapshots_use_the_effective_approved_identity(tmp_path: Path, isolated_git_config: Path) -> None:
+    subprocess.run(["git", "config", "--file", str(isolated_git_config), "user.name", OWNER[0]], check=True)
+    subprocess.run(["git", "config", "--file", str(isolated_git_config), "user.email", OWNER[1]], check=True)
+    project = _project(tmp_path, ["T-1"])
+    _raw(project, "config", "user.name", LEGACY[0])
+    _raw(project, "config", "user.email", LEGACY[1])
+    worktree = prepare_task_workspace(project, "T-1")
+    (worktree / "c.txt").write_text("candidate\n", encoding="utf-8")
+    GitWorkspace(worktree).commit_all("candidate")
+    assert _ident(worktree) == (f"{OWNER[0]} <{OWNER[1]}>",) * 2
+    (worktree / "s.txt").write_text("snapshot\n", encoding="utf-8")
+    snap = GitFacts(project).snapshot_worktree(worktree, "snapshot")
+    assert _ident(worktree, snap) == (f"{OWNER[0]} <{OWNER[1]}>",) * 2

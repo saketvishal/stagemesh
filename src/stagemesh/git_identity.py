@@ -44,6 +44,7 @@ class GitIdentity:
     name: str
     email: str
     source: str  # "configured" (environment or git config) or "synthetic"
+    origin: str = ""  # where a configured identity came from: "environment" or "git config"
 
     def env(self) -> dict[str, str]:
         return {
@@ -54,7 +55,7 @@ class GitIdentity:
         }
 
 
-SYNTHETIC_IDENTITY = GitIdentity(SYNTHETIC_NAME, SYNTHETIC_EMAIL, "synthetic")
+SYNTHETIC_IDENTITY = GitIdentity(SYNTHETIC_NAME, SYNTHETIC_EMAIL, "synthetic", "fallback")
 
 
 def validate_identity(name: str, email: str) -> None:
@@ -78,34 +79,68 @@ def validate_identity(name: str, email: str) -> None:
         )
 
 
-def _git_config(path: Path | None, key: str) -> str | None:
+def _is_synthetic(name: str | None = None, email: str | None = None) -> bool:
+    """StageMesh's own placeholder identity, including the legacy `stagemesh@example.invalid` older versions wrote into git config.
+
+    Such a value is never an approved owner identity: it must not outrank a real identity configured at another level.
+    """
+    if name is not None and name.strip() == SYNTHETIC_NAME:
+        return True
+    return email is not None and email.strip().lower().startswith("stagemesh@") and email.strip().lower().endswith(".invalid")
+
+
+def _git_config_values(path: Path | None, key: str) -> list[str]:
+    """Every value of `key` across system/global/local config, lowest precedence first (git itself uses the last)."""
     try:
         result = subprocess.run(
-            ["git", "config", "--get", key],
+            ["git", "config", "--get-all", key],
             cwd=path if path is not None and Path(path).is_dir() else None,
             text=True,
             capture_output=True,
             check=False,
         )
     except OSError:
-        return None
-    value = result.stdout.strip()
-    return value if result.returncode == 0 and value else None
+        return []
+    if result.returncode != 0:
+        return []
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+
+def _resolve_identity(path: Path | None, environ: dict[str, str] | None) -> tuple[GitIdentity | None, str | None]:
+    """(approved identity or None, legacy synthetic value that was ignored, if any). Raises GitIdentityError for a bad identity."""
+    env = os.environ if environ is None else environ
+    ignored: str | None = None
+
+    def pick(env_key: str, config_key: str, is_synth) -> tuple[str | None, str | None]:
+        nonlocal ignored
+        # git's own committer resolution (GIT_COMMITTER_* then config, last level wins), skipping StageMesh's placeholder identity so a
+        # legacy `StageMesh <stagemesh@example.invalid>` in the local config cannot hide the owner's identity configured elsewhere.
+        # GIT_AUTHOR_* describes only the author and is not a fallback.
+        candidates = [(env.get(env_key), "environment")] + [(v, "git config") for v in reversed(_git_config_values(path, config_key))]
+        for value, origin in candidates:
+            if not value:
+                continue
+            if is_synth(value):
+                ignored = ignored or value
+                continue
+            return value, origin
+        return None, None
+
+    name, name_origin = pick("GIT_COMMITTER_NAME", "user.name", lambda v: _is_synthetic(name=v))
+    email, email_origin = pick("GIT_COMMITTER_EMAIL", "user.email", lambda v: _is_synthetic(email=v))
+    if not name or not email:
+        return None, ignored
+    validate_identity(name, email)
+    return GitIdentity(name.strip(), email.strip(), "configured", email_origin or name_origin or "git config"), ignored
 
 
 def configured_identity(path: Path | None = None, environ: dict[str, str] | None = None) -> GitIdentity | None:
-    """The identity git itself would commit with (environment, then local/global config), or None when none is set.
+    """The approved owner identity git would commit with (environment, then local/global config), or None when none is set.
 
+    StageMesh's own placeholder identity (including the legacy `stagemesh@example.invalid`) is never approved and is skipped.
     Never guesses from the host name and never writes anything. Raises GitIdentityError for a malformed or placeholder identity.
     """
-    env = os.environ if environ is None else environ
-    # Exactly git's own committer resolution: GIT_COMMITTER_* then config. GIT_AUTHOR_* describes only the author and is not a fallback.
-    name = env.get("GIT_COMMITTER_NAME") or _git_config(path, "user.name")
-    email = env.get("GIT_COMMITTER_EMAIL") or _git_config(path, "user.email")
-    if not name or not email:
-        return None
-    validate_identity(name, email)
-    return GitIdentity(name.strip(), email.strip(), "configured")
+    return _resolve_identity(path, environ)[0]
 
 
 def project_identity(path: Path | None = None) -> GitIdentity:
@@ -179,9 +214,10 @@ def provider_environment(path: Path | None = None, base: dict[str, str] | None =
     to the provider's own git configuration. A placeholder or tool identity is left for StageMesh's own commit path to refuse."""
     env = dict(os.environ if base is None else base)
     try:
-        env.update(identity_env_for(path, env))
+        identity = project_identity(path)
     except GitIdentityError:
-        pass
+        return env
+    env.update(identity.env())  # forced, not filled: a provider's own GIT_* variables must not outrank the approved identity
     return env
 
 
@@ -192,16 +228,19 @@ def identity_report(path: Path | None = None, environ: dict[str, str] | None = N
     (an AI-provider, worker, placeholder or malformed identity that StageMesh refuses to commit with).
     """
     try:
-        identity = configured_identity(path, environ)
+        identity, ignored = _resolve_identity(path, environ)
     except GitIdentityError as exc:
-        return {"status": "unapproved", "name": None, "email": None, "source": "configured", "problem": str(exc)}
+        return {"status": "unapproved", "name": None, "email": None, "source": "configured", "origin": None, "problem": str(exc)}
     if identity is None:
+        problem = "no approved git identity configured; commits use the synthetic StageMesh identity (set user.name/user.email to the owner)"
+        if ignored:
+            problem += f"; ignored placeholder {ignored!r} in git config"
         return {
-            "status": "synthetic", "name": SYNTHETIC_NAME, "email": SYNTHETIC_EMAIL, "source": "synthetic",
-            "problem": "no git identity configured; commits use the synthetic StageMesh identity (set user.name/user.email to the owner)",
+            "status": "synthetic", "name": SYNTHETIC_NAME, "email": SYNTHETIC_EMAIL, "source": "synthetic", "origin": "fallback",
+            "problem": problem,
         }
-    warn = "email uses a .invalid domain" if identity.email.lower().endswith(".invalid") else None
-    return {"status": "ok", "name": identity.name, "email": identity.email, "source": identity.source, "problem": warn}
+    note = f"ignored placeholder {ignored!r} in favour of the configured owner identity" if ignored else None
+    return {"status": "ok", "name": identity.name, "email": identity.email, "source": identity.source, "origin": identity.origin, "problem": note}
 
 
 def attribution_offences(commits: list[tuple[str, str, str, str]]) -> list[str]:
