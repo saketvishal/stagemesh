@@ -73,6 +73,48 @@ def test_missing_contract_is_generated_and_the_task_continues(tmp_path: Path, fa
     assert ".stagemesh/**" in contract["forbidden_files"] and contract["required_tests"][0]["name"] == "project-acceptance-fake"
 
 
+def test_auto_plan_uses_task_provided_narrow_scope(tmp_path: Path, fake_gates: None) -> None:
+    description = """
+## Objective
+
+Add queue-run focus mode.
+
+## Suggested narrow implementation scope
+
+- `src/stagemesh/cli.py`
+- `src/stagemesh/parallel.py`
+- `src/stagemesh/queue_run.py`
+- `tests/test_queue_run.py`
+- optionally `tests/test_parallel.py` only if shared runner behavior needs coverage
+
+Do not change provider selection, task source sync, GitHub sync, worktree cleanup, attribution, or unrelated dashboard/status behavior.
+""".strip()
+    project = _project(
+        tmp_path,
+        description,
+    )
+    store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+    store.migrate()
+    store.upsert_task("Widget endpoint", source="local-backlog", source_id="T-1")
+    store.cache_source("local-backlog", "T-1", {"objective": description}, "OPEN")
+
+    result = auto_plan_module.create_contract(store, project, "T-1")
+
+    assert result.gates == ("project-acceptance-fake",)
+    contract = json.loads(_contract(project).read_text(encoding="utf-8"))
+    assert contract["allowed_files"] == [
+        "src/stagemesh/cli.py",
+        "src/stagemesh/parallel.py",
+        "src/stagemesh/queue_run.py",
+        "tests/test_queue_run.py",
+        "tests/test_parallel.py",
+    ]
+    assert "**" not in contract["allowed_files"]
+    assert contract["validation_escalation_reasons"] == [
+        "auto-generated contract uses task-provided file scope; bounded project smoke required before merge-readiness checks"
+    ]
+
+
 def test_existing_contract_is_reused_untouched(tmp_path: Path, fake_gates: None) -> None:
     project = _project(tmp_path)
     manual = {
