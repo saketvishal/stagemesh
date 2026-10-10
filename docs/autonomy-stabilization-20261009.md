@@ -30,13 +30,31 @@ All commands used workspace-owned temporary directories and a command-scoped `co
 
 No full repository test suite was run.
 
-## Remaining acceptance gate
+## Live acceptance
 
-Live external-provider acceptance is **not proven**. The synthetic CLI-provider matrix also cannot complete its independent review stage in this Work session: Git clone launches an MSYS shell that the Windows sandbox rejects with `NtCreateDirectoryObject ... 0xC0000022`. Native Git network transport also fails with `getaddrinfo() thread failed to start`. Python and native Git operations that do not require that shell were usable for scoped verification.
+Live external-provider acceptance was proven in a separate synthetic canary repository so external provider CLIs only received canary tasks and not the StageMesh source checkout. StageMesh ran this PR branch against five local backlog tasks with three-way concurrency. Each task required one provider-created `stagemesh-task-live-*.txt` file, a focused validation gate that checked the exact file contents, independent review, and serialized integration into the canary repository's `master` branch.
 
-The hosted synthetic independent-review/provider matrix passed on Linux and Windows. Keep this PR in draft until five real tasks with two or three concurrent providers and live outage recovery complete in an execution environment that permits the required subprocesses. Preserve normal checks; do not replace independent review with the synthetic reviewer for live acceptance.
+Final canary status:
 
-Queue runs now wait through recorded temporary provider outages and retry automatically at the cooldown deadline. Implementation and independent review recovery are covered by scoped tests, including an outage already recorded before startup, exact cooldown expiry, and operator pause/stop. Review recovery retains the same candidate SHA and does not reimplement. Authentication, missing tools, and coding no-progress do not enter an indefinite capacity wait. queue-run --no-wait-for-providers retains finite exhaustion behavior. Live-provider outage recovery remains unproven in this sandbox.
+- `LIVE-1`: `DONE`; implemented by Claude, independently reviewed by Codex after Grok outage and Agy malformed-review fallback, validated, rebased/integrated.
+- `LIVE-2`: `DONE`; implemented by Codex, independently reviewed by Claude, validated, rebased/integrated.
+- `LIVE-3`: `DONE`; implemented by Codex, independently reviewed and integrated.
+- `LIVE-4`: `DONE`; implemented by Codex, independently reviewed by Claude, validated, rebased/integrated.
+- `LIVE-5`: `DONE`; implemented by Claude, independently reviewed by Codex after Agy malformed-review fallback, validated, integrated.
+
+Observed provider behavior:
+
+- Codex and Claude both produced durable live implementation candidates.
+- Codex and Claude both served as independent reviewers.
+- Grok was classified as `provider_unavailable` and placed in provider cooldown instead of poisoning task state.
+- Agy failures were classified as `provider_permission_denied` for implementation and `malformed_review_output` for review fallback.
+- The queue continued through provider capacity/fallback conditions and finished all five tasks without manual SQLite edits or task hand-holding.
+
+Final canary state was healthy: `done_count: 5`, `current_problems: []`, `current_failed_execution_count: 0`, `unknown_execution_count: 0`, `stale_execution_count: 0`. Historical provider failures remained recorded as audit/evidence, as expected.
+
+The remaining unproven external item is real GitHub outbound source synchronization against a live issue. The synthetic GitHub acceptance path remains covered, and hosted Linux/Windows checks for PR #259 are green. Do not treat GitHub source mutation as proven until a real issue/comment/close acceptance run is intentionally authorized.
+
+Queue runs now wait through recorded temporary provider outages and retry automatically at the cooldown deadline. Implementation and independent review recovery are covered by scoped tests, including an outage already recorded before startup, exact cooldown expiry, and operator pause/stop. Review recovery retains the same candidate SHA and does not reimplement. Authentication, missing tools, and coding no-progress do not enter an indefinite capacity wait. queue-run --no-wait-for-providers retains finite exhaustion behavior. The live canary also observed a real Grok `provider_unavailable` event and continued through cooldown/fallback to complete all tasks.
 
 The initial Linux/Windows hosted stabilization matrix passed on PR #259 at caee016. The local outage recovery checks passed (13 cases), including shared cross-stage capacity deadlines, and seven focused queue-control/CLI/provider-preflight compatibility checks passed. No full suite was run.
 
