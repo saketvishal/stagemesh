@@ -52,7 +52,15 @@ Observed provider behavior:
 
 Final canary state was healthy: `done_count: 5`, `current_problems: []`, `current_failed_execution_count: 0`, `unknown_execution_count: 0`, `stale_execution_count: 0`. Historical provider failures remained recorded as audit/evidence, as expected.
 
-The remaining unproven external item is real GitHub outbound source synchronization against a live issue. The synthetic GitHub acceptance path remains covered, and hosted Linux/Windows checks for PR #259 are green. Do not treat GitHub source mutation as proven until a real issue/comment/close acceptance run is intentionally authorized.
+Live GitHub outbound source synchronization was proven against temporary issue
+[#260](https://github.com/saketvishal/stagemesh/issues/260). StageMesh
+`GitHubOutboundSync.publish_done("260", "52d059e48425ab4c4490a252931e44b2aa107623")`
+posted the expected integration comment, closed the issue, and recorded a local
+`source_events` outbound row with `status: OK` and payload statuses
+`comment: OK`, `close: OK`.
+
+The synthetic GitHub acceptance path remains covered, and hosted Linux/Windows
+checks for PR #259 were green before this evidence-only update.
 
 Queue runs now wait through recorded temporary provider outages and retry automatically at the cooldown deadline. Implementation and independent review recovery are covered by scoped tests, including an outage already recorded before startup, exact cooldown expiry, and operator pause/stop. Review recovery retains the same candidate SHA and does not reimplement. Authentication, missing tools, and coding no-progress do not enter an indefinite capacity wait. queue-run --no-wait-for-providers retains finite exhaustion behavior. The live canary also observed a real Grok `provider_unavailable` event and continued through cooldown/fallback to complete all tasks.
 
