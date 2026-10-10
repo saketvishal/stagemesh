@@ -132,6 +132,52 @@ def test_continue_human_output_is_operator_timeline(tmp_path: Path) -> None:
     assert "stopped: done" in text
 
 
+def test_continue_human_output_shows_live_provider_selection(tmp_path: Path) -> None:
+    provider = tmp_path / "provider.py"
+    provider.write_text(
+        "\n".join(
+            [
+                "from pathlib import Path",
+                "import sys",
+                "prompt = sys.stdin.read()",
+                "if 'Review candidate' in prompt:",
+                "    print('{\"decision\":\"PASS\"}')",
+                "else:",
+                "    Path('stagemesh-task-T-1.txt').write_text('implemented\\n', encoding='utf-8')",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    command = f'"{sys.executable}" "{provider}"'
+    project = _project(
+        tmp_path,
+        ["T-1"],
+        config={
+            "providers": {
+                "missing": "stagemesh-no-such-cli-xyz",
+                "writer": command,
+                "reviewer": command,
+            },
+            "routing": {
+                "mode": "STAGED",
+                "pools": {"IMPLEMENT": ["missing", "writer"], "REVIEW": ["reviewer"]},
+            },
+        },
+    )
+    out = io.StringIO()
+
+    with contextlib.redirect_stdout(out):
+        code = cli_module.main(["--project", str(project), "continue", "--task", "T-1"])
+
+    text = out.getvalue()
+    assert code == 0, text
+    assert "skipped missing: cli_not_installed" in text
+    assert "selected implementation provider writer" in text
+    assert text.index("selected implementation provider writer") < text.index("actor: writer")
+    assert text.count("selected implementation provider writer") == 1
+    assert "missing: skipped, not authenticated or unavailable" not in text
+
+
 def test_auto_continue_walks_to_next_task_after_provider_pool_exhaustion(tmp_path: Path, monkeypatch) -> None:
     project = _project(tmp_path, ["A-1", "B-1"])
     calls = []

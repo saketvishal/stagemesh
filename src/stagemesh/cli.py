@@ -870,7 +870,19 @@ def command_run_ready(args: argparse.Namespace) -> int:
     store.migrate()
     _sync_all_sources(store, project, config, requested)
     info: dict[str, object] = {}
-    provider_log = ProviderLog(echo=False)
+    provider_notice_index = 0
+
+    def live_provider_notice(message: str) -> None:
+        if args.json:
+            return
+        notice = _live_provider_notice(message)
+        if notice is None:
+            return
+        nonlocal provider_notice_index
+        provider_notice_index = len(provider_log.lines)
+        print(f"    {notice}", flush=True)
+
+    provider_log = ProviderLog(echo=False, on_line=live_provider_notice)
     if not args.json:
         for line in format_cooldowns(active_cooldowns(store, config.provider_failure_cooldown_seconds)):
             print(line, flush=True)
@@ -898,8 +910,6 @@ def command_run_ready(args: argparse.Namespace) -> int:
             if compact_timeline and not (message.startswith(("StageMesh run", "task selection", "["))):
                 return
             print(message, flush=True)
-
-    provider_notice_index = 0
 
     exhausted_tasks: list[dict[str, object]] = []
     seen_exhausted: set[str] = set()
@@ -979,6 +989,21 @@ def _continue_after_provider_exhaustion(summary: RunSummary, requested: str | No
         return False
     reason = str(failure.get("reason") or "")
     return failure.get("pool_exhausted") is True or reason.startswith("all_implementation_providers_")
+
+
+def _live_provider_notice(message: str) -> str | None:
+    line = message.strip()
+    if line.startswith(("selected implementation provider ", "selected review provider ")):
+        return line
+    if line.startswith(("fallback:", "REFUSED:")):
+        return line
+    if line.startswith(("skipped ", "skipped review provider ")):
+        return line
+    if line.startswith("provider ") and " is at capacity -> using " in line:
+        return line
+    if line.startswith("every provider is at capacity;"):
+        return line
+    return None
 
 
 def command_queue_run(args: argparse.Namespace) -> int:
