@@ -160,6 +160,7 @@ def test_continue_human_output_shows_live_provider_selection(tmp_path: Path) -> 
             },
             "routing": {
                 "mode": "STAGED",
+                "require_independent_review": False,
                 "pools": {"IMPLEMENT": ["missing", "writer"], "REVIEW": ["reviewer"]},
             },
         },
