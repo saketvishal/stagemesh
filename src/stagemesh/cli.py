@@ -106,7 +106,7 @@ from .work_transport import (
     write_packet_envelope,
 )
 from .workers import WorkerValidationError, heartbeat_worker, register_worker
-from .workspaces import legacy_worktree_roots, worktree_root
+from .workspaces import legacy_worktree_roots, sweep_task_worktrees, worktree_root
 
 
 def runtime_dir(project: Path) -> Path:
@@ -202,6 +202,31 @@ def command_doctor(args: argparse.Namespace) -> int:
     print(f"editable/development status: {'development' if 'site-packages' not in __file__ else 'installed'}")
     print(f"platform: {platform.platform()}")
     store.close()
+    return 0
+
+
+def command_worktrees(args: argparse.Namespace) -> int:
+    project = Path(args.project).resolve()
+    store = Store(db_path(project))
+    store.migrate()
+    try:
+        actions = sweep_task_worktrees(project, store, dry_run=args.dry_run)
+    finally:
+        store.close()
+    payload = {
+        "dry_run": args.dry_run,
+        "removed": sum(1 for item in actions if item["action"] == "REMOVED"),
+        "retained": sum(1 for item in actions if item["action"] != "REMOVED"),
+        "actions": actions,
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(f"worktrees removed: {payload['removed']}")
+    print(f"worktrees retained: {payload['retained']}")
+    for item in actions:
+        suffix = f" ({item['recovery_ref']})" if item.get("recovery_ref") else ""
+        print(f"{item['action']}: {item['worktree']} - {item['reason']}{suffix}")
     return 0
 
 
@@ -2233,6 +2258,12 @@ def build_parser() -> argparse.ArgumentParser:
     status = sub.add_parser("status")
     status.add_argument("--json", action="store_true")
     status.set_defaults(func=command_status)
+    worktrees = sub.add_parser("worktrees", help="Inspect or reconcile StageMesh-owned task worktrees")
+    worktrees_sub = worktrees.add_subparsers(dest="worktrees_command", required=True)
+    worktrees_sweep = worktrees_sub.add_parser("sweep", help="Clean only provably obsolete StageMesh-owned worktrees")
+    worktrees_sweep.add_argument("--dry-run", action="store_true", help="Explain cleanup decisions without removing worktrees")
+    worktrees_sweep.add_argument("--json", action="store_true")
+    worktrees_sweep.set_defaults(func=command_worktrees)
     plan = sub.add_parser("plan")
     plan.add_argument("file")
     plan.add_argument("--json", action="store_true")
