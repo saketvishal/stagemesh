@@ -16,6 +16,7 @@ from .concurrency import ConflictReason, contract_conflict, patterns_overlap
 from .config import StageMeshConfig
 from .contracts import ChangeContract
 from .git import GitError, GitWorkspace
+from .git_identity import identity_report
 from .parallel import ParallelRunner
 from .profile import ProfileError, load_profile
 from .profile_smoke import run_smoke
@@ -137,6 +138,9 @@ def preflight(project: Path, config: StageMeshConfig, *, require_ref: bool) -> d
     inside = git.run("rev-parse", "--git-dir", check=False).returncode == 0
     checks.append({"name": "project is a git repository", "ok": inside})
     ok = ok and inside
+    who = identity_report(project)
+    checks.append({"name": "git identity is approved", "ok": who["status"] != "unapproved", "detail": who.get("problem") or f"{who['name']} <{who['email']}>"})
+    ok = ok and who["status"] != "unapproved"
     if require_ref:
         ref = config.integration_ref or (git.run("symbolic-ref", "-q", "HEAD", check=False).stdout.strip() if inside else "")
         checks.append({"name": "integration target resolves", "ok": bool(ref), "detail": ref or "no integration_ref configured and no current branch"})

@@ -39,6 +39,7 @@ from .external_evidence import (
 )
 from .final_report import FinalReportValidationError, candidate_sha, render_final_report
 from .git import GitWorkspace
+from .git_identity import identity_report
 from .github import GitHubClient, UrlLibGitHubTransport
 from .github_acceptance import run_github_acceptance
 from .handoff import HandoffError, build_handoff, write_handoff
@@ -178,6 +179,7 @@ def command_doctor(args: argparse.Namespace) -> int:
         "backend_available": backend.available,
         "development_status": "development" if "site-packages" not in __file__ else "installed",
         "platform": platform.platform(),
+        "git_identity": identity_report(project),
     }
     if args.json:
         print(json.dumps(data, indent=2, sort_keys=True))
@@ -203,6 +205,10 @@ def command_doctor(args: argparse.Namespace) -> int:
     print(f"backend available: {backend.available}")
     print(f"editable/development status: {'development' if 'site-packages' not in __file__ else 'installed'}")
     print(f"platform: {platform.platform()}")
+    who = data["git_identity"]
+    print(f"git identity: {who['name']} <{who['email']}> [{who['status']}]")
+    if who["problem"]:
+        print(f"WARNING git identity: {who['problem']}")
     store.close()
     return 0
 

@@ -17,6 +17,7 @@ from .capacity import CapacityKind, CapacityRegistry
 from .config import StageMeshConfig
 from .contract_binding import ContractRejected, bind_task_contract
 from .domain import ExecutionKind, ExecutionStatus
+from .git_identity import provider_environment
 from .execution import (
     PROVIDER_TIMEOUT,
     ExecutionResult,
@@ -110,6 +111,7 @@ class RuntimeCommandAdapter:
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
+                env=provider_environment(run_path),
                 **popen_session_kwargs(),
             )
         except FileNotFoundError as exc:
@@ -197,6 +199,7 @@ class RuntimeCommandAdapter:
                     stdin=subprocess.PIPE,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
+                    env=provider_environment(Path(project)),
                     **popen_session_kwargs(),
                 )
             except FileNotFoundError:
