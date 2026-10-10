@@ -98,6 +98,19 @@ def describe_verdicts(verdicts: list[Verdict]) -> str:
     return "; ".join(f"{v.provider}: {v.reason}" for v in verdicts) or "no providers configured"
 
 
+def _capacity_reason(adapter: RuntimeCommandAdapter, capacity: str) -> str:
+    executable = adapter.command[0] if adapter.command else ""
+    if capacity == CapacityKind.UNKNOWN:
+        return f"cli_not_installed: '{executable}' is not callable on PATH"
+    if capacity == CapacityKind.PERMISSION:
+        return "provider_permission_denied: command refused unattended permissions"
+    if capacity == CapacityKind.AUTH:
+        return "authentication_failure: provider command is not authenticated"
+    if capacity == CapacityKind.CAPACITY:
+        return "provider_unavailable: provider reports no capacity"
+    return f"command_unavailable: {capacity}"
+
+
 def default_pools(
     names: list[str],
     stage_routes: dict[str, str],
@@ -184,8 +197,8 @@ class ProviderPool:
                 verdicts.append(Verdict(name, False, "not_configured: no command configured for this provider"))
             elif capability not in adapter.capabilities:
                 verdicts.append(Verdict(name, False, f"missing_capability: does not support '{capability}'"))
-            elif adapter.check_capacity() != CapacityKind.AVAILABLE:
-                verdicts.append(Verdict(name, False, f"cli_not_installed: '{adapter.command[0]}' is not callable on PATH"))
+            elif (capacity := adapter.check_capacity()) != CapacityKind.AVAILABLE:
+                verdicts.append(Verdict(name, False, _capacity_reason(adapter, capacity)))
             elif self.limiter is not None and self.limiter.cooling(name) is not None:
                 verdicts.append(Verdict(name, False, str(self.limiter.cooling(name))))
             else:

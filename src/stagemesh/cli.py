@@ -1649,25 +1649,92 @@ def command_registry(args: argparse.Namespace) -> int:
 
 
 def command_capacity(args: argparse.Namespace) -> int:
-    registry = CapacityRegistry()
-    registry.record(args.primary, CapacityKind.AVAILABLE if not args.primary_down else CapacityKind.CAPACITY)
-    registry.record(args.secondary, CapacityKind.AVAILABLE if not args.secondary_down else CapacityKind.CAPACITY)
-    chosen = registry.choose_primary_secondary(args.primary, args.secondary)
-    if args.json:
-        print(
-            json.dumps(
-                {
-                    "chosen": chosen,
-                    "providers": registry.snapshot((args.primary, args.secondary)),
-                },
-                indent=2,
-                sort_keys=True,
-            )
-        )
+    project = Path(args.project).resolve()
+    config = load_config(project)
+    adapters = adapters_from_config(config)
+    if args.primary_down or args.secondary_down:
+        registry = CapacityRegistry()
+        registry.record(args.primary, CapacityKind.AVAILABLE if not args.primary_down else CapacityKind.CAPACITY)
+        registry.record(args.secondary, CapacityKind.AVAILABLE if not args.secondary_down else CapacityKind.CAPACITY)
+        chosen = registry.choose_primary_secondary(args.primary, args.secondary)
+        payload = {
+            "chosen": chosen,
+            "providers": registry.snapshot((args.primary, args.secondary)),
+        }
+        if args.json:
+            print(json.dumps(payload, indent=2, sort_keys=True))
+            return 0
+        print(f"chosen: {chosen or 'NONE'}")
         return 0
-    print(f"chosen: {chosen or 'NONE'}")
+    adapter_by_name = {adapter.name: adapter for adapter in adapters}
+    stage_caps = {IMPLEMENT: "code", REVIEW: "review"}
+    capable = {stage: {a.name for a in adapters if capability in a.capabilities} for stage, capability in stage_caps.items()}
+    priorities = {name: spec.priority for name, spec in config.provider_specs.items() if spec.priority is not None}
+    pools = default_pools(
+        sorted(adapter_by_name),
+        config.stage_routes,
+        config.provider_pools,
+        config.single_agent_provider,
+        config.routing_mode,
+        capable=capable,
+        priorities=priorities,
+    )
+    store = Store(db_path(project))
+    store.migrate()
+    implementer = None
+    if args.task:
+        candidate = store.latest_candidate(args.task)
+        implementer = str(candidate["produced_by"]) if candidate is not None and candidate["produced_by"] is not None else None
+    pool = ProviderPool(
+        adapters,
+        pools,
+        require_independent=config.require_independent_review,
+        cooldown_seconds=config.provider_failure_cooldown_seconds,
+        policy=config.provider_selection_policy,
+        weights=config.provider_weights,
+        priorities=priorities,
+    )
+    impl = pool.evaluate(store, IMPLEMENT, args.task)
+    review = pool.evaluate(store, REVIEW, args.task, implementer=implementer)
+    provider_rows = []
+    for adapter in sorted(adapters, key=lambda item: item.name):
+        capacity = adapter.check_capacity()
+        provider_rows.append(
+            {
+                "provider": adapter.name,
+                "command": redact_command_secrets(shlex.join(adapter.command)),
+                "command_available": capacity == CapacityKind.AVAILABLE,
+                "capacity": capacity,
+                "capabilities": sorted(adapter.capabilities),
+                "live_acceptance": "not_run",
+            }
+        )
+    payload = {
+        "task_id": args.task,
+        "implementer": implementer,
+        "pools": {stage: list(names) for stage, names in sorted(pools.items())},
+        "providers": provider_rows,
+        "stages": {
+            IMPLEMENT: {
+                "available": any(v.eligible for v in impl),
+                "verdicts": [v.to_dict() for v in impl],
+            },
+            REVIEW: {
+                "available": any(v.eligible for v in review),
+                "verdicts": [v.to_dict() for v in review],
+            },
+        },
+    }
+    store.close()
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    for stage, stage_payload in payload["stages"].items():
+        state = "available" if stage_payload["available"] else "unavailable"
+        print(f"{stage}: {state}")
+        for verdict in stage_payload["verdicts"]:
+            print(f"  {verdict['provider']}: {verdict['reason']}")
     return 0
-
 
 def command_config(args: argparse.Namespace) -> int:
     config = load_config(Path(args.project).resolve(), Path(args.config).resolve() if args.config else None)
@@ -2372,6 +2439,7 @@ def build_parser() -> argparse.ArgumentParser:
     capacity.add_argument("--secondary", default="claude")
     capacity.add_argument("--primary-down", action="store_true")
     capacity.add_argument("--secondary-down", action="store_true")
+    capacity.add_argument("--task", help="Evaluate task-scoped provider cooldowns and review independence")
     capacity.add_argument("--json", action="store_true")
     capacity.set_defaults(func=command_capacity)
     config = sub.add_parser("config")

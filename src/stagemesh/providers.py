@@ -178,17 +178,18 @@ class RuntimeCommandAdapter:
         if self.check_capacity() != CapacityKind.AVAILABLE:
             return _review_infrastructure_failure("provider_unavailable")
         temp_dir = tempfile.mkdtemp(prefix="stagemesh-review-")
+        review_path = Path(temp_dir) / "candidate"
         try:
-            review_path = Path(temp_dir) / "candidate"
-            clone = subprocess.run(
-                ["git", "clone", "--quiet", "--no-checkout", str(Path(project).resolve()), str(review_path)],
+            add = subprocess.run(
+                ["git", "worktree", "add", "--quiet", "--detach", "--no-checkout", str(review_path), candidate_sha],
+                cwd=project,
                 text=True,
                 capture_output=True,
                 check=False,
             )
-            if clone.returncode != 0:
-                detail = (clone.stderr or clone.stdout).strip()[:1000]
-                return _review_infrastructure_failure("review workspace clone failed: " + detail)
+            if add.returncode != 0:
+                detail = _bounded_process_output(add)
+                return _review_infrastructure_failure("review workspace setup failed" + (f": {detail}" if detail else ""))
             # Reviewers must inspect the committed candidate bytes, not a platform-normalized
             # checkout shaped by the machine's global Git config.
             subprocess.run(
@@ -240,7 +241,7 @@ class RuntimeCommandAdapter:
                 return _review_infrastructure_failure(reason)
             return _provider_text_response(stdout)
         finally:
-            _cleanup_review_workspace(Path(temp_dir))
+            _cleanup_review_workspace(Path(temp_dir), review_path=review_path, project=Path(project))
 
 
 @dataclass(frozen=True)
@@ -336,7 +337,16 @@ def _provider_permission_denial(stdout: str, stderr: str) -> str | None:
     return None
 
 
-def _cleanup_review_workspace(path: Path) -> None:
+def _cleanup_review_workspace(path: Path, *, review_path: Path | None = None, project: Path | None = None) -> None:
+    if review_path is not None and project is not None:
+        subprocess.run(
+            ["git", "worktree", "remove", "--force", str(review_path)],
+            cwd=project,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
     def retry_with_write_permission(function: object, cleanup_path: str, _exc_info: object) -> None:
         try:
             os.chmod(cleanup_path, stat.S_IREAD | stat.S_IWRITE)
@@ -361,6 +371,10 @@ def _cleanup_review_workspace(path: Path) -> None:
 
 def _execution_result(exc: Exception) -> str:
     return f"{type(exc).__name__}: {exc}"[:MAX_EXECUTION_RESULT_CHARS]
+
+
+def _bounded_process_output(result: subprocess.CompletedProcess[str]) -> str:
+    return " ".join((result.stderr or result.stdout or "").split())[:MAX_EXECUTION_RESULT_CHARS]
 
 
 def _is_external_workspace_mutation(exc: Exception) -> bool:

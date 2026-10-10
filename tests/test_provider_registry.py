@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import sys
 from argparse import Namespace
@@ -311,7 +313,7 @@ def test_cooldown_removes_a_provider_from_the_rotation(tmp_path: Path) -> None:
     )
     rig.pool.record_failure(rig.store, IMPLEMENT, TASK, "beta", "quota_rate_limit")
     assert _picks(rig, IMPLEMENT, 4) == ["alpha", "gamma", "alpha", "gamma"]
-    assert "skipped beta: recent_failure: quota_rate_limit" in rig.text()
+    assert "skipped beta: provider_cooldown: quota_rate_limit" in rig.text()
 
 
 def _wired(tmp_path: Path, config: dict, **args) -> tuple[Rig, object]:
@@ -383,6 +385,32 @@ def test_cli_review_setup_ignores_implementation_provider_backoff(tmp_path: Path
     assert info["review_provider"].startswith("dynamic-pool:")
     assert "gamma" not in info["review_provider"]
     assert len(info["implementation_skipped"]) == 3
+
+
+def test_capacity_command_reports_stage_verdicts_and_local_cooldown(tmp_path: Path) -> None:
+    rig = Rig(tmp_path, {"alpha": "ok", "beta": "ok", "gamma": "ok"})
+    rig.pool.record_failure(rig.store, IMPLEMENT, TASK, "beta", "quota_rate_limit")
+    commands = {
+        name: f'"{sys.executable}" "{tmp_path / "provider.py"}" ok {name}'
+        for name in ("alpha", "beta", "gamma")
+    }
+    providers = {name: {"command": cmd, "capabilities": ["IMPLEMENT", "REVIEW"]} for name, cmd in commands.items()}
+    (rig.project / ".stagemesh" / "config.json").write_text(
+        json.dumps({"providers": providers, "routing": {"pools": {"IMPLEMENT": ["beta", "alpha"], "REVIEW": ["beta", "gamma"]}}}),
+        encoding="utf-8",
+    )
+
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        code = cli_module.main(["--project", str(rig.project), "capacity", "--task", TASK, "--json"])
+    data = json.loads(out.getvalue())
+
+    assert code == 0
+    impl = {v["provider"]: v for v in data["stages"]["IMPLEMENT"]["verdicts"]}
+    review = {v["provider"]: v for v in data["stages"]["REVIEW"]["verdicts"]}
+    assert impl["beta"]["reason"].startswith("provider_cooldown: quota_rate_limit")
+    assert review["beta"]["eligible"] is True
+    assert data["providers"][0]["live_acceptance"] == "not_run"
 
 
 def test_single_agent_mode_stays_single_provider_under_any_policy(tmp_path: Path) -> None:
