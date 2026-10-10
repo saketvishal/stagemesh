@@ -7,6 +7,7 @@ from .contract_binding import contract_for_candidate
 from .contracts import ContractError, evaluate_contract
 from .domain import EvidenceKind, EvidenceStatus, ExecutionKind, ExecutionStatus
 from .git import GitWorkspace
+from .git_identity import attribution_offences
 from .persistence import Store
 from .remediation import finding_identity
 from .review import independent_review_verified
@@ -75,6 +76,7 @@ class Integrator:
             )
             payload.update(bound.evidence_payload())
             findings.extend(evaluation.findings)
+            findings.extend(_attribution_findings(project, bound.baseline_sha, candidate_sha))
         except ContractError as exc:
             findings.append({"severity": "error", "code": "invalid_contract", "message": str(exc)})
 
@@ -155,6 +157,36 @@ class Integrator:
                 "integration_ref_not_updated",
                 f"{ref} resolves to {after}, not candidate {candidate_sha}",
             )
+
+
+def _attribution_findings(project: Path, baseline_sha: str | None, candidate_sha: str) -> list[dict[str, object]]:
+    """Refuse to land commits that credit an AI provider, a StageMesh worker or a placeholder GitHub account as contributor.
+
+    Only the candidate's own commits (baseline..candidate) are inspected, so existing history never blocks new work.
+    """
+    if not baseline_sha:
+        return []
+    result = GitWorkspace(project).run(
+        "log", "--format=%H%x1f%an <%ae>%x1f%cn <%ce>%x1f%B%x1e", f"{baseline_sha}..{candidate_sha}", check=False, encoding="utf-8"
+    )
+    if result.returncode != 0:
+        return []
+    commits = []
+    for record in result.stdout.split("\x1e"):
+        parts = record.strip("\n").split("\x1f", 3)
+        if len(parts) == 4:
+            commits.append((parts[0], parts[1], parts[2], parts[3]))
+    offences = attribution_offences(commits)
+    if not offences:
+        return []
+    return [
+        {
+            "severity": "error",
+            "code": "attribution_violation",
+            "message": "candidate commits credit a non-owner contributor: " + "; ".join(offences[:5])
+            + ". Commit as the repository owner and drop tool Co-authored-by trailers (providers belong in StageMesh metadata).",
+        }
+    ]
 
 
 def _has_exact_bound_evidence(

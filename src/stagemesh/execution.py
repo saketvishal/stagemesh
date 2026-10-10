@@ -13,6 +13,7 @@ from .attribution import attribution_for_worker
 from .contract_binding import ContractRejected, bind_task_contract
 from .domain import ExecutionKind, ExecutionStatus
 from .git import GitWorkspace
+from .git_identity import provider_environment
 from .persistence import Store
 from .process_identity import popen_identity
 from .remediation import remediation_context
@@ -252,6 +253,7 @@ class SubprocessExecutor(Executor):
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
+                env=provider_environment(run_path),
                 **popen_session_kwargs(),
             )
         except FileNotFoundError as exc:

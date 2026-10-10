@@ -65,6 +65,11 @@ def validate_identity(name: str, email: str) -> None:
         raise GitIdentityError(
             f"git identity email {email!r} is malformed (no whitespace or angle brackets allowed): fix user.email / GIT_*_EMAIL"
         )
+    if is_tool_email(email):
+        raise GitIdentityError(
+            f"git identity email {email!r} belongs to an AI provider or StageMesh worker; commits must carry the repository owner's "
+            "identity (providers are recorded in StageMesh execution metadata, not as contributors): fix user.email / GIT_*_EMAIL"
+        )
     match = _NOREPLY.match(email.strip())
     if match and match.group("id") in PLACEHOLDER_NOREPLY_IDS:
         raise GitIdentityError(
@@ -160,3 +165,57 @@ def sanitize_commit_message(message: str, *, minimal: bool = False) -> str:
                 continue
         kept.append(line)
     return "\n".join(kept).rstrip() + ("\n" if message.endswith("\n") else "")
+
+
+def is_tool_email(email: str) -> bool:
+    """AI-provider addresses and StageMesh provider-worker addresses: never an acceptable author, committer or co-author."""
+    cleaned = email.strip().lower()
+    local, _, domain = cleaned.rpartition("@")
+    return domain in AI_PROVIDER_EMAIL_DOMAINS or "+local-worker" in local
+
+
+def provider_environment(path: Path | None = None, base: dict[str, str] | None = None) -> dict[str, str]:
+    """Environment for a provider subprocess: pinned to the project identity so a commit the provider makes itself is never credited
+    to the provider's own git configuration. A placeholder or tool identity is left for StageMesh's own commit path to refuse."""
+    env = dict(os.environ if base is None else base)
+    try:
+        env.update(identity_env_for(path, env))
+    except GitIdentityError:
+        pass
+    return env
+
+
+def identity_report(path: Path | None = None, environ: dict[str, str] | None = None) -> dict[str, object]:
+    """What StageMesh would commit as in `path`, and whether that is acceptable. Never writes anything.
+
+    status: "ok" (owner identity), "synthetic" (none configured; StageMesh's per-command fallback is used), or "unapproved"
+    (an AI-provider, worker, placeholder or malformed identity that StageMesh refuses to commit with).
+    """
+    try:
+        identity = configured_identity(path, environ)
+    except GitIdentityError as exc:
+        return {"status": "unapproved", "name": None, "email": None, "source": "configured", "problem": str(exc)}
+    if identity is None:
+        return {
+            "status": "synthetic", "name": SYNTHETIC_NAME, "email": SYNTHETIC_EMAIL, "source": "synthetic",
+            "problem": "no git identity configured; commits use the synthetic StageMesh identity (set user.name/user.email to the owner)",
+        }
+    warn = "email uses a .invalid domain" if identity.email.lower().endswith(".invalid") else None
+    return {"status": "ok", "name": identity.name, "email": identity.email, "source": identity.source, "problem": warn}
+
+
+def attribution_offences(commits: list[tuple[str, str, str, str]]) -> list[str]:
+    """Offences in (sha, author, committer, message) tuples: tool/worker/placeholder identities or AI/placeholder co-author trailers."""
+    offences: list[str] = []
+    for sha, author, committer, message in commits:
+        for role, who in (("author", author), ("committer", committer)):
+            email = who.rsplit("<", 1)[-1].rstrip(">").strip()
+            if is_tool_email(email) or is_ai_or_placeholder_email(email):
+                offences.append(f"{sha[:10]} {role} {who}")
+        for line in message.splitlines():
+            trailer = _COAUTHOR_LINE.match(line)
+            if trailer and any(
+                is_tool_email(e) or is_ai_or_placeholder_email(e) for e in _EMAIL_IN_TRAILER.findall(trailer.group("who"))
+            ):
+                offences.append(f"{sha[:10]} trailer {line.strip()[:120]}")
+    return offences
