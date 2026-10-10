@@ -1098,7 +1098,8 @@ def _format_recovered(item: object) -> str:
         return f"recovered stale execution {item['execution_id']} ({state}){where}"
     if item.get("auto_recovery"):
         sha = str(item.get("candidate_sha") or "")[:10]
-        return f"automatic recovery {item['auto_recovery']}{where}" + (f" candidate {sha}" if sha else "")
+        note = f": {item['message']}" if item.get("message") else ""
+        return f"automatic recovery {item['auto_recovery']}{where}" + (f" candidate {sha}" if sha else "") + note
     detail = item.get("action") or item.get("reason") or ", ".join(sorted(str(key) for key in item)) or "no details"
     return f"recovered{where}: {detail}"
 
