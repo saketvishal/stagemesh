@@ -34,6 +34,15 @@ def _sets_identity_inline(args: tuple[str, ...]) -> bool:
     return any(a == "-c" and i + 1 < len(args) and args[i + 1].startswith(("user.name=", "user.email=")) for i, a in enumerate(args))
 
 
+def _windows_longpaths(args: tuple[str, ...], windows: bool | None = None) -> list[str]:
+    """Per-command `-c core.longpaths=true` on Windows: deep task-worktree paths otherwise make git fail with 'Filename too long'
+    (for example `git rebase` reports `failed to stat '<sha>...<sha>'`). Nothing is written to any git config; a caller's own
+    core.longpaths setting wins."""
+    if not (os.name == "nt" if windows is None else windows) or any(a == "-c" and i + 1 < len(args) and args[i + 1].lower().startswith("core.longpaths=") for i, a in enumerate(args)):
+        return []
+    return ["-c", "core.longpaths=true"]
+
+
 def _transient_file_error(stderr: str) -> bool:
     """Windows briefly denies access to .git files another git process (or a scanner) has open; the same command succeeds a moment later."""
     return "permission denied" in stderr.lower()
@@ -81,7 +90,7 @@ class GitWorkspace:
             merged_env.update(identity_env_for(self.path, merged_env))  # fills only what is unset; raises on a placeholder identity
         for attempt in range(_TRANSIENT_RETRIES + 1):
             result = subprocess.run(
-                ["git", *validated_args],
+                ["git", *_windows_longpaths(validated_args), *validated_args],
                 cwd=self.path,
                 text=True,
                 encoding=encoding,  # None keeps the process locale; callers that need exact paths pass "utf-8" (git writes UTF-8)

@@ -39,6 +39,8 @@ from .external_evidence import (
 )
 from .final_report import FinalReportValidationError, candidate_sha, render_final_report
 from .git import GitWorkspace
+from .blocked_recovery import can_auto_retry
+from .provider_cooldown import active_cooldowns, clear_cooldown, format_cooldowns
 from .git_identity import identity_report
 from .github import GitHubClient, UrlLibGitHubTransport
 from .github_acceptance import run_github_acceptance
@@ -180,6 +182,7 @@ def command_doctor(args: argparse.Namespace) -> int:
         "development_status": "development" if "site-packages" not in __file__ else "installed",
         "platform": platform.platform(),
         "git_identity": identity_report(project),
+        "provider_cooldowns": _json_safe_cooldowns(active_cooldowns(store, config.provider_failure_cooldown_seconds)),
     }
     if args.json:
         print(json.dumps(data, indent=2, sort_keys=True))
@@ -205,6 +208,8 @@ def command_doctor(args: argparse.Namespace) -> int:
     print(f"backend available: {backend.available}")
     print(f"editable/development status: {'development' if 'site-packages' not in __file__ else 'installed'}")
     print(f"platform: {platform.platform()}")
+    for line in format_cooldowns(active_cooldowns(store, config.provider_failure_cooldown_seconds)):
+        print(line)
     who = data["git_identity"]
     print(f"git identity: {who['name']} <{who['email']}> [{who['status']}]")
     if who["problem"]:
@@ -711,6 +716,7 @@ def command_status(args: argparse.Namespace) -> int:
                     "backlog_state": report.backlog_state,
                     "latest_implementation_failure": report.latest_implementation_failure,
                     "queue_control": control,
+                    "provider_cooldowns": _json_safe_cooldowns(active_cooldowns(store, load_config(project).provider_failure_cooldown_seconds)),
                     **_health_scope_fields(report),
                     "tasks": [
                         {
@@ -748,6 +754,8 @@ def command_status(args: argparse.Namespace) -> int:
     )
     for reason, count in report.blocked_reason_buckets.items():
         print(f"blocked_bucket {reason}: {count}")
+    for line in format_cooldowns(active_cooldowns(store, load_config(project).provider_failure_cooldown_seconds)):
+        print(line)
     for row in rows:
         print(f"{row['id']} {row['stage']} {row['status']} {row['title']}")
     store.close()
@@ -783,6 +791,40 @@ def command_plan(args: argparse.Namespace) -> int:
         return 0
     print(f"planned objective: {objective.id} ({len(objective.tasks)} tasks)")
     return 0
+
+
+def _json_safe_cooldowns(cooldowns: list[dict[str, object]]) -> list[dict[str, object]]:
+    return [dict(item) for item in cooldowns]
+
+
+def command_cooldown(args: argparse.Namespace) -> int:
+    project = Path(args.project).resolve()
+    config = load_config(project)
+    store = Store(db_path(project))
+    store.migrate()
+    try:
+        if args.cooldown_command == "clear":
+            cleared = clear_cooldown(
+                store, args.provider or getattr(args, "provider_name", None), config.provider_failure_cooldown_seconds
+            )
+            if args.json:
+                print(json.dumps({"cleared": cleared}, sort_keys=True))
+            elif cleared:
+                print(f"cleared provider cooldown: {', '.join(cleared)}; selection may use it again immediately")
+            else:
+                print("no provider is in cooldown")
+            return 0
+        active = active_cooldowns(store, config.provider_failure_cooldown_seconds)
+        if args.json:
+            print(json.dumps({"provider_cooldowns": _json_safe_cooldowns(active)}, indent=2, sort_keys=True))
+        elif active:
+            for line in format_cooldowns(active):
+                print(line)
+        else:
+            print("no provider is in cooldown")
+        return 0
+    finally:
+        store.close()
 
 
 def command_retry_task(args: argparse.Namespace) -> int:
@@ -829,6 +871,9 @@ def command_run_ready(args: argparse.Namespace) -> int:
     _sync_all_sources(store, project, config, requested)
     info: dict[str, object] = {}
     provider_log = ProviderLog(echo=False)
+    if not args.json:
+        for line in format_cooldowns(active_cooldowns(store, config.provider_failure_cooldown_seconds)):
+            print(line, flush=True)
 
     def make_coordinator(target: TargetSelection) -> Coordinator:
         coord, details = _build_coordinator(args, project, config, store, target, provider_log)
@@ -859,6 +904,7 @@ def command_run_ready(args: argparse.Namespace) -> int:
     exhausted_tasks: list[dict[str, object]] = []
     seen_exhausted: set[str] = set()
     blocked_tasks: list[RunSummary] = []
+    held_for_retry: set[str] = set()  # blocked earlier in this run: retried automatically only after the other work is done
     try:
         while True:
             summary = run_ready(
@@ -867,11 +913,20 @@ def command_run_ready(args: argparse.Namespace) -> int:
                 policy=config.task_selection,
                 chooser=_interactive_chooser if getattr(args, "choose", False) else None,
                 worktree_root_path=config.runtime.worktree_root if config.runtime else None,
+                no_auto_retry=held_for_retry,
             )
             if blocked_tasks and summary.stop_reason == "REFUSED:no_eligible_task":
+                retryable = [item for item in blocked_tasks if can_auto_retry(store, str(item.task_id))]
+                if retryable:  # all other work is done: give each ordinary provider/workspace block its bounded retry, then re-walk
+                    for item in retryable:
+                        blocked_tasks.remove(item)
+                        held_for_retry.discard(str(item.task_id))
+                        seen_exhausted.discard(str(item.task_id))
+                    continue
                 summary = blocked_tasks.pop()  # nothing else could run, so the task block is the real stop
             elif _continue_after_task_block(summary, requested) and str(summary.task_id) not in seen_exhausted:
                 seen_exhausted.add(str(summary.task_id))
+                held_for_retry.add(str(summary.task_id))
                 blocked_tasks.append(summary)
                 if not args.json:
                     print(f"task {summary.task_id}: blocked ({summary.message}); continuing with the next eligible task", flush=True)
@@ -1022,6 +1077,7 @@ def command_run_parallel(args: argparse.Namespace, *, queue: bool = False) -> in
                 ),
                 f"project checkout: {project}",
                 f"worktree root: {config.runtime.worktree_root if config.runtime else worktree_root(project)}",
+                *format_cooldowns(active_cooldowns(store, config.provider_failure_cooldown_seconds)),
             ]
         ),
     )
@@ -1098,7 +1154,8 @@ def _format_recovered(item: object) -> str:
         return f"recovered stale execution {item['execution_id']} ({state}){where}"
     if item.get("auto_recovery"):
         sha = str(item.get("candidate_sha") or "")[:10]
-        return f"automatic recovery {item['auto_recovery']}{where}" + (f" candidate {sha}" if sha else "")
+        note = f": {item['message']}" if item.get("message") else ""
+        return f"automatic recovery {item['auto_recovery']}{where}" + (f" candidate {sha}" if sha else "") + note
     detail = item.get("action") or item.get("reason") or ", ".join(sorted(str(key) for key in item)) or "no details"
     return f"recovered{where}: {detail}"
 
@@ -2429,6 +2486,18 @@ def build_parser() -> argparse.ArgumentParser:
     plan.add_argument("file")
     plan.add_argument("--json", action="store_true")
     plan.set_defaults(func=command_plan)
+    cooldown = sub.add_parser("cooldown", help="Show or clear providers StageMesh is resting after quota/auth/rate/no-progress failures")
+    cooldown_sub = cooldown.add_subparsers(dest="cooldown_command")
+    cooldown_list = cooldown_sub.add_parser("list", help="Show active provider cooldowns (default)")
+    cooldown_list.add_argument("--json", action="store_true")
+    cooldown_clear = cooldown_sub.add_parser("clear", help="End a cooldown now (after logging in or a quota reset)")
+    cooldown_clear.add_argument("provider_name", nargs="?", help="Provider to clear; default: every provider in cooldown")
+    cooldown_clear.add_argument("--provider", help="Same as the positional provider name")
+    cooldown_clear.add_argument("--json", action="store_true")
+    cooldown.add_argument("--json", action="store_true")
+    cooldown.set_defaults(func=command_cooldown, cooldown_command="list", provider=None)
+    cooldown_list.set_defaults(func=command_cooldown)
+    cooldown_clear.set_defaults(func=command_cooldown)
     retry_task = sub.add_parser("retry-task", help="Return a BLOCKED task to OPEN with a fresh remediation budget")
     retry_task.add_argument("--task", required=True)
     retry_task.add_argument("--json", action="store_true")

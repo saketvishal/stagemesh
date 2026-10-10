@@ -271,6 +271,7 @@ class Coordinator:
                 candidate_sha=result.candidate_sha,
                 durable_handoff=result.durable_handoff,
                 provider_attempts=result.provider_attempts,
+                provider_output=result.provider_output,
             )
             return 0
         candidate = self.store.latest_candidate(task_id)
@@ -315,6 +316,9 @@ class Coordinator:
                 except WorkspaceMutation:
                     self._block_on_mutation(task_id, "INTEGRATE")
                     return 1
+                moved = self.store.get_task(task_id)
+                if moved is not None and Stage(moved["stage"]) is not Stage.INTEGRATE:
+                    return 1  # the integrator rebased the candidate and sent it back to VALIDATE: earlier failures belong to the old SHA
             if self.store.has_bound_evidence(task_id, sha, EvidenceKind.INTEGRATION, bound.digest, EvidenceStatus.FAILED):
                 return self._remediate_or_block(task_id, sha, Stage.INTEGRATE)
             return self._advance_with_evidence(task_id, stage, sha, EvidenceKind.INTEGRATION, bound.digest)
@@ -358,6 +362,7 @@ class Coordinator:
         candidate_sha: str | None,
         durable_handoff: bool,
         provider_attempts: list | None = None,
+        provider_output: str | None = None,
     ) -> None:
         execution = self.store.latest_execution_for_claim(claim_id)
         if execution is not None and execution["status"] == ExecutionStatus.RUNNING:
@@ -394,6 +399,7 @@ class Coordinator:
                 "reason": reason,
                 "candidate_sha": candidate_sha,
                 "durable_handoff": durable_handoff,
+                **({"provider_output": provider_output[:500]} if provider_output else {}),
                 **pool_exhaustion_evidence(reason, provider_attempts),
             },
         )

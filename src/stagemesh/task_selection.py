@@ -110,6 +110,25 @@ POOL_EXHAUSTION_MARKERS = (
 POOL_EXHAUSTION_SKIP_SECONDS = 21600.0
 
 
+_AUTO_RECOVERY_EVENTS = ("task.auto_retried_provider_failure", "task.auto_reintegrated_runtime")
+
+
+def last_auto_recovery_at(store: Store, task_id: str) -> float:
+    """When StageMesh itself last chose to retry this task: failures recorded before that are history, not a reason to skip it."""
+    latest = 0.0
+    for row in store.conn.execute(
+        "SELECT payload, created_at FROM audit_events WHERE event_type IN (?, ?) ORDER BY created_at DESC LIMIT 100", _AUTO_RECOVERY_EVENTS
+    ):
+        try:
+            payload = json.loads(row["payload"])
+        except (TypeError, ValueError):
+            continue
+        if str(payload.get("task_id")) == task_id:
+            latest = max(latest, float(row["created_at"]))
+            break
+    return latest
+
+
 def stale_failure(store: Store, task: Any) -> str | None:
     """A previous attempt left this task failed, stale, or temporarily exhausted for autonomous selection."""
     exhausted = recent_provider_pool_exhaustion(store, str(task["id"]))
@@ -118,10 +137,10 @@ def stale_failure(store: Store, task: Any) -> str | None:
     candidate = store.latest_candidate(task["id"])
     if candidate is not None:
         row = store.conn.execute(
-            "SELECT status FROM evidence WHERE task_id=? AND candidate_sha=? AND kind=? ORDER BY created_at DESC, rowid DESC LIMIT 1",
+            "SELECT status, created_at FROM evidence WHERE task_id=? AND candidate_sha=? AND kind=? ORDER BY created_at DESC, rowid DESC LIMIT 1",
             (task["id"], candidate["sha"], EvidenceKind.INTEGRATION),
         ).fetchone()
-        if row is not None and row["status"] == EvidenceStatus.FAILED:
+        if row is not None and row["status"] == EvidenceStatus.FAILED and float(row["created_at"]) > last_auto_recovery_at(store, str(task["id"])):
             return "latest integration failed"
     pending = store.conn.execute(
         "SELECT stage FROM task_remediations WHERE task_id=? AND cleared=0 ORDER BY created_at DESC LIMIT 1", (task["id"],)
@@ -137,9 +156,10 @@ def recent_provider_pool_exhaustion(store: Store, task_id: str) -> str | None:
         ("task.implementation_unsuccessful",),
     ).fetchall()
     now = time.time()
+    recovered_at = last_auto_recovery_at(store, task_id)
     for row in rows:
         age = now - float(row["created_at"])
-        if age > POOL_EXHAUSTION_SKIP_SECONDS:
+        if age > POOL_EXHAUSTION_SKIP_SECONDS or float(row["created_at"]) <= recovered_at:
             continue
         try:
             payload = json.loads(row["payload"])
