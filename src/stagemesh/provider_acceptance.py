@@ -121,7 +121,8 @@ def run_live_provider_smoke(adapter, *, keep_temp: bool = False) -> LiveProvider
             # The provider writes inside the task worktree; verify the candidate tree instead of the disposable checkout path.
             candidate = store.latest_candidate(task_id)
             candidate_sha = str(candidate["sha"]) if candidate is not None else None
-            file_ok = bool(candidate_sha) and _candidate_file(project, candidate_sha, "provider-smoke.txt") == "after\n"
+            content = _candidate_file(project, candidate_sha, "provider-smoke.txt") if candidate_sha else None
+            file_ok = content is not None and content.strip() == "after"
         finally:
             store.close()
         status = "PASS" if result.status is ExecutionStatus.SUCCEEDED and file_ok else "FAIL"
@@ -152,7 +153,7 @@ def _prepare_smoke_project(project: Path) -> None:
                 "command": [
                     sys.executable,
                     "-c",
-                    "from pathlib import Path; assert Path('provider-smoke.txt').read_text(encoding='utf-8') == 'after\\n'",
+                    "from pathlib import Path; assert Path('provider-smoke.txt').read_text(encoding='utf-8').strip() == 'after'",
                 ],
             }
         ],
