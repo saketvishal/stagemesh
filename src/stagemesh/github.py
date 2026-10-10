@@ -71,9 +71,9 @@ class GitHubClient:
         )
         return self._result(code, headers, payload)
 
-    def list_issue_comments(self, number: str) -> GitHubResult:
+    def list_issue_comments(self, number: str, page: int = 1) -> GitHubResult:
         code, headers, payload = self.transport.request(
-            "GET", f"/repos/{self.owner}/{self.repo}/issues/{number}/comments"
+            "GET", f"/repos/{self.owner}/{self.repo}/issues/{number}/comments?per_page=100&page={page}"
         )
         result = self._result(code, headers, payload)
         if result.status == "OK" and not isinstance(result.payload, list):

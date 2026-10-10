@@ -39,6 +39,7 @@ from .external_evidence import (
 )
 from .final_report import FinalReportValidationError, candidate_sha, render_final_report
 from .git import GitWorkspace
+from .github import GitHubClient, UrlLibGitHubTransport
 from .github_acceptance import run_github_acceptance
 from .handoff import HandoffError, build_handoff, write_handoff
 from .objectives import ObjectivePlanner, ObjectiveValidationError
@@ -92,6 +93,7 @@ from .run_ready import RunSummary, format_step_update, format_stop, run_ready
 from .security import SecurityBoundaryError, WorkspaceBoundary
 from .serialized_integration import SerializedIntegrator
 from .task_sources import (
+    GitHubOutboundSync,
     LocalBacklogSource,
     TaskSourceValidationError,
     sync_source,
@@ -401,6 +403,7 @@ def _build_coordinator(
             )
     elif parallel:  # --dry-run: evidence-only integration, still behind the lock
         integrator = SerializedIntegrator(None, False, parallel.lock)
+    outbound_sync, outbound_sources = _github_outbound(config, store, dry_run=getattr(args, "dry_run", False))
     coord = Coordinator(
         store,
         project,
@@ -411,6 +414,8 @@ def _build_coordinator(
         require_independent_review=require_independent_review,
         diagnosis_policy=_diagnosis_policy(config, project, {} if getattr(args, "dry_run", False) else adapter_by_name),
         guard=guard,
+        outbound_sync=outbound_sync,
+        outbound_sources=outbound_sources,
         **({"worker_id": worker_id_for(target.task_id)} if parallel and target else {}),
     )
     info = {
@@ -422,6 +427,16 @@ def _build_coordinator(
         **info_extra,
     }
     return coord, info
+
+
+def _github_outbound(config, store: Store, *, dry_run: bool):
+    """Outbound DONE/BLOCKED sync for configured GitHub task sources; off for dry runs and when no token can write."""
+    names = frozenset(source.name for source in config.task_sources if source.kind == "github")
+    github = config.github
+    if dry_run or not names or not (github.owner and github.repo and github.token):
+        return None, frozenset()
+    client = GitHubClient(github.owner, github.repo, UrlLibGitHubTransport(github.token))
+    return GitHubOutboundSync(store, client), names
 
 
 @dataclass

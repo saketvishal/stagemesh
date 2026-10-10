@@ -354,7 +354,7 @@ class _RecordingGitHubTransport:
 
     def request(self, method: str, path: str, body: dict[str, object] | None = None):
         self.requests.append((method, path, body))
-        if method == "GET" and path.endswith("/comments"):
+        if method == "GET" and path.split("?")[0].endswith("/comments"):
             return 200, {}, list(self.comments)
         if method == "POST" and path.endswith("/comments"):
             assert body is not None
