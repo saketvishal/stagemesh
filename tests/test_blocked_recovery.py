@@ -185,3 +185,23 @@ def test_queue_run_completes_a_task_that_was_blocked_by_a_tampered_workspace_on_
     assert executor.worktrees["A"] != old  # the retry ran on the new generation, not on the tampered workspace
     assert (old / "README.md").read_text(encoding="utf-8").strip() == "tampered by a provider"  # which is still there to inspect
     assert "out/A.txt" in rig.tree() and "tampered" not in GitWorkspace(rig.project).run("show", f"{rig.ref}:README.md").stdout
+
+
+def test_a_task_that_blocked_earlier_in_this_run_is_held_until_the_other_work_is_done(tmp_path: Path) -> None:
+    from stagemesh.blocked_recovery import can_auto_retry
+
+    rig = ParallelRig(tmp_path, ["A"])
+    _advance_to(rig.store, "A", Stage.IMPLEMENT)
+    _block_no_progress(rig.store, "A")
+
+    assert can_auto_retry(rig.store, "A")
+    assert auto_retry_blocked_provider_failures(rig.store, rig.project, exclude={"A"}) == []  # held: it just blocked in this run
+    assert rig.store.get_task("A")["status"] == TaskStatus.BLOCKED
+    assert len(auto_retry_blocked_provider_failures(rig.store, rig.project)) == 1  # released for the end-of-run retry round
+
+    for _ in range(2):
+        _block_no_progress(rig.store, "A")
+        time.sleep(0.01)
+        auto_retry_blocked_provider_failures(rig.store, rig.project)
+    _block_no_progress(rig.store, "A")
+    assert not can_auto_retry(rig.store, "A")  # budget spent: the run reports it and stops retrying

@@ -39,6 +39,7 @@ from .external_evidence import (
 )
 from .final_report import FinalReportValidationError, candidate_sha, render_final_report
 from .git import GitWorkspace
+from .blocked_recovery import can_auto_retry
 from .git_identity import identity_report
 from .github import GitHubClient, UrlLibGitHubTransport
 from .github_acceptance import run_github_acceptance
@@ -859,6 +860,7 @@ def command_run_ready(args: argparse.Namespace) -> int:
     exhausted_tasks: list[dict[str, object]] = []
     seen_exhausted: set[str] = set()
     blocked_tasks: list[RunSummary] = []
+    held_for_retry: set[str] = set()  # blocked earlier in this run: retried automatically only after the other work is done
     try:
         while True:
             summary = run_ready(
@@ -867,11 +869,20 @@ def command_run_ready(args: argparse.Namespace) -> int:
                 policy=config.task_selection,
                 chooser=_interactive_chooser if getattr(args, "choose", False) else None,
                 worktree_root_path=config.runtime.worktree_root if config.runtime else None,
+                no_auto_retry=held_for_retry,
             )
             if blocked_tasks and summary.stop_reason == "REFUSED:no_eligible_task":
+                retryable = [item for item in blocked_tasks if can_auto_retry(store, str(item.task_id))]
+                if retryable:  # all other work is done: give each ordinary provider/workspace block its bounded retry, then re-walk
+                    for item in retryable:
+                        blocked_tasks.remove(item)
+                        held_for_retry.discard(str(item.task_id))
+                        seen_exhausted.discard(str(item.task_id))
+                    continue
                 summary = blocked_tasks.pop()  # nothing else could run, so the task block is the real stop
             elif _continue_after_task_block(summary, requested) and str(summary.task_id) not in seen_exhausted:
                 seen_exhausted.add(str(summary.task_id))
+                held_for_retry.add(str(summary.task_id))
                 blocked_tasks.append(summary)
                 if not args.json:
                     print(f"task {summary.task_id}: blocked ({summary.message}); continuing with the next eligible task", flush=True)

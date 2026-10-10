@@ -605,7 +605,7 @@ class ParallelRunner:
         summary.recovered.extend(auto_rebind_blocked_missing_validation_gates(self.store, self.project, limit=free))
         summary.recovered.extend(auto_revalidate_blocked_validation_gates(self.store, self.project, limit=free))
         summary.recovered.extend(auto_reintegrate_blocked_runtime_failures(self.store, self.project, limit=free))
-        retried = auto_retry_blocked_provider_failures(self.store, self.project, limit=free)
+        retried = auto_retry_blocked_provider_failures(self.store, self.project, limit=free, exclude=attempted)
         summary.recovered.extend(retried)
         for entry in retried:
             self._say(entry["task_id"], f"automatic recovery: {entry['message']}")

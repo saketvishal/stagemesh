@@ -697,6 +697,7 @@ def run_ready(
     policy: TaskSelectionConfig | None = None,
     chooser: Callable[[list[Candidate]], str | None] | None = None,
     worktree_root_path: Path | None = None,
+    no_auto_retry: frozenset[str] | set[str] = frozenset(),
 ) -> RunSummary:
     """Drive exactly one task through the existing coordinator until DONE, BLOCKED or a safe stop."""
     if max_steps < 1:
@@ -716,7 +717,7 @@ def run_ready(
         recovered.extend(auto_rebind_blocked_missing_validation_gates(store, project, task_id=task_id))
         recovered.extend(auto_revalidate_blocked_validation_gates(store, project, task_id=task_id))
         recovered.extend(auto_reintegrate_blocked_runtime_failures(store, project, task_id=task_id))
-        recovered.extend(auto_retry_blocked_provider_failures(store, project, task_id=task_id))
+        recovered.extend(auto_retry_blocked_provider_failures(store, project, task_id=task_id, exclude=no_auto_retry))
         selection = choose_task(store, project, task_id, policy or TaskSelectionConfig(), auto_plan, chooser)
         selection_info.update(selection.to_dict())
         _log_selection(selection, on_start)

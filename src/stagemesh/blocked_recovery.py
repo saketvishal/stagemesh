@@ -79,14 +79,21 @@ def auto_retry_blocked_provider_failures(
     task_id: str | None = None,
     limit: int = 1,
     max_retries: int = DEFAULT_MAX_AUTO_RETRIES,
+    exclude: frozenset[str] | set[str] = frozenset(),
 ) -> list[dict[str, Any]]:
-    """Unblock tasks stopped by provider no-progress or workspace tampering, within a per-task budget. Returns report entries."""
+    """Unblock tasks stopped by provider no-progress or workspace tampering, within a per-task budget. Returns report entries.
+
+    `exclude` holds tasks that blocked earlier in the current run: they wait until the run has nothing else to do, so one failing
+    task never starves the others (the caller lifts the exclusion for its final, bounded retry round).
+    """
     recovered: list[dict[str, Any]] = []
     if limit < 1:
         return recovered
     for task in store.tasks():
         current = str(task["id"])
         if task_id is not None and current != task_id:
+            continue
+        if current in exclude:
             continue
         if task["status"] != TaskStatus.BLOCKED or task["stage"] != Stage.IMPLEMENT:
             continue
@@ -116,6 +123,18 @@ def auto_retry_blocked_provider_failures(
         if len(recovered) >= limit:
             break
     return recovered
+
+
+def can_auto_retry(store: Store, task_id: str, max_retries: int = DEFAULT_MAX_AUTO_RETRIES) -> bool:
+    """True when the task is blocked by an ordinary provider/workspace failure and still has automatic retries left."""
+    task = store.get_task(task_id)
+    return (
+        task is not None
+        and task["status"] == TaskStatus.BLOCKED
+        and task["stage"] == Stage.IMPLEMENT
+        and recoverable_cause(store, task_id) is not None
+        and auto_retries_used(store, task_id) < max_retries
+    )
 
 
 def exhaustion_message(store: Store, task_id: str) -> str | None:
