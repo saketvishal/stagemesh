@@ -846,7 +846,26 @@ def pin_candidate(project: Path, task_id: str, candidate_sha: str) -> None:
     except ValueError:
         return  # an unreadable ledger is reported by the next check; an operator action must not hide it
     if ledger is not None:
-        _atomic_write(gitdir / LEDGER_FILE, {**ledger, "candidate": candidate_sha})
+        try:
+            seen = observe(target)
+        except UndecodableGitOutput:
+            return
+        if seen["head"] == candidate_sha:
+            _atomic_write(
+                gitdir / LEDGER_FILE,
+                {
+                    **ledger,
+                    "head": seen["head"],
+                    "dirty": seen["dirty"],
+                    "dirty_count": seen["dirty_count"],
+                    "dirty_digest": seen["dirty_digest"],
+                    "candidate": candidate_sha,
+                    "sealed_by": None,
+                    "sealed_kind": "operator",
+                },
+            )
+        else:
+            _atomic_write(gitdir / LEDGER_FILE, {**ledger, "candidate": candidate_sha})
 
 
 def verify_candidate_workspace(

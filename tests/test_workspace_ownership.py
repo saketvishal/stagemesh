@@ -780,6 +780,23 @@ def test_pinned_candidate_replaces_the_expected_one(tmp_path: Path) -> None:
     verify_candidate_workspace(store, project, TASK, adopted, "VALIDATE:before_validation")  # an authorized registration
 
 
+def test_pinned_candidate_seals_operator_commit_at_worktree_head(tmp_path: Path) -> None:
+    project, store, _coord, _sha = advance_to(Stage.VALIDATE, tmp_path)
+    wt = worktree(project)
+    (wt / "docs" / "operator.md").write_text("operator repair\n", encoding="utf-8")
+    adopted = GitWorkspace(wt).commit_all("operator repair")
+    store.add_candidate(TASK, adopted, "operator", durable_handoff=True)
+
+    with pytest.raises(WorkspaceMutation) as before:
+        verify_candidate_workspace(store, project, TASK, adopted, "VALIDATE:before_validation")
+
+    assert before.value.reason == "head_changed"
+    pin_candidate(project, TASK, adopted)
+    verify_candidate_workspace(store, project, TASK, adopted, "VALIDATE:before_validation")
+    ledger = ledger_of(project)
+    assert ledger["head"] == adopted and ledger["candidate"] == adopted and ledger["sealed_kind"] == "operator"
+
+
 def test_worktree_from_before_this_feature_is_adopted_only_when_it_matches_the_database(tmp_path: Path) -> None:
     project, store = _setup(tmp_path)
     wt = prepare_task_workspace(project, TASK)  # no ledger: how every existing in-flight worktree looks

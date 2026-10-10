@@ -261,6 +261,8 @@ def adopt_candidate(
         )
         store.advance_task(task_id, Stage.VALIDATE)
         record_audit(store, "task.advance", {"task_id": task_id, "stage": Stage.VALIDATE, "candidate_sha": resolved})
+    else:
+        pin_candidate(project, task_id, resolved)  # repeat adoption may be needed after a local operator repair moved the worktree HEAD
     report: dict[str, Any] = {
         "task_id": task_id,
         "candidate_sha": resolved,
