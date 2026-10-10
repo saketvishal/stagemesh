@@ -316,6 +316,9 @@ class Coordinator:
                 except WorkspaceMutation:
                     self._block_on_mutation(task_id, "INTEGRATE")
                     return 1
+                moved = self.store.get_task(task_id)
+                if moved is not None and Stage(moved["stage"]) is not Stage.INTEGRATE:
+                    return 1  # the integrator rebased the candidate and sent it back to VALIDATE: earlier failures belong to the old SHA
             if self.store.has_bound_evidence(task_id, sha, EvidenceKind.INTEGRATION, bound.digest, EvidenceStatus.FAILED):
                 return self._remediate_or_block(task_id, sha, Stage.INTEGRATE)
             return self._advance_with_evidence(task_id, stage, sha, EvidenceKind.INTEGRATION, bound.digest)

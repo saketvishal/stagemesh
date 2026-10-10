@@ -242,3 +242,36 @@ def test_an_automatically_reintegrated_task_is_not_skipped_as_latest_integration
     assert auto_reintegrate_blocked_runtime_failures(rig.store, rig.project)
 
     assert stale_failure(rig.store, rig.store.get_task("A")) is None
+
+
+def test_a_retried_integration_that_rebases_the_candidate_is_not_blocked_by_the_old_shas_failure(tmp_path: Path) -> None:
+    """Found by the live dogfood run: the retry rebased the candidate, then the old SHA's FAILED evidence blocked the task again."""
+    from stagemesh.concurrency import IntegrationLock
+    from stagemesh.contract_binding import contract_for_candidate
+    from stagemesh.domain import EvidenceKind, EvidenceStatus
+    from stagemesh.serialized_integration import SerializedIntegrator
+
+    rig = PoolRig(tmp_path, {"provider-a": "ok", "provider-b": "ok"}, pools={IMPLEMENT: ("provider-a",), REVIEW: ("provider-b",)})
+    rig.coordinator.integrator = SerializedIntegrator(
+        "refs/heads/integration", True, IntegrationLock(rig.project / ".stagemesh" / "integration.lock"), max_rebases=2
+    )
+    rig.tick(4)  # PLAN, IMPLEMENT, VALIDATE, REVIEW -> the task waits at INTEGRATE
+    assert rig.stage == Stage.INTEGRATE
+    sha = rig.store.latest_candidate(TASK)["sha"]
+    digest = contract_for_candidate(rig.store, TASK, sha, rig.project).digest
+    rig.store.add_evidence(TASK, sha, EvidenceKind.INTEGRATION, EvidenceStatus.FAILED, {
+        "contract_hash": digest, "findings": [{"code": "integration_rebase_unavailable", "severity": "error", "message": "git: Filename too long"}],
+    })
+    rig.git.run("checkout", "-q", "integration")  # another task landed: the ref moved, so the candidate needs a rebase
+    (rig.project / "other.txt").write_text("landed elsewhere\n", encoding="utf-8")
+    rig.git.commit_all("another change lands")
+    rig.git.run("checkout", "-q", "-")
+
+    rig.tick(1)
+
+    task = rig.store.get_task(TASK)
+    assert task["status"] == TaskStatus.OPEN and task["stage"] == Stage.VALIDATE, dict(task)
+    assert rig.store.latest_candidate(TASK)["sha"] != sha
+    assert not rig.store.conn.execute("SELECT 1 FROM audit_events WHERE event_type='task.remediation_exhausted'").fetchone()
+    rig.tick(6)
+    assert rig.stage == Stage.DONE  # re-validated, re-reviewed on the rebased SHA and integrated
