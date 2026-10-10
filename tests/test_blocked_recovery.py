@@ -205,3 +205,40 @@ def test_a_task_that_blocked_earlier_in_this_run_is_held_until_the_other_work_is
         auto_retry_blocked_provider_failures(rig.store, rig.project)
     _block_no_progress(rig.store, "A")
     assert not can_auto_retry(rig.store, "A")  # budget spent: the run reports it and stops retrying
+
+
+def test_an_automatically_retried_task_is_not_skipped_by_selection_as_stale(tmp_path: Path) -> None:
+    """Found by the live dogfood run: the retry unblocked the task but selection still skipped it as 'stale failed state'."""
+    from stagemesh.task_selection import stale_failure
+
+    rig = ParallelRig(tmp_path, ["A"])
+    _advance_to(rig.store, "A", Stage.IMPLEMENT)
+    record_audit(rig.store, "task.implementation_unsuccessful", {
+        "task_id": "A", "reason": "all_implementation_providers_exhausted: grok: quota_rate_limit; codex: no_implementation_change",
+    })
+    _block_no_progress(rig.store, "A")
+    assert stale_failure(rig.store, rig.store.get_task("A")).startswith("recent provider pool exhaustion")
+
+    time.sleep(0.01)
+    assert auto_retry_blocked_provider_failures(rig.store, rig.project)
+
+    assert stale_failure(rig.store, rig.store.get_task("A")) is None  # StageMesh chose to retry it: it is selectable again
+
+
+def test_an_automatically_reintegrated_task_is_not_skipped_as_latest_integration_failed(tmp_path: Path) -> None:
+    from stagemesh.domain import EvidenceKind, EvidenceStatus
+    from stagemesh.recovery import auto_reintegrate_blocked_runtime_failures
+    from stagemesh.task_selection import stale_failure
+
+    rig = ParallelRig(tmp_path, ["A"])
+    rig.store.add_candidate("A", "c" * 40, "codex", durable_handoff=True)
+    rig.store.advance_task("A", Stage.INTEGRATE)
+    rig.store.add_evidence("A", "c" * 40, EvidenceKind.INTEGRATION, EvidenceStatus.FAILED,
+                           {"contract_hash": "h", "findings": [{"code": "integration_rebase_unavailable", "severity": "error", "message": "x"}]})
+    rig.store.block_task("A")
+    assert stale_failure(rig.store, rig.store.get_task("A")) == "latest integration failed"
+
+    time.sleep(0.01)
+    assert auto_reintegrate_blocked_runtime_failures(rig.store, rig.project)
+
+    assert stale_failure(rig.store, rig.store.get_task("A")) is None
