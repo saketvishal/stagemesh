@@ -1082,7 +1082,18 @@ def main() -> int:
             capture_output=True,
             check=True,
         )
-        config = load_config(project)
+        github_env = ("STAGEMESH_GITHUB_OWNER", "STAGEMESH_GITHUB_REPO", "STAGEMESH_GITHUB_TOKEN")
+        old_github_env = {name: os.environ.get(name) for name in github_env}
+        try:
+            for name in github_env:
+                os.environ.pop(name, None)
+            config = load_config(project)
+        finally:
+            for name, value in old_github_env.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
         assert config.github.owner == "stage"
         assert config.github.repo == "mesh"
         assert config.github.configured is False

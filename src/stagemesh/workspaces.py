@@ -9,6 +9,7 @@ from pathlib import Path
 
 from .attribution import GitAttribution
 from .config import load_config
+from .domain import ExecutionStatus
 from .git import GitError, GitWorkspace
 from .persistence import Store
 
@@ -96,11 +97,12 @@ def remove_task_workspace(project: Path, task_id: str) -> None:
             shutil.rmtree(target, ignore_errors=True)
 
 
-def sweep_task_worktrees(project: Path, store: Store) -> list[dict[str, str]]:
-    """Remove worktrees nothing can resume: those of finished tasks and directories no known task owns.
+def sweep_task_worktrees(project: Path, store: Store, *, dry_run: bool = False) -> list[dict[str, str]]:
+    """Reconcile StageMesh-owned worktrees and remove only work that is provably obsolete.
 
     Worktrees of unfinished tasks are deliberately kept - a restarted run reuses them (and their commits) rather than
-    starting over. Stale git worktree registrations are pruned either way.
+    starting over. Clean terminal worktrees are removed only when their HEAD is already reachable from the integration
+    checkout. Clean terminal worktrees with unmerged commits are preserved under a recovery ref and retained.
     """
     root = worktree_root(project)
     git = GitWorkspace(project)
@@ -114,17 +116,93 @@ def sweep_task_worktrees(project: Path, store: Store) -> list[dict[str, str]]:
             continue
         row = tasks.get(entry.name.split("-g", 1)[0] if _GENERATION_DIR.match(entry.name) else entry.name)
         if row is None:
-            reason, task_id = "no task owns this worktree", None
-        elif row["status"] == "DONE" or row["stage"] == "DONE":
-            reason, task_id = "task is done", str(row["id"])
-        else:
+            actions.append(
+                _action(
+                    "RETAINED",
+                    entry,
+                    reason="no durable StageMesh task owns this worktree",
+                )
+            )
             continue
-        with _WORKTREE_CREATION:
-            if git.run("worktree", "remove", "--force", str(entry), check=False).returncode != 0:
-                shutil.rmtree(entry, ignore_errors=True)
-        actions.append({"task_id": task_id or "", "worktree": str(entry), "action": "REMOVED", "reason": reason})
+        task_id = str(row["id"])
+        if _task_has_active_state(store, task_id):
+            actions.append(_action("RETAINED", entry, task_id=task_id, reason="task has active claim or execution"))
+        elif row["status"] == "DONE" or row["stage"] == "DONE":
+            actions.append(_sweep_terminal_worktree(git, entry, task_id, dry_run=dry_run))
+        else:
+            actions.append(_action("RETAINED", entry, task_id=task_id, reason="task is still resumable"))
     git.run("worktree", "prune", check=False)
+    if actions:
+        store.add_audit_event(
+            "worktree.sweep",
+            {
+                "dry_run": dry_run,
+                "removed": sum(1 for item in actions if item["action"] == "REMOVED"),
+                "retained": sum(1 for item in actions if item["action"] != "REMOVED"),
+                "actions": actions,
+            },
+        )
     return actions
+
+
+def _sweep_terminal_worktree(git: GitWorkspace, entry: Path, task_id: str, *, dry_run: bool) -> dict[str, str]:
+    status = GitWorkspace(entry).run("status", "--porcelain", "--untracked-files=all", check=False).stdout.strip()
+    if status:
+        return _action("RETAINED", entry, task_id=task_id, reason="terminal worktree has uncommitted changes")
+    head = GitWorkspace(entry).run("rev-parse", "HEAD", check=False).stdout.strip()
+    if not head:
+        return _action("RETAINED", entry, task_id=task_id, reason="terminal worktree HEAD is unavailable")
+    if git.run("merge-base", "--is-ancestor", head, "HEAD", check=False).returncode != 0:
+        ref = _archive_ref(task_id, head)
+        git.run("update-ref", ref, head)
+        return _action(
+            "ARCHIVED_RETAINED",
+            entry,
+            task_id=task_id,
+            reason="terminal worktree has unmerged commits",
+            head=head,
+            recovery_ref=ref,
+        )
+    if dry_run:
+        return _action("WOULD_REMOVE", entry, task_id=task_id, reason="task is done and worktree is integrated", head=head)
+    with _WORKTREE_CREATION:
+        if git.run("worktree", "remove", str(entry), check=False).returncode != 0:
+            return _action("RETAINED", entry, task_id=task_id, reason="git refused to remove worktree", head=head)
+    return _action("REMOVED", entry, task_id=task_id, reason="task is done and worktree is integrated", head=head)
+
+
+def _task_has_active_state(store: Store, task_id: str) -> bool:
+    if store.conn.execute("SELECT 1 FROM claims WHERE task_id=? AND active=1 LIMIT 1", (task_id,)).fetchone():
+        return True
+    return (
+        store.conn.execute(
+            "SELECT 1 FROM executions WHERE task_id=? AND status IN (?, ?) LIMIT 1",
+            (task_id, ExecutionStatus.RUNNING, ExecutionStatus.UNKNOWN),
+        ).fetchone()
+        is not None
+    )
+
+
+def _archive_ref(task_id: str, head: str) -> str:
+    safe_task = re.sub(r"[^A-Za-z0-9._-]+", "-", task_id).strip("-") or "task"
+    return f"refs/stagemesh/archived-worktrees/{safe_task}/{head[:12]}"
+
+
+def _action(
+    action: str,
+    worktree: Path,
+    *,
+    reason: str,
+    task_id: str = "",
+    head: str = "",
+    recovery_ref: str = "",
+) -> dict[str, str]:
+    payload = {"task_id": task_id, "worktree": str(worktree), "action": action, "reason": reason}
+    if head:
+        payload["head"] = head
+    if recovery_ref:
+        payload["recovery_ref"] = recovery_ref
+    return payload
 
 
 def legacy_worktree_roots(project: Path) -> list[Path]:

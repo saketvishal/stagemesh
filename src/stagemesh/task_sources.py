@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sys
@@ -461,3 +462,54 @@ class GitHubOutboundSync(OutboundSync):
             status,
             {"candidate_sha": candidate_sha, "comment": comment.status, "close": close.status},
         )
+
+    def publish_blocked(self, issue_number: str, reason: str) -> str:
+        bounded = _bounded_block_reason(reason)
+        marker = _blocked_marker(bounded)
+        retry = RetryRegistry(self.store)
+        key = f"github:{issue_number}:blocked"
+        decision = retry.decision(key)
+        if not decision.allowed:
+            return self.publish(
+                "github",
+                issue_number,
+                "BACKOFF",
+                {"reason": bounded, "next_attempt_at": decision.next_attempt_at},
+            )
+        bodies: list[str] = []
+        for page in range(1, _MAX_COMMENT_PAGES + 1):
+            comments = self.client.list_issue_comments(issue_number, page)
+            if comments.status != "OK":
+                retry.record_failure(key, comments.status)
+                return self.publish("github", issue_number, comments.status, {"reason": bounded, "comments": comments.status})
+            items = comments.payload if isinstance(comments.payload, list) else []
+            bodies.extend(str(item.get("body", "")) for item in items if isinstance(item, dict))
+            if len(items) < 100 or any(marker in body for body in bodies):
+                break
+        if any(marker in body for body in bodies):
+            retry.record_success(key)
+            return self.publish("github", issue_number, "OK", {"reason": bounded, "comment": "DUPLICATE"})
+        body = f"StageMesh blocked this task: `{bounded}`.\n\n{marker}"
+        comment = self.client.comment_issue(issue_number, body)
+        if comment.status == "OK":
+            retry.record_success(key)
+        else:
+            retry.record_failure(key, comment.status)
+        return self.publish("github", issue_number, comment.status, {"reason": bounded, "comment": comment.status})
+
+
+_MAX_COMMENT_PAGES = 10  # 1000 comments of dedupe history; beyond that a re-block may repeat once
+
+
+def _bounded_block_reason(reason: str, limit: int = 200) -> str:
+    normalized = " ".join(str(reason or "blocked").split())
+    if not normalized:
+        normalized = "blocked"
+    if len(normalized) <= limit:
+        return normalized
+    return normalized[: limit - 3].rstrip() + "..."
+
+
+def _blocked_marker(reason: str) -> str:
+    digest = hashlib.sha256(reason.encode("utf-8")).hexdigest()[:16]
+    return f"<!-- stagemesh:blocked:{digest} -->"

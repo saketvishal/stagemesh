@@ -343,7 +343,7 @@ def auto_revalidate_blocked_validation_gates(
 
     This is for normal recovery after the validation runtime changes (for example a project Python path is now available).
     It does not grant a fresh implementation budget or alter the candidate; it only reruns the bound validation gate once per
-    latest failed evidence row.
+    candidate and contract. A failed recheck must not renew its own retry budget.
     """
     if limit < 1:
         return []
@@ -364,7 +364,7 @@ def auto_revalidate_blocked_validation_gates(
             continue
         candidate_sha = str(candidate["sha"])
         evidence = store.conn.execute(
-            "SELECT id, created_at FROM evidence WHERE task_id=? AND candidate_sha=? AND kind=? AND status=? "
+            "SELECT id, created_at, payload FROM evidence WHERE task_id=? AND candidate_sha=? AND kind=? AND status=? "
             "ORDER BY created_at DESC, rowid DESC LIMIT 1",
             (current_id, candidate_sha, EvidenceKind.VALIDATION, EvidenceStatus.FAILED),
         ).fetchone()
@@ -378,6 +378,7 @@ def auto_revalidate_blocked_validation_gates(
             "task_id": current_id,
             "candidate_sha": candidate_sha,
             "evidence_id": evidence_id,
+            "contract_hash": _loads(evidence["payload"]).get("contract_hash"),
             "reason": "automatic blocked validation gate recheck",
             "validation": report,
         }
@@ -391,10 +392,12 @@ def auto_revalidate_blocked_validation_gates(
 def _auto_revalidation_already_tried(
     store: Store, task_id: str, candidate_sha: str, evidence_id: str, evidence_created_at: float
 ) -> bool:
+    evidence = store.conn.execute("SELECT payload FROM evidence WHERE id=?", (evidence_id,)).fetchone()
+    contract_hash = _loads(evidence["payload"]).get("contract_hash") if evidence else None
     rows = store.conn.execute(
-        "SELECT payload, created_at FROM audit_events WHERE event_type=? AND created_at>=? ORDER BY created_at DESC, rowid DESC LIMIT 20",
-        ("task.auto_revalidated_blocked_validation", evidence_created_at),
-    ).fetchall()
+        "SELECT payload FROM audit_events WHERE event_type=? ORDER BY created_at DESC, rowid DESC",
+        ("task.auto_revalidated_blocked_validation",),
+    )
     for row in rows:
         try:
             payload = json.loads(row["payload"])
@@ -403,10 +406,58 @@ def _auto_revalidation_already_tried(
         if (
             payload.get("task_id") == task_id
             and payload.get("candidate_sha") == candidate_sha
-            and payload.get("evidence_id") == evidence_id
+            and payload.get("contract_hash") == contract_hash
         ):
             return True
     return False
+
+
+def auto_reintegrate_blocked_runtime_failures(
+    store: Store, project: Path, *, task_id: str | None = None, limit: int = 1,
+) -> list[dict[str, Any]]:
+    """Retry an unavailable integration runtime once, preserving the exact reviewed candidate.
+
+    Content conflicts and exhausted rebase budgets remain blocked. A retry cannot mint another
+    retry merely by writing a fresh failure row, and active ownership is never taken over.
+    """
+    recovered: list[dict[str, Any]] = []
+    if limit < 1:
+        return recovered
+    for task in store.tasks():
+        current_id = str(task["id"])
+        if task_id is not None and current_id != task_id:
+            continue
+        if task["status"] != TaskStatus.BLOCKED or task["stage"] != Stage.INTEGRATE:
+            continue
+        if store.has_active_claim(current_id) or any(row["task_id"] == current_id for row in store.running_executions()):
+            continue
+        candidate = store.latest_candidate(current_id)
+        if candidate is None:
+            continue
+        sha = str(candidate["sha"])
+        row = store.conn.execute(
+            "SELECT payload FROM evidence WHERE task_id=? AND candidate_sha=? AND kind=? AND status=? "
+            "ORDER BY created_at DESC, rowid DESC LIMIT 1",
+            (current_id, sha, EvidenceKind.INTEGRATION, EvidenceStatus.FAILED),
+        ).fetchone()
+        payload = _loads(row["payload"]) if row else {}
+        codes = {f.get("code") for f in payload.get("findings", []) if isinstance(f, dict)}
+        if codes != {"integration_rebase_unavailable"}:
+            continue
+        contract_hash = payload.get("contract_hash")
+        previous = store.conn.execute("SELECT payload FROM audit_events WHERE event_type=?", ("task.auto_reintegrated_runtime",))
+        if any(
+            item.get("task_id") == current_id and item.get("candidate_sha") == sha and item.get("contract_hash") == contract_hash
+            for item in (_loads(r["payload"]) for r in previous)
+        ):
+            continue
+        store.unblock_task(current_id)
+        action = {"task_id": current_id, "candidate_sha": sha, "contract_hash": contract_hash, "auto_recovery": "integration_runtime_recheck"}
+        record_audit(store, "task.auto_reintegrated_runtime", action)
+        recovered.append(action)
+        if len(recovered) >= limit:
+            break
+    return recovered
 
 
 def _force_analysis(project: Path, analysis: BaselineAnalysis) -> BaselineAnalysis:

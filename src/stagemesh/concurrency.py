@@ -52,6 +52,15 @@ class ProviderLimiter:
             self._reasons[provider] = reason
             self._condition.notify_all()
 
+    def temporary_retry_at(self, provider: str) -> float | None:
+        """Known temporary capacity deadline, shared across tasks and stages."""
+        with self._condition:
+            until = self._cooldown_until.get(provider, 0.0)
+            reason = self._reasons.get(provider)
+            if until > time.time() and reason in {"quota_rate_limit", "transient_provider_failure", "provider_timeout"}:
+                return until
+            return None
+
     def _has_room(self, provider: str) -> bool:
         limit = self.limit(provider)
         return limit is None or self._active.get(provider, 0) < limit

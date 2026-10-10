@@ -39,6 +39,7 @@ from .external_evidence import (
 )
 from .final_report import FinalReportValidationError, candidate_sha, render_final_report
 from .git import GitWorkspace
+from .github import GitHubClient, UrlLibGitHubTransport
 from .github_acceptance import run_github_acceptance
 from .handoff import HandoffError, build_handoff, write_handoff
 from .objectives import ObjectivePlanner, ObjectiveValidationError
@@ -62,7 +63,7 @@ from .persistence import Store, StoreValidationError
 from .persistence_backends import probe_backend
 from .postgres_store import PostgresStore, PostgresUnavailable, postgres_schema_contract
 from .process_identity import current_process_identity
-from .provider_acceptance import run_provider_acceptance
+from .provider_acceptance import run_live_provider_smoke, run_provider_acceptance
 from .provider_pool import (
     IMPLEMENT,
     REVIEW,
@@ -92,6 +93,7 @@ from .run_ready import RunSummary, format_step_update, format_stop, run_ready
 from .security import SecurityBoundaryError, WorkspaceBoundary
 from .serialized_integration import SerializedIntegrator
 from .task_sources import (
+    GitHubOutboundSync,
     LocalBacklogSource,
     TaskSourceValidationError,
     sync_source,
@@ -106,7 +108,7 @@ from .work_transport import (
     write_packet_envelope,
 )
 from .workers import WorkerValidationError, heartbeat_worker, register_worker
-from .workspaces import legacy_worktree_roots, worktree_root
+from .workspaces import legacy_worktree_roots, sweep_task_worktrees, worktree_root
 
 
 def runtime_dir(project: Path) -> Path:
@@ -202,6 +204,31 @@ def command_doctor(args: argparse.Namespace) -> int:
     print(f"editable/development status: {'development' if 'site-packages' not in __file__ else 'installed'}")
     print(f"platform: {platform.platform()}")
     store.close()
+    return 0
+
+
+def command_worktrees(args: argparse.Namespace) -> int:
+    project = Path(args.project).resolve()
+    store = Store(db_path(project))
+    store.migrate()
+    try:
+        actions = sweep_task_worktrees(project, store, dry_run=args.dry_run)
+    finally:
+        store.close()
+    payload = {
+        "dry_run": args.dry_run,
+        "removed": sum(1 for item in actions if item["action"] == "REMOVED"),
+        "retained": sum(1 for item in actions if item["action"] != "REMOVED"),
+        "actions": actions,
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(f"worktrees removed: {payload['removed']}")
+    print(f"worktrees retained: {payload['retained']}")
+    for item in actions:
+        suffix = f" ({item['recovery_ref']})" if item.get("recovery_ref") else ""
+        print(f"{item['action']}: {item['worktree']} - {item['reason']}{suffix}")
     return 0
 
 
@@ -309,7 +336,11 @@ def _build_coordinator(
         if not staged:
             ok = any(v.eligible for v in impl_verdicts)
             diagnostic = f"no implementation provider is available. IMPLEMENT pool: {describe_verdicts(impl_verdicts)}"
-        if not ok:
+        temporary_queue_wait = (
+            hasattr(args, "no_wait_for_providers") and not args.no_wait_for_providers
+            and pool.next_retry_at(store, task_stage or IMPLEMENT, target.task_id if target else "", implementer) is not None
+        )
+        if not ok and not temporary_queue_wait:
             print(diagnostic, file=sys.stderr)
             raise _SetupError(2)
         executor = PooledExecutor(pool)
@@ -372,6 +403,7 @@ def _build_coordinator(
             )
     elif parallel:  # --dry-run: evidence-only integration, still behind the lock
         integrator = SerializedIntegrator(None, False, parallel.lock)
+    outbound_sync, outbound_sources = _github_outbound(config, store, dry_run=getattr(args, "dry_run", False))
     coord = Coordinator(
         store,
         project,
@@ -382,6 +414,8 @@ def _build_coordinator(
         require_independent_review=require_independent_review,
         diagnosis_policy=_diagnosis_policy(config, project, {} if getattr(args, "dry_run", False) else adapter_by_name),
         guard=guard,
+        outbound_sync=outbound_sync,
+        outbound_sources=outbound_sources,
         **({"worker_id": worker_id_for(target.task_id)} if parallel and target else {}),
     )
     info = {
@@ -393,6 +427,16 @@ def _build_coordinator(
         **info_extra,
     }
     return coord, info
+
+
+def _github_outbound(config, store: Store, *, dry_run: bool):
+    """Outbound DONE/BLOCKED sync for configured GitHub task sources; off for dry runs and when no token can write."""
+    names = frozenset(source.name for source in config.task_sources if source.kind == "github")
+    github = config.github
+    if dry_run or not names or not (github.owner and github.repo and github.token):
+        return None, frozenset()
+    client = GitHubClient(github.owner, github.repo, UrlLibGitHubTransport(github.token))
+    return GitHubOutboundSync(store, client), names
 
 
 @dataclass
@@ -649,8 +693,12 @@ def command_status(args: argparse.Namespace) -> int:
                 {
                     "ok": report.ok,
                     "task_count": report.task_count,
+                    "open_task_count": report.open_task_count,
+                    "eligible_open_task_count": report.eligible_open_task_count,
                     "blocked_task_count": report.blocked_task_count,
+                    "blocked_reason_buckets": report.blocked_reason_buckets,
                     "running_count": report.running_count,
+                    "source_ready_count": report.source_ready_count,
                     "done_count": report.done_count,
                     "failed_execution_count": report.failed_execution_count,
                     "unknown_execution_count": report.unknown_execution_count,
@@ -681,6 +729,19 @@ def command_status(args: argparse.Namespace) -> int:
         print("backlog: EMPTY")
     for line in format_queue_control(control):
         print(line)
+    report = health(store)
+    print(
+        "counts: "
+        f"tracked={report.task_count} "
+        f"open={report.open_task_count} "
+        f"eligible_open={report.eligible_open_task_count} "
+        f"blocked={report.blocked_task_count} "
+        f"running={report.running_count} "
+        f"stale={report.stale_execution_count} "
+        f"source_ready={report.source_ready_count}"
+    )
+    for reason, count in report.blocked_reason_buckets.items():
+        print(f"blocked_bucket {reason}: {count}")
     for row in rows:
         print(f"{row['id']} {row['stage']} {row['status']} {row['title']}")
     store.close()
@@ -942,6 +1003,7 @@ def command_run_parallel(args: argparse.Namespace, *, queue: bool = False) -> in
         max_steps=getattr(args, "max_steps", 50),
         limiter=limiter,
         emit=emit,
+        wait_for_providers=queue and not getattr(args, "no_wait_for_providers", False),
     )
     wiring.on_integration_event = lambda task_id, event, detail: runner.note(task_id, event, **detail)
     emit(
@@ -1200,8 +1262,12 @@ def command_health(args: argparse.Namespace) -> int:
                 {
                     "ok": report.ok,
                     "task_count": report.task_count,
+                    "open_task_count": report.open_task_count,
+                    "eligible_open_task_count": report.eligible_open_task_count,
                     "blocked_task_count": report.blocked_task_count,
+                    "blocked_reason_buckets": report.blocked_reason_buckets,
                     "running_count": report.running_count,
+                    "source_ready_count": report.source_ready_count,
                     "done_count": report.done_count,
                     "failed_execution_count": report.failed_execution_count,
                     "unknown_execution_count": report.unknown_execution_count,
@@ -1220,8 +1286,13 @@ def command_health(args: argparse.Namespace) -> int:
     if report.current_problems:
         print(f"current_problems: {', '.join(report.current_problems)}")
     print(f"tasks: {report.task_count}")
+    print(f"open_tasks: {report.open_task_count}")
+    print(f"eligible_open_tasks: {report.eligible_open_task_count}")
     print(f"blocked_tasks: {report.blocked_task_count}")
+    for reason, count in report.blocked_reason_buckets.items():
+        print(f"blocked_bucket {reason}: {count}")
     print(f"running: {report.running_count}")
+    print(f"source_ready_tasks: {report.source_ready_count}")
     print(f"done: {report.done_count}")
     print(f"failed_executions_historical: {report.historical_failed_execution_count}")
     print(f"failed_executions_current: {report.current_failed_execution_count}")
@@ -1599,25 +1670,92 @@ def command_registry(args: argparse.Namespace) -> int:
 
 
 def command_capacity(args: argparse.Namespace) -> int:
-    registry = CapacityRegistry()
-    registry.record(args.primary, CapacityKind.AVAILABLE if not args.primary_down else CapacityKind.CAPACITY)
-    registry.record(args.secondary, CapacityKind.AVAILABLE if not args.secondary_down else CapacityKind.CAPACITY)
-    chosen = registry.choose_primary_secondary(args.primary, args.secondary)
-    if args.json:
-        print(
-            json.dumps(
-                {
-                    "chosen": chosen,
-                    "providers": registry.snapshot((args.primary, args.secondary)),
-                },
-                indent=2,
-                sort_keys=True,
-            )
-        )
+    project = Path(args.project).resolve()
+    config = load_config(project)
+    adapters = adapters_from_config(config)
+    if args.primary_down or args.secondary_down:
+        registry = CapacityRegistry()
+        registry.record(args.primary, CapacityKind.AVAILABLE if not args.primary_down else CapacityKind.CAPACITY)
+        registry.record(args.secondary, CapacityKind.AVAILABLE if not args.secondary_down else CapacityKind.CAPACITY)
+        chosen = registry.choose_primary_secondary(args.primary, args.secondary)
+        payload = {
+            "chosen": chosen,
+            "providers": registry.snapshot((args.primary, args.secondary)),
+        }
+        if args.json:
+            print(json.dumps(payload, indent=2, sort_keys=True))
+            return 0
+        print(f"chosen: {chosen or 'NONE'}")
         return 0
-    print(f"chosen: {chosen or 'NONE'}")
+    adapter_by_name = {adapter.name: adapter for adapter in adapters}
+    stage_caps = {IMPLEMENT: "code", REVIEW: "review"}
+    capable = {stage: {a.name for a in adapters if capability in a.capabilities} for stage, capability in stage_caps.items()}
+    priorities = {name: spec.priority for name, spec in config.provider_specs.items() if spec.priority is not None}
+    pools = default_pools(
+        sorted(adapter_by_name),
+        config.stage_routes,
+        config.provider_pools,
+        config.single_agent_provider,
+        config.routing_mode,
+        capable=capable,
+        priorities=priorities,
+    )
+    store = Store(db_path(project))
+    store.migrate()
+    implementer = None
+    if args.task:
+        candidate = store.latest_candidate(args.task)
+        implementer = str(candidate["produced_by"]) if candidate is not None and candidate["produced_by"] is not None else None
+    pool = ProviderPool(
+        adapters,
+        pools,
+        require_independent=config.require_independent_review,
+        cooldown_seconds=config.provider_failure_cooldown_seconds,
+        policy=config.provider_selection_policy,
+        weights=config.provider_weights,
+        priorities=priorities,
+    )
+    impl = pool.evaluate(store, IMPLEMENT, args.task)
+    review = pool.evaluate(store, REVIEW, args.task, implementer=implementer)
+    provider_rows = []
+    for adapter in sorted(adapters, key=lambda item: item.name):
+        capacity = adapter.check_capacity()
+        provider_rows.append(
+            {
+                "provider": adapter.name,
+                "command": redact_command_secrets(shlex.join(adapter.command)),
+                "command_available": capacity == CapacityKind.AVAILABLE,
+                "capacity": capacity,
+                "capabilities": sorted(adapter.capabilities),
+                "live_acceptance": "not_run",
+            }
+        )
+    payload = {
+        "task_id": args.task,
+        "implementer": implementer,
+        "pools": {stage: list(names) for stage, names in sorted(pools.items())},
+        "providers": provider_rows,
+        "stages": {
+            IMPLEMENT: {
+                "available": any(v.eligible for v in impl),
+                "verdicts": [v.to_dict() for v in impl],
+            },
+            REVIEW: {
+                "available": any(v.eligible for v in review),
+                "verdicts": [v.to_dict() for v in review],
+            },
+        },
+    }
+    store.close()
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    for stage, stage_payload in payload["stages"].items():
+        state = "available" if stage_payload["available"] else "unavailable"
+        print(f"{stage}: {state}")
+        for verdict in stage_payload["verdicts"]:
+            print(f"  {verdict['provider']}: {verdict['reason']}")
     return 0
-
 
 def command_config(args: argparse.Namespace) -> int:
     config = load_config(Path(args.project).resolve(), Path(args.config).resolve() if args.config else None)
@@ -1777,6 +1915,35 @@ def command_provider_acceptance(args: argparse.Namespace) -> int:
     print(f"single_agent_provider: {result.single_agent_provider}")
     print(f"review_provider: {result.review_provider}")
     store.close()
+    return 0 if result.status == "PASS" else 1
+
+
+def command_provider_smoke(args: argparse.Namespace) -> int:
+    project = Path(args.project).resolve()
+    config = load_config(project)
+    try:
+        adapters = adapters_from_config(config)
+    except ProviderValidationError as exc:
+        print(f"provider config error: {exc}", file=sys.stderr)
+        return 2
+    adapter = next((item for item in adapters if item.name == args.provider), None)
+    if adapter is None:
+        print(f"provider not found: {args.provider}", file=sys.stderr)
+        return 2
+    result = run_live_provider_smoke(adapter, keep_temp=args.keep_temp)
+    payload = {
+        "status": result.status,
+        "provider": result.provider,
+        "execution_status": str(result.execution_status),
+        "candidate_sha": result.candidate_sha,
+        "file_ok": result.file_ok,
+        "failure_reason": result.failure_reason,
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0 if result.status == "PASS" else 1
+    for key, value in payload.items():
+        print(f"{key}: {value}")
     return 0 if result.status == "PASS" else 1
 
 
@@ -2170,6 +2337,7 @@ def build_parser() -> argparse.ArgumentParser:
     queue_cmd.add_argument("--concurrency", type=int, required=True, metavar="N", help="Maximum tasks running at once")
     queue_cmd.add_argument("--max-steps", type=int, default=50, help="Step budget for each task")
     queue_cmd.add_argument("--no-auto-plan", action="store_true", help="Refuse tasks without a contract instead of auto-planning one")
+    queue_cmd.add_argument("--no-wait-for-providers", action="store_true", help="Exit after temporary provider exhaustion instead of waiting for cooldown recovery")
     queue_cmd.add_argument("--json", action="store_true")
     queue_cmd.add_argument("--provider", help="Provider name to use for implementation (e.g. claude, codex)")
     queue_cmd.add_argument("--dry-run", action="store_true", help="Use FakeExecutor instead of a real provider")
@@ -2227,6 +2395,12 @@ def build_parser() -> argparse.ArgumentParser:
     status = sub.add_parser("status")
     status.add_argument("--json", action="store_true")
     status.set_defaults(func=command_status)
+    worktrees = sub.add_parser("worktrees", help="Inspect or reconcile StageMesh-owned task worktrees")
+    worktrees_sub = worktrees.add_subparsers(dest="worktrees_command", required=True)
+    worktrees_sweep = worktrees_sub.add_parser("sweep", help="Clean only provably obsolete StageMesh-owned worktrees")
+    worktrees_sweep.add_argument("--dry-run", action="store_true", help="Explain cleanup decisions without removing worktrees")
+    worktrees_sweep.add_argument("--json", action="store_true")
+    worktrees_sweep.set_defaults(func=command_worktrees)
     plan = sub.add_parser("plan")
     plan.add_argument("file")
     plan.add_argument("--json", action="store_true")
@@ -2286,6 +2460,7 @@ def build_parser() -> argparse.ArgumentParser:
     capacity.add_argument("--secondary", default="claude")
     capacity.add_argument("--primary-down", action="store_true")
     capacity.add_argument("--secondary-down", action="store_true")
+    capacity.add_argument("--task", help="Evaluate task-scoped provider cooldowns and review independence")
     capacity.add_argument("--json", action="store_true")
     capacity.set_defaults(func=command_capacity)
     config = sub.add_parser("config")
@@ -2301,6 +2476,11 @@ def build_parser() -> argparse.ArgumentParser:
     provider_acceptance = sub.add_parser("provider-acceptance")
     provider_acceptance.add_argument("--json", action="store_true")
     provider_acceptance.set_defaults(func=command_provider_acceptance)
+    provider_smoke = sub.add_parser("provider-smoke", help="Run one configured provider against a temporary one-file fixture")
+    provider_smoke.add_argument("--provider", required=True, help="Configured provider name to exercise")
+    provider_smoke.add_argument("--keep-temp", action="store_true", help="Keep the temporary smoke repository for debugging")
+    provider_smoke.add_argument("--json", action="store_true")
+    provider_smoke.set_defaults(func=command_provider_smoke)
     github_acceptance = sub.add_parser("github-acceptance")
     github_acceptance.add_argument("--json", action="store_true")
     github_acceptance.set_defaults(func=command_github_acceptance)

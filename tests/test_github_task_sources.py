@@ -2,6 +2,7 @@ import json
 
 from stagemesh.config import load_config
 from stagemesh.domain import EvidenceKind, EvidenceStatus, Stage, TaskStatus
+from stagemesh.github import GitHubClient
 from stagemesh.operator_actions import task_details
 from stagemesh.persistence import Store
 from stagemesh.scheduling import Scheduler
@@ -10,6 +11,7 @@ from stagemesh.task_sources import (
     DiscoveredTask,
     GitHubApiIssueSource,
     GitHubIssueSource,
+    GitHubOutboundSync,
     sync_source,
     task_sources_from_config,
 )
@@ -300,6 +302,31 @@ def test_task_source_label_filter_change_retires_previously_matching_issue(tmp_p
         store.close()
 
 
+def test_blocked_github_outbound_comment_is_bounded_deduped_and_preserves_labels(tmp_path):
+    store = _store(tmp_path)
+    transport = _RecordingGitHubTransport()
+    try:
+        sync = GitHubOutboundSync(store, GitHubClient("example", "repo", transport))
+        event_id = sync.publish_blocked("7", "validation_gate " + "x" * 400)
+        sync.publish_blocked("7", "validation_gate " + "x" * 400)
+
+        event = store.conn.execute("SELECT * FROM source_events WHERE id=?", (event_id,)).fetchone()
+        payload = json.loads(event["payload"])
+        posts = [request for request in transport.requests if request[0] == "POST"]
+        assert event["status"] == "OK"
+        assert len(payload["reason"]) <= 200 and payload["reason"].endswith("...")
+        assert len(posts) == 1
+        assert posts[0][2] is not None and "StageMesh blocked this task:" in str(posts[0][2]["body"])
+        assert all(request[0] != "PATCH" for request in transport.requests)
+        statuses = [
+            json.loads(row["payload"])["comment"]
+            for row in store.conn.execute("SELECT payload FROM source_events WHERE source_id='7' ORDER BY rowid")
+        ]
+        assert statuses == ["OK", "DUPLICATE"]
+    finally:
+        store.close()
+
+
 def _store(tmp_path) -> Store:
     store = Store(tmp_path / "state.sqlite3")
     store.migrate()
@@ -318,3 +345,21 @@ class _JsonResponse:
 
     def read(self):
         return json.dumps(self.payload).encode("utf-8")
+
+
+class _RecordingGitHubTransport:
+    def __init__(self):
+        self.requests = []
+        self.comments: list[dict[str, str]] = []
+
+    def request(self, method: str, path: str, body: dict[str, object] | None = None):
+        self.requests.append((method, path, body))
+        if method == "GET" and path.split("?")[0].endswith("/comments"):
+            return 200, {}, list(self.comments)
+        if method == "POST" and path.endswith("/comments"):
+            assert body is not None
+            self.comments.append({"body": str(body["body"])})
+            return 201, {}, {"id": len(self.comments)}
+        if method == "PATCH":
+            return 500, {}, {"message": "labels should not be patched"}
+        return 500, {}, {"message": "unexpected request"}

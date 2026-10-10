@@ -209,7 +209,8 @@ def test_provider_no_progress_from_failed_attempts_and_identical_trees(tmp_path:
         coordinator.tick()
     diagnosis = diagnose(store, TASK, project)
     assert diagnosis.category == PROVIDER_NO_PROGRESS and diagnosis.repeated and diagnosis.no_progress["attempts"] == 2
-    assert "try a different provider" in diagnosis.recommendation
+    assert "stagemesh continue" in diagnosis.recommendation
+    assert "try a different provider" not in diagnosis.recommendation
     (tmp_path / "t2").mkdir()
     project2, store2 = _setup(tmp_path / "t2", DOCS_CONTRACT)
     run_path = prepare_task_workspace(project2, TASK)

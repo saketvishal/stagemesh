@@ -75,6 +75,7 @@ class QueueRunner(ParallelRunner):
         # Missing contracts are auto-planned by the same deterministic path `continue` uses (unless --no-auto-plan). That path fails
         # closed: with no detectable validation gate, or a contract that does not round-trip, the task is refused, never run unbounded.
         kwargs.setdefault("auto_plan", True)
+        kwargs.setdefault("wait_for_providers", True)
         super().__init__(*args, **kwargs)
         self._dirty: list[str] | None = None
 

@@ -362,7 +362,7 @@ def test_repeated_provider_no_progress_is_not_retried(tmp_path: Path) -> None:
     drive(project, store, executor, ticks=10)
     assert executor.calls == 2 and store.get_task(TASK)["status"] == TaskStatus.BLOCKED
     (stop,) = events(store, "task.diagnosis_stop")
-    assert stop["category"] == "provider_no_progress" and "task-doctor" in stop["recommendation"]
+    assert stop["category"] == "provider_no_progress" and "stagemesh continue" in stop["recommendation"]
 
 
 def test_a_repair_command_starts_a_fresh_failure_history(tmp_path: Path) -> None:

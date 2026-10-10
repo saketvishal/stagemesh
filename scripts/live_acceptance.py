@@ -9,12 +9,43 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from stagemesh.config import load_config
+from stagemesh.domain import ExecutionKind, ExecutionStatus
 from stagemesh.github import GitHubClient, UrlLibGitHubTransport
+from stagemesh.persistence import Store
 from stagemesh.providers import ProviderValidationError, adapters_from_config
 
 
-def live_acceptance_checks() -> list[dict[str, str]]:
-    config = load_config(ROOT)
+def provider_execution_status(root: Path, provider: str) -> str:
+    db = root / ".stagemesh" / "stagemesh.sqlite3"
+    if not db.is_file():
+        return "NOT_PROVEN"
+    store = Store(db)
+    try:
+        row = store.conn.execute(
+            """
+            SELECT 1
+            FROM executions
+            WHERE lower(actor)=lower(?)
+              AND kind IN (?, ?)
+              AND status IN (?, ?)
+            ORDER BY updated_at DESC, rowid DESC
+            LIMIT 1
+            """,
+            (
+                provider,
+                ExecutionKind.IMPLEMENTATION,
+                ExecutionKind.REVIEW,
+                ExecutionStatus.SUCCEEDED,
+                ExecutionStatus.FAILED,
+            ),
+        ).fetchone()
+    finally:
+        store.close()
+    return "PROVEN" if row else "NOT_PROVEN"
+
+
+def live_acceptance_checks(root: Path = ROOT) -> list[dict[str, str]]:
+    config = load_config(root)
     checks: list[dict[str, str]] = []
     if config.github.configured:
         client = GitHubClient(
@@ -37,7 +68,12 @@ def live_acceptance_checks() -> list[dict[str, str]]:
         return checks
     for adapter in adapters:
         checks.append({"name": f"provider:{adapter.name}", "status": adapter.check_capacity()})
-        checks.append({"name": f"provider:{adapter.name}:execution", "status": "NOT_PROVEN"})
+        checks.append(
+            {
+                "name": f"provider:{adapter.name}:execution",
+                "status": provider_execution_status(root, adapter.name),
+            }
+        )
     return checks
 
 

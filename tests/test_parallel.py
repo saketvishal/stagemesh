@@ -25,7 +25,7 @@ from stagemesh.concurrency import (
 from stagemesh.config import ConfigValidationError, load_config
 from stagemesh.contracts import parse_contract
 from stagemesh.coordinator import Coordinator
-from stagemesh.domain import EvidenceKind, ExecutionKind, ExecutionStatus
+from stagemesh.domain import EvidenceKind, ExecutionKind, ExecutionStatus, Stage
 from stagemesh.execution import ExecutionResult, Executor
 from stagemesh.git import GitWorkspace
 from stagemesh.parallel import ParallelRunner, recover_orphaned_claims, worker_id_for
@@ -253,6 +253,92 @@ def test_sweep_does_not_delete_legacy_global_worktrees(tmp_path: Path) -> None:
     assert sweep_task_worktrees(rig.project, rig.store) == []
     assert (old_worktree / ".git").exists()
     GitWorkspace(rig.project).run("worktree", "remove", "--force", str(old_worktree), check=False)
+
+
+def test_sweep_removes_only_integrated_terminal_worktrees(tmp_path: Path) -> None:
+    rig = Rig(tmp_path, ["A"])
+    run_path = prepare_task_workspace(rig.project, "A")
+    rig.store.advance_task("A", Stage.DONE)
+
+    actions = sweep_task_worktrees(rig.project, rig.store)
+
+    assert actions == [
+        {
+            "task_id": "A",
+            "worktree": str(run_path),
+            "action": "REMOVED",
+            "reason": "task is done and worktree is integrated",
+            "head": GitWorkspace(rig.project).head(),
+        }
+    ]
+    assert not run_path.exists()
+
+
+def test_sweep_archives_and_retains_clean_unmerged_terminal_worktrees(tmp_path: Path) -> None:
+    rig = Rig(tmp_path, ["A"])
+    run_path = prepare_task_workspace(rig.project, "A")
+    (run_path / "out").mkdir(exist_ok=True)
+    (run_path / "out" / "A.txt").write_text("unfinished candidate\n", encoding="utf-8")
+    head = GitWorkspace(run_path).commit_all("candidate not integrated")
+    rig.store.add_candidate("A", head, "scripted", durable_handoff=True)
+    rig.store.advance_task("A", Stage.DONE)
+
+    actions = sweep_task_worktrees(rig.project, rig.store)
+
+    assert len(actions) == 1
+    assert actions[0]["action"] == "ARCHIVED_RETAINED"
+    assert actions[0]["reason"] == "terminal worktree has unmerged commits"
+    assert actions[0]["head"] == head
+    assert actions[0]["recovery_ref"].startswith("refs/stagemesh/archived-worktrees/A/")
+    assert GitWorkspace(rig.project).run("rev-parse", actions[0]["recovery_ref"]).stdout.strip() == head
+    assert run_path.exists()
+
+
+def test_sweep_dry_run_reports_integrated_terminal_worktree_without_removing(tmp_path: Path) -> None:
+    rig = Rig(tmp_path, ["A"])
+    run_path = prepare_task_workspace(rig.project, "A")
+    rig.store.advance_task("A", Stage.DONE)
+
+    actions = sweep_task_worktrees(rig.project, rig.store, dry_run=True)
+
+    assert actions[0]["action"] == "WOULD_REMOVE"
+    assert run_path.exists()
+
+
+def test_worktrees_sweep_cli_explains_dry_run_as_json(tmp_path: Path) -> None:
+    rig = Rig(tmp_path, ["A"])
+    run_path = prepare_task_workspace(rig.project, "A")
+    rig.store.advance_task("A", Stage.DONE)
+    out = io.StringIO()
+
+    with contextlib.redirect_stdout(out):
+        assert cli_module.main(["--project", str(rig.project), "worktrees", "sweep", "--dry-run", "--json"]) == 0
+
+    data = json.loads(out.getvalue())
+    assert data["dry_run"] is True
+    assert data["removed"] == 0 and data["retained"] == 1
+    assert data["actions"][0]["action"] == "WOULD_REMOVE"
+    assert data["actions"][0]["worktree"] == str(run_path)
+    assert run_path.exists()
+
+
+def test_sweep_retains_unknown_dirty_and_active_worktrees(tmp_path: Path) -> None:
+    rig = Rig(tmp_path, ["A", "B"])
+    unknown = worktree_root(rig.project) / "deadbeef0000"
+    GitWorkspace(rig.project).run("worktree", "add", "--detach", str(unknown), "HEAD")
+    dirty = prepare_task_workspace(rig.project, "A")
+    (dirty / "loose.txt").write_text("keep me\n", encoding="utf-8")
+    active = prepare_task_workspace(rig.project, "B")
+    rig.store.start_execution(task_id="B", claim_id=None, kind=ExecutionKind.IMPLEMENTATION)
+    rig.store.advance_task("A", Stage.DONE)
+    rig.store.advance_task("B", Stage.DONE)
+
+    actions = {Path(row["worktree"]).name: row for row in sweep_task_worktrees(rig.project, rig.store)}
+
+    assert actions[unknown.name]["reason"] == "no durable StageMesh task owns this worktree"
+    assert actions[dirty.name]["reason"] == "terminal worktree has uncommitted changes"
+    assert actions[active.name]["reason"] == "task has active claim or execution"
+    assert unknown.exists() and dirty.exists() and active.exists()
 
 
 def test_doctor_reports_legacy_worktree_roots_for_manual_cleanup(tmp_path: Path) -> None:
@@ -579,7 +665,8 @@ def test_restart_recovers_dead_runs_claims_and_orphaned_worktrees(tmp_path: Path
     assert not partial.exists()  # partial edits discarded, worktree itself kept for resume
     assert task_workspace(rig.project, "A").exists()
     swept = sweep_task_worktrees(rig.project, rig.store)
-    assert [Path(s["worktree"]) for s in swept] == [orphan] and not orphan.exists()
+    assert [Path(s["worktree"]) for s in swept if s["worktree"] == str(orphan)] == [orphan]
+    assert orphan.exists()
     assert task_workspace(rig.project, "A").exists()
     rig.store.release_claim(live_claim)
 
@@ -643,8 +730,8 @@ def test_cli_parallel_output_is_grouped_by_task(tmp_path: Path) -> None:
     assert code == 0
     lines = [line for line in out.getvalue().splitlines() if line.strip()]
     assert all(line.startswith(("[T-1] ", "[T-2] ", "[run]", "Parallel run")) for line in lines), lines
-    assert any(line.startswith("[T-1]") and "Validation" in line for line in lines)
-    assert any(line.startswith("[T-2]") and "Integration" in line for line in lines)
+    assert any(line.startswith("[T-1]") and "VALIDATE" in line for line in lines)
+    assert any(line.startswith("[T-2]") and "INTEGRATE" in line for line in lines)
     assert "Parallel run stopped: done" in out.getvalue()
 
 

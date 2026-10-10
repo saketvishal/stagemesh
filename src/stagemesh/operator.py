@@ -79,8 +79,15 @@ def operator_report(store: Store) -> OperatorReport:
             f"provider={execution['provider']} pid={execution['pid_label']} "
             f"process={execution['process_state']} stale={execution['stale']}"
         )
+    blocked_bucket_rows = tuple(
+        {"reason": reason, "count": count}
+        for reason, count in h.blocked_reason_buckets.items()
+    )
+    for bucket in blocked_bucket_rows:
+        lines.append(f"blocked_bucket reason={bucket['reason']} count={bucket['count']}")
     sections = (
         OperatorSection("Active Executions", tuple(active_executions)),
+        OperatorSection("Blocked Buckets", blocked_bucket_rows),
         OperatorSection(
             "Stage Summary",
             tuple({"stage": stage, "count": count} for stage, count in sorted(stage_counts.items())),

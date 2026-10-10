@@ -22,6 +22,7 @@ from .recovery import (
     auto_rebaseline_blocked_stale_baselines,
     auto_rebind_blocked_missing_validation_gates,
     auto_revalidate_blocked_validation_gates,
+    auto_reintegrate_blocked_runtime_failures,
 )
 from .scheduling import Scheduler
 from .task_selection import Candidate, Selection, SelectionRefusal, select_next_task
@@ -713,6 +714,7 @@ def run_ready(
         recovered.extend(auto_rebaseline_blocked_stale_baselines(store, project, task_id=task_id))
         recovered.extend(auto_rebind_blocked_missing_validation_gates(store, project, task_id=task_id))
         recovered.extend(auto_revalidate_blocked_validation_gates(store, project, task_id=task_id))
+        recovered.extend(auto_reintegrate_blocked_runtime_failures(store, project, task_id=task_id))
         selection = choose_task(store, project, task_id, policy or TaskSelectionConfig(), auto_plan, chooser)
         selection_info.update(selection.to_dict())
         _log_selection(selection, on_start)

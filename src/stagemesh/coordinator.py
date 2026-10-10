@@ -24,11 +24,12 @@ from .lifecycle import evidence_allows_advance
 from .persistence import Store
 from .process_identity import classify_process, process_identity
 from .provider_pool import pool_exhaustion_evidence
+from .outbound_lifecycle import outcomes, sync_outbound_outcomes
 from .recovery import RecoveryRefusal, rebaseline_task
 from .remediation import RemediationPolicy
 from .review import Reviewer, independent_review_verified
 from .scheduling import Scheduler
-from .serialized_integration import REBASE_CONFLICT, STALE_BASE
+from .serialized_integration import REBASE_CONFLICT, REBASE_UNAVAILABLE, STALE_BASE
 from .validation import Validator
 from .workspace_guard import (
     EXTERNAL_WORKSPACE_MUTATION,
@@ -37,7 +38,7 @@ from .workspace_guard import (
 )
 from .workspaces import NO_IMPLEMENTATION_CHANGE
 
-_REF_STATE_CODES = frozenset({REBASE_CONFLICT, STALE_BASE})
+_REF_STATE_CODES = frozenset({REBASE_CONFLICT, REBASE_UNAVAILABLE, STALE_BASE})
 
 
 def _is_workspace_mutation_reason(reason: str | None) -> bool:
@@ -68,6 +69,8 @@ class Coordinator:
         worker_id: str = "local-worker",
         diagnosis_policy: DiagnosisPolicy | None = None,
         guard: Any | None = None,
+        outbound_sync: Any | None = None,
+        outbound_sources: frozenset[str] = frozenset(),
     ):
         self.guard = guard  # optional autonomy supervisor: allow(), integration_verified(), recover_unknown(), execution_finished(), candidate_committed()
         self.worker_id = worker_id
@@ -81,6 +84,8 @@ class Coordinator:
         self.integrator = integrator or Integrator(require_independent_review=require_independent_review)
         self.remediation_policy = remediation_policy or RemediationPolicy()
         self.target = target
+        self.outbound_sync = outbound_sync
+        self.outbound_sources = outbound_sources
 
     def recover(self) -> None:
         for execution in self.store.running_executions():
@@ -126,13 +131,28 @@ class Coordinator:
         self.validate_target()
         self.recover()
         progressed = 0
+        before = outcomes(self._selected_tasks()) if self.outbound_sync is not None else {}
         for task in self._selected_tasks():
             if task["status"] == "DONE" or task["stage"] == Stage.DONE:
                 continue
             if not Scheduler(self.store).decision(task["id"]).eligible:
                 continue
             progressed += self._advance_task(task["id"])
+        self._sync_outbound(before)
         return progressed
+
+    def _sync_outbound(self, before: dict[str, str]) -> None:
+        """Publish DONE/BLOCKED transitions of GitHub-sourced tasks; failures are recorded and never alter local state."""
+        if self.outbound_sync is None or not self.outbound_sources:
+            return
+        after = outcomes(self._selected_tasks())
+        sync_outbound_outcomes(
+            self.store,
+            self.outbound_sync,
+            self.outbound_sources,
+            self._selected_tasks(),
+            {task_id: outcome for task_id, outcome in after.items() if before.get(task_id) != outcome},
+        )
 
     def _selected_tasks(self):
         if self.target is None:

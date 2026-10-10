@@ -98,6 +98,19 @@ def describe_verdicts(verdicts: list[Verdict]) -> str:
     return "; ".join(f"{v.provider}: {v.reason}" for v in verdicts) or "no providers configured"
 
 
+def _capacity_reason(adapter: RuntimeCommandAdapter, capacity: str) -> str:
+    executable = adapter.command[0] if adapter.command else ""
+    if capacity == CapacityKind.UNKNOWN:
+        return f"cli_not_installed: '{executable}' is not callable on PATH"
+    if capacity == CapacityKind.PERMISSION:
+        return "provider_permission_denied: command refused unattended permissions"
+    if capacity == CapacityKind.AUTH:
+        return "authentication_failure: provider command is not authenticated"
+    if capacity == CapacityKind.CAPACITY:
+        return "provider_unavailable: provider reports no capacity"
+    return f"command_unavailable: {capacity}"
+
+
 def default_pools(
     names: list[str],
     stage_routes: dict[str, str],
@@ -184,8 +197,8 @@ class ProviderPool:
                 verdicts.append(Verdict(name, False, "not_configured: no command configured for this provider"))
             elif capability not in adapter.capabilities:
                 verdicts.append(Verdict(name, False, f"missing_capability: does not support '{capability}'"))
-            elif adapter.check_capacity() != CapacityKind.AVAILABLE:
-                verdicts.append(Verdict(name, False, f"cli_not_installed: '{adapter.command[0]}' is not callable on PATH"))
+            elif (capacity := adapter.check_capacity()) != CapacityKind.AVAILABLE:
+                verdicts.append(Verdict(name, False, _capacity_reason(adapter, capacity)))
             elif self.limiter is not None and self.limiter.cooling(name) is not None:
                 verdicts.append(Verdict(name, False, str(self.limiter.cooling(name))))
             else:
@@ -219,13 +232,69 @@ class ProviderPool:
             cooldown = _failure_cooldown_seconds(reason, self.cooldown_seconds)
             if cooldown <= 0:
                 continue
-            if age > cooldown:
+            retry_at = payload.get("retry_at", float(row["created_at"]) + cooldown)
+            if not isinstance(retry_at, (int, float)):
+                retry_at = float(row["created_at"]) + cooldown
+            if now >= retry_at:
                 continue
             if reason in _CAPACITY_OUTCOMES:
                 return f"provider_cooldown: {reason} {age}s ago (cooldown {int(cooldown)}s)"
             if payload.get("task_id") == task_id:
                 return f"recent_failure: {reason} {age}s ago (cooldown {int(cooldown)}s)"
         return None
+
+    def next_retry_at(self, store: Store, stage: str, task_id: str, implementer: str | None = None) -> float | None:
+        """Earliest known temporary outage deadline for a usable provider in this task's pool.
+
+        Missing tools, authentication, malformed responses and no-progress are not temporary
+        capacity waits. A reviewer must still be independent when its capacity returns.
+        """
+        deadlines: list[float] = []
+        seen: set[str] = set()
+        shared: dict[str, float] = {}
+        if self.limiter is not None:
+            for name in self.pool(stage):
+                adapter = self.adapters.get(name)
+                if adapter is None or STAGE_CAPABILITY[stage] not in adapter.capabilities or adapter.check_capacity() != CapacityKind.AVAILABLE:
+                    continue
+                if stage == REVIEW and self.require_independent and implementer and _same(adapter, implementer, self.adapters.get(implementer)):
+                    continue
+                deadline = self.limiter.temporary_retry_at(name)
+                if deadline is not None:
+                    shared[name] = deadline
+        rows = store.conn.execute(
+            "SELECT payload, created_at FROM audit_events WHERE event_type=? ORDER BY created_at DESC, rowid DESC",
+            (PROVIDER_FAILURE_EVENT,),
+        )
+        for row in rows:
+            try:
+                payload = json.loads(row["payload"])
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(payload, dict) or payload.get("stage") != stage:
+                continue
+            name = str(payload.get("provider", ""))
+            reason = str(payload.get("reason", ""))
+            if name in seen or name not in self.pool(stage):
+                continue
+            if payload.get("task_id") != task_id and reason not in _CAPACITY_OUTCOMES:
+                continue
+            seen.add(name)
+            adapter = self.adapters.get(name)
+            if adapter is None or STAGE_CAPABILITY[stage] not in adapter.capabilities or adapter.check_capacity() != CapacityKind.AVAILABLE:
+                continue
+            if stage == REVIEW and self.require_independent and implementer and _same(adapter, implementer, self.adapters.get(implementer)):
+                continue
+            if reason not in {"quota_rate_limit", "transient_provider_failure", PROVIDER_TIMEOUT}:
+                continue
+            cooldown = _failure_cooldown_seconds(reason, self.cooldown_seconds)
+            if cooldown <= 0:
+                continue
+            deadline = payload.get("retry_at", float(row["created_at"]) + cooldown)
+            if isinstance(deadline, (int, float)):
+                deadlines.append(max(float(deadline), shared.pop(name, 0.0)))
+        deadlines.extend(shared.values())
+        return min(deadlines) if deadlines else None
 
     def record_failure(
         self,
@@ -240,6 +309,7 @@ class ProviderPool:
         next_provider: str | None = None,
     ) -> None:
         payload: dict[str, object] = {"task_id": task_id, "stage": stage, "provider": provider, "reason": reason[:300]}
+        payload["retry_at"] = time.time() + _failure_cooldown_seconds(reason, self.cooldown_seconds)
         if provider_output:
             payload["provider_output"] = provider_output[:500]
         if retry_after:

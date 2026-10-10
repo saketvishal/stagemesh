@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import json
+import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
 from .capacity import CapacityKind, CapacityRegistry
 from .domain import ExecutionStatus, Stage
 from .execution import ExecutionResult
+from .git import GitWorkspace
 from .persistence import Store
 from .providers import record_provider_capacity
 from .routing import Provider, Router
@@ -34,6 +38,16 @@ class DryRunProviderAdapter:
         if self.capacity != CapacityKind.AVAILABLE:
             return ExecutionResult(ExecutionStatus.FAILED, capacity_failure=True)
         return ExecutionResult(ExecutionStatus.SUCCEEDED)
+
+
+@dataclass(frozen=True)
+class LiveProviderSmokeResult:
+    status: str
+    provider: str
+    execution_status: str
+    candidate_sha: str | None
+    file_ok: bool
+    failure_reason: str | None
 
 
 def run_provider_acceptance(store: Store, project: Path) -> ProviderAcceptanceResult:
@@ -85,3 +99,74 @@ def run_provider_acceptance(store: Store, project: Path) -> ProviderAcceptanceRe
         single_provider.name if single_provider else None,
         review_provider.name if review_provider else None,
     )
+
+
+def run_live_provider_smoke(adapter, *, keep_temp: bool = False) -> LiveProviderSmokeResult:
+    """Run one configured provider against a throwaway one-file repository."""
+    if adapter.check_capacity() != CapacityKind.AVAILABLE:
+        return LiveProviderSmokeResult("FAIL", adapter.name, ExecutionStatus.FAILED, None, False, "provider_unavailable")
+    temp = tempfile.TemporaryDirectory(prefix="stagemesh-provider-smoke-")
+    project = Path(temp.name)
+    try:
+        _prepare_smoke_project(project)
+        store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+        store.migrate()
+        try:
+            task_id = store.upsert_task(
+                "Change provider-smoke.txt so it contains exactly: after",
+                source="provider-smoke",
+                source_id="provider-smoke",
+            )
+            result = adapter.execute(store, task_id, None, project)
+            # The provider writes inside the task worktree; verify the candidate tree instead of the disposable checkout path.
+            candidate = store.latest_candidate(task_id)
+            candidate_sha = str(candidate["sha"]) if candidate is not None else None
+            content = _candidate_file(project, candidate_sha, "provider-smoke.txt") if candidate_sha else None
+            file_ok = content is not None and content.strip() == "after"
+        finally:
+            store.close()
+        status = "PASS" if result.status is ExecutionStatus.SUCCEEDED and file_ok else "FAIL"
+        return LiveProviderSmokeResult(
+            status,
+            adapter.name,
+            result.status,
+            result.candidate_sha,
+            file_ok,
+            result.failure_reason,
+        )
+    finally:
+        if keep_temp:
+            temp._finalizer.detach()  # noqa: SLF001 - explicit debug escape hatch for this short-lived CLI.
+        else:
+            temp.cleanup()
+
+
+def _prepare_smoke_project(project: Path) -> None:
+    (project / ".stagemesh" / "contracts").mkdir(parents=True)
+    (project / "provider-smoke.txt").write_text("before\n", encoding="utf-8")
+    contract = {
+        "objective": "Change provider-smoke.txt so it contains exactly: after",
+        "allowed_files": ["provider-smoke.txt"],
+        "required_tests": [
+            {
+                "name": "provider-smoke-content",
+                "command": [
+                    sys.executable,
+                    "-c",
+                    "from pathlib import Path; assert Path('provider-smoke.txt').read_text(encoding='utf-8').strip() == 'after'",
+                ],
+            }
+        ],
+    }
+    (project / ".stagemesh" / "contracts" / "provider-smoke.json").write_text(
+        json.dumps(contract),
+        encoding="utf-8",
+    )
+    git = GitWorkspace(project)
+    git.init_if_needed()
+    git.commit_all("Initial provider smoke fixture")
+
+
+def _candidate_file(project: Path, candidate_sha: str, path: str) -> str | None:
+    result = GitWorkspace(project).run("show", f"{candidate_sha}:{path}", check=False)
+    return result.stdout if result.returncode == 0 else None
