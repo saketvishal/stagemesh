@@ -71,6 +71,15 @@ class GitHubClient:
         )
         return self._result(code, headers, payload)
 
+    def list_issue_comments(self, number: str) -> GitHubResult:
+        code, headers, payload = self.transport.request(
+            "GET", f"/repos/{self.owner}/{self.repo}/issues/{number}/comments"
+        )
+        result = self._result(code, headers, payload)
+        if result.status == "OK" and not isinstance(result.payload, list):
+            return GitHubResult("UNKNOWN", result.payload)
+        return result
+
     def close_issue(self, number: str) -> GitHubResult:
         code, headers, payload = self.transport.request(
             "PATCH", f"/repos/{self.owner}/{self.repo}/issues/{number}", {"state": "closed"}
