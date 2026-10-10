@@ -131,6 +131,23 @@ def test_repeated_gate_failure_on_the_code_is_an_implementation_defect(tmp_path:
     (stop,) = events(store, "task.diagnosis_stop")
     assert stop["category"] == IMPLEMENTATION_DEFECT and stop["failed_gates"] == ["docs-static-unit"] and executor.calls == 2
 
+def test_diagnose_and_stop_output_include_gate_excerpt(tmp_path: Path) -> None:
+    contract = dict(
+        DOCS_CONTRACT,
+        required_tests=[{"name": "docs-static-unit", "command": [PY, "-c", "import sys; print('FAILED test_x - assert 1 == 2'); sys.exit(1)"]}],
+    )
+    project, store = _setup(tmp_path, contract)
+    coordinator = Coordinator(store, project, executor=Attempts(), target=TargetSelection(TASK))
+    summary = RunSummary(True, "UNSET", task_id=TASK)
+
+    drive_task(store, project, coordinator, TASK, summary, max_steps=40)
+
+    diagnosis = diagnose(store, TASK)
+    assert diagnosis and "FAILED test_x" in diagnosis.failing_evidence[-1]["excerpt"]
+    assert "output excerpt:" in "\n".join(diagnosis.format_lines())
+    stop_text = format_stop(summary)
+    assert "output excerpt:" in stop_text and "FAILED test_x" in stop_text
+
 
 def test_a_different_failure_each_time_is_progress_not_a_repeat(tmp_path: Path) -> None:
     script = (

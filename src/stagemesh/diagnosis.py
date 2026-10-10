@@ -194,6 +194,12 @@ class Diagnosis:
                 )
             )
         lines.append(f"  next step: {self.recommendation}")
+        latest = self.failing_evidence[-1] if self.failing_evidence else {}
+        excerpt = str(latest.get("excerpt") or "").strip()
+        if excerpt:
+            lines.append("  output excerpt:")
+            for line in excerpt.splitlines()[:8]:
+                lines.append(f"    {line[:240]}")
         lines.extend(format_findings(self.review_findings))
         if self.provider_analysis and self.provider_analysis.get("text"):
             lines.append(f"  provider analysis ({self.provider_analysis.get('provider')}): {str(self.provider_analysis['text'])[:600]}")

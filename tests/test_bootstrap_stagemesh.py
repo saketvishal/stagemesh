@@ -33,6 +33,24 @@ def test_windows_dispatcher_finds_project_local_runtime_from_current_tree(tmp_pa
     assert r'call "%DIR%\.stagemesh\bin\stagemesh.cmd" %*' in text
     assert "no project-local runtime found" in text
 
+def test_unix_dispatcher_prefers_project_local_runtime_and_falls_back_to_global(tmp_path: Path) -> None:
+    bootstrap = _load_bootstrap()
+    dispatcher = tmp_path / "stagemesh"
+
+    original_name = os.name
+    bootstrap.os.name = "posix"
+    try:
+        bootstrap._write_user_dispatcher(dispatcher)
+    finally:
+        bootstrap.os.name = original_name
+
+    text = dispatcher.read_text(encoding="utf-8")
+    assert 'exec "$dir/.stagemesh/bin/stagemesh" "$@"' in text
+    assert 'candidate="$candidate_dir/stagemesh"' in text
+    assert '[ "$candidate" != "$self" ]' in text
+    assert 'exec "$candidate" "$@"' in text
+    assert "no project-local runtime or global fallback found" in text
+
 
 def test_user_dispatcher_prefers_writable_user_path_already_on_path(tmp_path: Path, monkeypatch) -> None:
     bootstrap = _load_bootstrap()

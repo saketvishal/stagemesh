@@ -22,6 +22,11 @@ BUILTIN_PROVIDERS = ("codex", "claude", "grok", "agy")
 PROVIDER_STAGES = ("IMPLEMENT", "REVIEW")
 SELECTION_POLICIES = ("priority", "round_robin", "least_recently_used", "weighted")
 _LEGACY_CAPABILITIES = {"code": "IMPLEMENT", "review": "REVIEW"}
+PROVIDER_PROFILES = ("balanced",)
+BALANCED_PROVIDER_POOLS = {
+    "IMPLEMENT": ("codex", "grok", "claude", "agy"),
+    "REVIEW": ("claude", "grok", "agy", "codex"),
+}
 
 
 TIE_BREAKERS = ("issue_number", "created_at")
@@ -102,6 +107,7 @@ class StageMeshConfig:
     provider_failure_cooldown_seconds: float = 900.0
     provider_specs: dict[str, ProviderSpec] = field(default_factory=dict)
     provider_selection_policy: str = "round_robin"
+    provider_profile: str | None = None
     provider_weights: dict[str, int] = field(default_factory=dict)
     task_selection: TaskSelectionConfig = field(default_factory=TaskSelectionConfig)
     parallel: ParallelConfig = field(default_factory=ParallelConfig)
@@ -158,12 +164,21 @@ def load_config(project: Path, config_path: Path | None = None) -> StageMeshConf
     cooldown = routing_data.get("provider_failure_cooldown_seconds", 900.0)
     if isinstance(cooldown, bool) or not isinstance(cooldown, (int, float)) or cooldown < 0:
         raise ConfigValidationError("routing.provider_failure_cooldown_seconds must be a non-negative number")
-    policy = os.environ.get("STAGEMESH_PROVIDER_SELECTION_POLICY") or routing_data.get("provider_selection_policy", "round_robin")
+    provider_profile = _string(routing_data.get("provider_profile"))
+    if provider_profile is not None and provider_profile not in PROVIDER_PROFILES:
+        raise ConfigValidationError(f"routing.provider_profile must be one of: {', '.join(PROVIDER_PROFILES)}")
+    policy_default = "least_recently_used" if provider_profile == "balanced" else "round_robin"
+    policy = os.environ.get("STAGEMESH_PROVIDER_SELECTION_POLICY") or routing_data.get("provider_selection_policy", policy_default)
     if policy not in SELECTION_POLICIES:
         raise ConfigValidationError(
             f"routing.provider_selection_policy must be one of: {', '.join(SELECTION_POLICIES)}"
         )
     provider_pools = _provider_pools(_optional_mapping(routing_data, "pools"))
+    if provider_profile == "balanced":
+        provider_pools = {
+            **{stage: tuple(names) for stage, names in BALANCED_PROVIDER_POOLS.items()},
+            **provider_pools,
+        }
     provider_weights = _provider_weights(_optional_mapping(routing_data, "provider_weights"))
     known = set(BUILTIN_PROVIDERS) | set(provider_commands)
     for stage, names in provider_pools.items():
@@ -204,6 +219,7 @@ def load_config(project: Path, config_path: Path | None = None) -> StageMeshConf
         provider_failure_cooldown_seconds=float(cooldown),
         provider_specs=provider_specs,
         provider_selection_policy=str(policy),
+        provider_profile=provider_profile,
         provider_weights=provider_weights,
         task_selection=_task_selection(_optional_mapping(data, "task_selection") or _profile_task_selection(project)),
         parallel=_parallel(_optional_mapping(data, "parallel")),

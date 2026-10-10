@@ -25,7 +25,7 @@ from .ci import CIValidationError, broken_future_feature_gate, default_gates
 from .ci_wait import decide_ci_wait
 from .completion_audit import CompletionAuditValidationError, completion_audit
 from .concurrency import IntegrationLock, ProviderLimiter
-from .config import ConfigValidationError, load_config
+from .config import BALANCED_PROVIDER_POOLS, ConfigValidationError, load_config
 from .coordinator import Coordinator, TargetSelection, TargetSelectionError
 from .dashboard import dashboard_summary, render_dashboard
 from .demo import DemoValidationError, create_demo_project
@@ -1839,14 +1839,18 @@ def command_capacity(args: argparse.Namespace) -> int:
     payload = {
         "task_id": args.task,
         "implementer": implementer,
+        "active_provider_profile": config.provider_profile,
+        "selection_policy": config.provider_selection_policy,
         "pools": {stage: list(names) for stage, names in sorted(pools.items())},
         "providers": provider_rows,
         "stages": {
             IMPLEMENT: {
+                "pool": list(pools.get(IMPLEMENT, ())),
                 "available": any(v.eligible for v in impl),
                 "verdicts": [v.to_dict() for v in impl],
             },
             REVIEW: {
+                "pool": list(pools.get(REVIEW, ())),
                 "available": any(v.eligible for v in review),
                 "verdicts": [v.to_dict() for v in review],
             },
@@ -1901,6 +1905,7 @@ def command_config(args: argparse.Namespace) -> int:
                     "routing": {
                         "mode": config.routing_mode,
                         "single_agent_provider": config.single_agent_provider,
+                        "provider_profile": config.provider_profile,
                         "stage_routes": dict(sorted(config.stage_routes.items())),
                         "provider_selection_policy": config.provider_selection_policy,
                         "pools": {stage: list(names) for stage, names in sorted(pools.items())},
@@ -1923,6 +1928,7 @@ def command_config(args: argparse.Namespace) -> int:
     print(f"github.configured: {config.github.configured}")
     print(f"database_url: {display_database_url}")
     print(f"routing.mode: {config.routing_mode}")
+    print(f"routing.provider_profile: {config.provider_profile or ''}")
     print(f"routing.single_agent_provider: {config.single_agent_provider or ''}")
     print(f"routing.provider_selection_policy: {config.provider_selection_policy}")
     for stage, provider in sorted(config.stage_routes.items()):
@@ -1937,6 +1943,39 @@ def command_config(args: argparse.Namespace) -> int:
         print(f"task_source.{source.name}: {source.kind} {source.path}")
     return 0
 
+def command_provider_profile(args: argparse.Namespace) -> int:
+    project = Path(args.project).resolve()
+    config_path = runtime_dir(project) / "config.json"
+    if config_path.exists():
+        try:
+            data = json.loads(config_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            print(f"config error: {exc}", file=sys.stderr)
+            return 2
+        if not isinstance(data, dict):
+            print("config error: config root must be an object", file=sys.stderr)
+            return 2
+    else:
+        data = {}
+    routing = data.setdefault("routing", {})
+    if not isinstance(routing, dict):
+        print("config error: routing must be an object", file=sys.stderr)
+        return 2
+    if args.profile != "balanced":
+        print(f"provider profile not found: {args.profile}", file=sys.stderr)
+        return 2
+    routing["provider_profile"] = "balanced"
+    routing.setdefault("provider_selection_policy", "least_recently_used")
+    routing["pools"] = {stage: list(names) for stage, names in BALANCED_PROVIDER_POOLS.items()}
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    payload = {"provider_profile": "balanced", "config": str(config_path), "routing": routing}
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print("provider profile: balanced")
+        print(f"config: {config_path}")
+    return 0
 
 def command_backend(args: argparse.Namespace) -> int:
     config = load_config(Path(args.project).resolve(), Path(args.config).resolve() if args.config else None)
@@ -1994,6 +2033,35 @@ def command_backend(args: argparse.Namespace) -> int:
 
 def command_provider_acceptance(args: argparse.Namespace) -> int:
     project = Path(args.project).resolve()
+    if getattr(args, "live", False) or getattr(args, "provider", None):
+        if not args.provider:
+            print("--live requires --provider", file=sys.stderr)
+            return 2
+        config = load_config(project)
+        try:
+            adapters = adapters_from_config(config)
+        except ProviderValidationError as exc:
+            print(f"provider config error: {exc}", file=sys.stderr)
+            return 2
+        adapter = next((item for item in adapters if item.name == args.provider), None)
+        if adapter is None:
+            print(f"provider not found: {args.provider}", file=sys.stderr)
+            return 2
+        result = run_live_provider_smoke(adapter, keep_temp=args.keep_temp)
+        payload = {
+            "status": result.status,
+            "provider": result.provider,
+            "execution_status": str(result.execution_status),
+            "candidate_sha": result.candidate_sha,
+            "file_ok": result.file_ok,
+            "failure_reason": result.failure_reason,
+        }
+        if args.json:
+            print(json.dumps(payload, indent=2, sort_keys=True))
+        else:
+            for key, value in payload.items():
+                print(f"{key}: {value}")
+        return 0 if result.status == "PASS" else 1
     store = Store(db_path(project))
     store.migrate()
     result = run_provider_acceptance(store, project)
@@ -2527,6 +2595,12 @@ def build_parser() -> argparse.ArgumentParser:
     retry_task.add_argument("--task", required=True)
     retry_task.add_argument("--json", action="store_true")
     retry_task.set_defaults(func=command_retry_task)
+    provider_profile = sub.add_parser("provider-profile", help="Use a built-in provider routing profile")
+    provider_profile_sub = provider_profile.add_subparsers(dest="provider_profile_command", required=True)
+    provider_profile_use = provider_profile_sub.add_parser("use", help="Persist a provider routing profile in project config")
+    provider_profile_use.add_argument("profile", choices=["balanced"])
+    provider_profile_use.add_argument("--json", action="store_true")
+    provider_profile_use.set_defaults(func=command_provider_profile)
     run_ready_cmd = sub.add_parser(
         "run-ready", help="Run one ready task to completion under supervision (sync, select, tick, recover dead claims)"
     )
@@ -2592,6 +2666,9 @@ def build_parser() -> argparse.ArgumentParser:
     backend.add_argument("--json", action="store_true")
     backend.set_defaults(func=command_backend)
     provider_acceptance = sub.add_parser("provider-acceptance")
+    provider_acceptance.add_argument("--provider", help="Configured provider name to exercise with --live")
+    provider_acceptance.add_argument("--live", action="store_true", help="Run the provider against a temporary one-file fixture")
+    provider_acceptance.add_argument("--keep-temp", action="store_true", help="Keep the temporary live fixture for debugging")
     provider_acceptance.add_argument("--json", action="store_true")
     provider_acceptance.set_defaults(func=command_provider_acceptance)
     provider_smoke = sub.add_parser("provider-smoke", help="Run one configured provider against a temporary one-file fixture")

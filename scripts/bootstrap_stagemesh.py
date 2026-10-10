@@ -109,6 +109,8 @@ exit /b 9009
     else:
         path.write_text(
             """#!/usr/bin/env sh
+self_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"
+self="$self_dir/$(basename -- "$0")"
 dir="$(pwd)"
 while :; do
   if [ -x "$dir/.stagemesh/bin/stagemesh" ]; then
@@ -116,11 +118,25 @@ while :; do
   fi
   parent="$(dirname "$dir")"
   if [ "$parent" = "$dir" ]; then
-    echo "stagemesh: no project-local runtime found from $(pwd); run python scripts/bootstrap_stagemesh.py in the project first." >&2
-    exit 127
+    break
   fi
   dir="$parent"
 done
+old_ifs=$IFS
+IFS=:
+for path_dir in $PATH; do
+  IFS=$old_ifs
+  [ -n "$path_dir" ] || path_dir=.
+  candidate_dir="$(CDPATH= cd -- "$path_dir" 2>/dev/null && pwd -P)" || continue
+  candidate="$candidate_dir/stagemesh"
+  if [ -x "$candidate" ] && [ "$candidate" != "$self" ]; then
+    exec "$candidate" "$@"
+  fi
+  IFS=:
+done
+IFS=$old_ifs
+echo "stagemesh: no project-local runtime or global fallback found from $(pwd); run python scripts/bootstrap_stagemesh.py in the project first." >&2
+exit 127
 """,
             encoding="utf-8",
         )
