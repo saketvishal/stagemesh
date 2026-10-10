@@ -88,6 +88,7 @@ def test_adapters_carry_declared_capabilities_and_builtins_stay_registered(tmp_p
         {"providers": {"x": {"command": "x", "weight": True}}},
         {"providers": {"has space": "x"}},
         {"routing": {"provider_selection_policy": "random"}},
+        {"routing": {"provider_profile": "project-x"}},
         {"routing": {"pools": {"IMPLEMENT": ["nope"]}}},
         {"routing": {"provider_weights": {"nope": 2}}},
         {"routing": {"provider_weights": {"codex": 0}}},
@@ -109,6 +110,39 @@ def test_env_command_overrides_work_for_builtins_and_custom_providers(tmp_path: 
 def test_default_policy_is_round_robin_and_stage_routes_still_load(tmp_path: Path) -> None:
     config = load_config(_config(tmp_path, {"routing": {"stage_routes": {"IMPLEMENT": "codex", "REVIEW": "claude"}}}))
     assert config.provider_selection_policy == "round_robin" and config.stage_routes == {"IMPLEMENT": "codex", "REVIEW": "claude"}
+
+
+
+def test_balanced_provider_profile_sets_generic_stage_pools(tmp_path: Path) -> None:
+    config = load_config(_config(tmp_path, {"routing": {"provider_profile": "balanced"}}))
+    assert config.provider_profile == "balanced"
+    assert config.provider_selection_policy == "least_recently_used"
+    assert config.provider_pools[IMPLEMENT] == ("codex", "grok", "claude", "agy")
+    assert config.provider_pools[REVIEW] == ("claude", "grok", "agy", "codex")
+
+
+def test_provider_profile_use_balanced_writes_generic_config(tmp_path: Path) -> None:
+    code = cli_module.main(["--project", str(tmp_path), "provider-profile", "use", "balanced", "--json"])
+
+    assert code == 0
+    config = load_config(tmp_path)
+    assert config.provider_profile == "balanced"
+    assert config.provider_pools[IMPLEMENT] == ("codex", "grok", "claude", "agy")
+    assert config.provider_selection_policy == "least_recently_used"
+
+
+def test_capacity_reports_balanced_policy_pools_and_skip_reasons(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    _config(tmp_path, {"routing": {"provider_profile": "balanced"}})
+
+    code = cli_module.main(["--project", str(tmp_path), "capacity", "--json"])
+
+    assert code == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["active_provider_profile"] == "balanced"
+    assert data["selection_policy"] == "least_recently_used"
+    assert data["stages"][IMPLEMENT]["pool"] == ["codex", "grok", "claude", "agy"]
+    assert data["stages"][REVIEW]["pool"] == ["claude", "grok", "agy", "codex"]
+    assert all("reason" in verdict for verdict in data["stages"][IMPLEMENT]["verdicts"])
 
 def test_legacy_builtin_priority_config_is_normalized_to_round_robin(tmp_path: Path) -> None:
     project = _config(

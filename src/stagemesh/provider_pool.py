@@ -9,7 +9,7 @@ import time
 from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .audit import record_audit
 from .autonomy.gitfacts import GitFacts
@@ -89,15 +89,18 @@ class Verdict:
 class ProviderLog:
     """Writes provider decisions to stderr (keeps --json stdout clean) and remembers them for reports."""
 
-    def __init__(self, stream: Any = None, echo: bool = True):
+    def __init__(self, stream: Any = None, echo: bool = True, on_line: Callable[[str], None] | None = None):
         self.lines: list[str] = []
         self._stream = stream
         self._echo = echo
+        self._on_line = on_line
 
     def __call__(self, message: str) -> None:
         self.lines.append(message)
         if self._echo:
             print(f"[stagemesh] {message}", file=self._stream or sys.stderr, flush=True)
+        if self._on_line is not None:
+            self._on_line(message)
 
 
 def describe_verdicts(verdicts: list[Verdict]) -> str:
