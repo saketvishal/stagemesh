@@ -62,7 +62,7 @@ from .persistence import Store, StoreValidationError
 from .persistence_backends import probe_backend
 from .postgres_store import PostgresStore, PostgresUnavailable, postgres_schema_contract
 from .process_identity import current_process_identity
-from .provider_acceptance import run_provider_acceptance
+from .provider_acceptance import run_live_provider_smoke, run_provider_acceptance
 from .provider_pool import (
     IMPLEMENT,
     REVIEW,
@@ -1810,6 +1810,35 @@ def command_provider_acceptance(args: argparse.Namespace) -> int:
     return 0 if result.status == "PASS" else 1
 
 
+def command_provider_smoke(args: argparse.Namespace) -> int:
+    project = Path(args.project).resolve()
+    config = load_config(project)
+    try:
+        adapters = adapters_from_config(config)
+    except ProviderValidationError as exc:
+        print(f"provider config error: {exc}", file=sys.stderr)
+        return 2
+    adapter = next((item for item in adapters if item.name == args.provider), None)
+    if adapter is None:
+        print(f"provider not found: {args.provider}", file=sys.stderr)
+        return 2
+    result = run_live_provider_smoke(adapter, keep_temp=args.keep_temp)
+    payload = {
+        "status": result.status,
+        "provider": result.provider,
+        "execution_status": str(result.execution_status),
+        "candidate_sha": result.candidate_sha,
+        "file_ok": result.file_ok,
+        "failure_reason": result.failure_reason,
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0 if result.status == "PASS" else 1
+    for key, value in payload.items():
+        print(f"{key}: {value}")
+    return 0 if result.status == "PASS" else 1
+
+
 def command_github_acceptance(args: argparse.Namespace) -> int:
     project = Path(args.project).resolve()
     store = Store(db_path(project))
@@ -2338,6 +2367,11 @@ def build_parser() -> argparse.ArgumentParser:
     provider_acceptance = sub.add_parser("provider-acceptance")
     provider_acceptance.add_argument("--json", action="store_true")
     provider_acceptance.set_defaults(func=command_provider_acceptance)
+    provider_smoke = sub.add_parser("provider-smoke", help="Run one configured provider against a temporary one-file fixture")
+    provider_smoke.add_argument("--provider", required=True, help="Configured provider name to exercise")
+    provider_smoke.add_argument("--keep-temp", action="store_true", help="Keep the temporary smoke repository for debugging")
+    provider_smoke.add_argument("--json", action="store_true")
+    provider_smoke.set_defaults(func=command_provider_smoke)
     github_acceptance = sub.add_parser("github-acceptance")
     github_acceptance.add_argument("--json", action="store_true")
     github_acceptance.set_defaults(func=command_github_acceptance)
