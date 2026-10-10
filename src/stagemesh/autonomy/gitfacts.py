@@ -227,12 +227,7 @@ class GitFacts:
         args = ["commit-tree", tree, "-F", "-"]
         if head:
             args += ["-p", head]
-        env = {
-            "GIT_AUTHOR_NAME": STAGEMESH_COMMITTER[0],
-            "GIT_AUTHOR_EMAIL": STAGEMESH_COMMITTER[1],
-            "GIT_COMMITTER_NAME": STAGEMESH_COMMITTER[0],
-            "GIT_COMMITTER_EMAIL": STAGEMESH_COMMITTER[1],
-        }
+        env = project_identity(worktree).env()  # the approved owner identity; synthetic only when none exists
         return GitFacts(worktree)._commit_tree_with_message(args, message, env)
 
 

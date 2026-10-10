@@ -211,7 +211,7 @@ def command_doctor(args: argparse.Namespace) -> int:
     for line in format_cooldowns(active_cooldowns(store, config.provider_failure_cooldown_seconds)):
         print(line)
     who = data["git_identity"]
-    print(f"git identity: {who['name']} <{who['email']}> [{who['status']}]")
+    print(f"git identity: {who['name']} <{who['email']}> [{who['status']}]" + (f" via {who['origin']}" if who.get("origin") else ""))
     if who["problem"]:
         print(f"WARNING git identity: {who['problem']}")
     store.close()
