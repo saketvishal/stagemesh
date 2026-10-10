@@ -681,6 +681,7 @@ def command_status(args: argparse.Namespace) -> int:
                     "open_task_count": report.open_task_count,
                     "eligible_open_task_count": report.eligible_open_task_count,
                     "blocked_task_count": report.blocked_task_count,
+                    "blocked_reason_buckets": report.blocked_reason_buckets,
                     "running_count": report.running_count,
                     "source_ready_count": report.source_ready_count,
                     "done_count": report.done_count,
@@ -724,6 +725,8 @@ def command_status(args: argparse.Namespace) -> int:
         f"stale={report.stale_execution_count} "
         f"source_ready={report.source_ready_count}"
     )
+    for reason, count in report.blocked_reason_buckets.items():
+        print(f"blocked_bucket {reason}: {count}")
     for row in rows:
         print(f"{row['id']} {row['stage']} {row['status']} {row['title']}")
     store.close()
@@ -1247,6 +1250,7 @@ def command_health(args: argparse.Namespace) -> int:
                     "open_task_count": report.open_task_count,
                     "eligible_open_task_count": report.eligible_open_task_count,
                     "blocked_task_count": report.blocked_task_count,
+                    "blocked_reason_buckets": report.blocked_reason_buckets,
                     "running_count": report.running_count,
                     "source_ready_count": report.source_ready_count,
                     "done_count": report.done_count,
@@ -1270,6 +1274,8 @@ def command_health(args: argparse.Namespace) -> int:
     print(f"open_tasks: {report.open_task_count}")
     print(f"eligible_open_tasks: {report.eligible_open_task_count}")
     print(f"blocked_tasks: {report.blocked_task_count}")
+    for reason, count in report.blocked_reason_buckets.items():
+        print(f"blocked_bucket {reason}: {count}")
     print(f"running: {report.running_count}")
     print(f"source_ready_tasks: {report.source_ready_count}")
     print(f"done: {report.done_count}")

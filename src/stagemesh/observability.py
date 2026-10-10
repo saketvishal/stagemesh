@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections import Counter
 from dataclasses import dataclass
 from typing import Any
 
@@ -17,6 +18,7 @@ class HealthReport:
     open_task_count: int
     eligible_open_task_count: int
     blocked_task_count: int
+    blocked_reason_buckets: dict[str, int]
     running_count: int
     source_ready_count: int
     done_count: int
@@ -73,6 +75,7 @@ def health(store: Store) -> HealthReport:
         open_task_count=len(open_tasks),
         eligible_open_task_count=sum(1 for task in open_tasks if scheduler.decision(str(task["id"])).eligible),
         blocked_task_count=len(blocked),
+        blocked_reason_buckets=_blocked_reason_buckets(store, blocked),
         running_count=len(running),
         source_ready_count=_source_ready_count(store, tasks),
         done_count=len(done),
@@ -98,6 +101,28 @@ def _source_ready_count(store: Store, tasks: list[Any]) -> int:
         if state.get("eligible") is True and str(state.get("state", "")).upper() == "OPEN":
             count += 1
     return count
+
+
+def _blocked_reason_buckets(store: Store, blocked: list[Any]) -> dict[str, int]:
+    buckets: Counter[str] = Counter()
+    for task in blocked:
+        buckets[_latest_blocked_reason(store, str(task["id"]))] += 1
+    return dict(sorted(buckets.items()))
+
+
+def _latest_blocked_reason(store: Store, task_id: str) -> str:
+    rows = store.conn.execute(
+        "SELECT payload FROM audit_events WHERE event_type=? ORDER BY created_at DESC, rowid DESC LIMIT 200",
+        ("task.blocked",),
+    ).fetchall()
+    for row in rows:
+        try:
+            payload = json.loads(row["payload"])
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if str(payload.get("task_id") or "") == task_id:
+            return str(payload.get("reason") or "blocked")
+    return "blocked"
 
 
 def _current_failed_execution_count(store: Store) -> int:

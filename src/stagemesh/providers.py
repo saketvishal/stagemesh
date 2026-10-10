@@ -180,34 +180,9 @@ class RuntimeCommandAdapter:
         temp_dir = tempfile.mkdtemp(prefix="stagemesh-review-")
         review_path = Path(temp_dir) / "candidate"
         try:
-            add = subprocess.run(
-                ["git", "worktree", "add", "--quiet", "--detach", "--no-checkout", str(review_path), candidate_sha],
-                cwd=project,
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-            if add.returncode != 0:
-                detail = _bounded_process_output(add)
-                return _review_infrastructure_failure("review workspace setup failed" + (f": {detail}" if detail else ""))
-            # Reviewers must inspect the committed candidate bytes, not a platform-normalized
-            # checkout shaped by the machine's global Git config.
-            subprocess.run(
-                ["git", "config", "core.autocrlf", "false"],
-                cwd=review_path,
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-            checkout = subprocess.run(
-                ["git", "checkout", "--quiet", "--detach", candidate_sha],
-                cwd=review_path,
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-            if checkout.returncode != 0:
-                return _review_infrastructure_failure("review candidate checkout failed")
+            setup_error = _prepare_review_checkout(Path(project), review_path, candidate_sha)
+            if setup_error:
+                return setup_error
             before_head = _git_output(review_path, "rev-parse", "HEAD")
             if before_head != candidate_sha:
                 return _review_infrastructure_failure("review workspace did not checkout exact candidate")
@@ -241,7 +216,7 @@ class RuntimeCommandAdapter:
                 return _review_infrastructure_failure(reason)
             return _provider_text_response(stdout)
         finally:
-            _cleanup_review_workspace(Path(temp_dir), review_path=review_path, project=Path(project))
+            _cleanup_review_workspace(Path(temp_dir))
 
 
 @dataclass(frozen=True)
@@ -337,15 +312,47 @@ def _provider_permission_denial(stdout: str, stderr: str) -> str | None:
     return None
 
 
-def _cleanup_review_workspace(path: Path, *, review_path: Path | None = None, project: Path | None = None) -> None:
-    if review_path is not None and project is not None:
-        subprocess.run(
-            ["git", "worktree", "remove", "--force", str(review_path)],
-            cwd=project,
-            text=True,
-            capture_output=True,
-            check=False,
-        )
+def _prepare_review_checkout(project: Path, review_path: Path, candidate_sha: str) -> str | None:
+    review_path.mkdir(parents=True, exist_ok=True)
+    init = subprocess.run(["git", "init", "--quiet"], cwd=review_path, text=True, capture_output=True, check=False)
+    if init.returncode != 0:
+        detail = _bounded_process_output(init)
+        return _review_infrastructure_failure("review workspace setup failed" + (f": {detail}" if detail else ""))
+
+    objects = _source_object_store(project)
+    if objects is None:
+        return _review_infrastructure_failure("review workspace setup failed: source object store unavailable")
+    alternates = review_path / ".git" / "objects" / "info" / "alternates"
+    alternates.parent.mkdir(parents=True, exist_ok=True)
+    alternates.write_bytes((objects.as_posix() + "\n").encode("utf-8"))
+
+    # Reviewers must inspect the committed candidate bytes, not a platform-normalized
+    # checkout shaped by the machine's global Git config.
+    subprocess.run(["git", "config", "core.autocrlf", "false"], cwd=review_path, text=True, capture_output=True, check=False)
+    checkout = subprocess.run(
+        ["git", "-c", "advice.detachedHead=false", "checkout", "--quiet", "--detach", candidate_sha],
+        cwd=review_path,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if checkout.returncode != 0:
+        detail = _bounded_process_output(checkout)
+        return _review_infrastructure_failure("review candidate checkout failed" + (f": {detail}" if detail else ""))
+    return None
+
+
+def _source_object_store(project: Path) -> Path | None:
+    result = subprocess.run(["git", "rev-parse", "--git-path", "objects"], cwd=project, text=True, capture_output=True, check=False)
+    if result.returncode != 0:
+        return None
+    objects = Path(result.stdout.strip())
+    if not objects.is_absolute():
+        objects = project / objects
+    return objects.resolve()
+
+
+def _cleanup_review_workspace(path: Path) -> None:
 
     def retry_with_write_permission(function: object, cleanup_path: str, _exc_info: object) -> None:
         try:
@@ -361,7 +368,7 @@ def _cleanup_review_workspace(path: Path, *, review_path: Path | None = None, pr
         except OSError:
             if attempt < 2:
                 time.sleep(0.1)
-    # Review workspaces are throwaway clones. On Windows, provider tooling can leave cache files briefly locked
+    # Review workspaces are throwaway checkouts. On Windows, provider tooling can leave cache files briefly locked
     # (for example .uv-cache), and that cleanup failure must not replace a completed review result.
     try:
         shutil.rmtree(path, ignore_errors=True)

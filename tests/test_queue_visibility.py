@@ -97,6 +97,7 @@ def test_status_shows_compact_queue_counts_in_text_and_json(tmp_path: Path) -> N
     project, _ = _project_with_executions(tmp_path)
     store = _store(project)
     store.block_task("T-2")
+    record_audit(store, "task.blocked", {"task_id": "T-2", "reason": "validation_gate", "stage": "VALIDATE"})
     store.close()
 
     code, out, _ = run_stagemesh_cli(project, "status", "--json")
@@ -106,6 +107,7 @@ def test_status_shows_compact_queue_counts_in_text_and_json(tmp_path: Path) -> N
     assert data["open_task_count"] == 1
     assert data["eligible_open_task_count"] == 1
     assert data["blocked_task_count"] == 1
+    assert data["blocked_reason_buckets"] == {"validation_gate": 1}
     assert data["running_count"] == 3
     assert data["stale_execution_count"] == 1
     assert data["source_ready_count"] == 2
@@ -113,6 +115,19 @@ def test_status_shows_compact_queue_counts_in_text_and_json(tmp_path: Path) -> N
     code, out, _ = run_stagemesh_cli(project, "status")
     assert code == 0
     assert "counts: tracked=2 open=1 eligible_open=1 blocked=1 running=3 stale=1 source_ready=2" in out
+    assert "blocked_bucket validation_gate: 1" in out
+
+    code, out, _ = run_stagemesh_cli(project, "operator", "--json")
+    assert code == 0
+    operator = json.loads(out)
+    buckets = next(section for section in operator["sections"] if section["name"] == "Blocked Buckets")
+    assert buckets["rows"] == [{"count": 1, "reason": "validation_gate"}]
+
+    dashboard = project / "dashboard.html"
+    code, out, _ = run_stagemesh_cli(project, "dashboard", "--output", str(dashboard), "--json")
+    assert code == 0
+    assert "Blocked Buckets" in json.loads(out)["sections"]
+    assert "validation_gate" in dashboard.read_text(encoding="utf-8")
 
 
 def test_json_surfaces_expose_state_event_reason_and_process(tmp_path: Path) -> None:
