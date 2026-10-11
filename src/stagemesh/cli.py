@@ -66,7 +66,13 @@ from .persistence import Store, StoreValidationError
 from .persistence_backends import probe_backend
 from .postgres_store import PostgresStore, PostgresUnavailable, postgres_schema_contract
 from .process_identity import current_process_identity
-from .provider_acceptance import run_live_provider_smoke, run_provider_acceptance
+from .provider_acceptance import (
+    _latest_live_acceptance_payload,
+    live_provider_readiness,
+    record_live_provider_acceptance,
+    run_live_provider_smoke,
+    run_provider_acceptance,
+)
 from .provider_pool import (
     IMPLEMENT,
     REVIEW,
@@ -256,6 +262,24 @@ def _sync_all_sources(store: Store, project: Path, config, targeted_task_id: str
         sync_source(store, _filter_targeted_tasks(source.discover(), targeted_task_id))
 
 
+# Live provider acceptance in provider selection. Default queue runs only skip providers whose recorded live check failed; refusing
+# providers that were never live-checked is opt-in (`queue-run --require-live-acceptance`), e.g. for release gating.
+LIVE_ACCEPTANCE_SKIP_FAILED = "skip_failed"
+LIVE_ACCEPTANCE_REQUIRED = "required"
+
+
+def _live_acceptance_mode(args: argparse.Namespace, *, queue: bool) -> str | None:
+    """How provider selection treats live acceptance for this run (see LIVE_ACCEPTANCE_*)."""
+    if getattr(args, "require_live_acceptance", False):
+        return LIVE_ACCEPTANCE_REQUIRED
+    return LIVE_ACCEPTANCE_SKIP_FAILED if queue else None
+
+
+def _live_acceptance_build_kwargs(mode: str | None) -> dict[str, str]:
+    """Extra `_build_coordinator` keywords for live acceptance: none when it is ignored, so that path is called exactly as before."""
+    return {} if mode is None else {"live_acceptance": mode}
+
+
 def _build_coordinator(
     args,
     project: Path,
@@ -265,8 +289,13 @@ def _build_coordinator(
     provider_log: ProviderLog | None = None,
     *,
     parallel: ParallelWiring | None = None,
+    live_acceptance: str | None = None,
 ):
-    """Wire provider adapters, router, reviewer and integrator; raises _SetupError after printing why."""
+    """Wire provider adapters, router, reviewer and integrator; raises _SetupError after printing why.
+
+    `live_acceptance` is None (live acceptance is ignored), LIVE_ACCEPTANCE_SKIP_FAILED (skip a provider whose recorded live check
+    failed; one that was never checked stays eligible) or LIVE_ACCEPTANCE_REQUIRED (also refuse a provider with no passing live check).
+    """
     # Wire real provider adapters unless --dry-run is requested.
     executor = None
     reviewer = None
@@ -331,6 +360,8 @@ def _build_coordinator(
             limiter=parallel.limiter if parallel else None,
             active_selections=parallel.active_selections if parallel else None,
             selection_lock=parallel.selection_lock if parallel else None,
+            require_live_acceptance=live_acceptance is not None,
+            block_unproven=live_acceptance == LIVE_ACCEPTANCE_REQUIRED,
         )
         staged = config.routing_mode == RoutingMode.STAGED
         task_stage = None
@@ -1100,9 +1131,20 @@ def command_run_parallel(args: argparse.Namespace, *, queue: bool = False) -> in
         log.set_on_line(lambda message, task_id=task_id: live_provider_notice(task_id, message))
         return log
 
+    queue_live_acceptance = _live_acceptance_mode(args, queue=queue)
+
     def make_coordinator(target: TargetSelection, task_store: Store, task_id: str) -> Coordinator:
         try:
-            coord, details = _build_coordinator(args, project, config, task_store, target, task_provider_log(task_id), parallel=wiring)
+            coord, details = _build_coordinator(
+                args,
+                project,
+                config,
+                task_store,
+                target,
+                task_provider_log(task_id),
+                parallel=wiring,
+                **_live_acceptance_build_kwargs(queue_live_acceptance),
+            )
         except _SetupError as exc:
             raise SetupRefused(f"provider setup failed for task {task_id} (see stderr; exit {exc.code})") from exc
         info.update(details)
@@ -1870,6 +1912,8 @@ def command_capacity(args: argparse.Namespace) -> int:
         policy=config.provider_selection_policy,
         weights=config.provider_weights,
         priorities=priorities,
+        require_live_acceptance=True,
+        block_unproven=bool(getattr(args, "require_live_acceptance", False)),
     )
     impl = pool.evaluate(store, IMPLEMENT, args.task)
     review = pool.evaluate(store, REVIEW, args.task, implementer=implementer)
@@ -1891,7 +1935,11 @@ def command_capacity(args: argparse.Namespace) -> int:
                 "command_available": capacity == CapacityKind.AVAILABLE,
                 "capacity": capacity,
                 "capabilities": sorted(adapter.capabilities),
-                "live_acceptance": "not_run",
+                "live_acceptance": "not_run" if _latest_live_acceptance_payload(store, adapter.name) is None else "recorded",
+                "live_readiness": {
+                    IMPLEMENT: _live_readiness(store, adapter.name, "code") if "code" in adapter.capabilities else "not_applicable",
+                    REVIEW: _live_readiness(store, adapter.name, "review") if "review" in adapter.capabilities else "not_applicable",
+                },
                 "recent_use": {
                     stage: next(
                         (
@@ -1950,6 +1998,12 @@ def command_capacity(args: argparse.Namespace) -> int:
     else:
         print("provider cooldowns: none")
     return 0
+
+
+def _live_readiness(store: Store, provider: str, capability: str) -> dict[str, object]:
+    ready, reason = live_provider_readiness(store, provider, capability)
+    return {"ready": ready, "reason": reason}
+
 
 def command_config(args: argparse.Namespace) -> int:
     config = load_config(Path(args.project).resolve(), Path(args.config).resolve() if args.config else None)
@@ -2131,14 +2185,31 @@ def command_provider_acceptance(args: argparse.Namespace) -> int:
         if adapter is None:
             print(f"provider not found: {args.provider}", file=sys.stderr)
             return 2
-        result = run_live_provider_smoke(adapter, keep_temp=args.keep_temp)
+        result = run_live_provider_smoke(
+            adapter,
+            timeout_seconds=getattr(args, "timeout", None),
+            keep_temp=args.keep_temp,
+        )
+        store = Store(db_path(project))
+        store.migrate()
+        try:
+            record_live_provider_acceptance(store, result)
+        finally:
+            store.close()
         payload = {
             "status": result.status,
             "provider": result.provider,
             "execution_status": str(result.execution_status),
             "candidate_sha": result.candidate_sha,
             "file_ok": result.file_ok,
+            "implementation_checked": result.implementation_checked,
+            "review_checked": result.review_checked,
+            "implementation_ready": result.implementation_ready,
+            "review_ready": result.review_ready,
+            "review_json_ok": result.review_json_ok,
             "failure_reason": result.failure_reason,
+            "timed_out": result.timed_out,
+            "timeout_seconds": result.timeout_seconds,
         }
         if args.json:
             print(json.dumps(payload, indent=2, sort_keys=True))
@@ -2188,14 +2259,31 @@ def command_provider_smoke(args: argparse.Namespace) -> int:
     if adapter is None:
         print(f"provider not found: {args.provider}", file=sys.stderr)
         return 2
-    result = run_live_provider_smoke(adapter, keep_temp=args.keep_temp)
+    result = run_live_provider_smoke(
+        adapter,
+        timeout_seconds=getattr(args, "timeout", None),
+        keep_temp=args.keep_temp,
+    )
+    store = Store(db_path(project))
+    store.migrate()
+    try:
+        record_live_provider_acceptance(store, result)
+    finally:
+        store.close()
     payload = {
         "status": result.status,
         "provider": result.provider,
         "execution_status": str(result.execution_status),
         "candidate_sha": result.candidate_sha,
         "file_ok": result.file_ok,
+        "implementation_checked": result.implementation_checked,
+        "review_checked": result.review_checked,
+        "implementation_ready": result.implementation_ready,
+        "review_ready": result.review_ready,
+        "review_json_ok": result.review_json_ok,
         "failure_reason": result.failure_reason,
+        "timed_out": result.timed_out,
+        "timeout_seconds": result.timeout_seconds,
     }
     if args.json:
         print(json.dumps(payload, indent=2, sort_keys=True))
@@ -2611,6 +2699,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--sprint",
         help="Only admit OPEN tasks whose title, labels, source metadata or task metadata match this sprint/week name",
     )
+    queue_cmd.add_argument(
+        "--require-live-acceptance",
+        action="store_true",
+        help="Refuse providers that have no passing `provider-acceptance --live` result (default: only providers whose live check failed are skipped)",
+    )
     queue_cmd.add_argument("--max-steps", type=int, default=50, help="Step budget for each task")
     queue_cmd.add_argument("--no-auto-plan", action="store_true", help="Refuse tasks without a contract instead of auto-planning one")
     queue_cmd.add_argument("--no-wait-for-providers", action="store_true", help="Exit after temporary provider exhaustion instead of waiting for cooldown recovery")
@@ -2755,6 +2848,11 @@ def build_parser() -> argparse.ArgumentParser:
     capacity.add_argument("--primary-down", action="store_true")
     capacity.add_argument("--secondary-down", action="store_true")
     capacity.add_argument("--task", help="Evaluate task-scoped provider cooldowns and review independence")
+    capacity.add_argument(
+        "--require-live-acceptance",
+        action="store_true",
+        help="Show eligibility as a run with --require-live-acceptance would see it (providers never live-checked are ineligible)",
+    )
     capacity.add_argument("--json", action="store_true")
     capacity.set_defaults(func=command_capacity)
     config = sub.add_parser("config")
@@ -2770,11 +2868,13 @@ def build_parser() -> argparse.ArgumentParser:
     provider_acceptance = sub.add_parser("provider-acceptance")
     provider_acceptance.add_argument("--provider", help="Configured provider name to exercise with --live")
     provider_acceptance.add_argument("--live", action="store_true", help="Run the provider against a temporary one-file fixture")
+    provider_acceptance.add_argument("--timeout", type=float, help="Timeout in seconds for provider live acceptance smoke check")
     provider_acceptance.add_argument("--keep-temp", action="store_true", help="Keep the temporary live fixture for debugging")
     provider_acceptance.add_argument("--json", action="store_true")
     provider_acceptance.set_defaults(func=command_provider_acceptance)
     provider_smoke = sub.add_parser("provider-smoke", help="Run one configured provider against a temporary one-file fixture")
     provider_smoke.add_argument("--provider", required=True, help="Configured provider name to exercise")
+    provider_smoke.add_argument("--timeout", type=float, help="Timeout in seconds for provider smoke check")
     provider_smoke.add_argument("--keep-temp", action="store_true", help="Keep the temporary smoke repository for debugging")
     provider_smoke.add_argument("--json", action="store_true")
     provider_smoke.set_defaults(func=command_provider_smoke)
