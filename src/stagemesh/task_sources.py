@@ -13,7 +13,7 @@ from pathlib import Path
 from .audit import record_audit
 from .config import StageMeshConfig
 from .domain import TaskStatus
-from .github import GitHubClient, parse_retry_after
+from .github import GitHubClient, GitHubResult, parse_retry_after
 from .objective_roots import (
     DIRECT_EXECUTION_LABELS,
     folded_labels,
@@ -476,29 +476,56 @@ class GitHubOutboundSync(OutboundSync):
                 "BACKOFF",
                 {"reason": bounded, "next_attempt_at": decision.next_attempt_at},
             )
+        label = _add_issue_labels(self.client, issue_number, (BLOCKED_OUTBOUND_LABEL,))
         bodies: list[str] = []
         for page in range(1, _MAX_COMMENT_PAGES + 1):
             comments = self.client.list_issue_comments(issue_number, page)
             if comments.status != "OK":
-                retry.record_failure(key, comments.status)
-                return self.publish("github", issue_number, comments.status, {"reason": bounded, "comments": comments.status})
+                status = label.status if label.status != "OK" else comments.status
+                retry.record_failure(key, status)
+                return self.publish(
+                    "github",
+                    issue_number,
+                    status,
+                    {"reason": bounded, "label": label.status, "comments": comments.status},
+                )
             items = comments.payload if isinstance(comments.payload, list) else []
             bodies.extend(str(item.get("body", "")) for item in items if isinstance(item, dict))
             if len(items) < 100 or any(marker in body for body in bodies):
                 break
         if any(marker in body for body in bodies):
-            retry.record_success(key)
-            return self.publish("github", issue_number, "OK", {"reason": bounded, "comment": "DUPLICATE"})
+            status = label.status
+            if status == "OK":
+                retry.record_success(key)
+            else:
+                retry.record_failure(key, status)
+            return self.publish(
+                "github",
+                issue_number,
+                status,
+                {"reason": bounded, "label": label.status, "comment": "DUPLICATE"},
+            )
         body = f"StageMesh blocked this task: `{bounded}`.\n\n{marker}"
         comment = self.client.comment_issue(issue_number, body)
-        if comment.status == "OK":
+        status = (
+            "OK"
+            if label.status == "OK" and comment.status == "OK"
+            else (label.status if label.status != "OK" else comment.status)
+        )
+        if status == "OK":
             retry.record_success(key)
         else:
-            retry.record_failure(key, comment.status)
-        return self.publish("github", issue_number, comment.status, {"reason": bounded, "comment": comment.status})
+            retry.record_failure(key, status)
+        return self.publish(
+            "github",
+            issue_number,
+            status,
+            {"reason": bounded, "label": label.status, "comment": comment.status},
+        )
 
 
 _MAX_COMMENT_PAGES = 10  # 1000 comments of dedupe history; beyond that a re-block may repeat once
+BLOCKED_OUTBOUND_LABEL = "stagemesh:task-blocked"  # additive, and not a source-gating label
 
 
 def _bounded_block_reason(reason: str, limit: int = 200) -> str:
@@ -513,3 +540,14 @@ def _bounded_block_reason(reason: str, limit: int = 200) -> str:
 def _blocked_marker(reason: str) -> str:
     digest = hashlib.sha256(reason.encode("utf-8")).hexdigest()[:16]
     return f"<!-- stagemesh:blocked:{digest} -->"
+
+
+def _add_issue_labels(
+    client: GitHubClient, issue_number: str, labels: tuple[str, ...]
+) -> GitHubResult:
+    code, headers, payload = client.transport.request(
+        "POST",
+        f"/repos/{client.owner}/{client.repo}/issues/{issue_number}/labels",
+        {"labels": list(labels)},
+    )
+    return client._result(code, headers, payload)

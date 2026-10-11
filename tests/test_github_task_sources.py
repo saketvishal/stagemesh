@@ -7,6 +7,7 @@ from stagemesh.operator_actions import task_details
 from stagemesh.persistence import Store
 from stagemesh.scheduling import Scheduler
 from stagemesh.task_sources import (
+    BLOCKED_OUTBOUND_LABEL,
     ConfiguredGitHubTaskSource,
     DiscoveredTask,
     GitHubApiIssueSource,
@@ -312,12 +313,26 @@ def test_blocked_github_outbound_comment_is_bounded_deduped_and_preserves_labels
 
         event = store.conn.execute("SELECT * FROM source_events WHERE id=?", (event_id,)).fetchone()
         payload = json.loads(event["payload"])
-        posts = [request for request in transport.requests if request[0] == "POST"]
+        posts = [
+            request
+            for request in transport.requests
+            if request[0] == "POST" and request[1].endswith("/comments")
+        ]
+        label_posts = [
+            request
+            for request in transport.requests
+            if request[0] == "POST" and request[1].endswith("/labels")
+        ]
         assert event["status"] == "OK"
         assert len(payload["reason"]) <= 200 and payload["reason"].endswith("...")
         assert len(posts) == 1
-        assert posts[0][2] is not None and "StageMesh blocked this task:" in str(posts[0][2]["body"])
-        assert all(request[0] != "PATCH" for request in transport.requests)
+        assert label_posts == [
+            ("POST", "/repos/example/repo/issues/7/labels", {"labels": [BLOCKED_OUTBOUND_LABEL]}),
+            ("POST", "/repos/example/repo/issues/7/labels", {"labels": [BLOCKED_OUTBOUND_LABEL]}),
+        ]
+        assert posts[0][2] is not None
+        assert "StageMesh blocked this task:" in str(posts[0][2]["body"])
+        assert all(request[0] not in {"PATCH", "PUT", "DELETE"} for request in transport.requests)
         statuses = [
             json.loads(row["payload"])["comment"]
             for row in store.conn.execute("SELECT payload FROM source_events WHERE source_id='7' ORDER BY rowid")
@@ -360,6 +375,9 @@ class _RecordingGitHubTransport:
             assert body is not None
             self.comments.append({"body": str(body["body"])})
             return 201, {}, {"id": len(self.comments)}
+        if method == "POST" and path.endswith("/labels"):
+            assert body is not None
+            return 200, {}, [{"name": name} for name in body.get("labels", [])]
         if method == "PATCH":
             return 500, {}, {"message": "labels should not be patched"}
         return 500, {}, {"message": "unexpected request"}
