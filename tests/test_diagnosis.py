@@ -132,10 +132,8 @@ def test_repeated_gate_failure_on_the_code_is_an_implementation_defect(tmp_path:
     assert stop["category"] == IMPLEMENTATION_DEFECT and stop["failed_gates"] == ["docs-static-unit"] and executor.calls == 2
 
 def test_diagnose_and_stop_output_include_gate_excerpt(tmp_path: Path) -> None:
-    contract = dict(
-        DOCS_CONTRACT,
-        required_tests=[{"name": "docs-static-unit", "command": [PY, "-c", "import sys; print('FAILED test_x - assert 1 == 2'); sys.exit(1)"]}],
-    )
+    script = "import sys; print('FAILED test_x - assert 1 == 2'); print('stderr: boom detail', file=sys.stderr); sys.exit(1)"
+    contract = dict(DOCS_CONTRACT, required_tests=[{"name": "docs-static-unit", "command": [PY, "-c", script]}])
     project, store = _setup(tmp_path, contract)
     coordinator = Coordinator(store, project, executor=Attempts(), target=TargetSelection(TASK))
     summary = RunSummary(True, "UNSET", task_id=TASK)
@@ -143,10 +141,49 @@ def test_diagnose_and_stop_output_include_gate_excerpt(tmp_path: Path) -> None:
     drive_task(store, project, coordinator, TASK, summary, max_steps=40)
 
     diagnosis = diagnose(store, TASK)
-    assert diagnosis and "FAILED test_x" in diagnosis.failing_evidence[-1]["excerpt"]
-    assert "output excerpt:" in "\n".join(diagnosis.format_lines())
+    assert diagnosis
+    excerpt = diagnosis.failing_evidence[-1]["excerpt"]
+    assert "FAILED test_x" in excerpt and "stderr: boom detail" in excerpt and len(excerpt) <= 700
+    assert "FAILED test_x" in json.dumps(diagnosis.to_dict())
+    text = "\n".join(diagnosis.format_lines())
+    assert "output excerpt:" in text and "stderr: boom detail" in text
     stop_text = format_stop(summary)
-    assert "output excerpt:" in stop_text and "FAILED test_x" in stop_text
+    assert "output excerpt:" in stop_text and "FAILED test_x" in stop_text and "stderr: boom detail" in stop_text
+
+
+def test_continue_on_blocked_task_refusal_includes_gate_excerpt(tmp_path: Path) -> None:
+    from stagemesh.run_ready import run_ready
+
+    script = "import sys; print('FAILED test_x - assert 1 == 2'); print('stderr: boom detail', file=sys.stderr); sys.exit(1)"
+    contract = dict(DOCS_CONTRACT, required_tests=[{"name": "docs-static-unit", "command": [PY, "-c", script]}])
+    project, store = _setup(tmp_path, contract)
+    drive(project, store, Attempts())
+    assert store.get_task(TASK)["status"] == TaskStatus.BLOCKED
+
+    summary = run_ready(store, project, lambda selection: Coordinator(store, project, executor=Attempts(), target=selection), task_id=TASK)
+
+    assert summary.stop_reason == "REFUSED:task_blocked" and summary.started is False
+    assert "FAILED test_x" in json.dumps(summary.detail["diagnosis"])
+    text = format_stop(summary)
+    assert "output excerpt:" in text and "FAILED test_x" in text and "stderr: boom detail" in text
+
+
+def test_queue_run_stop_output_includes_gate_excerpt(capsys: pytest.CaptureFixture[str]) -> None:
+    from types import SimpleNamespace
+
+    diagnosis = {
+        "category": IMPLEMENTATION_DEFECT,
+        "stage": "VALIDATE",
+        "summary": "gate docs-static-unit fails",
+        "recommendation": "fix the code",
+        "failing_evidence": [{"excerpt": "FAILED test_x - assert 1 == 2\nstderr: boom detail"}],
+    }
+    task = SimpleNamespace(task_id="T-1", summary=SimpleNamespace(stop_reason="BLOCKED", message="blocked", detail={"diagnosis": diagnosis}))
+    parallel = SimpleNamespace(focus=None, tasks=[task], stop_reason="BLOCKED", message="", interrupted=False, succeeded=False)
+
+    assert cli_module._report_parallel(parallel, {}, as_json=False) == 1
+    out = capsys.readouterr().out
+    assert "[T-1]   output excerpt:" in out and "FAILED test_x" in out and "stderr: boom detail" in out
 
 
 def test_a_different_failure_each_time_is_progress_not_a_repeat(tmp_path: Path) -> None:

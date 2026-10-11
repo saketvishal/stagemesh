@@ -92,7 +92,7 @@ from .release_readiness import ReleaseReadinessValidationError, release_readines
 from .retry import RetryRegistry, RetryValidationError
 from .review import Reviewer
 from .routing import RoutingMode
-from .run_ready import RunSummary, format_step_update, format_stop, run_ready
+from .run_ready import RunSummary, format_excerpt, format_step_update, format_stop, run_ready
 from .security import SecurityBoundaryError, WorkspaceBoundary
 from .serialized_integration import SerializedIntegrator
 from .task_sources import (
@@ -1179,6 +1179,8 @@ def _report_parallel(summary: ParallelSummary, info: dict[str, object], *, as_js
             if shown:
                 print(f"[{task.task_id}]   diagnosis: {shown['category']} at {shown['stage']}: {shown['summary']}")
                 print(f"[{task.task_id}]   next step: {shown['recommendation']}")
+                for line in format_excerpt(shown):
+                    print(f"[{task.task_id}] {line}")
                 for line in format_findings(shown.get("review_findings", [])):
                     print(f"[{task.task_id}] {line}")
         print(f"Parallel run stopped: {summary.stop_reason.replace('_', ' ').lower()}" + (f" ({summary.message})" if summary.message else ""))
