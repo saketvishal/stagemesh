@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -34,6 +35,39 @@ def _venv_python() -> Path:
     if os.name == "nt":
         return VENV / "Scripts" / "python.exe"
     return VENV / "bin" / "python"
+
+
+def _source_version() -> str | None:
+    try:
+        text = (ROOT / "src" / "stagemesh" / "__init__.py").read_text(encoding="utf-8")
+    except OSError:
+        return None
+    match = re.search(r"^__version__\s*=\s*[\"']([^\"']+)[\"']", text, re.MULTILINE)
+    return match.group(1) if match else None
+
+
+def _configured_version() -> str | None:
+    try:
+        import tomllib
+
+        data = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+        proj = data.get("project", {})
+        if proj.get("name") != "stagemesh":
+            return None
+        version = proj.get("version")
+    except (OSError, ValueError):
+        return None
+    return version if isinstance(version, str) else None
+
+
+def _installed_version(py: Path) -> str | None:
+    result = subprocess.run(
+        [str(py), "-c", "import importlib.metadata as m; print(m.version('stagemesh'))"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout.strip() or None if result.returncode == 0 else None
 
 
 def _script_name() -> str:
@@ -230,7 +264,14 @@ def main(argv: list[str] | None = None) -> int:
         _run(sys.executable, "-m", "venv", str(VENV))
     py = _venv_python()
     _run(str(py), "-m", "pip", "install", "--upgrade", "pip")
-    _run(str(py), "-m", "pip", "install", f"{ROOT}[dev]")
+    _run(str(py), "-m", "pip", "install", "--upgrade", f"{ROOT}[dev]")
+    installed_version = _installed_version(py)
+    for label, expected in (("repository source", _source_version()), ("configured version", _configured_version())):
+        if expected and installed_version and expected != installed_version:
+            raise SystemExit(
+                f"project-local runtime is stale: installed {installed_version}, {label} {expected}; "
+                "rerun python scripts/bootstrap_stagemesh.py"
+            )
     installed = py.parent / _script_name()
     if not installed.exists():
         raise SystemExit(f"installed stagemesh entry point not found: {installed}")

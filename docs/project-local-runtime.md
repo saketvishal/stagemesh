@@ -19,3 +19,8 @@ stagemesh continue
 The dispatcher walks upward from the current directory and invokes the nearest project-owned `.stagemesh/bin/stagemesh` or `.stagemesh\bin\stagemesh.cmd`, so different repositories can use different local StageMesh versions.
 
 Acceptance gates must use this installed runtime path. They must not depend on `PYTHONPATH=src`, an editable install, a developer checkout outside the project, or a stale `code_checkout` value.
+
+## Stale runtime detection
+
+`stagemesh doctor` warns when the repository source or configured package version declares a different StageMesh version than the installed project-local package, for example after pulling newer source. The warning names the fix: rerun `python scripts/bootstrap_stagemesh.py`, which reinstalls the package and fails loudly if the installed version still differs from the source. No warning appears when the versions match, when the project is a normal host project with its own `pyproject.toml`, or when the project has no StageMesh source tree.
+
