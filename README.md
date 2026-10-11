@@ -93,6 +93,17 @@ or an object with `command`, `capabilities` (`IMPLEMENT`, `REVIEW`), optional `p
                "provider_selection_policy": "round_robin", "provider_weights": { "claude": 2, "grok": 2 } } }
 ```
 
+A provider can run a different command for one stage (for example a read-only reviewer) while staying **one logical provider**:
+`command` is the default, and `review_command` / `implement_command` (or `"commands": {"REVIEW": "...", "IMPLEMENT": "..."}`) replace it for
+that stage only. Independence is judged by provider name (and any command in common), so a candidate implemented by `claude` is never
+reviewed by `claude`, whichever command each stage runs. `command` may be omitted only when every stage the provider serves has its own.
+`stagemesh capacity`, `config` and `doctor` show which command runs for each stage and whether it is the default or an override.
+
+```json
+{ "providers": { "claude": { "command": "claude -p --permission-mode acceptEdits",
+                             "review_command": "claude -p --allowedTools Read Grep Glob" } } }
+```
+
 `provider_selection_policy` ranks the *eligible* providers of a stage (after CLI, capability, cooldown and independence checks):
 `priority` (default: priority, then pool order), `round_robin` (next after the provider that last answered for the stage),
 `least_recently_used` (never-used first, then oldest answer) or `weighted` (lowest `(uses+1)/weight` first). The remaining providers

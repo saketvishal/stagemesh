@@ -80,6 +80,8 @@ class Rig:
         modes: dict[str, str | None],
         pools: dict[str, tuple[str, ...]] | None = None,
         contract: dict | None = None,
+        review_modes: dict[str, str] | None = None,
+        implement_modes: dict[str, str] | None = None,
         **pool_kwargs,
     ):
         """modes: provider name -> behavior ('ok', 'auth-fail', 'review-rate-limit') or None for a missing CLI."""
@@ -108,10 +110,15 @@ class Rig:
         )
         script = tmp_path / "provider.py"
         script.write_text(SCRIPT, encoding="utf-8")
+        def stage_command(stage_modes: dict[str, str] | None, name: str) -> tuple[str, ...] | None:
+            return (sys.executable, str(script), stage_modes[name], name) if stage_modes and name in stage_modes else None
+
         adapters = [
             RuntimeCommandAdapter(
                 name,
                 (sys.executable, str(script), mode, name) if mode else ("stagemesh-no-such-cli-xyz",),
+                implement_command=stage_command(implement_modes, name),
+                review_command=stage_command(review_modes, name),
             )
             for name, mode in modes.items()
         ]

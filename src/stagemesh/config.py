@@ -61,6 +61,10 @@ class ProviderSpec:
     priority: int | None = None
     weight: int | None = None
     max_concurrency: int | None = None  # simultaneous provider runs allowed under parallel execution
+    # Optional per-stage commands. The provider's `command` is the default for every stage; these replace it for one stage only.
+    # The provider stays ONE logical provider (same name, same independence), it just runs a different command for that stage.
+    implement_command: str | None = None
+    review_command: str | None = None
 
 
 @dataclass(frozen=True)
@@ -242,7 +246,12 @@ def _optional_mapping(data: dict[str, object], key: str) -> dict[str, object]:
 
 
 def _parse_providers(data: dict[str, object]) -> tuple[dict[str, str], dict[str, ProviderSpec]]:
-    """A provider is `name: "command"` (legacy) or `name: {command, capabilities?, priority?, weight?}`."""
+    """A provider is `name: "command"` (legacy) or `name: {command, capabilities?, priority?, weight?, max_concurrency?}`.
+
+    The object form may also set `review_command` / `implement_command` (or `commands: {"REVIEW": ..., "IMPLEMENT": ...}`) to run a
+    different command for that stage, e.g. a read-only reviewer. `command` stays the default; it may be omitted only when every
+    stage the provider serves has its own command.
+    """
     commands: dict[str, str] = {}
     specs: dict[str, ProviderSpec] = {}
     for key, value in data.items():
@@ -250,12 +259,20 @@ def _parse_providers(data: dict[str, object]) -> tuple[dict[str, str], dict[str,
         if not name or any(char.isspace() for char in name):
             raise ConfigValidationError("provider names must be non-empty strings without whitespace")
         if isinstance(value, dict):
-            unknown = set(value) - {"command", "capabilities", "priority", "weight", "max_concurrency"}
+            unknown = set(value) - {
+                "command", "capabilities", "priority", "weight", "max_concurrency", "implement_command", "review_command", "commands"
+            }
             if unknown:
                 raise ConfigValidationError(f"provider {name} has unsupported keys: {', '.join(sorted(unknown))}")
             command = _string(value.get("command"))
+            capabilities = _provider_capabilities(name, value.get("capabilities"))
+            stage_commands = _stage_commands(name, value, capabilities)
+            if not command and capabilities <= set(stage_commands):  # every served stage has its own command: the default is never used
+                command = stage_commands[min(capabilities)]
             specs[name] = ProviderSpec(
-                capabilities=_provider_capabilities(name, value.get("capabilities")),
+                capabilities=capabilities,
+                implement_command=stage_commands.get("IMPLEMENT"),
+                review_command=stage_commands.get("REVIEW"),
                 priority=_provider_int(name, "priority", value.get("priority"), minimum=0),
                 weight=_provider_int(name, "weight", value.get("weight"), minimum=1),
                 max_concurrency=_provider_int(name, "max_concurrency", value.get("max_concurrency"), minimum=1),
@@ -266,6 +283,36 @@ def _parse_providers(data: dict[str, object]) -> tuple[dict[str, str], dict[str,
             raise ConfigValidationError(f"provider command for {name} must be a non-empty string")
         commands[name] = command
     return commands, specs
+
+
+def _stage_commands(name: str, value: dict[str, object], capabilities: frozenset[str]) -> dict[str, str]:
+    """Per-stage commands from `implement_command` / `review_command` / `commands`; a stage may be set only one way."""
+    found: dict[str, str] = {}
+    sources = {"IMPLEMENT": "implement_command", "REVIEW": "review_command"}
+    for stage, key in sources.items():
+        if value.get(key) is not None:
+            command = _string(value.get(key))
+            if not command or not command.strip():
+                raise ConfigValidationError(f"provider {name} {key} must be a non-empty string")
+            found[stage] = command
+    grouped = value.get("commands")
+    if grouped is not None:
+        if not isinstance(grouped, dict) or not grouped:
+            raise ConfigValidationError(f"provider {name} commands must be an object keyed by stage ({', '.join(PROVIDER_STAGES)})")
+        for key, raw in grouped.items():
+            stage = _LEGACY_CAPABILITIES.get(str(key).strip().lower(), str(key).strip().upper())
+            if stage not in PROVIDER_STAGES:
+                raise ConfigValidationError(f"provider {name} commands has unsupported stage {key!r} (use {', '.join(PROVIDER_STAGES)})")
+            command = _string(raw)
+            if not command or not command.strip():
+                raise ConfigValidationError(f"provider {name} commands.{stage} must be a non-empty string")
+            if stage in found:
+                raise ConfigValidationError(f"provider {name} sets the {stage} command twice ({sources[stage]} and commands.{stage})")
+            found[stage] = command
+    unserved = set(found) - set(capabilities)
+    if unserved:
+        raise ConfigValidationError(f"provider {name} has a command for {', '.join(sorted(unserved))}, a stage it does not serve (capabilities)")
+    return found
 
 
 def _provider_capabilities(name: str, value: object) -> frozenset[str]:
@@ -572,7 +619,7 @@ def _task_sources(project: Path, value: object) -> tuple[TaskSourceConfig, ...]:
 
 
 def _labels(value: object) -> tuple[str, ...]:
-    if value in (None, "", []):
+    if value in (None, "", [], ()):  # `()` is the default for an absent key
         return ()
     if isinstance(value, str):
         labels = [value]

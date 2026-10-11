@@ -83,7 +83,7 @@ from .provider_pool import (
     default_pools,
     describe_verdicts,
 )
-from .providers import ProviderValidationError, adapters_from_config
+from .providers import ProviderValidationError, adapters_from_config, stage_command_summary
 from .queue_run import QueueRunner
 from .queue_visibility import format_queue_control, queue_control_report
 from .recovery import RecoveryRefusal, advance_baseline, format_doctor, rebaseline_task, rebind_contract, task_doctor
@@ -2063,11 +2063,13 @@ def command_capacity(args: argparse.Namespace) -> int:
     provider_rows = []
     for adapter in sorted(adapters, key=lambda item: item.name):
         capacity = adapter.check_capacity()
+        stage_commands = stage_command_summary(adapter)
         provider_rows.append(
             {
                 "provider": adapter.name,
                 "command": redact_command_secrets(shlex.join(adapter.command)),
-                "command_available": capacity == CapacityKind.AVAILABLE,
+                "stage_commands": stage_commands,
+                "command_available": all(item["available"] for item in stage_commands.values()) if stage_commands else capacity == CapacityKind.AVAILABLE,
                 "capacity": capacity,
                 "capabilities": sorted(adapter.capabilities),
                 "live_acceptance": "not_run" if _latest_live_acceptance_payload(store, adapter.name) is None else "recorded",
@@ -2127,6 +2129,12 @@ def command_capacity(args: argparse.Namespace) -> int:
             print("  most recent use: never")
         for verdict in stage_payload["verdicts"]:
             print(f"  {verdict['provider']}: {verdict['reason']}")
+    for row in provider_rows:
+        stages = "; ".join(
+            f"{stage} {info['executable']} [{info['source']}{'' if info['available'] else ', NOT FOUND'}]"
+            for stage, info in row["stage_commands"].items()
+        )
+        print(f"provider {row['provider']} commands: {stages}")
     if cooldowns:
         for line in format_cooldowns(cooldowns):
             print(line)
@@ -2164,6 +2172,7 @@ def command_config(args: argparse.Namespace) -> int:
         adapter.name: redact_command_secrets(shlex.join(adapter.command))
         for adapter in sorted(adapters, key=lambda item: item.name)
     }
+    provider_stage_commands = {adapter.name: stage_command_summary(adapter) for adapter in sorted(adapters, key=lambda item: item.name)}
     if args.json:
         print(
             json.dumps(
@@ -2184,6 +2193,7 @@ def command_config(args: argparse.Namespace) -> int:
                         "pools": {stage: list(names) for stage, names in sorted(pools.items())},
                     },
                     "providers": effective_provider_commands,
+                    "provider_stage_commands": provider_stage_commands,
                     "provider_overrides": provider_overrides,
                     "task_sources": [
                         {"name": source.name, "type": source.kind, "path": str(source.path)}
@@ -2210,6 +2220,9 @@ def command_config(args: argparse.Namespace) -> int:
         print(f"routing.pool.{stage}: {', '.join(names)}")
     for name, command in effective_provider_commands.items():
         print(f"provider.{name}: {command}")
+        for stage, info in provider_stage_commands[name].items():
+            if info["source"] == "override":
+                print(f"provider.{name}.{stage}: {info['command']} (stage override)")
     for name, command in provider_overrides.items():
         print(f"provider_override.{name}: {command}")
     for source in config.task_sources:

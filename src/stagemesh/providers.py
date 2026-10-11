@@ -29,6 +29,7 @@ from .execution import (
 )
 from .persistence import Store
 from .process_identity import popen_identity
+from .redaction import redact_command_secrets
 from .remediation import remediation_context
 from .workspace_guard import (
     EXTERNAL_WORKSPACE_MUTATION,
@@ -69,18 +70,42 @@ class RuntimeCommandAdapter:
     command: tuple[str, ...]
     capabilities: frozenset[str] = frozenset({"code", "review", "validate"})
     timeout_seconds: float | None = None
+    # Optional stage-specific commands. `command` is the default; these replace it for one stage. The adapter is still ONE provider
+    # (one `name`), so a candidate it implemented is never reviewed by it, whichever command each stage runs.
+    implement_command: tuple[str, ...] | None = None
+    review_command: tuple[str, ...] | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "name", _validate_name(self.name))
         object.__setattr__(self, "command", _validate_command(self.command))
         object.__setattr__(self, "capabilities", _validate_capabilities(self.capabilities))
+        for field_name in ("implement_command", "review_command"):
+            value = getattr(self, field_name)
+            if value is not None:
+                object.__setattr__(self, field_name, _validate_command(value))
+
+    def command_for(self, capability: str) -> tuple[str, ...]:
+        """The command this provider runs for a stage: "code" (implementation) or "review"; anything else uses the default."""
+        if capability == "code" and self.implement_command is not None:
+            return self.implement_command
+        if capability == "review" and self.review_command is not None:
+            return self.review_command
+        return self.command
+
+    def all_commands(self) -> tuple[tuple[str, ...], ...]:
+        return tuple(dict.fromkeys(c for c in (self.command, self.implement_command, self.review_command) if c is not None))
 
     def check_capacity(self) -> str:
         executable = self.command[0] if self.command else ""
         return CapacityKind.AVAILABLE if executable and shutil.which(executable) else CapacityKind.UNKNOWN
 
+    def check_stage_capacity(self, capability: str) -> str:
+        """Is the command this provider would run for that stage callable? (check_capacity() only looks at the default command.)"""
+        command = self.command_for(capability)
+        return CapacityKind.AVAILABLE if command and shutil.which(command[0]) else CapacityKind.UNKNOWN
+
     def execute(self, store: Store, task_id: str, claim_id: str | None, project: Path) -> ExecutionResult:
-        if self.check_capacity() != CapacityKind.AVAILABLE:
+        if self.check_stage_capacity("code") != CapacityKind.AVAILABLE:
             return ExecutionResult(ExecutionStatus.FAILED, capacity_failure=True, failure_reason="provider_unavailable")
         try:
             with owned_workspace(store, project, task_id, ExecutionKind.IMPLEMENTATION, claim_id=claim_id) as lease:
@@ -99,7 +124,7 @@ class RuntimeCommandAdapter:
         task_prompt = _build_task_prompt(
             task_id, task, run_path, contract=bound.contract, remediation=remediation_context(store, task_id)
         )
-        command, provider_input = _command_and_input(self.command, task_prompt)
+        command, provider_input = _command_and_input(self.command_for("code"), task_prompt)
         lease.check("before_agent")
         try:
             proc = subprocess.Popen(
@@ -177,7 +202,7 @@ class RuntimeCommandAdapter:
         return self.execute(store, task_id, claim_id, project)
 
     def review_candidate(self, prompt: str, project: Path, candidate_sha: str) -> str:
-        if self.check_capacity() != CapacityKind.AVAILABLE:
+        if self.check_stage_capacity("review") != CapacityKind.AVAILABLE:
             return _review_infrastructure_failure("provider_unavailable")
         temp_dir = tempfile.mkdtemp(prefix="stagemesh-review-")
         review_path = Path(temp_dir) / "candidate"
@@ -188,7 +213,7 @@ class RuntimeCommandAdapter:
             before_head = _git_output(review_path, "rev-parse", "HEAD")
             if before_head != candidate_sha:
                 return _review_infrastructure_failure("review workspace did not checkout exact candidate")
-            command, provider_input = _command_and_input(self.command, prompt, structured_review=True)
+            command, provider_input = _command_and_input(self.command_for("review"), prompt, structured_review=True)
             try:
                 proc = subprocess.Popen(
                     command,
@@ -449,9 +474,44 @@ def adapters_from_config(config: StageMeshConfig) -> list[RuntimeCommandAdapter]
         spec = config.provider_specs.get(adapter.name)
         if spec is not None:
             capabilities = frozenset({"validate", *(stage_caps[stage] for stage in spec.capabilities)})
-            adapter = RuntimeCommandAdapter(adapter.name, adapter.command, capabilities, adapter.timeout_seconds)
+            adapter = RuntimeCommandAdapter(
+                adapter.name,
+                adapter.command,
+                capabilities,
+                adapter.timeout_seconds,
+                implement_command=_stage_command(adapter.name, spec.implement_command),
+                review_command=_stage_command(adapter.name, spec.review_command),
+            )
         resolved.append(adapter)
     return resolved
+
+
+def stage_command_summary(adapter: RuntimeCommandAdapter) -> dict[str, dict[str, object]]:
+    """Per served stage: which command runs, whether it is the provider default or a stage override, and if it is callable."""
+    summary: dict[str, dict[str, object]] = {}
+    for stage, capability in (("IMPLEMENT", "code"), ("REVIEW", "review")):
+        if capability not in adapter.capabilities:
+            continue
+        command = adapter.command_for(capability)
+        override = command != adapter.command
+        summary[stage] = {
+            "command": redact_command_secrets(shlex.join(command)),
+            "executable": command[0],
+            "source": "override" if override else "default",
+            "available": adapter.check_stage_capacity(capability) == CapacityKind.AVAILABLE,
+        }
+    return summary
+
+
+def _stage_command(name: str, command: str | None) -> tuple[str, ...] | None:
+    if command is None:
+        return None
+    if len(command) > 2000:
+        raise ProviderValidationError(f"stage command for {name} must be 2000 characters or fewer")
+    try:
+        return tuple(shlex.split(command))
+    except ValueError as exc:
+        raise ProviderValidationError(f"stage command for {name} is not valid shell syntax: {exc}") from exc
 
 
 def adapters_from_commands(commands: dict[str, str]) -> list[RuntimeCommandAdapter]:

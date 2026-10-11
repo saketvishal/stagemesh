@@ -126,8 +126,15 @@ def _optional_live_acceptance_reason(reason: str) -> bool:
     return reason.startswith("live_acceptance_unproven") or reason.startswith("live_acceptance_stale")
 
 
-def _capacity_reason(adapter: RuntimeCommandAdapter, capacity: str) -> str:
-    executable = adapter.command[0] if adapter.command else ""
+def _stage_capacity(adapter: RuntimeCommandAdapter, capability: str) -> str:
+    """Capacity of the command the provider would run for this stage; adapters without stage commands use their one command."""
+    check = getattr(adapter, "check_stage_capacity", None)
+    return check(capability) if check is not None else adapter.check_capacity()
+
+
+def _capacity_reason(adapter: RuntimeCommandAdapter, capacity: str, capability: str = "code") -> str:
+    command = adapter.command_for(capability) if hasattr(adapter, "command_for") else adapter.command
+    executable = command[0] if command else ""
     if capacity == CapacityKind.UNKNOWN:
         return f"cli_not_installed: '{executable}' is not callable on PATH"
     if capacity == CapacityKind.PERMISSION:
@@ -233,8 +240,8 @@ class ProviderPool:
                 verdicts.append(Verdict(name, False, "not_configured: no command configured for this provider"))
             elif capability not in adapter.capabilities:
                 verdicts.append(Verdict(name, False, f"missing_capability: does not support '{capability}'"))
-            elif (capacity := adapter.check_capacity()) != CapacityKind.AVAILABLE:
-                verdicts.append(Verdict(name, False, _capacity_reason(adapter, capacity)))
+            elif (capacity := _stage_capacity(adapter, capability)) != CapacityKind.AVAILABLE:
+                verdicts.append(Verdict(name, False, _capacity_reason(adapter, capacity, capability)))
             elif self.limiter is not None and self.limiter.cooling(name) is not None:
                 verdicts.append(Verdict(name, False, str(self.limiter.cooling(name))))
             else:
@@ -300,7 +307,7 @@ class ProviderPool:
         if self.limiter is not None:
             for name in self.pool(stage):
                 adapter = self.adapters.get(name)
-                if adapter is None or STAGE_CAPABILITY[stage] not in adapter.capabilities or adapter.check_capacity() != CapacityKind.AVAILABLE:
+                if adapter is None or STAGE_CAPABILITY[stage] not in adapter.capabilities or _stage_capacity(adapter, STAGE_CAPABILITY[stage]) != CapacityKind.AVAILABLE:
                     continue
                 if stage == REVIEW and self.require_independent and implementer and _same(adapter, implementer, self.adapters.get(implementer)):
                     continue
@@ -328,7 +335,7 @@ class ProviderPool:
                 continue
             seen.add(name)
             adapter = self.adapters.get(name)
-            if adapter is None or STAGE_CAPABILITY[stage] not in adapter.capabilities or adapter.check_capacity() != CapacityKind.AVAILABLE:
+            if adapter is None or STAGE_CAPABILITY[stage] not in adapter.capabilities or _stage_capacity(adapter, STAGE_CAPABILITY[stage]) != CapacityKind.AVAILABLE:
                 continue
             if stage == REVIEW and self.require_independent and implementer and _same(adapter, implementer, self.adapters.get(implementer)):
                 continue
@@ -588,7 +595,7 @@ class ProviderPool:
         if not implementers:
             return False, f"no implementation provider is available. IMPLEMENT pool: {describe_verdicts(impl)}", impl, review
         if self.require_independent and not any(
-            r.name != i.name and r.command != i.command for i in implementers for r in reviewers
+            _distinct(r, i) for i in implementers for r in reviewers
         ):
             names = lambda items: ", ".join(a.name for a in items) or "none"
             message = (
@@ -647,10 +654,19 @@ class ProviderPool:
         return FallbackReviewAdapter(self, store, task_id, eligible), verdicts
 
 
+def _commands(adapter: RuntimeCommandAdapter) -> set[tuple[str, ...]]:
+    return set(adapter.all_commands()) if hasattr(adapter, "all_commands") else {adapter.command}
+
+
+def _distinct(reviewer: RuntimeCommandAdapter, implementer: RuntimeCommandAdapter) -> bool:
+    """Independent means a different provider AND no command in common. Stage commands do not make a provider a different provider."""
+    return reviewer.name.casefold() != implementer.name.casefold() and not (_commands(reviewer) & _commands(implementer))
+
+
 def _same(adapter: RuntimeCommandAdapter, implementer: str, implementer_adapter: RuntimeCommandAdapter | None) -> bool:
     if adapter.name.casefold() == implementer.casefold():
         return True
-    return implementer_adapter is not None and adapter.command == implementer_adapter.command
+    return implementer_adapter is not None and bool(_commands(adapter) & _commands(implementer_adapter))
 
 
 class FallbackReviewAdapter:
