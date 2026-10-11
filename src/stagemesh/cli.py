@@ -1090,6 +1090,11 @@ def command_run_parallel(args: argparse.Namespace, *, queue: bool = False) -> in
         limiter=limiter,
         emit=emit,
         wait_for_providers=queue and not getattr(args, "no_wait_for_providers", False),
+        **(
+            {"focus": getattr(args, "focus", None), "sprint": getattr(args, "sprint", None)}
+            if queue
+            else {}
+        ),
     )
     wiring.on_integration_event = lambda task_id, event, detail: runner.note(task_id, event, **detail)
     emit(
@@ -1102,6 +1107,14 @@ def command_run_parallel(args: argparse.Namespace, *, queue: bool = False) -> in
                 ),
                 f"project checkout: {project}",
                 f"worktree root: {config.runtime.worktree_root if config.runtime else worktree_root(project)}",
+                *(
+                    [
+                        "active focus: "
+                        + ", ".join(f"{key}={value!r}" for key, value in runner.summary.focus.items())
+                    ]
+                    if queue and runner.summary.focus
+                    else []
+                ),
                 *format_cooldowns(active_cooldowns(store, config.provider_failure_cooldown_seconds)),
             ]
         ),
@@ -1138,6 +1151,11 @@ def _report_parallel(summary: ParallelSummary, info: dict[str, object], *, as_js
             extra = {"mode": "queue", "preflight": preflight, "refused": refused}
         print(json.dumps({**summary.to_dict(), **extra, "provider_config": info}, indent=2, sort_keys=True, default=str))
     else:
+        if summary.focus is not None:
+            print("Queue focus: " + ", ".join(f"{key}={value!r}" for key, value in summary.focus.items()))
+            if summary.skipped_out_of_focus:
+                shown = ", ".join(f"{item['task_id']} ({item['reason']})" for item in summary.skipped_out_of_focus[:10])
+                print(f"Skipped out of focus: {shown}")
         for task in summary.tasks:
             outcome = task.summary.stop_reason if task.summary else "UNSET"
             print(f"[{task.task_id}] result: {outcome}" + (f" - {task.summary.message}" if task.summary and task.summary.message else ""))
@@ -2509,6 +2527,14 @@ def build_parser() -> argparse.ArgumentParser:
         "queue-run", help="Run several ready tasks at once when their contracts do not conflict (strict admission, serial integration)"
     )
     queue_cmd.add_argument("--concurrency", type=int, required=True, metavar="N", help="Maximum tasks running at once")
+    queue_cmd.add_argument(
+        "--focus",
+        help="Only admit OPEN tasks whose title, labels, source metadata or task metadata match this text",
+    )
+    queue_cmd.add_argument(
+        "--sprint",
+        help="Only admit OPEN tasks whose title, labels, source metadata or task metadata match this sprint/week name",
+    )
     queue_cmd.add_argument("--max-steps", type=int, default=50, help="Step budget for each task")
     queue_cmd.add_argument("--no-auto-plan", action="store_true", help="Refuse tasks without a contract instead of auto-planning one")
     queue_cmd.add_argument("--no-wait-for-providers", action="store_true", help="Exit after temporary provider exhaustion instead of waiting for cooldown recovery")

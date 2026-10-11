@@ -9,12 +9,16 @@ never the reverse.
 from __future__ import annotations
 
 import fnmatch
+import json
+import re
 from pathlib import Path
 from typing import Any
 
+from .auto_plan import cached_state
 from .concurrency import ConflictReason, contract_conflict, patterns_overlap
 from .config import StageMeshConfig
 from .contracts import ChangeContract
+from .domain import Stage, TaskStatus
 from .git import GitError, GitWorkspace
 from .git_identity import identity_report
 from .parallel import ParallelRunner
@@ -71,14 +75,88 @@ def dirty_in_scope(contract: ChangeContract, dirty: list[str]) -> list[str]:
     ]
 
 
+def _compact(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", text.casefold())
+
+
 class QueueRunner(ParallelRunner):
-    def __init__(self, *args: Any, **kwargs: Any):
+    def __init__(self, *args: Any, focus: str | None = None, sprint: str | None = None, **kwargs: Any):
         # Missing contracts are auto-planned by the same deterministic path `continue` uses (unless --no-auto-plan). That path fails
         # closed: with no detectable validation gate, or a contract that does not round-trip, the task is refused, never run unbounded.
         kwargs.setdefault("auto_plan", True)
         kwargs.setdefault("wait_for_providers", True)
         super().__init__(*args, **kwargs)
         self._dirty: list[str] | None = None
+        self.focus = (focus or "").strip()
+        self.sprint = (sprint or "").strip()
+        self._focus_terms = tuple(term for term in (self.focus, self.sprint) if term)
+        if self._focus_terms:
+            self.summary.focus = {k: v for k, v in (("focus", self.focus), ("sprint", self.sprint)) if v}
+
+    def _task_matches_focus(self, task_id: str) -> bool:
+        if not self._focus_terms:
+            return True
+        task = self.store.get_task(task_id)
+        if task is None:
+            return False
+        state = cached_state(self.store, task)
+        searchable = " ".join(
+            [
+                str(task["id"]),
+                str(task["title"]),
+                str(task["source"]),
+                str(task["source_id"] or ""),
+                str(task["project"] or ""),
+                str(task["stage"]),
+                str(task["status"]),
+                json.dumps(state, sort_keys=True, default=str),
+            ]
+        ).casefold()
+        compact = _compact(searchable)
+        return all(term.casefold() in searchable or _compact(term) in compact for term in self._focus_terms)
+
+    def _open_not_done(self, task_id: str) -> bool:
+        task = self.store.get_task(task_id)
+        return bool(task is not None and task["status"] == TaskStatus.OPEN and task["stage"] != Stage.DONE)
+
+    def _filter_ranked_candidates(self, summary, ranked, skipped, running):  # type: ignore[no-untyped-def]
+        if not self._focus_terms:
+            return ranked, skipped
+        focused_ranked = [candidate for candidate in ranked if self._task_matches_focus(candidate.task_id)]
+        focused_skipped: list[dict[str, str]] = []
+        out_of_focus: dict[str, dict[str, str]] = {}
+        for candidate in ranked:
+            if candidate not in focused_ranked and self._open_not_done(candidate.task_id):
+                out_of_focus[candidate.task_id] = {
+                    "task_id": candidate.task_id,
+                    "reason": "does not match active queue focus",
+                }
+        for item in skipped:
+            task_id = item["task_id"]
+            if self._task_matches_focus(task_id):
+                focused_skipped.append(item)
+            elif self._open_not_done(task_id):
+                out_of_focus[task_id] = {"task_id": task_id, "reason": "does not match active queue focus"}
+        focused_ids = {item["task_id"] for item in focused_skipped} | {
+            candidate.task_id for candidate in focused_ranked
+        }
+        for task in self.store.tasks():
+            task_id = str(task["id"])
+            if task_id in focused_ids or task["stage"] == Stage.DONE or not self._task_matches_focus(task_id):
+                continue
+            if task["status"] != TaskStatus.OPEN:
+                focused_skipped.append({"task_id": task_id, "reason": str(task["status"]).casefold()})
+        summary.skipped_out_of_focus = sorted(out_of_focus.values(), key=lambda item: item["task_id"])
+        return focused_ranked, focused_skipped
+
+    def _finalize(self, summary) -> None:  # type: ignore[no-untyped-def]
+        super()._finalize(summary)
+        if self._focus_terms and summary.stop_reason == "REFUSED:no_eligible_task":
+            label = ", ".join(f"{key}={value!r}" for key, value in (summary.focus or {}).items())
+            details = "; ".join(f"{s['task_id']}: {s['reason']}" for s in summary.skipped[:10])
+            summary.message = f"no eligible OPEN task matching active queue focus ({label})" + (
+                f" (focused skipped: {details})" if details else ""
+            )
 
     def _refuse_unrunnable(self, summary, skipped, attempted) -> None:  # type: ignore[no-untyped-def]
         for item in skipped:
