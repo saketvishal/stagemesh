@@ -367,3 +367,39 @@ def test_design_decision_tasks_are_still_reported_separately_from_retired_ones(t
 
     assert [d["task_id"] for d in data["needs_decision"]] == ["T-design"]
     assert "R-local" not in {t["task_id"] for t in data["ledger"]["live_tasks"]}
+
+
+def _block_on_provider_failure(store, task_id: str, provider: str, remaining: float, reason: str = "quota_rate_limit") -> None:
+    import time
+
+    store.add_audit_event("provider.failure", {"task_id": task_id, "stage": "IMPLEMENT", "provider": provider, "reason": reason, "retry_at": time.time() + remaining})
+    store.add_audit_event("task.diagnosis_stop", {"task_id": task_id, "category": "provider_no_progress"})
+    store.block_task(task_id)
+
+
+def _cooldown_ledger(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, remaining: float):
+    store, project = make_store(tmp_path, ["T-cool", "T-real"])
+    _block_on_provider_failure(store, "T-cool", "grok", remaining)
+    store.block_task("T-real")  # blocked for no provider reason: actionable
+    config = cli_module.load_config(project)
+    return readiness.build_readiness(store, project, config, list_prs=None, runtime=FRESH)
+
+
+def test_a_task_blocked_on_a_long_provider_cooldown_is_parked_not_real_work(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    data = _cooldown_ledger(tmp_path, monkeypatch, remaining=3 * 3600)
+
+    ledger = data["ledger"]
+    assert ledger["parked_cooldown"] == 1 and ledger["blocked"] == 1
+    assert [t["task_id"] for t in ledger["live_tasks"]] == ["T-real"]
+    waiting = ledger["parked_cooldown_tasks"][0]["waiting_on"][0]
+    assert waiting["provider"] == "grok" and 0 < waiting["seconds_remaining"] <= 3 * 3600
+    text = "\n".join(readiness.format_readiness(data))
+    assert "1 parked: provider cooldown" in text and "parked: provider cooldown - T-cool" in text and "grok 2h5" in text
+
+
+def test_a_short_provider_cooldown_stays_real_work_and_becomes_actionable_when_it_expires(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    short = _cooldown_ledger(tmp_path, monkeypatch, remaining=300)["ledger"]
+    assert short["parked_cooldown"] == 0 and {t["task_id"] for t in short["live_tasks"]} == {"T-cool", "T-real"}
+
+    expired = _cooldown_ledger(tmp_path / "expired", monkeypatch, remaining=-10)["ledger"]
+    assert expired["parked_cooldown"] == 0 and "T-cool" in {t["task_id"] for t in expired["live_tasks"]}

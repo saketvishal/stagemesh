@@ -16,7 +16,7 @@ from .baseline import resolve_integration_ref
 from .config import StageMeshConfig
 from .persistence import Store
 from .provider_acceptance import LIVE_PASSING, live_acceptance_status
-from .provider_cooldown import active_cooldowns
+from .provider_cooldown import active_cooldowns, cooldown_parked
 from .providers import adapters_from_config, stage_command_summary
 from .runtime_freshness import RuntimeFreshness, check_runtime
 from .survivor_wave import blocked_needs_decision, git_repo_state
@@ -126,8 +126,10 @@ def build_readiness(
         if census["running_executions"] or census["active_claims"]:
             attention.append("work is in flight (running executions or active claims)")
 
+    cooldowns = {str(item["provider"]): item for item in active_cooldowns(store, config.provider_failure_cooldown_seconds)}
     decisions = []
-    ledger = {"done": 0, "retired_closed": 0, "retired_operator": 0, "retired_ineligible": 0, "open": 0, "blocked": 0, "running": 0}
+    parked_cooldown: list[dict[str, Any]] = []
+    ledger = {"done": 0, "retired_closed": 0, "retired_operator": 0, "retired_ineligible": 0, "parked_cooldown": 0, "open": 0, "blocked": 0, "running": 0}
     live_tasks: list[dict[str, str]] = []
     for row in store.tasks():
         status = str(row["status"])
@@ -145,20 +147,22 @@ def build_readiness(
             continue
         if reason:  # still open upstream but not runnable (blocked/unlabelled): counted apart, and a decision still needs a person
             ledger["retired_ineligible"] += 1
+        elif status == "BLOCKED" and (waiting := cooldown_parked(store, str(row["id"]), cooldowns)):
+            ledger["parked_cooldown"] += 1  # waiting out a long provider cooldown: not actionable until it expires
+            parked_cooldown.append({"task_id": str(row["id"]), "stage": str(row["stage"]), "title": str(row["title"]), "waiting_on": waiting})
         else:
             key = {"OPEN": "open", "RUNNING": "running"}.get(status, "blocked")
             ledger[key] += 1
             live_tasks.append({"task_id": str(row["id"]), "stage": str(row["stage"]), "status": status, "title": str(row["title"])})
-        if status == "BLOCKED":
+        if status == "BLOCKED" and not (parked_cooldown and parked_cooldown[-1]["task_id"] == str(row["id"])):
             decision = blocked_needs_decision(store, str(row["id"]))
             if decision:
                 decisions.append({"task_id": str(row["id"]), "title": str(row["title"]), "reason": decision})
-    data["ledger"] = {**ledger, "live_tasks": live_tasks}
+    data["ledger"] = {**ledger, "live_tasks": live_tasks, "parked_cooldown_tasks": parked_cooldown}
     data["needs_decision"] = decisions
     if decisions:
         attention.append(f"{len(decisions)} task(s) need a design decision")
 
-    cooldowns = {str(item["provider"]): item for item in active_cooldowns(store, config.provider_failure_cooldown_seconds)}
     providers = []
     try:
         adapters = {adapter.name: adapter for adapter in adapters_from_config(config)}
@@ -196,6 +200,11 @@ def build_readiness(
     data["attention"] = attention
     data["verdict"] = "attention" if attention else "ready"
     return data
+
+
+def _duration(seconds: int) -> str:
+    hours, rest = divmod(int(seconds), 3600)
+    return f"{hours}h{rest // 60:02d}m" if hours else f"{rest // 60}m{rest % 60:02d}s"
 
 
 def format_readiness(data: dict[str, Any]) -> list[str]:
@@ -262,9 +271,13 @@ def format_readiness(data: dict[str, Any]) -> list[str]:
         f"ledger: {ledger['done']} done; {ledger['retired_closed']} retired (source closed); "
         f"{ledger['retired_ineligible']} parked (open upstream but not runnable); "
         f"{ledger['retired_operator']} retired (audited, not work); "
+        f"{ledger['parked_cooldown']} parked: provider cooldown; "
         f"{ledger['open']} open, {ledger['blocked']} blocked, {ledger['running']} running = real work"
     )
     lines += [f"  {t['task_id']} {t['stage']}/{t['status']}: {t['title']}" for t in ledger["live_tasks"]]
+    for t in ledger.get("parked_cooldown_tasks", []):
+        waits = ", ".join(f"{w['provider']} {_duration(w['seconds_remaining'])} left ({w['failure_class']})" for w in t["waiting_on"])
+        lines.append(f"  parked: provider cooldown - {t['task_id']} {t['stage']}/BLOCKED: {t['title']} (waiting on {waits})")
     if data["needs_decision"]:
         lines.append("tasks needing a design decision:")
         lines += [f"  {item['task_id']} {item['title']}: {item['reason']}" for item in data["needs_decision"]]
