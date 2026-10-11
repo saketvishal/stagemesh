@@ -39,6 +39,24 @@ def gh_open_wave_prs(project: Path) -> list[dict[str, Any]]:
     return [pr for pr in json.loads(proc.stdout or "[]") if str(pr.get("headRefName", "")).startswith("wave/")]
 
 
+def merge_order(project: Path, prs: list[dict[str, Any]], base: str = "origin/main") -> list[dict[str, Any]]:
+    """Wave PRs in the order they must be merged. Wave branches are stacked: a branch carries the commits integrated before it, so
+    the PR with the fewest commits ahead of the base goes first. PR number only breaks ties (it is not the stack order, because
+    PRs are opened after the whole batch finished)."""
+
+    def ahead(pr: dict[str, Any]) -> int:
+        proc = subprocess.run(
+            ["git", "rev-list", "--count", f"{base}..origin/{pr.get('headRefName', '')}"],
+            cwd=project,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        return int(proc.stdout.strip()) if proc.returncode == 0 and proc.stdout.strip().isdigit() else 10**9
+
+    return sorted(prs, key=lambda pr: (ahead(pr), int(pr.get("number", 0))))
+
+
 def _runtime_block(project: Path, freshness: RuntimeFreshness, version_warning: str | None) -> dict[str, Any]:
     return {
         "stale": freshness.stale or bool(version_warning),
@@ -78,7 +96,7 @@ def build_readiness(
         data["wave_prs"] = {"available": False, "reason": "skipped (--no-network)", "prs": []}
     else:
         try:
-            data["wave_prs"] = {"available": True, "prs": list_prs(project)}
+            data["wave_prs"] = {"available": True, "prs": merge_order(project, list_prs(project))}
             if data["wave_prs"]["prs"]:
                 attention.append(f"{len(data['wave_prs']['prs'])} open wave PR(s) waiting for merge")
         except Exception as exc:  # noqa: BLE001 - an unreachable GitHub must not hide the rest of the report
@@ -219,8 +237,8 @@ def format_readiness(data: dict[str, Any]) -> list[str]:
     elif not prs["prs"]:
         lines.append("open wave PRs: none")
     else:
-        lines.append(f"open wave PRs: {len(prs['prs'])} (merge them in order, oldest first)")
-        lines += [f"  #{pr['number']} {pr['headRefName']}: {pr['title']} {pr['url']}" for pr in sorted(prs["prs"], key=lambda p: p["number"])]
+        lines.append(f"open wave PRs: {len(prs['prs'])} (merge in this order: each branch carries the ones before it)")
+        lines += [f"  {i}. #{pr['number']} {pr['headRefName']}: {pr['title']} {pr['url']}" for i, pr in enumerate(prs["prs"], 1)]
     main = data["main"]
     if main is None:
         lines.append(f"local main: not checked ({data.get('census_error') or 'the integration ref is not a local branch'})")

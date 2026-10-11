@@ -493,7 +493,7 @@ def _finish(
     prs = (report.readiness or {}).get("wave_prs", {}).get("prs", [])
     mine = {task.pr_url for task in report.tasks if getattr(task, "pr_url", None)}
     report.open_wave_prs = [
-        {**pr, "opened_this_window": pr.get("url") in mine} for pr in sorted(prs, key=lambda pr: int(pr.get("number", 0)))
+        {**pr, "opened_this_window": pr.get("url") in mine} for pr in prs  # already in stack (merge) order
     ]
     report.next_command = next_command(report)
     path = report.options.report_path
@@ -552,8 +552,8 @@ def format_window_report(report: WindowReport) -> str:
     if report.not_selected:
         lines.append("left alone: " + "; ".join(f"{k} ({v})" for k, v in sorted(report.not_selected.items(), key=lambda kv: _task_sort_key(kv[0]))))
     if report.open_wave_prs:
-        lines.append("open wave PRs, merge in this order (oldest first, normal merge commit):")
-        lines += [f"  #{pr['number']} {pr.get('headRefName', '')}{' (this window)' if pr.get('opened_this_window') else ''}: {pr.get('title', '')} {pr.get('url', '')}" for pr in report.open_wave_prs]
+        lines.append("open wave PRs, merge in this order (stacked: each branch carries the ones before it; normal merge commit):")
+        lines += [f"  {i}. #{pr['number']} {pr.get('headRefName', '')}{' (this window)' if pr.get('opened_this_window') else ''}: {pr.get('title', '')} {pr.get('url', '')}" for i, pr in enumerate(report.open_wave_prs, 1)]
     else:
         lines.append("open wave PRs: none")
     first, last = (report.waves[0], report.waves[-1]) if report.waves else (None, None)
