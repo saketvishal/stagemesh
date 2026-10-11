@@ -298,6 +298,16 @@ findings, evidence or audit events, and write an audit event (`task.contract_reb
   candidate's merge-base with the integration ref, removing files integrated by other work from the task diff. It refuses when the
   baseline is not stale, the candidate is already integrated, or the history is ambiguous (`--force` only overrides the ambiguous
   cases).
+* `stagemesh advance-baseline --task <id> [--to <ref>] [--reason TEXT] --yes [--json]` moves the task baseline (and the frozen
+  contract's baseline) forward to the integration ref, resets the task's idle worktree onto it and returns the task to `IMPLEMENT`
+  with a fresh remediation budget, so the next run starts from current code instead of stacking on an old worktree. Use it when a
+  task's candidates keep failing on code that has since been fixed on the integration ref (`rebaseline-task` cannot help there,
+  because the candidates descend from the old baseline). It refuses without `--yes`, with an active claim or running execution, at
+  `INTEGRATE`, for a quarantined or unreadable worktree, and unless the old baseline is an ancestor of the target. Before anything
+  changes, the worktree state (including uncommitted files) and every earlier candidate are kept under
+  `refs/stagemesh/preserved/<task>/<sha>`; candidates, evidence and findings are never deleted, they stay bound to the old baseline
+  and cannot satisfy a candidate built on the new one. One `task.baseline_advanced` audit event records old/new baseline, reason,
+  operator, preserved refs and superseded candidates.
 
 `queue-run` auto-plans a task that has no contract with the same deterministic path as `continue` (log line
 `task <id>: auto-planned contract ...`), and still refuses it when no safe bounded contract can be derived or with `--no-auto-plan`.

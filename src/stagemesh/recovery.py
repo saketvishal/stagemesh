@@ -35,6 +35,7 @@ from .validation import Validator
 
 REBIND_EVENT = "task.contract_rebound"
 REBASELINE_EVENT = "task.rebaselined"
+ADVANCE_EVENT = "task.baseline_advanced"
 # Ambiguous baseline situations a rebaseline refuses unless the operator passes --force (and a merge-base still exists).
 FORCEABLE_REFUSALS = frozenset({"candidate_not_based_on_baseline", "baseline_diverged"})
 
@@ -221,6 +222,146 @@ def rebaseline_task(
     current = store.get_task(task_id)
     report["stage"], report["status"] = current["stage"], current["status"]
     return report
+
+
+# --- advance-baseline ------------------------------------------------------------------------------------------------------------
+
+
+def _worktree_quarantined(store: Store, task_id: str) -> bool:
+    """The supervisor quarantined this task's worktree and nothing has re-claimed it since."""
+    decision = store.conn.execute(
+        "SELECT created_at, rowid FROM audit_events WHERE event_type='autonomy.decision' AND json_extract(payload, '$.task_id')=? "
+        "AND json_extract(payload, '$.action')='FAIL_CLOSED_QUARANTINE' ORDER BY created_at DESC, rowid DESC LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    if decision is None:
+        return False
+    reclaimed = store.conn.execute(
+        "SELECT 1 FROM audit_events WHERE event_type='autonomy.workspace_ownership' AND json_extract(payload, '$.task_id')=? "
+        "AND (created_at > ? OR (created_at = ? AND rowid > ?)) LIMIT 1",
+        (task_id, decision["created_at"], decision["created_at"], decision["rowid"]),
+    ).fetchone()
+    return reclaimed is None
+
+
+def advance_baseline(
+    store: Store,
+    project: Path,
+    task_id: str,
+    target_ref: str | None = None,
+    *,
+    reason: str | None = None,
+    yes: bool = False,
+) -> dict[str, Any]:
+    """Move a task's baseline forward to `target_ref` (default: the integration ref) so the next run starts fresh from current code.
+
+    Everything is validated before anything changes. Old candidates, evidence and findings are kept as history: they stay bound to the
+    old baseline, so they never satisfy a candidate built on the new one. The idle task worktree is snapshotted under
+    refs/stagemesh/preserved/ and then reset onto the new base, and the task returns to IMPLEMENT with a fresh remediation budget.
+    """
+    from .autonomy.gitfacts import GitFacts
+    from .autonomy.provenance import load_ownership, save_ownership, tracked_fingerprint
+    from .workspace_guard import (
+        _gitdir,
+        _load_ledger,
+        record_supervised_move,
+        unexpected_embedded_repositories,
+    )
+    from .workspaces import _task_key, prepare_task_workspace, task_workspace
+
+    task = _require_repairable(store, task_id)
+    if task["stage"] == Stage.INTEGRATE:
+        raise RecoveryRefusal("integrating", f"task {task_id} is at INTEGRATE; wait for integration to finish before moving its baseline")
+    if not yes:
+        raise RecoveryRefusal("confirmation_required", f"advancing the baseline of task {task_id} resets its worktree and restarts IMPLEMENT; re-run with --yes")
+    facts = GitFacts(project)
+    ref = target_ref or resolve_integration_ref(project) or "HEAD"
+    new_base = facts.resolve(ref)
+    if new_base is None:
+        raise RecoveryRefusal("unresolvable", f"cannot resolve {ref!r} to a commit")
+    old_base = store.task_baseline(task_id)
+    if old_base is None:
+        raise RecoveryRefusal("no_baseline", f"task {task_id} has no recorded baseline")
+    if old_base == new_base:
+        raise RecoveryRefusal("already_at_target", f"task {task_id}: baseline is already {new_base[:12]}")
+    if not facts.exists(old_base) or not facts.is_ancestor(old_base, new_base):
+        raise RecoveryRefusal("baseline_not_ancestor", f"task {task_id}: baseline {old_base[:12]} is not an ancestor of {ref} ({new_base[:12]}); refusing to move it sideways or backwards")
+
+    worktree = task_workspace(project, task_id)
+    has_worktree = (worktree / ".git").exists()
+    if has_worktree:
+        if _worktree_quarantined(store, task_id):
+            raise RecoveryRefusal("worktree_quarantined", f"task {task_id}: its worktree is quarantined by the supervisor; resolve that first")
+        try:
+            _load_ledger(_gitdir(worktree))
+        except ValueError as exc:
+            raise RecoveryRefusal("worktree_unreadable", f"task {task_id}: the worktree ledger is unreadable ({exc}); not resetting it") from exc
+        embedded = unexpected_embedded_repositories(worktree)
+        if embedded:
+            raise RecoveryRefusal("worktree_unpreservable", f"task {task_id}: worktree contains embedded repositories that cannot be preserved: {', '.join(embedded[:5])}")
+
+    # Preserve first: refs only add objects to the namespace, they never move or delete anything.
+    key = _task_key(task_id)
+    preserved: list[str] = []
+    superseded = [str(row["sha"]) for row in store.conn.execute("SELECT sha FROM candidates WHERE task_id=? ORDER BY created_at, rowid", (task_id,))]
+
+    def preserve(sha: str) -> None:
+        ref_name = f"refs/stagemesh/preserved/{key}/{sha[:12]}"
+        facts.ensure_ref(ref_name, sha)
+        if ref_name not in preserved:
+            preserved.append(ref_name)
+
+    old_head: str | None = None
+    if has_worktree:
+        work = GitFacts(worktree)
+        old_head = work.resolve("HEAD")
+        snapshot = work.snapshot_worktree(worktree, f"StageMesh: state of {task_id}'s worktree before its baseline advanced to {new_base[:7]}")
+        if snapshot:
+            preserve(snapshot)
+    for sha in superseded:
+        if facts.exists(sha):
+            preserve(sha)
+
+    # Reset the idle worktree (creating one at the target when the task never had one), then move the ledger.
+    if not has_worktree:
+        worktree = prepare_task_workspace(project, task_id)
+    work = GitFacts(worktree)
+    work.git.run("reset", "--hard", new_base)
+    work.git.run("clean", "-fdq", check=False)
+    if work.resolve("HEAD") != new_base:
+        raise RecoveryRefusal("worktree_reset_failed", f"task {task_id}: worktree is not at {new_base[:12]} after reset; the ledger was not changed")
+    ownership = load_ownership(store, task_id)
+    previous = ownership.expected_head if ownership is not None else (old_head or new_base)
+    latest = store.latest_candidate(task_id)
+    moved = record_supervised_move(project, task_id, previous, new_base, None if latest is None else str(latest["sha"]), require_same_dirty=False)
+    if moved and ownership is not None:
+        from dataclasses import replace
+
+        save_ownership(store, replace(ownership, expected_head=new_base, tracked_fingerprint=tracked_fingerprint(worktree)))
+
+    store.rebaseline_task(task_id, new_base, None)  # baseline + frozen contract baseline in one transaction; old bindings stay as history
+    unblocked = store.unblock_task(task_id) if task["status"] == TaskStatus.BLOCKED else False
+    store.advance_task(task_id, Stage.IMPLEMENT)
+    record_audit(store, "task.advance", {"task_id": task_id, "stage": Stage.IMPLEMENT, "reason": "operator advanced the task baseline"})
+    payload: dict[str, Any] = {
+        "task_id": task_id,
+        "old_baseline": old_base,
+        "new_baseline": new_base,
+        "target_ref": ref,
+        "reason": (reason or "").strip() or "operator advanced the task baseline to the integration ref",
+        "operator": _operator(),
+        "operator_action": "ADVANCE_BASELINE",
+        "preserved_refs": preserved,
+        "superseded_candidates": superseded,
+        "worktree": str(worktree),
+        "worktree_reset": True,
+        "ownership_rebound": bool(moved and ownership is not None),
+        "unblocked": unblocked,
+        "previous_stage": str(task["stage"]),
+    }
+    record_audit(store, ADVANCE_EVENT, payload)
+    current = store.get_task(task_id)
+    return {**payload, "stage": current["stage"], "status": current["status"]}
 
 
 def auto_rebaseline_blocked_stale_baselines(

@@ -79,7 +79,7 @@ from .provider_pool import (
 from .providers import ProviderValidationError, adapters_from_config
 from .queue_run import QueueRunner
 from .queue_visibility import format_queue_control, queue_control_report
-from .recovery import RecoveryRefusal, format_doctor, rebaseline_task, rebind_contract, task_doctor
+from .recovery import RecoveryRefusal, advance_baseline, format_doctor, rebaseline_task, rebind_contract, task_doctor
 from .redaction import redact_command_secrets, redact_url_credentials
 from .registry import (
     GlobalRegistry,
@@ -555,6 +555,22 @@ def command_rebaseline_task(args: argparse.Namespace) -> int:
             check = report["validation"]
             if check:
                 print("  validation: " + (f"{check['status']}" + (" - advanced" if check["advanced"] else "") if check["ran"] else f"not run ({check['reason']})"))
+            print(f"  stage/status: {report['stage']}/{report['status']}")
+        return report
+
+    return _repair_command(args, run)
+
+
+def command_advance_baseline(args: argparse.Namespace) -> int:
+    def run(store, project):  # type: ignore[no-untyped-def]
+        report = advance_baseline(store, project, args.task, args.to, reason=args.reason, yes=args.yes)
+        if not args.json:
+            print(f"task {args.task}: baseline {report['old_baseline'][:12]} -> {report['new_baseline'][:12]} (against {report['target_ref']})")
+            print(f"  worktree reset to the new base: {report['worktree']}")
+            for ref in report["preserved_refs"]:
+                print(f"  preserved: {ref}")
+            if report["unblocked"]:
+                print("  task unblocked with a fresh remediation budget")
             print(f"  stage/status: {report['stage']}/{report['status']}")
         return report
 
@@ -2513,6 +2529,16 @@ def build_parser() -> argparse.ArgumentParser:
     rebase.add_argument("--reason", help="Why the baseline moved (recorded in the audit event)")
     rebase.add_argument("--json", action="store_true")
     rebase.set_defaults(func=command_rebaseline_task)
+    advance = sub.add_parser(
+        "advance-baseline",
+        help="Move a task's baseline forward to the integration ref, reset its idle worktree and restart IMPLEMENT (audited; old state preserved)",
+    )
+    advance.add_argument("--task", required=True)
+    advance.add_argument("--to", metavar="REF", help="Ref to advance the baseline to (default: the integration ref / current branch)")
+    advance.add_argument("--reason", help="Why the baseline moved (recorded in the audit event)")
+    advance.add_argument("--yes", action="store_true", help="Confirm: the task worktree is reset and IMPLEMENT restarts (required)")
+    advance.add_argument("--json", action="store_true")
+    advance.set_defaults(func=command_advance_baseline)
     doctor_task = sub.add_parser("task-doctor", help="Read-only task summary: claims, candidate, baseline, contract, failures, findings, diagnosis, next command")
     doctor_task.add_argument("--task", required=True)
     doctor_task.add_argument("--to", metavar="INTEGRATION_REF", help="Integration ref to compare the baseline with (default: configured ref or current branch)")
