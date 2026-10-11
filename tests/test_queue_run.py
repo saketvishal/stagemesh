@@ -22,7 +22,7 @@ from stagemesh.domain import ExecutionKind, ExecutionStatus
 from stagemesh.execution import ExecutionResult, communicate_bounded
 from stagemesh.git import GitWorkspace
 from stagemesh.parallel import queue_control_state, recover_orphaned_claims, request_queue_control, worker_id_for
-from stagemesh.process_identity import boot_id
+from stagemesh.process_identity import boot_id, popen_identity
 from stagemesh.queue_run import QueueRunner, dirty_in_scope, dirty_paths, preflight, write_scope_overlap
 from stagemesh.review import Reviewer
 from stagemesh.serialized_integration import SerializedIntegrator
@@ -464,6 +464,69 @@ def test_stop_during_review_kills_tracked_provider_and_fails_execution(tmp_path:
     assert any(e["kind"] == "REVIEW" for e in failed)
     assert queue_control_state(rig.store)["state"] == "stopped"
     assert outcomes(queue(rig, ScriptedExecutor(rig.files), concurrency=1).run()) == {"A": "DONE"}
+
+
+def test_stop_does_not_terminate_another_runners_live_execution(tmp_path: Path) -> None:
+    rig = Rig(tmp_path, ["A", "B"])
+    holder: dict[str, QueueRunner] = {}
+    other = subprocess.Popen([PY, "-c", "import time; time.sleep(60)"])
+    identity = popen_identity(other)
+    other_claim = rig.store.acquire_claim("B", f"parallel-{os.getpid()}-B")
+    assert other_claim
+    other_execution = rig.store.start_execution(
+        task_id="B",
+        claim_id=other_claim,
+        kind=ExecutionKind.IMPLEMENTATION,
+        pid=identity.pid,
+        process_create_time=identity.create_time,
+        boot_id=identity.boot_id,
+        executable=identity.executable,
+    )
+
+    class StopA(ScriptedExecutor):
+        def run(self, store, task_id, claim_id, project):
+            holder["runner"].stop_admission("operator stop", terminate_running=True)
+            return super().run(store, task_id, claim_id, project)
+
+    try:
+        runner = queue(rig, StopA(rig.files), concurrency=1)
+        holder["runner"] = runner
+        summary = runner.run()
+
+        assert summary.stop_reason == "STOPPED"
+        assert outcomes(summary) == {"A": "DONE"}
+        assert other.poll() is None
+        assert rig.store.conn.execute("SELECT status FROM executions WHERE id=?", (other_execution,)).fetchone()["status"] == "RUNNING"
+        assert rig.store.conn.execute("SELECT active FROM claims WHERE id=?", (other_claim,)).fetchone()["active"] == 1
+        stop_event = json.loads(rig.store.conn.execute("SELECT payload FROM audit_events WHERE event_type='queue.stop'").fetchone()["payload"])
+        assert other_execution not in stop_event["active_execution_ids"]
+    finally:
+        other.kill()
+        other.wait(timeout=10)
+        rig.store.finish_execution(other_execution, ExecutionStatus.FAILED)
+        rig.store.release_claim(other_claim)
+
+
+def test_stop_cleanup_preserves_task_blocked_reason(tmp_path: Path) -> None:
+    rig = Rig(tmp_path, ["A"])
+    holder: dict[str, QueueRunner] = {}
+
+    class FailsAfterStop(ScriptedExecutor):
+        def run(self, store, task_id, claim_id, project):
+            execution_id = store.start_execution(task_id=task_id, claim_id=claim_id, kind=ExecutionKind.IMPLEMENTATION)
+            holder["runner"].stop_admission("operator stop", terminate_running=True)
+            store.finish_execution(execution_id, ExecutionStatus.FAILED)
+            store.block_task(task_id)
+            return ExecutionResult(ExecutionStatus.FAILED, failure_reason="provider reported failure")
+
+    runner = queue(rig, FailsAfterStop(rig.files), concurrency=1, interrupt_grace_seconds=5)
+    holder["runner"] = runner
+    summary = runner.run()
+
+    assert summary.stop_reason == "STOPPED"
+    assert outcomes(summary) == {"A": "BLOCKED"}
+    task = rig.store.get_task("A")
+    assert task["status"] == "BLOCKED" and task["stage"] == "IMPLEMENT"
 
 
 def test_dead_runner_does_not_lose_the_protection_of_an_unknown_identity_execution(tmp_path: Path) -> None:

@@ -859,10 +859,9 @@ class ParallelRunner:
             stopped_task_ids = (
                 active_thread_task_ids
                 | self._stop_request_task_ids
-                | {str(item["task_id"]) for item in active_before}
             )
             in_process_killed = kill_active_provider_processes()  # implementation and review providers started by this runner
-            live_known_killed = self._terminate_live_known_executions(cleanup)
+            live_known_killed = self._terminate_live_known_executions(cleanup, {str(item["id"]) for item in active_before})
             record_audit(
                 cleanup,
                 "queue.stop",
@@ -886,7 +885,7 @@ class ParallelRunner:
                 if (
                     task_id in stopped_task_ids
                     and lifecycle.summary is not None
-                    and lifecycle.summary.stop_reason != "DONE"
+                    and lifecycle.summary.stop_reason in {"UNSET", "INTERRUPTED"}
                 ):
                     lifecycle.summary.stop_reason = stop_reason
                     lifecycle.summary.message = reason
@@ -922,7 +921,10 @@ class ParallelRunner:
 
     def _execution_stop_snapshot(self, store: Store) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
+        runner_task_ids = set(self._threads) | self._stop_request_task_ids
         for execution in store.running_executions():
+            if str(execution["task_id"]) not in runner_task_ids:
+                continue
             saved = store.execution_process_identity(str(execution["id"]))
             state = classify_process(saved, process_identity(execution["pid"]))
             rows.append(
@@ -937,10 +939,12 @@ class ParallelRunner:
             )
         return rows
 
-    def _terminate_live_known_executions(self, store: Store) -> list[int]:
+    def _terminate_live_known_executions(self, store: Store, execution_ids: set[str]) -> list[int]:
         killed: list[int] = []
         seen: set[int] = set()
         for execution in store.running_executions():
+            if str(execution["id"]) not in execution_ids:
+                continue
             pid = execution["pid"]
             if not pid:
                 continue
