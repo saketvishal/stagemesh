@@ -224,6 +224,12 @@ def command_doctor(args: argparse.Namespace) -> int:
     stale = stale_runtime_warning(project)
     if stale:
         data["stale_runtime_warning"] = stale
+    from .readiness import build_readiness, format_readiness, gh_open_wave_prs
+
+    readiness = build_readiness(
+        store, project, config, version_warning=stale, list_prs=None if getattr(args, "no_network", False) else gh_open_wave_prs
+    )
+    data["readiness"] = readiness
     if args.json:
         print(json.dumps(data, indent=2, sort_keys=True))
         store.close()
@@ -256,6 +262,9 @@ def command_doctor(args: argparse.Namespace) -> int:
     print(f"git identity: {who['name']} <{who['email']}> [{who['status']}]" + (f" via {who['origin']}" if who.get("origin") else ""))
     if who["problem"]:
         print(f"WARNING git identity: {who['problem']}")
+    print()
+    for line in format_readiness(readiness):
+        print(line)
     store.close()
     return 0
 
@@ -2769,6 +2778,7 @@ def build_parser() -> argparse.ArgumentParser:
     init.set_defaults(func=command_init)
     doctor = sub.add_parser("doctor")
     doctor.add_argument("--json", action="store_true")
+    doctor.add_argument("--no-network", action="store_true", help="Do not ask GitHub for open wave PRs")
     doctor.set_defaults(func=command_doctor)
     diagnose_cmd = sub.add_parser(
         "diagnose", help="Explain why a task keeps failing: failing evidence, comparison across candidates, category, next step"
