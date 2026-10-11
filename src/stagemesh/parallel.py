@@ -346,6 +346,8 @@ class ParallelRunner:
         self._admission_paused = threading.Event()
         self._admission_stopped = threading.Event()
         self._terminate_requested = threading.Event()
+        self._stop_request_snapshot: list[dict[str, Any]] | None = None
+        self._stop_request_task_ids: set[str] = set()
         self._protected_claims: set[str] = set()  # claims of executions with unknown process identity; only an operator releases them
         self._lock = threading.Lock()
         self._lifecycles: dict[str, TaskLifecycle] = {}
@@ -397,6 +399,7 @@ class ParallelRunner:
         """Stop admitting new tasks; optionally terminate active provider work through the audited cleanup path."""
         self._admission_stopped.set()
         if terminate_running:
+            self._capture_stop_request()
             self._terminate_requested.set()
             self.stop.set()
         self._record_control("stopping", reason, terminate_running=terminate_running)
@@ -480,6 +483,7 @@ class ParallelRunner:
             elif state == "stopping":
                 self._admission_stopped.set()
                 if terminate:
+                    self._capture_stop_request()
                     self._terminate_requested.set()
                     self.stop.set()
                 self._refresh_control_state("stopping")
@@ -848,28 +852,42 @@ class ParallelRunner:
             if interrupted
             else f"{reason}; stopping all tasks",
         )
+        active_thread_task_ids = {task_id for task_id, thread in self._threads.items() if thread.is_alive()}
         cleanup = Store(self.store.db_path)
         try:
+            active_before = self._merged_stop_snapshot(cleanup)
+            stopped_task_ids = (
+                active_thread_task_ids
+                | self._stop_request_task_ids
+                | {str(item["task_id"]) for item in active_before}
+            )
+            in_process_killed = kill_active_provider_processes()  # implementation and review providers started by this runner
+            live_known_killed = self._terminate_live_known_executions(cleanup)
             record_audit(
                 cleanup,
                 "queue.stop",
-                {"reason": reason, "stop_reason": stop_reason, "interrupted": interrupted},
+                {
+                    "reason": reason,
+                    "stop_reason": stop_reason,
+                    "interrupted": interrupted,
+                    "active_executions": active_before,
+                    "active_execution_ids": [item["id"] for item in active_before],
+                    "terminated_in_process_providers": in_process_killed,
+                    "terminated_live_execution_pids": live_known_killed,
+                    "unknown_execution_ids": [item["id"] for item in active_before if item["process_state"] == "UNKNOWN"],
+                },
             )
-            kill_active_provider_processes()  # implementation AND review providers: nothing may outlive the interrupt
-            for task_id, thread in self._threads.items():
-                if thread.is_alive():  # stop the provider so the worker's tick returns instead of running to its timeout
-                    for execution in [e for e in cleanup.running_executions() if e["task_id"] == task_id and e["pid"]]:
-                        if execution["kind"] == ExecutionKind.IMPLEMENTATION:
-                            saved = cleanup.execution_process_identity(str(execution["id"]))
-                            if classify_process(saved, process_identity(execution["pid"])) == "LIVE":
-                                _kill_pid(int(execution["pid"]))
             deadline = time.monotonic() + self.interrupt_grace_seconds
             for thread in self._threads.values():
                 thread.join(timeout=max(0.0, deadline - time.monotonic()))
             for task_id, thread in self._threads.items():
                 lifecycle = self._lifecycles[task_id]
                 stuck = thread.is_alive()
-                if lifecycle.summary is not None and lifecycle.summary.stop_reason in {"UNSET", "INTERRUPTED"}:
+                if (
+                    task_id in stopped_task_ids
+                    and lifecycle.summary is not None
+                    and lifecycle.summary.stop_reason != "DONE"
+                ):
                     lifecycle.summary.stop_reason = stop_reason
                     lifecycle.summary.message = reason
                     self._abandon(cleanup, task_id, stop_reason.lower())
@@ -881,6 +899,61 @@ class ParallelRunner:
                     )
         finally:
             cleanup.close()
+
+    def _capture_stop_request(self) -> None:
+        self._stop_request_task_ids.update(task_id for task_id, thread in self._threads.items() if thread.is_alive())
+        self._capture_stop_request_snapshot()
+
+    def _capture_stop_request_snapshot(self) -> None:
+        """Remember executions active at termination request time before workers can finish or fail them."""
+        if self._stop_request_snapshot is not None:
+            return
+        snapshot = Store(self.store.db_path)
+        try:
+            self._stop_request_snapshot = self._execution_stop_snapshot(snapshot)
+        finally:
+            snapshot.close()
+
+    def _merged_stop_snapshot(self, store: Store) -> list[dict[str, Any]]:
+        by_id = {item["id"]: item for item in self._stop_request_snapshot or []}
+        for item in self._execution_stop_snapshot(store):
+            by_id[item["id"]] = item
+        return list(by_id.values())
+
+    def _execution_stop_snapshot(self, store: Store) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for execution in store.running_executions():
+            saved = store.execution_process_identity(str(execution["id"]))
+            state = classify_process(saved, process_identity(execution["pid"]))
+            rows.append(
+                {
+                    "id": str(execution["id"]),
+                    "task_id": str(execution["task_id"]),
+                    "claim_id": execution["claim_id"],
+                    "kind": str(execution["kind"]),
+                    "pid": execution["pid"],
+                    "process_state": state,
+                }
+            )
+        return rows
+
+    def _terminate_live_known_executions(self, store: Store) -> list[int]:
+        killed: list[int] = []
+        seen: set[int] = set()
+        for execution in store.running_executions():
+            pid = execution["pid"]
+            if not pid:
+                continue
+            saved = store.execution_process_identity(str(execution["id"]))
+            if classify_process(saved, process_identity(pid)) != "LIVE":
+                continue
+            pid_int = int(pid)
+            if pid_int == os.getpid() or pid_int in seen:
+                continue
+            seen.add(pid_int)
+            _kill_pid(pid_int)
+            killed.append(pid_int)
+        return killed
 
     def _finalize(self, summary: ParallelSummary) -> None:
         # Defensive: whatever happened, no claim of this process may outlive the run.
