@@ -695,8 +695,44 @@ def _smoke_project(tmp_path: Path, labels: dict[str, list[str]] | None = None) -
 def run_cli(project: Path, *argv: str) -> tuple[int, str, str]:
     out, err = io.StringIO(), io.StringIO()
     with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-        code = cli_module.main(["--project", str(project), "queue-run", *argv])
+        code = cli_module.main(["--project", str(project), "queue-run", "--legacy-unsafe", *argv])
     return code, out.getvalue(), err.getvalue()
+
+
+def test_plain_queue_run_refuses_and_points_to_run_window(tmp_path: Path) -> None:
+    project = _smoke_project(tmp_path)
+    code, out, err = run_stagemesh_cli(project, "queue-run", "--concurrency", "5")
+    assert code != 0 and out == ""
+    assert "run-window" in err and "legacy" in err and "--legacy-unsafe" in err
+    assert "stagemesh run-window --duration 45m --concurrency 2" in err
+
+
+def test_plain_queue_run_starts_nothing_and_sweeps_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    project = _smoke_project(tmp_path)
+    sweeps: list[object] = []
+    monkeypatch.setattr("stagemesh.parallel.sweep_task_worktrees", lambda *a, **k: sweeps.append(a) or [])
+    code, _, _ = run_stagemesh_cli(project, "queue-run", "--concurrency", "5", "--dry-run")
+    assert code != 0 and sweeps == []
+    assert not (project / ".stagemesh" / "worktrees").exists() or not any((project / ".stagemesh" / "worktrees").iterdir())
+
+
+@pytest.mark.parametrize("sweep_flag", [False, True])
+def test_legacy_queue_run_sweeps_worktrees_only_when_requested(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sweep_flag: bool
+) -> None:
+    project = _smoke_project(tmp_path)
+    sweeps: list[object] = []
+    monkeypatch.setattr("stagemesh.parallel.sweep_task_worktrees", lambda *a, **k: sweeps.append(a) or [])
+    extra = ["--sweep-worktrees"] if sweep_flag else []
+    code, _, _ = run_cli(project, "--concurrency", "2", "--dry-run", "--json", *extra)
+    assert code == 0
+    assert bool(sweeps) is sweep_flag
+
+
+def test_queue_control_resume_warns_it_is_not_production_safe(tmp_path: Path) -> None:
+    project = _smoke_project(tmp_path)
+    code, _, err = run_stagemesh_cli(project, "queue-control", "resume", "--json")
+    assert code == 0 and "run-window" in err and "only opens queue admission" in err
 
 
 def run_stagemesh_cli(project: Path, *argv: str) -> tuple[int, str, str]:
@@ -914,3 +950,8 @@ def test_a_deferred_task_is_not_admission_checked_until_its_blocker_has_finished
     ended = {task: at for kind, task, at in executor.log if kind == "end"}
     b_checks = [at for task, at in admitted if task == "B"]
     assert b_checks and all(at >= ended["A"] for at in b_checks)
+
+
+def test_operator_flow_docs_point_production_work_at_run_window() -> None:
+    text = (Path(__file__).resolve().parents[1] / "docs" / "operator-flow.md").read_text(encoding="utf-8")
+    assert "Production operation: use `run-window`" in text and "--legacy-unsafe" in text

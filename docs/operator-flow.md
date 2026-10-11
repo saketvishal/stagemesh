@@ -3,6 +3,17 @@
 The normal loop has four steps. Do not hand-run individual stages (`continue --task`, `advance-baseline`, `rebaseline-task`, manual
 PRs) unless `survivor-wave` reports a task as blocked and needs a decision.
 
+## Production operation: use `run-window`, not `queue-run`
+
+For unattended or production work use `stagemesh run-window` (bounded, preflighted, journaled; see [run-window.md](run-window.md)):
+
+    stagemesh run-window --duration 45m --concurrency 2 --max-steps-per-task 8 --integration pr
+
+`stagemesh queue-run` is legacy/raw queue execution. It can start broad queue work, retry tasks and interrupt provider work outside
+those guards, so plain `queue-run` now refuses and points here. It only runs with an explicit `--legacy-unsafe`, and even then it does
+not sweep worktrees unless you also pass `--sweep-worktrees`. `stagemesh queue-control resume` only opens admission; it does not make
+`queue-run` production-safe.
+
 ## 1. Check the checkout: `stagemesh doctor`
 
 `stagemesh doctor` ends with an **operational readiness** section. It is read-only (`--no-network` also skips the GitHub lookup).

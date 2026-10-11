@@ -1311,7 +1311,27 @@ def _live_provider_notice(message: str) -> str | None:
     return None
 
 
+QUEUE_RUN_REFUSAL = """\
+queue-run refused: it is legacy/raw queue execution. It can start broad queue work, retry tasks and interrupt provider work
+outside the production-safe workflow, so it no longer runs by default.
+
+For production-safe unattended work use run-window, for example:
+  stagemesh run-window --duration 45m --concurrency 2 --max-steps-per-task 8 --integration pr
+
+To run the legacy behavior anyway, pass --legacy-unsafe explicitly:
+  stagemesh queue-run --legacy-unsafe --concurrency N
+Legacy queue-run does not sweep worktrees unless you also pass --sweep-worktrees."""
+
+QUEUE_RESUME_WARNING = (
+    "warning: queue-control resume only opens queue admission. It does not make legacy queue-run production-safe; "
+    "use `stagemesh run-window` for production unattended work."
+)
+
+
 def command_queue_run(args: argparse.Namespace) -> int:
+    if not getattr(args, "legacy_unsafe", False):
+        print(QUEUE_RUN_REFUSAL, file=sys.stderr)
+        return 2
     if args.concurrency < 1:
         print("--concurrency must be at least 1", file=sys.stderr)
         return 2
@@ -1333,6 +1353,8 @@ def command_queue_control(args: argparse.Namespace) -> int:
     else:
         report = queue_control_report(store)
     store.close()
+    if args.queue_control_command == "resume":
+        print(QUEUE_RESUME_WARNING, file=sys.stderr)
     if args.json:
         print(json.dumps(report, indent=2, sort_keys=True, default=str))
     else:
@@ -1416,6 +1438,7 @@ def command_run_parallel(args: argparse.Namespace, *, queue: bool = False) -> in
         limiter=limiter,
         emit=emit,
         wait_for_providers=queue and not getattr(args, "no_wait_for_providers", False),
+        sweep_worktrees=not queue or getattr(args, "sweep_worktrees", False),
         **(
             {"focus": getattr(args, "focus", None), "sprint": getattr(args, "sprint", None)}
             if queue
@@ -3015,6 +3038,16 @@ def build_parser() -> argparse.ArgumentParser:
     timing_cmd.set_defaults(func=command_task_timing)
     queue_cmd = sub.add_parser(
         "queue-run", help="Run several ready tasks at once when their contracts do not conflict (strict admission, serial integration)"
+    )
+    queue_cmd.add_argument(
+        "--legacy-unsafe",
+        action="store_true",
+        help="Required to run: queue-run is legacy/raw queue execution. Production-safe unattended work uses `run-window`",
+    )
+    queue_cmd.add_argument(
+        "--sweep-worktrees",
+        action="store_true",
+        help="Also sweep obsolete StageMesh worktrees at startup (legacy queue-run does not by default)",
     )
     queue_cmd.add_argument("--concurrency", type=int, required=True, metavar="N", help="Maximum tasks running at once")
     queue_cmd.add_argument(
