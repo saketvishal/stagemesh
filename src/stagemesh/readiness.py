@@ -165,6 +165,12 @@ def build_readiness(
             attention.append(f"provider {name} is cooling down ({cooldown['failure_class']})")
     data["providers"] = providers
     data["strict_live"] = strict_live
+    from .window_journal import last_window
+
+    window = last_window(store)
+    data["window"] = window
+    if window is not None and window["state"] == "interrupted":
+        attention.append(f"run-window {window['window_id']} was interrupted (started, never finished)")
     data["live_acceptance_ttl_seconds"] = config.live_acceptance_ttl_seconds
     data["attention"] = attention
     data["verdict"] = "attention" if attention else "ready"
@@ -193,6 +199,20 @@ def format_readiness(data: dict[str, Any]) -> list[str]:
                 f"{stage} {info['executable']} [{info['source']}{'' if info['available'] else ', NOT FOUND'}]" for stage, info in stages.items()
             )
             lines.append(f"  {name}: {detail}")
+    window = data.get("window")
+    if window is None:
+        lines.append("last run-window: none")
+    elif window["state"] == "interrupted":
+        lines.append(
+            f"last run-window {window['window_id']}: INTERRUPTED (started {window['age_seconds'] / 3600:.1f}h ago, never finished). "
+            "Rerun `stagemesh run-window`: its preflight recovers dead executions and refuses, with the exact command, on any it cannot prove dead"
+        )
+    elif window["state"] == "refused":
+        lines.append(f"last run-window {window['window_id']}: refused to start - {window.get('stop_reason')}")
+    else:
+        counts = ", ".join(f"{n} {k}" for k, n in sorted((window.get("counts") or {}).items())) or "no tasks"
+        stop = window.get("stop_reason") or ("time budget reached" if window.get("time_limit_reached") else "ran to completion")
+        lines.append(f"last run-window {window['window_id']}: {'ok' if window.get('ok') else 'STOPPED'} ({counts}); {stop}; report {window.get('report')}")
     prs = data["wave_prs"]
     if not prs["available"]:
         lines.append(f"open wave PRs: not checked ({prs['reason']})")
