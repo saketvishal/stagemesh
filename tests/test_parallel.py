@@ -341,6 +341,24 @@ def test_sweep_retains_unknown_dirty_and_active_worktrees(tmp_path: Path) -> Non
     assert unknown.exists() and dirty.exists() and active.exists()
 
 
+def test_sweep_never_judges_a_directory_without_its_own_git_by_the_parent_repository(tmp_path: Path) -> None:
+    rig = Rig(tmp_path, ["A", "B"])
+    plain = worktree_root(rig.project) / hashlib.sha1(b"A").hexdigest()[:12]
+    (plain / ".tmp-install").mkdir(parents=True)  # a DONE task's leftover directory: not a worktree, git would see the project repo
+    resumable = worktree_root(rig.project) / hashlib.sha1(b"B").hexdigest()[:12]
+    resumable.mkdir(parents=True)
+    rig.store.advance_task("A", Stage.DONE)
+    reason = "directory is not a git worktree (no .git of its own)"
+
+    dry = {Path(row["worktree"]).name: row for row in sweep_task_worktrees(rig.project, rig.store, dry_run=True)}
+    real = {Path(row["worktree"]).name: row for row in sweep_task_worktrees(rig.project, rig.store)}
+
+    for actions in (dry, real):
+        assert actions[plain.name]["action"] == "RETAINED" and actions[plain.name]["reason"] == reason
+        assert actions[resumable.name]["action"] == "RETAINED" and actions[resumable.name]["reason"] == reason
+    assert (plain / ".tmp-install").is_dir() and resumable.is_dir()  # nothing was removed, even when the project checkout is clean
+
+
 def test_doctor_reports_legacy_worktree_roots_for_manual_cleanup(tmp_path: Path) -> None:
     rig = Rig(tmp_path, ["A"])
     old_root = (

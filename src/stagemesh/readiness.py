@@ -15,7 +15,7 @@ from typing import Any
 from .baseline import resolve_integration_ref
 from .config import StageMeshConfig
 from .persistence import Store
-from .provider_acceptance import live_provider_readiness
+from .provider_acceptance import LIVE_PASSING, live_acceptance_status
 from .provider_cooldown import active_cooldowns
 from .providers import adapters_from_config
 from .runtime_freshness import RuntimeFreshness, check_runtime
@@ -62,6 +62,7 @@ def build_readiness(
     version_warning: str | None = None,
     list_prs: PrLister | None = gh_open_wave_prs,
     runtime: RuntimeFreshness | None = None,
+    strict_live: bool = False,
 ) -> dict[str, Any]:
     """The readiness report as plain data. `list_prs=None` skips the network lookup."""
     project = Path(project).resolve()
@@ -104,11 +105,30 @@ def build_readiness(
             attention.append("work is in flight (running executions or active claims)")
 
     decisions = []
+    ledger = {"done": 0, "retired_closed": 0, "retired_ineligible": 0, "open": 0, "blocked": 0, "running": 0}
+    live_tasks: list[dict[str, str]] = []
     for row in store.tasks():
-        if str(row["status"]) == "BLOCKED":
-            reason = blocked_needs_decision(store, str(row["id"]))
-            if reason:
-                decisions.append({"task_id": str(row["id"]), "title": str(row["title"]), "reason": reason})
+        status = str(row["status"])
+        if status == "DONE":
+            ledger["done"] += 1
+            continue
+        reason = ""
+        if row["source"] is not None:
+            reason = str(store.source_state(str(row["source"]), str(row["source_id"])).get("retirement_reason") or "")
+        if reason == "source closed":  # closed upstream: history, not production work
+            ledger["retired_closed"] += 1
+            continue
+        if reason:  # still open upstream but not runnable (blocked/unlabelled): counted apart, and a decision still needs a person
+            ledger["retired_ineligible"] += 1
+        else:
+            key = {"OPEN": "open", "RUNNING": "running"}.get(status, "blocked")
+            ledger[key] += 1
+            live_tasks.append({"task_id": str(row["id"]), "stage": str(row["stage"]), "status": status, "title": str(row["title"])})
+        if status == "BLOCKED":
+            decision = blocked_needs_decision(store, str(row["id"]))
+            if decision:
+                decisions.append({"task_id": str(row["id"]), "title": str(row["title"]), "reason": decision})
+    data["ledger"] = {**ledger, "live_tasks": live_tasks}
     data["needs_decision"] = decisions
     if decisions:
         attention.append(f"{len(decisions)} task(s) need a design decision")
@@ -116,16 +136,22 @@ def build_readiness(
     cooldowns = {str(item["provider"]): item for item in active_cooldowns(store, config.provider_failure_cooldown_seconds)}
     providers = []
     try:
-        names = sorted(adapter.name for adapter in adapters_from_config(config))
+        adapters = {adapter.name: adapter for adapter in adapters_from_config(config)}
     except Exception:  # noqa: BLE001 - a broken provider config is reported by `doctor` elsewhere
-        names = sorted(cooldowns)
-    for name in names:
-        ok, reason = live_provider_readiness(store, name, "code")
+        adapters = {}
+    for name in sorted(adapters) or sorted(cooldowns):
+        adapter = adapters.get(name)
+        capability = "code" if adapter is None or "code" in adapter.capabilities else "review"
+        live = live_acceptance_status(store, name, capability, ttl_seconds=config.live_acceptance_ttl_seconds)
         cooldown = cooldowns.get(name)
+        # Strict mode (release gating) requires a fresh passing live check; otherwise a missing one is only information.
+        if strict_live and live["state"] != LIVE_PASSING:
+            attention.append(f"provider {name} has no passing live acceptance check ({live['state']}); strict mode requires one")
         providers.append(
             {
                 "provider": name,
-                "live_acceptance": "passed" if ok else reason,
+                "command_available": None if adapter is None else adapter.check_capacity() == "AVAILABLE",
+                "live_acceptance": live,
                 "cooldown": None
                 if cooldown is None
                 else {"failure_class": cooldown["failure_class"], "seconds_remaining": cooldown["seconds_remaining"], "clear_command": cooldown["clear_command"]},
@@ -134,6 +160,8 @@ def build_readiness(
         if cooldown is not None:
             attention.append(f"provider {name} is cooling down ({cooldown['failure_class']})")
     data["providers"] = providers
+    data["strict_live"] = strict_live
+    data["live_acceptance_ttl_seconds"] = config.live_acceptance_ttl_seconds
     data["attention"] = attention
     data["verdict"] = "attention" if attention else "ready"
     return data
@@ -177,13 +205,28 @@ def format_readiness(data: dict[str, Any]) -> list[str]:
             f"resumable {wt['resumable_worktrees']}; other {wt['other_worktrees']} "
             "(doctor cleans nothing; preview with `stagemesh worktrees sweep --dry-run`)"
         )
+    ledger = data["ledger"]
+    lines.append(
+        f"ledger: {ledger['done']} done; {ledger['retired_closed']} retired (source closed); "
+        f"{ledger['retired_ineligible']} parked (open upstream but not runnable); "
+        f"{ledger['open']} open, {ledger['blocked']} blocked, {ledger['running']} running = real work"
+    )
+    lines += [f"  {t['task_id']} {t['stage']}/{t['status']}: {t['title']}" for t in ledger["live_tasks"]]
     if data["needs_decision"]:
         lines.append("tasks needing a design decision:")
         lines += [f"  {item['task_id']} {item['title']}: {item['reason']}" for item in data["needs_decision"]]
     else:
         lines.append("tasks needing a design decision: none")
+    lines.append(
+        f"provider live checks: {'REQUIRED (strict)' if data['strict_live'] else 'informational'}; "
+        f"a passing check stays fresh for {data['live_acceptance_ttl_seconds'] / 86400:g} days (routing.live_acceptance_ttl_seconds)"
+    )
     for item in data["providers"]:
         cooldown = item["cooldown"]
         state = "ok" if cooldown is None else f"COOLING DOWN ({cooldown['failure_class']}, {cooldown['seconds_remaining']}s left; clear: {cooldown['clear_command']})"
-        lines.append(f"provider {item['provider']}: {state}; last recorded live check: {item['live_acceptance']}")
+        live = item["live_acceptance"]
+        age = "" if live["age_seconds"] is None else f", checked {live['age_seconds'] / 3600:.1f}h ago"
+        command = {True: "available", False: "NOT FOUND", None: "unknown"}[item["command_available"]]
+        hint = "" if live["state"] == "passing" else f" ({live['reason'].split(': ', 1)[-1]})"
+        lines.append(f"provider {item['provider']}: {state}; command {command}; live check {live['state']}{age}{hint}")
     return lines

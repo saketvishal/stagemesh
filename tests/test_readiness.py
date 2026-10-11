@@ -133,7 +133,8 @@ def test_provider_cooldowns_and_live_check_state_are_shown_per_provider(tmp_path
     by_name = {item["provider"]: item for item in data["providers"]}
     assert {"codex", "claude", "grok", "agy"} <= set(by_name)
     assert by_name["grok"]["cooldown"]["failure_class"] == "quota_rate_limit" and by_name["codex"]["cooldown"] is None
-    assert by_name["codex"]["live_acceptance"].startswith("live_acceptance_unproven")  # never checked live: said so, not "ok"
+    assert by_name["codex"]["live_acceptance"]["state"] == "missing"  # never checked live: said so, not "ok"
+    assert by_name["codex"]["command_available"] in (True, False)
     text = "\n".join(readiness.format_readiness(data))
     assert "provider grok: COOLING DOWN (quota_rate_limit, 600s left; clear: stagemesh cooldown clear grok)" in text
     assert "provider grok is cooling down (quota_rate_limit)" in data["attention"]
@@ -172,3 +173,146 @@ def test_doctor_prints_and_exports_the_readiness_section_without_touching_github
     data = json.loads(capsys.readouterr().out)
     assert data["readiness"]["runtime"]["stale"] is True and data["readiness"]["wave_prs"]["available"] is False
     assert set(data["readiness"]) >= {"runtime", "wave_prs", "main", "activity", "worktrees", "needs_decision", "providers", "verdict"}
+
+
+# --- live acceptance readiness -------------------------------------------------------------------------------------------------------
+
+
+def _record_live(store, provider: str, *, passed: bool, age_seconds: float = 0.0) -> None:
+    import time
+
+    from stagemesh.domain import ExecutionStatus
+    from stagemesh.provider_acceptance import LiveProviderSmokeResult
+
+    payload = LiveProviderSmokeResult(
+        "PASS" if passed else "FAIL",
+        provider,
+        ExecutionStatus.SUCCEEDED if passed else ExecutionStatus.FAILED,
+        "candidate-sha",
+        True,  # file_ok
+        True,  # implementation_checked
+        True,  # review_checked
+        passed,  # implementation_ready
+        passed,  # review_ready
+        passed,  # review_json_ok
+        None if passed else "provider_timeout",
+    ).to_payload()
+    payload["checked_at"] = time.time() - age_seconds
+    store.add_audit_event("provider.live_acceptance", payload)
+
+
+def test_live_acceptance_is_classified_missing_failed_stale_or_passing(tmp_path: Path) -> None:
+    from stagemesh.provider_acceptance import (
+        DEFAULT_LIVE_ACCEPTANCE_TTL_SECONDS,
+        live_acceptance_status,
+    )
+
+    store, _project = make_store(tmp_path, ["T-1"])
+    _record_live(store, "ok", passed=True)
+    _record_live(store, "broken", passed=False)
+    _record_live(store, "old", passed=True, age_seconds=DEFAULT_LIVE_ACCEPTANCE_TTL_SECONDS + 60)
+
+    states = {name: live_acceptance_status(store, name) for name in ("ok", "broken", "old", "never")}
+
+    assert {name: item["state"] for name, item in states.items()} == {"ok": "passing", "broken": "failed", "old": "stale", "never": "missing"}
+    assert states["old"]["age_seconds"] > DEFAULT_LIVE_ACCEPTANCE_TTL_SECONDS and states["ok"]["ttl_seconds"] == DEFAULT_LIVE_ACCEPTANCE_TTL_SECONDS
+    assert "provider_timeout" in states["broken"]["reason"] and "--live --provider old" in states["old"]["reason"]
+
+
+def test_the_live_acceptance_freshness_window_is_configurable(tmp_path: Path) -> None:
+    from stagemesh.config import (
+        DEFAULT_LIVE_ACCEPTANCE_TTL_SECONDS,
+        ConfigValidationError,
+        load_config,
+    )
+    from stagemesh.provider_acceptance import live_acceptance_status
+
+    store, project = make_store(tmp_path, ["T-1"])
+    _record_live(store, "p", passed=True, age_seconds=2 * 3600)  # two hours old
+
+    assert load_config(project).live_acceptance_ttl_seconds == DEFAULT_LIVE_ACCEPTANCE_TTL_SECONDS == 7 * 86400
+    assert live_acceptance_status(store, "p")["state"] == "passing"
+    assert live_acceptance_status(store, "p", ttl_seconds=3600)["state"] == "stale"  # a one-hour window makes it stale
+
+    config_path = project / ".stagemesh" / "config.json"
+    config_path.write_text(json.dumps({"routing": {"live_acceptance_ttl_seconds": 3600}}), encoding="utf-8")
+    assert load_config(project).live_acceptance_ttl_seconds == 3600.0
+    config_path.write_text(json.dumps({"routing": {"live_acceptance_ttl_seconds": 0}}), encoding="utf-8")
+    with pytest.raises(ConfigValidationError, match="live_acceptance_ttl_seconds"):
+        load_config(project)
+
+
+def test_missing_live_checks_are_informational_by_default_and_fail_closed_in_strict_mode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(readiness, "active_cooldowns", lambda store, seconds: [])
+    store, project = make_store(tmp_path, ["T-1"])
+    _with_origin(tmp_path, project)
+    config = cli_module.load_config(project)
+
+    relaxed = readiness.build_readiness(store, project, config, list_prs=None, runtime=FRESH)
+    strict = readiness.build_readiness(store, project, config, list_prs=None, runtime=FRESH, strict_live=True)
+
+    assert relaxed["verdict"] == "ready" and not any("live acceptance" in item for item in relaxed["attention"])  # informational
+    assert strict["verdict"] == "attention" and any("strict mode requires" in item for item in strict["attention"])
+    relaxed_text = "\n".join(readiness.format_readiness(relaxed))
+    strict_text = "\n".join(readiness.format_readiness(strict))
+    assert "informational" in relaxed_text and "REQUIRED (strict)" in strict_text
+
+    for name in (item["provider"] for item in strict["providers"]):
+        _record_live(store, name, passed=True)
+    passing = readiness.build_readiness(store, project, config, list_prs=None, runtime=FRESH, strict_live=True)
+    assert passing["verdict"] == "ready" and all(item["live_acceptance"]["state"] == "passing" for item in passing["providers"])
+
+
+def test_doctor_strict_live_exits_nonzero_but_the_default_does_not(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    store, project = make_store(tmp_path, ["T-1"])
+    store.close()
+    monkeypatch.setattr(readiness, "check_runtime", lambda project: FRESH)
+
+    assert cli_module.main(["--project", str(project), "doctor", "--no-network"]) == 0
+    assert cli_module.main(["--project", str(project), "doctor", "--no-network", "--strict-live"]) == 1
+
+
+def test_a_cooling_provider_does_not_block_the_others_and_capacity_shows_live_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    store, project = make_store(tmp_path, ["T-1"])
+    for name in ("codex", "claude", "agy"):
+        _record_live(store, name, passed=True)
+    store.close()
+    monkeypatch.setattr(
+        cli_module,
+        "active_cooldowns",
+        lambda store, seconds: [{"provider": "grok", "failure_class": "quota_rate_limit", "seconds_remaining": 600, "clear_command": "x", "stages": ["IMPLEMENT"], "action": "wait"}],
+    )
+
+    assert cli_module.main(["--project", str(project), "capacity", "--json"]) == 0
+    data = json.loads(capsys.readouterr().out)
+
+    rows = {row["provider"]: row for row in data["providers"]}
+    assert rows["codex"]["live_status"]["state"] == "passing" and rows["grok"]["live_status"]["state"] == "missing"
+    assert rows["codex"]["command_available"] in (True, False) and "live_readiness" in rows["codex"]
+    assert [item["provider"] for item in data["provider_cooldowns"]] == ["grok"]  # only grok is cooling; the others are untouched
+
+
+def test_the_ledger_separates_retired_and_parked_tasks_from_real_work(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from stagemesh.domain import Stage
+
+    monkeypatch.setattr(readiness, "active_cooldowns", lambda store, seconds: [])
+    store, project = make_store(tmp_path, ["T-1", "T-2", "T-3", "T-4"])
+    store.advance_task("T-1", Stage.DONE)
+
+    def retire(task_id: str, reason: str) -> None:
+        task = store.get_task(task_id)
+        store.cache_source(task["source"], task["source_id"], {"retirement_reason": reason}, "CLOSED" if reason == "source closed" else "OPEN")
+        store.block_task(task_id)
+
+    retire("T-2", "source closed")
+    retire("T-3", "source no longer eligible")
+    store.block_task("T-4")  # a genuinely blocked task: this is the real work
+    config = cli_module.load_config(project)
+
+    data = readiness.build_readiness(store, project, config, list_prs=None, runtime=FRESH)
+
+    ledger = data["ledger"]
+    assert (ledger["done"], ledger["retired_closed"], ledger["retired_ineligible"], ledger["blocked"], ledger["open"]) == (1, 1, 1, 1, 0)
+    assert [t["task_id"] for t in ledger["live_tasks"]] == ["T-4"]  # neither the closed nor the parked task is listed as work
+    text = "\n".join(readiness.format_readiness(data))
+    assert "1 retired (source closed); 1 parked" in text and "1 blocked" in text and "T-4" in text

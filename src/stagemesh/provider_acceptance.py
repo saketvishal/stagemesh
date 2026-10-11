@@ -19,10 +19,9 @@ from .providers import record_provider_capacity
 from .review import VERDICT_FAIL_WITH_FINDINGS, VERDICT_PASS, classify_review_response
 from .routing import Provider, Router
 
-
 LIVE_PROVIDER_ACCEPTANCE_EVENT = "provider.live_acceptance"
 DEFAULT_LIVE_SMOKE_TIMEOUT_SECONDS = 30.0
-DEFAULT_LIVE_ACCEPTANCE_TTL_SECONDS = 7 * 24 * 60 * 60
+DEFAULT_LIVE_ACCEPTANCE_TTL_SECONDS = 7 * 24 * 60 * 60  # same default as config.DEFAULT_LIVE_ACCEPTANCE_TTL_SECONDS
 
 
 def provider_smoke_timeout_seconds(configured: float | None = None) -> float:
@@ -293,7 +292,9 @@ def record_live_provider_acceptance(store: Store, result: LiveProviderSmokeResul
     store.add_audit_event(LIVE_PROVIDER_ACCEPTANCE_EVENT, result.to_payload())
 
 
-def live_provider_readiness(store: Store, provider: str, capability: str) -> tuple[bool, str]:
+def live_provider_readiness(
+    store: Store, provider: str, capability: str, *, ttl_seconds: float | None = None
+) -> tuple[bool, str]:
     payload = _latest_live_acceptance_payload(store, provider)
     if payload is None:
         return False, "live_acceptance_unproven: run stagemesh provider-acceptance --live --provider " + provider
@@ -314,17 +315,34 @@ def live_provider_readiness(store: Store, provider: str, capability: str) -> tup
     if capability not in {"code", "review"} and payload.get("status") != "PASS":
         reason = str(payload.get("failure_reason") or "live_acceptance_failed")
         return False, f"live_acceptance_failed: {reason}"
-    if _live_acceptance_is_stale(payload):
+    if _live_acceptance_is_stale(payload, ttl_seconds=ttl_seconds):
         return False, "live_acceptance_stale: run stagemesh provider-acceptance --live --provider " + provider
     return True, "live_acceptance_passed"
 
 
-def _live_acceptance_is_stale(payload: dict[str, Any], *, now: float | None = None) -> bool:
+def _live_acceptance_is_stale(payload: dict[str, Any], *, now: float | None = None, ttl_seconds: float | None = None) -> bool:
     checked_at = payload.get("checked_at")
     if not isinstance(checked_at, (int, float)):
         return True
     current = time.time() if now is None else now
-    return current - float(checked_at) > DEFAULT_LIVE_ACCEPTANCE_TTL_SECONDS
+    return current - float(checked_at) > (DEFAULT_LIVE_ACCEPTANCE_TTL_SECONDS if ttl_seconds is None else ttl_seconds)
+
+
+LIVE_MISSING, LIVE_FAILED, LIVE_STALE, LIVE_PASSING = "missing", "failed", "stale", "passing"
+
+
+def live_acceptance_status(
+    store: Store, provider: str, capability: str = "code", *, ttl_seconds: float | None = None, now: float | None = None
+) -> dict[str, Any]:
+    """The last live check for a provider as one of missing / failed / stale / passing, with its age and the TTL in force."""
+    ttl = DEFAULT_LIVE_ACCEPTANCE_TTL_SECONDS if ttl_seconds is None else ttl_seconds
+    payload = _latest_live_acceptance_payload(store, provider)
+    ready, reason = live_provider_readiness(store, provider, capability, ttl_seconds=ttl_seconds)
+    state = LIVE_PASSING if ready else LIVE_MISSING if payload is None else LIVE_STALE if reason.startswith("live_acceptance_stale") else LIVE_FAILED
+    checked_at = None if payload is None else payload.get("checked_at")
+    current = time.time() if now is None else now
+    age = None if not isinstance(checked_at, (int, float)) else max(0.0, current - float(checked_at))
+    return {"state": state, "reason": reason, "checked_at": checked_at, "age_seconds": age, "ttl_seconds": ttl}
 
 
 def _latest_live_acceptance_payload(store: Store, provider: str) -> dict[str, Any] | None:

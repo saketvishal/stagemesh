@@ -13,7 +13,6 @@ from .domain import ExecutionStatus
 from .git import GitError, GitWorkspace
 from .persistence import Store
 
-
 _GENERATION_DIR = re.compile(r"^[0-9a-f]{12}-g\d+$")
 
 # `git worktree add` and the config writes that follow it touch shared repository files; parallel tasks take turns.
@@ -125,6 +124,11 @@ def sweep_task_worktrees(project: Path, store: Store, *, dry_run: bool = False) 
             )
             continue
         task_id = str(row["id"])
+        if not (entry / ".git").exists():
+            # git run inside a directory with no .git of its own resolves to the parent repository and would describe (and
+            # "remove") the wrong tree, so such a directory is never judged by git: it is only reported.
+            actions.append(_action("RETAINED", entry, task_id=task_id, reason="directory is not a git worktree (no .git of its own)"))
+            continue
         if _task_has_active_state(store, task_id):
             actions.append(_action("RETAINED", entry, task_id=task_id, reason="task has active claim or execution"))
         elif row["status"] == "DONE" or row["stage"] == "DONE":
