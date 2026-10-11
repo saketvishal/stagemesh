@@ -179,9 +179,12 @@ def stale_runtime_warning(project: Path, installed_version: str = __version__) -
     try:
         import tomllib
 
-        configured = tomllib.loads((project / "pyproject.toml").read_text(encoding="utf-8")).get("project", {}).get("version")
-        if isinstance(configured, str):
-            declared.append(("configured version", configured))
+        data = tomllib.loads((project / "pyproject.toml").read_text(encoding="utf-8"))
+        proj = data.get("project", {})
+        if proj.get("name") == "stagemesh":
+            configured = proj.get("version")
+            if isinstance(configured, str):
+                declared.append(("configured version", configured))
     except (OSError, ValueError):
         pass
     for label, version in declared:

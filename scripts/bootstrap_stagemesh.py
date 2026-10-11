@@ -50,7 +50,11 @@ def _configured_version() -> str | None:
     try:
         import tomllib
 
-        version = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8")).get("project", {}).get("version")
+        data = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+        proj = data.get("project", {})
+        if proj.get("name") != "stagemesh":
+            return None
+        version = proj.get("version")
     except (OSError, ValueError):
         return None
     return version if isinstance(version, str) else None

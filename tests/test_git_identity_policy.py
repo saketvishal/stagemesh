@@ -329,3 +329,14 @@ def test_stale_runtime_warning_checks_configured_pyproject_version(tmp_path) -> 
     assert stale_runtime_warning(tmp_path, "0.2.0") is not None  # __init__ still says 0.1.0
     (pkg / "__init__.py").write_text('__version__ = "0.2.0"\n', encoding="utf-8")
     assert stale_runtime_warning(tmp_path, "0.2.0") is None
+
+
+def test_stale_runtime_warning_quiet_for_normal_installed_package(tmp_path) -> None:
+    from stagemesh.cli import stale_runtime_warning
+
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "my-host-app"\nversion = "2.0.0"\n', encoding="utf-8")
+    assert stale_runtime_warning(tmp_path, "0.1.0") is None
+
+    (tmp_path / "pyproject.toml").write_text('[build-system]\nrequires = ["setuptools"]\n', encoding="utf-8")
+    assert stale_runtime_warning(tmp_path, "0.1.0") is None
+

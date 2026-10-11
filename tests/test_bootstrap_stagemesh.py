@@ -117,3 +117,11 @@ def test_source_version_reads_repo_package_version() -> None:
     from stagemesh import __version__
 
     assert bootstrap._source_version() == __version__
+
+
+def test_configured_version_reads_repo_package_version() -> None:
+    bootstrap = _load_bootstrap()
+    from stagemesh import __version__
+
+    assert bootstrap._configured_version() == __version__
+
