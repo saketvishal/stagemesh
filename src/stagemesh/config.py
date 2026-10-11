@@ -12,6 +12,9 @@ from .github import detect_github_repository
 from .routing import RoutingMode
 from .security import SecurityBoundaryError, WorkspaceBoundary
 
+# How long a passing live provider check stays fresh (routing.live_acceptance_ttl_seconds overrides it): 7 days.
+DEFAULT_LIVE_ACCEPTANCE_TTL_SECONDS = 7 * 24 * 60 * 60.0
+
 
 class ConfigValidationError(ValueError):
     pass
@@ -105,6 +108,7 @@ class StageMeshConfig:
     integration_ref: str | None = None
     provider_pools: dict[str, tuple[str, ...]] = field(default_factory=dict)
     provider_failure_cooldown_seconds: float = 900.0
+    live_acceptance_ttl_seconds: float = DEFAULT_LIVE_ACCEPTANCE_TTL_SECONDS
     provider_specs: dict[str, ProviderSpec] = field(default_factory=dict)
     provider_selection_policy: str = "round_robin"
     provider_profile: str | None = None
@@ -164,6 +168,9 @@ def load_config(project: Path, config_path: Path | None = None) -> StageMeshConf
     cooldown = routing_data.get("provider_failure_cooldown_seconds", 900.0)
     if isinstance(cooldown, bool) or not isinstance(cooldown, (int, float)) or cooldown < 0:
         raise ConfigValidationError("routing.provider_failure_cooldown_seconds must be a non-negative number")
+    live_ttl = routing_data.get("live_acceptance_ttl_seconds", DEFAULT_LIVE_ACCEPTANCE_TTL_SECONDS)
+    if isinstance(live_ttl, bool) or not isinstance(live_ttl, (int, float)) or live_ttl <= 0:
+        raise ConfigValidationError("routing.live_acceptance_ttl_seconds must be a positive number")
     provider_profile = _string(routing_data.get("provider_profile"))
     if provider_profile is not None and provider_profile not in PROVIDER_PROFILES:
         raise ConfigValidationError(f"routing.provider_profile must be one of: {', '.join(PROVIDER_PROFILES)}")
@@ -217,6 +224,7 @@ def load_config(project: Path, config_path: Path | None = None) -> StageMeshConf
         integration_ref=integration_ref,
         provider_pools=provider_pools,
         provider_failure_cooldown_seconds=float(cooldown),
+        live_acceptance_ttl_seconds=float(live_ttl),
         provider_specs=provider_specs,
         provider_selection_policy=str(policy),
         provider_profile=provider_profile,

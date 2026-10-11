@@ -198,6 +198,7 @@ class ProviderPool:
         active_selections: dict[tuple[str, str], int] | None = None,
         selection_lock: threading.Lock | None = None,
         require_live_acceptance: bool = False,
+        live_acceptance_ttl_seconds: float | None = None,
         block_unproven: bool = True,
     ):
         if policy not in SELECTION_POLICIES:
@@ -206,6 +207,7 @@ class ProviderPool:
         self.weights = weights or {}
         self.priorities = priorities or {}
         self.require_live_acceptance = require_live_acceptance
+        self.live_acceptance_ttl_seconds = live_acceptance_ttl_seconds
         self.block_unproven = block_unproven  # False: only a recorded live failure skips a provider
         self._reasons: dict[tuple[str, str], str] = {}
         self.adapters = {adapter.name: adapter for adapter in adapters}
@@ -243,7 +245,7 @@ class ProviderPool:
                     verdicts.append(Verdict(name, False, recent))
                 elif (
                     self.require_live_acceptance
-                    and (live := live_provider_readiness(store, name, capability))[0] is False
+                    and (live := live_provider_readiness(store, name, capability, ttl_seconds=self.live_acceptance_ttl_seconds))[0] is False
                     and (self.block_unproven or not _optional_live_acceptance_reason(live[1]))
                 ):
                     verdicts.append(Verdict(name, False, live[1]))

@@ -69,6 +69,7 @@ from .postgres_store import PostgresStore, PostgresUnavailable, postgres_schema_
 from .process_identity import current_process_identity
 from .provider_acceptance import (
     _latest_live_acceptance_payload,
+    live_acceptance_status,
     live_provider_readiness,
     record_live_provider_acceptance,
     run_live_provider_smoke,
@@ -196,6 +197,12 @@ def stale_runtime_warning(project: Path, installed_version: str = __version__) -
     return None
 
 
+def _doctor_exit(args: argparse.Namespace, readiness: dict[str, object]) -> int:
+    """Doctor reports and exits 0, except in --strict-live (release) mode, which fails closed when its requirement is not met."""
+    strict_failures = [item for item in readiness["attention"] if "strict mode requires" in str(item)]  # type: ignore[union-attr]
+    return 1 if getattr(args, "strict_live", False) and strict_failures else 0
+
+
 def command_doctor(args: argparse.Namespace) -> int:
     project = Path(args.project).resolve()
     config = load_config(project)
@@ -227,13 +234,18 @@ def command_doctor(args: argparse.Namespace) -> int:
     from .readiness import build_readiness, format_readiness, gh_open_wave_prs
 
     readiness = build_readiness(
-        store, project, config, version_warning=stale, list_prs=None if getattr(args, "no_network", False) else gh_open_wave_prs
+        store,
+        project,
+        config,
+        version_warning=stale,
+        list_prs=None if getattr(args, "no_network", False) else gh_open_wave_prs,
+        strict_live=getattr(args, "strict_live", False),
     )
     data["readiness"] = readiness
     if args.json:
         print(json.dumps(data, indent=2, sort_keys=True))
         store.close()
-        return 0
+        return _doctor_exit(args, readiness)
     print(f"version: {__version__}")
     print(f"executable path: {Path(sys.argv[0]).resolve()}")
     print(f"python interpreter: {sys.executable}")
@@ -266,7 +278,7 @@ def command_doctor(args: argparse.Namespace) -> int:
     for line in format_readiness(readiness):
         print(line)
     store.close()
-    return 0
+    return _doctor_exit(args, readiness)
 
 
 def command_worktrees(args: argparse.Namespace) -> int:
@@ -406,6 +418,7 @@ def _build_coordinator(
             active_selections=parallel.active_selections if parallel else None,
             selection_lock=parallel.selection_lock if parallel else None,
             require_live_acceptance=live_acceptance is not None,
+            live_acceptance_ttl_seconds=config.live_acceptance_ttl_seconds,
             block_unproven=live_acceptance == LIVE_ACCEPTANCE_REQUIRED,
         )
         staged = config.routing_mode == RoutingMode.STAGED
@@ -2049,6 +2062,7 @@ def command_capacity(args: argparse.Namespace) -> int:
         priorities=priorities,
         require_live_acceptance=True,
         block_unproven=bool(getattr(args, "require_live_acceptance", False)),
+        live_acceptance_ttl_seconds=config.live_acceptance_ttl_seconds,
     )
     impl = pool.evaluate(store, IMPLEMENT, args.task)
     review = pool.evaluate(store, REVIEW, args.task, implementer=implementer)
@@ -2071,9 +2085,12 @@ def command_capacity(args: argparse.Namespace) -> int:
                 "capacity": capacity,
                 "capabilities": sorted(adapter.capabilities),
                 "live_acceptance": "not_run" if _latest_live_acceptance_payload(store, adapter.name) is None else "recorded",
+                "live_status": live_acceptance_status(
+                    store, adapter.name, "code" if "code" in adapter.capabilities else "review", ttl_seconds=config.live_acceptance_ttl_seconds
+                ),
                 "live_readiness": {
-                    IMPLEMENT: _live_readiness(store, adapter.name, "code") if "code" in adapter.capabilities else "not_applicable",
-                    REVIEW: _live_readiness(store, adapter.name, "review") if "review" in adapter.capabilities else "not_applicable",
+                    IMPLEMENT: _live_readiness(store, adapter.name, "code", config.live_acceptance_ttl_seconds) if "code" in adapter.capabilities else "not_applicable",
+                    REVIEW: _live_readiness(store, adapter.name, "review", config.live_acceptance_ttl_seconds) if "review" in adapter.capabilities else "not_applicable",
                 },
                 "recent_use": {
                     stage: next(
@@ -2132,11 +2149,21 @@ def command_capacity(args: argparse.Namespace) -> int:
             print(line)
     else:
         print("provider cooldowns: none")
+    print(f"live acceptance freshness window: {config.live_acceptance_ttl_seconds / 86400:g} days (routing.live_acceptance_ttl_seconds)")
+    for row in provider_rows:
+        live = row["live_status"]
+        age = "" if live["age_seconds"] is None else f", checked {live['age_seconds'] / 3600:.1f}h ago"
+        cooling = next((c for c in cooldowns if c["provider"] == row["provider"]), None)
+        print(
+            f"provider {row['provider']}: command {'available' if row['command_available'] else 'NOT FOUND'}; "
+            f"live check {live['state']}{age}"
+            + (f"; cooling down ({cooling['failure_class']})" if cooling else "")
+        )
     return 0
 
 
-def _live_readiness(store: Store, provider: str, capability: str) -> dict[str, object]:
-    ready, reason = live_provider_readiness(store, provider, capability)
+def _live_readiness(store: Store, provider: str, capability: str, ttl_seconds: float | None = None) -> dict[str, object]:
+    ready, reason = live_provider_readiness(store, provider, capability, ttl_seconds=ttl_seconds)
     return {"ready": ready, "reason": reason}
 
 
@@ -2779,6 +2806,11 @@ def build_parser() -> argparse.ArgumentParser:
     doctor = sub.add_parser("doctor")
     doctor.add_argument("--json", action="store_true")
     doctor.add_argument("--no-network", action="store_true", help="Do not ask GitHub for open wave PRs")
+    doctor.add_argument(
+        "--strict-live",
+        action="store_true",
+        help="Release mode: fail (exit 1) unless every provider has a fresh passing `provider-acceptance --live` result",
+    )
     doctor.set_defaults(func=command_doctor)
     diagnose_cmd = sub.add_parser(
         "diagnose", help="Explain why a task keeps failing: failing evidence, comparison across candidates, category, next step"
