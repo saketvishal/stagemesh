@@ -652,7 +652,7 @@ def git_repo_state(store: Store, project: Path, base_ref: str, remote: str = "or
             if not entry.is_dir():
                 continue
             row = tasks.get(entry.name.split("-g", 1)[0] if _GENERATION_DIR.match(entry.name) else entry.name)
-            if row is None:
+            if row is None or not (entry / ".git").exists():  # no .git: git would resolve to the parent repo and describe the wrong tree
                 state.other_worktrees += 1
             elif not (row["status"] == TaskStatus.DONE or row["stage"] == Stage.DONE):
                 state.resumable_worktrees += 1

@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 _BOOTSTRAP = "import sys; from stagemesh.cli import main; sys.exit(main(sys.argv[1:]))"
+SOURCE_RUN = 'PYTHONPATH=src python -c "from stagemesh.cli import main; main()"'
 _CHOICES = re.compile(r"\{([A-Za-z0-9_,\-]+)\}")
 
 Runner = Callable[..., "subprocess.CompletedProcess[str]"]
@@ -28,6 +29,8 @@ class RuntimeFreshness:
     running_from: str = ""
     running_from_source: bool = False
     installed_cli: str | None = None
+    source_cli: str | None = None  # the source entry point the comparison used (src/stagemesh/cli.py)
+    source_run: str = SOURCE_RUN  # how to run a command from source
     installed_commands: list[str] = field(default_factory=list)
     source_commands: list[str] = field(default_factory=list)
     missing_from_installed: list[str] = field(default_factory=list)
@@ -74,6 +77,8 @@ def check_runtime(project: Path, *, runner: Runner = subprocess.run, running_fil
     src = project / "src"
     here = Path(running_file or stagemesh.__file__).resolve()
     result = RuntimeFreshness(running_from=str(here.parent), running_from_source=src.is_dir() and src in here.parents)
+    if (src / "stagemesh" / "cli.py").is_file():
+        result.source_cli = str(src / "stagemesh" / "cli.py")
     cli = installed_cli_path(project)
     if not (src / "stagemesh" / "cli.py").is_file():
         result.message = "no StageMesh source in this project to compare the install with"
@@ -96,7 +101,10 @@ def check_runtime(project: Path, *, runner: Runner = subprocess.run, running_fil
     if not result.stale:
         result.message = f"installed CLI {cli} has every command in source"
         return result
-    result.refresh_command = f'"{_python_for(cli)}" -m pip install --upgrade "{project}"'
+    bootstrap = project / "scripts" / "bootstrap_stagemesh.py"
+    result.refresh_command = (
+        f'python "{bootstrap}"' if bootstrap.is_file() else f'"{_python_for(cli)}" -m pip install --upgrade "{project}"'
+    )
     using = (
         "this process is running from source, so it is not using the stale install"
         if result.running_from_source
@@ -104,7 +112,7 @@ def check_runtime(project: Path, *, runner: Runner = subprocess.run, running_fil
     )
     result.message = (
         f"installed CLI {cli} is stale: it lacks {', '.join(result.missing_from_installed)} (present in source). {using}. "
-        f"To run a missing command from source: PYTHONPATH=src python -c \"from stagemesh.cli import main; main()\" <command> ... "
+        f"To run a missing command from source: {SOURCE_RUN} <command> ... "
         f"To refresh the install (not done automatically): {result.refresh_command}"
     )
     return result
