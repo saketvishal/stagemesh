@@ -505,11 +505,40 @@ def test_the_window_has_no_merge_path(tmp_path: Path) -> None:
 # --- CLI ---------------------------------------------------------------------------------------------------------------------------
 
 
-def test_cli_defaults_to_a_two_hour_pr_mode_window() -> None:
+def test_cli_defaults_to_a_safe_45_minute_pr_mode_window() -> None:
     args = cli_module.build_parser().parse_args(["run-window"])
 
-    assert (args.duration, args.concurrency, args.max_steps_per_task, args.integration) == ("2h", 2, 8, "pr")
+    assert (args.duration, args.concurrency, args.max_steps_per_task, args.integration) == ("45m", 2, 8, "pr")
     assert args.plan is False and args.no_pr is False and args.allow_stale_runtime is False and args.strict_live is False
+    assert args.report is None and args.tasks is None
+
+
+def test_cli_concurrency_overrides_only_concurrency() -> None:
+    args = cli_module.build_parser().parse_args(["run-window", "--concurrency", "3"])
+
+    assert (args.duration, args.concurrency, args.max_steps_per_task, args.integration) == ("45m", 3, 8, "pr")
+    assert args.no_pr is False and args.strict_live is False and args.report is None
+
+
+def test_cli_help_shows_the_defaults(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit):
+        cli_module.build_parser().parse_args(["run-window", "--help"])
+    out = " ".join(capsys.readouterr().out.split())
+
+    assert "default 45m" in out and "default 2)" in out and "default 8)" in out
+    assert "pr (default" in out and ".stagemesh/reports/run-window/<timestamp>.json" in out
+
+
+def test_cli_default_report_path_is_auto_created(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    store, project = make_store(tmp_path, ["1"])
+    store.close()
+    monkeypatch.setattr(rw, "check_runtime", lambda project: FRESH)
+
+    cli_module.main(["--project", str(project), "run-window", "--plan", "--json"])
+
+    # --plan is read-only, but its preflight proves the default report location is creatable
+    reports = list((project / ".stagemesh" / "reports" / "run-window").glob("*.json"))
+    assert len(reports) == 1
 
 
 def test_cli_plan_is_read_only_and_shows_the_selection(tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch) -> None:
