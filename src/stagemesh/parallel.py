@@ -514,7 +514,7 @@ class ParallelRunner:
             self._record_control("running", "queue run started", terminate_running=False)
         summary.recovered.extend(recover_orphaned_claims(self.store, self.project))
         for row in self.store.tasks():  # provably dead provider processes only; live/unknown are never touched
-            summary.recovered.extend(_recover_dead(self.store, str(row["id"])))
+            summary.recovered.extend(_recover_dead(self.store, str(row["id"]), own_task=False))
         summary.swept = sweep_task_worktrees(self.project, self.store)
         for item in summary.recovered:
             self._say("run", f"recovered {item.get('action', 'RELEASED').lower()} claim/execution for task {item['task_id']}")

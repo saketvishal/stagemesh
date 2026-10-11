@@ -82,30 +82,39 @@ def current_problems(store: Store) -> tuple[str, ...]:
     return tuple(problem for problem in health(store).current_problems if problem not in _IGNORED_PROBLEMS)
 
 
-def _recover_dead(store: Store, task_id: str) -> list[dict[str, Any]]:
+def _recover_dead(store: Store, task_id: str, *, own_task: bool = True) -> list[dict[str, Any]]:
+    """Release what is provably dead for one task.
+
+    `own_task` is True only when the caller is about to drive `task_id` itself. A built-in stage row with no recorded owner
+    can then be fenced, because this runner is the one that would have started it. Sweeping other tasks (`own_task=False`) never
+    touches such a row: with no owner identity it could belong to a live sibling runner.
+    """
     recovered = [
         {"task_id": task_id, **action.to_dict()}
         for action in recover_stale(store, task_id)
         if action.action == "RELEASED"
     ]
-    recovered.extend(_recover_detached_builtin_executions(store, task_id))
+    recovered.extend(_recover_detached_builtin_executions(store, task_id, include_unidentified=own_task))
     return recovered
 
 
 def _recover_all_dead(store: Store) -> list[dict[str, Any]]:
     recovered: list[dict[str, Any]] = []
     for row in store.tasks():
-        recovered.extend(_recover_dead(store, str(row["id"])))
+        recovered.extend(_recover_dead(store, str(row["id"]), own_task=False))
     return recovered
 
 
-def _recover_detached_builtin_executions(store: Store, task_id: str) -> list[dict[str, Any]]:
-    """Terminalize orphaned built-in stage executions from a previous `continue` invocation.
+def _recover_detached_builtin_executions(store: Store, task_id: str, *, include_unidentified: bool = True) -> list[dict[str, Any]]:
+    """Terminalize built-in stage executions that have no owner identity (rows written before owners were recorded).
 
-    Provider implementation executions carry process identity and claims; those still go through the conservative stale-process
-    path. Built-in validation/review/integration runs execute inside the prior StageMesh process and have no child pid to inspect,
-    so a RUNNING row at the start of a fresh command is stale bookkeeping, not work we can wait on.
+    Built-in validation/review/integration runs execute inside a StageMesh process. Current code records that process as the
+    row's owner, so those rows take the conservative stale-process path (`recover_stale`) like provider executions: LIVE is left
+    alone and only a provably DEAD owner is failed. A row without any owner cannot be judged; it is fenced only for the task the
+    caller is about to drive (`include_unidentified`), never in a sweep across tasks, where it may belong to a live sibling runner.
     """
+    if not include_unidentified:
+        return []
     recovered: list[dict[str, Any]] = []
     for execution in [row for row in store.running_executions() if row["task_id"] == task_id]:
         kind = str(execution["kind"])
@@ -729,6 +738,7 @@ def run_ready(
         selection_info.update(selection.to_dict())
         _log_selection(selection, on_start)
         selected = selection.task_id
+        recovered.extend(_recover_dead(store, selected))  # this runner is about to drive it: an owner-less stage row is its own
         if store.get_task(selected)["status"] == TaskStatus.BLOCKED:
             raise RunReadyRefusal(
                 "task_blocked",

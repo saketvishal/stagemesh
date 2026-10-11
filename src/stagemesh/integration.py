@@ -9,6 +9,7 @@ from .domain import EvidenceKind, EvidenceStatus, ExecutionKind, ExecutionStatus
 from .git import GitWorkspace
 from .git_identity import attribution_offences
 from .persistence import Store
+from .process_identity import owner_execution_fields
 from .remediation import finding_identity
 from .review import independent_review_verified
 
@@ -36,6 +37,7 @@ class Integrator:
             kind=ExecutionKind.INTEGRATION,
             candidate_sha=candidate_sha,
             actor="stagemesh-integrator",
+            **owner_execution_fields(),
         )
         findings: list[dict[str, object]] = []
         payload: dict[str, object] = {

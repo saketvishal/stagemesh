@@ -10,6 +10,7 @@ from .contract_binding import contract_for_candidate
 from .contracts import ContractError, evaluate_contract
 from .domain import EvidenceKind, EvidenceStatus, ExecutionKind, ExecutionStatus
 from .persistence import Store
+from .process_identity import owner_execution_fields
 from .remediation import finding_identity
 
 
@@ -307,6 +308,7 @@ class Reviewer:
             kind=ExecutionKind.REVIEW,
             candidate_sha=candidate_sha,
             actor=self.provider_name,
+            **owner_execution_fields(),
         )
         reviewer_provider = self.provider_name
 
