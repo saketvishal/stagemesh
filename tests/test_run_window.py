@@ -401,22 +401,49 @@ def test_an_interrupt_during_the_window_still_writes_the_finished_journal_entry(
 # --- PR-mode safety and the report -----------------------------------------------------------------------------------------------
 
 
-def test_older_open_wave_prs_are_detected_across_runs_and_listed_in_merge_order(tmp_path: Path) -> None:
+def test_older_open_wave_prs_are_detected_across_runs_and_listed_in_merge_order(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     store, project, _rig, hooks, options, config, kwargs = window(tmp_path, ["1"])
     older = [
         {"number": 301, "headRefName": "wave/task-9", "title": "older", "url": "https://example.invalid/301"},
         {"number": 288, "headRefName": "wave/task-8", "title": "oldest", "url": "https://example.invalid/288"},
     ]
     kwargs["list_prs"] = lambda project: [*older, {"number": 302, "headRefName": "wave/task-1", "title": "task 1", "url": "https://example.invalid/pr/1"}]
+    monkeypatch.setattr(readiness, "merge_order", lambda project, prs: sorted(prs, key=lambda pr: pr["number"]))  # no git here: number order
 
     report = rw.run_window(store, project, config, options, hooks, base_ref="refs/heads/main", **kwargs)
 
-    assert [pr["number"] for pr in report.open_wave_prs] == [288, 301, 302]  # merge order: oldest first
+    assert [pr["number"] for pr in report.open_wave_prs] == [288, 301, 302]
     assert [pr["opened_this_window"] for pr in report.open_wave_prs] == [False, False, True]
     text = rw.format_window_report(report)
-    assert text.index("#288") < text.index("#301") < text.index("#302") and "(this window)" in text
+    assert text.index("1. #288") < text.index("2. #301") < text.index("3. #302") and "(this window)" in text
     assert report.next_command.startswith("review and merge the open wave PRs oldest first")
     assert any(entry for entry in report.readiness["attention"] if "open wave PR" in entry)
+
+
+def test_wave_prs_are_ordered_by_their_stack_not_by_pr_number(tmp_path: Path) -> None:
+    """Branches are stacked in integration order; PR numbers are assigned later, in task order, so they can disagree."""
+    from test_survivor_wave import _commit_on, _git, _with_origin
+
+    _store, project = make_store(tmp_path, ["1"])
+    _with_origin(tmp_path, project)
+    main_ref = _git(project, "symbolic-ref", "HEAD")
+    base = _git(project, "rev-parse", main_ref)
+    _git(project, "branch", "staging", base)
+    first = _commit_on(project, "refs/heads/staging", "w5")  # integrated first
+    second = _commit_on(project, "refs/heads/staging", "w4")
+    third = _commit_on(project, "refs/heads/staging", "w6")
+    for name, sha in (("wave/task-w5", first), ("wave/task-w4", second), ("wave/task-w6", third)):
+        _git(project, "push", "-q", "origin", f"{sha}:refs/heads/{name}")
+    _git(project, "fetch", "-q", "origin")
+    prs = [  # opened in task order, so PR numbers disagree with the stack
+        {"number": 297, "headRefName": "wave/task-w4"},
+        {"number": 298, "headRefName": "wave/task-w5"},
+        {"number": 299, "headRefName": "wave/task-w6"},
+    ]
+
+    ordered = readiness.merge_order(project, prs, base=f"origin/{main_ref.removeprefix('refs/heads/')}")
+
+    assert [pr["number"] for pr in ordered] == [298, 297, 299]
 
 
 def test_blocked_tasks_are_reported_with_the_reason_and_the_window_carries_on(tmp_path: Path) -> None:
