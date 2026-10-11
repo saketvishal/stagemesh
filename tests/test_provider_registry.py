@@ -140,9 +140,12 @@ def test_capacity_reports_balanced_policy_pools_and_skip_reasons(tmp_path: Path,
     data = json.loads(capsys.readouterr().out)
     assert data["active_provider_profile"] == "balanced"
     assert data["selection_policy"] == "least_recently_used"
+    assert data["recent_use"] == {IMPLEMENT: [], REVIEW: []}
+    assert data["provider_cooldowns"] == []
     assert data["stages"][IMPLEMENT]["pool"] == ["codex", "grok", "claude", "agy"]
     assert data["stages"][REVIEW]["pool"] == ["claude", "grok", "agy", "codex"]
     assert all("reason" in verdict for verdict in data["stages"][IMPLEMENT]["verdicts"])
+    assert all("recent_use" in provider for provider in data["providers"])
 
 def test_legacy_builtin_priority_config_is_normalized_to_round_robin(tmp_path: Path) -> None:
     project = _config(

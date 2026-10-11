@@ -1859,6 +1859,14 @@ def command_capacity(args: argparse.Namespace) -> int:
     )
     impl = pool.evaluate(store, IMPLEMENT, args.task)
     review = pool.evaluate(store, REVIEW, args.task, implementer=implementer)
+    recent_use = {
+        stage: [
+            {"provider": provider, "used_at": used_at}
+            for provider, used_at in pool.uses(store, stage)
+        ]
+        for stage in (IMPLEMENT, REVIEW)
+    }
+    cooldowns = _json_safe_cooldowns(active_cooldowns(store, config.provider_failure_cooldown_seconds))
     provider_rows = []
     for adapter in sorted(adapters, key=lambda item: item.name):
         capacity = adapter.check_capacity()
@@ -1870,6 +1878,17 @@ def command_capacity(args: argparse.Namespace) -> int:
                 "capacity": capacity,
                 "capabilities": sorted(adapter.capabilities),
                 "live_acceptance": "not_run",
+                "recent_use": {
+                    stage: next(
+                        (
+                            item
+                            for item in reversed(recent_use[stage])
+                            if item["provider"] == adapter.name
+                        ),
+                        None,
+                    )
+                    for stage in (IMPLEMENT, REVIEW)
+                },
             }
         )
     payload = {
@@ -1878,6 +1897,8 @@ def command_capacity(args: argparse.Namespace) -> int:
         "active_provider_profile": config.provider_profile,
         "selection_policy": config.provider_selection_policy,
         "pools": {stage: list(names) for stage, names in sorted(pools.items())},
+        "provider_cooldowns": cooldowns,
+        "recent_use": recent_use,
         "providers": provider_rows,
         "stages": {
             IMPLEMENT: {
@@ -1896,11 +1917,24 @@ def command_capacity(args: argparse.Namespace) -> int:
     if args.json:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
+    print(f"active provider profile: {config.provider_profile or '(default)'}")
+    print(f"selection policy: {config.provider_selection_policy}")
     for stage, stage_payload in payload["stages"].items():
         state = "available" if stage_payload["available"] else "unavailable"
         print(f"{stage}: {state}")
+        print(f"  pool: {', '.join(stage_payload['pool']) or '(empty)'}")
+        if recent_use[stage]:
+            last = recent_use[stage][-1]
+            print(f"  most recent use: {last['provider']} at {last['used_at']}")
+        else:
+            print("  most recent use: never")
         for verdict in stage_payload["verdicts"]:
             print(f"  {verdict['provider']}: {verdict['reason']}")
+    if cooldowns:
+        for line in format_cooldowns(cooldowns):
+            print(line)
+    else:
+        print("provider cooldowns: none")
     return 0
 
 def command_config(args: argparse.Namespace) -> int:
