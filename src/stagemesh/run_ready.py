@@ -446,12 +446,14 @@ def format_start(summary: RunSummary) -> str:
     return "\n".join(lines)
 
 
-def _attach_diagnosis(summary: RunSummary, store: Store, project: Path, task_id: str, coordinator: Coordinator) -> None:
+def _attach_diagnosis(
+    summary: RunSummary, store: Store, project: Path, task_id: str, coordinator: Coordinator | None
+) -> None:
     """Put the actionable diagnosis next to the stop reason; for a repeat-failure stop it replaces the generic message."""
     from .diagnosis import DIAGNOSIS_STOP_EVENT, diagnose
 
     try:
-        threshold = coordinator.diagnosis_policy.repeat_threshold
+        threshold = coordinator.diagnosis_policy.repeat_threshold if coordinator is not None else 2
         diagnosis = diagnose(store, task_id, project, threshold)
         if diagnosis is None:
             return
@@ -761,7 +763,7 @@ def run_ready(
                 "current_problems", f"health has current problems: {', '.join(problems)}", problems=list(problems)
             )
     except RunReadyRefusal as refusal:
-        return RunSummary(
+        refused = RunSummary(
             False,
             f"REFUSED:{refusal.reason}",
             message=refusal.message,
@@ -770,6 +772,10 @@ def run_ready(
             auto_plan=plan_info,
             selection=selection_info,
         )
+        if refusal.reason == "task_blocked" and refusal.detail.get("task_id"):
+            # the stored failure evidence (e.g. failed gate output) is still the operator's next-action context
+            _attach_diagnosis(refused, store, project, refusal.detail["task_id"], None)
+        return refused
 
     summary = RunSummary(True, "UNSET", task_id=selected, recovered=recovered, auto_plan=plan_info, selection=selection_info)
     try:
