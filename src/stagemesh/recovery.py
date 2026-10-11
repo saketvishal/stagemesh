@@ -29,6 +29,7 @@ from .git import GitError, GitWorkspace
 from .lifecycle import evidence_allows_advance
 from .operator_actions import OperatorActionError, _operator, task_details
 from .persistence import MAX_CANONICAL_CONTRACT_CHARS, Store
+from .redaction import redact_mapping
 from .remediation import latest_candidate_findings
 from .timing import format_task_summary, task_timing
 from .validation import Validator
@@ -262,8 +263,11 @@ def advance_baseline(
     from .autonomy.gitfacts import GitFacts
     from .autonomy.provenance import load_ownership, save_ownership, tracked_fingerprint
     from .workspace_guard import (
+        OWNER_FILE,
         _gitdir,
         _load_ledger,
+        _owner_is_active,
+        _read_json,
         record_supervised_move,
         unexpected_embedded_repositories,
     )
@@ -289,60 +293,75 @@ def advance_baseline(
 
     worktree = task_workspace(project, task_id)
     has_worktree = (worktree / ".git").exists()
+    if worktree.exists() and not has_worktree:
+        raise RecoveryRefusal("worktree_not_a_checkout", f"task {task_id}: {worktree} exists but is not a git checkout; not touching it (a fresh run would delete it)")
+    ledger: dict[str, Any] | None = None
     if has_worktree:
         if _worktree_quarantined(store, task_id):
             raise RecoveryRefusal("worktree_quarantined", f"task {task_id}: its worktree is quarantined by the supervisor; resolve that first")
+        gitdir = _gitdir(worktree)
         try:
-            _load_ledger(_gitdir(worktree))
+            ledger, _raw = _load_ledger(gitdir)
+            owner = _read_json(gitdir / OWNER_FILE)
         except ValueError as exc:
-            raise RecoveryRefusal("worktree_unreadable", f"task {task_id}: the worktree ledger is unreadable ({exc}); not resetting it") from exc
+            raise RecoveryRefusal("worktree_unreadable", f"task {task_id}: the worktree ownership record is unreadable ({exc}); not resetting it") from exc
+        if owner is not None and _owner_is_active(owner):
+            raise RecoveryRefusal("worktree_in_use", f"task {task_id}: its worktree is owned by a live execution ({owner.get('execution_id') or owner.get('claim_id')}); wait for it or run `stagemesh recover-stale --task {task_id}`")
         embedded = unexpected_embedded_repositories(worktree)
         if embedded:
             raise RecoveryRefusal("worktree_unpreservable", f"task {task_id}: worktree contains embedded repositories that cannot be preserved: {', '.join(embedded[:5])}")
 
-    # Preserve first: refs only add objects to the namespace, they never move or delete anything.
     key = _task_key(task_id)
     preserved: list[str] = []
+    snapshot_ref: str | None = None
     superseded = [str(row["sha"]) for row in store.conn.execute("SELECT sha FROM candidates WHERE task_id=? ORDER BY created_at, rowid", (task_id,))]
+    latest = store.latest_candidate(task_id)
+    ownership = load_ownership(store, task_id)
+    old_head: str | None = None
 
-    def preserve(sha: str) -> None:
+    def preserve(sha: str) -> str:
         ref_name = f"refs/stagemesh/preserved/{key}/{sha[:12]}"
         facts.ensure_ref(ref_name, sha)
         if ref_name not in preserved:
             preserved.append(ref_name)
+        return ref_name
 
-    old_head: str | None = None
-    if has_worktree:
+    # Nothing in the ledger has changed up to here. From now on only refs are added until the worktree is reset, and the one DB
+    # transaction at the end moves the baseline, the stage and the audit event together.
+    try:
+        if has_worktree:
+            work = GitFacts(worktree)
+            old_head = work.resolve("HEAD")
+            snapshot = work.snapshot_worktree(worktree, f"StageMesh: state of {task_id}'s worktree before its baseline advanced to {new_base[:7]}")
+            if snapshot:
+                snapshot_ref = preserve(snapshot)
+        for sha in superseded:
+            if facts.exists(sha):
+                preserve(sha)
+        if not has_worktree:
+            worktree = prepare_task_workspace(project, task_id)  # a worktree for a task that never had one starts at the target
         work = GitFacts(worktree)
-        old_head = work.resolve("HEAD")
-        snapshot = work.snapshot_worktree(worktree, f"StageMesh: state of {task_id}'s worktree before its baseline advanced to {new_base[:7]}")
-        if snapshot:
-            preserve(snapshot)
-    for sha in superseded:
-        if facts.exists(sha):
-            preserve(sha)
-
-    # Reset the idle worktree (creating one at the target when the task never had one), then move the ledger.
-    if not has_worktree:
-        worktree = prepare_task_workspace(project, task_id)
-    work = GitFacts(worktree)
-    work.git.run("reset", "--hard", new_base)
-    work.git.run("clean", "-fdq", check=False)
+        work.git.run("reset", "--hard", new_base)
+        work.git.run("clean", "-fdq", check=False)
+    except GitError as exc:
+        raise RecoveryRefusal("git_error", f"task {task_id}: git failed while preserving or resetting the worktree ({str(exc).strip()[:200]}); the ledger was not changed; preserved so far: {preserved}") from exc
     if work.resolve("HEAD") != new_base:
-        raise RecoveryRefusal("worktree_reset_failed", f"task {task_id}: worktree is not at {new_base[:12]} after reset; the ledger was not changed")
-    ownership = load_ownership(store, task_id)
-    previous = ownership.expected_head if ownership is not None else (old_head or new_base)
-    latest = store.latest_candidate(task_id)
+        raise RecoveryRefusal("worktree_reset_failed", f"task {task_id}: worktree is not at {new_base[:12]} after reset; the ledger was not changed; preserved: {preserved}")
+    # The operator reset is authorised and everything it replaces is preserved above, so the workspace ledger is rewritten from its own head.
+    previous = str(ledger["head"]) if ledger is not None else (ownership.expected_head if ownership is not None else (old_head or new_base))
     moved = record_supervised_move(project, task_id, previous, new_base, None if latest is None else str(latest["sha"]), require_same_dirty=False)
-    if moved and ownership is not None:
+    if not moved:
+        if old_head is not None:
+            work.git.run("reset", "--hard", old_head, check=False)
+        raise RecoveryRefusal(
+            "worktree_reset_unsafe",
+            f"task {task_id}: the reset left files StageMesh cannot reseal (ignored paths or embedded repositories); the worktree was put back on {str(old_head)[:12]} and the ledger was not changed; preserved: {preserved}",
+        )
+    if ownership is not None:
         from dataclasses import replace
 
         save_ownership(store, replace(ownership, expected_head=new_base, tracked_fingerprint=tracked_fingerprint(worktree)))
 
-    store.rebaseline_task(task_id, new_base, None)  # baseline + frozen contract baseline in one transaction; old bindings stay as history
-    unblocked = store.unblock_task(task_id) if task["status"] == TaskStatus.BLOCKED else False
-    store.advance_task(task_id, Stage.IMPLEMENT)
-    record_audit(store, "task.advance", {"task_id": task_id, "stage": Stage.IMPLEMENT, "reason": "operator advanced the task baseline"})
     payload: dict[str, Any] = {
         "task_id": task_id,
         "old_baseline": old_base,
@@ -352,16 +371,20 @@ def advance_baseline(
         "operator": _operator(),
         "operator_action": "ADVANCE_BASELINE",
         "preserved_refs": preserved,
+        "snapshot_ref": snapshot_ref,
         "superseded_candidates": superseded,
+        "previous_latest_candidate": None if latest is None else str(latest["sha"]),
         "worktree": str(worktree),
+        "old_worktree_head": old_head,
         "worktree_reset": True,
-        "ownership_rebound": bool(moved and ownership is not None),
-        "unblocked": unblocked,
+        "ownership_expected_head_before": None if ownership is None else ownership.expected_head,
+        "ledger_head_before": None if ledger is None else str(ledger["head"]),
         "previous_stage": str(task["stage"]),
+        "previous_status": str(task["status"]),
     }
-    record_audit(store, ADVANCE_EVENT, payload)
+    cleared = store.advance_task_baseline(task_id, new_base, redact_mapping(payload))
     current = store.get_task(task_id)
-    return {**payload, "stage": current["stage"], "status": current["status"]}
+    return {**payload, "remediations_cleared": cleared, "unblocked": task["status"] == TaskStatus.BLOCKED, "stage": current["stage"], "status": current["status"]}
 
 
 def auto_rebaseline_blocked_stale_baselines(

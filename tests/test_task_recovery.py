@@ -372,7 +372,7 @@ def test_advance_baseline_refuses_a_quarantined_worktree_until_it_is_reclaimed(t
     assert refused.value.code == "worktree_quarantined" and store.task_baseline(TASK) == old_base
     claim_workspace(store, TASK, run_path)  # re-claimed after the restore
     report = advance_baseline(store, project, TASK, yes=True)
-    assert report["old_baseline"] == old_base and report["ownership_rebound"] is True
+    assert report["old_baseline"] == old_base
     assert load_ownership(store, TASK).expected_head == head(project)  # the guard expects the new base, so the reset is not a foreign mutation
 
 
@@ -430,6 +430,82 @@ def test_advance_baseline_creates_the_worktree_at_the_target_when_the_task_never
     report = advance_baseline(store, project, TASK, yes=True)
     assert report["preserved_refs"] == [] and store.task_baseline(TASK) == head(project) != old_base
     assert GitWorkspace(prepare_task_workspace(project, TASK)).head() == head(project)
+
+
+def test_advance_baseline_refuses_unreadable_ownership_embedded_repos_and_non_checkouts_without_changing_anything(tmp_path: Path) -> None:
+    from stagemesh.workspace_guard import LEDGER_FILE, _gitdir
+    from stagemesh.workspaces import task_workspace
+
+    project, store, old_base, _, old_candidate, run_path = stale_worktree_task(tmp_path)
+    ledger = _gitdir(run_path) / LEDGER_FILE
+    ledger.write_text("{not json", encoding="utf-8")
+    with pytest.raises(RecoveryRefusal) as unreadable:
+        advance_baseline(store, project, TASK, yes=True)
+    assert unreadable.value.code == "worktree_unreadable"
+    ledger.unlink()
+    nested = run_path / "vendored"
+    nested.mkdir()
+    GitWorkspace(nested).init_if_needed()
+    (nested / "x.txt").write_text("x\n", encoding="utf-8")
+    GitWorkspace(nested).commit_all("nested")
+    with pytest.raises(RecoveryRefusal) as embedded:
+        advance_baseline(store, project, TASK, yes=True)
+    assert embedded.value.code == "worktree_unpreservable"
+    assert store.task_baseline(TASK) == old_base and GitWorkspace(run_path).head() == old_candidate and not events(store, "task.baseline_advanced")
+    assert not GitWorkspace(project).run("for-each-ref", "refs/stagemesh/preserved/").stdout.strip()  # nothing was preserved or reset either
+
+    (tmp_path / "other").mkdir()
+    other_project, other_store = _setup(tmp_path / "other", DOCS_CONTRACT)
+    other_store.set_task_baseline(TASK, head(other_project))
+    (other_project / "newer.txt").write_text("x\n", encoding="utf-8")
+    GitWorkspace(other_project).commit_all("main moved on")
+    leftover = task_workspace(other_project, TASK)
+    leftover.mkdir(parents=True)
+    (leftover / "notes.txt").write_text("not a checkout\n", encoding="utf-8")
+    with pytest.raises(RecoveryRefusal) as not_checkout:
+        advance_baseline(other_store, other_project, TASK, yes=True)
+    assert not_checkout.value.code == "worktree_not_a_checkout" and (leftover / "notes.txt").exists()
+
+
+def test_advance_baseline_refuses_a_live_worktree_owner(tmp_path: Path) -> None:
+    import os
+
+    from stagemesh.workspace_guard import OWNER_FILE, _gitdir
+
+    project, store, old_base, _, _, run_path = stale_worktree_task(tmp_path)
+    (_gitdir(run_path) / OWNER_FILE).write_text(json.dumps({"token": "t", "task_id": TASK, "pid": os.getpid(), "execution_id": "e1"}), encoding="utf-8")
+    with pytest.raises(RecoveryRefusal) as refused:
+        advance_baseline(store, project, TASK, yes=True)
+    assert refused.value.code == "worktree_in_use" and store.task_baseline(TASK) == old_base
+
+
+def test_advance_baseline_reseals_a_stale_workspace_ledger_instead_of_leaving_the_next_run_to_fail(tmp_path: Path) -> None:
+    from stagemesh.workspace_guard import LEDGER_FILE, _gitdir
+
+    project, store, old_base, new_base, old_candidate, run_path = stale_worktree_task(tmp_path)
+    ledger = _gitdir(run_path) / LEDGER_FILE
+    ledger.write_text(json.dumps({"head": old_base, "dirty": [], "dirty_count": 0, "dirty_digest": "", "candidate": None}), encoding="utf-8")
+    advance_baseline(store, project, TASK, yes=True)
+    assert json.loads(ledger.read_text(encoding="utf-8"))["head"] == new_base == GitWorkspace(run_path).head()
+
+
+def test_advance_baseline_records_recovery_evidence_and_moves_state_in_one_transaction(tmp_path: Path) -> None:
+    project, store, old_base, new_base, old_candidate, run_path = stale_worktree_task(tmp_path)
+    store.add_task_remediation(TASK, "VALIDATE", old_candidate)
+    with pytest.raises(TypeError):  # an audit payload that cannot be written rolls the whole move back
+        store.advance_task_baseline(TASK, new_base, {"task_id": TASK, "bad": object()})
+    assert store.task_baseline(TASK) == old_base and store.task_contract(TASK)["baseline_sha"] == old_base
+    assert (store.get_task(TASK)["stage"], store.get_task(TASK)["status"]) == (Stage.VALIDATE, TaskStatus.BLOCKED)
+    assert store.task_remediation_count(TASK, "VALIDATE") == 1 and not events(store, "task.baseline_advanced")
+
+    report = advance_baseline(store, project, TASK, yes=True)
+
+    (event,) = events(store, "task.baseline_advanced")
+    assert event["old_worktree_head"] == old_candidate and event["previous_latest_candidate"] == old_candidate
+    assert event["previous_stage"] == "VALIDATE" and event["previous_status"] == "BLOCKED" and event["remediations_cleared"] == 1
+    assert event["snapshot_ref"] is None or event["snapshot_ref"] in event["preserved_refs"]
+    assert report["remediations_cleared"] == 1 and report["unblocked"] is True
+    assert len(events(store, "task.advance")) >= 1 and store.task_remediation_count(TASK, "VALIDATE") == 0
 
 
 def test_advance_baseline_cli(tmp_path: Path) -> None:
