@@ -288,7 +288,7 @@ def test_the_report_has_per_task_status_baselines_candidates_and_pr_urls(tmp_pat
 
     text = format_report(report)
     assert "survivor wave: OK" in text and "orphan-recovery events: 0 -> 0" in text
-    assert "T-1: done (DONE/DONE)" in text and "T-2: open" in text
+    assert "T-1: done -> PR opened, ready for merge (OPEN) (DONE/DONE)" in text and "T-2: open" in text
     assert "PR: https://example.invalid/pr/T-1" in text
     assert text.count("baseline aaaaaaa") == 2  # before; the fake advancer does not rewrite the ledger
     data = json.loads(json.dumps(report.to_dict()))
@@ -356,3 +356,298 @@ def test_survivor_wave_command_reports_skips_without_running_anything(tmp_path: 
         "T-9": ("skipped", "no such task"),
     }
     assert cli_module.main(["--project", str(project), "survivor-wave", "--tasks", " ,", "--no-pr"]) == 2
+
+
+# --- integration modes, repo state and runtime freshness ----------------------------------------------------------------------------
+
+
+def _git(project: Path, *argv: str) -> str:
+    import subprocess as sp
+
+    proc = sp.run(["git", *argv], cwd=project, capture_output=True, text=True, check=True)
+    return proc.stdout.strip()
+
+
+def _commit(project: Path, name: str) -> str:
+    (project / name).write_text(name, encoding="utf-8")
+    _git(project, "add", "-A")
+    _git(project, "commit", "-q", "-m", name)
+    return _git(project, "rev-parse", "HEAD")
+
+
+def _with_origin(tmp_path: Path, project: Path) -> Path:
+    origin = tmp_path / "origin.git"
+    _git(tmp_path, "init", "-q", "--bare", str(origin))
+    _git(project, "remote", "add", "origin", str(origin))
+    _git(project, "push", "-q", "-u", "origin", "HEAD")
+    return origin
+
+
+def _main_ref(project: Path) -> str:
+    return _git(project, "symbolic-ref", "HEAD")
+
+
+def _commit_on(project: Path, ref: str, name: str) -> str:
+    """Add an empty-tree-changing commit on top of `ref` without touching the checkout."""
+    tip = _git(project, "rev-parse", ref)
+    tree = _git(project, "rev-parse", f"{tip}^{{tree}}")
+    sha = _git(project, "-c", "user.email=t@example.invalid", "-c", "user.name=t", "commit-tree", "-p", tip, "-m", name, tree)
+    _git(project, "update-ref", ref, sha, tip)
+    return sha
+
+
+class GitRig(Rig):
+    """A Rig whose `run_task` lands the finished task on `land_ref` the way a child `continue --integration-ref` would."""
+
+    def __init__(self, project: Path, land_ref: str, **kwargs):
+        super().__init__(project, **kwargs)
+        self.land_ref = land_ref
+        self.commits: dict[str, str] = {}
+
+    def run_task(self, task_id: str, max_steps: int) -> RunResult:
+        result = super().run_task(task_id, max_steps)
+        if result.stop_reason == "DONE" and task_id not in self.commits:
+            with self.lock:
+                self.commits[task_id] = _commit_on(self.project, self.land_ref, f"task {task_id}")
+        return result
+
+
+def test_pr_mode_lands_on_the_staging_ref_and_never_advances_local_main(tmp_path: Path) -> None:
+    from stagemesh.survivor_wave import STAGING_REF, git_repo_state, prepare_staging_ref
+
+    store, project = make_store(tmp_path, ["T-1", "T-2"])
+    _with_origin(tmp_path, project)
+    main_ref = _main_ref(project)
+    main_before = _git(project, "rev-parse", main_ref)
+    assert prepare_staging_ref(project, main_ref) == main_before and _git(project, "rev-parse", STAGING_REF) == main_before
+
+    rig = GitRig(project, STAGING_REF)
+    hooks = rig.hooks()
+    hooks.repo_state = git_repo_state(store, project, main_ref)
+    report = run_wave(store, ["T-1", "T-2"], hooks, concurrency=1, integration_mode="pr", staging_ref=STAGING_REF)
+
+    assert _git(project, "rev-parse", main_ref) == main_before  # local main did not move
+    assert _git(project, "rev-parse", STAGING_REF) == rig.commits["T-2"]  # the work is on the staging ref, stacked
+    assert report.main_moved is False and report.ok and report.repo_after.relation == "in_sync" and report.repo_after.ahead == 0
+    assert report.wave_state == "needs_pr_merges"
+    for task in report.tasks:
+        assert (task.landing, task.ready_for_merge, task.pr_state) == ("pr_opened", True, "OPEN")  # opened, not "landed"
+
+
+def test_pr_mode_flags_a_wave_that_moved_local_main_anyway(tmp_path: Path) -> None:
+    from stagemesh.survivor_wave import git_repo_state
+
+    store, project = make_store(tmp_path, ["T-1"])
+    _with_origin(tmp_path, project)
+    main_ref = _main_ref(project)
+    rig = GitRig(project, main_ref)  # a child that ignores the staging ref and lands on main
+    hooks = rig.hooks()
+    hooks.repo_state = git_repo_state(store, project, main_ref)
+
+    report = run_wave(store, ["T-1"], hooks, integration_mode="pr")
+
+    assert report.main_moved and report.integration_violation and report.ok is False
+    assert report.wave_state == "main_moved_unexpectedly" and report.repo_after.relation == "ahead"
+    text = format_report(report)
+    assert "LOCAL MAIN MOVED IN PR MODE" in text and "local main MOVED" in text
+
+
+def test_local_mode_is_explicit_moves_main_reports_it_and_opens_no_pr(tmp_path: Path) -> None:
+    from stagemesh.survivor_wave import git_repo_state
+
+    store, project = make_store(tmp_path, ["T-1"])
+    _with_origin(tmp_path, project)
+    main_ref = _main_ref(project)
+    main_before = _git(project, "rev-parse", main_ref)
+    rig = GitRig(project, main_ref)
+    hooks = rig.hooks()
+    hooks.repo_state = git_repo_state(store, project, main_ref)
+
+    report = run_wave(store, ["T-1"], hooks, integration_mode="local")
+
+    task = report.tasks[0]
+    assert rig.prs == [] and task.pr_url is None and task.ready_for_merge is False  # the PR is not a second integration path
+    assert task.landing == "locally_integrated" and report.main_moved and report.ok
+    assert report.wave_state == "local_main_advanced" and _git(project, "rev-parse", main_ref) != main_before
+    text = format_report(report)
+    assert "integration mode: local" in text and "local main MOVED" in text and "integrated into the local integration branch" in text
+    with pytest.raises(ValueError):
+        run_wave(store, ["T-1"], hooks, integration_mode="sideways")
+
+
+def test_cli_defaults_to_pr_mode_and_passes_the_staging_ref_to_the_child_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import subprocess as sp
+
+    from stagemesh import survivor_wave
+
+    parser = cli_module.build_parser()
+    assert parser.parse_args(["survivor-wave", "--tasks", "1"]).integration == "pr"
+    assert parser.parse_args(["survivor-wave", "--tasks", "1", "--integration", "local"]).integration == "local"
+    with pytest.raises(SystemExit):
+        parser.parse_args(["survivor-wave", "--tasks", "1", "--integration", "auto-merge"])
+
+    seen: list[list[str]] = []
+
+    def fake_run(argv, **kwargs):
+        seen.append(argv)
+        return sp.CompletedProcess([], 0, json.dumps({"stop_reason": "DONE"}), "")
+
+    monkeypatch.setattr(survivor_wave.subprocess, "run", fake_run)
+    survivor_wave.subprocess_task_runner(tmp_path, integration_ref=survivor_wave.STAGING_REF)("7", 3)
+    survivor_wave.subprocess_task_runner(tmp_path)("7", 3)
+
+    assert seen[0][-2:] == ["--integration-ref", "refs/heads/wave/staging"] and "--integration-ref" not in seen[1]
+    assert parser.parse_args(["continue", "--task", "7", "--integration-ref", "refs/heads/x"]).integration_ref == "refs/heads/x"
+
+
+def test_the_pr_branch_contains_the_candidate_commit_and_nothing_is_merged(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import subprocess as sp
+
+    from stagemesh import survivor_wave
+    from stagemesh.survivor_wave import (
+        STAGING_REF,
+        TaskRecord,
+        git_gh_pr_opener,
+        prepare_staging_ref,
+    )
+
+    _store, project = make_store(tmp_path, ["T-1"])
+    origin = _with_origin(tmp_path, project)
+    main_ref = _main_ref(project)
+    main_before = _git(project, "rev-parse", main_ref)
+    prepare_staging_ref(project, main_ref)
+    candidate = _commit_on(project, STAGING_REF, "feature")
+    gh_calls: list[list[str]] = []
+    real_run = sp.run
+
+    def fake_run(argv, **kwargs):
+        if argv[0] == "gh":
+            gh_calls.append(list(argv))
+            return sp.CompletedProcess(argv, 0, "https://example.invalid/pr/1\n", "")
+        return real_run(argv, **kwargs)
+
+    monkeypatch.setattr(survivor_wave.subprocess, "run", fake_run)
+    record = TaskRecord("T-1", title="the task", integrated_candidate=candidate)
+
+    url = git_gh_pr_opener(project, base=main_ref.removeprefix("refs/heads/"))(record)
+
+    assert url == "https://example.invalid/pr/1"
+    assert _git(project, "rev-parse", "refs/heads/wave/task-T-1") == candidate  # the PR branch is exactly the candidate
+    assert _git(origin, "rev-parse", "refs/heads/wave/task-T-1") == candidate  # and it was pushed
+    assert _git(project, "rev-parse", main_ref) == main_before and _git(origin, "rev-parse", main_ref) == main_before
+    assert [call[:3] for call in gh_calls] == [["gh", "pr", "create"]]  # create only: no merge call exists
+    assert not any(call[1:3] == ["pr", "merge"] or "--auto" in call for call in gh_calls)
+
+
+def test_staging_ref_is_created_kept_when_stacked_moved_when_merged_and_refused_when_diverged(tmp_path: Path) -> None:
+    from stagemesh.survivor_wave import STAGING_REF, prepare_staging_ref
+
+    _store, project = make_store(tmp_path, ["T-1"])
+    main_ref = _main_ref(project)
+    base = _git(project, "rev-parse", main_ref)
+
+    assert prepare_staging_ref(project, main_ref) == base  # absent: created at the base
+    stacked = _commit_on(project, STAGING_REF, "a")
+    assert prepare_staging_ref(project, main_ref) == stacked and _git(project, "rev-parse", STAGING_REF) == stacked  # earlier wave work kept
+    _git(project, "update-ref", main_ref, stacked, base)  # its PR got merged into main
+    _git(project, "update-ref", STAGING_REF, base)  # staging is now behind main
+    assert prepare_staging_ref(project, main_ref) == stacked  # a stale ref moves up; nothing is lost
+    _commit_on(project, STAGING_REF, "b")
+    _commit_on(project, main_ref, "c")  # main moves on its own: staging and main now diverge
+    staged = _git(project, "rev-parse", STAGING_REF)
+    with pytest.raises(RuntimeError, match="diverged"):
+        prepare_staging_ref(project, main_ref)
+    assert _git(project, "rev-parse", STAGING_REF) == staged  # refused, and not moved
+
+
+def test_stale_installed_runtime_is_detected_and_reported_not_silently_used(tmp_path: Path) -> None:
+    import subprocess as sp
+
+    from stagemesh.runtime_freshness import check_runtime
+
+    project = tmp_path / "proj"
+    (project / "src" / "stagemesh").mkdir(parents=True)
+    (project / "src" / "stagemesh" / "cli.py").write_text("", encoding="utf-8")
+    scripts = project / ".stagemesh" / "tooling" / "venv" / "Scripts"
+    scripts.mkdir(parents=True)
+    exe = scripts / "stagemesh.exe"
+    exe.write_text("", encoding="utf-8")
+    outputs = {"installed": "usage: stagemesh [-h] {init,status,worktrees}", "source": "usage: stagemesh [-h] {init,status,worktrees,survivor-wave}"}
+
+    def fake_run(argv, **kwargs):
+        return sp.CompletedProcess(argv, 0, outputs["installed" if str(exe) == argv[0] else "source"], "")
+
+    from_source = str(project / "src" / "stagemesh" / "__init__.py")
+    stale = check_runtime(project, runner=fake_run, running_file=from_source)
+
+    assert stale.stale and stale.missing_from_installed == ["survivor-wave"] and stale.running_from_source
+    assert "stale" in stale.message and "lacks survivor-wave" in stale.message and "running from source" in stale.message
+    assert "PYTHONPATH=src" in stale.message and "pip install --upgrade" in stale.message  # says what to do; changes nothing itself
+    installed_copy = check_runtime(project, runner=fake_run, running_file=str(scripts / "site-packages" / "stagemesh" / "__init__.py"))
+    assert installed_copy.stale and installed_copy.running_from_source is False and "not from source" in installed_copy.message
+    outputs["installed"] = outputs["source"]
+    fresh = check_runtime(project, runner=fake_run, running_file=from_source)
+    assert fresh.stale is False and fresh.missing_from_installed == []
+
+
+def test_report_separates_orphan_events_cleanable_resumable_and_done_unmerged_worktrees(tmp_path: Path) -> None:
+    from stagemesh.survivor_wave import git_repo_state
+    from stagemesh.workspaces import _task_key, worktree_root
+
+    store, project = make_store(tmp_path, ["T-1", "T-2", "T-3"])
+    _with_origin(tmp_path, project)
+    main_ref = _main_ref(project)
+    root = worktree_root(project)
+    root.mkdir(parents=True, exist_ok=True)
+    store.advance_task("T-1", Stage.DONE)  # done and already in main -> cleanable
+    store.advance_task("T-2", Stage.DONE)  # done but only on a side commit -> waiting on a PR
+    for task_id in ("T-1", "T-2", "T-3"):  # T-3 stays OPEN -> resumable
+        _git(project, "worktree", "add", "-q", "--detach", str(root / _task_key(task_id)), "HEAD")
+    _git(root / _task_key("T-2"), "-c", "user.email=a@b.c", "-c", "user.name=n", "commit", "-q", "--allow-empty", "-m", "unmerged")
+    record_audit(store, ORPHAN_EVENT, {"task_id": "T-3"})
+
+    state = git_repo_state(store, project, main_ref)()
+
+    assert (state.cleanable_worktrees, state.done_unmerged_worktrees, state.resumable_worktrees) == (1, 1, 1)
+    assert state.running_executions == 0 and state.active_claims == 0
+    assert state.relation == "in_sync" and state.main_sha == state.origin_sha
+    assert sorted(path.name for path in root.iterdir()) == sorted(_task_key(t) for t in ("T-1", "T-2", "T-3"))  # read-only: nothing cleaned
+
+    rig = Rig(project, {"T-3": RunResult("MAX_STEPS", "stopped")})
+    hooks = rig.hooks()
+    hooks.repo_state = git_repo_state(store, project, main_ref)
+    report = run_wave(store, ["T-3"], hooks, open_prs=False)
+    data = report.to_dict()
+    assert data["orphan_events_before"] == 1 and data["repo_before"]["orphan_events"] == 1  # event count and worktree counts are separate
+    for key in ("active_claims", "running_executions", "cleanable_worktrees", "resumable_worktrees", "done_unmerged_worktrees", "ahead", "behind", "relation"):
+        assert key in data["repo_after"]
+    text = format_report(report)
+    assert "worktrees: cleanable 1 -> 1" in text and "none were cleaned" in text and "active claims: 0; running executions: 0" in text
+
+
+def test_hitting_the_step_cap_leaves_a_resumable_task_and_is_not_a_failure(tmp_path: Path) -> None:
+    store, project = make_store(tmp_path, ["T-1"])
+    rig = Rig(project, {"T-1": RunResult("MAX_STEPS", "stopped after 4 steps")})
+
+    report = run_wave(store, ["T-1"], rig.hooks())
+
+    task = report.tasks[0]
+    assert (task.outcome, task.resumable, task.stop_reason, task.final_status) == ("open", True, "MAX_STEPS", "OPEN")
+    assert report.ok and not report.stopped_early and rig.prs == [] and task.landing is None
+    assert not store.has_active_claim("T-1") and list(store.running_executions()) == []
+    assert "resumable: not a failure" in format_report(report)
+
+
+def test_the_wave_has_no_merge_path_in_code_or_cli() -> None:
+    import inspect
+
+    from stagemesh import survivor_wave
+
+    assert not any("merge" in name for name in survivor_wave.WaveHooks.__dataclass_fields__)
+    source = inspect.getsource(survivor_wave.git_gh_pr_opener)
+    assert '"merge"' not in source and "pr merge" not in source and "--auto" not in source
+    assert "push" in source and "--force" not in source
+    parser = cli_module.build_parser()
+    for flag in ("--merge", "--auto-merge", "--force"):
+        with pytest.raises(SystemExit):
+            parser.parse_args(["survivor-wave", "--tasks", "1", flag])

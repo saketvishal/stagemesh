@@ -20,6 +20,7 @@ from .autonomy.isolation import check_isolation
 from .autonomy.review_adapter import supervise_reviewer
 from .autonomy.supervisor import Supervisor
 from .autonomy.wiring import SUPERVISED_MIN_REFRESH_ATTEMPTS, load_settings
+from .blocked_recovery import can_auto_retry
 from .capacity import CapacityKind, CapacityRegistry, CapacityValidationError
 from .ci import CIValidationError, broken_future_feature_gate, default_gates
 from .ci_wait import decide_ci_wait
@@ -39,8 +40,6 @@ from .external_evidence import (
 )
 from .final_report import FinalReportValidationError, candidate_sha, render_final_report
 from .git import GitWorkspace
-from .blocked_recovery import can_auto_retry
-from .provider_cooldown import active_cooldowns, clear_cooldown, format_cooldowns
 from .git_identity import identity_report
 from .github import GitHubClient, UrlLibGitHubTransport
 from .github_acceptance import run_github_acceptance
@@ -73,6 +72,7 @@ from .provider_acceptance import (
     run_live_provider_smoke,
     run_provider_acceptance,
 )
+from .provider_cooldown import active_cooldowns, clear_cooldown, format_cooldowns
 from .provider_pool import (
     IMPLEMENT,
     REVIEW,
@@ -85,7 +85,14 @@ from .provider_pool import (
 from .providers import ProviderValidationError, adapters_from_config
 from .queue_run import QueueRunner
 from .queue_visibility import format_queue_control, queue_control_report
-from .recovery import RecoveryRefusal, advance_baseline, format_doctor, rebaseline_task, rebind_contract, task_doctor
+from .recovery import (
+    RecoveryRefusal,
+    advance_baseline,
+    format_doctor,
+    rebaseline_task,
+    rebind_contract,
+    task_doctor,
+)
 from .redaction import redact_command_secrets, redact_url_credentials
 from .registry import (
     GlobalRegistry,
@@ -406,7 +413,7 @@ def _build_coordinator(
             implementation_skipped=[v.to_dict() for v in impl_verdicts if not v.eligible],
             review_skipped=[v.to_dict() for v in review_verdicts if not v.eligible],
         )
-        integration_ref = config.integration_ref or _current_branch_ref(project)
+        integration_ref = getattr(args, "integration_ref", None) or config.integration_ref or _current_branch_ref(project)
         if integration_ref is None:
             print("no integration_ref configured and the project has no current branch", file=sys.stderr)
             raise _SetupError(2)
@@ -616,11 +623,17 @@ def command_survivor_wave(args: argparse.Namespace) -> int:
     from .autonomy.gitfacts import GitFacts
     from .baseline import resolve_integration_ref
     from .recovery import advance_baseline as advance_task_baseline
+    from .runtime_freshness import check_runtime
     from .survivor_wave import (
+        INTEGRATION_LOCAL,
+        STAGING_REF,
         WaveHooks,
         format_report,
+        gh_pr_state,
         git_gh_pr_opener,
+        git_repo_state,
         parse_task_ids,
+        prepare_staging_ref,
         run_wave,
         subprocess_task_runner,
     )
@@ -633,10 +646,28 @@ def command_survivor_wave(args: argparse.Namespace) -> int:
         print("--concurrency and --max-steps-per-task must be at least 1", file=sys.stderr)
         return 2
     project = Path(args.project).resolve()
+    local = args.integration == INTEGRATION_LOCAL
+    base_ref = resolve_integration_ref(project) or "HEAD"
+    if not local and not base_ref.startswith("refs/heads/"):
+        print(f"PR mode needs the integration branch to be a local branch ref, got {base_ref}; use --integration local or configure integration_ref", file=sys.stderr)
+        return 2
+    runtime = check_runtime(project)
+    if runtime.stale:
+        print(f"warning: {runtime.message}", file=sys.stderr)
     store = Store(db_path(project))
     store.migrate()
     facts = GitFacts(project)
-    ref = args.to or resolve_integration_ref(project) or "HEAD"
+    staging_ref: str | None = None
+    if not local:
+        try:
+            prepare_staging_ref(project, base_ref, STAGING_REF)
+        except RuntimeError as exc:
+            store.close()
+            print(f"survivor wave not started: {exc}", file=sys.stderr)
+            return 2
+        staging_ref = STAGING_REF
+    land_ref = base_ref if local else str(staging_ref)  # where finished work lands, and so what stale baselines are advanced to
+    ref = args.to or land_ref
 
     def advance(task_id: str) -> dict[str, object]:
         return advance_task_baseline(
@@ -644,11 +675,13 @@ def command_survivor_wave(args: argparse.Namespace) -> int:
         )
 
     hooks = WaveHooks(
-        run_task=subprocess_task_runner(project),
+        run_task=subprocess_task_runner(project, integration_ref=staging_ref),
         advance_baseline=advance,
-        open_pr=None if args.no_pr else git_gh_pr_opener(project, base=ref.removeprefix("refs/heads/")),
+        open_pr=None if args.no_pr or local else git_gh_pr_opener(project, base=base_ref.removeprefix("refs/heads/")),
         target_sha=lambda: facts.resolve(ref),
         is_ancestor=facts.is_ancestor,
+        repo_state=git_repo_state(store, project, base_ref),
+        pr_state=gh_pr_state(project),
     )
     try:
         report = run_wave(
@@ -660,9 +693,12 @@ def command_survivor_wave(args: argparse.Namespace) -> int:
             advance_baselines=not args.no_advance_baselines,
             open_prs=not args.no_pr,
             stop_on_blocked=args.stop_on_blocked,
+            integration_mode=args.integration,
+            staging_ref=staging_ref,
         )
     finally:
         store.close()
+    report.runtime = runtime.to_dict()
     payload = report.to_dict()
     if args.report:
         Path(args.report).write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
@@ -2745,9 +2781,16 @@ def build_parser() -> argparse.ArgumentParser:
     wave.add_argument("--tasks", required=True, help="Comma-separated task ids, e.g. 155,156,159")
     wave.add_argument("--concurrency", type=int, default=2, help="Tasks running at once (default 2)")
     wave.add_argument("--max-steps-per-task", type=int, default=12, help="Step budget for each task (default 12)")
-    wave.add_argument("--to", metavar="REF", help="Ref stale baselines are advanced to (default: the integration ref)")
+    wave.add_argument("--to", metavar="REF", help="Ref stale baselines are advanced to (default: where this wave lands work: wave/staging, or the integration branch in local mode)")
     wave.add_argument("--no-advance-baselines", action="store_true", help="Do not advance stale baselines")
-    wave.add_argument("--no-pr", action="store_true", help="Do not open a PR for tasks that reach DONE")
+    wave.add_argument(
+        "--integration",
+        choices=("pr", "local"),
+        default="pr",
+        help="pr (default): land work on the wave/staging branch, open a PR per DONE task, leave local main alone. "
+        "local: land work on the integration branch itself (local main moves), open no PRs",
+    )
+    wave.add_argument("--no-pr", action="store_true", help="Do not open a PR for tasks that reach DONE (PR mode: they stay on the wave/staging branch)")
     wave.add_argument("--stop-on-blocked", action="store_true", help="Stop starting tasks as soon as one is blocked")
     wave.add_argument("--report", metavar="PATH", help="Also write the JSON report to this file")
     wave.add_argument("--json", action="store_true")
@@ -2835,6 +2878,7 @@ def build_parser() -> argparse.ArgumentParser:
     cont.add_argument("--dry-run", action="store_true", help="Use FakeExecutor instead of a real provider")
     cont.add_argument("--task", dest="task", help="Run exactly one selected task id")
     cont.add_argument("--task-id", dest="task", help=argparse.SUPPRESS)
+    cont.add_argument("--integration-ref", dest="integration_ref", help=argparse.SUPPRESS)  # survivor-wave PR mode: land on the staging ref
     cont.set_defaults(func=command_continue)
     status = sub.add_parser("status")
     status.add_argument("--json", action="store_true")

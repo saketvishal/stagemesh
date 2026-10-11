@@ -1,8 +1,14 @@
 """Bounded survivor wave: run a chosen set of stuck or open tasks end to end with little operator hand-holding.
 
 For each task the wave (1) advances a stale baseline when that cannot discard useful progress, (2) runs the task through the normal
-`continue` loop with bounded concurrency, (3) records what happened, and (4) opens a PR for a task that reached DONE locally. It never
-merges a PR and never cleans a worktree.
+`continue` loop with bounded concurrency, (3) records what happened, and (4) publishes a task that reached DONE. It never merges a PR
+and never cleans a worktree.
+
+Integration is explicit. In PR mode (the default) the child runs integrate into a wave staging ref (`refs/heads/wave/staging`), never
+into the integration branch, so local `main` does not move; each DONE task is pushed to a `wave/task-N` branch and a PR is opened for a
+person to merge. In local mode the child runs integrate straight into the integration branch, local `main` moves, no PR is opened, and
+the report says so. The report also carries the repo state before and after (main versus origin, claims, running executions, worktree
+census) so it is obvious whether the wave left the repo ready, ahead, diverged or waiting on PR merges.
 
 The wave stops starting new work when two tasks hit the same infrastructure failure, when the orphan-recovery event count rises, or
 (with `stop_on_blocked`) when a task is blocked. A task blocked on unresolved review findings is marked as needing a decision and the
@@ -28,6 +34,11 @@ from .objective_roots import objective_root_reason
 from .persistence import Store
 
 ORPHAN_EVENT = "recovery.orphan_execution_failed"
+
+INTEGRATION_PR = "pr"
+INTEGRATION_LOCAL = "local"
+INTEGRATION_MODES = (INTEGRATION_PR, INTEGRATION_LOCAL)
+STAGING_REF = "refs/heads/wave/staging"
 
 # `continue` stop reasons that say the environment, not the task, is the problem.
 INFRASTRUCTURE_STOP_REASONS = frozenset({"CURRENT_PROBLEM", "TARGET_ERROR", "RUNNER_CRASH"})
@@ -68,8 +79,34 @@ class TaskRecord:
     reason: str = ""
     pr_url: str | None = None
     pr_error: str | None = None
+    pr_state: str | None = None  # OPEN | MERGED | CLOSED as GitHub reports it; None when no PR
+    landing: str | None = None  # pr_opened | pr_failed | staged_not_published | locally_integrated; None unless DONE
+    ready_for_merge: bool = False  # a PR is open and waiting for a person
+    resumable: bool = False  # stopped (e.g. at the step cap) with the task still OPEN: `continue` picks it up again
     integrated_candidate: str | None = None
     infrastructure_signature: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return dict(self.__dict__)
+
+
+@dataclass
+class RepoState:
+    """A read-only snapshot of what the wave could have changed. Taken before and after the wave."""
+
+    main_ref: str = ""
+    main_sha: str | None = None
+    origin_sha: str | None = None
+    ahead: int = 0
+    behind: int = 0
+    relation: str = "unknown"  # in_sync | ahead | behind | diverged | unknown
+    active_claims: int = 0
+    running_executions: int = 0
+    orphan_events: int = 0
+    cleanable_worktrees: int = 0  # task done and the worktree HEAD is already in the integration checkout: a sweep would remove it
+    done_unmerged_worktrees: int = 0  # task done but its work is not in the integration checkout yet (e.g. waiting on a PR)
+    resumable_worktrees: int = 0  # unfinished tasks: kept so a restart reuses them
+    other_worktrees: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return dict(self.__dict__)
@@ -84,10 +121,41 @@ class WaveReport:
     stop_reason: str | None = None
     started_at: float = 0.0
     finished_at: float = 0.0
+    integration_mode: str = INTEGRATION_PR
+    staging_ref: str | None = None
+    repo_before: RepoState | None = None
+    repo_after: RepoState | None = None
+    runtime: dict[str, Any] | None = None
+
+    @property
+    def main_moved(self) -> bool:
+        before, after = self.repo_before, self.repo_after
+        return bool(before and after and before.main_sha and after.main_sha and before.main_sha != after.main_sha)
+
+    @property
+    def integration_violation(self) -> bool:
+        """PR mode promises local main stays put; if it moved, the wave did not do what it said."""
+        return self.integration_mode == INTEGRATION_PR and self.main_moved
 
     @property
     def ok(self) -> bool:
-        return not self.stopped_early and self.orphan_events_after <= self.orphan_events_before
+        return not self.stopped_early and self.orphan_events_after <= self.orphan_events_before and not self.integration_violation
+
+    @property
+    def wave_state(self) -> str:
+        """Where the wave left the repo: ready | needs_pr_merges | local_main_advanced | ahead | diverged | main_moved_unexpectedly."""
+        after = self.repo_after
+        if after is not None and after.relation == "diverged":
+            return "diverged"
+        if self.integration_violation:
+            return "main_moved_unexpectedly"
+        if self.integration_mode == INTEGRATION_LOCAL and self.main_moved:
+            return "local_main_advanced"
+        if after is not None and after.ahead > 0:
+            return "ahead"
+        if any(task.ready_for_merge and task.pr_state != "MERGED" for task in self.tasks):
+            return "needs_pr_merges"
+        return "ready"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -96,6 +164,13 @@ class WaveReport:
             "stop_reason": self.stop_reason,
             "orphan_events_before": self.orphan_events_before,
             "orphan_events_after": self.orphan_events_after,
+            "integration_mode": self.integration_mode,
+            "staging_ref": self.staging_ref,
+            "main_moved": self.main_moved,
+            "wave_state": self.wave_state,
+            "repo_before": None if self.repo_before is None else self.repo_before.to_dict(),
+            "repo_after": None if self.repo_after is None else self.repo_after.to_dict(),
+            "runtime": self.runtime,
             "tasks": [task.to_dict() for task in self.tasks],
         }
 
@@ -109,6 +184,8 @@ class WaveHooks:
     open_pr: Callable[[TaskRecord], str] | None = None
     target_sha: Callable[[], str | None] = lambda: None
     is_ancestor: Callable[[str, str], bool] = lambda older, newer: False
+    repo_state: Callable[[], RepoState | None] = lambda: None
+    pr_state: Callable[[str], str | None] = lambda url: None
 
 
 def orphan_event_count(store: Store) -> int:
@@ -240,10 +317,21 @@ def run_wave(
     unblock_blocked: bool = True,
     open_prs: bool = True,
     stop_on_blocked: bool = False,
+    integration_mode: str = INTEGRATION_PR,
+    staging_ref: str | None = None,
     clock: Callable[[], float] = time.time,
 ) -> WaveReport:
     """Run `task_ids` with at most `concurrency` running at once. The store is only touched from the calling thread."""
-    report = WaveReport(started_at=clock(), orphan_events_before=orphan_event_count(store))
+    if integration_mode not in INTEGRATION_MODES:
+        raise ValueError(f"integration_mode must be one of {', '.join(INTEGRATION_MODES)}")
+    local = integration_mode == INTEGRATION_LOCAL
+    report = WaveReport(
+        started_at=clock(),
+        orphan_events_before=orphan_event_count(store),
+        integration_mode=integration_mode,
+        staging_ref=None if local else staging_ref,
+        repo_before=hooks.repo_state(),
+    )
     report.orphan_events_after = report.orphan_events_before
     eligible, skipped = select_eligible(store, task_ids)
     records = {task_id: TaskRecord(task_id, title=str((store.get_task(task_id) or {"title": ""})["title"])) for task_id in task_ids}
@@ -308,14 +396,28 @@ def run_wave(
         records[task_id].outcome, records[task_id].reason = "not_started", "wave stopped before this task started"
         _snapshot(store, records[task_id], report.started_at)
 
-    if open_prs and hooks.open_pr is not None:
-        for record in report.tasks:
-            if record.outcome == "done":
-                try:
-                    record.pr_url = hooks.open_pr(record)
-                except Exception as exc:  # noqa: BLE001 - a failed PR must not hide that the task is done
-                    record.pr_error = f"{type(exc).__name__}: {exc}"
+    publish = open_prs and hooks.open_pr is not None and not local  # local mode integrates into the branch itself; a PR would be a second path
+    for record in report.tasks:
+        record.resumable = record.outcome == "open"
+        if record.outcome != "done":
+            continue
+        if local:
+            record.landing = "locally_integrated"
+        elif not publish:
+            record.landing = "staged_not_published"
+        else:
+            try:
+                record.pr_url = hooks.open_pr(record)  # type: ignore[misc]
+                record.landing, record.ready_for_merge = "pr_opened", True
+                record.pr_state = hooks.pr_state(record.pr_url) or "OPEN"
+            except Exception as exc:  # noqa: BLE001 - a failed PR must not hide that the task is done
+                record.pr_error = f"{type(exc).__name__}: {exc}"
+                record.landing = "pr_failed"
     report.orphan_events_after = orphan_event_count(store)
+    report.repo_after = hooks.repo_state()
+    for state, count in ((report.repo_before, report.orphan_events_before), (report.repo_after, report.orphan_events_after)):
+        if state is not None:
+            state.orphan_events = count
     if report.orphan_events_after > report.orphan_events_before and not report.stopped_early:
         report.stopped_early, report.stop_reason = True, "orphan-recovery events increased during the wave"
     report.finished_at = clock()
@@ -342,22 +444,63 @@ def _classify(store: Store, record: TaskRecord, result: RunResult) -> None:
 
 
 def format_report(report: WaveReport) -> str:
+    if report.ok:
+        verdict = "OK"
+    elif report.integration_violation:
+        verdict = "LOCAL MAIN MOVED IN PR MODE"
+    elif report.stopped_early:
+        verdict = "STOPPED"
+    else:
+        verdict = "ORPHAN EVENTS INCREASED"
     lines = [
-        f"survivor wave: {'OK' if report.ok else 'STOPPED' if report.stopped_early else 'ORPHAN EVENTS INCREASED'}"
-        + (f" ({report.stop_reason})" if report.stop_reason else ""),
+        f"survivor wave: {verdict}" + (f" ({report.stop_reason})" if report.stop_reason else ""),
+        f"integration mode: {report.integration_mode}"
+        + (f" (staging {report.staging_ref}; local main is not advanced)" if report.integration_mode == INTEGRATION_PR and report.staging_ref else "")
+        + (" (integrates into the integration branch; local main moves; no PRs)" if report.integration_mode == INTEGRATION_LOCAL else ""),
+        f"repo state: {report.wave_state}",
         f"orphan-recovery events: {report.orphan_events_before} -> {report.orphan_events_after}",
     ]
+    if report.runtime and report.runtime.get("message"):
+        lines.append(f"runtime: {report.runtime['message']}")
+    before, after = report.repo_before, report.repo_after
+    if after is not None:
+        main = f"{after.main_ref or 'main'} {(after.main_sha or '-')[:7]} vs origin {(after.origin_sha or '-')[:7]}: {after.relation}"
+        main += f" (ahead {after.ahead}, behind {after.behind})"
+        if report.main_moved and before is not None:
+            main += f"; local main MOVED {(before.main_sha or '-')[:7]} -> {(after.main_sha or '-')[:7]}"
+        lines.append(f"local main: {main}")
+        lines.append(f"active claims: {after.active_claims}; running executions: {after.running_executions}")
+        lines.append(
+            "worktrees: "
+            + (f"cleanable {before.cleanable_worktrees} -> " if before is not None else "cleanable ")
+            + f"{after.cleanable_worktrees}; "
+            + (f"done, work not in main yet {before.done_unmerged_worktrees} -> " if before is not None else "done, work not in main yet ")
+            + f"{after.done_unmerged_worktrees}; "
+            + (f"resumable {before.resumable_worktrees} -> " if before is not None else "resumable ")
+            + f"{after.resumable_worktrees}; other {after.other_worktrees} (none were cleaned)"
+        )
     for task in report.tasks:
         base = "-" if task.baseline_before is None else task.baseline_before[:7]
         if task.baseline_after and task.baseline_after != task.baseline_before:
             base += f" -> {task.baseline_after[:7]}"
+        landing = ""
+        if task.landing == "pr_opened":
+            landing = f" -> PR opened, ready for merge ({task.pr_state or 'OPEN'})"
+        elif task.landing == "locally_integrated":
+            landing = " -> integrated into the local integration branch"
+        elif task.landing == "staged_not_published":
+            landing = " -> staged on the wave branch, no PR requested"
+        elif task.landing == "pr_failed":
+            landing = " -> PR not opened"
         lines.append(
-            f"  {task.task_id}: {task.outcome} ({task.final_stage}/{task.final_status}) baseline {base}; "
+            f"  {task.task_id}: {task.outcome}{landing} ({task.final_stage}/{task.final_status}) baseline {base}; "
             f"candidates {', '.join(sha[:7] for sha in task.candidates) or '-'}; validation {task.validation or '-'}, "
             f"review {task.review or '-'}, integration {task.integration or '-'}"
         )
         if task.reason:
             lines.append(f"      {task.reason}")
+        if task.resumable:
+            lines.append("      resumable: not a failure; `stagemesh continue --task " + task.task_id + "` picks it up")
         if task.pr_url:
             lines.append(f"      PR: {task.pr_url}")
         if task.pr_error:
@@ -368,13 +511,20 @@ def format_report(report: WaveReport) -> str:
 # --- real hooks -------------------------------------------------------------------------------------------------------------------
 
 
-def subprocess_task_runner(project: Path, *, python: str | None = None) -> Callable[[str, int], RunResult]:
-    """Run `continue --task N --json` in a child process, so each task gets its own connection and process identity."""
+def subprocess_task_runner(
+    project: Path, *, python: str | None = None, integration_ref: str | None = None
+) -> Callable[[str, int], RunResult]:
+    """Run `continue --task N --json` in a child process, so each task gets its own connection and process identity.
+
+    `integration_ref` overrides where the child lands finished work (PR mode passes the wave staging ref); None keeps the configured one.
+    """
     interpreter = python or sys.executable
     bootstrap = "import sys; from stagemesh.cli import main; sys.exit(main(sys.argv[1:]))"
 
     def run(task_id: str, max_steps: int) -> RunResult:
         argv = [interpreter, "-c", bootstrap, "--project", str(project), "continue", "--task", task_id, "--max-steps", str(max_steps), "--json"]
+        if integration_ref:
+            argv += ["--integration-ref", integration_ref]
         proc = subprocess.run(argv, capture_output=True, text=True, check=False)
         try:
             data = json.loads(proc.stdout)
@@ -426,3 +576,103 @@ def git_gh_pr_opener(project: Path, base: str = "main") -> Callable[[TaskRecord]
         return run("gh", "pr", "create", "--base", base, "--head", branch, "--title", f"{record.title} (task {record.task_id})", "--body", body)
 
     return open_pr
+
+
+# --- staging ref and read-only repo census ----------------------------------------------------------------------------------------
+
+
+def _git(project: Path, *argv: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(["git", *argv], cwd=project, capture_output=True, text=True, check=False)
+
+
+def _rev(project: Path, ref: str) -> str | None:
+    proc = _git(project, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}")
+    return proc.stdout.strip() if proc.returncode == 0 and proc.stdout.strip() else None
+
+
+def _is_ancestor(project: Path, older: str, newer: str) -> bool:
+    return _git(project, "merge-base", "--is-ancestor", older, newer).returncode == 0
+
+
+def prepare_staging_ref(project: Path, base_ref: str, staging_ref: str = STAGING_REF) -> str:
+    """Make `staging_ref` a safe place to land wave work and return its tip. Only ever moves the wave's own ref.
+
+    Absent: created at the base tip. Already contained in the base (merged or stale): moved up to the base tip, which loses nothing.
+    Ahead of the base (earlier wave work still waiting on its PRs): kept, so this wave stacks on it. Diverged from the base: refused,
+    because moving it would drop commits that are not in the base; the operator decides.
+    """
+    base = _rev(project, base_ref)
+    if base is None:
+        raise RuntimeError(f"integration base {base_ref} does not resolve")
+    current = _rev(project, staging_ref)
+    if current is None:
+        proc = _git(project, "update-ref", staging_ref, base, "0" * 40)
+    elif current == base or _is_ancestor(project, base, current):
+        return current
+    elif _is_ancestor(project, current, base):
+        proc = _git(project, "update-ref", staging_ref, base, current)
+    else:
+        raise RuntimeError(
+            f"{staging_ref} ({current[:7]}) has diverged from {base_ref} ({base[:7]}); not moving it because that would drop commits "
+            "that are not in the base. Merge or delete the old wave branch first."
+        )
+    if proc.returncode != 0:
+        raise RuntimeError(f"could not set {staging_ref}: {(proc.stderr or proc.stdout).strip()[-200:]}")
+    return _rev(project, staging_ref) or base
+
+
+def git_repo_state(store: Store, project: Path, base_ref: str, remote: str = "origin") -> Callable[[], RepoState]:
+    """A read-only census: it fetches nothing, creates no ref, removes no worktree and writes no audit event."""
+    from .workspaces import _GENERATION_DIR, _task_key, worktree_root
+
+    branch = base_ref.removeprefix("refs/heads/")
+    short_main = branch
+
+    def worktree_census(state: RepoState) -> None:
+        root = worktree_root(project)
+        if not root.is_dir():
+            return
+        tasks = {_task_key(str(row["id"])): row for row in store.tasks()}
+        for entry in sorted(root.iterdir()):
+            if not entry.is_dir():
+                continue
+            row = tasks.get(entry.name.split("-g", 1)[0] if _GENERATION_DIR.match(entry.name) else entry.name)
+            if row is None:
+                state.other_worktrees += 1
+            elif not (row["status"] == TaskStatus.DONE or row["stage"] == Stage.DONE):
+                state.resumable_worktrees += 1
+            else:
+                head = _git(entry, "rev-parse", "HEAD").stdout.strip()
+                dirty = _git(entry, "status", "--porcelain", "--untracked-files=all").stdout.strip()
+                if not head or dirty:
+                    state.other_worktrees += 1
+                elif _is_ancestor(project, head, "HEAD"):
+                    state.cleanable_worktrees += 1
+                else:
+                    state.done_unmerged_worktrees += 1
+
+    def collect() -> RepoState:
+        state = RepoState(main_ref=short_main, main_sha=_rev(project, base_ref), origin_sha=_rev(project, f"refs/remotes/{remote}/{branch}"))
+        if state.main_sha and state.origin_sha:
+            counts = _git(project, "rev-list", "--left-right", "--count", f"{state.main_sha}...{state.origin_sha}").stdout.split()
+            if len(counts) == 2:
+                state.ahead, state.behind = int(counts[0]), int(counts[1])
+                state.relation = (
+                    "in_sync" if not (state.ahead or state.behind) else "ahead" if not state.behind else "behind" if not state.ahead else "diverged"
+                )
+        state.active_claims = int(store.conn.execute("SELECT COUNT(*) FROM claims WHERE active=1").fetchone()[0])
+        state.running_executions = len(list(store.running_executions()))
+        worktree_census(state)
+        return state
+
+    return collect
+
+
+def gh_pr_state(project: Path) -> Callable[[str], str | None]:
+    """The PR's state as GitHub reports it (OPEN, MERGED, CLOSED); None when it cannot be read."""
+
+    def state(url: str) -> str | None:
+        proc = subprocess.run(["gh", "pr", "view", url, "--json", "state", "--jq", ".state"], cwd=project, capture_output=True, text=True, check=False)
+        return proc.stdout.strip() or None if proc.returncode == 0 else None
+
+    return state
