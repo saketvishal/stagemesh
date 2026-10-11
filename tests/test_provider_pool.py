@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -437,6 +438,61 @@ def test_no_implementation_provider_available_lists_every_provider(tmp_path: Pat
     for provider in ("codex", "claude", "grok"):
         assert f"{provider}: cli_not_installed" in result.failure_reason
     assert rig.pool.preflight(rig.store)[0] is False
+
+
+def test_concurrent_implementation_tasks_reserve_different_providers(tmp_path: Path) -> None:
+    project = tmp_path / "repo"
+    project.mkdir()
+    db = tmp_path / "stagemesh.sqlite3"
+    store = Store(db)
+    store.migrate()
+    store.close()
+
+    selected: list[str] = []
+    errors: list[BaseException] = []
+    lock = threading.Lock()
+    barrier = threading.Barrier(2)
+
+    class WaitingAdapter(RuntimeCommandAdapter):
+        def check_capacity(self) -> str:
+            return CapacityKind.AVAILABLE
+
+        def execute(self, store: Store, task_id: str, claim_id: str | None, project: Path) -> ExecutionResult:
+            with lock:
+                selected.append(self.name)
+            barrier.wait(timeout=10)
+            return ExecutionResult(ExecutionStatus.SUCCEEDED, candidate_sha=f"{self.name}-{task_id}")
+
+    pool = ProviderPool(
+        [WaitingAdapter("codex", (sys.executable,)), WaitingAdapter("grok", (sys.executable,))],
+        {IMPLEMENT: ("codex", "grok"), REVIEW: ("codex", "grok")},
+        require_independent=False,
+        log=ProviderLog(echo=False),
+    )
+
+    def run(task_id: str) -> None:
+        task_store = Store(db)
+        task_store.migrate()
+        try:
+            result = PooledExecutor(pool).run(task_store, task_id, None, project)
+            assert result.status is ExecutionStatus.SUCCEEDED
+        except BaseException as exc:  # noqa: BLE001 - thread exceptions must fail the assertion below
+            errors.append(exc)
+        finally:
+            task_store.close()
+
+    threads = [threading.Thread(target=run, args=(task_id,)) for task_id in ("TASK-A", "TASK-B")]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=15)
+
+    assert not any(thread.is_alive() for thread in threads)
+    assert errors == []
+    assert sorted(selected) == ["codex", "grok"]
+    text = pool.log.lines
+    assert any("selected implementation provider codex" in line for line in text)
+    assert any("selected implementation provider grok" in line for line in text)
 
 
 def test_capacity_failure_cools_provider_across_tasks_for_the_same_stage(tmp_path: Path) -> None:

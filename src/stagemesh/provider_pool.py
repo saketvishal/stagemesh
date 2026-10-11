@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from fractions import Fraction
@@ -189,6 +190,8 @@ class ProviderPool:
         self.cooldown_seconds = cooldown_seconds
         self.log = log or ProviderLog()
         self.limiter = limiter  # set under parallel execution: per-provider slots and provider-wide cooldown
+        self._selection_lock = threading.Lock()
+        self._active_selections: dict[tuple[str, str], int] = {}
 
     def pool(self, stage: str) -> tuple[str, ...]:
         return self.pools.get(stage, ())
@@ -457,20 +460,56 @@ class ProviderPool:
             PROVIDER_USED_EVENT, {"task_id": task_id, "stage": stage, "provider": provider, "outcome": str(outcome)}
         )
 
+    def _active_selection_counts(self, stage: str) -> dict[str, int]:
+        return {name: count for (active_stage, name), count in self._active_selections.items() if active_stage == stage and count > 0}
+
+    def reserve_next(self, store: Store, stage: str, eligible: list[RuntimeCommandAdapter]) -> RuntimeCommandAdapter | None:
+        """Reserve the provider that should receive the next live attempt.
+
+        Provider history is only recorded after a provider answers. Under concurrent queue runs that leaves a race where
+        two fresh tasks can both choose the same first provider. This in-process reservation makes an in-flight selection
+        visible to the next task before the provider finishes.
+        """
+        with self._selection_lock:
+            ordered, reasons = self.order(store, stage, eligible, active_counts=self._active_selection_counts(stage))
+            if not ordered:
+                return None
+            chosen = ordered[0]
+            key = (stage, chosen.name)
+            self._active_selections[key] = self._active_selections.get(key, 0) + 1
+            for name, why in reasons.items():
+                self._reasons[(stage, name)] = why
+            return chosen
+
+    def release_reservation(self, stage: str, provider: str) -> None:
+        with self._selection_lock:
+            key = (stage, provider)
+            remaining = self._active_selections.get(key, 0) - 1
+            if remaining > 0:
+                self._active_selections[key] = remaining
+            else:
+                self._active_selections.pop(key, None)
+
     def order(
-        self, store: Store, stage: str, eligible: list[RuntimeCommandAdapter]
+        self,
+        store: Store,
+        stage: str,
+        eligible: list[RuntimeCommandAdapter],
+        active_counts: dict[str, int] | None = None,
     ) -> tuple[list[RuntimeCommandAdapter], dict[str, str]]:
         """Rank eligible providers by the selection policy; the first is tried first and the rest are the fallback chain."""
+        active_counts = active_counts or {}
         pool = list(self.pool(stage))
         index = {name: i for i, name in enumerate(pool)}
         base = sorted(eligible, key=lambda a: (self.priorities.get(a.name, DEFAULT_PRIORITY), index.get(a.name, len(pool))))
         reasons: dict[str, str] = {}
         if not base:
             return [], reasons
+        active_note = lambda a: f"{active_counts.get(a.name, 0)} active selection(s), " if active_counts.get(a.name, 0) else ""
         if self.policy == "priority":
-            ordered = base
+            ordered = sorted(base, key=lambda a: (active_counts.get(a.name, 0), self.priorities.get(a.name, DEFAULT_PRIORITY), index.get(a.name, len(pool))))
             for a in ordered:
-                reasons[a.name] = f"priority: priority {self.priorities.get(a.name, DEFAULT_PRIORITY)}, pool position {index.get(a.name, -1) + 1}"
+                reasons[a.name] = f"priority: {active_note(a)}priority {self.priorities.get(a.name, DEFAULT_PRIORITY)}, pool position {index.get(a.name, -1) + 1}"
             return ordered, reasons
         uses = self.uses(store, stage)
         if self.policy == "round_robin":
@@ -478,35 +517,35 @@ class ProviderPool:
             start = pool.index(last) + 1 if last in pool else 0
             cycle = pool[start:] + pool[:start]
             by_name = {a.name: a for a in base}
-            ordered = [by_name[n] for n in cycle if n in by_name]
+            ordered = sorted([by_name[n] for n in cycle if n in by_name], key=lambda a: active_counts.get(a.name, 0))
             for a in ordered:
                 reasons[a.name] = (
-                    f"round_robin: previous {stage} provider was {last}, next eligible in pool order"
+                    f"round_robin: {active_note(a)}previous {stage} provider was {last}, next eligible in pool order"
                     if last
-                    else "round_robin: first selection for this stage, pool order"
+                    else f"round_robin: {active_note(a)}first selection for this stage, pool order"
                 )
             return ordered, reasons
         if self.policy == "least_recently_used":
             last_use: dict[str, float] = {}
             for name, when in uses:
                 last_use[name] = when
-            ordered = sorted(base, key=lambda a: last_use.get(a.name, float("-inf")))
+            ordered = sorted(base, key=lambda a: (active_counts.get(a.name, 0), last_use.get(a.name, float("-inf"))))
             for a in ordered:
                 reasons[a.name] = (
-                    "least_recently_used: never used for this stage"
+                    f"least_recently_used: {active_note(a)}never used for this stage"
                     if a.name not in last_use
-                    else f"least_recently_used: last used {int(time.time() - last_use[a.name])}s ago"
+                    else f"least_recently_used: {active_note(a)}last used {int(time.time() - last_use[a.name])}s ago"
                 )
             return ordered, reasons
         counts: dict[str, int] = {}
         for name, _ in uses:
             counts[name] = counts.get(name, 0) + 1
         weight = lambda a: max(1, self.weights.get(a.name, 1))
-        score = lambda a: Fraction(counts.get(a.name, 0) + 1, weight(a))
+        score = lambda a: Fraction(counts.get(a.name, 0) + active_counts.get(a.name, 0) + 1, weight(a))
         ordered = sorted(base, key=score)  # stable: ties keep priority/pool order
         for a in ordered:
             reasons[a.name] = (
-                f"weighted: weight {weight(a)}, {counts.get(a.name, 0)} prior use(s), score {score(a)} (lowest score first)"
+                f"weighted: weight {weight(a)}, {counts.get(a.name, 0)} prior use(s), {active_counts.get(a.name, 0)} active selection(s), score {score(a)} (lowest score first)"
             )
         return ordered, reasons
 
@@ -711,41 +750,56 @@ class PooledExecutor(Executor):
         index = 0
         previous_name = ""
         while remaining:
-            adapter = remaining[0]
+            adapter = self.pool.reserve_next(store, IMPLEMENT, remaining)
+            if adapter is None:
+                break
+            reserved = adapter.name
             held: str | None = None
-            if limiter is not None:
-                # Wait for a free slot on any not-yet-tried provider, still honouring the policy order; a saturated preferred
-                # provider hands the task to the next one instead of being overloaded.
-                if not any(limiter.has_room(a.name) for a in remaining):
-                    log(f"  every provider is at capacity; waiting for a slot ({', '.join(a.name for a in remaining)})")
-                held = limiter.acquire([a.name for a in remaining])
-                if held is None:
-                    break  # every remaining provider went into cooldown while waiting
-                adapter = next(a for a in remaining if a.name == held)
-                if adapter is not remaining[0]:
-                    log(f"  provider {remaining[0].name} is at capacity -> using {adapter.name}")
-            remaining.remove(adapter)
-            if index:
-                verb = "made no progress" if reasons[-1].startswith(NO_IMPLEMENTATION_CHANGE) else "failed"
-                log(f"  fallback: {previous_name} {verb} ({reasons[-1]}) -> trying {adapter.name}")
-            log(
-                f"  selected implementation provider {adapter.name} ({self.pool.kind(adapter.name)}): "
-                f"{self.pool.why(IMPLEMENT, adapter.name, index == 0)}"
-            )
-            self.name = adapter.name
             try:
+                if limiter is not None and not limiter.has_room(adapter.name):
+                    self.pool.release_reservation(IMPLEMENT, reserved)
+                    reserved = ""
+                    adapter = remaining[0]
+                if limiter is not None:
+                    # Wait for a free slot on any not-yet-tried provider, still honouring the policy order; a saturated
+                    # preferred provider hands the task to the next one instead of being overloaded.
+                    if not any(limiter.has_room(a.name) for a in remaining):
+                        log(f"  every provider is at capacity; waiting for a slot ({', '.join(a.name for a in remaining)})")
+                    candidates = [adapter.name] if reserved else [a.name for a in remaining]
+                    held = limiter.acquire(candidates)
+                    if held is None:
+                        break  # every remaining provider went into cooldown while waiting
+                    adapter = next(a for a in remaining if a.name == held)
+                    if not reserved:
+                        reserved_adapter = self.pool.reserve_next(store, IMPLEMENT, [adapter])
+                        reserved = reserved_adapter.name if reserved_adapter is not None else ""
+                    if adapter is not remaining[0]:
+                        log(f"  provider {remaining[0].name} is at capacity -> using {adapter.name}")
+                remaining.remove(adapter)
+                if index:
+                    verb = "made no progress" if reasons[-1].startswith(NO_IMPLEMENTATION_CHANGE) else "failed"
+                    log(f"  fallback: {previous_name} {verb} ({reasons[-1]}) -> trying {adapter.name}")
+                log(
+                    f"  selected implementation provider {adapter.name} ({self.pool.kind(adapter.name)}): "
+                    f"{self.pool.why(IMPLEMENT, adapter.name, index == 0)}"
+                )
+                self.name = adapter.name
                 try:
-                    result = adapter.execute(store, task_id, claim_id, project)
-                except Exception as exc:  # noqa: BLE001 - one provider crashing must not stop the fallback chain
-                    reason = f"{type(exc).__name__}: {exc}"
-                    result = ExecutionResult(
-                        ExecutionStatus.FAILED,
-                        capacity_failure=not _is_workspace_mutation_reason(reason),
-                        failure_reason=reason,
-                    )
+                    try:
+                        result = adapter.execute(store, task_id, claim_id, project)
+                    except Exception as exc:  # noqa: BLE001 - one provider crashing must not stop the fallback chain
+                        reason = f"{type(exc).__name__}: {exc}"
+                        result = ExecutionResult(
+                            ExecutionStatus.FAILED,
+                            capacity_failure=not _is_workspace_mutation_reason(reason),
+                            failure_reason=reason,
+                        )
+                finally:
+                    if held is not None and limiter is not None:
+                        limiter.release(held)
             finally:
-                if held is not None and limiter is not None:
-                    limiter.release(held)
+                if reserved:
+                    self.pool.release_reservation(IMPLEMENT, reserved)
             previous_name = adapter.name
             index += 1
             if _is_workspace_mutation_reason(result.failure_reason):
