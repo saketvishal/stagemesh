@@ -310,6 +310,18 @@ findings, evidence or audit events, and write an audit event (`task.contract_reb
   operator, preserved refs and superseded candidates. The baseline move, the stage reset, the cleared remediation budget and the audit
   event are written in one database transaction.
 
+* `stagemesh survivor-wave --tasks 155,156,159 [--concurrency 2] [--max-steps-per-task 12] [--to REF] [--no-advance-baselines] [--no-pr]
+  [--stop-on-blocked] [--report PATH] [--json]` runs a chosen set of stuck or open tasks end to end. For each eligible task (it exists, is
+  not done, is not an objective root and has no claim or running execution) it unblocks a BLOCKED task, advances a stale baseline with
+  `advance-baseline` only when that cannot discard validated progress (a task whose latest candidate already passed validation keeps it;
+  integration refreshes it onto the new base), then runs `continue --task N` in a child process with at most `--concurrency` at once.
+  A task that reaches DONE locally gets a PR (`wave/task-<id>` pushed without force, then `gh pr create`); the wave never merges and
+  never cleans a worktree. Review failures are remediated by the normal loop. A task blocked with unresolved review findings is reported
+  as `blocked_needs_decision` and the others carry on (`--stop-on-blocked` stops instead). The wave stops starting tasks when two tasks
+  fail with the same infrastructure signature (for example `CURRENT_PROBLEM`, a runner crash, an external workspace mutation) or when
+  the `recovery.orphan_execution_failed` count rises, and exits 1. Tasks already running finish; nothing is killed. The report lists
+  per task baseline before/after, candidates touched, validation/review/integration results, PR URL and final status.
+
 `queue-run` auto-plans a task that has no contract with the same deterministic path as `continue` (log line
 `task <id>: auto-planned contract ...`), and still refuses it when no safe bounded contract can be derived or with `--no-auto-plan`.
 
