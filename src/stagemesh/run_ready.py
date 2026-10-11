@@ -852,7 +852,8 @@ def drive_task(
             break
     else:
         summary.stop_reason, summary.message = "MAX_STEPS", f"stopped after {max_steps} steps"
-    if should_stop is not None and should_stop() and summary.stop_reason != "DONE":
+    if should_stop is not None and should_stop() and summary.stop_reason not in {"DONE", "BLOCKED"}:
         # A provider killed by the interrupt reports a failure; that is the interrupt, not a verdict on the task.
+        # A task that already finished or was blocked keeps its own outcome and reason.
         summary.stop_reason, summary.message = "INTERRUPTED", "the run was interrupted; claims were released and the worktree kept"
     summary.final = _snapshot(store, selected)

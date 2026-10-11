@@ -494,7 +494,9 @@ def test_stop_does_not_terminate_another_runners_live_execution(tmp_path: Path) 
         summary = runner.run()
 
         assert summary.stop_reason == "STOPPED"
-        assert outcomes(summary) == {"A": "DONE"}
+        # A asked for the terminate-stop itself, so it either finished its remaining ticks or was stopped cleanly.
+        assert outcomes(summary)["A"] in {"DONE", "STOPPED"}
+        assert set(outcomes(summary)) == {"A"}
         assert other.poll() is None
         assert rig.store.conn.execute("SELECT status FROM executions WHERE id=?", (other_execution,)).fetchone()["status"] == "RUNNING"
         assert rig.store.conn.execute("SELECT active FROM claims WHERE id=?", (other_claim,)).fetchone()["active"] == 1
