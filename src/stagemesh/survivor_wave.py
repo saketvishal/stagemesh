@@ -143,7 +143,7 @@ class WaveReport:
 
     @property
     def wave_state(self) -> str:
-        """Where the wave left the repo: ready | needs_pr_merges | local_main_advanced | ahead | diverged | main_moved_unexpectedly."""
+        """Where the wave left the repo: ready | needs_pr_merges | unpublished_work | local_main_advanced | ahead | diverged | main_moved_unexpectedly."""
         after = self.repo_after
         if after is not None and after.relation == "diverged":
             return "diverged"
@@ -155,6 +155,8 @@ class WaveReport:
             return "ahead"
         if any(task.ready_for_merge and task.pr_state != "MERGED" for task in self.tasks):
             return "needs_pr_merges"
+        if any(task.landing in ("staged_not_published", "pr_failed") for task in self.tasks):
+            return "unpublished_work"  # DONE work sits on the staging ref with no open PR
         return "ready"
 
     def to_dict(self) -> dict[str, Any]:
@@ -186,6 +188,14 @@ class WaveHooks:
     is_ancestor: Callable[[str, str], bool] = lambda older, newer: False
     repo_state: Callable[[], RepoState | None] = lambda: None
     pr_state: Callable[[str], str | None] = lambda url: None
+
+
+def _safe_state(hooks: WaveHooks) -> RepoState | None:
+    """The census is advice for the operator; a git or SQL hiccup in it must not sink a wave or lose its report."""
+    try:
+        return hooks.repo_state()
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def orphan_event_count(store: Store) -> int:
@@ -330,7 +340,7 @@ def run_wave(
         orphan_events_before=orphan_event_count(store),
         integration_mode=integration_mode,
         staging_ref=None if local else staging_ref,
-        repo_before=hooks.repo_state(),
+        repo_before=_safe_state(hooks),
     )
     report.orphan_events_after = report.orphan_events_before
     eligible, skipped = select_eligible(store, task_ids)
@@ -408,13 +418,18 @@ def run_wave(
         else:
             try:
                 record.pr_url = hooks.open_pr(record)  # type: ignore[misc]
-                record.landing, record.ready_for_merge = "pr_opened", True
-                record.pr_state = hooks.pr_state(record.pr_url) or "OPEN"
             except Exception as exc:  # noqa: BLE001 - a failed PR must not hide that the task is done
                 record.pr_error = f"{type(exc).__name__}: {exc}"
                 record.landing = "pr_failed"
+                continue
+            record.landing, record.ready_for_merge = "pr_opened", True
+            try:
+                record.pr_state = hooks.pr_state(record.pr_url)
+            except Exception:  # noqa: BLE001 - the PR exists; only its state is unknown
+                record.pr_state = None
+            record.pr_state = record.pr_state or "OPEN"
     report.orphan_events_after = orphan_event_count(store)
-    report.repo_after = hooks.repo_state()
+    report.repo_after = _safe_state(hooks)
     for state, count in ((report.repo_before, report.orphan_events_before), (report.repo_after, report.orphan_events_after)):
         if state is not None:
             state.orphan_events = count
@@ -646,7 +661,7 @@ def git_repo_state(store: Store, project: Path, base_ref: str, remote: str = "or
                 dirty = _git(entry, "status", "--porcelain", "--untracked-files=all").stdout.strip()
                 if not head or dirty:
                     state.other_worktrees += 1
-                elif _is_ancestor(project, head, "HEAD"):
+                elif _is_ancestor(project, head, base_ref):
                     state.cleanable_worktrees += 1
                 else:
                     state.done_unmerged_worktrees += 1

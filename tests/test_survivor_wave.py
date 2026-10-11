@@ -651,3 +651,48 @@ def test_the_wave_has_no_merge_path_in_code_or_cli() -> None:
     for flag in ("--merge", "--auto-merge", "--force"):
         with pytest.raises(SystemExit):
             parser.parse_args(["survivor-wave", "--tasks", "1", flag])
+
+
+def test_a_failing_pr_state_lookup_does_not_turn_an_opened_pr_into_a_failure(tmp_path: Path) -> None:
+    store, project = make_store(tmp_path, ["T-1"])
+    rig = Rig(project)
+    hooks = rig.hooks()
+    hooks.pr_state = lambda url: (_ for _ in ()).throw(OSError("gh timed out"))
+
+    report = run_wave(store, ["T-1"], hooks)
+
+    task = report.tasks[0]
+    assert (task.landing, task.ready_for_merge, task.pr_state, task.pr_error) == ("pr_opened", True, "OPEN", None)
+    assert report.wave_state == "needs_pr_merges"
+
+
+def test_a_broken_repo_census_does_not_sink_the_wave_or_lose_the_report(tmp_path: Path) -> None:
+    store, project = make_store(tmp_path, ["T-1"])
+    rig = Rig(project)
+    hooks = rig.hooks()
+    hooks.repo_state = lambda: (_ for _ in ()).throw(RuntimeError("git exploded"))
+
+    report = run_wave(store, ["T-1"], hooks)
+
+    assert report.tasks[0].outcome == "done" and report.repo_before is None and report.repo_after is None and report.ok
+    assert "repo state:" in format_report(report) and json.dumps(report.to_dict())
+
+
+def test_done_work_with_no_pr_is_not_reported_as_ready(tmp_path: Path) -> None:
+    store, project = make_store(tmp_path, ["T-1"])
+    rig = Rig(project)
+
+    report = run_wave(store, ["T-1"], rig.hooks(), open_prs=False)
+
+    assert report.tasks[0].landing == "staged_not_published" and report.wave_state == "unpublished_work"
+    assert rig.prs == []
+
+
+def test_the_installed_commands_are_read_from_the_subcommand_list_not_the_first_braces(tmp_path: Path) -> None:
+    import subprocess as sp
+
+    from stagemesh.runtime_freshness import _help_commands
+
+    text = "usage: stagemesh [-h] [--mode {a,b}] {init,status,survivor-wave} ..."
+
+    assert _help_commands(["x"], lambda argv, **kw: sp.CompletedProcess(argv, 0, text, "")) == ["init", "status", "survivor-wave"]

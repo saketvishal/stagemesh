@@ -20,7 +20,6 @@ from .autonomy.isolation import check_isolation
 from .autonomy.review_adapter import supervise_reviewer
 from .autonomy.supervisor import Supervisor
 from .autonomy.wiring import SUPERVISED_MIN_REFRESH_ATTEMPTS, load_settings
-from .blocked_recovery import can_auto_retry
 from .capacity import CapacityKind, CapacityRegistry, CapacityValidationError
 from .ci import CIValidationError, broken_future_feature_gate, default_gates
 from .ci_wait import decide_ci_wait
@@ -40,6 +39,8 @@ from .external_evidence import (
 )
 from .final_report import FinalReportValidationError, candidate_sha, render_final_report
 from .git import GitWorkspace
+from .blocked_recovery import can_auto_retry
+from .provider_cooldown import active_cooldowns, clear_cooldown, format_cooldowns
 from .git_identity import identity_report
 from .github import GitHubClient, UrlLibGitHubTransport
 from .github_acceptance import run_github_acceptance
@@ -72,7 +73,6 @@ from .provider_acceptance import (
     run_live_provider_smoke,
     run_provider_acceptance,
 )
-from .provider_cooldown import active_cooldowns, clear_cooldown, format_cooldowns
 from .provider_pool import (
     IMPLEMENT,
     REVIEW,
@@ -85,14 +85,7 @@ from .provider_pool import (
 from .providers import ProviderValidationError, adapters_from_config
 from .queue_run import QueueRunner
 from .queue_visibility import format_queue_control, queue_control_report
-from .recovery import (
-    RecoveryRefusal,
-    advance_baseline,
-    format_doctor,
-    rebaseline_task,
-    rebind_contract,
-    task_doctor,
-)
+from .recovery import RecoveryRefusal, advance_baseline, format_doctor, rebaseline_task, rebind_contract, task_doctor
 from .redaction import redact_command_secrets, redact_url_credentials
 from .registry import (
     GlobalRegistry,
@@ -647,9 +640,9 @@ def command_survivor_wave(args: argparse.Namespace) -> int:
         return 2
     project = Path(args.project).resolve()
     local = args.integration == INTEGRATION_LOCAL
-    base_ref = resolve_integration_ref(project) or "HEAD"
+    base_ref = resolve_integration_ref(project, load_config(project).integration_ref) or "HEAD"
     if not local and not base_ref.startswith("refs/heads/"):
-        print(f"PR mode needs the integration branch to be a local branch ref, got {base_ref}; use --integration local or configure integration_ref", file=sys.stderr)
+        print(f"PR mode needs the integration branch to be a local branch (refs/heads/...), got {base_ref}; check out a branch, set integration_ref in .stagemesh/config.json, or use --integration local", file=sys.stderr)
         return 2
     runtime = check_runtime(project)
     if runtime.stale:

@@ -51,11 +51,12 @@ def installed_cli_path(project: Path) -> Path | None:
 
 def _help_commands(argv: list[str], runner: Runner, env: dict[str, str] | None = None) -> list[str] | None:
     try:
-        proc = runner(argv, capture_output=True, text=True, check=False, timeout=60, env=env)
+        proc = runner(argv, capture_output=True, text=True, check=False, timeout=30, env=env)
     except (OSError, subprocess.SubprocessError):
         return None
-    match = _CHOICES.search((proc.stdout or "") + (proc.stderr or ""))
-    return sorted(match.group(1).split(",")) if match else None
+    groups = _CHOICES.findall((proc.stdout or "") + (proc.stderr or ""))
+    # argparse prints the subcommand list as `{a,b,c}`; an option metavar can also be braced, so take the longest group
+    return sorted(max(groups, key=len).split(",")) if groups else None
 
 
 def _python_for(cli: Path) -> str:
