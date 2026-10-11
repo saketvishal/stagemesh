@@ -515,3 +515,37 @@ def test_cli_rejects_a_bad_duration(tmp_path: Path, capsys: pytest.CaptureFixtur
 
     assert cli_module.main(["--project", str(project), "run-window", "--duration", "soon"]) == 2
     assert "duration must look like" in capsys.readouterr().err
+
+
+def test_pr_mode_refuses_to_start_unless_the_checkout_is_on_the_integration_branch(tmp_path: Path) -> None:
+    store, project, rig, hooks, options, config, kwargs = window(tmp_path, ["1"])
+
+    wrong = rw.run_window(store, project, config, options, hooks, base_ref="refs/heads/main", checkout_ref=lambda: "refs/heads/feature", **kwargs)
+
+    assert wrong.refused and rig.runs == []
+    assert "project checkout is on refs/heads/feature, not refs/heads/main" in wrong.stop_reason and "unmerged commits" in wrong.stop_reason
+    assert wrong.next_command == "git switch main"
+    detached = rw.run_window(store, project, config, options, hooks, base_ref="refs/heads/main", checkout_ref=lambda: None, **kwargs)
+    assert detached.refused and "a detached HEAD" in detached.stop_reason
+
+    right = rw.run_window(store, project, config, options, hooks, base_ref="refs/heads/main", checkout_ref=lambda: "refs/heads/main", **kwargs)
+    assert not right.refused and rig.runs == ["1"]
+
+
+def test_local_mode_does_not_need_the_checkout_on_the_integration_branch(tmp_path: Path) -> None:
+    store, project, rig, hooks, options, config, kwargs = window(tmp_path, ["1"], integration_mode="local")
+
+    report = rw.run_window(store, project, config, options, hooks, base_ref="refs/heads/main", checkout_ref=lambda: "refs/heads/feature", **kwargs)
+
+    assert not report.refused and rig.runs == ["1"]
+
+
+def test_survivor_wave_pr_mode_also_refuses_from_the_wrong_branch(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    store, project = make_store(tmp_path, ["1"])
+    store.close()
+    (project / ".stagemesh" / "config.json").write_text(json.dumps({"integration_ref": "other"}), encoding="utf-8")
+
+    code = cli_module.main(["--project", str(project), "survivor-wave", "--tasks", "1", "--no-pr"])
+
+    err = capsys.readouterr().err
+    assert code == 2 and "project checkout is on" in err and "not refs/heads/other" in err and "git switch other" in err

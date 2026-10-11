@@ -277,6 +277,7 @@ def preflight(
     provider_check: Callable[..., Check] = provider_pool_check,
     repo_state: Callable[[], Any] | None = None,
     recover: bool = True,
+    checkout_ref: Callable[[], str | None] | None = None,
 ) -> tuple[list[Check], list[dict[str, Any]]]:
     """Everything that must be true before unattended work starts. Returns (checks, executions auto-recovered)."""
     checks: list[Check] = []
@@ -326,6 +327,19 @@ def preflight(
     checks.append(Check("claims", claims == 0, "no active claims" if claims == 0 else f"{claims} active claim(s) with nothing running",
                         fix="stagemesh doctor; stagemesh recover-stale --task <id>"))
 
+    if options.integration_mode == INTEGRATION_PR and checkout_ref is not None:
+        # New task worktrees are created from the checkout's HEAD. On any other branch the task commits would be stacked on that
+        # branch's unmerged commits and the PR branches would carry them.
+        current = checkout_ref()
+        checks.append(
+            Check(
+                "checkout",
+                current == base_ref,
+                f"the project checkout is on {current or 'a detached HEAD'}"
+                + (f", not {base_ref}: task branches start from the checked-out commit, so PRs would carry its unmerged commits" if current != base_ref else f" ({base_ref})"),
+                fix=f"git switch {base_ref.removeprefix('refs/heads/')}",
+            )
+        )
     if options.integration_mode == INTEGRATION_PR:
         state = repo_state() if repo_state is not None else None
         if state is None:
@@ -386,6 +400,7 @@ def run_window(
     list_prs: PrLister | None = gh_open_wave_prs,
     provider_check: Callable[..., Check] = provider_pool_check,
     prepare_staging: Callable[[], object] | None = None,
+    checkout_ref: Callable[[], str | None] | None = None,
     clock: Callable[[], float] = time.time,
 ) -> WindowReport:
     local = options.integration_mode == INTEGRATION_LOCAL
@@ -393,7 +408,8 @@ def run_window(
     deadline = report.started_at + options.duration_seconds
 
     report.preflight, report.recovered = preflight(
-        store, project, config, options, base_ref=base_ref, runtime=runtime, provider_check=provider_check, repo_state=hooks.repo_state
+        store, project, config, options, base_ref=base_ref, runtime=runtime, provider_check=provider_check, repo_state=hooks.repo_state,
+        checkout_ref=checkout_ref,
     )
     if prepare_staging is not None and not local and all(check.ok or not check.fatal for check in report.preflight):
         try:

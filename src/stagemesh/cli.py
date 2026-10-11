@@ -757,7 +757,8 @@ def command_run_window(args: argparse.Namespace) -> int:
         )
         if args.plan:  # read-only: the same preflight (without recovering anything) and the same selection, nothing started
             checks, _ = preflight(
-                store, project, config, options, base_ref=base_ref, provider_check=provider_pool_check, repo_state=hooks.repo_state, recover=False
+                store, project, config, options, base_ref=base_ref, provider_check=provider_pool_check, repo_state=hooks.repo_state, recover=False,
+                checkout_ref=lambda: _current_branch_ref(project),
             )
             picked, skipped = planned_selection(store, options)
             payload = {
@@ -784,6 +785,7 @@ def command_run_window(args: argparse.Namespace) -> int:
             base_ref=base_ref,
             staging_ref=staging_ref,
             prepare_staging=None if local else (lambda: prepare_staging_ref(project, base_ref, STAGING_REF)),
+            checkout_ref=lambda: _current_branch_ref(project),
         )
     finally:
         store.close()
@@ -817,6 +819,14 @@ def command_survivor_wave(args: argparse.Namespace) -> int:
     runtime = check_runtime(project)
     if runtime.stale:
         print(f"warning: {runtime.message}", file=sys.stderr)
+    if not local and _current_branch_ref(project) != base_ref:
+        print(
+            f"survivor wave not started: the project checkout is on {_current_branch_ref(project) or 'a detached HEAD'}, not {base_ref}. "
+            "New task worktrees start from the checked-out commit, so PR branches would carry its unmerged commits. "
+            f"Run: git switch {base_ref.removeprefix('refs/heads/')}",
+            file=sys.stderr,
+        )
+        return 2
     store = Store(db_path(project))
     store.migrate()
     staging_ref: str | None = None
