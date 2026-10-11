@@ -127,7 +127,7 @@ def build_readiness(
             attention.append("work is in flight (running executions or active claims)")
 
     decisions = []
-    ledger = {"done": 0, "retired_closed": 0, "retired_ineligible": 0, "open": 0, "blocked": 0, "running": 0}
+    ledger = {"done": 0, "retired_closed": 0, "retired_operator": 0, "retired_ineligible": 0, "open": 0, "blocked": 0, "running": 0}
     live_tasks: list[dict[str, str]] = []
     for row in store.tasks():
         status = str(row["status"])
@@ -137,6 +137,9 @@ def build_readiness(
         reason = ""
         if row["source"] is not None:
             reason = str(store.source_state(str(row["source"]), str(row["source_id"])).get("retirement_reason") or "")
+        if not reason and row["source"] is not None and store.operator_retirement_reason(str(row["source"]), str(row["source_id"])):
+            ledger["retired_operator"] += 1  # retired through the audited store path (duplicate, already satisfied): history, not work
+            continue
         if reason == "source closed":  # closed upstream: history, not production work
             ledger["retired_closed"] += 1
             continue
@@ -258,6 +261,7 @@ def format_readiness(data: dict[str, Any]) -> list[str]:
     lines.append(
         f"ledger: {ledger['done']} done; {ledger['retired_closed']} retired (source closed); "
         f"{ledger['retired_ineligible']} parked (open upstream but not runnable); "
+        f"{ledger['retired_operator']} retired (audited, not work); "
         f"{ledger['open']} open, {ledger['blocked']} blocked, {ledger['running']} running = real work"
     )
     lines += [f"  {t['task_id']} {t['stage']}/{t['status']}: {t['title']}" for t in ledger["live_tasks"]]
