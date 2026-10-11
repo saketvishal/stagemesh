@@ -39,3 +39,11 @@ After merging, pull `main`; the next wave moves `wave/staging` up to it by itsel
 ## 4. Confirm: `stagemesh doctor` again
 
 Expect `operational readiness: READY` (or only the informational lines above).
+
+## If a run-window was interrupted
+
+`stagemesh doctor` shows `last run-window ...: INTERRUPTED` when a window started and never finished (crash, kill, power loss).
+
+Rerunning `stagemesh run-window` is safe because its preflight automatically recovers executions whose process is provably dead; executions that are LIVE are waited for, and executions with an unknown process identity fail closed and print the exact `stagemesh recover-stale --task <id> --release-unknown --execution <id> --reason ...` command to run after the operator has checked they are dead.
+
+Nobody should open the SQLite ledger by hand.
