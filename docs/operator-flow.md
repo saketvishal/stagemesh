@@ -7,7 +7,11 @@ PRs) unless `survivor-wave` reports a task as blocked and needs a decision.
 
 For unattended or production work use `stagemesh run-window` (bounded, preflighted, journaled; see [run-window.md](run-window.md)):
 
-    stagemesh run-window --duration 45m --concurrency 2 --max-steps-per-task 8 --integration pr
+    stagemesh run-window
+
+The defaults are safe: PR mode, 45m, concurrency 2, 8 steps per task, no auto-merge, and a report in
+`.stagemesh/reports/run-window/<timestamp>.json`. Override one thing at a time, e.g. `stagemesh run-window --concurrency 3`.
+The long form is equivalent: `stagemesh run-window --duration 45m --concurrency 2 --max-steps-per-task 8 --integration pr`.
 
 `stagemesh queue-run` is legacy/raw queue execution. It can start broad queue work, retry tasks and interrupt provider work outside
 those guards, so plain `queue-run` now refuses and points here. It only runs with an explicit `--legacy-unsafe`, and even then it does

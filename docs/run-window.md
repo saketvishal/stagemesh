@@ -10,11 +10,20 @@
 - **Safe PR integration:** Integrates finished work onto `wave/staging` and opens pull requests against `main` for completed tasks without moving local `main`.
 - **Never merges:** The command never merges PRs. Merging remains an explicit operator action.
 
+## Quick start
+
+    stagemesh run-window
+
+This is the whole command. It runs in PR mode for 45 minutes with concurrency 2 and 8 steps per task, never merges, does not clean
+up worktrees, closes no issues (only a PR merge does), and writes a report to `.stagemesh/reports/run-window/<timestamp>.json`
+(the directory is created for you). Preflight and stop rules are unchanged. Flags override only themselves, so
+`stagemesh run-window --concurrency 3` changes only the concurrency.
+
 ## Options
 
 | Option | Default | Description |
 | --- | --- | --- |
-| `--duration` | `2h` | Time budget for the window, e.g. `2h`, `90m`, `45s`, `1.5h`, or bare seconds. Running tasks finish within their step budget; nothing new starts after it. |
+| `--duration` | `45m` | Time budget for the window, e.g. `2h`, `90m`, `45s`, `1.5h`, or bare seconds. Running tasks finish within their step budget; nothing new starts after it. |
 | `--concurrency` | `2` | Number of tasks running concurrently. |
 | `--max-steps-per-task` | `8` | Step budget for each task. Tasks reaching this cap remain `OPEN` and marked `resumable`. |
 | `--max-tasks` | `10` | Maximum number of tasks to attempt during the window. |
@@ -24,7 +33,7 @@
 | `--strict-live` | Off | Release mode check: refuse to start unless providers have fresh passing live acceptance test results. |
 | `--allow-stale-runtime` | Off | Development bypass: allow starting even if the installed CLI runtime lacks commands present in source. |
 | `--plan` | Off | Read-only mode: run preflight checks and show which tasks would be picked or left alone without starting any work or recovering executions. |
-| `--report` | Auto-generated | Path to write the JSON report (defaults to `.stagemesh/reports/window-<timestamp>.json`). |
+| `--report` | Auto-generated | Path to write the JSON report (defaults to `.stagemesh/reports/run-window/<timestamp>.json`, created automatically). |
 
 ## Preflight Checks
 

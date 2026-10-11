@@ -734,7 +734,7 @@ def command_run_window(args: argparse.Namespace) -> int:
     if not local and not base_ref.startswith("refs/heads/"):
         print(f"PR mode needs the integration branch to be a local branch (refs/heads/...), got {base_ref}; use --integration local or set integration_ref", file=sys.stderr)
         return 2
-    report_path = Path(args.report) if args.report else runtime_dir(project) / "reports" / f"window-{datetime.now():%Y%m%d-%H%M%S}.json"
+    report_path = Path(args.report) if args.report else runtime_dir(project) / "reports" / "run-window" / f"{datetime.now():%Y%m%d-%H%M%S}.json"
     options = WindowOptions(
         duration_seconds=duration,
         concurrency=args.concurrency,
@@ -3011,8 +3011,10 @@ def build_parser() -> argparse.ArgumentParser:
     window = sub.add_parser(
         "run-window",
         help="Unattended bounded run: pick eligible tasks, run them in PR mode until the time budget, stop safely, print one report (never merges)",
+        description="Safe by default: plain `stagemesh run-window` runs in PR mode for 45m with concurrency 2 and 8 steps per task, "
+        "never merges, and keeps the normal preflight and stop rules. Any flag overrides only itself.",
     )
-    window.add_argument("--duration", default="2h", help="Time budget, e.g. 2h, 90m, 45s (default 2h). Running tasks finish; nothing new starts after it")
+    window.add_argument("--duration", default="45m", help="Time budget, e.g. 2h, 90m, 45s (default 45m). Running tasks finish; nothing new starts after it")
     window.add_argument("--concurrency", type=int, default=2, help="Tasks running at once (default 2)")
     window.add_argument("--max-steps-per-task", type=int, default=8, help="Step budget for each task (default 8)")
     window.add_argument("--max-tasks", type=int, default=10, help="Most tasks to attempt in one window (default 10)")
@@ -3023,7 +3025,7 @@ def build_parser() -> argparse.ArgumentParser:
     window.add_argument("--strict-live", action="store_true", help="Release mode: refuse to start unless providers have fresh passing live acceptance results")
     window.add_argument("--allow-stale-runtime", action="store_true", help="Start even though the installed CLI is stale (development only; reported in the output)")
     window.add_argument("--plan", action="store_true", help="Read-only: run the preflight checks and show what would be picked, start nothing")
-    window.add_argument("--report", metavar="PATH", help="Write the JSON report here (default: .stagemesh/reports/window-<time>.json)")
+    window.add_argument("--report", metavar="PATH", help="Write the JSON report here (default: .stagemesh/reports/run-window/<timestamp>.json, created automatically)")
     window.add_argument("--json", action="store_true")
     window.set_defaults(func=command_run_window)
     doctor_task = sub.add_parser("task-doctor", help="Read-only task summary: claims, candidate, baseline, contract, failures, findings, diagnosis, next command")
