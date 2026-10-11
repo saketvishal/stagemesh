@@ -7,6 +7,7 @@ from .contracts import ContractError, changed_files, evaluate_contract
 from .domain import EvidenceKind, EvidenceStatus, ExecutionKind, ExecutionStatus
 from .git import GitError
 from .persistence import Store
+from .process_identity import owner_execution_fields
 from .remediation import finding_identity
 from .validation_plan import derive_validation_plan, planned_contract
 
@@ -19,6 +20,7 @@ class Validator:
             kind=ExecutionKind.VALIDATION,
             candidate_sha=candidate_sha,
             actor="stagemesh-validator",
+            **owner_execution_fields(),
         )
         try:
             bound = contract_for_candidate(store, task_id, candidate_sha, project)

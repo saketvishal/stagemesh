@@ -25,6 +25,27 @@ def current_process_identity() -> ProcessIdentity:
     )
 
 
+def owner_identity() -> ProcessIdentity:
+    """Identity of the StageMesh process that is running a built-in stage (validation, review, integration) right now."""
+    observed = process_identity(os.getpid())
+    return observed if observed is not None else current_process_identity()
+
+
+def owner_execution_fields() -> dict[str, object]:
+    """`Store.start_execution` keyword arguments that record this process as the owner of a built-in stage execution.
+
+    Built-in stages run inside the StageMesh process, not in a child. Without an owner, another runner cannot tell a live sibling's
+    stage from a crashed one, so recovery must be able to prove the owner dead before it fails the row.
+    """
+    identity = owner_identity()
+    return {
+        "pid": identity.pid,
+        "process_create_time": identity.create_time,
+        "boot_id": identity.boot_id,
+        "executable": identity.executable,
+    }
+
+
 def popen_identity(proc: subprocess.Popen[str]) -> ProcessIdentity:
     """Capture the launched process's OS identity so it can be compared with a later observation."""
     observed = process_identity(proc.pid)
