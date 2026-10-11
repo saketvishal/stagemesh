@@ -18,6 +18,7 @@ from stagemesh.domain import ExecutionStatus
 from stagemesh.persistence import Store
 from stagemesh.process_identity import process_identity
 from stagemesh.provider_acceptance import (
+    DEFAULT_LIVE_ACCEPTANCE_TTL_SECONDS,
     LiveProviderSmokeResult,
     live_provider_readiness,
     record_live_provider_acceptance,
@@ -393,6 +394,68 @@ def test_live_provider_readiness_is_capability_specific_for_mixed_results(tmp_pa
     assert implementation_reason == "live_acceptance_passed"
     assert review_ready is False
     assert review_reason == "live_acceptance_failed: invalid_review_json"
+
+
+def test_live_provider_readiness_treats_old_passing_acceptance_as_stale(tmp_path: Path) -> None:
+    store = Store(tmp_path / "stagemesh.sqlite3")
+    store.migrate()
+    try:
+        payload = LiveProviderSmokeResult(
+            "PASS",
+            "smoke",
+            ExecutionStatus.SUCCEEDED,
+            "candidate-sha",
+            True,
+            False,
+            True,
+            True,
+            True,
+            True,
+            None,
+        ).to_payload()
+        payload["checked_at"] = time.time() - DEFAULT_LIVE_ACCEPTANCE_TTL_SECONDS - 1
+        store.add_audit_event("provider.live_acceptance", payload)
+
+        ready, reason = live_provider_readiness(store, "smoke", "review")
+    finally:
+        store.close()
+
+    assert ready is False
+    assert reason.startswith("live_acceptance_stale")
+    assert "provider-acceptance --live --provider smoke" in reason
+
+
+def test_capacity_strict_mode_fails_closed_on_stale_live_acceptance(tmp_path: Path) -> None:
+    project = _smoke_project(tmp_path)
+    store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+    store.migrate()
+    try:
+        payload = LiveProviderSmokeResult(
+            "PASS",
+            "smoke",
+            ExecutionStatus.SUCCEEDED,
+            "candidate-sha",
+            True,
+            False,
+            True,
+            True,
+            True,
+            True,
+            None,
+        ).to_payload()
+        payload["checked_at"] = time.time() - DEFAULT_LIVE_ACCEPTANCE_TTL_SECONDS - 1
+        store.add_audit_event("provider.live_acceptance", payload)
+    finally:
+        store.close()
+
+    default = _capacity_json(project)
+    strict = _capacity_json(project, "--require-live-acceptance")
+
+    assert _review_verdict(default)["eligible"] is True
+    strict_verdict = _review_verdict(strict)
+    assert strict_verdict["eligible"] is False
+    assert strict_verdict["reason"].startswith("live_acceptance_stale")
+    assert "provider-acceptance --live --provider smoke" in strict_verdict["reason"]
 
 
 def test_live_acceptance_keyword_is_only_passed_to_the_coordinator_builder_when_it_is_set() -> None:

@@ -22,6 +22,7 @@ from .routing import Provider, Router
 
 LIVE_PROVIDER_ACCEPTANCE_EVENT = "provider.live_acceptance"
 DEFAULT_LIVE_SMOKE_TIMEOUT_SECONDS = 30.0
+DEFAULT_LIVE_ACCEPTANCE_TTL_SECONDS = 7 * 24 * 60 * 60
 
 
 def provider_smoke_timeout_seconds(configured: float | None = None) -> float:
@@ -313,7 +314,17 @@ def live_provider_readiness(store: Store, provider: str, capability: str) -> tup
     if capability not in {"code", "review"} and payload.get("status") != "PASS":
         reason = str(payload.get("failure_reason") or "live_acceptance_failed")
         return False, f"live_acceptance_failed: {reason}"
+    if _live_acceptance_is_stale(payload):
+        return False, "live_acceptance_stale: run stagemesh provider-acceptance --live --provider " + provider
     return True, "live_acceptance_passed"
+
+
+def _live_acceptance_is_stale(payload: dict[str, Any], *, now: float | None = None) -> bool:
+    checked_at = payload.get("checked_at")
+    if not isinstance(checked_at, (int, float)):
+        return True
+    current = time.time() if now is None else now
+    return current - float(checked_at) > DEFAULT_LIVE_ACCEPTANCE_TTL_SECONDS
 
 
 def _latest_live_acceptance_payload(store: Store, provider: str) -> dict[str, Any] | None:

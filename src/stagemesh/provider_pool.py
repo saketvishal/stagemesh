@@ -122,6 +122,10 @@ def describe_verdicts(verdicts: list[Verdict]) -> str:
     return "; ".join(f"{v.provider}: {v.reason}" for v in verdicts) or "no providers configured"
 
 
+def _optional_live_acceptance_reason(reason: str) -> bool:
+    return reason.startswith("live_acceptance_unproven") or reason.startswith("live_acceptance_stale")
+
+
 def _capacity_reason(adapter: RuntimeCommandAdapter, capacity: str) -> str:
     executable = adapter.command[0] if adapter.command else ""
     if capacity == CapacityKind.UNKNOWN:
@@ -240,7 +244,7 @@ class ProviderPool:
                 elif (
                     self.require_live_acceptance
                     and (live := live_provider_readiness(store, name, capability))[0] is False
-                    and (self.block_unproven or not live[1].startswith("live_acceptance_unproven"))
+                    and (self.block_unproven or not _optional_live_acceptance_reason(live[1]))
                 ):
                     verdicts.append(Verdict(name, False, live[1]))
                 elif stage == REVIEW and self.require_independent and implementer and _same(adapter, implementer, implementer_adapter):
