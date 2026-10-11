@@ -17,6 +17,19 @@ PRs) unless `survivor-wave` reports a task as blocked and needs a decision.
 | `tasks needing a design decision` | These are blocked on review findings that were not resolved in the remediation budget. A person decides; the wave never retries them. |
 | `provider ... COOLING DOWN` | Wait for the reset or `stagemesh cooldown clear <provider>` once it has reset. "last recorded live check" shows whether a live acceptance run ever passed for that provider. |
 
+## If a run-window was interrupted
+
+`stagemesh doctor` reports `last run-window ...: INTERRUPTED` when a run window started but never finished because the process
+crashed, was killed, or the machine lost power. It is safe to rerun `stagemesh run-window`: its preflight automatically recovers
+executions whose process is provably dead.
+
+The preflight waits for executions that are still LIVE. If an execution has an unknown process identity, it fails closed and prints
+the exact command to run after an operator has checked that process is dead:
+
+    stagemesh recover-stale --task <id> --release-unknown --execution <id> --reason ...
+
+Do not open or edit the SQLite ledger by hand.
+
 ## 2. Run a wave: `stagemesh survivor-wave`
 
     stagemesh survivor-wave --tasks 155,156 --concurrency 2 --max-steps-per-task 8 --report wave.json
