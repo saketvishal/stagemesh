@@ -17,7 +17,7 @@ from .config import StageMeshConfig
 from .persistence import Store
 from .provider_acceptance import LIVE_PASSING, live_acceptance_status
 from .provider_cooldown import active_cooldowns
-from .providers import adapters_from_config
+from .providers import adapters_from_config, stage_command_summary
 from .runtime_freshness import RuntimeFreshness, check_runtime
 from .survivor_wave import blocked_needs_decision, git_repo_state
 
@@ -84,6 +84,10 @@ def build_readiness(
         except Exception as exc:  # noqa: BLE001 - an unreachable GitHub must not hide the rest of the report
             data["wave_prs"] = {"available": False, "reason": f"{type(exc).__name__}: {exc}", "prs": []}
 
+    try:
+        data["provider_stage_commands"] = {a.name: stage_command_summary(a) for a in sorted(adapters_from_config(config), key=lambda a: a.name)}
+    except Exception:  # noqa: BLE001 - a broken provider config is reported by `doctor` elsewhere
+        data["provider_stage_commands"] = {}
     base_ref = resolve_integration_ref(project, config.integration_ref) or ""
     census: dict[str, Any] | None = None
     if base_ref.startswith("refs/heads/"):
@@ -182,6 +186,13 @@ def format_readiness(data: dict[str, Any]) -> list[str]:
         lines.append(f"  run from source now: {runtime['run_from_source']} <command> ...")
         if runtime["reinstall"]:
             lines.append(f"  reinstall (not done automatically): {runtime['reinstall']}")
+    if data.get("provider_stage_commands"):
+        lines.append("provider commands (one logical provider; a stage override only changes what runs for that stage):")
+        for name, stages in data["provider_stage_commands"].items():
+            detail = "; ".join(
+                f"{stage} {info['executable']} [{info['source']}{'' if info['available'] else ', NOT FOUND'}]" for stage, info in stages.items()
+            )
+            lines.append(f"  {name}: {detail}")
     prs = data["wave_prs"]
     if not prs["available"]:
         lines.append(f"open wave PRs: not checked ({prs['reason']})")
