@@ -612,6 +612,67 @@ def command_advance_baseline(args: argparse.Namespace) -> int:
     return _repair_command(args, run)
 
 
+def command_survivor_wave(args: argparse.Namespace) -> int:
+    from .autonomy.gitfacts import GitFacts
+    from .baseline import resolve_integration_ref
+    from .recovery import advance_baseline as advance_task_baseline
+    from .survivor_wave import (
+        WaveHooks,
+        format_report,
+        git_gh_pr_opener,
+        parse_task_ids,
+        run_wave,
+        subprocess_task_runner,
+    )
+
+    task_ids = parse_task_ids(args.tasks)
+    if not task_ids:
+        print("--tasks needs at least one task id", file=sys.stderr)
+        return 2
+    if args.concurrency < 1 or args.max_steps_per_task < 1:
+        print("--concurrency and --max-steps-per-task must be at least 1", file=sys.stderr)
+        return 2
+    project = Path(args.project).resolve()
+    store = Store(db_path(project))
+    store.migrate()
+    facts = GitFacts(project)
+    ref = args.to or resolve_integration_ref(project) or "HEAD"
+
+    def advance(task_id: str) -> dict[str, object]:
+        return advance_task_baseline(
+            store, project, task_id, ref, reason=f"survivor wave: baseline moved to {ref}", yes=True
+        )
+
+    hooks = WaveHooks(
+        run_task=subprocess_task_runner(project),
+        advance_baseline=advance,
+        open_pr=None if args.no_pr else git_gh_pr_opener(project, base=ref.removeprefix("refs/heads/")),
+        target_sha=lambda: facts.resolve(ref),
+        is_ancestor=facts.is_ancestor,
+    )
+    try:
+        report = run_wave(
+            store,
+            task_ids,
+            hooks,
+            concurrency=args.concurrency,
+            max_steps=args.max_steps_per_task,
+            advance_baselines=not args.no_advance_baselines,
+            open_prs=not args.no_pr,
+            stop_on_blocked=args.stop_on_blocked,
+        )
+    finally:
+        store.close()
+    payload = report.to_dict()
+    if args.report:
+        Path(args.report).write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print(format_report(report))
+    return 0 if report.ok else 1
+
+
 def command_task_doctor(args: argparse.Namespace) -> int:
     def run(store, project):  # type: ignore[no-untyped-def]
         report = task_doctor(store, project, args.task, args.to, load_config(project).diagnosis.repeat_threshold)
@@ -2677,6 +2738,20 @@ def build_parser() -> argparse.ArgumentParser:
     advance.add_argument("--yes", action="store_true", help="Confirm: the task worktree is reset and IMPLEMENT restarts (required)")
     advance.add_argument("--json", action="store_true")
     advance.set_defaults(func=command_advance_baseline)
+    wave = sub.add_parser(
+        "survivor-wave",
+        help="Run a bounded set of stuck or open tasks end to end (advance stale baselines, bounded concurrency, open PRs; never merges)",
+    )
+    wave.add_argument("--tasks", required=True, help="Comma-separated task ids, e.g. 155,156,159")
+    wave.add_argument("--concurrency", type=int, default=2, help="Tasks running at once (default 2)")
+    wave.add_argument("--max-steps-per-task", type=int, default=12, help="Step budget for each task (default 12)")
+    wave.add_argument("--to", metavar="REF", help="Ref stale baselines are advanced to (default: the integration ref)")
+    wave.add_argument("--no-advance-baselines", action="store_true", help="Do not advance stale baselines")
+    wave.add_argument("--no-pr", action="store_true", help="Do not open a PR for tasks that reach DONE")
+    wave.add_argument("--stop-on-blocked", action="store_true", help="Stop starting tasks as soon as one is blocked")
+    wave.add_argument("--report", metavar="PATH", help="Also write the JSON report to this file")
+    wave.add_argument("--json", action="store_true")
+    wave.set_defaults(func=command_survivor_wave)
     doctor_task = sub.add_parser("task-doctor", help="Read-only task summary: claims, candidate, baseline, contract, failures, findings, diagnosis, next command")
     doctor_task.add_argument("--task", required=True)
     doctor_task.add_argument("--to", metavar="INTEGRATION_REF", help="Integration ref to compare the baseline with (default: configured ref or current branch)")
