@@ -46,6 +46,16 @@ def _source_version() -> str | None:
     return match.group(1) if match else None
 
 
+def _configured_version() -> str | None:
+    try:
+        import tomllib
+
+        version = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8")).get("project", {}).get("version")
+    except (OSError, ValueError):
+        return None
+    return version if isinstance(version, str) else None
+
+
 def _installed_version(py: Path) -> str | None:
     result = subprocess.run(
         [str(py), "-c", "import importlib.metadata as m; print(m.version('stagemesh'))"],
@@ -251,12 +261,13 @@ def main(argv: list[str] | None = None) -> int:
     py = _venv_python()
     _run(str(py), "-m", "pip", "install", "--upgrade", "pip")
     _run(str(py), "-m", "pip", "install", "--upgrade", f"{ROOT}[dev]")
-    source, installed_version = _source_version(), _installed_version(py)
-    if source and installed_version and source != installed_version:
-        raise SystemExit(
-            f"project-local runtime is stale: installed {installed_version}, repository source {source}; "
-            "rerun python scripts/bootstrap_stagemesh.py"
-        )
+    installed_version = _installed_version(py)
+    for label, expected in (("repository source", _source_version()), ("configured version", _configured_version())):
+        if expected and installed_version and expected != installed_version:
+            raise SystemExit(
+                f"project-local runtime is stale: installed {installed_version}, {label} {expected}; "
+                "rerun python scripts/bootstrap_stagemesh.py"
+            )
     installed = py.parent / _script_name()
     if not installed.exists():
         raise SystemExit(f"installed stagemesh entry point not found: {installed}")

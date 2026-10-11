@@ -168,17 +168,29 @@ def command_init(args: argparse.Namespace) -> int:
 
 def stale_runtime_warning(project: Path, installed_version: str = __version__) -> str | None:
     """Actionable warning when the repo source declares a different version than the running installed package."""
-    init = project / "src" / "stagemesh" / "__init__.py"
+    declared: list[tuple[str, str]] = []
     try:
-        match = re.search(r"^__version__\s*=\s*[\"']([^\"']+)[\"']", init.read_text(encoding="utf-8"), re.MULTILINE)
+        text = (project / "src" / "stagemesh" / "__init__.py").read_text(encoding="utf-8")
+        match = re.search(r"^__version__\s*=\s*[\"']([^\"']+)[\"']", text, re.MULTILINE)
+        if match:
+            declared.append(("repository source", match.group(1)))
     except OSError:
-        return None
-    if match is None or match.group(1) == installed_version:
-        return None
-    return (
-        f"project-local StageMesh runtime is stale: installed {installed_version}, repository source {match.group(1)}; "
-        "run `python scripts/bootstrap_stagemesh.py` to update it"
-    )
+        pass
+    try:
+        import tomllib
+
+        configured = tomllib.loads((project / "pyproject.toml").read_text(encoding="utf-8")).get("project", {}).get("version")
+        if isinstance(configured, str):
+            declared.append(("configured version", configured))
+    except (OSError, ValueError):
+        pass
+    for label, version in declared:
+        if version != installed_version:
+            return (
+                f"project-local StageMesh runtime is stale: installed {installed_version}, {label} {version}; "
+                "run `python scripts/bootstrap_stagemesh.py` to update it"
+            )
+    return None
 
 
 def command_doctor(args: argparse.Namespace) -> int:
