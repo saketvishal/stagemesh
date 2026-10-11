@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 import platform
 import shlex
@@ -1130,6 +1131,16 @@ def command_run_parallel(args: argparse.Namespace, *, queue: bool = False) -> in
 
     def make_coordinator(target: TargetSelection, task_store: Store, task_id: str) -> Coordinator:
         try:
+            build_kwargs: dict[str, object] = {"parallel": wiring}
+            if queue_live_acceptance is not None:
+                try:
+                    sig = inspect.signature(_build_coordinator)
+                    if "live_acceptance" in sig.parameters or any(
+                        p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+                    ):
+                        build_kwargs["live_acceptance"] = queue_live_acceptance
+                except (ValueError, TypeError):
+                    build_kwargs["live_acceptance"] = queue_live_acceptance
             coord, details = _build_coordinator(
                 args,
                 project,
@@ -1137,8 +1148,7 @@ def command_run_parallel(args: argparse.Namespace, *, queue: bool = False) -> in
                 task_store,
                 target,
                 task_provider_log(task_id),
-                parallel=wiring,
-                live_acceptance=queue_live_acceptance,
+                **build_kwargs,
             )
         except _SetupError as exc:
             raise SetupRefused(f"provider setup failed for task {task_id} (see stderr; exit {exc.code})") from exc
