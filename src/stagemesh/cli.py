@@ -670,24 +670,138 @@ def command_advance_baseline(args: argparse.Namespace) -> int:
     return _repair_command(args, run)
 
 
-def command_survivor_wave(args: argparse.Namespace) -> int:
+def _wave_hooks(project: Path, store: Store, *, base_ref: str, staging_ref: str | None, advance_ref: str, local: bool, no_pr: bool):
+    """The real hooks (child `continue` runs, baseline advance, PR opening, repo census, per-task safety checks) for a wave or window."""
     from .autonomy.gitfacts import GitFacts
-    from .baseline import resolve_integration_ref
     from .recovery import advance_baseline as advance_task_baseline
-    from .runtime_freshness import check_runtime
     from .survivor_wave import (
-        INTEGRATION_LOCAL,
-        STAGING_REF,
         WaveHooks,
-        format_report,
+        branch_tip,
         gh_pr_state,
         git_gh_pr_opener,
         git_repo_state,
-        parse_task_ids,
-        prepare_staging_ref,
-        run_wave,
+        store_leftover,
         subprocess_task_runner,
     )
+
+    facts = GitFacts(project)
+
+    def advance(task_id: str) -> dict[str, object]:
+        return advance_task_baseline(
+            store, project, task_id, advance_ref, reason=f"survivor wave: baseline moved to {advance_ref}", yes=True
+        )
+
+    return WaveHooks(
+        run_task=subprocess_task_runner(project, integration_ref=staging_ref),
+        advance_baseline=advance,
+        open_pr=None if no_pr or local else git_gh_pr_opener(project, base=base_ref.removeprefix("refs/heads/")),
+        target_sha=lambda: facts.resolve(advance_ref),
+        is_ancestor=facts.is_ancestor,
+        repo_state=git_repo_state(store, project, base_ref),
+        pr_state=gh_pr_state(project),
+        main_sha=branch_tip(project, base_ref),
+        leftover=store_leftover(store),
+    )
+
+
+def command_run_window(args: argparse.Namespace) -> int:
+    from datetime import datetime
+
+    from .baseline import resolve_integration_ref
+    from .run_window import (
+        WindowOptions,
+        format_window_report,
+        parse_duration,
+        planned_selection,
+        preflight,
+        provider_pool_check,
+        run_window,
+    )
+    from .survivor_wave import INTEGRATION_LOCAL, STAGING_REF, parse_task_ids, prepare_staging_ref
+
+    try:
+        duration = parse_duration(args.duration)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    if args.concurrency < 1 or args.max_steps_per_task < 1 or args.max_tasks < 1:
+        print("--concurrency, --max-steps-per-task and --max-tasks must be at least 1", file=sys.stderr)
+        return 2
+    project = Path(args.project).resolve()
+    config = load_config(project)
+    local = args.integration == INTEGRATION_LOCAL
+    base_ref = resolve_integration_ref(project, config.integration_ref) or "HEAD"
+    if not local and not base_ref.startswith("refs/heads/"):
+        print(f"PR mode needs the integration branch to be a local branch (refs/heads/...), got {base_ref}; use --integration local or set integration_ref", file=sys.stderr)
+        return 2
+    report_path = Path(args.report) if args.report else runtime_dir(project) / "reports" / f"window-{datetime.now():%Y%m%d-%H%M%S}.json"
+    options = WindowOptions(
+        duration_seconds=duration,
+        concurrency=args.concurrency,
+        max_steps_per_task=args.max_steps_per_task,
+        max_tasks=args.max_tasks,
+        integration_mode=args.integration,
+        open_prs=not args.no_pr,
+        advance_baselines=not args.no_advance_baselines,
+        strict_live=args.strict_live,
+        allow_stale_runtime=args.allow_stale_runtime,
+        tasks=parse_task_ids(args.tasks) if args.tasks else None,
+        report_path=report_path,
+    )
+    store = Store(db_path(project))
+    store.migrate()
+    try:
+        staging_ref = None if local else STAGING_REF
+        hooks = _wave_hooks(
+            project, store, base_ref=base_ref, staging_ref=staging_ref, advance_ref=base_ref if local else STAGING_REF, local=local, no_pr=args.no_pr
+        )
+        if args.plan:  # read-only: the same preflight (without recovering anything) and the same selection, nothing started
+            checks, _ = preflight(
+                store, project, config, options, base_ref=base_ref, provider_check=provider_pool_check, repo_state=hooks.repo_state, recover=False,
+                checkout_ref=lambda: _current_branch_ref(project),
+            )
+            picked, skipped = planned_selection(store, options)
+            payload = {
+                "preflight": [c.to_dict() for c in checks],
+                "would_run": picked,
+                "left_alone": skipped,
+                "ok": all(c.ok or not c.fatal for c in checks),
+            }
+            if args.json:
+                print(json.dumps(payload, indent=2, sort_keys=True))
+            else:
+                for c in checks:
+                    print(f"[{'ok' if c.ok else 'FAIL' if c.fatal else 'warn'}] {c.name}: {c.detail}")
+                print("would run: " + (", ".join(picked) or "nothing (no eligible work)"))
+                for task_id, reason in sorted(skipped.items()):
+                    print(f"left alone {task_id}: {reason}")
+            return 0 if payload["ok"] else 2
+        report = run_window(
+            store,
+            project,
+            config,
+            options,
+            hooks,
+            base_ref=base_ref,
+            staging_ref=staging_ref,
+            prepare_staging=None if local else (lambda: prepare_staging_ref(project, base_ref, STAGING_REF)),
+            checkout_ref=lambda: _current_branch_ref(project),
+        )
+    finally:
+        store.close()
+    if args.json:
+        print(json.dumps(report.to_dict(), indent=2, sort_keys=True, default=str))
+    else:
+        print(format_window_report(report))
+    if report.report_error:
+        print(f"report not written: {report.report_error}", file=sys.stderr)
+    return report.exit_code
+
+
+def command_survivor_wave(args: argparse.Namespace) -> int:
+    from .baseline import resolve_integration_ref
+    from .runtime_freshness import check_runtime
+    from .survivor_wave import INTEGRATION_LOCAL, STAGING_REF, format_report, parse_task_ids, prepare_staging_ref, run_wave
 
     task_ids = parse_task_ids(args.tasks)
     if not task_ids:
@@ -705,9 +819,16 @@ def command_survivor_wave(args: argparse.Namespace) -> int:
     runtime = check_runtime(project)
     if runtime.stale:
         print(f"warning: {runtime.message}", file=sys.stderr)
+    if not local and _current_branch_ref(project) != base_ref:
+        print(
+            f"survivor wave not started: the project checkout is on {_current_branch_ref(project) or 'a detached HEAD'}, not {base_ref}. "
+            "New task worktrees start from the checked-out commit, so PR branches would carry its unmerged commits. "
+            f"Run: git switch {base_ref.removeprefix('refs/heads/')}",
+            file=sys.stderr,
+        )
+        return 2
     store = Store(db_path(project))
     store.migrate()
-    facts = GitFacts(project)
     staging_ref: str | None = None
     if not local:
         try:
@@ -718,22 +839,7 @@ def command_survivor_wave(args: argparse.Namespace) -> int:
             return 2
         staging_ref = STAGING_REF
     land_ref = base_ref if local else str(staging_ref)  # where finished work lands, and so what stale baselines are advanced to
-    ref = args.to or land_ref
-
-    def advance(task_id: str) -> dict[str, object]:
-        return advance_task_baseline(
-            store, project, task_id, ref, reason=f"survivor wave: baseline moved to {ref}", yes=True
-        )
-
-    hooks = WaveHooks(
-        run_task=subprocess_task_runner(project, integration_ref=staging_ref),
-        advance_baseline=advance,
-        open_pr=None if args.no_pr or local else git_gh_pr_opener(project, base=base_ref.removeprefix("refs/heads/")),
-        target_sha=lambda: facts.resolve(ref),
-        is_ancestor=facts.is_ancestor,
-        repo_state=git_repo_state(store, project, base_ref),
-        pr_state=gh_pr_state(project),
-    )
+    hooks = _wave_hooks(project, store, base_ref=base_ref, staging_ref=staging_ref, advance_ref=args.to or land_ref, local=local, no_pr=args.no_pr)
     try:
         report = run_wave(
             store,
@@ -2879,6 +2985,24 @@ def build_parser() -> argparse.ArgumentParser:
     wave.add_argument("--report", metavar="PATH", help="Also write the JSON report to this file")
     wave.add_argument("--json", action="store_true")
     wave.set_defaults(func=command_survivor_wave)
+    window = sub.add_parser(
+        "run-window",
+        help="Unattended bounded run: pick eligible tasks, run them in PR mode until the time budget, stop safely, print one report (never merges)",
+    )
+    window.add_argument("--duration", default="2h", help="Time budget, e.g. 2h, 90m, 45s (default 2h). Running tasks finish; nothing new starts after it")
+    window.add_argument("--concurrency", type=int, default=2, help="Tasks running at once (default 2)")
+    window.add_argument("--max-steps-per-task", type=int, default=8, help="Step budget for each task (default 8)")
+    window.add_argument("--max-tasks", type=int, default=10, help="Most tasks to attempt in one window (default 10)")
+    window.add_argument("--tasks", help="Restrict the window to these comma-separated task ids (default: every eligible task)")
+    window.add_argument("--integration", choices=("pr", "local"), default="pr", help="pr (default, recommended unattended): work goes to wave/staging and PRs, local main stays put")
+    window.add_argument("--no-pr", action="store_true", help="Do not open PRs (PR mode: finished work stays on the staging branch)")
+    window.add_argument("--no-advance-baselines", action="store_true", help="Do not advance stale baselines")
+    window.add_argument("--strict-live", action="store_true", help="Release mode: refuse to start unless providers have fresh passing live acceptance results")
+    window.add_argument("--allow-stale-runtime", action="store_true", help="Start even though the installed CLI is stale (development only; reported in the output)")
+    window.add_argument("--plan", action="store_true", help="Read-only: run the preflight checks and show what would be picked, start nothing")
+    window.add_argument("--report", metavar="PATH", help="Write the JSON report here (default: .stagemesh/reports/window-<time>.json)")
+    window.add_argument("--json", action="store_true")
+    window.set_defaults(func=command_run_window)
     doctor_task = sub.add_parser("task-doctor", help="Read-only task summary: claims, candidate, baseline, contract, failures, findings, diagnosis, next command")
     doctor_task.add_argument("--task", required=True)
     doctor_task.add_argument("--to", metavar="INTEGRATION_REF", help="Integration ref to compare the baseline with (default: configured ref or current branch)")

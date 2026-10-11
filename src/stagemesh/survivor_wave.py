@@ -126,6 +126,7 @@ class WaveReport:
     repo_before: RepoState | None = None
     repo_after: RepoState | None = None
     runtime: dict[str, Any] | None = None
+    time_limit_reached: bool = False  # the deadline passed with tasks still unstarted: a clean stop, not a failure
 
     @property
     def main_moved(self) -> bool:
@@ -173,6 +174,7 @@ class WaveReport:
             "repo_before": None if self.repo_before is None else self.repo_before.to_dict(),
             "repo_after": None if self.repo_after is None else self.repo_after.to_dict(),
             "runtime": self.runtime,
+            "time_limit_reached": self.time_limit_reached,
             "tasks": [task.to_dict() for task in self.tasks],
         }
 
@@ -188,6 +190,10 @@ class WaveHooks:
     is_ancestor: Callable[[str, str], bool] = lambda older, newer: False
     repo_state: Callable[[], RepoState | None] = lambda: None
     pr_state: Callable[[str], str | None] = lambda url: None
+    # Cheap checks the wave runs after every task. main_sha: the integration branch tip (None = unknown). leftover: how many RUNNING
+    # executions and active claims a task still has after its runner exited (a provider process that was not cleaned up).
+    main_sha: Callable[[], str | None] = lambda: None
+    leftover: Callable[[str], tuple[int, int]] = lambda task_id: (0, 0)
 
 
 def _safe_state(hooks: WaveHooks) -> RepoState | None:
@@ -329,6 +335,7 @@ def run_wave(
     stop_on_blocked: bool = False,
     integration_mode: str = INTEGRATION_PR,
     staging_ref: str | None = None,
+    deadline: float | None = None,
     clock: Callable[[], float] = time.time,
 ) -> WaveReport:
     """Run `task_ids` with at most `concurrency` running at once. The store is only touched from the calling thread."""
@@ -343,6 +350,7 @@ def run_wave(
         repo_before=_safe_state(hooks),
     )
     report.orphan_events_after = report.orphan_events_before
+    main_before = hooks.main_sha() if not local else None
     eligible, skipped = select_eligible(store, task_ids)
     records = {task_id: TaskRecord(task_id, title=str((store.get_task(task_id) or {"title": ""})["title"])) for task_id in task_ids}
     for task_id, reason in skipped.items():
@@ -378,6 +386,9 @@ def run_wave(
     with ThreadPoolExecutor(max_workers=max(1, concurrency)) as pool:
         while pending or running:
             while pending and not stop and len(running) < max(1, concurrency):
+                if deadline is not None and clock() >= deadline:
+                    report.time_limit_reached = True
+                    break
                 task_id = pending.pop(0)
                 started_at[task_id] = clock()
                 running[pool.submit(hooks.run_task, task_id, max_steps)] = task_id
@@ -402,8 +413,20 @@ def run_wave(
                     halt(f"task {task_id} is blocked and the wave was asked to stop on blocked tasks")
                 if orphan_event_count(store) > report.orphan_events_before:
                     halt("orphan-recovery events increased during the wave")
+                running_left, claims_left = hooks.leftover(task_id)
+                if running_left or claims_left:
+                    record.outcome, record.reason = "infrastructure_failure", "execution or claim left behind after the runner exited"
+                    halt(
+                        f"provider process cleanup failure: task {task_id} still has {running_left} RUNNING execution(s) and "
+                        f"{claims_left} active claim(s) after its runner exited"
+                    )
+                if main_before is not None:
+                    main_now = hooks.main_sha()
+                    if main_now is not None and main_now != main_before:
+                        halt(f"local main moved in PR mode ({main_before[:7]} -> {main_now[:7]}) after task {task_id}")
     for task_id in pending:
-        records[task_id].outcome, records[task_id].reason = "not_started", "wave stopped before this task started"
+        why = "time budget reached before this task started" if report.time_limit_reached else "wave stopped before this task started"
+        records[task_id].outcome, records[task_id].reason = "not_started", why
         _snapshot(store, records[task_id], report.started_at)
 
     publish = open_prs and hooks.open_pr is not None and not local  # local mode integrates into the branch itself; a PR would be a second path
@@ -691,3 +714,18 @@ def gh_pr_state(project: Path) -> Callable[[str], str | None]:
         return proc.stdout.strip() or None if proc.returncode == 0 else None
 
     return state
+
+
+def branch_tip(project: Path, ref: str) -> Callable[[], str | None]:
+    """The commit a ref points at right now (None when it does not resolve). Cheap: one `git rev-parse`."""
+    return lambda: _rev(project, ref)
+
+
+def store_leftover(store: Store) -> Callable[[str], tuple[int, int]]:
+    """(RUNNING executions, active claims) a task still has: after its runner exited both must be zero."""
+
+    def leftover(task_id: str) -> tuple[int, int]:
+        running = sum(1 for row in store.running_executions() if str(row["task_id"]) == task_id)
+        return running, 1 if store.has_active_claim(task_id) else 0
+
+    return leftover
