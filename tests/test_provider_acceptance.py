@@ -393,3 +393,23 @@ def test_live_provider_readiness_is_capability_specific_for_mixed_results(tmp_pa
     assert implementation_reason == "live_acceptance_passed"
     assert review_ready is False
     assert review_reason == "live_acceptance_failed: invalid_review_json"
+
+
+def test_live_acceptance_keyword_is_only_passed_to_the_coordinator_builder_when_it_is_set() -> None:
+    # Regression: continue --parallel (live acceptance ignored) must call _build_coordinator exactly as before. A builder with the
+    # old signature (tests and wrappers substitute it) used to fail with "unexpected keyword argument 'live_acceptance'".
+    def old_signature_builder(args, project, config, store, target, log, parallel=None):
+        return ("built", parallel)
+
+    ignored = cli_module._live_acceptance_build_kwargs(cli_module._live_acceptance_mode(argparse.Namespace(), queue=False))
+    queue_default = cli_module._live_acceptance_build_kwargs(cli_module._live_acceptance_mode(argparse.Namespace(), queue=True))
+    strict = cli_module._live_acceptance_build_kwargs(
+        cli_module._live_acceptance_mode(argparse.Namespace(require_live_acceptance=True), queue=True)
+    )
+
+    assert ignored == {}
+    assert old_signature_builder(None, None, None, None, None, None, parallel="wiring", **ignored) == ("built", "wiring")
+    assert queue_default == {"live_acceptance": cli_module.LIVE_ACCEPTANCE_SKIP_FAILED}
+    assert strict == {"live_acceptance": cli_module.LIVE_ACCEPTANCE_REQUIRED}
+    with pytest.raises(TypeError):
+        old_signature_builder(None, None, None, None, None, None, parallel="wiring", **queue_default)  # only queue runs pass it

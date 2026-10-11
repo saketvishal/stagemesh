@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import inspect
 import json
 import platform
 import shlex
@@ -274,6 +273,11 @@ def _live_acceptance_mode(args: argparse.Namespace, *, queue: bool) -> str | Non
     if getattr(args, "require_live_acceptance", False):
         return LIVE_ACCEPTANCE_REQUIRED
     return LIVE_ACCEPTANCE_SKIP_FAILED if queue else None
+
+
+def _live_acceptance_build_kwargs(mode: str | None) -> dict[str, str]:
+    """Extra `_build_coordinator` keywords for live acceptance: none when it is ignored, so that path is called exactly as before."""
+    return {} if mode is None else {"live_acceptance": mode}
 
 
 def _build_coordinator(
@@ -1131,16 +1135,6 @@ def command_run_parallel(args: argparse.Namespace, *, queue: bool = False) -> in
 
     def make_coordinator(target: TargetSelection, task_store: Store, task_id: str) -> Coordinator:
         try:
-            build_kwargs: dict[str, object] = {"parallel": wiring}
-            if queue_live_acceptance is not None:
-                try:
-                    sig = inspect.signature(_build_coordinator)
-                    if "live_acceptance" in sig.parameters or any(
-                        p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
-                    ):
-                        build_kwargs["live_acceptance"] = queue_live_acceptance
-                except (ValueError, TypeError):
-                    build_kwargs["live_acceptance"] = queue_live_acceptance
             coord, details = _build_coordinator(
                 args,
                 project,
@@ -1148,7 +1142,8 @@ def command_run_parallel(args: argparse.Namespace, *, queue: bool = False) -> in
                 task_store,
                 target,
                 task_provider_log(task_id),
-                **build_kwargs,
+                parallel=wiring,
+                **_live_acceptance_build_kwargs(queue_live_acceptance),
             )
         except _SetupError as exc:
             raise SetupRefused(f"provider setup failed for task {task_id} (see stderr; exit {exc.code})") from exc
