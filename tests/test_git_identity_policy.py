@@ -303,3 +303,15 @@ def test_candidate_commits_and_snapshots_use_the_effective_approved_identity(tmp
     (worktree / "s.txt").write_text("snapshot\n", encoding="utf-8")
     snap = GitFacts(project).snapshot_worktree(worktree, "snapshot")
     assert _ident(worktree, snap) == (f"{OWNER[0]} <{OWNER[1]}>",) * 2
+
+
+def test_stale_runtime_warning_is_actionable_and_quiet_when_current(tmp_path) -> None:
+    from stagemesh.cli import stale_runtime_warning
+
+    pkg = tmp_path / "src" / "stagemesh"
+    pkg.mkdir(parents=True)
+    (pkg / "__init__.py").write_text('__version__ = "9.9.9"\n', encoding="utf-8")
+    warning = stale_runtime_warning(tmp_path, "0.1.0")
+    assert warning and "bootstrap_stagemesh.py" in warning and "9.9.9" in warning
+    assert stale_runtime_warning(tmp_path, "9.9.9") is None
+    assert stale_runtime_warning(tmp_path / "missing", "0.1.0") is None

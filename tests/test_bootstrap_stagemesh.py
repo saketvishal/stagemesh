@@ -110,3 +110,10 @@ def test_agy_unattended_requires_agy_provider(tmp_path: Path) -> None:
         assert "--agy-unattended requires --providers including agy" in str(exc)
     else:
         raise AssertionError("expected --agy-unattended without agy to fail")
+
+
+def test_source_version_reads_repo_package_version() -> None:
+    bootstrap = _load_bootstrap()
+    from stagemesh import __version__
+
+    assert bootstrap._source_version() == __version__

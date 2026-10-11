@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import platform
+import re
 import shlex
 import sys
 import threading
@@ -165,6 +166,21 @@ def command_init(args: argparse.Namespace) -> int:
     return 0
 
 
+def stale_runtime_warning(project: Path, installed_version: str = __version__) -> str | None:
+    """Actionable warning when the repo source declares a different version than the running installed package."""
+    init = project / "src" / "stagemesh" / "__init__.py"
+    try:
+        match = re.search(r"^__version__\s*=\s*[\"']([^\"']+)[\"']", init.read_text(encoding="utf-8"), re.MULTILINE)
+    except OSError:
+        return None
+    if match is None or match.group(1) == installed_version:
+        return None
+    return (
+        f"project-local StageMesh runtime is stale: installed {installed_version}, repository source {match.group(1)}; "
+        "run `python scripts/bootstrap_stagemesh.py` to update it"
+    )
+
+
 def command_doctor(args: argparse.Namespace) -> int:
     project = Path(args.project).resolve()
     config = load_config(project)
@@ -190,6 +206,9 @@ def command_doctor(args: argparse.Namespace) -> int:
         "git_identity": identity_report(project),
         "provider_cooldowns": _json_safe_cooldowns(active_cooldowns(store, config.provider_failure_cooldown_seconds)),
     }
+    stale = stale_runtime_warning(project)
+    if stale:
+        data["stale_runtime_warning"] = stale
     if args.json:
         print(json.dumps(data, indent=2, sort_keys=True))
         store.close()
@@ -213,6 +232,8 @@ def command_doctor(args: argparse.Namespace) -> int:
     print(f"backend: {backend.name}")
     print(f"backend available: {backend.available}")
     print(f"editable/development status: {'development' if 'site-packages' not in __file__ else 'installed'}")
+    if stale:
+        print(f"warning: {stale}")
     print(f"platform: {platform.platform()}")
     for line in format_cooldowns(active_cooldowns(store, config.provider_failure_cooldown_seconds)):
         print(line)
