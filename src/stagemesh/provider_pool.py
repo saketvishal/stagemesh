@@ -23,9 +23,20 @@ from .domain import ExecutionKind, ExecutionStatus
 from .execution import PROVIDER_TIMEOUT, ExecutionResult, Executor
 from .git import GitError, GitWorkspace
 from .persistence import Store
-from .provider_cooldown import NO_PROGRESS_THRESHOLD, REPEATED_NO_PROGRESS, cleared_at, no_progress_streak
+from .provider_acceptance import live_provider_readiness
+from .provider_cooldown import (
+    NO_PROGRESS_THRESHOLD,
+    REPEATED_NO_PROGRESS,
+    cleared_at,
+    no_progress_streak,
+)
 from .providers import RuntimeCommandAdapter
-from .review import INFRASTRUCTURE_FAILURE, VERDICT_REVIEW_INCOMPLETE, classify_review_response, parse_review_response
+from .review import (
+    INFRASTRUCTURE_FAILURE,
+    VERDICT_REVIEW_INCOMPLETE,
+    classify_review_response,
+    parse_review_response,
+)
 from .routing import RoutingMode
 from .workspace_guard import EXTERNAL_WORKSPACE_MUTATION, WorkspaceMutation, owned_workspace
 from .workspaces import (
@@ -182,12 +193,16 @@ class ProviderPool:
         limiter: ProviderLimiter | None = None,
         active_selections: dict[tuple[str, str], int] | None = None,
         selection_lock: threading.Lock | None = None,
+        require_live_acceptance: bool = False,
+        block_unproven: bool = True,
     ):
         if policy not in SELECTION_POLICIES:
             raise ValueError(f"unknown provider selection policy: {policy}")
         self.policy = policy
         self.weights = weights or {}
         self.priorities = priorities or {}
+        self.require_live_acceptance = require_live_acceptance
+        self.block_unproven = block_unproven  # False: only a recorded live failure skips a provider
         self._reasons: dict[tuple[str, str], str] = {}
         self.adapters = {adapter.name: adapter for adapter in adapters}
         self.pools = pools
@@ -222,6 +237,12 @@ class ProviderPool:
                 recent = self._recent_failure(store, stage, task_id, name)
                 if recent is not None:
                     verdicts.append(Verdict(name, False, recent))
+                elif (
+                    self.require_live_acceptance
+                    and (live := live_provider_readiness(store, name, capability))[0] is False
+                    and (self.block_unproven or not live[1].startswith("live_acceptance_unproven"))
+                ):
+                    verdicts.append(Verdict(name, False, live[1]))
                 elif stage == REVIEW and self.require_independent and implementer and _same(adapter, implementer, implementer_adapter):
                     why = "produced the candidate" if adapter.name == implementer else "uses the same command as the implementer"
                     verdicts.append(Verdict(name, False, f"not_independent: {why}"))

@@ -23,6 +23,7 @@ from stagemesh.provider_pool import (
     ProviderPool,
     default_pools,
 )
+from stagemesh.provider_acceptance import LiveProviderSmokeResult, record_live_provider_acceptance
 from stagemesh.providers import RuntimeCommandAdapter
 from stagemesh.review import Reviewer
 from stagemesh.workspaces import task_workspace
@@ -502,6 +503,132 @@ def test_concurrent_implementation_tasks_reserve_different_providers(tmp_path: P
     text = [line for log in logs for line in log.lines]
     assert any("selected implementation provider codex" in line for line in text)
     assert any("selected implementation provider grok" in line for line in text)
+
+
+def test_live_acceptance_failure_makes_configured_provider_ineligible(tmp_path: Path) -> None:
+    rig = Rig(tmp_path, {"provider-a": "ok", "provider-b": "ok"})
+    rig.pool.require_live_acceptance = True
+    record_live_provider_acceptance(
+        rig.store,
+        LiveProviderSmokeResult(
+            "FAIL",
+            "provider-a",
+            ExecutionStatus.FAILED,
+            None,
+            False,
+            True,
+            False,
+            False,
+            True,
+            True,
+            "provider_timeout",
+        ),
+    )
+    record_live_provider_acceptance(
+        rig.store,
+        LiveProviderSmokeResult(
+            "PASS",
+            "provider-b",
+            ExecutionStatus.SUCCEEDED,
+            "abc",
+            True,
+            True,
+            True,
+            True,
+            True,
+            True,
+            None,
+        ),
+    )
+
+    verdicts = {v.provider: v for v in rig.pool.evaluate(rig.store, IMPLEMENT, TASK)}
+
+    assert verdicts["provider-a"].eligible is False
+    assert verdicts["provider-a"].reason == "live_acceptance_failed: provider_timeout"
+    assert verdicts["provider-b"].eligible is True
+
+
+def _live_result(provider: str, passed: bool) -> LiveProviderSmokeResult:
+    return LiveProviderSmokeResult(
+        status="PASS" if passed else "FAIL",
+        provider=provider,
+        execution_status=ExecutionStatus.SUCCEEDED if passed else ExecutionStatus.FAILED,
+        candidate_sha="abc" if passed else None,
+        file_ok=passed,
+        implementation_checked=True,
+        review_checked=True,
+        implementation_ready=passed,
+        review_ready=passed,
+        review_json_ok=passed,
+        failure_reason=None if passed else "provider_timeout",
+    )
+
+
+def _verdicts(rig: Rig, stage: str = IMPLEMENT) -> dict:
+    return {v.provider: v for v in rig.pool.evaluate(rig.store, stage, TASK)}
+
+
+def test_live_acceptance_is_ignored_unless_the_pool_is_asked_to_check_it(tmp_path: Path) -> None:
+    rig = Rig(tmp_path, {"provider-a": "ok", "provider-b": "ok"})
+    record_live_provider_acceptance(rig.store, _live_result("provider-a", False))
+
+    verdicts = _verdicts(rig)
+
+    assert verdicts["provider-a"].eligible is True and verdicts["provider-b"].eligible is True  # default: no live-acceptance gate
+
+
+def test_default_queue_mode_skips_only_a_recorded_live_failure_and_keeps_never_checked_providers(tmp_path: Path) -> None:
+    rig = Rig(tmp_path, {"failed": "ok", "unproven": "ok", "proven": "ok"}, require_live_acceptance=True, block_unproven=False)
+    record_live_provider_acceptance(rig.store, _live_result("failed", False))
+    record_live_provider_acceptance(rig.store, _live_result("proven", True))
+
+    verdicts = _verdicts(rig)
+
+    assert verdicts["failed"].eligible is False and verdicts["failed"].reason == "live_acceptance_failed: provider_timeout"
+    assert verdicts["unproven"].eligible is True  # never running the live check is not, by itself, a reason to block queue work
+    assert verdicts["proven"].eligible is True
+
+
+def test_required_mode_refuses_a_provider_with_no_passing_live_check_and_says_what_to_run(tmp_path: Path) -> None:
+    rig = Rig(tmp_path, {"failed": "ok", "unproven": "ok", "proven": "ok"}, require_live_acceptance=True, block_unproven=True)
+    record_live_provider_acceptance(rig.store, _live_result("failed", False))
+    record_live_provider_acceptance(rig.store, _live_result("proven", True))
+
+    verdicts = _verdicts(rig)
+
+    assert verdicts["unproven"].eligible is False
+    assert verdicts["unproven"].reason.startswith("live_acceptance_unproven")
+    assert "provider-acceptance --live --provider unproven" in verdicts["unproven"].reason
+    assert verdicts["failed"].eligible is False and verdicts["failed"].reason.startswith("live_acceptance_failed")
+    assert verdicts["proven"].eligible is True
+
+
+def test_required_mode_fails_closed_when_no_provider_has_a_passing_live_check(tmp_path: Path) -> None:
+    rig = Rig(tmp_path, {"provider-a": "ok"}, require_live_acceptance=True, block_unproven=True)
+
+    available, reason, impl, _review = rig.pool.preflight(rig.store)
+
+    assert available is False
+    assert "live_acceptance_unproven" in reason and "live_acceptance_unproven" in impl[0].reason  # the refusal names live acceptance, not an unavailable command
+
+
+@pytest.mark.parametrize("block_unproven", [False, True])
+def test_cooldown_and_missing_cli_still_apply_and_are_named_differently_from_live_acceptance(tmp_path: Path, block_unproven: bool) -> None:
+    rig = Rig(
+        tmp_path,
+        {"cooling": "ok", "ghost": None, "fine": "ok"},
+        require_live_acceptance=True,
+        block_unproven=block_unproven,
+    )
+    for name in ("cooling", "fine"):
+        record_live_provider_acceptance(rig.store, _live_result(name, True))
+    rig.pool.record_failure(rig.store, IMPLEMENT, TASK, "cooling", "quota_rate_limit")
+
+    verdicts = _verdicts(rig)
+
+    assert verdicts["cooling"].eligible is False and verdicts["cooling"].reason.startswith("provider_cooldown")
+    assert verdicts["ghost"].eligible is False and not verdicts["ghost"].reason.startswith("live_acceptance")
+    assert verdicts["fine"].eligible is True
 
 
 def test_capacity_failure_cools_provider_across_tasks_for_the_same_stage(tmp_path: Path) -> None:
