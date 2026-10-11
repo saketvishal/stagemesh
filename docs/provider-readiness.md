@@ -45,7 +45,7 @@ Release-mode commands can make live acceptance required:
 
 - `stagemesh doctor --strict-live` fails readiness unless every provider has fresh passing live acceptance.
 - `stagemesh run-window --strict-live` refuses to start unless providers have fresh passing live acceptance.
-- `stagemesh queue-run --require-live-acceptance` refuses providers without a passing live acceptance result, so release-mode routing only
+- `stagemesh queue-run --legacy-unsafe --require-live-acceptance` refuses providers without a passing live acceptance result, so release-mode routing only
   uses proven providers.
 
 Use strict live checks before treating a provider pool as release-ready.

@@ -325,6 +325,7 @@ class ParallelRunner:
         interrupt_grace_seconds: float = 20.0,
         poll_seconds: float = 0.2,
         wait_for_providers: bool = False,
+        sweep_worktrees: bool = True,
     ):
         if concurrency < 1:
             raise ValueError("concurrency must be at least 1")
@@ -340,6 +341,7 @@ class ParallelRunner:
         self.interrupt_grace_seconds = interrupt_grace_seconds
         self.poll_seconds = poll_seconds
         self.wait_for_providers = wait_for_providers
+        self.sweep_worktrees = sweep_worktrees
         self._provider_waits: dict[str, float] = {}
         self._exhaustion_said: set[str] = set()
         self.stop = threading.Event()
@@ -515,7 +517,8 @@ class ParallelRunner:
         summary.recovered.extend(recover_orphaned_claims(self.store, self.project))
         for row in self.store.tasks():  # provably dead provider processes only; live/unknown are never touched
             summary.recovered.extend(_recover_dead(self.store, str(row["id"]), own_task=False))
-        summary.swept = sweep_task_worktrees(self.project, self.store)
+        if self.sweep_worktrees:
+            summary.swept = sweep_task_worktrees(self.project, self.store)
         for item in summary.recovered:
             self._say("run", f"recovered {item.get('action', 'RELEASED').lower()} claim/execution for task {item['task_id']}")
         for item in summary.swept:
