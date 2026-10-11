@@ -105,11 +105,30 @@ def build_readiness(
             attention.append("work is in flight (running executions or active claims)")
 
     decisions = []
+    ledger = {"done": 0, "retired_closed": 0, "retired_ineligible": 0, "open": 0, "blocked": 0, "running": 0}
+    live_tasks: list[dict[str, str]] = []
     for row in store.tasks():
-        if str(row["status"]) == "BLOCKED":
-            reason = blocked_needs_decision(store, str(row["id"]))
-            if reason:
-                decisions.append({"task_id": str(row["id"]), "title": str(row["title"]), "reason": reason})
+        status = str(row["status"])
+        if status == "DONE":
+            ledger["done"] += 1
+            continue
+        reason = ""
+        if row["source"] is not None:
+            reason = str(store.source_state(str(row["source"]), str(row["source_id"])).get("retirement_reason") or "")
+        if reason == "source closed":  # closed upstream: history, not production work
+            ledger["retired_closed"] += 1
+            continue
+        if reason:  # still open upstream but not runnable (blocked/unlabelled): counted apart, and a decision still needs a person
+            ledger["retired_ineligible"] += 1
+        else:
+            key = {"OPEN": "open", "RUNNING": "running"}.get(status, "blocked")
+            ledger[key] += 1
+            live_tasks.append({"task_id": str(row["id"]), "stage": str(row["stage"]), "status": status, "title": str(row["title"])})
+        if status == "BLOCKED":
+            decision = blocked_needs_decision(store, str(row["id"]))
+            if decision:
+                decisions.append({"task_id": str(row["id"]), "title": str(row["title"]), "reason": decision})
+    data["ledger"] = {**ledger, "live_tasks": live_tasks}
     data["needs_decision"] = decisions
     if decisions:
         attention.append(f"{len(decisions)} task(s) need a design decision")
@@ -186,6 +205,13 @@ def format_readiness(data: dict[str, Any]) -> list[str]:
             f"resumable {wt['resumable_worktrees']}; other {wt['other_worktrees']} "
             "(doctor cleans nothing; preview with `stagemesh worktrees sweep --dry-run`)"
         )
+    ledger = data["ledger"]
+    lines.append(
+        f"ledger: {ledger['done']} done; {ledger['retired_closed']} retired (source closed); "
+        f"{ledger['retired_ineligible']} parked (open upstream but not runnable); "
+        f"{ledger['open']} open, {ledger['blocked']} blocked, {ledger['running']} running = real work"
+    )
+    lines += [f"  {t['task_id']} {t['stage']}/{t['status']}: {t['title']}" for t in ledger["live_tasks"]]
     if data["needs_decision"]:
         lines.append("tasks needing a design decision:")
         lines += [f"  {item['task_id']} {item['title']}: {item['reason']}" for item in data["needs_decision"]]

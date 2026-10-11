@@ -290,3 +290,29 @@ def test_a_cooling_provider_does_not_block_the_others_and_capacity_shows_live_st
     assert rows["codex"]["live_status"]["state"] == "passing" and rows["grok"]["live_status"]["state"] == "missing"
     assert rows["codex"]["command_available"] in (True, False) and "live_readiness" in rows["codex"]
     assert [item["provider"] for item in data["provider_cooldowns"]] == ["grok"]  # only grok is cooling; the others are untouched
+
+
+def test_the_ledger_separates_retired_and_parked_tasks_from_real_work(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from stagemesh.domain import Stage
+
+    monkeypatch.setattr(readiness, "active_cooldowns", lambda store, seconds: [])
+    store, project = make_store(tmp_path, ["T-1", "T-2", "T-3", "T-4"])
+    store.advance_task("T-1", Stage.DONE)
+
+    def retire(task_id: str, reason: str) -> None:
+        task = store.get_task(task_id)
+        store.cache_source(task["source"], task["source_id"], {"retirement_reason": reason}, "CLOSED" if reason == "source closed" else "OPEN")
+        store.block_task(task_id)
+
+    retire("T-2", "source closed")
+    retire("T-3", "source no longer eligible")
+    store.block_task("T-4")  # a genuinely blocked task: this is the real work
+    config = cli_module.load_config(project)
+
+    data = readiness.build_readiness(store, project, config, list_prs=None, runtime=FRESH)
+
+    ledger = data["ledger"]
+    assert (ledger["done"], ledger["retired_closed"], ledger["retired_ineligible"], ledger["blocked"], ledger["open"]) == (1, 1, 1, 1, 0)
+    assert [t["task_id"] for t in ledger["live_tasks"]] == ["T-4"]  # neither the closed nor the parked task is listed as work
+    text = "\n".join(readiness.format_readiness(data))
+    assert "1 retired (source closed); 1 parked" in text and "1 blocked" in text and "T-4" in text
