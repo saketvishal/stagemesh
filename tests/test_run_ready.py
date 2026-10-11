@@ -179,6 +179,39 @@ def test_continue_human_output_shows_live_provider_selection(tmp_path: Path) -> 
     assert "missing: skipped, not authenticated or unavailable" not in text
 
 
+def test_parallel_continue_logs_provider_selection_as_coordinator_starts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = _project(tmp_path, ["T-1"])
+
+    def fake_build(args, project, config, store, target, provider_log=None, *, parallel=None):
+        assert parallel is not None
+        provider_log("  selected implementation provider codex (built-in default provider): least_recently_used")
+        return object(), {"provider": "codex", "review_provider": "dynamic-pool:claude"}
+
+    def fake_run(self):
+        task_store = Store(self.store.db_path)
+        try:
+            self.make_coordinator(TargetSelection("T-1"), task_store, "T-1")
+        finally:
+            task_store.close()
+        summary = cli_module.ParallelSummary(self.concurrency)
+        summary.stop_reason = "DONE"
+        return summary
+
+    monkeypatch.setattr(cli_module, "_build_coordinator", fake_build)
+    monkeypatch.setattr(cli_module.ParallelRunner, "run", fake_run)
+    out = io.StringIO()
+
+    with contextlib.redirect_stdout(out):
+        code = cli_module.main(["--project", str(project), "continue", "--parallel", "2", "--dry-run"])
+
+    text = out.getvalue()
+    assert code == 0, text
+    assert "[T-1] selected implementation provider codex" in text
+    assert text.index("[T-1] selected implementation provider codex") < text.index("Parallel run stopped")
+
+
 def test_auto_continue_walks_to_next_task_after_provider_pool_exhaustion(tmp_path: Path, monkeypatch) -> None:
     project = _project(tmp_path, ["A-1", "B-1"])
     calls = []

@@ -7,7 +7,7 @@ import shlex
 import sys
 import threading
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import __version__
@@ -329,6 +329,8 @@ def _build_coordinator(
             weights=weights,
             priorities=priorities,
             limiter=parallel.limiter if parallel else None,
+            active_selections=parallel.active_selections if parallel else None,
+            selection_lock=parallel.selection_lock if parallel else None,
         )
         staged = config.routing_mode == RoutingMode.STAGED
         task_stage = None
@@ -457,6 +459,8 @@ class ParallelWiring:
     limiter: ProviderLimiter
     lock: IntegrationLock
     on_integration_event: Callable[[str, str, dict[str, object]], None] | None = None
+    active_selections: dict[tuple[str, str], int] = field(default_factory=dict)
+    selection_lock: threading.Lock = field(default_factory=threading.Lock)
 
 
 def _diagnosis_policy(config, project: Path, adapters: dict[str, object]) -> DiagnosisPolicy:
@@ -1086,9 +1090,19 @@ def command_run_parallel(args: argparse.Namespace, *, queue: bool = False) -> in
 
     runner: ParallelRunner
 
+    def live_provider_notice(task_id: str, message: str) -> None:
+        notice = _live_provider_notice(message)
+        if notice is not None:
+            emit(task_id, notice)
+
+    def task_provider_log(task_id: str) -> ProviderLog:
+        log = runner.provider_log(task_id)
+        log.set_on_line(lambda message, task_id=task_id: live_provider_notice(task_id, message))
+        return log
+
     def make_coordinator(target: TargetSelection, task_store: Store, task_id: str) -> Coordinator:
         try:
-            coord, details = _build_coordinator(args, project, config, task_store, target, runner.provider_log(task_id), parallel=wiring)
+            coord, details = _build_coordinator(args, project, config, task_store, target, task_provider_log(task_id), parallel=wiring)
         except _SetupError as exc:
             raise SetupRefused(f"provider setup failed for task {task_id} (see stderr; exit {exc.code})") from exc
         info.update(details)
@@ -1859,6 +1873,14 @@ def command_capacity(args: argparse.Namespace) -> int:
     )
     impl = pool.evaluate(store, IMPLEMENT, args.task)
     review = pool.evaluate(store, REVIEW, args.task, implementer=implementer)
+    recent_use = {
+        stage: [
+            {"provider": provider, "used_at": used_at}
+            for provider, used_at in pool.uses(store, stage)
+        ]
+        for stage in (IMPLEMENT, REVIEW)
+    }
+    cooldowns = _json_safe_cooldowns(active_cooldowns(store, config.provider_failure_cooldown_seconds))
     provider_rows = []
     for adapter in sorted(adapters, key=lambda item: item.name):
         capacity = adapter.check_capacity()
@@ -1870,6 +1892,17 @@ def command_capacity(args: argparse.Namespace) -> int:
                 "capacity": capacity,
                 "capabilities": sorted(adapter.capabilities),
                 "live_acceptance": "not_run",
+                "recent_use": {
+                    stage: next(
+                        (
+                            item
+                            for item in reversed(recent_use[stage])
+                            if item["provider"] == adapter.name
+                        ),
+                        None,
+                    )
+                    for stage in (IMPLEMENT, REVIEW)
+                },
             }
         )
     payload = {
@@ -1878,6 +1911,8 @@ def command_capacity(args: argparse.Namespace) -> int:
         "active_provider_profile": config.provider_profile,
         "selection_policy": config.provider_selection_policy,
         "pools": {stage: list(names) for stage, names in sorted(pools.items())},
+        "provider_cooldowns": cooldowns,
+        "recent_use": recent_use,
         "providers": provider_rows,
         "stages": {
             IMPLEMENT: {
@@ -1896,11 +1931,24 @@ def command_capacity(args: argparse.Namespace) -> int:
     if args.json:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
+    print(f"active provider profile: {config.provider_profile or '(default)'}")
+    print(f"selection policy: {config.provider_selection_policy}")
     for stage, stage_payload in payload["stages"].items():
         state = "available" if stage_payload["available"] else "unavailable"
         print(f"{stage}: {state}")
+        print(f"  pool: {', '.join(stage_payload['pool']) or '(empty)'}")
+        if recent_use[stage]:
+            last = recent_use[stage][-1]
+            print(f"  most recent use: {last['provider']} at {last['used_at']}")
+        else:
+            print("  most recent use: never")
         for verdict in stage_payload["verdicts"]:
             print(f"  {verdict['provider']}: {verdict['reason']}")
+    if cooldowns:
+        for line in format_cooldowns(cooldowns):
+            print(line)
+    else:
+        print("provider cooldowns: none")
     return 0
 
 def command_config(args: argparse.Namespace) -> int:
