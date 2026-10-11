@@ -355,7 +355,7 @@ def advance_baseline(
             work.git.run("reset", "--hard", old_head, check=False)
         raise RecoveryRefusal(
             "worktree_reset_unsafe",
-            f"task {task_id}: the reset left files StageMesh cannot reseal (ignored paths or embedded repositories); the worktree was put back on {str(old_head)[:12]} and the ledger was not changed; preserved: {preserved}",
+            f"task {task_id}: the reset left files StageMesh cannot reseal (ignored paths or embedded repositories); tracked files were put back on {str(old_head)[:12]} and the ledger was not changed; uncommitted or untracked work is in the snapshot ref and can be restored with `git checkout <snapshot> -- .`; preserved: {preserved}",
         )
     if ownership is not None:
         from dataclasses import replace
