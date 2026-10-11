@@ -85,7 +85,8 @@ def check_runtime(project: Path, *, runner: Runner = subprocess.run, running_fil
         result.message = "no installed `stagemesh` found; run from source: PYTHONPATH=src python -c \"from stagemesh.cli import main; main()\" ..."
         return result
     result.installed_cli = str(cli)
-    installed = _help_commands([str(cli), "--help"], runner)
+    clean = {key: value for key, value in os.environ.items() if key.upper() not in ("PYTHONPATH", "PYTHONHOME")}
+    installed = _help_commands([str(cli), "--help"], runner, clean)  # an inherited PYTHONPATH=src would make the install look current
     if installed is None or not result.source_commands:
         result.message = f"could not compare the installed CLI {cli} with source (help output unavailable)"
         return result

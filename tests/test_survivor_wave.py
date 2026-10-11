@@ -560,7 +560,7 @@ def test_staging_ref_is_created_kept_when_stacked_moved_when_merged_and_refused_
     assert _git(project, "rev-parse", STAGING_REF) == staged  # refused, and not moved
 
 
-def test_stale_installed_runtime_is_detected_and_reported_not_silently_used(tmp_path: Path) -> None:
+def test_stale_installed_runtime_is_detected_and_reported_not_silently_used(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import subprocess as sp
 
     from stagemesh.runtime_freshness import check_runtime
@@ -574,14 +574,19 @@ def test_stale_installed_runtime_is_detected_and_reported_not_silently_used(tmp_
     exe.write_text("", encoding="utf-8")
     outputs = {"installed": "usage: stagemesh [-h] {init,status,worktrees}", "source": "usage: stagemesh [-h] {init,status,worktrees,survivor-wave}"}
 
+    probes: dict[str, dict] = {}
+
     def fake_run(argv, **kwargs):
+        probes["installed" if str(exe) == argv[0] else "source"] = kwargs.get("env") or {}
         return sp.CompletedProcess(argv, 0, outputs["installed" if str(exe) == argv[0] else "source"], "")
 
+    monkeypatch.setenv("PYTHONPATH", "leaked-src")
     from_source = str(project / "src" / "stagemesh" / "__init__.py")
     stale = check_runtime(project, runner=fake_run, running_file=from_source)
 
     assert stale.stale and stale.missing_from_installed == ["survivor-wave"] and stale.running_from_source
     assert "stale" in stale.message and "lacks survivor-wave" in stale.message and "running from source" in stale.message
+    assert "PYTHONPATH" not in probes["installed"] and str(project / "src") in probes["source"]["PYTHONPATH"]  # the install is probed as installed
     assert "PYTHONPATH=src" in stale.message and "pip install --upgrade" in stale.message  # says what to do; changes nothing itself
     installed_copy = check_runtime(project, runner=fake_run, running_file=str(scripts / "site-packages" / "stagemesh" / "__init__.py"))
     assert installed_copy.stale and installed_copy.running_from_source is False and "not from source" in installed_copy.message

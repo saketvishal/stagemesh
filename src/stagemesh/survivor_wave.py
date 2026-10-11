@@ -508,7 +508,7 @@ def format_report(report: WaveReport) -> str:
         elif task.landing == "pr_failed":
             landing = " -> PR not opened"
         lines.append(
-            f"  {task.task_id}: {task.outcome}{landing} ({task.final_stage}/{task.final_status}) baseline {base}; "
+            f"  {task.task_id}: {task.outcome}{landing}{f' ({task.final_stage}/{task.final_status})' if task.final_stage else ''} baseline {base}; "
             f"candidates {', '.join(sha[:7] for sha in task.candidates) or '-'}; validation {task.validation or '-'}, "
             f"review {task.review or '-'}, integration {task.integration or '-'}"
         )
