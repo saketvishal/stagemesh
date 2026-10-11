@@ -81,6 +81,37 @@ def active_cooldowns(store: Store, cooldown_seconds: float, now: float | None = 
     return result
 
 
+PARKED_COOLDOWN_MIN_SECONDS = 1800.0  # a cooldown at least this long parks the task; a shorter one is just a short wait
+
+
+def cooldown_parked(
+    store: Store, task_id: str, cooldowns: dict[str, dict[str, Any]], min_seconds: float = PARKED_COOLDOWN_MIN_SECONDS
+) -> list[dict[str, Any]] | None:
+    """The cooling providers a BLOCKED task is waiting on, soonest first, when its block is a provider-pool failure and every
+    provider that failed it is resting for at least `min_seconds`; otherwise None (the task is actionable now or soon)."""
+    from .blocked_recovery import recoverable_cause
+    from .diagnosis import PROVIDER_NO_PROGRESS, _last_reset
+    from .provider_pool import PROVIDER_FAILURE_EVENT, provider_wide_outcomes
+
+    if recoverable_cause(store, task_id) != PROVIDER_NO_PROGRESS:
+        return None
+    reset = _last_reset(store, task_id)
+    wide = provider_wide_outcomes()
+    failed: set[str] = set()
+    for row in store.conn.execute(
+        "SELECT payload FROM audit_events WHERE event_type=? AND created_at>? ORDER BY created_at, rowid", (PROVIDER_FAILURE_EVENT, reset)
+    ):
+        payload = _loads(row["payload"])
+        if payload.get("task_id") == task_id and payload.get("reason") in wide and payload.get("provider"):
+            failed.add(str(payload["provider"]))
+    if not failed or any(name not in cooldowns for name in failed):
+        return None
+    waiting = sorted((cooldowns[name] for name in failed), key=lambda item: item["seconds_remaining"])
+    if waiting[0]["seconds_remaining"] < min_seconds:
+        return None
+    return [{"provider": item["provider"], "seconds_remaining": item["seconds_remaining"], "failure_class": item["failure_class"]} for item in waiting]
+
+
 def format_cooldowns(cooldowns: list[dict[str, Any]]) -> list[str]:
     lines = []
     for item in cooldowns:
