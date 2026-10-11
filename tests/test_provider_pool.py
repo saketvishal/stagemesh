@@ -463,18 +463,27 @@ def test_concurrent_implementation_tasks_reserve_different_providers(tmp_path: P
             barrier.wait(timeout=10)
             return ExecutionResult(ExecutionStatus.SUCCEEDED, candidate_sha=f"{self.name}-{task_id}")
 
-    pool = ProviderPool(
-        [WaitingAdapter("codex", (sys.executable,)), WaitingAdapter("grok", (sys.executable,))],
-        {IMPLEMENT: ("codex", "grok"), REVIEW: ("codex", "grok")},
-        require_independent=False,
-        log=ProviderLog(echo=False),
-    )
+    active_selections: dict[tuple[str, str], int] = {}
+    selection_lock = threading.Lock()
+    logs: list[ProviderLog] = []
+
+    def make_pool() -> ProviderPool:
+        log = ProviderLog(echo=False)
+        logs.append(log)
+        return ProviderPool(
+            [WaitingAdapter("codex", (sys.executable,)), WaitingAdapter("grok", (sys.executable,))],
+            {IMPLEMENT: ("codex", "grok"), REVIEW: ("codex", "grok")},
+            require_independent=False,
+            log=log,
+            active_selections=active_selections,
+            selection_lock=selection_lock,
+        )
 
     def run(task_id: str) -> None:
         task_store = Store(db)
         task_store.migrate()
         try:
-            result = PooledExecutor(pool).run(task_store, task_id, None, project)
+            result = PooledExecutor(make_pool()).run(task_store, task_id, None, project)
             assert result.status is ExecutionStatus.SUCCEEDED
         except BaseException as exc:  # noqa: BLE001 - thread exceptions must fail the assertion below
             errors.append(exc)
@@ -490,7 +499,7 @@ def test_concurrent_implementation_tasks_reserve_different_providers(tmp_path: P
     assert not any(thread.is_alive() for thread in threads)
     assert errors == []
     assert sorted(selected) == ["codex", "grok"]
-    text = pool.log.lines
+    text = [line for log in logs for line in log.lines]
     assert any("selected implementation provider codex" in line for line in text)
     assert any("selected implementation provider grok" in line for line in text)
 

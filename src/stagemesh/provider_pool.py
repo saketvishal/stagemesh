@@ -103,6 +103,9 @@ class ProviderLog:
         if self._on_line is not None:
             self._on_line(message)
 
+    def set_on_line(self, on_line: Callable[[str], None] | None) -> None:
+        self._on_line = on_line
+
 
 def describe_verdicts(verdicts: list[Verdict]) -> str:
     return "; ".join(f"{v.provider}: {v.reason}" for v in verdicts) or "no providers configured"
@@ -177,6 +180,8 @@ class ProviderPool:
         weights: dict[str, int] | None = None,
         priorities: dict[str, int] | None = None,
         limiter: ProviderLimiter | None = None,
+        active_selections: dict[tuple[str, str], int] | None = None,
+        selection_lock: threading.Lock | None = None,
     ):
         if policy not in SELECTION_POLICIES:
             raise ValueError(f"unknown provider selection policy: {policy}")
@@ -190,8 +195,8 @@ class ProviderPool:
         self.cooldown_seconds = cooldown_seconds
         self.log = log or ProviderLog()
         self.limiter = limiter  # set under parallel execution: per-provider slots and provider-wide cooldown
-        self._selection_lock = threading.Lock()
-        self._active_selections: dict[tuple[str, str], int] = {}
+        self._selection_lock = selection_lock or threading.Lock()
+        self._active_selections = active_selections if active_selections is not None else {}
 
     def pool(self, stage: str) -> tuple[str, ...]:
         return self.pools.get(stage, ())
