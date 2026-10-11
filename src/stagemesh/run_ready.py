@@ -486,17 +486,21 @@ def format_stop(summary: RunSummary) -> str:
         lines.append(f"  diagnosis: {diagnosis['category']} at {diagnosis['stage']}: {diagnosis['summary']}")
         if diagnosis.get("recommendation"):
             lines.append(f"  next step: {diagnosis['recommendation']}")
-        evidence = diagnosis.get("failing_evidence") or []
-        latest = evidence[-1] if evidence else {}
-        excerpt = str(latest.get("excerpt") or "").strip() if isinstance(latest, dict) else ""
-        if excerpt:
-            lines.append("  output excerpt:")
-            for line in excerpt.splitlines()[:8]:
-                lines.append(f"    {line[:240]}")
+        lines.extend(format_excerpt(diagnosis))
         lines.extend(format_findings(diagnosis.get("review_findings", [])))
     if summary.final:
         lines.append(f"  final: {summary.final['stage']}/{summary.final['status']}")
     return "\n".join(lines)
+
+
+def format_excerpt(diagnosis: dict[str, Any]) -> list[str]:
+    """Bounded gate stdout/stderr excerpt of the latest failing evidence, as indented operator lines."""
+    evidence = diagnosis.get("failing_evidence") or []
+    latest = evidence[-1] if evidence else {}
+    excerpt = str(latest.get("excerpt") or "").strip() if isinstance(latest, dict) else ""
+    if not excerpt:
+        return []
+    return ["  output excerpt:"] + [f"    {line[:240]}" for line in excerpt.splitlines()[:8]]
 
 
 def format_step(step: dict[str, Any], notices: list[str] | None = None) -> str:
