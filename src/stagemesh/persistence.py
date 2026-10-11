@@ -652,6 +652,34 @@ class Store:
                     "UPDATE contract_bindings SET baseline_sha=? WHERE task_id=? AND candidate_sha=?", (baseline_sha, task_id, candidate_sha)
                 )
 
+    def advance_task_baseline(self, task_id: str, baseline_sha: str, audit_payload: dict[str, Any]) -> int:
+        """Move the baseline (and the frozen contract's), restart IMPLEMENT with a fresh remediation budget and record the audit event.
+
+        One transaction: a crash leaves either the old state or the whole move, never a moved baseline with an unfinished stage.
+        Candidates, evidence, findings and old contract bindings are not touched. Returns how many remediation attempts were cleared.
+        """
+        task_id = _validate_text(task_id, "task id")
+        baseline_sha = _validate_text(baseline_sha, "baseline sha")
+        now = time.time()
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO task_baselines(task_id, baseline_sha, created_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(task_id) DO UPDATE SET baseline_sha=excluded.baseline_sha",
+                (task_id, baseline_sha, now),
+            )
+            self.conn.execute("UPDATE task_contracts SET baseline_sha=? WHERE task_id=?", (baseline_sha, task_id))
+            cleared = self.conn.execute("UPDATE task_remediations SET cleared=1 WHERE task_id=? AND cleared=0", (task_id,)).rowcount
+            self.conn.execute("UPDATE tasks SET stage=?, status=?, updated_at=? WHERE id=?", (Stage.IMPLEMENT, TaskStatus.OPEN, now, task_id))
+            self.conn.execute("UPDATE claims SET active=0 WHERE task_id=?", (task_id,))
+            for event_type, payload in (
+                ("task.baseline_advanced", {**audit_payload, "remediations_cleared": cleared}),
+                ("task.advance", {"task_id": task_id, "stage": str(Stage.IMPLEMENT), "reason": "operator advanced the task baseline"}),
+            ):
+                self.conn.execute(
+                    "INSERT INTO audit_events VALUES (?, ?, ?, ?)", (str(uuid.uuid4()), event_type, json.dumps(payload, sort_keys=True), now)
+                )
+        return int(cleared)
+
     def contract_bindings_for_task(self, task_id: str) -> list[sqlite3.Row]:
         task_id = _validate_text(task_id, "task id")
         return list(self.conn.execute("SELECT * FROM contract_bindings WHERE task_id=? ORDER BY created_at, rowid", (task_id,)))
