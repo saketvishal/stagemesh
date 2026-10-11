@@ -12,7 +12,7 @@ from stagemesh.coordinator import Coordinator
 from stagemesh.github import GitHubClient
 from stagemesh.parallel import worker_id_for
 from stagemesh.serialized_integration import SerializedIntegrator
-from stagemesh.task_sources import GitHubOutboundSync, _blocked_marker
+from stagemesh.task_sources import BLOCKED_OUTBOUND_LABEL, GitHubOutboundSync, _blocked_marker
 
 
 class FakeTransport:
@@ -126,7 +126,13 @@ def test_coordinator_tick_posts_blocked_reason_once_and_skips_local_task(tmp_pat
     coord.tick()
     coord.tick()
     posts = transport.calls("POST")
-    assert len(posts) == 1 and "validation_gate" in posts[0][2]["body"] and "/issues/101/" in posts[0][1]
+    comments = [post for post in posts if post[1].endswith("/comments")]
+    labels = [post for post in posts if post[1].endswith("/labels")]
+    assert len(comments) == 1
+    assert "validation_gate" in comments[0][2]["body"] and "/issues/101/" in comments[0][1]
+    assert labels == [
+        ("POST", "/repos/o/r/issues/101/labels", {"labels": [BLOCKED_OUTBOUND_LABEL]})
+    ]
     assert transport.calls("PATCH") == []  # blocked tasks are commented, never closed or relabelled
     assert rig.store.get_task("A")["status"] == "BLOCKED"
     assert all("/issues/101/" in r[1] for r in transport.requests)
@@ -158,5 +164,5 @@ def test_blocked_dedupe_reads_every_comment_page(tmp_path):
 
     transport = Paged()
     GitHubOutboundSync(rig.store, GitHubClient("o", "r", transport)).publish_blocked("101", "validation_gate")
-    assert transport.calls("POST") == []
+    assert [post for post in transport.calls("POST") if post[1].endswith("/comments")] == []
     assert [status for status, _ in _outbound(rig, "101")] == ["OK"]
