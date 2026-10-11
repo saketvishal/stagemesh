@@ -316,3 +316,54 @@ def test_the_ledger_separates_retired_and_parked_tasks_from_real_work(tmp_path: 
     assert [t["task_id"] for t in ledger["live_tasks"]] == ["T-4"]  # neither the closed nor the parked task is listed as work
     text = "\n".join(readiness.format_readiness(data))
     assert "1 retired (source closed); 1 parked" in text and "1 blocked" in text and "T-4" in text
+
+
+def _ledger_with_retired(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sources: dict[str, str]):
+    from stagemesh.domain import TaskStatus  # noqa: F401
+
+    monkeypatch.setattr(readiness, "active_cooldowns", lambda store, seconds: [])
+    store, project = make_store(tmp_path, ["R-github", "R-local", "T-blocked", "T-design"])
+    for task_id, source in sources.items():
+        store.conn.execute("UPDATE tasks SET source=?, source_id=? WHERE id=?", (source, task_id, task_id))
+    store.conn.commit()
+    return store, project
+
+
+def test_audited_retirement_of_github_and_local_backlog_tasks_is_not_real_blocked_work(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    store, project = _ledger_with_retired(tmp_path, monkeypatch, {"R-github": "github", "R-local": "local-backlog"})
+    assert store.retire_source_task("github", "R-github", "already satisfied on main") == "R-github"
+    assert store.retire_source_task("local-backlog", "R-local", "duplicate local proof task") == "R-local"
+    store.block_task("T-blocked")  # genuinely blocked, actionable
+    config = cli_module.load_config(project)
+
+    data = readiness.build_readiness(store, project, config, list_prs=None, runtime=FRESH)
+
+    ledger = data["ledger"]
+    assert ledger["retired_operator"] == 2
+    assert [t["task_id"] for t in ledger["live_tasks"]] == ["T-design", "T-blocked"] or {t["task_id"] for t in ledger["live_tasks"]} == {"T-blocked", "T-design"}
+    assert "R-github" not in {t["task_id"] for t in ledger["live_tasks"]} and "R-local" not in {t["task_id"] for t in ledger["live_tasks"]}
+    assert "2 retired (audited, not work)" in "\n".join(readiness.format_readiness(data))
+
+
+def test_a_restored_audited_retirement_counts_as_work_again(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    store, project = _ledger_with_retired(tmp_path, monkeypatch, {"R-github": "github"})
+    store.retire_source_task("github", "R-github", "already satisfied")
+    store.restore_source_task("github", "R-github", "already satisfied")
+    config = cli_module.load_config(project)
+
+    ledger = readiness.build_readiness(store, project, config, list_prs=None, runtime=FRESH)["ledger"]
+
+    assert ledger["retired_operator"] == 0 and "R-github" in {t["task_id"] for t in ledger["live_tasks"]}
+
+
+def test_design_decision_tasks_are_still_reported_separately_from_retired_ones(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    store, project = _ledger_with_retired(tmp_path, monkeypatch, {"R-local": "local-backlog"})
+    store.retire_source_task("local-backlog", "R-local", "duplicate local proof task")
+    monkeypatch.setattr(readiness, "blocked_needs_decision", lambda s, task_id: "needs a human design decision" if task_id == "T-design" else None)
+    store.block_task("T-design")
+    config = cli_module.load_config(project)
+
+    data = readiness.build_readiness(store, project, config, list_prs=None, runtime=FRESH)
+
+    assert [d["task_id"] for d in data["needs_decision"]] == ["T-design"]
+    assert "R-local" not in {t["task_id"] for t in data["ledger"]["live_tasks"]}

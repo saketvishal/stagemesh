@@ -765,6 +765,21 @@ class Store:
             )
         return str(task["id"])
 
+    def operator_retirement_reason(self, source: str, source_id: str) -> str | None:
+        """Reason of the latest audited retirement (`retire_source_task`) unless a later restore reopened the task."""
+        row = self.conn.execute(
+            "SELECT status, payload FROM source_events WHERE source=? AND source_id=? AND status IN ('RETIRED', 'RESTORED') "
+            "ORDER BY created_at DESC, rowid DESC LIMIT 1",
+            (_validate_text(source, "source"), _validate_text(source_id, "source id")),
+        ).fetchone()
+        if row is None or row["status"] != "RETIRED":
+            return None
+        try:
+            reason = json.loads(row["payload"]).get("reason")
+        except (TypeError, json.JSONDecodeError, AttributeError):
+            return None
+        return str(reason) if reason else None
+
     def restore_source_task(
         self,
         source: str,
