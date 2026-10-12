@@ -112,13 +112,17 @@ def test_validation_failure_is_remediated_automatically(tmp_path: Path) -> None:
     r.assert_hands_off()
 
 
-def test_repeated_validation_failure_blocks_without_operator_retry_instruction(tmp_path: Path) -> None:
-    m = _matrix(tmp_path, ["T-1"], {"codex": {"implement": ["bad-1", "bad-2"]}}, implement_pool=("codex",))
+def test_repeated_validation_failure_keeps_parent_owned_context_without_operator_retry_instruction(tmp_path: Path) -> None:
+    m = _matrix(tmp_path, ["T-1"], {"codex": {"implement": ["bad-1", "bad-2", "bad-3", "bad-4"]}}, implement_pool=("codex",))
 
     r = m.continue_()
 
-    assert r.stop == "BLOCKED" and not m.integrated("T-1"), r.brief
+    assert r.stop in {"BLOCKED", "NO_PROGRESS"} and not m.integrated("T-1"), r.brief
     assert "stagemesh continue" in r.text
+    owner_states = m.audit("task.owner_state")
+    assert owner_states
+    assert owner_states[-1]["current_problem"]["kind"] == "validation_failed"
+    assert m.audit("task.parent_budget_reopened")
     r.assert_hands_off()
 
 
@@ -130,6 +134,30 @@ def test_review_failure_is_remediated_automatically(tmp_path: Path) -> None:
     assert r.stop == "REFUSED:no_eligible_task" and m.integrated("T-1"), r.brief
     assert [mode for p, stage, _, mode in r.calls if stage == "review"] == ["fail", "pass"]
     assert len(r.implementers("T-1")) == 2
+    r.assert_hands_off()
+
+
+def test_complex_single_task_survives_provider_validation_review_and_reaches_done(tmp_path: Path) -> None:
+    plan = {
+        "codex": {"implement": "noop"},
+        "claude": {"implement": ["bad", "ok", "ok"]},
+        "grok": {"review": ["fail", "pass"]},
+    }
+    m = _matrix(tmp_path, ["T-1"], plan, implement_pool=("codex", "claude"), review_pool=("grok",))
+
+    r = m.drain(max_runs=3)
+
+    assert r.stop == "REFUSED:no_eligible_task" and m.integrated("T-1"), r.brief
+    assert r.implementers("T-1")[:2] == ["codex", "claude"]
+    assert [mode for provider, stage, _, mode in r.calls if provider == "grok" and stage == "review"] == ["fail", "pass"]
+    owner_states = m.audit("task.owner_state")
+    final = owner_states[-1]
+    assert final["stage"] == "DONE"
+    assert final["current_problem"] is None and final["unresolved_findings"] == []
+    assert any((state.get("current_problem") or {}).get("kind") == "validation_failed" for state in owner_states)
+    queued = m.audit("task.remediation_queued")
+    assert {item["stage"] for item in queued} >= {"VALIDATE", "REVIEW"}
+    assert final["validation"]["status"] == "PASSED" and final["review"]["status"] == "PASSED"
     r.assert_hands_off()
 
 

@@ -3,8 +3,10 @@ from __future__ import annotations
 import hashlib
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 from .persistence import Store
+from .task_completion import task_owner_state
 
 
 class RemediationValidationError(ValueError):
@@ -70,7 +72,7 @@ def latest_candidate_findings(store: Store, task_id: str, open_only: bool = True
     return [f for f in found if f["status"] == "OPEN"] if open_only else found
 
 
-def remediation_context(store: Store, task_id: str) -> dict[str, object] | None:
+def remediation_context(store: Store, task_id: str, project: Path | None = None) -> dict[str, object] | None:
     """Persisted failure context for the most recent remediation of a task, or None for a first attempt."""
     latest = store.latest_task_remediation(task_id)
     if latest is None:
@@ -80,6 +82,7 @@ def remediation_context(store: Store, task_id: str) -> dict[str, object] | None:
         "stage": str(latest["stage"]),
         "candidate_sha": str(latest["candidate_sha"]),
         "findings": [{"id": row["id"], "severity": row["severity"], "message": row["message"]} for row in findings],
+        "task_owner_state": task_owner_state(store, task_id, project),
     }
     diagnosis = _latest_diagnosis(store, task_id, str(latest["candidate_sha"]))
     if diagnosis is not None:

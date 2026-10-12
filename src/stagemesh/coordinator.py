@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -26,10 +27,10 @@ from .git import GitWorkspace
 from .integration import Integrator
 from .integration_recovery import (
     DEFAULT_MAX_RECOVERIES,
+    _conflict_files,
     base_relation,
     block_with_decision,
     build_context,
-    _conflict_files,
     classify_integration_failure,
     record_decision,
     record_recovery,
@@ -64,6 +65,7 @@ from .remediation_recovery import (
 )
 from .review import Reviewer, independent_review_verified
 from .scheduling import Scheduler
+from .task_completion import record_task_owner_state
 from .validation import Validator
 from .workspace_guard import (
     EXTERNAL_WORKSPACE_MUTATION,
@@ -207,6 +209,7 @@ class Coordinator:
         if stage is Stage.PLAN:
             self.store.advance_task(task_id, Stage.IMPLEMENT)
             record_audit(self.store, "task.advance", {"task_id": task_id, "stage": Stage.IMPLEMENT})
+            record_task_owner_state(self.store, task_id, "task_advanced", self.project)
             return 1
         if stage is Stage.IMPLEMENT:
             if self._implementation_may_still_run(task_id):
@@ -264,6 +267,7 @@ class Coordinator:
                         **(result.satisfaction or {}),
                     },
                 )
+                record_task_owner_state(self.store, task_id, "task_already_satisfied", self.project)
                 return 1
             if result.capacity_failure:
                 # Provider is unavailable (not-found, rate-limit, capacity exhausted).
@@ -293,6 +297,7 @@ class Coordinator:
                     "candidate.produced",
                     {"task_id": task_id, "candidate_sha": result.candidate_sha, "executor": self.executor.name},
                 )
+                record_task_owner_state(self.store, task_id, "candidate_produced", self.project)
                 return 1
             reason = result.failure_reason
             if result.status is ExecutionStatus.SUCCEEDED:
@@ -549,6 +554,7 @@ class Coordinator:
             "task.advance",
             {"task_id": task_id, "stage": decision.target, "candidate_sha": sha, "reason": decision.reason},
         )
+        record_task_owner_state(self.store, task_id, "task_advanced_with_evidence", self.project)
         return 1
 
     def _recover_integration(self, task_id: str, sha: str) -> int | None:
@@ -634,7 +640,46 @@ class Coordinator:
         except RecoveryRefusal as exc:
             self.store.advance_task(task_id, Stage.INTEGRATE)
             return f"restarting on the current {ref} was refused ({exc.code}: {str(exc)[:200]})"
+        record_task_owner_state(self.store, task_id, "integration_recovery_redo_on_current_base", self.project)
         return None
+
+    def _integration_failure_is_ref_state(self, task_id: str, sha: str) -> bool:
+        failure = classify_integration_failure(self.store, task_id, sha)
+        return failure is not None and failure.category in {"merge_conflict_with_current_target", "target_advanced_after_review"}
+
+    def _advance_baseline_for_integration_conflict(self, task_id: str, sha: str) -> bool:
+        integration_ref = self.integrator.integration_ref or resolve_integration_ref(self.project)
+        if not integration_ref:
+            return False
+        try:
+            report = advance_baseline(
+                self.store,
+                self.project,
+                task_id,
+                integration_ref,
+                yes=True,
+                allow_integrating=True,
+                reason="automatic integration conflict recovery",
+            )
+        except RecoveryRefusal as exc:
+            record_audit(
+                self.store,
+                "task.auto_advance_baseline_refused",
+                {"task_id": task_id, "candidate_sha": sha, "code": exc.code, "message": str(exc)[:300]},
+            )
+            return False
+        record_audit(
+            self.store,
+            "task.integration_reconciliation_queued",
+            {
+                "task_id": task_id,
+                "candidate_sha": sha,
+                "new_baseline": report.get("new_baseline"),
+                "integration_ref": integration_ref,
+            },
+        )
+        record_task_owner_state(self.store, task_id, "integration_conflict_baseline_advanced", self.project)
+        return True
 
     def _auto_rebaseline(self, task_id: str, diagnosis: Diagnosis) -> bool:
         if diagnosis.category != STALE_BASELINE:
@@ -671,6 +716,17 @@ class Coordinator:
                 f"{failed_stage} failed without structured findings",
             )
             findings = self.store.open_findings_for_candidate(task_id, sha)
+        if failed_stage is Stage.INTEGRATE and self._integration_failure_is_ref_state(task_id, sha):
+            if self._advance_baseline_for_integration_conflict(task_id, sha):
+                return 1
+            return self._block_remediation_exhausted(
+                task_id,
+                sha,
+                failed_stage,
+                findings,
+                "integration_ref_state_unrecoverable",
+                None,
+            )
         if failed_stage is Stage.INTEGRATE:
             recovered = self._recover_integration(task_id, sha)
             if recovered is not None:
@@ -681,7 +737,7 @@ class Coordinator:
         diagnosis = self._diagnose(task_id, sha)
         if diagnosis is not None and self._auto_rebaseline(task_id, diagnosis):
             return 1
-        if diagnosis is not None and (diagnosis.repeated or diagnosis.stops_remediation) and self.diagnosis_policy.stop_on_repeat:
+        if diagnosis is not None and diagnosis.stops_remediation and self.diagnosis_policy.stop_on_repeat:
             # The same failure again (or one a provider cannot fix, like a stale baseline): another identical attempt would only repeat
             # it. Record the diagnosis, then recover differently instead of stopping.
             record_audit(
@@ -693,6 +749,9 @@ class Coordinator:
             return self._on_remediation_exhausted(task_id, sha, failed_stage, findings, diagnosis, reason)
         # The budget is scoped to task + failed stage so a new candidate SHA cannot reset it.
         if self.store.task_remediation_count(task_id, str(failed_stage)) >= self.remediation_policy.max_attempts:
+            if diagnosis is not None and self._reopen_budget_once(task_id, failed_stage, diagnosis):
+                self.store.add_task_remediation(task_id, str(failed_stage), sha)
+                return self._queue_remediation(task_id, sha, failed_stage, findings, budget_reopened=True)
             return self._on_remediation_exhausted(task_id, sha, failed_stage, findings, diagnosis, "remediation_budget_exhausted")
         self.store.add_task_remediation(task_id, str(failed_stage), sha)
         return self._queue_remediation(task_id, sha, failed_stage, findings)
@@ -721,7 +780,45 @@ class Coordinator:
                 **extra,
             },
         )
+        record_task_owner_state(self.store, task_id, "remediation_queued", self.project)
         return 1
+
+    def _reopen_budget_once(self, task_id: str, failed_stage: Stage, diagnosis: Diagnosis) -> bool:
+        signature = {"stage": str(failed_stage), "category": diagnosis.category, "summary": diagnosis.summary[:300]}
+        for row in self.store.conn.execute(
+            "SELECT payload FROM audit_events WHERE event_type=? ORDER BY created_at DESC, rowid DESC",
+            ("task.parent_budget_reopened",),
+        ):
+            payload = _loads(row["payload"])
+            if payload.get("task_id") == task_id and payload.get("signature") == signature:
+                return False
+        cleared = self.store.clear_task_remediations(task_id, str(failed_stage))
+        record_audit(
+            self.store,
+            "task.parent_budget_reopened",
+            {
+                "task_id": task_id,
+                "stage": str(failed_stage),
+                "reason": "budget_is_safety_not_completion",
+                "signature": signature,
+                "cleared": cleared,
+            },
+        )
+        record_task_owner_state(self.store, task_id, "parent_budget_reopened", self.project)
+        return True
+
+    def _block_remediation_exhausted(
+        self,
+        task_id: str,
+        sha: str,
+        failed_stage: Stage,
+        findings: list,
+        cause: str,
+        diagnosis: Diagnosis | None,
+    ) -> int:
+        result = self._on_remediation_exhausted(task_id, sha, failed_stage, findings, diagnosis, cause)
+        record_task_owner_state(self.store, task_id, "remediation_exhausted", self.project)
+        return result
 
     def _implementation_health(self, task_id: str) -> dict[str, str]:
         """provider -> "ok" or the reason it cannot take the next implementation attempt (empty when there is no provider pool)."""
@@ -800,3 +897,11 @@ class Coordinator:
         if not queue:
             return 1  # the task is about to be dispatched again: the switch / clean worktree applies to that attempt
         return self._queue_remediation(task_id, sha, failed_stage, findings, recovery_round=len(done) + 1, recovery_action=decision.action.value)
+
+
+def _loads(raw: object) -> dict[str, Any]:
+    try:
+        value = json.loads(str(raw))
+    except (TypeError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
