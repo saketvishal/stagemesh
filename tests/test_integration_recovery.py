@@ -3,13 +3,24 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import pytest
 from test_parallel import Rig, ScriptedExecutor
 
+from stagemesh import serialized_integration
+from stagemesh.contracts import bind_contract as make_bound_contract
+from stagemesh.contracts import changed_files
 from stagemesh.coordinator import Coordinator
-from stagemesh.domain import EvidenceKind, EvidenceStatus, ExecutionKind, ExecutionStatus, Stage, TaskStatus
+from stagemesh.domain import (
+    EvidenceKind,
+    EvidenceStatus,
+    ExecutionKind,
+    ExecutionStatus,
+    Stage,
+    TaskStatus,
+)
 from stagemesh.git import GitWorkspace
 from stagemesh.integration_recovery import (
     BLOCKER_EVENT,
@@ -21,8 +32,10 @@ from stagemesh.integration_recovery import (
     integration_blocker,
 )
 from stagemesh.persistence import Store
-from stagemesh.serialized_integration import SerializedIntegrator
+from stagemesh.serialized_integration import RECONSTRUCTED_EVENT, SerializedIntegrator
 from stagemesh.survivor_wave import blocked_needs_decision
+from stagemesh.workspace_guard import owned_workspace
+from stagemesh.workspaces import record_task_baseline
 
 TASK = "A"
 
@@ -88,6 +101,80 @@ def evidence_count(rig: Rig, kind: EvidenceKind, sha: str, status: EvidenceStatu
     ).fetchone()[0]
 
 
+def seed_baseline_not_ancestor_failure(
+    rig: Rig,
+    *,
+    files: dict[str, str],
+    failure_files: list[str] | None = None,
+    allowed_files: list[str] | None = None,
+    foreign_files: dict[str, str] | None = None,
+) -> tuple[str, str, str]:
+    """Create a reviewed candidate whose bound baseline is on side history, then put the integration ref on a different tip."""
+    scope = allowed_files or sorted(files)
+    git = GitWorkspace(rig.project)
+    branch = rig.ref.rsplit("/", 1)[-1]
+    git.run("checkout", "-b", "historical-baseline")
+    (rig.project / "historical.txt").write_text("foreign historical baseline\n", encoding="utf-8")
+    historical_baseline = git.commit_all("foreign historical baseline")
+    git.run("checkout", branch)
+    (rig.project / "current.txt").write_text("current integration tip\n", encoding="utf-8")
+    current_tip = git.commit_all("current integration tip")
+    (rig.project / ".stagemesh" / "contracts").mkdir(parents=True, exist_ok=True)
+    (rig.project / ".stagemesh" / "contracts" / f"{TASK}.json").write_text(
+        json.dumps(
+            {
+                "objective": f"touch {', '.join(scope)}",
+                "explicit": True,
+                "allowed_files": scope,
+                "required_tests": [{"name": "smoke", "command": [sys.executable, "-c", "pass"]}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with owned_workspace(rig.store, rig.project, TASK, ExecutionKind.IMPLEMENTATION) as lease:
+        work = GitWorkspace(lease.path)
+        work.run("checkout", "--detach", historical_baseline)
+        record_task_baseline(rig.store, TASK, lease.path)
+        for rel, content in (foreign_files or {}).items():
+            target = lease.path / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding="utf-8")
+        if foreign_files:
+            work.commit_all("foreign post-baseline change")
+        for rel, content in files.items():
+            target = lease.path / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding="utf-8")
+        candidate = work.commit_all(f"implement {TASK}")
+        rig.store.add_candidate(TASK, candidate, "scripted", durable_handoff=True)
+        lease.seal(candidate)
+
+    bound = make_bound_contract(rig.project, TASK, baseline_sha=historical_baseline, candidate_sha=candidate)
+    rig.store.bind_task_contract(TASK, historical_baseline, bound.version, bound.digest, bound.canonical_json)
+    rig.store.bind_contract(TASK, candidate, historical_baseline, bound.version, bound.digest, bound.canonical_json)
+    rig.store.add_evidence(TASK, candidate, EvidenceKind.VALIDATION, EvidenceStatus.PASSED, bound.evidence_payload())
+    rig.store.add_evidence(TASK, candidate, EvidenceKind.REVIEW, EvidenceStatus.PASSED, bound.evidence_payload())
+    rig.store.add_evidence(
+        TASK,
+        candidate,
+        EvidenceKind.INTEGRATION,
+        EvidenceStatus.FAILED,
+        {
+            **bound.evidence_payload(),
+            "findings": [
+                {
+                    "severity": "error",
+                    "code": "integration_rebase_conflict",
+                    "message": f"{rig.ref} advanced to {current_tip}; candidate {candidate} conflicts in {', '.join(failure_files or ['out/A.txt'])}; ref left unchanged",
+                }
+            ],
+        },
+    )
+    rig.store.advance_task(TASK, Stage.INTEGRATE)
+    return historical_baseline, current_tip, candidate
+
+
 def redo_until_back_at_integrate(rig: Rig, coord: Coordinator) -> None:
     """Tick until one recovery happened and the redone candidate is waiting at INTEGRATE again."""
     for _ in range(60):
@@ -121,6 +208,138 @@ def test_stale_main_after_review_is_refreshed_onto_the_current_base_and_lands_wi
         assert evidence_count(rig, kind, final) == 1, kind
     assert evidence_count(rig, EvidenceKind.INTEGRATION, original) == 0
     assert executions(rig, ExecutionKind.IMPLEMENTATION) == 1 and executions(rig, ExecutionKind.REVIEW) == 2  # only the exact-SHA review reran
+
+
+def test_baseline_not_ancestor_reconstructs_task_delta_and_lands_without_replaying_historical_baseline(tmp_path: Path) -> None:
+    rig = Rig(tmp_path, [TASK])
+    coord = coordinator(rig, ScriptedExecutor(rig.files))
+    historical_baseline, current_tip, original = seed_baseline_not_ancestor_failure(rig, files={"out/A.txt": "A\n"})
+
+    assert GitWorkspace(rig.project).run("merge-base", "--is-ancestor", historical_baseline, current_tip, check=False).returncode == 1
+    assert coord._recover_integration(TASK, original) == 1
+    reconstructed = rig.store.latest_candidate(TASK)["sha"]
+    assert reconstructed != original
+    assert rig.store.get_task(TASK)["stage"] == Stage.VALIDATE
+    advance_until(rig, coord, Stage.DONE, 80)
+
+    final = rig.store.latest_candidate(TASK)["sha"]
+    assert final == reconstructed and tip(rig) == final
+    assert "historical.txt" not in rig.tree()  # the side-baseline commit was not replayed
+    assert {"current.txt", "out/A.txt"} <= rig.tree()
+    (reconstructed_event,) = events(rig, RECONSTRUCTED_EVENT)
+    assert reconstructed_event["from_candidate"] == original
+    assert reconstructed_event["old_baseline"] == historical_baseline
+    assert reconstructed_event["onto"] == current_tip
+    (recovery,) = events(rig, RECOVERY_EVENT)
+    assert (recovery["category"], recovery["action"]) == (MERGE_CONFLICT, "REPAIR_WORKTREE")
+    assert evidence_count(rig, EvidenceKind.INTEGRATION, original, EvidenceStatus.FAILED) == 1
+    for kind in (EvidenceKind.VALIDATION, EvidenceKind.REVIEW, EvidenceKind.INTEGRATION):
+        assert evidence_count(rig, kind, reconstructed) == 1, kind
+    assert rig.store.contract_binding(TASK, reconstructed)["baseline_sha"] == current_tip
+
+
+def test_baseline_not_ancestor_reconstruction_refuses_ambiguous_out_of_scope_delta_and_preserves_history(tmp_path: Path) -> None:
+    rig = Rig(tmp_path, [TASK])
+    coord = coordinator(rig, ScriptedExecutor(rig.files), max_integration_recoveries=1)
+    _, current_tip, original = seed_baseline_not_ancestor_failure(
+        rig,
+        files={"out/A.txt": "A\n", "leaked.txt": "not task owned\n"},
+        failure_files=["out/A.txt"],
+        allowed_files=["out/A.txt"],
+    )
+    baseline = rig.store.contract_binding(TASK, original)["baseline_sha"]
+    assert changed_files(rig.project, original, baseline) == ["leaked.txt", "out/A.txt"]
+
+    assert coord._recover_integration(TASK, original) == 1
+
+    assert rig.store.get_task(TASK)["status"] == TaskStatus.BLOCKED
+    assert rig.store.latest_candidate(TASK)["sha"] == original
+    assert "leaked.txt" not in rig.tree() and tip(rig) == current_tip
+    blocker = integration_blocker(rig.store, TASK)
+    assert blocker["block_kind"] == "BLOCKED_POLICY_SAFETY"
+    assert blocker["files"] == ["leaked.txt"]
+    assert "outside the contract" in blocker["why_not_automatic"]
+    assert len(events(rig, RECOVERY_EVENT)) == 1
+    assert evidence_count(rig, EvidenceKind.VALIDATION, original) == 1
+    assert evidence_count(rig, EvidenceKind.REVIEW, original) == 1
+    assert evidence_count(rig, EvidenceKind.INTEGRATION, original, EvidenceStatus.FAILED) == 1
+
+
+def test_baseline_not_ancestor_reconstruction_refuses_foreign_allowed_commits(tmp_path: Path) -> None:
+    rig = Rig(tmp_path, [TASK])
+    coord = coordinator(rig, ScriptedExecutor(rig.files), max_integration_recoveries=1)
+    _, current_tip, original = seed_baseline_not_ancestor_failure(
+        rig,
+        files={"out/A.txt": "task-owned\n"},
+        failure_files=["out/A.txt"],
+        allowed_files=["out/A.txt"],
+        foreign_files={"out/A.txt": "foreign allowed-path change\n"},
+    )
+
+    assert coord._recover_integration(TASK, original) == 1
+
+    assert rig.store.get_task(TASK)["status"] == TaskStatus.BLOCKED
+    assert rig.store.latest_candidate(TASK)["sha"] == original
+    assert GitWorkspace(rig.project).run("show", f"{rig.ref}:out/A.txt", check=False).returncode != 0
+    assert tip(rig) == current_tip
+    blocker = integration_blocker(rig.store, TASK)
+    assert blocker["block_kind"] == "BLOCKED_POLICY_SAFETY"
+    assert "not recorded as candidates for this task" in blocker["why_not_automatic"]
+    assert len(events(rig, RECOVERY_EVENT)) == 1
+
+
+def test_baseline_not_ancestor_reconstruction_conflict_is_bounded_and_lists_files(tmp_path: Path) -> None:
+    files = {TASK: ("shared.txt", "task version\n")}
+    rig = Rig(tmp_path, [TASK], files=files)
+    (rig.project / "shared.txt").write_text("base\n", encoding="utf-8")
+    GitWorkspace(rig.project).commit_all("shared base")
+    coord = coordinator(rig, ScriptedExecutor(files), max_integration_recoveries=1)
+    _, _, original = seed_baseline_not_ancestor_failure(rig, files={"shared.txt": "task version\n"}, failure_files=["shared.txt"])
+    (rig.project / "shared.txt").write_text("current version\n", encoding="utf-8")
+    current_tip = GitWorkspace(rig.project).commit_all("current shared version")
+
+    assert coord._recover_integration(TASK, original) == 1
+
+    assert rig.store.get_task(TASK)["status"] == TaskStatus.BLOCKED
+    assert tip(rig) == current_tip
+    blocker = integration_blocker(rig.store, TASK)
+    assert blocker["classification"] == MERGE_CONFLICT
+    assert blocker["files"] == ["shared.txt"]
+    assert [a["action"] for a in blocker["recoveries_attempted"]] == ["REPAIR_WORKTREE"]
+    assert blocker["block_kind"] == "BLOCKED_HUMAN_DECISION"
+    assert "reconstructing the task-owned delta" in blocker["why_not_automatic"]
+    assert len(events(rig, RECOVERY_EVENT)) == 1
+
+
+def test_baseline_not_ancestor_reconstruction_apply_error_is_typed_without_workspace_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rig = Rig(tmp_path, [TASK])
+    coord = coordinator(rig, ScriptedExecutor(rig.files), max_integration_recoveries=1)
+    _, current_tip, original = seed_baseline_not_ancestor_failure(rig, files={"out/A.txt": "A\n"})
+    real_run = serialized_integration.subprocess.run
+
+    def fail_apply(*args, **kwargs):  # type: ignore[no-untyped-def]
+        command = args[0] if args else kwargs.get("args", [])
+        if "apply" in command:
+            raise OSError("simulated apply failure after checkout")
+        return real_run(*args, **kwargs)
+
+    monkeypatch.setattr(serialized_integration.subprocess, "run", fail_apply)
+
+    assert coord._recover_integration(TASK, original) == 1
+
+    assert rig.store.get_task(TASK)["status"] == TaskStatus.BLOCKED
+    assert rig.store.latest_candidate(TASK)["sha"] == original
+    assert tip(rig) == current_tip
+    blocker = integration_blocker(rig.store, TASK)
+    assert blocker["block_kind"] == "BLOCKED_RECOVERABLE_OPERATIONAL"
+    assert "simulated apply failure after checkout" in blocker["why_not_automatic"]
+    mutation_blocks = [
+        json.loads(row["payload"])
+        for row in rig.store.conn.execute("SELECT payload FROM audit_events WHERE event_type='task.blocked'")
+    ]
+    assert not mutation_blocks
 
 
 def test_a_task_scoped_merge_conflict_is_redone_against_what_landed_and_lands(tmp_path: Path) -> None:
