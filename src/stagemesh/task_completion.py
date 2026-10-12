@@ -17,7 +17,7 @@ def task_owner_state(store: Store, task_id: str, project: Path | None = None) ->
     task = store.get_task(task_id)
     candidate = store.latest_candidate(task_id)
     candidate_sha = str(candidate["sha"]) if candidate is not None else None
-    integration_ref = resolve_integration_ref(project) if project is not None else None
+    integration_ref = resolve_integration_ref(project) if project is not None and Path(project).is_dir() else None  # advisory snapshot: a project that does not exist yet has no ref
     state: dict[str, Any] = {
         "task_id": task_id,
         "objective": None if task is None else str(task["title"]),

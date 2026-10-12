@@ -643,44 +643,6 @@ class Coordinator:
         record_task_owner_state(self.store, task_id, "integration_recovery_redo_on_current_base", self.project)
         return None
 
-    def _integration_failure_is_ref_state(self, task_id: str, sha: str) -> bool:
-        failure = classify_integration_failure(self.store, task_id, sha)
-        return failure is not None and failure.category in {"merge_conflict_with_current_target", "target_advanced_after_review"}
-
-    def _advance_baseline_for_integration_conflict(self, task_id: str, sha: str) -> bool:
-        integration_ref = self.integrator.integration_ref or resolve_integration_ref(self.project)
-        if not integration_ref:
-            return False
-        try:
-            report = advance_baseline(
-                self.store,
-                self.project,
-                task_id,
-                integration_ref,
-                yes=True,
-                allow_integrating=True,
-                reason="automatic integration conflict recovery",
-            )
-        except RecoveryRefusal as exc:
-            record_audit(
-                self.store,
-                "task.auto_advance_baseline_refused",
-                {"task_id": task_id, "candidate_sha": sha, "code": exc.code, "message": str(exc)[:300]},
-            )
-            return False
-        record_audit(
-            self.store,
-            "task.integration_reconciliation_queued",
-            {
-                "task_id": task_id,
-                "candidate_sha": sha,
-                "new_baseline": report.get("new_baseline"),
-                "integration_ref": integration_ref,
-            },
-        )
-        record_task_owner_state(self.store, task_id, "integration_conflict_baseline_advanced", self.project)
-        return True
-
     def _auto_rebaseline(self, task_id: str, diagnosis: Diagnosis) -> bool:
         if diagnosis.category != STALE_BASELINE:
             return False
@@ -716,17 +678,6 @@ class Coordinator:
                 f"{failed_stage} failed without structured findings",
             )
             findings = self.store.open_findings_for_candidate(task_id, sha)
-        if failed_stage is Stage.INTEGRATE and self._integration_failure_is_ref_state(task_id, sha):
-            if self._advance_baseline_for_integration_conflict(task_id, sha):
-                return 1
-            return self._block_remediation_exhausted(
-                task_id,
-                sha,
-                failed_stage,
-                findings,
-                "integration_ref_state_unrecoverable",
-                None,
-            )
         if failed_stage is Stage.INTEGRATE:
             recovered = self._recover_integration(task_id, sha)
             if recovered is not None:
@@ -806,19 +757,6 @@ class Coordinator:
         )
         record_task_owner_state(self.store, task_id, "parent_budget_reopened", self.project)
         return True
-
-    def _block_remediation_exhausted(
-        self,
-        task_id: str,
-        sha: str,
-        failed_stage: Stage,
-        findings: list,
-        cause: str,
-        diagnosis: Diagnosis | None,
-    ) -> int:
-        result = self._on_remediation_exhausted(task_id, sha, failed_stage, findings, diagnosis, cause)
-        record_task_owner_state(self.store, task_id, "remediation_exhausted", self.project)
-        return result
 
     def _implementation_health(self, task_id: str) -> dict[str, str]:
         """provider -> "ok" or the reason it cannot take the next implementation attempt (empty when there is no provider pool)."""
