@@ -87,6 +87,7 @@ from .provider_pool import (
 from .providers import ProviderValidationError, adapters_from_config, stage_command_summary
 from .queue_run import QueueRunner
 from .queue_visibility import format_queue_control, queue_control_report
+from .contract_check import check_contract, format_report
 from .recovery import RecoveryRefusal, advance_baseline, format_doctor, rebaseline_task, rebind_contract, task_doctor
 from .redaction import redact_command_secrets, redact_url_credentials
 from .registry import (
@@ -635,6 +636,16 @@ def command_rebind_contract(args: argparse.Namespace) -> int:
         return report
 
     return _repair_command(args, run)
+
+
+def command_contract_check(args: argparse.Namespace) -> int:
+    if not args.task and not args.file:
+        print("contract-check needs --task or --file", file=sys.stderr)
+        return 2
+    project = Path(args.project).resolve()
+    report = check_contract(project, args.task, Path(args.file) if args.file else None)
+    print(json.dumps(report, indent=2, sort_keys=True) if args.json else "\n".join(format_report(report)))
+    return 0 if report["ok"] else 2
 
 
 def command_rebaseline_task(args: argparse.Namespace) -> int:
@@ -2983,6 +2994,14 @@ def build_parser() -> argparse.ArgumentParser:
     rebind.add_argument("--reason", help="Why the contract changed (recorded in the audit event)")
     rebind.add_argument("--json", action="store_true")
     rebind.set_defaults(func=command_rebind_contract)
+    contract_check = sub.add_parser(
+        "contract-check",
+        help="Validate a contract's parseability, canonical size and planned gates before labelling an issue stagemesh:ready (exit 2 if not)",
+    )
+    contract_check.add_argument("--task", help="Check .stagemesh/contracts/<task>.json")
+    contract_check.add_argument("--file", help="Check this contract file instead")
+    contract_check.add_argument("--json", action="store_true")
+    contract_check.set_defaults(func=command_contract_check)
     rebase = sub.add_parser("rebaseline-task", help="Move a stale task baseline to the candidate's merge-base with the integration ref (audited)")
     rebase.add_argument("--task", required=True)
     rebase.add_argument("--to", required=True, metavar="INTEGRATION_REF", help="Integration ref the baseline is recomputed against")
