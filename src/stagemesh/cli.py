@@ -2164,7 +2164,10 @@ def command_capacity(args: argparse.Namespace) -> int:
         if args.json:
             print(json.dumps(payload, indent=2, sort_keys=True))
             return 0
-        print(f"chosen: {chosen or 'NONE'}")
+        print(
+            f"chosen: {chosen or 'NONE'} "
+            f"(legacy --primary/--secondary fallback check only; run `stagemesh capacity` without those flags for the active routing policy)"
+        )
         return 0
     adapter_by_name = {adapter.name: adapter for adapter in adapters}
     stage_caps = {IMPLEMENT: "code", REVIEW: "review"}
@@ -2219,6 +2222,7 @@ def command_capacity(args: argparse.Namespace) -> int:
                 "command_available": all(item["available"] for item in stage_commands.values()) if stage_commands else capacity == CapacityKind.AVAILABLE,
                 "capacity": capacity,
                 "capabilities": sorted(adapter.capabilities),
+                "max_concurrency": _provider_max_concurrency(config, adapter.name),
                 "live_acceptance": "not_run" if _latest_live_acceptance_payload(store, adapter.name) is None else "recorded",
                 "live_status": live_acceptance_status(
                     store, adapter.name, "code" if "code" in adapter.capabilities else "review", ttl_seconds=config.live_acceptance_ttl_seconds
@@ -2279,12 +2283,6 @@ def command_capacity(args: argparse.Namespace) -> int:
             print("  most recent use: never")
         for verdict in stage_payload["verdicts"]:
             print(f"  {verdict['provider']}: {verdict['reason']}")
-    for row in provider_rows:
-        stages = "; ".join(
-            f"{stage} {info['executable']} [{info['source']}{'' if info['available'] else ', NOT FOUND'}]"
-            for stage, info in row["stage_commands"].items()
-        )
-        print(f"provider {row['provider']} commands: {stages}")
     if cooldowns:
         for line in format_cooldowns(cooldowns):
             print(line)
@@ -2292,15 +2290,27 @@ def command_capacity(args: argparse.Namespace) -> int:
         print("provider cooldowns: none")
     print(f"live acceptance freshness window: {config.live_acceptance_ttl_seconds / 86400:g} days (routing.live_acceptance_ttl_seconds)")
     for row in provider_rows:
+        stages = "; ".join(
+            f"{stage} {info['executable']} [{info['source']}{'' if info['available'] else ', NOT FOUND'}]"
+            for stage, info in row["stage_commands"].items()
+        )
         live = row["live_status"]
         age = "" if live["age_seconds"] is None else f", checked {live['age_seconds'] / 3600:.1f}h ago"
         cooling = next((c for c in cooldowns if c["provider"] == row["provider"]), None)
         print(
-            f"provider {row['provider']}: command {'available' if row['command_available'] else 'NOT FOUND'}; "
-            f"live check {live['state']}{age}"
+            f"provider {row['provider']} commands: {stages}; "
+            f"command {'available' if row['command_available'] else 'NOT FOUND'}; "
+            f"live check {live['state']}{age}; max concurrency {row['max_concurrency']}"
             + (f"; cooling down ({cooling['failure_class']})" if cooling else "")
         )
     return 0
+
+
+def _provider_max_concurrency(config, provider: str) -> int:
+    spec = config.provider_specs.get(provider)
+    if spec is not None and spec.max_concurrency is not None:
+        return spec.max_concurrency
+    return config.parallel.provider_max_concurrency
 
 
 def _live_readiness(store: Store, provider: str, capability: str, ttl_seconds: float | None = None) -> dict[str, object]:
