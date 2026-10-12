@@ -228,6 +228,10 @@ def _check_running_code(project: Path, report: IsolationReport, expected_checkou
     allow_project_local = expected_checkout is None or _norm(expected_checkout) == _norm(project)
     if allow_project_local and _inside(running, _project_local_install_root(project)):
         return
+    from ..runtime_info import runtime_venv
+
+    if allow_project_local and _inside(running, runtime_venv()):
+        return
     expected = f"{own_package}"
     if allow_project_local:
         expected += f" or {_project_local_install_root(project)}"

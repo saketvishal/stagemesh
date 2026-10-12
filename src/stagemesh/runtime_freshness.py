@@ -1,6 +1,6 @@
 """Is the installed `stagemesh` CLI behind the repo source? Say so, instead of letting an operator hit "invalid choice".
 
-The project-local install (`.stagemesh/tooling/venv`) is a copy that does not follow the checkout, so a command added to source is
+The installed runtime (the standalone tool environment, or a legacy `.stagemesh/tooling/venv`) is a copy that does not follow the checkout, so a command added to source is
 missing from `stagemesh.exe` until it is reinstalled. This compares the command sets of the two and reports the difference, and says
 which one the current process is running. Nothing here changes the install.
 """
@@ -48,6 +48,11 @@ def installed_cli_path(project: Path) -> Path | None:
     for candidate in (venv / "Scripts" / "stagemesh.exe", venv / "bin" / "stagemesh"):
         if candidate.is_file():
             return candidate
+    from .runtime_info import runtime_cli
+
+    standalone = runtime_cli()
+    if standalone.is_file():
+        return standalone
     found = shutil.which("stagemesh")
     return Path(found) if found else None
 
@@ -80,6 +85,8 @@ def check_runtime(project: Path, *, runner: Runner = subprocess.run, running_fil
     if (src / "stagemesh" / "cli.py").is_file():
         result.source_cli = str(src / "stagemesh" / "cli.py")
     cli = installed_cli_path(project)
+    if cli is not None:
+        result.installed_cli = str(cli)
     if not (src / "stagemesh" / "cli.py").is_file():
         result.message = "no StageMesh source in this project to compare the install with"
         return result

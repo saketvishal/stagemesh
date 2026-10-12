@@ -4,6 +4,7 @@ import base64
 import csv
 import hashlib
 import io
+import subprocess
 import zipfile
 from pathlib import Path
 
@@ -41,6 +42,22 @@ def _wheel() -> str:
     )
 
 
+def _build_info(root: Path) -> bytes:
+    """Provenance baked into a built wheel: the checkout commit it came from (a source checkout has no such module)."""
+
+    def git(*args: str) -> str:
+        try:
+            out = subprocess.run(["git", *args], cwd=root, capture_output=True, text=True, timeout=20, check=False)
+            return out.stdout.strip() if out.returncode == 0 else ""
+        except (OSError, subprocess.SubprocessError):
+            return ""
+
+    commit = git("rev-parse", "HEAD")
+    dirty = bool(git("status", "--porcelain")) if commit else False
+    lines = [f"SOURCE_COMMIT = {commit!r}", f"SOURCE_DIRTY = {dirty!r}", f"BUILT_FROM = {str(root)!r}", ""]
+    return "\n".join(lines).encode("utf-8")
+
+
 def get_requires_for_build_wheel(config_settings=None):
     return []
 
@@ -75,6 +92,7 @@ def build_wheel(wheel_directory, config_settings=None, metadata_directory=None):
             zf.writestr(arcname, data)
             records.append((arcname, data))
         generated = {
+            "stagemesh/_build_info.py": _build_info(root),
             f"{DIST_INFO}/METADATA": _metadata().encode("utf-8"),
             f"{DIST_INFO}/WHEEL": _wheel().encode("utf-8"),
             f"{DIST_INFO}/entry_points.txt": b"[console_scripts]\nstagemesh=stagemesh.cli:main\n",
