@@ -136,6 +136,7 @@ def test_true_rebase_conflict_refreshes_baseline_then_reimplements_to_done(tmp_p
     assert rig.store.conn.execute("SELECT COUNT(*) FROM candidates WHERE task_id=? AND sha=?", (TASK, original)).fetchone()[0] == 1
     assert GitWorkspace(rig.project).run("merge-base", "--is-ancestor", tip, _tip(rig), check=False).returncode == 0
     events = [json.loads(row["payload"]) for row in rig.store.audit_events() if row["event_type"] == "task.baseline_advanced"]
-    assert any(event.get("reason") == "automatic integration conflict recovery" for event in events)
+    assert any(str(event.get("reason", "")).startswith("integration recovery: merge_conflict_with_current_target") for event in events)
+    assert any(row["event_type"] == "integration.recovery" for row in rig.store.audit_events())  # recorded and counted against the recovery budget
     owner_state = [json.loads(row["payload"]) for row in rig.store.audit_events() if row["event_type"] == "task.owner_state"][-1]
     assert owner_state["current_problem"] is None and owner_state["unresolved_findings"] == []
