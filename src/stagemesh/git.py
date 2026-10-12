@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 
 from .attribution import GitAttribution
-from .git_identity import identity_env_for, sanitize_commit_message
+from .git_identity import identity_env_for, sanitize_commit_message, stage_mesh_commit_env_for
 
 
 _TRANSIENT_RETRIES = 4
@@ -121,7 +121,8 @@ class GitWorkspace:
         diff = self.run("diff", "--cached", "--quiet", check=False)
         if diff.returncode == 0:
             return self.head_or_synthetic()
-        self.run("commit", "-m", message)
+        env = stage_mesh_commit_env_for(self.path) if attribution is not None else None
+        self.run("commit", "-m", message, env=env)
         return self.head()
 
     def head(self) -> str:

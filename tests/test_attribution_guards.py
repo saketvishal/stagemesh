@@ -6,10 +6,11 @@ import io
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
-from test_provider_pool import Rig
+from test_provider_pool import TASK, Rig
 
 import stagemesh.cli as cli_module
 import stagemesh.providers as providers_module
@@ -97,6 +98,74 @@ def test_implementation_and_review_providers_are_launched_with_the_project_ident
     for env in launched:
         assert env["GIT_COMMITTER_EMAIL"] == env["GIT_AUTHOR_EMAIL"] == "t@example.invalid"
         assert env["GIT_COMMITTER_NAME"] == env["GIT_AUTHOR_NAME"] == "T"
+
+
+def test_provider_candidate_commit_uses_owner_when_environment_names_worker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rig = Rig(
+        tmp_path,
+        {"provider-a": "ok", "provider-b": "ok"},
+        pools={IMPLEMENT: ("provider-a",), REVIEW: ("provider-b",)},
+    )
+    monkeypatch.setenv("GIT_AUTHOR_NAME", "StageMesh claude worker local-worker")
+    monkeypatch.setenv("GIT_AUTHOR_EMAIL", "claude+local-worker@stagemesh.invalid")
+    monkeypatch.setenv("GIT_COMMITTER_NAME", "StageMesh claude worker local-worker")
+    monkeypatch.setenv("GIT_COMMITTER_EMAIL", "claude+local-worker@stagemesh.invalid")
+
+    rig.tick(2)  # PLAN, IMPLEMENT
+
+    sha = rig.store.latest_candidate(TASK)["sha"]
+    assert (
+        _raw(rig.project, "log", "-1", "--format=%an <%ae>|%cn <%ce>", sha)
+        == "T <t@example.invalid>|T <t@example.invalid>"
+    )
+    assert "local-worker" not in _raw(rig.project, "log", "-1", "--format=%an %ae %cn %ce %B", sha)
+
+
+def test_remediation_candidate_commit_uses_owner_when_environment_names_worker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rig = Rig(
+        tmp_path,
+        {"provider-a": "ok", "provider-b": "ok"},
+        pools={IMPLEMENT: ("provider-a",), REVIEW: ("provider-b",)},
+        contract={
+            "objective": "docs only",
+            "allowed_files": ["docs/**"],
+            "required_tests": [
+                {
+                    "name": "force-remediation",
+                    "command": [sys.executable, "-c", "import sys; sys.exit(1)"],
+                }
+            ],
+        },
+    )
+    (tmp_path / "provider.py").write_text(
+        "import pathlib, sys\n"
+        "prompt = sys.stdin.read()\n"
+        "if 'Review candidate' in prompt:\n"
+        "    print('{\"decision\":\"PASS\"}'); sys.exit(0)\n"
+        "path = pathlib.Path('docs/rework.md' if 'Previous candidate' in prompt else 'docs/a.md')\n"
+        "path.write_text(('rework' if 'Previous candidate' in prompt else 'initial') + '\\n')\n",
+        encoding="utf-8",
+    )
+    rig.tick(3)  # PLAN, IMPLEMENT, failing VALIDATE queues remediation back to IMPLEMENT
+    first = rig.store.latest_candidate(TASK)["sha"]
+    monkeypatch.setenv("GIT_AUTHOR_NAME", "StageMesh claude worker local-worker")
+    monkeypatch.setenv("GIT_AUTHOR_EMAIL", "claude+local-worker@stagemesh.invalid")
+    monkeypatch.setenv("GIT_COMMITTER_NAME", "StageMesh claude worker local-worker")
+    monkeypatch.setenv("GIT_COMMITTER_EMAIL", "claude+local-worker@stagemesh.invalid")
+
+    rig.tick(1)  # remediation/rework implementation
+
+    sha = rig.store.latest_candidate(TASK)["sha"]
+    assert sha != first
+    assert (
+        _raw(rig.project, "log", "-1", "--format=%an <%ae>|%cn <%ce>", sha)
+        == "T <t@example.invalid>|T <t@example.invalid>"
+    )
+    assert "local-worker" not in _raw(rig.project, "log", "-1", "--format=%an %ae %cn %ce %B", sha)
 
 
 @pytest.mark.parametrize("email", TOOL_EMAILS)

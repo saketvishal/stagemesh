@@ -148,6 +148,38 @@ def project_identity(path: Path | None = None) -> GitIdentity:
     return configured_identity(path) or SYNTHETIC_IDENTITY
 
 
+def _without_unapproved_commit_identity(environ: dict[str, str]) -> dict[str, str]:
+    emails = [
+        environ.get(key, "").strip()
+        for key in ("GIT_AUTHOR_EMAIL", "GIT_COMMITTER_EMAIL", "EMAIL")
+        if environ.get(key, "").strip()
+    ]
+    if not any(is_non_human_email(email) or is_ai_or_placeholder_email(email) for email in emails):
+        return environ
+    blocked = {
+        "GIT_AUTHOR_NAME",
+        "GIT_AUTHOR_EMAIL",
+        "GIT_AUTHOR_DATE",
+        "GIT_COMMITTER_NAME",
+        "GIT_COMMITTER_EMAIL",
+        "GIT_COMMITTER_DATE",
+        "EMAIL",
+    }
+    return {key: value for key, value in environ.items() if key not in blocked}
+
+
+def stage_mesh_commit_env_for(path: Path | None, existing: dict[str, str] | None = None) -> dict[str, str]:
+    """Forced owner identity for StageMesh-owned candidate commits.
+
+    Provider CLIs can carry their own GIT_* identity in the process environment. Candidate commits belong to the repository owner,
+    so those variables must not participate in identity selection or survive into the git commit process.
+    """
+    base = dict(os.environ)
+    base.update(existing or {})
+    identity = configured_identity(path, _without_unapproved_commit_identity(base)) or SYNTHETIC_IDENTITY
+    return identity.env()
+
+
 def identity_env_for(path: Path | None, existing: dict[str, str] | None = None) -> dict[str, str]:
     """Environment variables supplying an identity to a single git command, filling only what the caller has not already set.
 
@@ -159,6 +191,11 @@ def identity_env_for(path: Path | None, existing: dict[str, str] | None = None) 
     explicit_email = present.get("GIT_AUTHOR_EMAIL") or present.get("GIT_COMMITTER_EMAIL")
     if explicit_name and explicit_email:
         validate_identity(explicit_name, explicit_email)
+    if all(
+        present.get(key)
+        for key in ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL")
+    ):
+        return {}
     identity = project_identity(path)
     fill = {key: value for key, value in identity.env().items() if not present.get(key)}
     return fill
@@ -211,10 +248,10 @@ def is_tool_email(email: str) -> bool:
 
 def provider_environment(path: Path | None = None, base: dict[str, str] | None = None) -> dict[str, str]:
     """Environment for a provider subprocess: pinned to the project identity so a commit the provider makes itself is never credited
-    to the provider's own git configuration. A placeholder or tool identity is left for StageMesh's own commit path to refuse."""
+    to the provider's own git configuration."""
     env = dict(os.environ if base is None else base)
     try:
-        identity = project_identity(path)
+        identity = configured_identity(path, _without_unapproved_commit_identity(env)) or SYNTHETIC_IDENTITY
     except GitIdentityError:
         return env
     env.update(identity.env())  # forced, not filled: a provider's own GIT_* variables must not outrank the approved identity
