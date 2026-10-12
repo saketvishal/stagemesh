@@ -91,6 +91,15 @@ def build_wheel(wheel_directory, config_settings=None, metadata_directory=None):
             data = path.read_bytes()
             zf.writestr(arcname, data)
             records.append((arcname, data))
+        # Offline skills, their companions, provenance, and licenses belong to
+        # the independently installed runtime, not the host/source checkout.
+        for path in sorted((root / "src" / "stagemesh" / "skill_packs").rglob("*")):
+            if not path.is_file() or "__pycache__" in path.parts or path.suffix == ".py":
+                continue
+            arcname = path.relative_to(root / "src").as_posix()
+            data = path.read_bytes()
+            zf.writestr(arcname, data)
+            records.append((arcname, data))
         generated = {
             "stagemesh/_build_info.py": _build_info(root),
             f"{DIST_INFO}/METADATA": _metadata().encode("utf-8"),

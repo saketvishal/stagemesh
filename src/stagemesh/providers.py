@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import shlex
 import shutil
 import stat
@@ -13,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from .agent_skills import SkillPackError, is_frontend_task, skill_prompt
 from .attribution import attribution_for_worker
 from .capacity import CapacityKind, CapacityRegistry
 from .config import StageMeshConfig
@@ -76,39 +76,6 @@ FRONTEND_DESIGN_DISCIPLINE = (
     "- Preserve mobile responsiveness, visible keyboard focus, reduced-motion behavior, and accessible color contrast.\n\n"
 )
 
-_FRONTEND_FILE_HINTS = (
-    ".astro",
-    ".css",
-    ".html",
-    ".jsx",
-    ".less",
-    ".scss",
-    ".svelte",
-    ".tsx",
-    ".vue",
-)
-_FRONTEND_TEXT_HINTS = (
-    "component",
-    "design",
-    "frontend",
-    "layout",
-    "mobile",
-    "page",
-    "screen",
-    "theme",
-    "ui",
-    "ux",
-    "web",
-)
-_FRONTEND_PATH_HINTS = (
-    "app/",
-    "components/",
-    "frontend/",
-    "pages/",
-    "styles/",
-    "ui/",
-    "web/",
-)
 MAX_SPEC_PROMPT_CHARS = 12000
 MAX_SPEC_PROMPT_CHARS_PER_FILE = 5000
 
@@ -187,9 +154,12 @@ class RuntimeCommandAdapter:
         except ContractRejected as exc:
             return ExecutionResult(ExecutionStatus.FAILED, failure_reason=f"{exc.reason}: {exc}")
         task = store.get_task(task_id)
-        task_prompt = _build_task_prompt(
-            task_id, task, run_path, contract=bound.contract, remediation=remediation_context(store, task_id, project)
-        )
+        try:
+            task_prompt = _build_task_prompt(
+                task_id, task, run_path, contract=bound.contract, remediation=remediation_context(store, task_id, project)
+            )
+        except SkillPackError as exc:
+            return ExecutionResult(ExecutionStatus.FAILED, failure_reason=f"skill_pack_unavailable: {exc}")
         command, provider_input = _command_and_input(self.command_for("code"), task_prompt)
         lease.check("before_agent")
         try:
@@ -279,7 +249,11 @@ class RuntimeCommandAdapter:
             before_head = _git_output(review_path, "rev-parse", "HEAD")
             if before_head != candidate_sha:
                 return _review_infrastructure_failure("review workspace did not checkout exact candidate")
-            command, provider_input = _command_and_input(self.command_for("review"), prompt, structured_review=True)
+            try:
+                review_prompt = prompt + skill_prompt("", stage="review")
+            except SkillPackError as exc:
+                return _review_infrastructure_failure(f"skill_pack_unavailable: {exc}")
+            command, provider_input = _command_and_input(self.command_for("review"), review_prompt, structured_review=True)
             try:
                 proc = subprocess.Popen(
                     command,
@@ -652,6 +626,7 @@ def _build_task_prompt(
     row_keys = set(task.keys()) if isinstance(task, _sqlite3.Row) else set()
     title = task["title"] if "title" in row_keys else str(task_id)
     contract_text = ""
+    effective_contract = contract
     frontend_text = _frontend_design_prompt(title, contract)
     spec_text = _project_specs_prompt(project, contract)
     if contract is not None:
@@ -659,6 +634,7 @@ def _build_task_prompt(
     elif project is not None:
         try:
             loaded_contract = load_contract(project, task_id)
+            effective_contract = loaded_contract
             contract_text = "\n\n" + contract_prompt(loaded_contract) + "\n"
             frontend_text = _frontend_design_prompt(title, loaded_contract)
             spec_text = _project_specs_prompt(project, loaded_contract)
@@ -673,6 +649,7 @@ def _build_task_prompt(
         "Please implement the changes described above.\n\n"
         f"{IMPLEMENTATION_DISCIPLINE}"
         f"{frontend_text}"
+        f"{skill_prompt(title, effective_contract, remediation=bool(remediation))}"
         "Workspace rules:\n"
         "- Edit files only. Do not run git commit, checkout, switch, reset, rebase, merge, cherry-pick, branch, tag, "
         "amend, or any command that moves HEAD or rewrites history.\n"
@@ -684,24 +661,7 @@ def _build_task_prompt(
 
 
 def _frontend_design_prompt(title: str, contract: object | None) -> str:
-    fields = [title]
-    for attr in ("objective",):
-        value = getattr(contract, attr, None)
-        if isinstance(value, str):
-            fields.append(value)
-    for attr in ("allowed_files", "acceptance_criteria", "public_api", "spec_refs"):
-        value = getattr(contract, attr, ())
-        if isinstance(value, (list, tuple)):
-            fields.extend(str(item) for item in value)
-    text = "\n".join(fields).lower().replace("\\", "/")
-    if any(hint in text for hint in _FRONTEND_FILE_HINTS):
-        return FRONTEND_DESIGN_DISCIPLINE
-    if any(hint in text for hint in _FRONTEND_PATH_HINTS):
-        return FRONTEND_DESIGN_DISCIPLINE
-    words = set(re.findall(r"[a-z0-9]+", text))
-    if words.intersection(_FRONTEND_TEXT_HINTS):
-        return FRONTEND_DESIGN_DISCIPLINE
-    return ""
+    return FRONTEND_DESIGN_DISCIPLINE if is_frontend_task(title, contract) else ""
 
 
 def _project_specs_prompt(project: Path | None, contract: object | None) -> str:
