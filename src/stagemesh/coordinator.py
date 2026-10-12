@@ -29,6 +29,7 @@ from .integration_recovery import (
     base_relation,
     block_with_decision,
     build_context,
+    _conflict_files,
     classify_integration_failure,
     record_decision,
     record_recovery,
@@ -308,6 +309,10 @@ class Coordinator:
                 provider_attempts=result.provider_attempts,
                 provider_output=result.provider_output,
             )
+            # A repeated no-progress failure is answered now (next recovery round or a typed block), not at the next dispatch.
+            moved = self.store.get_task(task_id)
+            if moved is not None and Stage(moved["stage"]) is Stage.IMPLEMENT and self._provider_stalled(task_id):
+                return 1
             return 0
         candidate = self.store.latest_candidate(task_id)
         if candidate is None or not candidate["durable_handoff"]:
@@ -575,13 +580,16 @@ class Coordinator:
             if decision.blocks:
                 block_with_decision(self.store, task_id, sha, failure, attempted, decision, runtime_fingerprint(self.project))
                 return 1
-            record = record_recovery(self.store, task_id, sha, failure, attempted, decision.action)
             if decision.action in {RecoveryAction.REFRESH_REVALIDATE, RecoveryAction.REFRESH_REVALIDATE_REREVIEW}:
-                if self.integrator.refresh(self.store, task_id, sha, self.project):  # type: ignore[attr-defined]
+                applied = self.integrator.refresh(self.store, task_id, sha, self.project)  # type: ignore[attr-defined]
+                if not applied:  # keep the files the refresh conflicted in: scope and repeat-conflict rules need them
+                    failure.files = _conflict_files(str(getattr(self.integrator, "last_refresh_failure", "") or "")) or failure.files
+                record = record_recovery(self.store, task_id, sha, failure, attempted, decision.action, outcome="applied" if applied else "did_not_apply")
+                if applied:
                     return 1  # a new candidate SHA is back at VALIDATE; earlier evidence belongs to the old SHA
-                record["outcome"] = "did_not_apply"
                 attempted, can_refresh = [*attempted, record], False
                 continue
+            record = record_recovery(self.store, task_id, sha, failure, attempted, decision.action)
             if decision.action is RecoveryAction.REPAIR_WORKTREE:
                 blocked = self._redo_on_current_base(task_id, sha, failure)
                 if blocked is not None:

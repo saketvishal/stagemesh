@@ -21,7 +21,7 @@ class RecoveryAction(StrEnum):
     REFRESH_REVALIDATE = "REFRESH_REVALIDATE"  # new SHA on the current base; validation reruns (no review exists for the old SHA yet)
     REFRESH_REVALIDATE_REREVIEW = "REFRESH_REVALIDATE_REREVIEW"  # new SHA on the current base; validation AND independent review rerun
     SWITCH_PROVIDER = "SWITCH_PROVIDER"  # the next attempt goes to a different healthy provider
-    REPAIR_WORKTREE = "REPAIR_WORKTREE"  # the next attempt starts on a clean worktree, history preserved
+    REPAIR_WORKTREE = "REPAIR_WORKTREE"  # a narrowed, fresh-context attempt (integration: redone on a clean worktree at the current base)
     RETRY_INTEGRATION = "RETRY_INTEGRATION"  # integrate the same reviewed candidate again
     BLOCK_EXTERNAL = "BLOCK_EXTERNAL"  # waiting on something outside this run: environment, runtime, capacity, a missing dependency
     BLOCK_HUMAN_DECISION = "BLOCK_HUMAN_DECISION"  # a product, spec, security or legal choice that evidence cannot settle
@@ -80,7 +80,7 @@ class RecoveryContext:
         """The same files conflicted again after an earlier recovery already redid the work against the current base."""
         current = set(self.changed_files)
         return bool(current) and any(
-            a.action == RecoveryAction.REPAIR_WORKTREE and a.category == self.failure_category and current & set(a.files) for a in self.retry_history
+            a.action == RecoveryAction.REPAIR_WORKTREE and current & set(a.files) for a in self.retry_history
         )
 
     def summary(self) -> dict[str, object]:
@@ -145,7 +145,7 @@ def rules(ctx: RecoveryContext) -> RecoveryDecision | None:
         return RecoveryDecision(RecoveryAction.BLOCK_EXTERNAL, "rules", "the environment, not the change, is what fails; it clears when the baseline or gate environment does")
     if category == INTEGRATION_TARGET_MISSING or ctx.base_relation == BASE_MISSING:
         return RecoveryDecision(RecoveryAction.BLOCK_EXTERNAL, "rules", "the integration target does not exist, so there is nothing to refresh or retry against", external_dependency=True)
-    if category == INTEGRATION_CONFLICT and not ctx.task_scoped:
+    if category in {INTEGRATION_CONFLICT, INTEGRATION_TARGET_ADVANCED} and ctx.changed_files and not ctx.task_scoped:
         return RecoveryDecision(
             RecoveryAction.BLOCK_HUMAN_DECISION,
             "rules",

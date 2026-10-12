@@ -66,6 +66,7 @@ class SerializedIntegrator(Integrator):
         self.max_rebases = max_rebases
         self.on_event = on_event
         self._typed_failure: tuple[str, str] | None = None
+        self.last_refresh_failure: str | None = None  # why the latest refresh() did not apply (names the conflicting files)
 
     def integrate(self, store: Store, task_id: str, candidate_sha: str, project: Path) -> EvidenceStatus | None:  # type: ignore[override]
         with self.lock.hold(task_id):
@@ -148,10 +149,13 @@ class SerializedIntegrator(Integrator):
         """
         with self.lock.hold(task_id):
             self._typed_failure = None
+            self.last_refresh_failure = None
             try:
                 if self.integration_ref is None or self._diverged(project, candidate_sha) is None:
                     return False
-                return self._rebase(store, task_id, candidate_sha, project, budgeted=False)
+                applied = self._rebase(store, task_id, candidate_sha, project, budgeted=False)
+                self.last_refresh_failure = None if applied or self._typed_failure is None else self._typed_failure[1]
+                return applied
             finally:
                 self._typed_failure = None
 

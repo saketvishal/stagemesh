@@ -74,7 +74,7 @@ _DECISION_CATEGORY = {
     TARGET_MISSING: INTEGRATION_TARGET_MISSING,
 }
 _DECISIONS = {
-    TARGET_MISSING: "Restore or reconfigure the integration branch (integration_ref); the task is reconsidered automatically once it exists.",
+    TARGET_MISSING: "Restore or reconfigure the integration branch (integration_ref), then run `stagemesh retry-task --task <id>`.",
     MERGE_CONFLICT: "Decide which side wins in the conflicting files (this task's change or what already landed), or correct the task so the two no longer overlap; then run `stagemesh retry-task`.",
     TARGET_ADVANCED: "Nothing is wrong with the change. The integration branch kept moving; run-window reconsiders the task automatically after the runtime or configuration changes, or `stagemesh retry-task` grants a fresh budget now.",
     TRANSIENT: "Nothing is wrong with the change. Check git and filesystem health of the integration checkout; run-window reconsiders the task automatically after the runtime or configuration changes.",

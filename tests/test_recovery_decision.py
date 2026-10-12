@@ -145,3 +145,14 @@ def test_once_the_budget_is_spent_an_advisor_can_only_choose_to_stop() -> None:
     spent = ctx("something_new", stage="VALIDATE", recovery_attempts=3, max_attempts=3)
     assert permitted_actions(spent) <= {RecoveryAction.BLOCK_EXTERNAL, RecoveryAction.BLOCK_HUMAN_DECISION, RecoveryAction.ABORT_UNSAFE}
     assert decide(spent, Advisor(RecoveryAction.RETRY_SAME)).action is RecoveryAction.BLOCK_EXTERNAL
+
+
+def test_a_conflict_after_a_redo_is_a_design_conflict_whatever_category_started_the_recovery() -> None:
+    redo = RecoveryAttempt("REPAIR_WORKTREE", INTEGRATION_TARGET_ADVANCED, ("a.py",))  # the redo began as a stale-base recovery
+    decision = decide(ctx(INTEGRATION_CONFLICT, changed_files=("a.py",), retry_history=(redo,), recovery_attempts=1, can_refresh_mechanically=False))
+    assert decision.action is RecoveryAction.BLOCK_HUMAN_DECISION
+
+
+def test_a_refresh_conflict_outside_the_contract_is_a_human_decision_even_when_the_ref_merely_advanced() -> None:
+    decision = decide(ctx(INTEGRATION_TARGET_ADVANCED, changed_files=("apps/other.py",), task_scoped=False, can_refresh_mechanically=False))
+    assert decision.action is RecoveryAction.BLOCK_HUMAN_DECISION
