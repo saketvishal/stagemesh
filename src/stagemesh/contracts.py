@@ -52,6 +52,7 @@ class ChangeContract:
     validation_risk: str | None = None
     validation_escalation_reasons: tuple[str, ...] = ()
     acceptance_criteria: tuple[str, ...] = ()
+    spec_refs: tuple[str, ...] = ()
     allowed_files: tuple[str, ...] = ("**",)
     forbidden_files: tuple[str, ...] = ()
     exclusions: tuple[str, ...] = ()
@@ -207,6 +208,7 @@ def parse_contract(payload: dict[str, Any]) -> ChangeContract:
             payload.get("validation_escalation_reasons", ()), "validation_escalation_reasons"
         ),
         acceptance_criteria=_texts(payload.get("acceptance_criteria", ()), "acceptance_criteria"),
+        spec_refs=_relative_paths(payload.get("spec_refs", ()), "spec_refs"),
         allowed_files=_texts(payload.get("allowed_files", ("**",)), "allowed_files") or ("**",),
         forbidden_files=_texts(payload.get("forbidden_files", ()), "forbidden_files"),
         exclusions=_texts(payload.get("exclusions", ()), "exclusions"),
@@ -568,6 +570,9 @@ def contract_prompt(contract: ChangeContract) -> str:
     if contract.acceptance_criteria:
         lines.append("- Acceptance criteria:")
         lines.extend(f"  - {item}" for item in contract.acceptance_criteria)
+    if contract.spec_refs:
+        lines.append("- Project specs:")
+        lines.extend(f"  - {item}" for item in contract.spec_refs)
     if contract.max_changed_files is not None:
         lines.append(f"- Max changed files: {contract.max_changed_files}")
     if contract.max_diff_lines is not None:
@@ -588,6 +593,16 @@ def _texts(value: Any, field: str) -> tuple[str, ...]:
     if not isinstance(value, (list, tuple)):
         raise ContractError(f"{field} must be a list of strings")
     return tuple(_required_text(item, field) for item in value)
+
+
+def _relative_paths(value: Any, field: str) -> tuple[str, ...]:
+    paths = _texts(value, field)
+    for path in paths:
+        normalized = path.replace("\\", "/")
+        parts = normalized.split("/")
+        if normalized.startswith("/") or ":" in normalized or ".." in parts:
+            raise ContractError(f"{field} entries must be relative paths inside the project")
+    return paths
 
 
 def _optional_text(value: Any, field: str) -> str | None:
@@ -674,6 +689,8 @@ def _contract_payload(contract: ChangeContract) -> dict[str, Any]:
         "public_api": list(contract.public_api),
         "protected_files": list(contract.protected_files),
     }
+    if contract.spec_refs:
+        payload["spec_refs"] = list(contract.spec_refs)
     if contract.exclusive_resources:  # only when set, so existing contracts keep their digests
         payload["exclusive_resources"] = list(contract.exclusive_resources)
     if contract.max_changed_files is not None:

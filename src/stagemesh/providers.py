@@ -109,6 +109,8 @@ _FRONTEND_PATH_HINTS = (
     "ui/",
     "web/",
 )
+MAX_SPEC_PROMPT_CHARS = 12000
+MAX_SPEC_PROMPT_CHARS_PER_FILE = 5000
 
 
 class ProviderValidationError(ValueError):
@@ -651,6 +653,7 @@ def _build_task_prompt(
     title = task["title"] if "title" in row_keys else str(task_id)
     contract_text = ""
     frontend_text = _frontend_design_prompt(title, contract)
+    spec_text = _project_specs_prompt(project, contract)
     if contract is not None:
         contract_text = "\n\n" + contract_prompt(contract) + "\n"
     elif project is not None:
@@ -658,12 +661,14 @@ def _build_task_prompt(
             loaded_contract = load_contract(project, task_id)
             contract_text = "\n\n" + contract_prompt(loaded_contract) + "\n"
             frontend_text = _frontend_design_prompt(title, loaded_contract)
+            spec_text = _project_specs_prompt(project, loaded_contract)
         except ContractError as exc:
             contract_text = f"\n\nChange contract is invalid and must be fixed before coding: {exc}\n"
     remediation_text = _remediation_prompt(remediation) if remediation else ""
     return (
         f"StageMesh task: {title}\n\n"
         f"{contract_text}"
+        f"{spec_text}"
         f"{remediation_text}"
         "Please implement the changes described above.\n\n"
         f"{IMPLEMENTATION_DISCIPLINE}"
@@ -684,7 +689,7 @@ def _frontend_design_prompt(title: str, contract: object | None) -> str:
         value = getattr(contract, attr, None)
         if isinstance(value, str):
             fields.append(value)
-    for attr in ("allowed_files", "acceptance_criteria", "public_api"):
+    for attr in ("allowed_files", "acceptance_criteria", "public_api", "spec_refs"):
         value = getattr(contract, attr, ())
         if isinstance(value, (list, tuple)):
             fields.extend(str(item) for item in value)
@@ -697,6 +702,49 @@ def _frontend_design_prompt(title: str, contract: object | None) -> str:
     if words.intersection(_FRONTEND_TEXT_HINTS):
         return FRONTEND_DESIGN_DISCIPLINE
     return ""
+
+
+def _project_specs_prompt(project: Path | None, contract: object | None) -> str:
+    spec_refs = getattr(contract, "spec_refs", ())
+    if not spec_refs:
+        return ""
+    if project is None:
+        return ""
+    lines = ["", "Project-local specs from this installed project:"]
+    remaining = MAX_SPEC_PROMPT_CHARS
+    for ref in spec_refs:
+        if not isinstance(ref, str):
+            continue
+        resolved = _resolve_project_spec(project, ref)
+        if resolved is None:
+            lines.extend([f"\n--- {ref} ---", "[spec ref rejected: path must stay inside the project]"])
+            continue
+        try:
+            text = resolved.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            lines.extend([f"\n--- {ref} ---", f"[spec ref could not be read: {exc}]"])
+            continue
+        excerpt = text[: min(remaining, MAX_SPEC_PROMPT_CHARS_PER_FILE)]
+        remaining -= len(excerpt)
+        lines.extend([f"\n--- {ref} ---", excerpt.rstrip()])
+        if len(text) > len(excerpt):
+            lines.append("[spec truncated for prompt size]")
+        if remaining <= 0:
+            lines.append("[remaining project specs omitted for prompt size]")
+            break
+    lines.append("\nUse these project specs as the source of truth. Do not invent StageMesh-owned product specs.")
+    return "\n".join(lines) + "\n\n"
+
+
+def _resolve_project_spec(project: Path, ref: str) -> Path | None:
+    try:
+        root = project.resolve()
+        target = (root / ref).resolve()
+    except OSError:
+        return None
+    if target == root or root not in target.parents:
+        return None
+    return target
 
 
 def _remediation_prompt(remediation: dict[str, object]) -> str:

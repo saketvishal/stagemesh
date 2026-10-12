@@ -5,9 +5,12 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from stagemesh.contract_binding import contract_for_candidate
 from stagemesh.contracts import (
     ChangeContract,
+    ContractError,
     GateCommand,
     _gate_runtime_command,
     evaluate_contract,
@@ -504,6 +507,7 @@ def test_contract_parser_accepts_named_command_objects() -> None:
         {
             "objective": "Ship safely",
             "acceptance_criteria": ["tests pass"],
+            "spec_refs": ["docs/specs/voice-intake.md"],
             "allowed_files": ["src/**"],
             "required_tests": [{"name": "unit", "command": [sys.executable, "--version"], "timeout_seconds": 5}],
         }
@@ -511,7 +515,14 @@ def test_contract_parser_accepts_named_command_objects() -> None:
 
     assert contract.objective == "Ship safely"
     assert contract.acceptance_criteria == ("tests pass",)
+    assert contract.spec_refs == ("docs/specs/voice-intake.md",)
     assert contract.required_tests[0].name == "unit"
+
+
+@pytest.mark.parametrize("ref", ["../outside.md", "/tmp/spec.md", "C:/tmp/spec.md"])
+def test_contract_parser_rejects_spec_refs_outside_project(ref: str) -> None:
+    with pytest.raises(ContractError, match="spec_refs entries must be relative paths inside the project"):
+        parse_contract({"objective": "Ship safely", "spec_refs": [ref]})
 
 
 def test_dependency_manifest_change_requires_dependency_gate(tmp_path: Path) -> None:
