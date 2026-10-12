@@ -1,0 +1,53 @@
+{
+  "format_version": 1,
+  "resources": {
+    "frontend-design/SKILL.md": {
+      "source_url": "https://github.com/anthropics/skills/blob/main/skills/frontend-design/SKILL.md",
+      "git_blob_sha": "a5333457c414d20d625f307df945842c0952ecc3"
+    },
+    "frontend-design/LICENSE.txt": {
+      "source_url": "https://github.com/anthropics/skills/blob/main/skills/frontend-design/LICENSE.txt",
+      "git_blob_sha": "f433b1a53f5b830a205fd2df78e2b34974656c7b"
+    },
+    "superpowers/LICENSE.txt": {
+      "source_url": "https://github.com/obra/superpowers/blob/main/LICENSE",
+      "git_blob_sha": "abf0390320aa14406af7a520b9b0739fdda9bf08"
+    },
+    "superpowers/verification-before-completion/SKILL.md": {
+      "source_url": "https://github.com/obra/superpowers/blob/main/skills/verification-before-completion/SKILL.md",
+      "git_blob_sha": "7d45333cc4a49c57a80df6c1fe2fa777a207afbc"
+    },
+    "superpowers/test-driven-development/SKILL.md": {
+      "source_url": "https://github.com/obra/superpowers/blob/main/skills/test-driven-development/SKILL.md",
+      "git_blob_sha": "46838cc9e893c06259e3bdad0fc2425b36242f15"
+    },
+    "superpowers/test-driven-development/writing-good-tests.md": {
+      "source_url": "https://github.com/obra/superpowers/blob/main/skills/test-driven-development/writing-good-tests.md",
+      "git_blob_sha": "d3c4482fd30b4f9084bb61545fe73939a7502c28"
+    },
+    "superpowers/systematic-debugging/SKILL.md": {
+      "source_url": "https://github.com/obra/superpowers/blob/main/skills/systematic-debugging/SKILL.md",
+      "git_blob_sha": "62fc752aaef59a8bbed5d305f4cadc60f8ae07ed"
+    },
+    "superpowers/systematic-debugging/root-cause-tracing.md": {
+      "source_url": "https://github.com/obra/superpowers/blob/main/skills/systematic-debugging/root-cause-tracing.md",
+      "git_blob_sha": "0e72e8f9566b7ef85e814633d1feacad9d0c5868"
+    },
+    "superpowers/systematic-debugging/defense-in-depth.md": {
+      "source_url": "https://github.com/obra/superpowers/blob/main/skills/systematic-debugging/defense-in-depth.md",
+      "git_blob_sha": "e2483354dc2b62478a2624e34ca18bc0efe887b2"
+    },
+    "superpowers/systematic-debugging/condition-based-waiting.md": {
+      "source_url": "https://github.com/obra/superpowers/blob/main/skills/systematic-debugging/condition-based-waiting.md",
+      "git_blob_sha": "70994f777c586f7d4c43033aac34c7cf0da6688b"
+    },
+    "superpowers/systematic-debugging/find-polluter.sh": {
+      "source_url": "https://github.com/obra/superpowers/blob/main/skills/systematic-debugging/find-polluter.sh",
+      "git_blob_sha": "985f5d08ccf8a3f2d40739cfcaf4413bb24bf1cb"
+    },
+    "superpowers/systematic-debugging/condition-based-waiting-example.ts": {
+      "source_url": "https://github.com/obra/superpowers/blob/main/skills/systematic-debugging/condition-based-waiting-example.ts",
+      "git_blob_sha": "703a06b653160d060bbf46ab5c6e0cd7446bd592"
+    }
+  }
+}

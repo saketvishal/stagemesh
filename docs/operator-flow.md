@@ -72,11 +72,17 @@ Every implementation provider receives a built-in discipline prompt before it ed
 
 This discipline lives in `src/stagemesh/providers.py` so it applies to Codex, Claude, Grok, Agy and any configured command provider. It is covered by `tests/test_canary_regression.py`.
 
-When a task looks like frontend work (for example `.tsx`, `.jsx`, `.css`, `.html`, `web/`, `components/`, `styles/`, `ui/`, or an
-objective mentioning UI, screens, layout, theme, mobile, UX or frontend), StageMesh also injects a frontend design discipline inspired
-by Anthropic's `frontend-design` skill. The extra rule tells the provider to ground the UI in the product and audience, pick deliberate
-palette/type/layout choices, avoid generic AI-page defaults, use visual structure as information, keep interface copy functional, and
-preserve mobile responsiveness, focus, reduced motion and contrast.
+StageMesh also selects [bundled agent skills](agent-skills.md) automatically from the task title, bound contract and remediation state.
+Frontend tasks receive Anthropic's full `frontend-design` skill alongside the compact frontend discipline. Superpowers supplies
+`systematic-debugging` for failures/remediation, `test-driven-development` for behavior changes, and `verification-before-completion`
+for implementations and reviews. Documentation and simple copy/style tasks receive fewer skills. Generic backend paths such as
+`app/services/cache.py` do not trigger frontend guidance. No manual chat attachment or global plugin install is required.
+
+The installed project's guidance, referenced specs, approved UI and change contract take precedence over upstream skill procedures.
+StageMesh keeps ownership of scheduling, Git and review, and requires scoped verification plus contract gates. Skills cannot authorize
+a redesign, broaden scope, refresh a baseline to hide drift, or require repeated full-suite runs. Their licensed resources ship inside
+the runtime wheel, so workers do not depend on a StageMesh source checkout. Missing or corrupted selected resources stop dispatch
+with `skill_pack_unavailable` instead of silently dropping the guidance.
 
 `no-mistakes` is not a replacement for this runtime discipline. Use it as an optional downstream ship gate after StageMesh has produced a committed feature branch: validate the branch in an isolated worktree, then publish the PR only if the external gate passes.
 

@@ -1,0 +1,2 @@
+# Skill provenance is checked against exact upstream bytes, including newlines.
+src/stagemesh/skill_packs/** -text
