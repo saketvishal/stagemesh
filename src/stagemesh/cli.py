@@ -776,6 +776,10 @@ def command_run_window(args: argparse.Namespace) -> int:
                 for task_id, reason in sorted(skipped.items()):
                     print(f"left alone {task_id}: {reason}")
             return 0 if payload["ok"] else 2
+        if not args.no_progress:  # progress goes to stderr, so the report (and --json) on stdout is unchanged
+            from .progress import ProgressReporter, with_progress
+
+            hooks = with_progress(hooks, db_path(project), ProgressReporter(), heartbeat_seconds=args.heartbeat)
         report = run_window(
             store,
             project,
@@ -3026,6 +3030,8 @@ def build_parser() -> argparse.ArgumentParser:
     window.add_argument("--allow-stale-runtime", action="store_true", help="Start even though the installed CLI is stale (development only; reported in the output)")
     window.add_argument("--plan", action="store_true", help="Read-only: run the preflight checks and show what would be picked, start nothing")
     window.add_argument("--report", metavar="PATH", help="Write the JSON report here (default: .stagemesh/reports/run-window/<timestamp>.json, created automatically)")
+    window.add_argument("--no-progress", action="store_true", help="Do not stream live progress lines to stderr")
+    window.add_argument("--heartbeat", type=float, default=60.0, metavar="SECONDS", help="Seconds of silence before a running step prints a heartbeat line (default 60, 0 = off)")
     window.add_argument("--json", action="store_true")
     window.set_defaults(func=command_run_window)
     doctor_task = sub.add_parser("task-doctor", help="Read-only task summary: claims, candidate, baseline, contract, failures, findings, diagnosis, next command")
