@@ -43,10 +43,10 @@ def is_placeholder(profile: Any) -> bool:
 
 def default_profile(project: Path) -> dict[str, Any]:
     detected = [_argv(g) for g in detect_gates(project)]
-    gates = detected or [dict(_FALLBACK_GATE)]
-    ids = {_gate_id(g["name"]): g for g in gates}
+    gates = list(detected)
     if not any("acceptance" in g["name"].casefold() for g in gates):
-        raise ProfileError("default profile needs an acceptance gate")
+        gates.append(dict(_FALLBACK_GATE))  # a `full` task type needs a broad gate; detected gates (e.g. a narrow smoke) may not be one
+    ids = {_gate_id(g["name"]): g for g in gates}
     summary = (
         "Generated default: runs the gates detected at the project root."
         if detected
@@ -74,16 +74,16 @@ def ensure_profile(project: Path) -> tuple[str, str]:
         except ProfileError as exc:
             return "invalid", f"{PROFILE_FILE} exists but is not usable and was left unchanged: {exc}"
         return "kept", str(path)
-    payload = default_profile(project)
-    parse_profile(payload)  # never write a profile this version would reject
-    path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".profile.json.{os.getpid()}.tmp")
-    tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     try:
+        payload = default_profile(project)
+        parse_profile(payload)  # never write a profile this version would reject
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
         os.link(tmp, path)  # fails if a profile appeared meanwhile, so a concurrent init cannot be overwritten
     except FileExistsError:
         return "kept", str(path)
-    except OSError as exc:
+    except (OSError, ProfileError) as exc:
         if path.exists():
             return "kept", str(path)
         return "invalid", f"could not create {PROFILE_FILE}: {exc}"  # init still succeeds; project-smoke will say the profile is missing
