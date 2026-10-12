@@ -223,6 +223,10 @@ def select_tasks(
         if task["status"] == TaskStatus.DONE or task["stage"] == Stage.DONE:
             continue  # finished work is not news
         if task["status"] == TaskStatus.BLOCKED:
+            external = scheduler.decision(task_id).reason  # "blocked" unless the work itself is gone (source closed, objective root, ...)
+            if external != "blocked":
+                skipped[task_id] = external
+                continue
             info = classify_block(store, task_id)
             refusal = None if fingerprint is None else reentry_refusal(store, task_id, fingerprint)
             if info is not None and refusal is None:
