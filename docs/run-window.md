@@ -35,6 +35,23 @@ up worktrees, closes no issues (only a PR merge does), and writes a report to `.
 | `--plan` | Off | Read-only mode: run preflight checks and show which tasks would be picked or left alone without starting any work or recovering executions. |
 | `--report` | Auto-generated | Path to write the JSON report (defaults to `.stagemesh/reports/run-window/<timestamp>.json`, created automatically). |
 
+## Live Progress
+
+While the window runs, one line per event is written to stderr and flushed immediately, for example:
+
+```
+[2m05s] task 238: started (up to 8 steps)
+[2m07s] task 238: implementation provider grok (order: grok > claude)
+[2m07s] task 238: implementation started
+[3m09s] task 238: implementation still running (provider grok), 1m02s so far
+[5m41s] task 238: candidate 3f9a1c0b2e created by grok
+[5m58s] task 238: validation passed on 3f9a1c0b2e
+[7m20s] task 238: review passed on 3f9a1c0b2e
+[7m31s] task 238: opening PR
+```
+
+Lines come from the ledger the task's child process writes (executions, candidates, evidence, provider events); the progress reader never calls a provider and never writes. The report on stdout, human or `--json`, is unchanged. `--heartbeat SECONDS` sets how long a running step may be silent before a heartbeat line (default 60, `0` = off); `--no-progress` turns the stream off.
+
 ## Preflight Checks
 
 Before any work begins, `stagemesh run-window` runs preflight checks and refuses to start (exit code `2`) if any required condition fails:
