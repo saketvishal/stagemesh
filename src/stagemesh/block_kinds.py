@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -60,7 +61,7 @@ def block_kind_for(decision: RecoveryDecision) -> BlockKind:
 
 
 def runtime_fingerprint(project: Path) -> str:
-    """A short hash of what a recovery decision depends on: the StageMesh code that is running and the project's StageMesh configuration."""
+    """A short hash of what a recovery decision depends on: the StageMesh code that is running, the project's StageMesh configuration and the `python` gates run with."""
     import stagemesh
 
     digest = hashlib.sha256()
@@ -68,6 +69,7 @@ def runtime_fingerprint(project: Path) -> str:
     for source in sorted(package.rglob("*.py")):
         digest.update(source.relative_to(package).as_posix().encode())
         digest.update(source.read_bytes())
+    digest.update(str(shutil.which("python") or "").encode())  # validation gates run `python` from PATH: a different interpreter is a different environment
     for name in ("config.json", "project.yaml"):
         config = Path(project) / ".stagemesh" / name
         if config.is_file():

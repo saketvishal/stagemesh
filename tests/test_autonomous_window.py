@@ -198,3 +198,14 @@ def test_a_continued_task_does_not_count_against_the_task_limit(tmp_path: Path) 
 
     assert sorted({t.task_id for t in report.tasks}) == ["148", "149"] and rig.runs.count("148") == 2
     assert report.counts() == {"done": 2}
+
+
+def test_a_different_python_on_path_changes_the_runtime_fingerprint(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import shutil
+
+    from stagemesh.block_kinds import runtime_fingerprint
+
+    monkeypatch.setattr(shutil, "which", lambda name: "C:/one/python.exe")
+    first = runtime_fingerprint(tmp_path)
+    monkeypatch.setattr(shutil, "which", lambda name: "C:/two/python.exe")
+    assert runtime_fingerprint(tmp_path) != first  # gates that failed under the wrong interpreter are reconsidered once it is fixed
