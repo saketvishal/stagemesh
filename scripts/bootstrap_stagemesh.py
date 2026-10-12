@@ -9,10 +9,10 @@ import sys
 import tempfile
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
-RUNTIME = ROOT / ".stagemesh" / "tooling"
-VENV = RUNTIME / "venv"
-BIN = ROOT / ".stagemesh" / "bin"
+ROOT = Path(__file__).resolve().parents[1]  # the StageMesh source checkout this script builds from
+# The runtime is a standalone, non-editable install shared by every project: <runtime home>/venv. Projects only get a shim to it.
+# `--editable` keeps the old development layout (an editable install in <project>/.stagemesh/tooling/venv).
+RUNTIME_HOME_ENV = "STAGEMESH_RUNTIME_HOME"
 USER_BIN = Path(os.environ.get("STAGEMESH_USER_BIN", Path.home() / ".stagemesh" / "bin"))
 BUILTIN_PROVIDERS = ("codex", "claude", "grok", "agy")
 DEFAULT_COMMANDS = {
@@ -29,6 +29,26 @@ DEFAULT_EXCLUDED_QUEUE_LABELS = (
     "status:BLOCKED",
     "status:REMEDIATING",
 )
+
+
+def _runtime_home() -> Path:
+    if os.environ.get(RUNTIME_HOME_ENV):
+        return Path(os.environ[RUNTIME_HOME_ENV])
+    if os.name == "nt":
+        return Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local") / "StageMesh" / "runtime"
+    return Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share") / "stagemesh" / "runtime"
+
+
+VENV = _runtime_home() / "venv"
+BIN = ROOT / ".stagemesh" / "bin"
+PROJECT = ROOT
+
+
+def _use_project(project: Path, *, editable: bool) -> None:
+    global BIN, VENV, PROJECT
+    PROJECT = project
+    BIN = project / ".stagemesh" / "bin"
+    VENV = project / ".stagemesh" / "tooling" / "venv" if editable else _runtime_home() / "venv"
 
 
 def _venv_python() -> Path:
@@ -63,7 +83,7 @@ def _configured_version() -> str | None:
 def _installed_version(py: Path) -> str | None:
     result = subprocess.run(
         [str(py), "-c", "import importlib.metadata as m; print(m.version('stagemesh'))"],
-        cwd=ROOT,
+        cwd=tempfile.gettempdir(),
         capture_output=True,
         text=True,
     )
@@ -184,6 +204,12 @@ def _install_user_dispatcher() -> Path:
     return dispatcher
 
 
+def _windows_shim(installed: Path) -> str:
+    # PYTHONPATH/PYTHONHOME would shadow the installed package (e.g. a leftover PYTHONPATH=...\src); the shim never honours them.
+    lines = ["@echo off", "setlocal", 'set "PYTHONPATH="', 'set "PYTHONHOME="', f'"{installed}" %*', "exit /b %ERRORLEVEL%", ""]
+    return "\n".join(lines)  # write_text translates to CRLF on Windows
+
+
 def _selected_providers(raw: str | None) -> list[str] | None:
     if raw is None:
         return None
@@ -201,7 +227,7 @@ def _configure_providers(selected: list[str] | None, *, agy_unattended: bool = F
         raise SystemExit("--agy-unattended requires --providers including agy")
     if selected is None:
         return
-    path = ROOT / ".stagemesh" / "config.json"
+    path = PROJECT / ".stagemesh" / "config.json"
     data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
     providers = data.setdefault("providers", {})
     for name in selected:
@@ -219,7 +245,7 @@ def _configure_providers(selected: list[str] | None, *, agy_unattended: bool = F
 
 
 def _configure_queue_source() -> None:
-    path = ROOT / ".stagemesh" / "config.json"
+    path = PROJECT / ".stagemesh" / "config.json"
     if not path.exists():
         return
     data = json.loads(path.read_text(encoding="utf-8"))
@@ -257,14 +283,30 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Leave existing GitHub task-source label filters unchanged.",
     )
+    parser.add_argument(
+        "--project",
+        help="Project whose .stagemesh/bin shim should point at the runtime (default: this checkout). The project is only configured, never installed into.",
+    )
+    parser.add_argument(
+        "--editable",
+        action="store_true",
+        help="Development layout: editable install of this checkout in <project>/.stagemesh/tooling/venv instead of the standalone runtime.",
+    )
     args = parser.parse_args(argv)
-    RUNTIME.mkdir(parents=True, exist_ok=True)
+    if args.project and not Path(args.project).is_dir():
+        raise SystemExit(f"--project {args.project} is not an existing directory")
+    _use_project(Path(args.project).resolve() if args.project else ROOT, editable=args.editable)
+    VENV.parent.mkdir(parents=True, exist_ok=True)
     BIN.mkdir(parents=True, exist_ok=True)
     if not _venv_python().exists():
         _run(sys.executable, "-m", "venv", str(VENV))
     py = _venv_python()
     _run(str(py), "-m", "pip", "install", "--upgrade", "pip")
-    _run(str(py), "-m", "pip", "install", "--upgrade", f"{ROOT}[dev]")
+    if args.editable:
+        _run(str(py), "-m", "pip", "install", "--upgrade", "-e", f"{ROOT}[dev]")
+    else:
+        # A real copy of the package: the checkout may move, change branch or disappear without affecting this runtime.
+        _run(str(py), "-m", "pip", "install", "--upgrade", "--force-reinstall", "--no-deps", str(ROOT))
     installed_version = _installed_version(py)
     for label, expected in (("repository source", _source_version()), ("configured version", _configured_version())):
         if expected and installed_version and expected != installed_version:
@@ -277,16 +319,17 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(f"installed stagemesh entry point not found: {installed}")
     if os.name == "nt":
         shim = BIN / "stagemesh.cmd"
-        shim.write_text(f"@echo off\r\n\"{installed}\" %*\r\n", encoding="utf-8")
+        shim.write_text(_windows_shim(installed), encoding="utf-8")
     else:
         shim = BIN / "stagemesh"
-        shim.write_text(f"#!/usr/bin/env sh\nexec \"{installed}\" \"$@\"\n", encoding="utf-8")
+        shim.write_text(f"#!/usr/bin/env sh\nunset PYTHONPATH PYTHONHOME\nexec \"{installed}\" \"$@\"\n", encoding="utf-8")
         shim.chmod(0o755)
     dispatcher = _install_user_dispatcher()
     _configure_providers(_selected_providers(args.providers), agy_unattended=args.agy_unattended)
     if not args.no_queue_config:
         _configure_queue_source()
     print(shim)
+    print(f"runtime: {VENV} ({'editable, development' if args.editable else 'standalone, installed'}) version {installed_version}")
     print(f"dispatcher: {dispatcher}")
     return 0
 

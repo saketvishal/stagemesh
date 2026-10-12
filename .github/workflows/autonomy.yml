@@ -16,7 +16,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: python scripts/bootstrap_stagemesh.py
+      - run: python scripts/bootstrap_stagemesh.py --editable
       - run: .stagemesh/tooling/venv/bin/python -m pip install pytest
         if: runner.os != 'Windows'
       - run: .stagemesh\tooling\venv\Scripts\python.exe -m pip install pytest

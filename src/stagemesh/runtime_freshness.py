@@ -1,6 +1,6 @@
 """Is the installed `stagemesh` CLI behind the repo source? Say so, instead of letting an operator hit "invalid choice".
 
-The project-local install (`.stagemesh/tooling/venv`) is a copy that does not follow the checkout, so a command added to source is
+The installed runtime (the standalone tool environment, or a legacy `.stagemesh/tooling/venv`) is a copy that does not follow the checkout, so a command added to source is
 missing from `stagemesh.exe` until it is reinstalled. This compares the command sets of the two and reports the difference, and says
 which one the current process is running. Nothing here changes the install.
 """
@@ -43,11 +43,23 @@ class RuntimeFreshness:
 
 
 def installed_cli_path(project: Path) -> Path | None:
-    """The project-local install if there is one, else whatever `stagemesh` is on PATH."""
+    """The CLI the project actually runs: an editable development venv, else the standalone runtime, else a legacy copy, else PATH.
+
+    A non-editable `.stagemesh/tooling/venv` is a leftover from before the standalone runtime; the project shim no longer points at it,
+    so it must not win over the standalone runtime (it would stay stale however often the runtime is refreshed).
+    """
+    from .runtime_info import runtime_cli
+
     venv = project / ".stagemesh" / "tooling" / "venv"
-    for candidate in (venv / "Scripts" / "stagemesh.exe", venv / "bin" / "stagemesh"):
-        if candidate.is_file():
-            return candidate
+    legacy = [c for c in (venv / "Scripts" / "stagemesh.exe", venv / "bin" / "stagemesh") if c.is_file()]
+    editable = any(venv.glob("Lib/site-packages/__editable__*")) or any(venv.glob("lib/python*/site-packages/__editable__*"))
+    if legacy and editable:
+        return legacy[0]
+    standalone = runtime_cli()
+    if standalone.is_file():
+        return standalone
+    if legacy:
+        return legacy[0]
     found = shutil.which("stagemesh")
     return Path(found) if found else None
 
@@ -80,6 +92,8 @@ def check_runtime(project: Path, *, runner: Runner = subprocess.run, running_fil
     if (src / "stagemesh" / "cli.py").is_file():
         result.source_cli = str(src / "stagemesh" / "cli.py")
     cli = installed_cli_path(project)
+    if cli is not None:
+        result.installed_cli = str(cli)
     if not (src / "stagemesh" / "cli.py").is_file():
         result.message = "no StageMesh source in this project to compare the install with"
         return result

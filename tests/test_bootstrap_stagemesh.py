@@ -90,7 +90,7 @@ def test_user_dispatcher_falls_back_to_stagemesh_user_bin(tmp_path: Path, monkey
 
 def test_agy_unattended_is_explicit_project_local_opt_in(tmp_path: Path) -> None:
     bootstrap = _load_bootstrap()
-    bootstrap.ROOT = tmp_path
+    bootstrap.PROJECT = tmp_path
 
     bootstrap._configure_providers(["codex", "agy"], agy_unattended=True)
 
@@ -102,7 +102,7 @@ def test_agy_unattended_is_explicit_project_local_opt_in(tmp_path: Path) -> None
 
 def test_agy_unattended_requires_agy_provider(tmp_path: Path) -> None:
     bootstrap = _load_bootstrap()
-    bootstrap.ROOT = tmp_path
+    bootstrap.PROJECT = tmp_path
 
     try:
         bootstrap._configure_providers(["codex"], agy_unattended=True)

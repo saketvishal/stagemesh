@@ -581,6 +581,7 @@ def test_stale_installed_runtime_is_detected_and_reported_not_silently_used(tmp_
         probes["installed" if str(exe) == argv[0] else "source"] = kwargs.get("env") or {}
         return sp.CompletedProcess(argv, 0, outputs["installed" if str(exe) == argv[0] else "source"], "")
 
+    monkeypatch.setenv("STAGEMESH_RUNTIME_HOME", str(tmp_path / "no-standalone-runtime"))  # hermetic: ignore this machine's runtime
     monkeypatch.setenv("PYTHONPATH", "leaked-src")
     from_source = str(project / "src" / "stagemesh" / "__init__.py")
     stale = check_runtime(project, runner=fake_run, running_file=from_source)

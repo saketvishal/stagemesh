@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import __version__
+from .runtime_info import format_runtime, runtime_info
 from .acceptance import AcceptanceValidationError, local_acceptance_report
 from .acceptance_matrix import AcceptanceMatrixValidationError, acceptance_matrix
 from .audit import AuditValidationError, export_audit_jsonl
@@ -243,6 +244,7 @@ def command_doctor(args: argparse.Namespace) -> int:
         strict_live=getattr(args, "strict_live", False),
     )
     data["readiness"] = readiness
+    data["runtime_info"] = runtime_info()
     if args.json:
         print(json.dumps(data, indent=2, sort_keys=True))
         store.close()
@@ -251,6 +253,8 @@ def command_doctor(args: argparse.Namespace) -> int:
     print(f"executable path: {Path(sys.argv[0]).resolve()}")
     print(f"python interpreter: {sys.executable}")
     print(f"imported package path: {Path(__file__).resolve().parent}")
+    for line in format_runtime(data["runtime_info"]):
+        print(line)
     print(f"project: {project}")
     if config.runtime:
         print(f"worktree root: {config.runtime.worktree_root}")
@@ -265,7 +269,7 @@ def command_doctor(args: argparse.Namespace) -> int:
     print(f"github configured: {config.github.configured}")
     print(f"backend: {backend.name}")
     print(f"backend available: {backend.available}")
-    print(f"editable/development status: {'development' if 'site-packages' not in __file__ else 'installed'}")
+    print(f"editable/development status: {'development' if data['runtime_info']['source_checkout'] else 'installed'}")
     if stale:
         print(f"warning: {stale}")
     print(f"platform: {platform.platform()}")
@@ -2982,7 +2986,8 @@ def command_ci_wait(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="stagemesh")
     parser.add_argument("--project", default=".")
-    sub = parser.add_subparsers(dest="command", required=True)
+    parser.add_argument("--version", action="store_true", help="Print the StageMesh version, install path and provenance, then exit")
+    sub = parser.add_subparsers(dest="command", required=False)
     init = sub.add_parser("init")
     init.add_argument("--task")
     init.add_argument("--register", action="store_true")
@@ -3446,6 +3451,13 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.version:
+        print(f"stagemesh {__version__}")
+        for line in format_runtime(runtime_info()):
+            print(line)
+        return 0
+    if not args.command:
+        parser.error("the following arguments are required: command")
     try:
         return int(args.func(args))
     except ConfigValidationError as exc:

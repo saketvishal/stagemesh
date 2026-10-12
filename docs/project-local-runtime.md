@@ -1,14 +1,42 @@
-# Project-local StageMesh runtime
+# StageMesh runtime: independently installed
 
-StageMesh is owned by the project that runs it. A project does not need a global editable checkout, a global `PYTHONPATH`, or another repository's `code_checkout` to use the StageMesh runtime for that project.
+StageMesh is an installed tool, not a checkout a project points at. The runtime is a normal (non-editable) package in a standalone
+environment that belongs to no project:
 
-Run the bootstrap from the repository root:
+| Platform | Runtime |
+| --- | --- |
+| Windows | `%LOCALAPPDATA%\StageMesh
+untimeenv` |
+| POSIX | `$XDG_DATA_HOME/stagemesh/runtime/venv` (default `~/.local/share/stagemesh/runtime/venv`) |
+
+`STAGEMESH_RUNTIME_HOME` overrides the location. A host project (for example Caventra) keeps only its own state in `.stagemesh/` and a
+shim in `.stagemesh/bin` that runs the installed `stagemesh`. The shim clears `PYTHONPATH`/`PYTHONHOME`, so nothing can substitute a
+source checkout. Deleting, moving or switching branches in the StageMesh checkout does not affect any project.
+
+## Install or update
+
+From the StageMesh checkout (the only place the source is needed):
 
 ```bash
-python scripts/bootstrap_stagemesh.py
+python scripts/bootstrap_stagemesh.py --project <path-to-host-project>
 ```
 
-The bootstrap creates `.stagemesh/tooling/venv`, installs the current StageMesh package into that project-owned environment as a normal package, writes a project shim in `.stagemesh/bin`, and installs a tiny user-level dispatcher named `stagemesh` on `PATH`.
+This builds and installs the checkout as a package into the standalone runtime (a re-run is the update), writes the project shim and the
+user-level `stagemesh` dispatcher, and never edits the host project's source. Other projects keep working during and after an update and
+pick up the new version immediately because they share the runtime. `--providers` and `--no-queue-config` behave as before.
+
+`--editable` keeps the old development layout (an editable install in `<project>/.stagemesh/tooling/venv`). `stagemesh doctor` reports
+that as `development (editable/source checkout)`; a production project must not use it.
+
+## Which runtime am I using?
+
+```bash
+stagemesh --version     # version, package path, editable?, source checkout?, build provenance (commit, dirty flag)
+stagemesh doctor        # same block, plus `editable/development status: installed`
+```
+
+A production configuration reports `editable install: no` and `source checkout: no`. Provenance (`built from: <commit>`) is baked into the
+wheel at build time.
 
 After bootstrap, run StageMesh from the project folder with the normal command:
 
