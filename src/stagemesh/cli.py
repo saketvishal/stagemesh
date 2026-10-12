@@ -12,6 +12,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import __version__
+from .profile import load_profile
+from .profile_default import ensure_profile, is_placeholder
 from .runtime_info import format_runtime, runtime_info
 from .acceptance import AcceptanceValidationError, local_acceptance_report
 from .acceptance_matrix import AcceptanceMatrixValidationError, acceptance_matrix
@@ -141,6 +143,9 @@ def command_init(args: argparse.Namespace) -> int:
         store.upsert_task(args.task)
     schema_version = store.schema_version()
     store.close()
+    profile_status, profile_detail = ensure_profile(project)
+    if profile_status == "invalid":
+        print(f"warning: {profile_detail}", file=sys.stderr)
     registered = False
     if args.register:
         registry = GlobalRegistry(Path(args.registry).resolve())
@@ -159,6 +164,7 @@ def command_init(args: argparse.Namespace) -> int:
                     "db": str(db_path(project)),
                     "schema_version": schema_version,
                     "registered": registered,
+                    "profile": profile_status,
                 },
                 indent=2,
                 sort_keys=True,
@@ -166,6 +172,10 @@ def command_init(args: argparse.Namespace) -> int:
         )
         return 0
     print(f"initialized StageMesh at {runtime_dir(project)}")
+    if profile_status == "created":
+        print(f"created default profile {profile_detail}")
+        if is_placeholder(load_profile(project)):
+            print("warning: no test gate was detected; the default profile only runs `git diff --check`. Add real gates to .stagemesh/profile.json.")
     return 0
 
 

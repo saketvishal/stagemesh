@@ -20,6 +20,7 @@ from .auto_plan import AutoPlanError, profile_payload, validate_generated
 from .config import StageMeshConfig
 from .contracts import ContractError, canonical_contract_json, parse_contract, task_contract_path
 from .persistence import Store
+from .profile_default import is_placeholder
 from .profile import (
     PROFILE_FILE,
     Profile,
@@ -143,6 +144,8 @@ def run_smoke(
         return report
     report.profile = profile.name
     _check_types(report, profile)
+    if is_placeholder(profile):
+        report.add("validation gates are real", "warn", "only the generated placeholder gate (git diff --check) is defined; add the project's real test gates to "+str(PROFILE_FILE))
     _check_forbidden(report, profile)
     _check_probes(report, profile)
     if task_ids or dry_run_selection:
