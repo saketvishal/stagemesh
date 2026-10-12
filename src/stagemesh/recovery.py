@@ -700,6 +700,9 @@ def task_doctor(store: Store, project: Path, task_id: str, integration_ref: str 
             else None
         ),
         "recent_repairs": _recent_repairs(store, task_id),
+        "integration_recoveries": _integration_recoveries(store, task_id),
+        "integration_blocker": _integration_blocker(store, task_id),
+        "block": _block(store, task_id) if task["status"] == TaskStatus.BLOCKED else None,
         "timing": task_timing(store, task_id),
     }
     report["recommended_command"], report["recommendation_reason"] = _recommend(report, task_id, ref)
@@ -808,12 +811,41 @@ def format_doctor(report: dict[str, Any]) -> str:
         lines.extend(format_findings(report["review_findings"]))
     d = report["diagnosis"]
     lines.append(f"  diagnosis: {d['category']} at {d['stage']}: {d['summary']}" if d else "  diagnosis: none")
+    if report.get("block"):
+        lines.append(f"  block: {report['block']['kind']}: {report['block']['reason']}" + (" (run-window reconsiders it automatically)" if report["block"]["automatic_reentry"] else ""))
+    for recovery in report.get("integration_recoveries", []):
+        lines.append(f"  integration recovery #{recovery['attempt']}: {recovery['category']} -> {recovery['action']} (candidate {str(recovery['candidate_sha'])[:7]})")
+    if report.get("integration_blocker"):
+        from .integration_recovery import format_blocker
+
+        lines.append("  integration blocker: " + format_blocker(report["integration_blocker"]))
     for repair in report["recent_repairs"]:
         lines.append(f"  repair: {repair['event']} by {repair['operator']}: {repair['reason']}")
     if report["timing"]["executions"]:
         lines.extend("  " + line for line in format_task_summary(report["timing"]).splitlines())
     lines.append(f"  next: {report['recommended_command'] or '(nothing)'}  # {report['recommendation_reason']}")
     return "\n".join(lines)
+
+
+def _block(store: Store, task_id: str) -> dict[str, Any] | None:
+    from .block_kinds import BlockKind, classify_block
+
+    info = classify_block(store, task_id)
+    if info is None:
+        return None
+    return {"kind": info.kind.value, "reason": info.reason, "automatic_reentry": info.kind is BlockKind.RECOVERABLE_OPERATIONAL}
+
+
+def _integration_recoveries(store: Store, task_id: str) -> list[dict[str, Any]]:
+    from .integration_recovery import recoveries
+
+    return recoveries(store, task_id)
+
+
+def _integration_blocker(store: Store, task_id: str) -> dict[str, Any] | None:
+    from .integration_recovery import integration_blocker
+
+    return integration_blocker(store, task_id)
 
 
 def _queue_control_summary(store: Store) -> dict[str, Any]:

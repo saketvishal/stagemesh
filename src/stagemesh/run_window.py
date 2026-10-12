@@ -23,16 +23,19 @@ import re
 import time
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
+from .audit import record_audit
+from .block_kinds import classify_block, reenter_blocked_task, reentry_refusal, runtime_fingerprint
 from .config import StageMeshConfig
-from .domain import Stage, TaskStatus
+from .domain import EvidenceKind, Stage, TaskStatus
 from .operator_actions import recover_stale
 from .persistence import Store
 from .queue_visibility import queue_control_report
 from .readiness import PrLister, build_readiness, gh_open_wave_prs
+from .recovery_decision import STEP_BUDGET_EXHAUSTED, RecoveryAction, RecoveryContext, decide
 from .runtime_freshness import RuntimeFreshness, check_runtime
 from .scheduling import Scheduler
 from .survivor_wave import (
@@ -79,6 +82,7 @@ class WindowOptions:
     concurrency: int = 2
     max_steps_per_task: int = 8
     max_tasks: int = 10
+    max_continuations: int = 3  # extra runs a task gets after hitting the step cap, while each run still made progress
     integration_mode: str = INTEGRATION_PR
     open_prs: bool = True
     advance_baselines: bool = True
@@ -97,6 +101,8 @@ class WindowReport:
     preflight: list[Check] = field(default_factory=list)
     recovered: list[dict[str, Any]] = field(default_factory=list)
     selected: list[str] = field(default_factory=list)
+    reentered: list[dict[str, Any]] = field(default_factory=list)  # recoverable blocks reconsidered this window
+    continued: list[dict[str, Any]] = field(default_factory=list)  # step-capped tasks resumed from their recorded state
     not_selected: dict[str, str] = field(default_factory=dict)
     waves: list[WaveReport] = field(default_factory=list)
     refused: bool = False
@@ -111,7 +117,16 @@ class WindowReport:
 
     @property
     def tasks(self) -> list[Any]:
-        return [task for wave in self.waves for task in wave.tasks]
+        """One record per task: the latest run of it, with how many runs the window gave it."""
+        latest: dict[str, Any] = {}
+        runs: dict[str, int] = {}
+        for wave in self.waves:
+            for task in wave.tasks:
+                if task.outcome in ("skipped", "not_started") and task.task_id in latest:
+                    continue
+                runs[task.task_id] = runs.get(task.task_id, 0) + 1
+                latest[task.task_id] = task
+        return [replace(task, runs=runs[task_id]) for task_id, task in latest.items()]
 
     @property
     def stopped_early(self) -> bool:
@@ -160,6 +175,8 @@ class WindowReport:
             "preflight": [check.to_dict() for check in self.preflight],
             "recovered": self.recovered,
             "selected": self.selected,
+            "reentered": self.reentered,
+            "continued": self.continued,
             "not_selected": self.not_selected,
             "counts": self.counts(),
             "orphan_events_before": None if first is None else first.orphan_events_before,
@@ -183,12 +200,14 @@ def _task_sort_key(task_id: str) -> tuple[int, int, str]:
 
 
 def select_tasks(
-    store: Store, *, attempted: set[str], limit: int, only: list[str] | None = None
+    store: Store, *, attempted: set[str], limit: int, only: list[str] | None = None, fingerprint: str | None = None
 ) -> tuple[list[str], dict[str, str]]:
     """Up to `limit` runnable tasks (oldest first) and why the others were left alone.
 
     Runnable means: OPEN, not DONE, eligible to the scheduler (so not blocked, parked, source-closed, waiting on a dependency or an
-    objective root) and with no active claim or running execution. Blocked and design-decision tasks are never picked.
+    objective root) and with no active claim or running execution. A BLOCKED task is picked only when it is blocked for a recoverable
+    operational reason and the runtime or configuration changed since (`fingerprint`, see `block_kinds`); every other block stays blocked
+    and is reported with its kind and cause.
     """
     scheduler = Scheduler(store)
     skipped: dict[str, str] = {}
@@ -203,8 +222,24 @@ def select_tasks(
             continue
         if task["status"] == TaskStatus.DONE or task["stage"] == Stage.DONE:
             continue  # finished work is not news
+        if task["status"] == TaskStatus.BLOCKED:
+            info = classify_block(store, task_id)
+            refusal = None if fingerprint is None else reentry_refusal(store, task_id, fingerprint)
+            if info is not None and refusal is None:
+                reason = skip_reason(store, task_id)  # claims, running executions, objective roots still apply
+                if reason is None:
+                    picked.append(task_id)
+                    if len(picked) >= limit:
+                        break
+                else:
+                    skipped[task_id] = reason
+            elif info is not None:
+                skipped[task_id] = f"{info.kind.value}: {info.reason[:300]}" + (f" [{refusal}]" if info.kind.value.endswith("OPERATIONAL") else "")
+            elif only is not None:
+                skipped[task_id] = "blocked with no recorded cause: not picked automatically (retry it deliberately)"
+            continue
         if task["status"] != TaskStatus.OPEN:
-            # Blocked, parked and design-decision tasks are never picked. They are only named when the caller asked for them.
+            # Parked tasks are never picked. They are only named when the caller asked for them.
             if only is not None:
                 skipped[task_id] = f"{str(task['status']).lower()}: not picked automatically (retry it deliberately)"
             continue
@@ -218,6 +253,72 @@ def select_tasks(
         if len(picked) >= limit:
             break
     return picked, skipped
+
+
+def progress_key(store: Store, task_id: str) -> tuple[Any, ...]:
+    """What a run of the task can change: stage, status, latest candidate, evidence recorded and remediation attempts spent."""
+    task = store.get_task(task_id)
+    latest = store.latest_candidate(task_id)
+    evidence = store.conn.execute("SELECT COUNT(*) FROM evidence WHERE task_id=?", (task_id,)).fetchone()[0]
+    remediations = store.conn.execute("SELECT COUNT(*) FROM task_remediations WHERE task_id=?", (task_id,)).fetchone()[0]
+    return (
+        None if task is None else (str(task["stage"]), str(task["status"])),
+        None if latest is None else str(latest["sha"]),
+        evidence,
+        remediations,
+    )
+
+
+def continuation(store: Store, task_id: str, used: int, limit: int, progressed: bool) -> dict[str, Any]:
+    """Should a task that ran out of steps get another run from its recorded state? Decided by the recovery rules, and audited.
+
+    Nothing is restarted: the next run resumes the stage the task is in, with its candidate, evidence lineage and (when review findings
+    are open) the remediation context already in the ledger.
+    """
+    task = store.get_task(task_id)
+    latest = store.latest_candidate(task_id)
+    sha = None if latest is None else str(latest["sha"])
+
+    def status(kind: EvidenceKind) -> str | None:
+        if sha is None:
+            return None
+        row = store.conn.execute(
+            "SELECT status FROM evidence WHERE task_id=? AND candidate_sha=? AND kind=? ORDER BY created_at DESC, rowid DESC LIMIT 1", (task_id, sha, kind)
+        ).fetchone()
+        return None if row is None else str(row["status"])
+
+    open_findings = 0 if sha is None else len(store.open_findings_for_candidate(task_id, sha))
+    state = {
+        "task_id": task_id,
+        "stage": None if task is None else str(task["stage"]),
+        "candidate_sha": sha,
+        "validation": status(EvidenceKind.VALIDATION),
+        "review": status(EvidenceKind.REVIEW),
+        "integration": status(EvidenceKind.INTEGRATION),
+        "open_findings": open_findings,
+        "attempt": used + 1,
+    }
+    ctx = RecoveryContext(
+        stage=str(state["stage"]),
+        failure_category=STEP_BUDGET_EXHAUSTED,
+        candidate_sha=sha,
+        validation_state=state["validation"],
+        review_state=state["review"],
+        recovery_attempts=used,
+        max_attempts=limit,
+    )
+    decision = decide(ctx)
+    if used >= limit:
+        why = f"{used} continuation(s) already used (limit {limit})"
+    elif not progressed:
+        why = "the run made no progress (same stage, candidate, evidence and remediation count), so another run would repeat it"
+    elif decision.action is not RecoveryAction.RETRY_SAME:
+        why = decision.reason
+    else:
+        why = ""
+    note = {**state, "continue": not why, "why": why or decision.reason}
+    record_audit(store, "task.max_steps_continuation", note)
+    return note
 
 
 # --- preflight ------------------------------------------------------------------------------------------------------------------
@@ -430,20 +531,39 @@ def run_window(
         {"mode": options.integration_mode, "duration_seconds": options.duration_seconds, "concurrency": options.concurrency, "max_steps": options.max_steps_per_task},
     )
     attempted: set[str] = set()
+    fingerprint = runtime_fingerprint(project)
+    resume: dict[str, int] = {}  # step-capped tasks waiting for another run, and how many they have had
     try:
         while True:
             if clock() >= deadline:
                 report.time_limit_reached = True
                 break
-            if len(attempted) >= options.max_tasks:
+            room = options.concurrency * 2
+            continuing = [task_id for task_id in resume if skip_reason(store, task_id) is None][:room]
+            if len(attempted) >= options.max_tasks and not continuing:
                 report.task_limit_reached = True
                 break
-            batch, skipped = select_tasks(
-                store, attempted=attempted, limit=min(options.concurrency * 2, options.max_tasks - len(attempted)), only=options.tasks
+            fresh, skipped = (
+                select_tasks(
+                    store,
+                    attempted=attempted | set(resume),
+                    limit=min(room - len(continuing), options.max_tasks - len(attempted)),
+                    only=options.tasks,
+                    fingerprint=fingerprint,
+                )
+                if len(attempted) < options.max_tasks and room - len(continuing) > 0
+                else ([], {})
             )
             report.not_selected.update(skipped)
+            batch = [*continuing, *fresh]
             if not batch:
                 break
+            for task_id in fresh:  # a recoverable block is reconsidered here, before the wave runs the task
+                entry = reenter_blocked_task(store, task_id, fingerprint)
+                if entry is not None:
+                    report.reentered.append(entry)
+                    report.not_selected.pop(task_id, None)
+            before = {task_id: progress_key(store, task_id) for task_id in batch}
             wave = run_wave(
                 store,
                 batch,
@@ -458,9 +578,19 @@ def run_window(
                 deadline=deadline,
                 clock=clock,
             )
-            attempted.update(batch)
-            report.selected.extend(batch)
+            attempted.update(fresh)
+            report.selected.extend(task_id for task_id in batch if task_id not in report.selected)
             report.waves.append(wave)
+            for record in wave.tasks:
+                resume.pop(record.task_id, None)
+                if record.outcome == "open" and record.stop_reason == "MAX_STEPS":
+                    count = sum(1 for entry in report.continued if entry["task_id"] == record.task_id)
+                    note = continuation(store, record.task_id, count, options.max_continuations, progress_key(store, record.task_id) != before.get(record.task_id))
+                    if note["continue"]:
+                        resume[record.task_id] = count + 1
+                        report.continued.append(note)
+                    else:
+                        record.reason = f"{record.reason}; not continued: {note['why']}"
             if wave.stopped_early or not wave.ok:
                 report.stop_reason = wave.stop_reason or "the wave reported a violation"
                 break
@@ -549,6 +679,10 @@ def format_window_report(report: WindowReport) -> str:
             lines.append(f"      {task.pr_url}")
         if task.pr_error:
             lines.append(f"      PR error: {task.pr_error}")
+    for entry in report.reentered:
+        lines.append(f"  reconsidered blocked task {entry['task_id']} (attempt {entry['attempt']} of {entry['of']}): was blocked because {entry['was_blocked_because']}")
+    for entry in report.continued:
+        lines.append(f"  resumed {entry['task_id']} after the step cap (run {entry['attempt'] + 1}): stage {entry['stage']}, candidate {str(entry['candidate_sha'])[:7]}")
     if report.not_selected:
         lines.append("left alone: " + "; ".join(f"{k} ({v})" for k, v in sorted(report.not_selected.items(), key=lambda kv: _task_sort_key(kv[0]))))
     if report.open_wave_prs:
@@ -586,9 +720,10 @@ def format_window_report(report: WindowReport) -> str:
     return "\n".join(lines)
 
 
-def planned_selection(store: Store, options: WindowOptions) -> tuple[list[str], dict[str, str]]:
+def planned_selection(store: Store, options: WindowOptions, project: Path | None = None) -> tuple[list[str], dict[str, str]]:
     """What a window would pick right now (`run-window --plan`): the same selection, nothing started."""
-    return select_tasks(store, attempted=set(), limit=options.max_tasks, only=options.tasks)
+    fingerprint = None if project is None else runtime_fingerprint(project)
+    return select_tasks(store, attempted=set(), limit=options.max_tasks, only=options.tasks, fingerprint=fingerprint)
 
 
 __all__ = [

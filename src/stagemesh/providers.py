@@ -624,6 +624,8 @@ def _remediation_prompt(remediation: dict[str, object]) -> str:
         lines.extend(["", f"Diagnosis ({diagnosis.get('category')}): {str(diagnosis.get('summary'))[:500]}"])
         if diagnosis.get("provider_analysis"):
             lines.append(f"Independent analysis: {str(diagnosis['provider_analysis'])[:800]}")
+    if remediation.get("recovery_note"):
+        lines.extend(["", str(remediation["recovery_note"])])
     lines.extend(
         [
             "",

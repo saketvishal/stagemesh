@@ -9,6 +9,8 @@ import pytest
 from test_survivor_wave import _commit_on, _main_ref, _with_origin, make_store
 
 import stagemesh.cli as cli_module
+from stagemesh.audit import record_audit
+from stagemesh.block_kinds import BlockKind, record_block
 from stagemesh import readiness
 from stagemesh.domain import EvidenceKind, EvidenceStatus
 from stagemesh.runtime_freshness import RuntimeFreshness
@@ -104,22 +106,27 @@ def test_local_main_ahead_and_inflight_work_are_flagged(tmp_path: Path, monkeypa
     assert "ahead 1, behind 0" in "\n".join(readiness.format_readiness(data))
 
 
-def test_tasks_blocked_on_unresolved_review_findings_are_listed_as_needing_a_decision(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_only_genuine_human_decision_blocks_are_listed_as_needing_a_decision(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(readiness, "active_cooldowns", lambda store, seconds: [])
-    store, project = make_store(tmp_path, ["T-1", "T-2"])
+    store, project = make_store(tmp_path, ["T-1", "T-2", "T-3"])
     sha = "d" * 40
     store.add_candidate("T-1", sha, "codex", True)
     store.add_evidence("T-1", sha, EvidenceKind.REVIEW, EvidenceStatus.FAILED)
     store.upsert_finding("f1", "T-1", sha, "error", "design question")
-    store.block_task("T-1")
-    store.block_task("T-2")  # blocked, but not on review findings: not a design decision
+    record_block(store, "T-1", BlockKind.HUMAN_DECISION, "review finding states a decision is needed: which retention period applies?")
+    # a spent remediation budget is not a question for a person, with or without failed review evidence behind it
+    store.add_candidate("T-2", "e" * 40, "codex", True)
+    store.add_evidence("T-2", "e" * 40, EvidenceKind.REVIEW, EvidenceStatus.FAILED)
+    store.block_task("T-2")
+    record_audit(store, "task.remediation_exhausted", {"task_id": "T-2", "candidate_sha": "e" * 40, "stage": "REVIEW"})
+    store.block_task("T-3")  # blocked with no recorded cause: not a design decision either
     config = cli_module.load_config(project)
 
     data = readiness.build_readiness(store, project, config, list_prs=None, runtime=FRESH)
 
     assert [item["task_id"] for item in data["needs_decision"]] == ["T-1"]
     assert "1 task(s) need a design decision" in data["attention"]
-    assert "T-1 task T-1: review findings on ddddddd" in "\n".join(readiness.format_readiness(data))
+    assert "which retention period applies?" in "\n".join(readiness.format_readiness(data))
 
 
 def test_provider_cooldowns_and_live_check_state_are_shown_per_provider(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

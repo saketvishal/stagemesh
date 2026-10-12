@@ -12,6 +12,7 @@ from test_run_ready import _project
 
 import stagemesh.cli as cli_module
 from stagemesh.audit import record_audit
+from stagemesh.block_kinds import BlockKind, record_block
 from stagemesh.domain import EvidenceKind, EvidenceStatus, ExecutionKind, Stage
 from stagemesh.persistence import Store
 from stagemesh.survivor_wave import (
@@ -218,7 +219,7 @@ def test_a_design_blocker_marks_only_that_task_and_the_wave_carries_on(tmp_path:
             worker.add_evidence(task_id, sha, EvidenceKind.VALIDATION, EvidenceStatus.PASSED)
             worker.add_evidence(task_id, sha, EvidenceKind.REVIEW, EvidenceStatus.FAILED)
             worker.upsert_finding("f1", task_id, sha, "error", "unproven providers are eligible by default")
-            worker.block_task(task_id)
+            record_block(worker, task_id, BlockKind.HUMAN_DECISION, "Should unproven providers be eligible by default?")
         finally:
             worker.close()
         return RunResult("BLOCKED", "task exhausted its remediation budget")
@@ -229,7 +230,7 @@ def test_a_design_blocker_marks_only_that_task_and_the_wave_carries_on(tmp_path:
 
     by_id = {t.task_id: t for t in report.tasks}
     assert by_id["T-2"].outcome == "blocked_needs_decision" and by_id["T-2"].final_status == "BLOCKED"
-    assert "needs a decision" in by_id["T-2"].reason and "1 open" in by_id["T-2"].reason
+    assert by_id["T-2"].reason == "Should unproven providers be eligible by default?"  # the concrete question, not a budget message
     assert by_id["T-1"].outcome == by_id["T-3"].outcome == "done"  # others are unaffected
     assert report.ok and rig.runs == ["T-1", "T-2", "T-3"]
 

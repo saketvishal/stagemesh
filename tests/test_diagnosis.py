@@ -128,8 +128,9 @@ def test_repeated_gate_failure_on_the_code_is_an_implementation_defect(tmp_path:
     project, store = _setup(tmp_path, contract)
     executor = Attempts()
     drive(project, store, executor)
-    (stop,) = events(store, "task.diagnosis_stop")
-    assert stop["category"] == IMPLEMENTATION_DEFECT and stop["failed_gates"] == ["docs-static-unit"] and executor.calls == 2
+    stop = events(store, "task.diagnosis_stop")[-1]
+    # the repeat granted one recovery round (a clean, narrowed attempt) before the task stopped: 2 identical failures + 1 round
+    assert stop["category"] == IMPLEMENTATION_DEFECT and stop["failed_gates"] == ["docs-static-unit"] and executor.calls == 3
 
 def test_diagnose_and_stop_output_include_gate_excerpt(tmp_path: Path) -> None:
     script = "import sys; print('FAILED test_x - assert 1 == 2'); print('stderr: boom detail', file=sys.stderr); sys.exit(1)"
@@ -196,9 +197,9 @@ def test_a_different_failure_each_time_is_progress_not_a_repeat(tmp_path: Path) 
     project, store = _setup(tmp_path, contract)
     executor = Attempts()
     drive(project, store, executor)
-    assert executor.calls == 4 and not events(store, "task.diagnosis_stop")  # distinct failures keep the normal remediation loop
+    assert executor.calls == 5 and not events(store, "task.diagnosis_stop")  # distinct failures keep the normal loop (4 attempts) plus one recovery round
     assert all(d["repeated"] is False for d in events(store, "task.diagnosis"))
-    assert diagnose(store, TASK).categories == {IMPLEMENTATION_DEFECT: 4}
+    assert diagnose(store, TASK).categories == {IMPLEMENTATION_DEFECT: 5}
 
 
 def test_stop_on_repeat_can_be_switched_off(tmp_path: Path) -> None:
