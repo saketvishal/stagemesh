@@ -85,6 +85,7 @@ class TaskRecord:
     resumable: bool = False  # stopped (e.g. at the step cap) with the task still OPEN: `continue` picks it up again
     integrated_candidate: str | None = None
     infrastructure_signature: str | None = None
+    runs: int = 1  # how many times a run window ran this task (more than one after a step-cap continuation)
 
     def to_dict(self) -> dict[str, Any]:
         return dict(self.__dict__)
@@ -288,17 +289,21 @@ def infrastructure_signature(result: RunResult) -> str | None:
 
 
 def blocked_needs_decision(store: Store, task_id: str) -> str | None:
-    """A task StageMesh blocked after its remediation budget while the latest review still fails: a person has to decide."""
-    latest = store.latest_candidate(task_id)
-    if latest is None:
+    """The concrete question when a person has to decide something, else None.
+
+    Only `BLOCKED_HUMAN_DECISION` is a question for a person (see `block_kinds`). A spent remediation or recovery budget on its own is not:
+    that block is recoverable and is reconsidered by `run-window` after the runtime changes.
+    """
+    from .block_kinds import BlockKind, classify_block
+    from .integration_recovery import format_blocker, integration_blocker
+
+    info = classify_block(store, task_id)
+    if info is None or info.kind is not BlockKind.HUMAN_DECISION:
         return None
-    sha = str(latest["sha"])
-    if latest_evidence_status(store, task_id, sha, EvidenceKind.REVIEW) != "FAILED":
-        return None
-    open_findings = store.conn.execute(
-        "SELECT COUNT(*) FROM findings WHERE task_id=? AND candidate_sha=? AND status='OPEN'", (task_id, sha)
-    ).fetchone()[0]
-    return f"review findings on {sha[:7]} were not resolved within the remediation budget ({open_findings} open); needs a decision"
+    blocker = integration_blocker(store, task_id)
+    if blocker is not None and blocker.get("block_kind") == BlockKind.HUMAN_DECISION.value:
+        return format_blocker(blocker)
+    return info.reason
 
 
 def _snapshot(store: Store, record: TaskRecord, since: float) -> None:
@@ -470,9 +475,12 @@ def _classify(store: Store, record: TaskRecord, result: RunResult) -> None:
     elif record.final_status == TaskStatus.DONE:
         record.outcome = "done"
     elif record.final_status == TaskStatus.BLOCKED:
+        from .block_kinds import classify_block
+
         decision = blocked_needs_decision(store, record.task_id)
+        info = classify_block(store, record.task_id)
         record.outcome = "blocked_needs_decision" if decision else "blocked"
-        record.reason = decision or result.message or "blocked"
+        record.reason = decision or (f"{info.kind.value}: {info.reason}" if info is not None else result.message or "blocked")
     else:
         record.outcome = "open"  # step budget used up or interrupted with the task still progressing
         record.reason = result.message or result.stop_reason

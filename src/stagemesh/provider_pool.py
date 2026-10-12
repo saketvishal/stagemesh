@@ -261,7 +261,22 @@ class ProviderPool:
                     verdicts.append(Verdict(name, False, f"not_independent: {why}"))
                 else:
                     verdicts.append(Verdict(name, True, "eligible"))
+        if stage == IMPLEMENT and task_id is not None:
+            verdicts = self._apply_recovery_switch(store, task_id, verdicts)
         return verdicts
+
+    @staticmethod
+    def _apply_recovery_switch(store: Store, task_id: str, verdicts: list[Verdict]) -> list[Verdict]:
+        """After an exhausted remediation budget the next attempt goes to a different provider, if another one is usable."""
+        from .remediation_recovery import avoided_providers
+
+        avoid = avoided_providers(store, task_id)
+        if not avoid or not any(v.eligible and v.provider not in avoid for v in verdicts):
+            return verdicts
+        return [
+            Verdict(v.provider, False, "recovery_switch: the previous attempts by this provider did not resolve the findings") if v.eligible and v.provider in avoid else v
+            for v in verdicts
+        ]
 
     def _recent_failure(self, store: Store, stage: str, task_id: str | None, provider: str) -> str | None:
         now = time.time()

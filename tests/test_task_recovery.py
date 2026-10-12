@@ -586,8 +586,8 @@ def test_repeated_provider_no_progress_is_not_retried(tmp_path: Path) -> None:
     project, store = _setup(tmp_path, DOCS_CONTRACT)
     executor = Attempts(nothing=True)
     drive(project, store, executor, ticks=10)
-    assert executor.calls == 2 and store.get_task(TASK)["status"] == TaskStatus.BLOCKED
-    (stop,) = events(store, "task.diagnosis_stop")
+    assert executor.calls == 3 and store.get_task(TASK)["status"] == TaskStatus.BLOCKED  # 2 no-progress attempts + one clean recovery round
+    stop = events(store, "task.diagnosis_stop")[-1]
     assert stop["category"] == "provider_no_progress" and "stagemesh continue" in stop["recommendation"]
 
 

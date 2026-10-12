@@ -24,6 +24,26 @@ REBASE_CONFLICT = "integration_rebase_conflict"  # the ref advanced and the cand
 REBASE_UNAVAILABLE = "integration_rebase_unavailable"  # git/runtime failed without a content conflict
 
 
+def _preserve_original(project: Path, task_id: str, candidate_sha: str) -> None:
+    """Keep the reviewed candidate reachable once a refreshed replacement exists: the ledger still names it as history."""
+    from .autonomy.gitfacts import GitFacts
+    from .workspaces import _task_key
+
+    GitFacts(project).ensure_ref(f"refs/stagemesh/preserved/{_task_key(task_id)}/{candidate_sha[:12]}", candidate_sha)
+
+
+def _rebase_args(git: GitWorkspace, tip: str, baseline_sha: str | None, candidate_sha: str) -> tuple[str, ...]:
+    """Replay only the task's own commits (`baseline..candidate`) onto `tip`.
+
+    A plain `git rebase <tip>` replays everything since the merge-base with the tip. When the candidate's recorded baseline carries
+    commits that reached the tip by another route (a squash or merge of an earlier task's PR), that replays foreign commits that
+    conflict with their own landed copies although the task's change itself applies cleanly.
+    """
+    if baseline_sha and baseline_sha != candidate_sha and git.run("merge-base", "--is-ancestor", baseline_sha, candidate_sha, check=False).returncode == 0:
+        return ("rebase", "--onto", tip, baseline_sha)
+    return ("rebase", tip)
+
+
 class SerializedIntegrator(Integrator):
     """Holds the integration lock around the whole integrate step, so verification and the ref update see the same ref.
 
@@ -120,12 +140,27 @@ class SerializedIntegrator(Integrator):
                 continue
         return count
 
-    def _rebase(self, store: Store, task_id: str, candidate_sha: str, project: Path) -> bool:
+    def refresh(self, store: Store, task_id: str, candidate_sha: str, project: Path) -> bool:
+        """Recovery's refresh: rebase the candidate onto the current ref even though the automatic rebase budget is spent.
+
+        True when a new candidate was produced and the task is back at VALIDATE (so it is validated and independently reviewed on the
+        new SHA). False when there is nothing to refresh or the candidate does not apply; the ref is never touched either way.
+        """
+        with self.lock.hold(task_id):
+            self._typed_failure = None
+            try:
+                if self.integration_ref is None or self._diverged(project, candidate_sha) is None:
+                    return False
+                return self._rebase(store, task_id, candidate_sha, project, budgeted=False)
+            finally:
+                self._typed_failure = None
+
+    def _rebase(self, store: Store, task_id: str, candidate_sha: str, project: Path, *, budgeted: bool = True) -> bool:
         tip = self._resolve(project)
         if tip is None:
             return False
         attempts = self._rebase_count(store, task_id)
-        if attempts >= self.max_rebases:
+        if budgeted and attempts >= self.max_rebases:
             self._typed_failure = (
                 STALE_BASE,
                 f"{self.integration_ref} advanced to {tip} again after {attempts} automatic rebase(s) of task {task_id}; "
@@ -143,7 +178,7 @@ class SerializedIntegrator(Integrator):
                 git.run("reset", "--hard", "HEAD", check=False)
                 git.run("clean", "-fdq", check=False)
                 git.run("checkout", "--detach", candidate_sha)
-                result = git.run("rebase", tip, check=False)
+                result = git.run(*_rebase_args(git, tip, bound.baseline_sha, candidate_sha), check=False)
                 if result.returncode != 0:
                     conflicts = [
                         line for line in git.run("diff", "--name-only", "--diff-filter=U", check=False).stdout.splitlines() if line
@@ -161,6 +196,7 @@ class SerializedIntegrator(Integrator):
                     self._emit(task_id, failure_code, {"ref_tip": tip, "conflicts": conflicts[:10]})
                     return False
                 rebased = git.head()
+                _preserve_original(project, task_id, candidate_sha)
                 previous = store.latest_candidate(task_id)
                 producer = str(previous["produced_by"]) if previous is not None else "rebase"
                 store.add_candidate(task_id, rebased, producer, durable_handoff=True)

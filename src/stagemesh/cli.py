@@ -761,7 +761,7 @@ def command_run_window(args: argparse.Namespace) -> int:
                 store, project, config, options, base_ref=base_ref, provider_check=provider_pool_check, repo_state=hooks.repo_state, recover=False,
                 checkout_ref=lambda: _current_branch_ref(project),
             )
-            picked, skipped = planned_selection(store, options)
+            picked, skipped = planned_selection(store, options, project)
             payload = {
                 "preflight": [c.to_dict() for c in checks],
                 "would_run": picked,

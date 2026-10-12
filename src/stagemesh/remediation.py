@@ -84,6 +84,11 @@ def remediation_context(store: Store, task_id: str) -> dict[str, object] | None:
     diagnosis = _latest_diagnosis(store, task_id, str(latest["candidate_sha"]))
     if diagnosis is not None:
         context["diagnosis"] = diagnosis
+    from .remediation_recovery import narrowed_note
+
+    note = narrowed_note(store, task_id)
+    if note is not None:
+        context["recovery_note"] = note
     return context
 
 

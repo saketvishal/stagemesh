@@ -55,6 +55,33 @@ After merging, pull `main`; the next wave moves `wave/staging` up to it by itsel
 
 Expect `operational readiness: READY` (or only the informational lines above).
 
+## Routine failures repair themselves
+
+A routine engineering failure is not an operator task. StageMesh classifies it, repairs it, validates and reviews the result again, and retries, within bounded budgets. Every choice is one of a fixed set of actions (`RETRY_SAME`, `REFRESH_REVALIDATE`, `REFRESH_REVALIDATE_REREVIEW`, `SWITCH_PROVIDER`, `REPAIR_WORKTREE`, `RETRY_INTEGRATION`, `BLOCK_EXTERNAL`, `BLOCK_HUMAN_DECISION`, `ABORT_UNSAFE`) made by deterministic rules in `recovery_decision.py`; an optional advisor (for example a decision model) is only asked about contexts the rules call ambiguous and cannot step outside the fixed set. Each decision is a `recovery.decision` audit event.
+
+**Integration** (3 recoveries per task):
+
+| Classification | What StageMesh does |
+| --- | --- |
+| `transient_integration_failure` (git/ref update trouble, no content conflict) | `RETRY_INTEGRATION`: integrates the same reviewed candidate again |
+| `target_advanced_after_review` (the integration ref moved after review) | `REFRESH_REVALIDATE_REREVIEW`: replays only the task's own commits (`baseline..candidate`) onto the current ref, so commits that reached the ref by another route are not replayed; the new SHA is validated and independently reviewed before it integrates. The original candidate is kept under `refs/stagemesh/preserved/` |
+| `merge_conflict_with_current_target` | `REPAIR_WORKTREE`: redoes the task on a clean worktree at the current ref; the provider is told which files conflict and to keep what landed |
+
+**Remediation budget.** A spent budget (or an identical repeat) is not a question for a person. StageMesh first tries a different healthy provider (`SWITCH_PROVIDER`), then a narrowed attempt on the open findings only (`REPAIR_WORKTREE`), at most 2 recovery rounds. A finding that itself says a product, spec, security or legal decision is needed skips the attempts and is asked at once.
+
+**Step cap.** A task that hits `--max-steps-per-task` while still making progress is resumed from its recorded stage, candidate and evidence in the same window (up to 3 continuations), never restarted.
+
+Nothing is force-pushed, no gate is skipped and no test is weakened. A task blocks only when repair is unsafe or exhausted, and the block has a kind:
+
+| Block kind | Meaning | Who clears it |
+| --- | --- | --- |
+| `BLOCKED_RECOVERABLE_OPERATIONAL` | recovery budget spent, provider/runtime trouble, an ordinary failure that kept coming back | `run-window` reconsiders it automatically after the StageMesh runtime or `.stagemesh` configuration changes (3 times at most per `retry-task`) |
+| `BLOCKED_EXTERNAL_DEPENDENCY` | something outside StageMesh must exist first, e.g. the integration branch | fix the dependency |
+| `BLOCKED_HUMAN_DECISION` | a design/spec/product/legal choice, e.g. the same file conflicts again after a redo, or a conflict reaches outside the task contract | a person answers the question shown by `stagemesh doctor` and runs `stagemesh retry-task --task <id>` |
+| `BLOCKED_POLICY_SAFETY` | a workspace or ref changed outside StageMesh | never retried automatically |
+
+`stagemesh doctor`, `task-doctor` and the run-window report show the kind, what was tried and why further automatic action is unsafe. Only `BLOCKED_HUMAN_DECISION` is listed under "tasks needing a design decision".
+
 ## If a run-window was interrupted
 
 `stagemesh doctor` shows `last run-window ...: INTERRUPTED` when a window started and never finished (crash, kill, power loss).

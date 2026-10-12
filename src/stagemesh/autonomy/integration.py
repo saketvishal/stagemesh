@@ -37,9 +37,9 @@ class SupervisedIntegrator(SerializedIntegrator):
             return
         super()._fast_forward(project, candidate_sha, payload, findings)
 
-    def _rebase(self, store: Store, task_id: str, candidate_sha: str, project: Path) -> bool:
+    def _rebase(self, store: Store, task_id: str, candidate_sha: str, project: Path, *, budgeted: bool = True) -> bool:
         attempts = self._rebase_count(store, task_id)
-        if attempts >= self.max_rebases:
+        if budgeted and attempts >= self.max_rebases:
             tip = self._resolve(project)
             self._typed_failure = (
                 STALE_BASE,

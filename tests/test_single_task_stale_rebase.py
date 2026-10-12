@@ -89,7 +89,7 @@ def test_clean_stale_candidate_is_rebased_then_revalidated_and_integrated(tmp_pa
     assert _tip(rig) == rebased
 
 
-def test_true_rebase_conflict_leaves_ref_unchanged_and_stops_without_reimplementing(tmp_path: Path) -> None:
+def test_true_rebase_conflict_never_rewrites_the_ref_and_is_redone_on_the_current_base_once(tmp_path: Path) -> None:
     files = {TASK: ("shared.txt", "from A\n")}
     rig = Rig(tmp_path, [TASK], files=files)
     executor = ScriptedExecutor(files)
@@ -98,15 +98,17 @@ def test_true_rebase_conflict_leaves_ref_unchanged_and_stops_without_reimplement
     original = rig.store.latest_candidate(TASK)["sha"]
     tip = _land_on_main(rig, "shared.txt", "from elsewhere\n")
 
-    for _ in range(8):
-        coord.tick()
-
+    coord.tick()  # integrate: the rebase conflicts, the ref is left exactly as it was
     assert _tip(rig) == tip
-    assert GitWorkspace(rig.project).run("show", f"{rig.ref}:shared.txt").stdout == "from elsewhere\n"
     codes = set()
     for row in rig.store.conn.execute("SELECT payload FROM evidence WHERE task_id=? AND kind=?", (TASK, EvidenceKind.INTEGRATION)):
         codes |= {f["code"] for f in json.loads(row["payload"]).get("findings", [])}
-    assert "integration_rebase_conflict" in codes
-    assert rig.store.latest_candidate(TASK)["sha"] == original  # no fabricated candidate
-    assert _executions(rig, ExecutionKind.IMPLEMENTATION) == 1  # no meaningless implementation retries
-    assert rig.store.get_task(TASK)["status"] != TaskStatus.DONE
+    assert "integration_rebase_conflict" in codes  # the failed attempt stays in the ledger
+
+    for _ in range(40):
+        coord.tick()
+
+    # recovery (see test_integration_recovery.py): one task-scoped redo on the current base, history intact, the ref only ever fast-forwarded
+    assert _executions(rig, ExecutionKind.IMPLEMENTATION) == 2
+    assert rig.store.conn.execute("SELECT COUNT(*) FROM candidates WHERE task_id=? AND sha=?", (TASK, original)).fetchone()[0] == 1
+    assert GitWorkspace(rig.project).run("merge-base", "--is-ancestor", tip, _tip(rig), check=False).returncode == 0

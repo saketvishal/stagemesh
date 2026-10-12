@@ -1,35 +1,68 @@
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from .audit import record_audit
 from .baseline import resolve_integration_ref
+from .block_kinds import block_kind_for, record_block, runtime_fingerprint
 from .contract_binding import contract_for_candidate
+from .contracts import _matches
 from .diagnosis import (
+    CONTRACT_SCOPE,
     DIAGNOSIS_EVENT,
     DIAGNOSIS_STOP_EVENT,
     PROVIDER_NO_PROGRESS,
     STALE_BASELINE,
+    VALIDATION_GATE,
     Diagnosis,
     DiagnosisPolicy,
     diagnose,
 )
 from .domain import EvidenceKind, EvidenceStatus, ExecutionStatus, Stage, TaskStatus
 from .execution import Executor, FakeExecutor
+from .git import GitWorkspace
 from .integration import Integrator
+from .integration_recovery import (
+    DEFAULT_MAX_RECOVERIES,
+    base_relation,
+    block_with_decision,
+    build_context,
+    classify_integration_failure,
+    record_decision,
+    record_recovery,
+    recoveries,
+)
 from .lifecycle import evidence_allows_advance
+from .outbound_lifecycle import outcomes, sync_outbound_outcomes
 from .persistence import Store
 from .process_identity import classify_process, process_identity
 from .provider_pool import pool_exhaustion_evidence
-from .outbound_lifecycle import outcomes, sync_outbound_outcomes
-from .recovery import RecoveryRefusal, rebaseline_task
-from .remediation import RemediationPolicy
+from .recovery import RecoveryRefusal, advance_baseline, rebaseline_task
+from .recovery_decision import (
+    ENVIRONMENT_BLOCKED,
+    JUDGMENT_REQUIRED,
+    REMEDIATION_EXHAUSTED,
+    DecisionAdvisor,
+    RecoveryAction,
+    RecoveryAttempt,
+    RecoveryContext,
+    RecoveryDecision,
+    decide,
+)
+from .remediation import RemediationPolicy, finding_identity
+from .remediation_recovery import (
+    MAX_EXHAUSTION_ROUNDS,
+    ROUND_EVENT,
+    SWITCH_EVENT,
+    judgment_reason,
+    producers_of_failed_candidates,
+    rounds,
+    stalled_since_last_round,
+)
 from .review import Reviewer, independent_review_verified
 from .scheduling import Scheduler
-from .serialized_integration import REBASE_CONFLICT, REBASE_UNAVAILABLE, STALE_BASE
 from .validation import Validator
 from .workspace_guard import (
     EXTERNAL_WORKSPACE_MUTATION,
@@ -37,8 +70,6 @@ from .workspace_guard import (
     verify_candidate_workspace,
 )
 from .workspaces import NO_IMPLEMENTATION_CHANGE
-
-_REF_STATE_CODES = frozenset({REBASE_CONFLICT, REBASE_UNAVAILABLE, STALE_BASE})
 
 
 def _is_workspace_mutation_reason(reason: str | None) -> bool:
@@ -71,7 +102,11 @@ class Coordinator:
         guard: Any | None = None,
         outbound_sync: Any | None = None,
         outbound_sources: frozenset[str] = frozenset(),
+        max_integration_recoveries: int = DEFAULT_MAX_RECOVERIES,
+        recovery_advisor: DecisionAdvisor | None = None,
     ):
+        self.max_integration_recoveries = max_integration_recoveries
+        self.recovery_advisor = recovery_advisor  # only consulted for contexts the deterministic rules leave ambiguous
         self.guard = guard  # optional autonomy supervisor: allow(), integration_verified(), recover_unknown(), execution_finished(), candidate_committed()
         self.worker_id = worker_id
         self.diagnosis_policy = diagnosis_policy or DiagnosisPolicy()
@@ -319,7 +354,9 @@ class Coordinator:
                 moved = self.store.get_task(task_id)
                 if moved is not None and Stage(moved["stage"]) is not Stage.INTEGRATE:
                     return 1  # the integrator rebased the candidate and sent it back to VALIDATE: earlier failures belong to the old SHA
-            if self.store.has_bound_evidence(task_id, sha, EvidenceKind.INTEGRATION, bound.digest, EvidenceStatus.FAILED):
+            if not self.store.has_bound_evidence(task_id, sha, EvidenceKind.INTEGRATION, bound.digest) and self.store.has_bound_evidence(
+                task_id, sha, EvidenceKind.INTEGRATION, bound.digest, EvidenceStatus.FAILED
+            ):
                 return self._remediate_or_block(task_id, sha, Stage.INTEGRATE)
             return self._advance_with_evidence(task_id, stage, sha, EvidenceKind.INTEGRATION, bound.digest)
         return 0
@@ -460,15 +497,14 @@ class Coordinator:
             return False
         if diagnosis is None or diagnosis.category != PROVIDER_NO_PROGRESS or not diagnosis.repeated:
             return False
-        self.store.block_task(task_id)
+        if not stalled_since_last_round(self.store, task_id):
+            return False  # a recovery round already granted the next attempt and it has not run yet
         record_audit(self.store, DIAGNOSIS_EVENT, diagnosis.audit_payload())
         record_audit(self.store, DIAGNOSIS_STOP_EVENT, {**diagnosis.audit_payload(), "remediation_attempts": 0})
-        record_audit(
-            self.store,
-            "task.remediation_exhausted",
-            {"task_id": task_id, "candidate_sha": diagnosis.candidate_sha, "stage": "IMPLEMENT", "reason": "repeated_failure_diagnosed"},
-        )
-        return True
+        sha = diagnosis.candidate_sha or ""
+        findings = self.store.open_findings_for_candidate(task_id, sha) if sha else []
+        self._on_remediation_exhausted(task_id, sha, Stage.IMPLEMENT, findings, diagnosis, "repeated_failure_diagnosed", queue=False)
+        return self.store.get_task(task_id)["status"] == TaskStatus.BLOCKED
 
     def _review_satisfied(self, task_id: str, sha: str, contract_hash: str) -> bool:
         for payload in self.store.bound_evidence_payloads(task_id, sha, EvidenceKind.REVIEW, contract_hash):
@@ -510,20 +546,87 @@ class Coordinator:
         )
         return 1
 
-    def _integration_failure_is_ref_state(self, task_id: str, sha: str) -> bool:
-        """True when the latest failed INTEGRATION evidence for the candidate is a typed rebase conflict or stale base."""
+    def _recover_integration(self, task_id: str, sha: str) -> int | None:
+        """Repair a routine integration failure without the operator; None when the failure is some other kind (ordinary remediation).
+
+        Every step is chosen by `recovery_decision.decide`: retry the same reviewed candidate, refresh it onto the current ref (a new SHA
+        that is validated and independently reviewed again), redo the task on a clean worktree, or block with a typed kind.
+        """
+        failure = classify_integration_failure(self.store, task_id, sha)
+        if failure is None:
+            return None
+        attempted = recoveries(self.store, task_id)
+        bound = contract_for_candidate(self.store, task_id, sha, self.project)
+        can_refresh = failure.category != "merge_conflict_with_current_target" and hasattr(self.integrator, "refresh")
+        for _ in range(3):  # a refresh that does not apply is followed by exactly one more decision in the same tick
+            ctx = build_context(
+                failure,
+                sha,
+                attempted,
+                self.max_integration_recoveries,
+                relation=self._base_relation(sha),
+                validation_state=self._evidence_state(task_id, sha, EvidenceKind.VALIDATION),
+                review_state=self._evidence_state(task_id, sha, EvidenceKind.REVIEW),
+                in_scope=lambda path: bool(_matches(path, bound.contract.allowed_files)),
+                can_refresh_mechanically=can_refresh,
+            )
+            decision = decide(ctx, self.recovery_advisor)
+            record_decision(self.store, task_id, ctx, decision)
+            if decision.blocks:
+                block_with_decision(self.store, task_id, sha, failure, attempted, decision, runtime_fingerprint(self.project))
+                return 1
+            record = record_recovery(self.store, task_id, sha, failure, attempted, decision.action)
+            if decision.action in {RecoveryAction.REFRESH_REVALIDATE, RecoveryAction.REFRESH_REVALIDATE_REREVIEW}:
+                if self.integrator.refresh(self.store, task_id, sha, self.project):  # type: ignore[attr-defined]
+                    return 1  # a new candidate SHA is back at VALIDATE; earlier evidence belongs to the old SHA
+                record["outcome"] = "did_not_apply"
+                attempted, can_refresh = [*attempted, record], False
+                continue
+            if decision.action is RecoveryAction.REPAIR_WORKTREE:
+                blocked = self._redo_on_current_base(task_id, sha, failure)
+                if blocked is not None:
+                    refused = RecoveryDecision(RecoveryAction.BLOCK_EXTERNAL, "rules", blocked)
+                    block_with_decision(self.store, task_id, sha, failure, [*attempted, record], refused, runtime_fingerprint(self.project))
+                return 1
+            return 1  # RETRY_INTEGRATION (anything else an advisor could not legally say here): the next tick integrates the same candidate
+        return 1
+
+    def _base_relation(self, sha: str) -> str:
+        ref = getattr(self.integrator, "integration_ref", None)
+        git = GitWorkspace(self.project)
+        tip = None
+        if ref:
+            result = git.run("rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}", check=False)
+            tip = result.stdout.strip() if result.returncode == 0 and result.stdout.strip() else None
+        return base_relation(lambda older, newer: git.run("merge-base", "--is-ancestor", older, newer, check=False).returncode == 0, tip, sha)
+
+    def _evidence_state(self, task_id: str, sha: str, kind: EvidenceKind) -> str | None:
         row = self.store.conn.execute(
-            "SELECT payload FROM evidence WHERE task_id=? AND candidate_sha=? AND kind=? AND status=? "
-            "ORDER BY created_at DESC, rowid DESC LIMIT 1",
-            (task_id, sha, EvidenceKind.INTEGRATION, EvidenceStatus.FAILED),
+            "SELECT status FROM evidence WHERE task_id=? AND candidate_sha=? AND kind=? ORDER BY created_at DESC, rowid DESC LIMIT 1", (task_id, sha, kind)
         ).fetchone()
-        if row is None:
-            return False
+        return None if row is None else str(row["status"])
+
+    def _redo_on_current_base(self, task_id: str, sha: str, failure) -> str | None:  # type: ignore[no-untyped-def]
+        """Redo the task on a clean worktree at the current integration ref; the old candidate, evidence and worktree stay as history.
+
+        None on success, otherwise why the redo was refused.
+        """
+        ref = self.integrator.integration_ref or resolve_integration_ref(self.project)
+        if not ref:
+            return "no integration ref is configured to refresh against"
+        message = (
+            f"{ref} advanced after review and candidate {sha[:10]} no longer integrates ({failure.category}"
+            + (f"; conflicting files: {', '.join(failure.files)}" if failure.files else "")
+            + "). Redo the task on the current base and keep what already landed there."
+        )
+        self.store.upsert_finding(finding_identity(sha, message, None), task_id, sha, "error", message)
+        self.store.advance_task(task_id, Stage.IMPLEMENT)  # a baseline cannot be moved while the task is at INTEGRATE
         try:
-            findings = json.loads(row["payload"]).get("findings", [])
-        except (TypeError, ValueError):
-            return False
-        return any(isinstance(f, dict) and f.get("code") in _REF_STATE_CODES for f in findings)
+            advance_baseline(self.store, self.project, task_id, ref, reason=f"integration recovery: {failure.category}", yes=True)
+        except RecoveryRefusal as exc:
+            self.store.advance_task(task_id, Stage.INTEGRATE)
+            return f"restarting on the current {ref} was refused ({exc.code}: {str(exc)[:200]})"
+        return None
 
     def _auto_rebaseline(self, task_id: str, diagnosis: Diagnosis) -> bool:
         if diagnosis.category != STALE_BASELINE:
@@ -560,49 +663,33 @@ class Coordinator:
                 f"{failed_stage} failed without structured findings",
             )
             findings = self.store.open_findings_for_candidate(task_id, sha)
-        if failed_stage is Stage.INTEGRATE and self._integration_failure_is_ref_state(task_id, sha):
-            # The code is fine; the integration ref moved and the candidate cannot be rebased onto it. A provider re-run
-            # would only reproduce the same tree, so stop with the typed finding for the operator.
-            self.store.block_task(task_id)
-            record_audit(
-                self.store,
-                "task.remediation_exhausted",
-                {"task_id": task_id, "candidate_sha": sha, "stage": failed_stage, "reason": "integration_ref_state"},
-            )
-            return 1
+        if failed_stage is Stage.INTEGRATE:
+            recovered = self._recover_integration(task_id, sha)
+            if recovered is not None:
+                return recovered
+        if judgment_reason([str(f["message"]) for f in findings]) is not None:
+            # A finding that says a decision is needed is not repaired by more attempts: ask the question now, not after the budget.
+            return self._on_remediation_exhausted(task_id, sha, failed_stage, findings, None, "judgment_required")
         diagnosis = self._diagnose(task_id, sha)
         if diagnosis is not None and self._auto_rebaseline(task_id, diagnosis):
             return 1
         if diagnosis is not None and (diagnosis.repeated or diagnosis.stops_remediation) and self.diagnosis_policy.stop_on_repeat:
-            # The same failure again (or one a provider cannot fix, like a stale baseline): another implementation attempt would only
-            # repeat it. Stop with the diagnosis and the operator command that fixes it.
-            self.store.block_task(task_id)
+            # The same failure again (or one a provider cannot fix, like a stale baseline): another identical attempt would only repeat
+            # it. Record the diagnosis, then recover differently instead of stopping.
             record_audit(
                 self.store,
                 DIAGNOSIS_STOP_EVENT,
                 {**diagnosis.audit_payload(), "remediation_attempts": self.store.task_remediation_count(task_id, str(failed_stage))},
             )
-            record_audit(
-                self.store,
-                "task.remediation_exhausted",
-                {
-                    "task_id": task_id,
-                    "candidate_sha": sha,
-                    "stage": failed_stage,
-                    "reason": "stale_baseline_diagnosed" if diagnosis.category == STALE_BASELINE else "repeated_failure_diagnosed",
-                },
-            )
-            return 1
+            reason = "stale_baseline_diagnosed" if diagnosis.category == STALE_BASELINE else "repeated_failure_diagnosed"
+            return self._on_remediation_exhausted(task_id, sha, failed_stage, findings, diagnosis, reason)
         # The budget is scoped to task + failed stage so a new candidate SHA cannot reset it.
         if self.store.task_remediation_count(task_id, str(failed_stage)) >= self.remediation_policy.max_attempts:
-            self.store.block_task(task_id)
-            record_audit(
-                self.store,
-                "task.remediation_exhausted",
-                {"task_id": task_id, "candidate_sha": sha, "stage": failed_stage},
-            )
-            return 1
+            return self._on_remediation_exhausted(task_id, sha, failed_stage, findings, diagnosis, "remediation_budget_exhausted")
         self.store.add_task_remediation(task_id, str(failed_stage), sha)
+        return self._queue_remediation(task_id, sha, failed_stage, findings)
+
+    def _queue_remediation(self, task_id: str, sha: str, failed_stage: Stage, findings: list, **extra: Any) -> int:
         for finding in findings:
             self.remediation_policy.record_attempt(
                 self.store,
@@ -623,6 +710,85 @@ class Coordinator:
                 "candidate_sha": sha,
                 "stage": failed_stage,
                 "finding_count": len(findings),
+                **extra,
             },
         )
         return 1
+
+    def _implementation_health(self, task_id: str) -> dict[str, str]:
+        """provider -> "ok" or the reason it cannot take the next implementation attempt (empty when there is no provider pool)."""
+        pool = getattr(self.executor, "pool", None)
+        if pool is None:
+            return {}
+        try:
+            return {v.provider: ("ok" if v.eligible else v.reason) for v in pool.evaluate(self.store, "IMPLEMENT", task_id)}
+        except Exception:  # noqa: BLE001 - health is an input to a decision, never a reason to fail the lifecycle
+            return {}
+
+    def _on_remediation_exhausted(
+        self, task_id: str, sha: str, failed_stage: Stage, findings: list, diagnosis: Diagnosis | None, cause: str, *, queue: bool = True
+    ) -> int:
+        """The remediation budget (or an identical repeat) ended the ordinary attempts. Recover with a different approach, or block with
+        the kind of block it really is; budget exhaustion alone is never a question for the operator."""
+        done = rounds(self.store, task_id)
+        messages = [str(f["message"]) for f in findings]
+        needs_judgment = judgment_reason(messages)
+        if needs_judgment is None and diagnosis is not None and diagnosis.category == CONTRACT_SCOPE:
+            needs_judgment = "the contract's allowed files and the work disagree: should the contract be widened (stagemesh rebind-contract) to include what the work needed, or must the work stay inside it?"
+        health = self._implementation_health(task_id)
+        if needs_judgment is not None:
+            category = JUDGMENT_REQUIRED
+        elif diagnosis is not None and diagnosis.category in {STALE_BASELINE, VALIDATION_GATE}:
+            category = ENVIRONMENT_BLOCKED  # no provider attempt can fix a baseline that cannot advance or a gate that cannot run
+        else:
+            category = REMEDIATION_EXHAUSTED
+        ctx = RecoveryContext(
+            stage=str(failed_stage),
+            failure_category=category,
+            candidate_sha=sha,
+            validation_state=self._evidence_state(task_id, sha, EvidenceKind.VALIDATION),
+            review_state=self._evidence_state(task_id, sha, EvidenceKind.REVIEW),
+            retry_history=tuple(RecoveryAttempt(str(r.get("action")), REMEDIATION_EXHAUSTED) for r in done),
+            provider_health=health,
+            recovery_attempts=len(done),
+            max_attempts=MAX_EXHAUSTION_ROUNDS,
+        )
+        decision = decide(ctx, self.recovery_advisor)
+        record_decision(self.store, task_id, ctx, decision)
+        tried = [str(r.get("action")) for r in done]
+        if decision.blocks:
+            reason = needs_judgment if decision.action is RecoveryAction.BLOCK_HUMAN_DECISION and needs_judgment else decision.reason
+            record_audit(
+                self.store,
+                "task.remediation_exhausted",
+                {
+                    "task_id": task_id,
+                    "candidate_sha": sha,
+                    "stage": failed_stage,
+                    "reason": cause,
+                    "block_kind": block_kind_for(decision).value,
+                    "why_automatic_recovery_stopped": reason,
+                    "recoveries_attempted": tried,
+                },
+            )
+            record_block(
+                self.store,
+                task_id,
+                block_kind_for(decision),
+                f"{failed_stage} failed on {sha[:10]} ({cause}): {reason}",
+                stage=str(failed_stage),
+                candidate_sha=sha,
+                runtime=runtime_fingerprint(self.project),
+                detail={"recoveries_attempted": tried, "open_findings": len(findings)},
+            )
+            return 1
+        record_audit(
+            self.store,
+            ROUND_EVENT,
+            {"task_id": task_id, "candidate_sha": sha, "stage": failed_stage, "action": decision.action.value, "cause": cause, "round": len(done) + 1},
+        )
+        if decision.action is RecoveryAction.SWITCH_PROVIDER:
+            record_audit(self.store, SWITCH_EVENT, {"task_id": task_id, "avoid": producers_of_failed_candidates(self.store, task_id)})
+        if not queue:
+            return 1  # the task is about to be dispatched again: the switch / clean worktree applies to that attempt
+        return self._queue_remediation(task_id, sha, failed_stage, findings, recovery_round=len(done) + 1, recovery_action=decision.action.value)
