@@ -24,6 +24,34 @@ def write_config(project: Path, data: dict) -> Path:
     return path
 
 
+def caventra_like_legacy_config() -> dict:
+    return {
+        "providers": {
+            "claude": {
+                "command": "claude -p --permission-mode acceptEdits",
+                "priority": 20,
+                "max_concurrency": 1,
+            },
+            "claude-review": {
+                "command": "claude -p --permission-mode plan --allowedTools Read Grep",
+                "capabilities": ["REVIEW"],
+            },
+            "grok": "grok --write",
+            "grok-review": "grok --read-only",
+        },
+        "routing": {
+            "pools": {
+                "IMPLEMENT": ["claude", "grok"],
+                "REVIEW": ["claude-review", "grok-review"],
+            },
+            "stage_routes": {"REVIEW": "claude-review"},
+            "single_agent_provider": "claude-review",
+            "provider_weights": {"claude": 2, "claude-review": 2},
+        },
+        "diagnosis": {"provider": "grok-review"},
+    }
+
+
 def adapter_for(project: Path, providers: dict, name: str) -> RuntimeCommandAdapter:
     write_config(project, {"providers": providers})
     return {a.name: a for a in adapters_from_config(load_config(project))}[name]
@@ -219,3 +247,83 @@ def test_capacity_config_and_doctor_show_which_command_runs_for_each_stage(
     assert cli_module.main(["--project", str(project), "doctor", "--no-network"]) == 0
     out = capsys.readouterr().out
     assert "provider commands (one logical provider" in out and "claude: IMPLEMENT claude [default]; REVIEW claude [override" in out
+
+
+def test_config_migrate_dry_run_reports_caventra_like_legacy_review_providers_without_writing(
+    project: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = write_config(project, caventra_like_legacy_config())
+    before = path.read_text(encoding="utf-8")
+
+    assert cli_module.main(["--project", str(project), "config", "migrate", "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["dry_run"] is True
+    assert payload["changed"] is True
+    assert payload["backup_path"] is None
+    assert "claude-review" not in payload["data"]["providers"]
+    assert payload["data"]["providers"]["claude"]["command"] == "claude -p --permission-mode acceptEdits"
+    assert payload["data"]["providers"]["claude"]["review_command"] == "claude -p --permission-mode plan --allowedTools Read Grep"
+    assert payload["data"]["routing"]["pools"]["REVIEW"] == ["claude", "grok"]
+    assert path.read_text(encoding="utf-8") == before
+    assert not path.with_name(path.name + ".bak").exists()
+
+
+def test_config_migrate_write_backs_up_preserves_implementation_commands_and_is_idempotent(
+    project: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = write_config(project, caventra_like_legacy_config())
+    before = path.read_text(encoding="utf-8")
+
+    assert cli_module.main(["--project", str(project), "config", "migrate", "--write", "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    backup = Path(payload["backup_path"])
+    assert payload["dry_run"] is False and payload["changed"] is True
+    assert backup.exists() and backup.read_text(encoding="utf-8") == before
+    written = json.loads(path.read_text(encoding="utf-8"))
+    assert set(written["providers"]) == {"claude", "grok"}
+    assert written["providers"]["claude"]["command"] == "claude -p --permission-mode acceptEdits"
+    assert written["providers"]["grok"]["command"] == "grok --write"
+    assert written["providers"]["grok"]["review_command"] == "grok --read-only"
+    assert written["routing"]["stage_routes"]["REVIEW"] == "claude"
+    assert written["routing"]["single_agent_provider"] == "claude"
+    assert written["diagnosis"]["provider"] == "grok"
+
+    config = load_config(project)
+    adapters = {adapter.name: adapter for adapter in adapters_from_config(config)}
+    assert adapters["claude"].name == "claude" and adapters["claude"].command_for("code") == (
+        "claude",
+        "-p",
+        "--permission-mode",
+        "acceptEdits",
+    )
+    assert adapters["claude"].command_for("review") == (
+        "claude",
+        "-p",
+        "--permission-mode",
+        "plan",
+        "--allowedTools",
+        "Read",
+        "Grep",
+    )
+    assert adapters["grok"].name == "grok" and adapters["grok"].command_for("review") == ("grok", "--read-only")
+
+    assert cli_module.main(["--project", str(project), "config", "migrate", "--write", "--json"]) == 0
+    second = json.loads(capsys.readouterr().out)
+    assert second["changed"] is False and second["backup_path"] is None
+    assert not path.with_name(path.name + ".bak.1").exists()
+
+
+def test_doctor_points_legacy_review_provider_config_to_the_migration_command(
+    project: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    write_config(project, caventra_like_legacy_config())
+    Store(project / ".stagemesh" / "stagemesh.sqlite3").migrate()
+    monkeypatch.setattr(readiness, "check_runtime", lambda p: readiness.RuntimeFreshness())
+
+    assert cli_module.main(["--project", str(project), "doctor", "--no-network"]) == 0
+
+    out = capsys.readouterr().out
+    assert "legacy provider review config detected" in out
+    assert "stagemesh config migrate --write" in out

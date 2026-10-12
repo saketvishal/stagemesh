@@ -14,6 +14,7 @@ from typing import Any
 
 from .baseline import resolve_integration_ref
 from .config import StageMeshConfig
+from .config_migration import legacy_review_config_hint
 from .persistence import Store
 from .provider_acceptance import LIVE_PASSING, live_acceptance_status
 from .provider_cooldown import active_cooldowns, cooldown_parked
@@ -91,6 +92,9 @@ def build_readiness(
     data["runtime"] = _runtime_block(project, freshness, version_warning)
     if data["runtime"]["stale"]:
         attention.append("installed runtime is stale")
+    migration_hint = legacy_review_config_hint(project)
+    if migration_hint:
+        attention.append(migration_hint)
 
     if list_prs is None:
         data["wave_prs"] = {"available": False, "reason": "skipped (--no-network)", "prs": []}
