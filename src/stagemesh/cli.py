@@ -102,6 +102,7 @@ from .retry import RetryRegistry, RetryValidationError
 from .review import Reviewer
 from .routing import RoutingMode
 from .run_ready import RunSummary, format_excerpt, format_step_update, format_stop, run_ready
+from .runtime_repair import detect_runtime_contamination, plan_runtime_repair, repair_runtime
 from .security import SecurityBoundaryError, WorkspaceBoundary
 from .serialized_integration import SerializedIntegrator
 from .task_sources import (
@@ -210,11 +211,12 @@ def command_doctor(args: argparse.Namespace) -> int:
     store = Store(db_path(project))
     store.migrate()
     backend = probe_backend(config.database_url, db_path(project))
+    runtime_contamination = detect_runtime_contamination(project)
     data = {
         "version": __version__,
         "executable_path": str(Path(sys.argv[0]).resolve()),
         "python_interpreter": sys.executable,
-        "imported_package_path": str(Path(__file__).resolve().parent),
+        "imported_package_path": str(runtime_contamination.imported_package_path),
         "project": str(project),
         "worktree_root": str(config.runtime.worktree_root) if config.runtime else None,
         "legacy_worktree_roots": [str(path) for path in legacy_worktree_roots(project) if path.exists()],
@@ -229,6 +231,7 @@ def command_doctor(args: argparse.Namespace) -> int:
         "git_identity": identity_report(project),
         "provider_cooldowns": _json_safe_cooldowns(active_cooldowns(store, config.provider_failure_cooldown_seconds)),
     }
+    data["runtime_contamination"] = runtime_contamination.to_dict()
     stale = stale_runtime_warning(project)
     if stale:
         data["stale_runtime_warning"] = stale
@@ -250,7 +253,13 @@ def command_doctor(args: argparse.Namespace) -> int:
     print(f"version: {__version__}")
     print(f"executable path: {Path(sys.argv[0]).resolve()}")
     print(f"python interpreter: {sys.executable}")
-    print(f"imported package path: {Path(__file__).resolve().parent}")
+    print(f"imported package path: {runtime_contamination.imported_package_path}")
+    print(f"project runtime venv: {runtime_contamination.venv}")
+    print(f"imported package outside project runtime: {runtime_contamination.imported_package_outside_project_runtime}")
+    if runtime_contamination.pythonpath_contaminated:
+        print("PYTHONPATH contamination: true")
+    if runtime_contamination.next:
+        print(f"next: {runtime_contamination.next}")
     print(f"project: {project}")
     if config.runtime:
         print(f"worktree root: {config.runtime.worktree_root}")
@@ -280,6 +289,45 @@ def command_doctor(args: argparse.Namespace) -> int:
         print(line)
     store.close()
     return _doctor_exit(args, readiness)
+
+
+def command_runtime_repair(args: argparse.Namespace) -> int:
+    project = Path(args.project).resolve()
+    source = Path(args.source).resolve() if args.source else None
+    result = repair_runtime(project, source=source) if args.write else plan_runtime_repair(project, source=source)
+    if args.json:
+        print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
+        return 0 if not result.limitations else 2
+    print(f"runtime repair: {'write' if args.write else 'dry-run'}")
+    print(f"project: {result.project}")
+    print(f"venv: {result.venv}")
+    print(f"python: {result.python}")
+    print(f"source: {result.source}")
+    print(f"contaminated: {result.contaminated}")
+    if result.removals:
+        print("will remove editable/source metadata:")
+        for path in result.removals:
+            print(f"  - {path}")
+    else:
+        print("will remove editable/source metadata: none")
+    if result.reinstall_command:
+        print("will reinstall:")
+        print("  " + " ".join(result.reinstall_command))
+    else:
+        print("will reinstall: none")
+    if result.backups:
+        print("backups:")
+        for item in result.backups:
+            print(f"  - {item['removed']} -> {item['backup']}")
+    if result.reinstalled:
+        print("reinstalled: true")
+    if result.limitations:
+        print("limitations:")
+        for item in result.limitations:
+            print(f"  - {item}")
+    elif not args.write:
+        print("run `stagemesh runtime repair --write` to apply")
+    return 0 if not result.limitations else 2
 
 
 def command_worktrees(args: argparse.Namespace) -> int:
@@ -3172,6 +3220,13 @@ def build_parser() -> argparse.ArgumentParser:
     status = sub.add_parser("status")
     status.add_argument("--json", action="store_true")
     status.set_defaults(func=command_status)
+    runtime = sub.add_parser("runtime", help="Inspect or repair the project-local StageMesh runtime")
+    runtime_sub = runtime.add_subparsers(dest="runtime_command", required=True)
+    runtime_repair = runtime_sub.add_parser("repair", help="Remove editable/source contamination from the project-local venv")
+    runtime_repair.add_argument("--write", action="store_true", help="Back up editable metadata and reinstall StageMesh into the project venv")
+    runtime_repair.add_argument("--source", help="Source directory to install StageMesh from; default is the running/source checkout")
+    runtime_repair.add_argument("--json", action="store_true")
+    runtime_repair.set_defaults(func=command_runtime_repair)
     worktrees = sub.add_parser("worktrees", help="Inspect or reconcile StageMesh-owned task worktrees")
     worktrees_sub = worktrees.add_subparsers(dest="worktrees_command", required=True)
     worktrees_sweep = worktrees_sub.add_parser("sweep", help="Clean only provably obsolete StageMesh-owned worktrees")
