@@ -599,7 +599,11 @@ class Coordinator:
             if decision.action is RecoveryAction.REPAIR_WORKTREE:
                 blocked = self._redo_on_current_base(task_id, sha, failure)
                 if blocked is not None:
-                    refused = RecoveryDecision(RecoveryAction.BLOCK_EXTERNAL, "rules", blocked)
+                    refused = (
+                        blocked
+                        if isinstance(blocked, RecoveryDecision)
+                        else RecoveryDecision(RecoveryAction.BLOCK_EXTERNAL, "rules", blocked)
+                    )
                     block_with_decision(self.store, task_id, sha, failure, [*attempted, record], refused, runtime_fingerprint(self.project))
                 return 1
             return 1  # RETRY_INTEGRATION (anything else an advisor could not legally say here): the next tick integrates the same candidate
@@ -620,7 +624,7 @@ class Coordinator:
         ).fetchone()
         return None if row is None else str(row["status"])
 
-    def _redo_on_current_base(self, task_id: str, sha: str, failure) -> str | None:  # type: ignore[no-untyped-def]
+    def _redo_on_current_base(self, task_id: str, sha: str, failure) -> str | RecoveryDecision | None:  # type: ignore[no-untyped-def]
         """Redo the task on a clean worktree at the current integration ref; the old candidate, evidence and worktree stay as history.
 
         None on success, otherwise why the redo was refused.
@@ -639,6 +643,19 @@ class Coordinator:
             advance_baseline(self.store, self.project, task_id, ref, reason=f"integration recovery: {failure.category}", yes=True)
         except RecoveryRefusal as exc:
             self.store.advance_task(task_id, Stage.INTEGRATE)
+            if exc.code == "baseline_not_ancestor" and hasattr(self.integrator, "reconstruct_onto_current_tip"):
+                applied, reason, files, code = self.integrator.reconstruct_onto_current_tip(self.store, task_id, sha, self.project)  # type: ignore[attr-defined]
+                if applied:
+                    record_task_owner_state(self.store, task_id, "integration_recovery_reconstructed_on_current_tip", self.project)
+                    return None
+                if files:
+                    failure.files = files
+                if code in {"ambiguous_delta", "out_of_scope_delta"}:
+                    return RecoveryDecision(RecoveryAction.ABORT_UNSAFE, "rules", f"reconstructing the task-owned delta on the current {ref} was unsafe ({code}: {reason[:200]})")
+                if code == "patch_conflict" or (code == "patch_failed" and failure.files):
+                    conflict_files = files or failure.files
+                    return RecoveryDecision(RecoveryAction.BLOCK_HUMAN_DECISION, "rules", f"reconstructing the task-owned delta on the current {ref} still conflicts in {', '.join(conflict_files) or 'the patch'}; automatic recovery cannot decide which side wins")
+                return f"reconstructing the task-owned delta on the current {ref} was refused ({code}: {reason[:200]})"
             return f"restarting on the current {ref} was refused ({exc.code}: {str(exc)[:200]})"
         record_task_owner_state(self.store, task_id, "integration_recovery_redo_on_current_base", self.project)
         return None

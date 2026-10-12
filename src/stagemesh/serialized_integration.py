@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from collections.abc import Callable
 from pathlib import Path
 
 from .audit import record_audit
 from .concurrency import IntegrationLock
 from .contract_binding import contract_for_candidate
-from .contracts import ContractError
+from .contracts import ContractError, _matches, changed_files
 from .domain import EvidenceStatus, ExecutionKind, Stage
 from .git import GitError, GitWorkspace
 from .integration import Integrator, _attribution_findings
@@ -19,6 +20,7 @@ from .workspace_guard import owned_workspace
 
 REBASED_EVENT = "integration.rebased"
 REATTRIBUTED_EVENT = "integration.reattributed"
+RECONSTRUCTED_EVENT = "integration.reconstructed"
 STALE_BASE = "integration_stale_base"  # the ref advanced and the rebase budget is spent
 REBASE_CONFLICT = "integration_rebase_conflict"  # the ref advanced and the candidate no longer applies cleanly
 REBASE_UNAVAILABLE = "integration_rebase_unavailable"  # git/runtime failed without a content conflict
@@ -73,9 +75,8 @@ class SerializedIntegrator(Integrator):
             self._typed_failure = None
             if self.integration_ref is not None and self._reattribute(store, task_id, candidate_sha, project):
                 return None  # sent back to VALIDATE with the same tree under the owner's identity
-            if self.integration_ref is not None and self._diverged(project, candidate_sha) is not None:
-                if self._rebase(store, task_id, candidate_sha, project):
-                    return None  # sent back to VALIDATE with a rebased candidate
+            if self.integration_ref is not None and self._diverged(project, candidate_sha) is not None and self._rebase(store, task_id, candidate_sha, project):
+                return None  # sent back to VALIDATE with a rebased candidate
             try:
                 return super().integrate(store, task_id, candidate_sha, project)
             finally:
@@ -159,6 +160,105 @@ class SerializedIntegrator(Integrator):
             finally:
                 self._typed_failure = None
 
+    def reconstruct_onto_current_tip(self, store: Store, task_id: str, candidate_sha: str, project: Path) -> tuple[bool, str, list[str], str]:
+        """Rebuild only the task-owned delta on the current integration tip.
+
+        This is the bounded fallback for a task whose recorded baseline is not an ancestor of the integration tip. The baseline is
+        intentionally not moved sideways: the original candidate and evidence remain intact, while a patch of `baseline..candidate`
+        is applied to the current tip in the task worktree. The new SHA must then pass validation and exact-SHA review normally.
+        """
+        with self.lock.hold(task_id):
+            tip = self._resolve(project)
+            if tip is None:
+                return False, "integration target is missing", [], "target_missing"
+            try:
+                bound = contract_for_candidate(store, task_id, candidate_sha, project)
+                if not bound.baseline_sha:
+                    return False, "candidate has no bound baseline, so the task-owned delta is ambiguous", [], "ambiguous_delta"
+                root = GitWorkspace(project)
+                baseline = bound.baseline_sha
+                if root.run("merge-base", "--is-ancestor", baseline, candidate_sha, check=False).returncode != 0:
+                    return False, "candidate does not descend from its bound baseline, so the task-owned delta is ambiguous", [], "ambiguous_delta"
+                commits = [line for line in root.run("rev-list", "--reverse", f"{baseline}..{candidate_sha}").stdout.splitlines() if line]
+                if not commits:
+                    return False, "candidate has no task-owned commits to reconstruct", [], "ambiguous_delta"
+                task_candidates = {
+                    str(row["sha"]) for row in store.conn.execute("SELECT sha FROM candidates WHERE task_id=?", (task_id,))
+                }
+                foreign_commits = [commit for commit in commits if commit not in task_candidates]
+                if foreign_commits:
+                    return (
+                        False,
+                        "candidate history after the bound baseline contains commit(s) that are not recorded as candidates for this task",
+                        foreign_commits[:10],
+                        "ambiguous_delta",
+                    )
+                changed = changed_files(project, candidate_sha, baseline)
+                if not changed:
+                    return False, "candidate has no task-owned changed files to reconstruct", [], "ambiguous_delta"
+                out_of_scope = [path for path in changed if not _matches(path, bound.contract.allowed_files)]
+                if out_of_scope:
+                    return False, "task-owned delta reaches files outside the contract", out_of_scope[:10], "out_of_scope_delta"
+                patch = root.run("diff", "--binary", baseline, candidate_sha, encoding="utf-8").stdout
+                with owned_workspace(store, project, task_id, ExecutionKind.INTEGRATION) as lease:
+                    worktree = lease.path
+                    git = GitWorkspace(worktree)
+                    try:
+                        git.run("reset", "--hard", "HEAD", check=False)
+                        git.run("clean", "-fdq", check=False)
+                        git.run("checkout", "--detach", tip)
+                        result = subprocess.run(
+                            ["git", "-c", "core.longpaths=true", "apply", "--index", "--3way"],
+                            cwd=worktree,
+                            input=patch,
+                            text=True,
+                            encoding="utf-8",
+                            errors="replace",
+                            capture_output=True,
+                            check=False,
+                        )
+                        if result.returncode != 0:
+                            conflicts = [
+                                line for line in git.run("diff", "--name-only", "--diff-filter=U", check=False).stdout.splitlines() if line
+                            ]
+                            git.run("reset", "--hard", tip, check=False)
+                            lease.seal(tip)
+                            detail = (result.stderr or result.stdout).strip()[-1000:] or "patch did not apply"
+                            return False, detail, conflicts[:10], "patch_conflict" if conflicts else "patch_failed"
+                        reconstructed = git.commit_all(f"reconstruct {task_id} on current integration tip")
+                    except (GitError, OSError) as exc:
+                        git.run("reset", "--hard", tip, check=False)
+                        lease.seal(tip)
+                        return False, str(exc)[:300], [], "git_error"
+                    if reconstructed == tip:
+                        git.run("reset", "--hard", tip, check=False)
+                        lease.seal(tip)
+                        return False, "reconstruction produced no change on the current integration tip", changed[:10], "empty_reconstruction"
+                    _preserve_original(project, task_id, candidate_sha)
+                    previous = store.latest_candidate(task_id)
+                    producer = str(previous["produced_by"]) if previous is not None else "reconstruction"
+                    store.add_candidate(task_id, reconstructed, producer, durable_handoff=True)
+                    lease.seal(reconstructed)
+            except (GitError, ContractError, OSError) as exc:
+                return False, str(exc)[:300], [], "git_error"
+            store.bind_contract(task_id, reconstructed, tip, bound.version, bound.digest, bound.canonical_json)
+            store.advance_task(task_id, Stage.VALIDATE)
+            record_audit(
+                store,
+                RECONSTRUCTED_EVENT,
+                {
+                    "task_id": task_id,
+                    "from_candidate": candidate_sha,
+                    "candidate_sha": reconstructed,
+                    "old_baseline": bound.baseline_sha,
+                    "onto": tip,
+                    "ref": str(self.integration_ref),
+                    "changed_files": changed,
+                },
+            )
+            self._emit(task_id, "integration_reconstructed", {"from_candidate": candidate_sha, "candidate_sha": reconstructed, "onto": tip})
+            return True, "", [], "applied"
+
     def _rebase(self, store: Store, task_id: str, candidate_sha: str, project: Path, *, budgeted: bool = True) -> bool:
         tip = self._resolve(project)
         if tip is None:
@@ -167,8 +267,10 @@ class SerializedIntegrator(Integrator):
         if budgeted and attempts >= self.max_rebases:
             self._typed_failure = (
                 STALE_BASE,
-                f"{self.integration_ref} advanced to {tip} again after {attempts} automatic rebase(s) of task {task_id}; "
-                "ref left unchanged. Retry the task explicitly once the ref settles.",
+                (
+                    f"{self.integration_ref} advanced to {tip} again after {attempts} automatic rebase(s) of task {task_id}; "
+                    "ref left unchanged. Retry the task explicitly once the ref settles."
+                ),
             )
             self._emit(task_id, STALE_BASE, {"ref_tip": tip, "rebases": attempts})
             return False
