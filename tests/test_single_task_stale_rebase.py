@@ -9,9 +9,16 @@ from test_parallel import Rig, ScriptedExecutor
 import stagemesh.cli as cli_module
 from stagemesh.config import load_config
 from stagemesh.coordinator import Coordinator
-from stagemesh.domain import EvidenceKind, EvidenceStatus, ExecutionKind, Stage, TaskStatus
+from stagemesh.domain import (
+    EvidenceKind,
+    EvidenceStatus,
+    ExecutionKind,
+    Stage,
+    TaskStatus,
+)
 from stagemesh.git import GitWorkspace
 from stagemesh.serialized_integration import SerializedIntegrator
+from stagemesh.workspace_guard import record_supervised_move
 
 TASK = "A"
 
@@ -89,10 +96,22 @@ def test_clean_stale_candidate_is_rebased_then_revalidated_and_integrated(tmp_pa
     assert _tip(rig) == rebased
 
 
-def test_true_rebase_conflict_never_rewrites_the_ref_and_is_redone_on_the_current_base_once(tmp_path: Path) -> None:
+def test_true_rebase_conflict_refreshes_baseline_then_reimplements_to_done(tmp_path: Path) -> None:
     files = {TASK: ("shared.txt", "from A\n")}
     rig = Rig(tmp_path, [TASK], files=files)
-    executor = ScriptedExecutor(files)
+
+    class Reconciler(ScriptedExecutor):
+        def run(self, store, task_id, claim_id, project):
+            if len([item for item in self.log if item[0] == "start" and item[1] == task_id]) == 0:
+                return super().run(store, task_id, claim_id, project)
+            self.files[task_id] = ("shared.txt", "from elsewhere\nfrom A\n")
+            baseline = store.task_baseline(task_id)
+            result = super().run(store, task_id, claim_id, project)
+            assert baseline is not None and result.candidate_sha is not None
+            assert record_supervised_move(project, task_id, baseline, result.candidate_sha, result.candidate_sha, require_same_dirty=False)
+            return result
+
+    executor = Reconciler(files)
     coord = _single_task_coordinator(rig, executor)
     _advance_until(rig, coord, Stage.INTEGRATE)
     original = rig.store.latest_candidate(TASK)["sha"]
@@ -105,10 +124,18 @@ def test_true_rebase_conflict_never_rewrites_the_ref_and_is_redone_on_the_curren
         codes |= {f["code"] for f in json.loads(row["payload"]).get("findings", [])}
     assert "integration_rebase_conflict" in codes  # the failed attempt stays in the ledger
 
-    for _ in range(40):
+    for _ in range(60):
         coord.tick()
+        if rig.store.get_task(TASK)["stage"] == Stage.DONE:
+            break
 
-    # recovery (see test_integration_recovery.py): one task-scoped redo on the current base, history intact, the ref only ever fast-forwarded
+    assert rig.store.get_task(TASK)["stage"] == Stage.DONE
+    assert GitWorkspace(rig.project).run("show", f"{rig.ref}:shared.txt").stdout == "from elsewhere\nfrom A\n"
     assert _executions(rig, ExecutionKind.IMPLEMENTATION) == 2
+    assert rig.store.latest_candidate(TASK)["sha"] != original
     assert rig.store.conn.execute("SELECT COUNT(*) FROM candidates WHERE task_id=? AND sha=?", (TASK, original)).fetchone()[0] == 1
     assert GitWorkspace(rig.project).run("merge-base", "--is-ancestor", tip, _tip(rig), check=False).returncode == 0
+    events = [json.loads(row["payload"]) for row in rig.store.audit_events() if row["event_type"] == "task.baseline_advanced"]
+    assert any(event.get("reason") == "automatic integration conflict recovery" for event in events)
+    owner_state = [json.loads(row["payload"]) for row in rig.store.audit_events() if row["event_type"] == "task.owner_state"][-1]
+    assert owner_state["current_problem"] is None and owner_state["unresolved_findings"] == []

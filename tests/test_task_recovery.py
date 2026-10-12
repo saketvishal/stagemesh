@@ -618,7 +618,7 @@ def test_remediation_prompt_includes_exact_review_findings_and_candidate_sha(tmp
     sha = "a" * 40
     review_failed(store, sha)
     store.add_task_remediation(TASK, "REVIEW", sha)
-    prompt = _remediation_prompt(remediation_context(store, TASK))
+    prompt = _remediation_prompt(remediation_context(store, TASK, project))
     assert sha in prompt
     assert LONG_FINDING in prompt  # verbatim, not truncated to a few hundred characters
     assert "[warning] Missing test for the timeout path" in prompt and "[error] The retry loop" in prompt
@@ -655,10 +655,41 @@ def test_a_real_remediation_attempt_prompt_carries_the_findings(tmp_path: Path) 
         coordinator.tick()
         if store.latest_task_remediation(TASK) is not None:
             break
-    context = remediation_context(store, TASK)
+    context = remediation_context(store, TASK, project)
     sha = str(store.latest_candidate(TASK)["sha"])
     prompt = _remediation_prompt(context)
     assert sha in prompt and "src/app.py" in prompt
+    assert '"integration_ref":' in prompt and '"integration_sha":' in prompt
+
+
+def test_cleared_remediation_is_not_used_as_the_next_worker_context(tmp_path: Path) -> None:
+    project, store = _setup(tmp_path, DOCS_CONTRACT)
+    sha = "c" * 40
+    store.add_candidate(TASK, sha, "impl", durable_handoff=True)
+    store.upsert_finding(finding_identity(sha, "broken"), TASK, sha, "error", "broken")
+    store.add_task_remediation(TASK, "VALIDATE", sha)
+
+    assert remediation_context(store, TASK, project) is not None
+
+    assert store.clear_task_remediations(TASK, "VALIDATE") == 1
+    assert remediation_context(store, TASK, project) is None
+
+
+def test_owner_state_next_action_waits_when_human_judgment_is_required(tmp_path: Path) -> None:
+    from stagemesh.task_completion import task_owner_state
+
+    project, store = _setup(tmp_path, DOCS_CONTRACT)
+    sha = "d" * 40
+    message = "Need operator decision before changing the public contract"
+    store.add_candidate(TASK, sha, "impl", durable_handoff=True)
+    store.advance_task(TASK, Stage.VALIDATE)
+    store.add_evidence(TASK, sha, EvidenceKind.VALIDATION, EvidenceStatus.FAILED, {"findings": [{"message": message}]})
+    store.upsert_finding(finding_identity(sha, message), TASK, sha, "error", message)
+
+    state = task_owner_state(store, TASK, project)
+
+    assert state["human_decision_required"] is True
+    assert state["next_action"] == "await_human_decision"
 
 
 # --- 6. task-doctor --------------------------------------------------------------------------------------------------------------------

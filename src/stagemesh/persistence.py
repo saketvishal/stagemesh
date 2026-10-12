@@ -1230,9 +1230,21 @@ class Store:
         ).fetchone()
         return int(row["count"])
 
+    def clear_task_remediations(self, task_id: str, stage: str | None = None) -> int:
+        task_id = _validate_text(task_id, "task id")
+        if stage is None:
+            cursor = self.conn.execute("UPDATE task_remediations SET cleared=1 WHERE task_id=? AND cleared=0", (task_id,))
+        else:
+            cursor = self.conn.execute(
+                "UPDATE task_remediations SET cleared=1 WHERE task_id=? AND stage=? AND cleared=0",
+                (task_id, _validate_text(stage, "remediation stage")),
+            )
+        self.conn.commit()
+        return int(cursor.rowcount)
+
     def latest_task_remediation(self, task_id: str) -> sqlite3.Row | None:
         return self.conn.execute(
-            "SELECT * FROM task_remediations WHERE task_id=? ORDER BY created_at DESC, rowid DESC LIMIT 1",
+            "SELECT * FROM task_remediations WHERE task_id=? AND cleared=0 ORDER BY created_at DESC, rowid DESC LIMIT 1",
             (_validate_text(task_id, "task id"),),
         ).fetchone()
 
