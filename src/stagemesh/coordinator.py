@@ -21,15 +21,16 @@ from .domain import EvidenceKind, EvidenceStatus, ExecutionStatus, Stage, TaskSt
 from .execution import Executor, FakeExecutor
 from .integration import Integrator
 from .lifecycle import evidence_allows_advance
+from .outbound_lifecycle import outcomes, sync_outbound_outcomes
 from .persistence import Store
 from .process_identity import classify_process, process_identity
 from .provider_pool import pool_exhaustion_evidence
-from .outbound_lifecycle import outcomes, sync_outbound_outcomes
 from .recovery import RecoveryRefusal, rebaseline_task
 from .remediation import RemediationPolicy
 from .review import Reviewer, independent_review_verified
 from .scheduling import Scheduler
 from .serialized_integration import REBASE_CONFLICT, REBASE_UNAVAILABLE, STALE_BASE
+from .task_completion import record_task_owner_state
 from .validation import Validator
 from .workspace_guard import (
     EXTERNAL_WORKSPACE_MUTATION,
@@ -167,6 +168,7 @@ class Coordinator:
         task = self.store.get_task(task_id)
         if task is None:
             return 0
+        record_task_owner_state(self.store, task_id, "before_advance")
         stage = Stage(task["stage"])
         if stage is Stage.PLAN:
             self.store.advance_task(task_id, Stage.IMPLEMENT)
@@ -508,6 +510,7 @@ class Coordinator:
             "task.advance",
             {"task_id": task_id, "stage": decision.target, "candidate_sha": sha, "reason": decision.reason},
         )
+        record_task_owner_state(self.store, task_id, "after_advance")
         return 1
 
     def _integration_failure_is_ref_state(self, task_id: str, sha: str) -> bool:
@@ -561,19 +564,28 @@ class Coordinator:
             )
             findings = self.store.open_findings_for_candidate(task_id, sha)
         if failed_stage is Stage.INTEGRATE and self._integration_failure_is_ref_state(task_id, sha):
-            # The code is fine; the integration ref moved and the candidate cannot be rebased onto it. A provider re-run
-            # would only reproduce the same tree, so stop with the typed finding for the operator.
-            self.store.block_task(task_id)
+            # The integration ref moved or the rebase conflicted. That is ordinary task work: preserve the exact typed
+            # finding and send the task back to implementation so the next worker reconciles against current accepted main.
+            self.store.add_task_remediation(task_id, str(failed_stage), sha)
+            for finding in findings:
+                self.remediation_policy.record_attempt(
+                    self.store,
+                    str(finding["id"]),
+                    "QUEUED",
+                    {"candidate_sha": sha, "failed_stage": failed_stage, "next_stage": Stage.IMPLEMENT},
+                )
+            self.store.advance_task(task_id, Stage.IMPLEMENT)
             record_audit(
                 self.store,
-                "task.remediation_exhausted",
-                {"task_id": task_id, "candidate_sha": sha, "stage": failed_stage, "reason": "integration_ref_state"},
+                "task.integration_reconciliation_queued",
+                {"task_id": task_id, "candidate_sha": sha, "stage": failed_stage, "finding_count": len(findings)},
             )
+            record_task_owner_state(self.store, task_id, "integration_reconciliation_queued")
             return 1
         diagnosis = self._diagnose(task_id, sha)
         if diagnosis is not None and self._auto_rebaseline(task_id, diagnosis):
             return 1
-        if diagnosis is not None and (diagnosis.repeated or diagnosis.stops_remediation) and self.diagnosis_policy.stop_on_repeat:
+        if diagnosis is not None and diagnosis.stops_remediation and self.diagnosis_policy.stop_on_repeat:
             # The same failure again (or one a provider cannot fix, like a stale baseline): another implementation attempt would only
             # repeat it. Stop with the diagnosis and the operator command that fixes it.
             self.store.block_task(task_id)
@@ -595,13 +607,23 @@ class Coordinator:
             return 1
         # The budget is scoped to task + failed stage so a new candidate SHA cannot reset it.
         if self.store.task_remediation_count(task_id, str(failed_stage)) >= self.remediation_policy.max_attempts:
-            self.store.block_task(task_id)
+            cleared = self.store.clear_task_remediations(task_id, str(failed_stage))
             record_audit(
                 self.store,
-                "task.remediation_exhausted",
+                "task.parent_budget_reopened",
+                {
+                    "task_id": task_id,
+                    "candidate_sha": sha,
+                    "stage": failed_stage,
+                    "cleared_remediation_attempts": cleared,
+                    "reason": "budget_is_safety_not_completion",
+                },
+            )
+            record_audit(
+                self.store,
+                "task.remediation_budget_recovered",
                 {"task_id": task_id, "candidate_sha": sha, "stage": failed_stage},
             )
-            return 1
         self.store.add_task_remediation(task_id, str(failed_stage), sha)
         for finding in findings:
             self.remediation_policy.record_attempt(
@@ -625,4 +647,5 @@ class Coordinator:
                 "finding_count": len(findings),
             },
         )
+        record_task_owner_state(self.store, task_id, "remediation_queued")
         return 1

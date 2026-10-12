@@ -89,7 +89,7 @@ def test_clean_stale_candidate_is_rebased_then_revalidated_and_integrated(tmp_pa
     assert _tip(rig) == rebased
 
 
-def test_true_rebase_conflict_leaves_ref_unchanged_and_stops_without_reimplementing(tmp_path: Path) -> None:
+def test_true_rebase_conflict_leaves_ref_unchanged_and_queues_reconciliation(tmp_path: Path) -> None:
     files = {TASK: ("shared.txt", "from A\n")}
     rig = Rig(tmp_path, [TASK], files=files)
     executor = ScriptedExecutor(files)
@@ -107,6 +107,11 @@ def test_true_rebase_conflict_leaves_ref_unchanged_and_stops_without_reimplement
     for row in rig.store.conn.execute("SELECT payload FROM evidence WHERE task_id=? AND kind=?", (TASK, EvidenceKind.INTEGRATION)):
         codes |= {f["code"] for f in json.loads(row["payload"]).get("findings", [])}
     assert "integration_rebase_conflict" in codes
-    assert rig.store.latest_candidate(TASK)["sha"] == original  # no fabricated candidate
-    assert _executions(rig, ExecutionKind.IMPLEMENTATION) == 1  # no meaningless implementation retries
+    assert rig.store.latest_candidate(TASK)["sha"] == original  # no fabricated candidate when the worker made no useful change
+    assert _executions(rig, ExecutionKind.IMPLEMENTATION) > 1
+    assert rig.store.task_remediation_count(TASK, "INTEGRATE") >= 1
+    assert rig.store.conn.execute(
+        "SELECT 1 FROM audit_events WHERE event_type='task.integration_reconciliation_queued' AND payload LIKE ?",
+        (f"%{TASK}%",),
+    ).fetchone()
     assert rig.store.get_task(TASK)["status"] != TaskStatus.DONE

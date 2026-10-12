@@ -112,13 +112,35 @@ def test_validation_failure_is_remediated_automatically(tmp_path: Path) -> None:
     r.assert_hands_off()
 
 
-def test_repeated_validation_failure_blocks_without_operator_retry_instruction(tmp_path: Path) -> None:
+def test_repeated_validation_failure_keeps_parent_owned_context_without_operator_retry_instruction(tmp_path: Path) -> None:
     m = _matrix(tmp_path, ["T-1"], {"codex": {"implement": ["bad-1", "bad-2"]}}, implement_pool=("codex",))
 
     r = m.continue_()
 
-    assert r.stop == "BLOCKED" and not m.integrated("T-1"), r.brief
-    assert "stagemesh continue" in r.text
+    assert r.stop == "NO_PROGRESS" and not m.integrated("T-1"), r.brief
+    owner_states = m.audit("task.owner_state")
+    assert owner_states and owner_states[-1]["task_id"] == "T-1"
+    assert any(state.get("current_problem") == "validation_failed" for state in owner_states)
+    r.assert_hands_off()
+
+
+def test_complex_single_task_survives_provider_validation_review_and_budget_recovery(tmp_path: Path) -> None:
+    plan = {
+        "codex": {"implement:T-1": "noop"},
+        "claude": {"implement:T-1": ["bad", "ok", "ok"]},
+        "grok": {"review:T-1": ["fail", "pass"]},
+    }
+    m = _matrix(tmp_path, ["T-1"], plan, implement_pool=("codex", "claude"), review_pool=("grok",))
+
+    r = m.drain(max_runs=3)
+
+    assert r.stop == "REFUSED:no_eligible_task" and m.integrated("T-1"), r.brief
+    assert r.implementers("T-1")[:2] == ["codex", "claude"]
+    assert [mode for _, stage, _, mode in r.calls if stage == "review"] == ["fail", "pass"]
+    owner_states = m.audit("task.owner_state")
+    assert owner_states and owner_states[-1]["stage"] == "DONE"
+    assert any(state.get("current_problem") == "validation_failed" for state in owner_states)
+    assert any(state.get("current_problem") == "review_failed" for state in owner_states)
     r.assert_hands_off()
 
 

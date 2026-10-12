@@ -5,6 +5,7 @@ import time
 from dataclasses import dataclass
 
 from .persistence import Store
+from .task_completion import task_owner_state
 
 
 class RemediationValidationError(ValueError):
@@ -80,6 +81,7 @@ def remediation_context(store: Store, task_id: str) -> dict[str, object] | None:
         "stage": str(latest["stage"]),
         "candidate_sha": str(latest["candidate_sha"]),
         "findings": [{"id": row["id"], "severity": row["severity"], "message": row["message"]} for row in findings],
+        "task_owner_state": task_owner_state(store, task_id),
     }
     diagnosis = _latest_diagnosis(store, task_id, str(latest["candidate_sha"]))
     if diagnosis is not None:
