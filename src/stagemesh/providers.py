@@ -17,7 +17,6 @@ from .capacity import CapacityKind, CapacityRegistry
 from .config import StageMeshConfig
 from .contract_binding import ContractRejected, bind_task_contract
 from .domain import ExecutionKind, ExecutionStatus
-from .git_identity import provider_environment
 from .execution import (
     PROVIDER_TIMEOUT,
     ExecutionResult,
@@ -27,6 +26,7 @@ from .execution import (
     popen_session_kwargs,
     provider_timeout_seconds,
 )
+from .git_identity import provider_environment
 from .persistence import Store
 from .process_identity import popen_identity
 from .redaction import redact_command_secrets
@@ -122,7 +122,7 @@ class RuntimeCommandAdapter:
             return ExecutionResult(ExecutionStatus.FAILED, failure_reason=f"{exc.reason}: {exc}")
         task = store.get_task(task_id)
         task_prompt = _build_task_prompt(
-            task_id, task, run_path, contract=bound.contract, remediation=remediation_context(store, task_id)
+            task_id, task, run_path, contract=bound.contract, remediation=remediation_context(store, task_id, project)
         )
         command, provider_input = _command_and_input(self.command_for("code"), task_prompt)
         lease.check("before_agent")
@@ -624,6 +624,27 @@ def _remediation_prompt(remediation: dict[str, object]) -> str:
         lines.extend(["", f"Diagnosis ({diagnosis.get('category')}): {str(diagnosis.get('summary'))[:500]}"])
         if diagnosis.get("provider_analysis"):
             lines.append(f"Independent analysis: {str(diagnosis['provider_analysis'])[:800]}")
+    owner_state = remediation.get("task_owner_state")
+    if isinstance(owner_state, dict):
+        compact_state = {
+            key: owner_state.get(key)
+            for key in (
+                "objective",
+                "stage",
+                "status",
+                "baseline_sha",
+                "integration_ref",
+                "integration_sha",
+                "candidate_sha",
+                "accepted_work",
+                "current_problem",
+                "next_action",
+                "unresolved_findings",
+                "fixes_attempted",
+                "recovery_history",
+            )
+        }
+        lines.extend(["", "Durable StageMesh parent state for this task:", json.dumps(compact_state, indent=2, sort_keys=True)[:4000]])
     lines.extend(
         [
             "",

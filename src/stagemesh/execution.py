@@ -44,7 +44,7 @@ _QUOTA = re.compile(
     r"rate[_ ]limit|quota exceeded|exceeded your current quota|too many requests|"
     r"\b429\b|insufficient_quota|overloaded_error|rate_limit_error|"
     r"credit balance|out of credits|insufficient credits|resource_exhausted|quota exhausted|usage limit reached|"
-    r"402|payment required|balance exhausted|usage balance",
+    r"\b402\b|payment required|balance exhausted|usage balance",
     re.IGNORECASE,
 )
 _SECRET = re.compile(r"(?i)(bearer\s+)\S+|(\bgh[pousr]_|sk-|xai-)[A-Za-z0-9_\-]+")
@@ -243,7 +243,7 @@ class SubprocessExecutor(Executor):
         except ContractRejected as exc:
             return ExecutionResult(ExecutionStatus.FAILED, failure_reason=f"{exc.reason}: {exc}")
         task_prompt = build_prompt(
-            task_id, task, run_path, contract=bound.contract, remediation=remediation_context(store, task_id)
+            task_id, task, run_path, contract=bound.contract, remediation=remediation_context(store, task_id, project)
         )
 
         lease.check("before_agent")

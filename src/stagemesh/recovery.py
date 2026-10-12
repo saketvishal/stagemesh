@@ -253,6 +253,7 @@ def advance_baseline(
     *,
     reason: str | None = None,
     yes: bool = False,
+    allow_integrating: bool = False,
 ) -> dict[str, Any]:
     """Move a task's baseline forward to `target_ref` (default: the integration ref) so the next run starts fresh from current code.
 
@@ -274,7 +275,7 @@ def advance_baseline(
     from .workspaces import _task_key, prepare_task_workspace, task_workspace
 
     task = _require_repairable(store, task_id)
-    if task["stage"] == Stage.INTEGRATE:
+    if task["stage"] == Stage.INTEGRATE and not allow_integrating:
         raise RecoveryRefusal("integrating", f"task {task_id} is at INTEGRATE; wait for integration to finish before moving its baseline")
     if not yes:
         raise RecoveryRefusal("confirmation_required", f"advancing the baseline of task {task_id} resets its worktree and restarts IMPLEMENT; re-run with --yes")

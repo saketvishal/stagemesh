@@ -12,6 +12,7 @@ from stagemesh.coordinator import Coordinator
 from stagemesh.domain import EvidenceKind, EvidenceStatus, ExecutionKind, Stage, TaskStatus
 from stagemesh.git import GitWorkspace
 from stagemesh.serialized_integration import SerializedIntegrator
+from stagemesh.workspace_guard import record_supervised_move
 
 TASK = "A"
 
@@ -89,24 +90,46 @@ def test_clean_stale_candidate_is_rebased_then_revalidated_and_integrated(tmp_pa
     assert _tip(rig) == rebased
 
 
-def test_true_rebase_conflict_leaves_ref_unchanged_and_stops_without_reimplementing(tmp_path: Path) -> None:
+def test_true_rebase_conflict_refreshes_baseline_then_reimplements_to_done(tmp_path: Path) -> None:
     files = {TASK: ("shared.txt", "from A\n")}
     rig = Rig(tmp_path, [TASK], files=files)
-    executor = ScriptedExecutor(files)
+
+    class Reconciler(ScriptedExecutor):
+        def __init__(self) -> None:
+            super().__init__(dict(files))
+            self.calls = 0
+
+        def run(self, store, task_id, claim_id, project):  # type: ignore[no-untyped-def]
+            self.calls += 1
+            baseline = store.task_baseline(task_id)
+            if self.calls > 1:
+                self.files[task_id] = ("shared.txt", "from elsewhere\nfrom A\n")
+            result = super().run(store, task_id, claim_id, project)
+            if baseline and result.candidate_sha:
+                record_supervised_move(project, task_id, baseline, result.candidate_sha, result.candidate_sha, require_same_dirty=False)
+            return result
+
+    executor = Reconciler()
     coord = _single_task_coordinator(rig, executor)
     _advance_until(rig, coord, Stage.INTEGRATE)
     original = rig.store.latest_candidate(TASK)["sha"]
     tip = _land_on_main(rig, "shared.txt", "from elsewhere\n")
 
-    for _ in range(8):
+    for _ in range(30):
         coord.tick()
+        if rig.store.get_task(TASK)["stage"] == Stage.DONE:
+            break
 
-    assert _tip(rig) == tip
-    assert GitWorkspace(rig.project).run("show", f"{rig.ref}:shared.txt").stdout == "from elsewhere\n"
+    assert rig.store.get_task(TASK)["stage"] == Stage.DONE
+    assert GitWorkspace(rig.project).run("show", f"{rig.ref}:shared.txt").stdout == "from elsewhere\nfrom A\n"
     codes = set()
     for row in rig.store.conn.execute("SELECT payload FROM evidence WHERE task_id=? AND kind=?", (TASK, EvidenceKind.INTEGRATION)):
         codes |= {f["code"] for f in json.loads(row["payload"]).get("findings", [])}
     assert "integration_rebase_conflict" in codes
-    assert rig.store.latest_candidate(TASK)["sha"] == original  # no fabricated candidate
-    assert _executions(rig, ExecutionKind.IMPLEMENTATION) == 1  # no meaningless implementation retries
-    assert rig.store.get_task(TASK)["status"] != TaskStatus.DONE
+    assert rig.store.latest_candidate(TASK)["sha"] != original
+    assert _executions(rig, ExecutionKind.IMPLEMENTATION) == 2
+    assert any(
+        json.loads(row["payload"]).get("reason") == "automatic integration conflict recovery"
+        for row in rig.store.conn.execute("SELECT payload FROM audit_events WHERE event_type='task.baseline_advanced'")
+    )
+    assert _tip(rig) != tip

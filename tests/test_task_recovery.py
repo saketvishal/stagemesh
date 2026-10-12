@@ -655,10 +655,23 @@ def test_a_real_remediation_attempt_prompt_carries_the_findings(tmp_path: Path) 
         coordinator.tick()
         if store.latest_task_remediation(TASK) is not None:
             break
-    context = remediation_context(store, TASK)
+    context = remediation_context(store, TASK, project)
     sha = str(store.latest_candidate(TASK)["sha"])
     prompt = _remediation_prompt(context)
     assert sha in prompt and "src/app.py" in prompt
+    assert '"integration_ref":' in prompt and '"integration_sha":' in prompt
+
+
+def test_cleared_remediation_is_not_used_as_the_next_worker_context(tmp_path: Path) -> None:
+    project, store = _setup(tmp_path, DOCS_CONTRACT)
+    sha = "c" * 40
+    store.add_candidate(TASK, sha, "impl", durable_handoff=True)
+    store.add_task_remediation(TASK, "VALIDATE", sha)
+
+    assert remediation_context(store, TASK, project) is not None
+    store.clear_task_remediations(TASK, "VALIDATE")
+
+    assert remediation_context(store, TASK, project) is None
 
 
 # --- 6. task-doctor --------------------------------------------------------------------------------------------------------------------
