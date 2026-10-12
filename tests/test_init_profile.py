@@ -100,3 +100,38 @@ def test_malformed_profile_is_not_overwritten(tmp_path: Path, capsys, content: s
     assert profile_path(tmp_path).read_text(encoding="utf-8") == content
     assert main(["--project", str(tmp_path), "init", "--json"]) == 0
     assert json.loads(capsys.readouterr().out)["profile"] == "invalid"
+
+
+@pytest.mark.parametrize(
+    "files",
+    [
+        {"package.json": '{"scripts": {"test": "jest"}}'},
+        {"Cargo.toml": "[package]\n"},
+        {"go.mod": "module x\n"},
+        {"pytest.ini": "[pytest]\n"},
+        {},
+    ],
+)
+def test_project_smoke_passes_for_every_detected_gate_kind(tmp_path: Path, capsys, files: dict[str, str]) -> None:
+    for name, text in files.items():
+        (tmp_path / name).write_text(text, encoding="utf-8")
+    _init(tmp_path, capsys)
+    code = main(["--project", str(tmp_path), "project-smoke", "--json"])
+    report = json.loads(capsys.readouterr().out)
+    assert code == 0 and report["ok"], report["checks"]
+    assert all(g["command"][0] not in ("cmd", "sh") for g in load_profile(tmp_path).gates.values())
+
+
+def test_placeholder_gate_is_called_out(tmp_path: Path, capsys) -> None:
+    _, out, _ = _init(tmp_path, capsys)
+    assert "no test gate was detected" in out
+    main(["--project", str(tmp_path), "project-smoke", "--json"])
+    checks = {c["name"]: c for c in json.loads(capsys.readouterr().out)["checks"]}
+    assert checks["validation gates are real"]["status"] == "warn"
+
+
+def test_default_profile_keeps_planner_forbidden_set(tmp_path: Path, capsys) -> None:
+    from stagemesh.auto_plan import FORBIDDEN_FILES
+
+    _init(tmp_path, capsys)
+    assert set(FORBIDDEN_FILES) <= set(load_profile(tmp_path).forbidden_files)

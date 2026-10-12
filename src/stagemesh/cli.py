@@ -12,7 +12,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import __version__
-from .profile_default import ensure_profile
+from .profile import load_profile
+from .profile_default import ensure_profile, is_placeholder
 from .runtime_info import format_runtime, runtime_info
 from .acceptance import AcceptanceValidationError, local_acceptance_report
 from .acceptance_matrix import AcceptanceMatrixValidationError, acceptance_matrix
@@ -173,6 +174,8 @@ def command_init(args: argparse.Namespace) -> int:
     print(f"initialized StageMesh at {runtime_dir(project)}")
     if profile_status == "created":
         print(f"created default profile {profile_detail}")
+        if is_placeholder(load_profile(project)):
+            print("warning: no test gate was detected; the default profile only runs `git diff --check`. Add real gates to .stagemesh/profile.json.")
     return 0
 
 
