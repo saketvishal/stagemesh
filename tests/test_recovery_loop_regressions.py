@@ -117,7 +117,16 @@ def test_rebase_runtime_error_is_not_a_content_conflict(tmp_path, monkeypatch):
     assert "Filename too long" in payload["findings"][0]["message"]
     assert rig.store.latest_candidate("A")["sha"] == candidate
     assert GitWorkspace(rig.project).head() == tip
+    # a runtime error is transient: retried automatically within a bounded budget, then blocked with a typed decision (not at once)
+    assert rig.store.get_task("A")["status"] == TaskStatus.OPEN
+    for _ in range(8):
+        coord.tick()
     assert rig.store.get_task("A")["status"] == TaskStatus.BLOCKED
+    from stagemesh.integration_recovery import integration_blocker
+
+    blocker = integration_blocker(rig.store, "A")
+    assert blocker["classification"] == "transient_integration_failure" and len(blocker["recoveries_attempted"]) == 3
+    assert rig.store.latest_candidate("A")["sha"] == candidate and GitWorkspace(rig.project).head() == tip
     rig.store.close()
 
 

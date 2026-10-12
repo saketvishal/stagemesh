@@ -55,6 +55,20 @@ After merging, pull `main`; the next wave moves `wave/staging` up to it by itsel
 
 Expect `operational readiness: READY` (or only the informational lines above).
 
+## Integration failures repair themselves
+
+A failed integration is classified from its typed finding and repaired without the operator, within a budget of 3 recoveries per task:
+
+| Classification | What StageMesh does |
+| --- | --- |
+| `transient_integration_failure` (git/ref update trouble, no content conflict) | integrates again on the same candidate |
+| `target_advanced_after_review` (the integration ref moved past review and the rebase budget is spent) | redoes the task on the current ref |
+| `merge_conflict_with_current_target` | redoes the task on the current ref; the provider is told which files conflict and to keep what landed |
+
+A redo moves the task baseline forward (old candidates, evidence and the worktree snapshot stay as history). The new candidate has a new SHA, so it is validated, independently reviewed on that exact SHA and integrated normally. Nothing is force-pushed and no gate is skipped. Every recovery is an `integration.recovery` audit event, shown by `stagemesh task-doctor`.
+
+The task blocks only when repair is unsafe or exhausted: the integration ref is missing, the same file conflicts again after the redo (a design/spec conflict), or the budget is spent. `stagemesh doctor` then lists it under "tasks needing a design decision" with the classification, the recoveries attempted, why automatic repair stops and the one decision needed. After deciding, run `stagemesh retry-task --task <id>`.
+
 ## If a run-window was interrupted
 
 `stagemesh doctor` shows `last run-window ...: INTERRUPTED` when a window started and never finished (crash, kill, power loss).

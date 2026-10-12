@@ -25,11 +25,20 @@ from .persistence import Store
 from .process_identity import classify_process, process_identity
 from .provider_pool import pool_exhaustion_evidence
 from .outbound_lifecycle import outcomes, sync_outbound_outcomes
-from .recovery import RecoveryRefusal, rebaseline_task
+from .integration_recovery import (
+    DEFAULT_MAX_RECOVERIES,
+    RESTART_ON_CURRENT_BASE,
+    block_with_decision,
+    classify_integration_failure,
+    escalation_reason,
+    record_recovery,
+    recoveries,
+)
+from .recovery import RecoveryRefusal, advance_baseline, rebaseline_task
+from .remediation import finding_identity
 from .remediation import RemediationPolicy
 from .review import Reviewer, independent_review_verified
 from .scheduling import Scheduler
-from .serialized_integration import REBASE_CONFLICT, REBASE_UNAVAILABLE, STALE_BASE
 from .validation import Validator
 from .workspace_guard import (
     EXTERNAL_WORKSPACE_MUTATION,
@@ -38,7 +47,6 @@ from .workspace_guard import (
 )
 from .workspaces import NO_IMPLEMENTATION_CHANGE
 
-_REF_STATE_CODES = frozenset({REBASE_CONFLICT, REBASE_UNAVAILABLE, STALE_BASE})
 
 
 def _is_workspace_mutation_reason(reason: str | None) -> bool:
@@ -71,7 +79,9 @@ class Coordinator:
         guard: Any | None = None,
         outbound_sync: Any | None = None,
         outbound_sources: frozenset[str] = frozenset(),
+        max_integration_recoveries: int = DEFAULT_MAX_RECOVERIES,
     ):
+        self.max_integration_recoveries = max_integration_recoveries
         self.guard = guard  # optional autonomy supervisor: allow(), integration_verified(), recover_unknown(), execution_finished(), candidate_committed()
         self.worker_id = worker_id
         self.diagnosis_policy = diagnosis_policy or DiagnosisPolicy()
@@ -319,7 +329,9 @@ class Coordinator:
                 moved = self.store.get_task(task_id)
                 if moved is not None and Stage(moved["stage"]) is not Stage.INTEGRATE:
                     return 1  # the integrator rebased the candidate and sent it back to VALIDATE: earlier failures belong to the old SHA
-            if self.store.has_bound_evidence(task_id, sha, EvidenceKind.INTEGRATION, bound.digest, EvidenceStatus.FAILED):
+            if not self.store.has_bound_evidence(task_id, sha, EvidenceKind.INTEGRATION, bound.digest) and self.store.has_bound_evidence(
+                task_id, sha, EvidenceKind.INTEGRATION, bound.digest, EvidenceStatus.FAILED
+            ):
                 return self._remediate_or_block(task_id, sha, Stage.INTEGRATE)
             return self._advance_with_evidence(task_id, stage, sha, EvidenceKind.INTEGRATION, bound.digest)
         return 0
@@ -510,20 +522,39 @@ class Coordinator:
         )
         return 1
 
-    def _integration_failure_is_ref_state(self, task_id: str, sha: str) -> bool:
-        """True when the latest failed INTEGRATION evidence for the candidate is a typed rebase conflict or stale base."""
-        row = self.store.conn.execute(
-            "SELECT payload FROM evidence WHERE task_id=? AND candidate_sha=? AND kind=? AND status=? "
-            "ORDER BY created_at DESC, rowid DESC LIMIT 1",
-            (task_id, sha, EvidenceKind.INTEGRATION, EvidenceStatus.FAILED),
-        ).fetchone()
-        if row is None:
-            return False
+    def _recover_integration(self, task_id: str, sha: str) -> int | None:
+        """Repair a routine integration failure without the operator; None when the failure is some other kind (ordinary remediation)."""
+        failure = classify_integration_failure(self.store, task_id, sha)
+        if failure is None:
+            return None
+        attempted = recoveries(self.store, task_id)
+        why = escalation_reason(failure, attempted, self.max_integration_recoveries)
+        if why is None:
+            record_recovery(self.store, task_id, sha, failure, attempted)
+            if failure.action == RESTART_ON_CURRENT_BASE:
+                why = self._restart_on_current_base(task_id, sha, failure)
+        if why is not None:
+            block_with_decision(self.store, task_id, sha, failure, attempted, why)
+        return 1  # recovered (the next tick retries or reworks) or blocked with a typed decision
+
+    def _restart_on_current_base(self, task_id: str, sha: str, failure) -> str | None:  # type: ignore[no-untyped-def]
+        """Redo the task on the current integration ref; the old candidate, evidence and worktree stay as history. None on success."""
+        ref = self.integrator.integration_ref or resolve_integration_ref(self.project)
+        if not ref:
+            return "no integration ref is configured to refresh against"
+        message = (
+            f"{ref} advanced after review and candidate {sha[:10]} no longer integrates ({failure.category}"
+            + (f"; conflicting files: {', '.join(failure.files)}" if failure.files else "")
+            + "). Redo the task on the current base and keep what already landed there."
+        )
+        self.store.upsert_finding(finding_identity(sha, message, None), task_id, sha, "error", message)
+        self.store.advance_task(task_id, Stage.IMPLEMENT)  # a baseline cannot be moved while the task is at INTEGRATE
         try:
-            findings = json.loads(row["payload"]).get("findings", [])
-        except (TypeError, ValueError):
-            return False
-        return any(isinstance(f, dict) and f.get("code") in _REF_STATE_CODES for f in findings)
+            advance_baseline(self.store, self.project, task_id, ref, reason=f"integration recovery: {failure.category}", yes=True)
+        except RecoveryRefusal as exc:
+            self.store.advance_task(task_id, Stage.INTEGRATE)
+            return f"restarting on the current {ref} was refused ({exc.code}: {str(exc)[:200]})"
+        return None
 
     def _auto_rebaseline(self, task_id: str, diagnosis: Diagnosis) -> bool:
         if diagnosis.category != STALE_BASELINE:
@@ -560,16 +591,10 @@ class Coordinator:
                 f"{failed_stage} failed without structured findings",
             )
             findings = self.store.open_findings_for_candidate(task_id, sha)
-        if failed_stage is Stage.INTEGRATE and self._integration_failure_is_ref_state(task_id, sha):
-            # The code is fine; the integration ref moved and the candidate cannot be rebased onto it. A provider re-run
-            # would only reproduce the same tree, so stop with the typed finding for the operator.
-            self.store.block_task(task_id)
-            record_audit(
-                self.store,
-                "task.remediation_exhausted",
-                {"task_id": task_id, "candidate_sha": sha, "stage": failed_stage, "reason": "integration_ref_state"},
-            )
-            return 1
+        if failed_stage is Stage.INTEGRATE:
+            recovered = self._recover_integration(task_id, sha)
+            if recovered is not None:
+                return recovered
         diagnosis = self._diagnose(task_id, sha)
         if diagnosis is not None and self._auto_rebaseline(task_id, diagnosis):
             return 1

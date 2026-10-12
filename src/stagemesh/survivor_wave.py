@@ -288,7 +288,12 @@ def infrastructure_signature(result: RunResult) -> str | None:
 
 
 def blocked_needs_decision(store: Store, task_id: str) -> str | None:
-    """A task StageMesh blocked after its remediation budget while the latest review still fails: a person has to decide."""
+    """A task StageMesh blocked after its remediation budget while the latest review still fails, or on a typed integration blocker: a person has to decide."""
+    from .integration_recovery import format_blocker, integration_blocker
+
+    blocker = integration_blocker(store, task_id)
+    if blocker is not None:
+        return format_blocker(blocker)
     latest = store.latest_candidate(task_id)
     if latest is None:
         return None
