@@ -27,6 +27,7 @@ from .ci_wait import decide_ci_wait
 from .completion_audit import CompletionAuditValidationError, completion_audit
 from .concurrency import IntegrationLock, ProviderLimiter
 from .config import BALANCED_PROVIDER_POOLS, ConfigValidationError, load_config
+from .config_migration import config_path_for, plan_provider_stage_command_migration, write_provider_stage_command_migration
 from .coordinator import Coordinator, TargetSelection, TargetSelectionError
 from .dashboard import dashboard_summary, render_dashboard
 from .demo import DemoValidationError, create_demo_project
@@ -2399,6 +2400,35 @@ def command_config(args: argparse.Namespace) -> int:
         print(f"task_source.{source.name}: {source.kind} {source.path}")
     return 0
 
+
+def command_config_migrate(args: argparse.Namespace) -> int:
+    project = Path(args.project).resolve()
+    path = config_path_for(project, Path(args.config).resolve() if args.config else None)
+    result = write_provider_stage_command_migration(path) if args.write else plan_provider_stage_command_migration(path)
+    if args.json:
+        print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
+        return 0
+    mode = "write" if args.write else "dry-run"
+    print(f"config migration: {mode}")
+    print(f"config: {result.config_path}")
+    print(f"changed: {result.changed}")
+    if result.backup_path:
+        print(f"backup: {result.backup_path}")
+    if result.changes:
+        print("changes:")
+        for change in result.changes:
+            print(f"  - {change}")
+    else:
+        print("changes: none")
+    if result.limitations:
+        print("limitations:")
+        for limitation in result.limitations:
+            print(f"  - {limitation}")
+    if not args.write and result.changed:
+        print("run `stagemesh config migrate --write` to apply")
+    return 0
+
+
 def command_provider_profile(args: argparse.Namespace) -> int:
     project = Path(args.project).resolve()
     config_path = runtime_dir(project) / "config.json"
@@ -3237,6 +3267,12 @@ def build_parser() -> argparse.ArgumentParser:
     config.add_argument("--config")
     config.add_argument("--json", action="store_true")
     config.set_defaults(func=command_config)
+    config_sub = config.add_subparsers(dest="config_command")
+    config_migrate = config_sub.add_parser("migrate", help="Migrate legacy review providers to per-stage provider commands")
+    config_migrate.add_argument("--config")
+    config_migrate.add_argument("--write", action="store_true", help="Write the migrated config after creating a backup")
+    config_migrate.add_argument("--json", action="store_true")
+    config_migrate.set_defaults(func=command_config_migrate)
     backend = sub.add_parser("backend")
     backend.add_argument("--config")
     backend.add_argument("--ping", action="store_true")
