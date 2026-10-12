@@ -155,3 +155,22 @@ def test_project_shim_ignores_pythonpath(venv: Path, project: Path) -> None:
         ["cmd", "/c", str(shim), "--version"], cwd=project, env=_env(PYTHONPATH=str(SOURCE / "src")), capture_output=True, text=True
     )
     assert "stagemesh runtime: installed" in proc.stdout, proc.stdout + proc.stderr
+
+
+def test_legacy_non_editable_tooling_venv_does_not_shadow_standalone_runtime(tmp_path: Path, monkeypatch) -> None:
+    from stagemesh.runtime_freshness import installed_cli_path
+
+    home = tmp_path / "runtime"
+    standalone = home / "venv" / ("Scripts/stagemesh.exe" if os.name == "nt" else "bin/stagemesh")
+    standalone.parent.mkdir(parents=True)
+    standalone.write_text("")
+    monkeypatch.setenv("STAGEMESH_RUNTIME_HOME", str(home))
+    project = tmp_path / "proj"
+    legacy = project / ".stagemesh" / "tooling" / "venv" / ("Scripts/stagemesh.exe" if os.name == "nt" else "bin/stagemesh")
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text("")
+    assert installed_cli_path(project) == standalone
+    site = legacy.parent.parent / ("Lib/site-packages" if os.name == "nt" else "lib/python3/site-packages")
+    site.mkdir(parents=True)
+    (site / "__editable__.stagemesh.pth").write_text("x")
+    assert installed_cli_path(project) == legacy

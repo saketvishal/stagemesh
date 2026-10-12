@@ -293,6 +293,8 @@ def main(argv: list[str] | None = None) -> int:
         help="Development layout: editable install of this checkout in <project>/.stagemesh/tooling/venv instead of the standalone runtime.",
     )
     args = parser.parse_args(argv)
+    if args.project and not Path(args.project).is_dir():
+        raise SystemExit(f"--project {args.project} is not an existing directory")
     _use_project(Path(args.project).resolve() if args.project else ROOT, editable=args.editable)
     VENV.parent.mkdir(parents=True, exist_ok=True)
     BIN.mkdir(parents=True, exist_ok=True)

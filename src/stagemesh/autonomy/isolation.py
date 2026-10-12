@@ -234,7 +234,7 @@ def _check_running_code(project: Path, report: IsolationReport, expected_checkou
         return
     expected = f"{own_package}"
     if allow_project_local:
-        expected += f" or {_project_local_install_root(project)}"
+        expected += f", {_project_local_install_root(project)} or the standalone runtime"
     report.findings.append(
         IsolationFinding(
             "RUNNING_CODE_FROM_OTHER_CHECKOUT",

@@ -43,16 +43,23 @@ class RuntimeFreshness:
 
 
 def installed_cli_path(project: Path) -> Path | None:
-    """The project-local install if there is one, else whatever `stagemesh` is on PATH."""
-    venv = project / ".stagemesh" / "tooling" / "venv"
-    for candidate in (venv / "Scripts" / "stagemesh.exe", venv / "bin" / "stagemesh"):
-        if candidate.is_file():
-            return candidate
+    """The CLI the project actually runs: an editable development venv, else the standalone runtime, else a legacy copy, else PATH.
+
+    A non-editable `.stagemesh/tooling/venv` is a leftover from before the standalone runtime; the project shim no longer points at it,
+    so it must not win over the standalone runtime (it would stay stale however often the runtime is refreshed).
+    """
     from .runtime_info import runtime_cli
 
+    venv = project / ".stagemesh" / "tooling" / "venv"
+    legacy = [c for c in (venv / "Scripts" / "stagemesh.exe", venv / "bin" / "stagemesh") if c.is_file()]
+    editable = any(venv.glob("Lib/site-packages/__editable__*")) or any(venv.glob("lib/python*/site-packages/__editable__*"))
+    if legacy and editable:
+        return legacy[0]
     standalone = runtime_cli()
     if standalone.is_file():
         return standalone
+    if legacy:
+        return legacy[0]
     found = shutil.which("stagemesh")
     return Path(found) if found else None
 
