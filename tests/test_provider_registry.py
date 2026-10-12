@@ -147,6 +147,43 @@ def test_capacity_reports_balanced_policy_pools_and_skip_reasons(tmp_path: Path,
     assert all("reason" in verdict for verdict in data["stages"][IMPLEMENT]["verdicts"])
     assert all("recent_use" in provider for provider in data["providers"])
 
+
+def test_capacity_text_shows_policy_pools_and_each_provider_once(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    _config(
+        tmp_path,
+        {
+            "routing": {"provider_profile": "balanced"},
+            "providers": {"claude": {"command": "claude -p", "max_concurrency": 3}},
+        },
+    )
+
+    code = cli_module.main(["--project", str(tmp_path), "capacity"])
+
+    assert code == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert [line for line in lines if line.startswith("active provider profile:")] == ["active provider profile: balanced"]
+    assert [line for line in lines if line.startswith("selection policy:")] == ["selection policy: least_recently_used"]
+    assert [line for line in lines if line.strip().startswith("pool:")] == [
+        "  pool: codex, grok, claude, agy",
+        "  pool: claude, grok, agy, codex",
+    ]
+    assert len([line for line in lines if line.strip().startswith("most recent use:")]) == 2
+    for name in ("codex", "grok", "claude", "agy"):
+        assert len([line for line in lines if line.startswith(f"provider {name} ")]) == 1
+    claude_line = next(line for line in lines if line.startswith("provider claude "))
+    assert "max concurrency 3" in claude_line and "live check" in claude_line and "command " in claude_line
+    assert not any(line.startswith("chosen:") for line in lines)
+
+
+def test_capacity_legacy_chosen_line_is_labelled_as_fallback_check(capsys: pytest.CaptureFixture[str], tmp_path: Path) -> None:
+    _config(tmp_path, {"routing": {"provider_profile": "balanced"}})
+
+    code = cli_module.main(["--project", str(tmp_path), "capacity", "--primary-down"])
+
+    assert code == 0
+    out = capsys.readouterr().out
+    assert out.startswith("chosen: claude (legacy --primary/--secondary fallback check only")
+
 def test_legacy_builtin_priority_config_is_normalized_to_round_robin(tmp_path: Path) -> None:
     project = _config(
         tmp_path,
