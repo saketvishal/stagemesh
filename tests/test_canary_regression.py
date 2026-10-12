@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 import stagemesh.coordinator as coordinator_module
+from stagemesh.contracts import ChangeContract
 from stagemesh.coordinator import Coordinator, TargetSelection, TargetSelectionError
 from stagemesh.domain import ExecutionKind, ExecutionStatus, ProcessIdentity, Stage, TaskStatus
 from stagemesh.execution import ExecutionResult, FakeExecutor, SubprocessExecutor, classify_failure
@@ -358,6 +359,40 @@ def test_runtime_provider_prompt_leaves_git_commits_to_stagemesh() -> None:
     assert "Do not run git commit" in prompt
     assert "StageMesh owns all Git commits" in prompt
     assert "commit all changes to git" not in prompt
+
+
+def test_runtime_provider_prompt_enforces_minimal_verified_change_discipline() -> None:
+    prompt = _build_task_prompt("task-1", {"title": "change app"})
+
+    assert "Implementation discipline:" in prompt
+    assert "smallest complete change" in prompt
+    assert "callers, tests, fixtures, config, docs, exports, and migrations" in prompt
+    assert "Never weaken a gate" in prompt
+    assert "focused test, assertion, or runnable check" in prompt
+    assert "deferred work" in prompt
+
+
+def test_runtime_provider_prompt_adds_frontend_design_discipline_for_ui_contracts() -> None:
+    contract = ChangeContract(
+        objective="Improve the mobile intake screen",
+        allowed_files=("web/components/IntakePanel.tsx", "web/styles/intake.css"),
+    )
+    prompt = _build_task_prompt("task-1", {"title": "change UI"}, contract=contract)
+
+    assert "Frontend design discipline:" in prompt
+    assert "product, audience, and job of the screen" in prompt
+    assert "Avoid generic AI-page tells" in prompt
+    assert "Preserve mobile responsiveness" in prompt
+
+
+def test_runtime_provider_prompt_skips_frontend_design_discipline_for_non_ui_contracts() -> None:
+    contract = ChangeContract(
+        objective="Fix provider cooldown classification",
+        allowed_files=("src/stagemesh/provider_cooldown.py", "tests/test_provider_cooldown.py"),
+    )
+    prompt = _build_task_prompt("task-1", {"title": "fix cooldown"}, contract=contract)
+
+    assert "Frontend design discipline:" not in prompt
 
 
 def test_runtime_provider_terminalizes_execution_when_post_start_exception_occurs(

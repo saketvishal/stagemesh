@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import shutil
 import stat
@@ -45,6 +46,69 @@ from .workspaces import (
 
 MAX_EXECUTION_RESULT_CHARS = 200
 PROVIDER_PERMISSION_DENIED = "provider_permission_denied"
+
+
+IMPLEMENTATION_DISCIPLINE = (
+    "Implementation discipline:\n"
+    "- Make the smallest complete change that satisfies the task and the change contract; do not add future-proofing, optional "
+    "features, wrappers, or broad refactors.\n"
+    "- Before editing, identify the surfaces the change must touch: callers, tests, fixtures, config, docs, exports, and migrations. "
+    "Do not edit outside those surfaces unless the contract explicitly allows it.\n"
+    "- Prefer existing project helpers and patterns, then platform or standard library features, then installed dependencies. Do not add "
+    "a dependency for a small local change.\n"
+    "- Keep validation, error handling, security, accessibility, data-loss protection, and requested behavior intact. Never weaken a gate "
+    "to make a change pass.\n"
+    "- For non-trivial logic, leave a focused test, assertion, or runnable check that proves the behavior. Use the narrowest check that "
+    "actually verifies the result.\n"
+    "- If you discover useful work outside the contract, leave it out of the diff and mention it as deferred work.\n\n"
+)
+
+FRONTEND_DESIGN_DISCIPLINE = (
+    "Frontend design discipline:\n"
+    "- Ground UI choices in the product, audience, and job of the screen instead of default SaaS chrome.\n"
+    "- Before building new or reshaped UI, choose a compact design direction: palette, type scale, layout logic, and the one "
+    "memorable element.\n"
+    "- Avoid generic AI-page tells unless the brief explicitly asks for them: decorative gradients, identical card grids, all-caps "
+    "eyebrows, arbitrary numbered labels, and scattered fade/slide animations.\n"
+    "- Use visual structure as information: borders, labels, dividers, spacing, and numbers must explain the workflow, not decorate it.\n"
+    "- Keep copy functional and consistent. Buttons should say exactly what happens, errors should say what failed and how to fix it, "
+    "and empty states should point to the next action.\n"
+    "- Preserve mobile responsiveness, visible keyboard focus, reduced-motion behavior, and accessible color contrast.\n\n"
+)
+
+_FRONTEND_FILE_HINTS = (
+    ".astro",
+    ".css",
+    ".html",
+    ".jsx",
+    ".less",
+    ".scss",
+    ".svelte",
+    ".tsx",
+    ".vue",
+)
+_FRONTEND_TEXT_HINTS = (
+    "component",
+    "design",
+    "frontend",
+    "layout",
+    "mobile",
+    "page",
+    "screen",
+    "theme",
+    "ui",
+    "ux",
+    "web",
+)
+_FRONTEND_PATH_HINTS = (
+    "app/",
+    "components/",
+    "frontend/",
+    "pages/",
+    "styles/",
+    "ui/",
+    "web/",
+)
 
 
 class ProviderValidationError(ValueError):
@@ -586,11 +650,14 @@ def _build_task_prompt(
     row_keys = set(task.keys()) if isinstance(task, _sqlite3.Row) else set()
     title = task["title"] if "title" in row_keys else str(task_id)
     contract_text = ""
+    frontend_text = _frontend_design_prompt(title, contract)
     if contract is not None:
         contract_text = "\n\n" + contract_prompt(contract) + "\n"
     elif project is not None:
         try:
-            contract_text = "\n\n" + contract_prompt(load_contract(project, task_id)) + "\n"
+            loaded_contract = load_contract(project, task_id)
+            contract_text = "\n\n" + contract_prompt(loaded_contract) + "\n"
+            frontend_text = _frontend_design_prompt(title, loaded_contract)
         except ContractError as exc:
             contract_text = f"\n\nChange contract is invalid and must be fixed before coding: {exc}\n"
     remediation_text = _remediation_prompt(remediation) if remediation else ""
@@ -599,6 +666,8 @@ def _build_task_prompt(
         f"{contract_text}"
         f"{remediation_text}"
         "Please implement the changes described above.\n\n"
+        f"{IMPLEMENTATION_DISCIPLINE}"
+        f"{frontend_text}"
         "Workspace rules:\n"
         "- Edit files only. Do not run git commit, checkout, switch, reset, rebase, merge, cherry-pick, branch, tag, "
         "amend, or any command that moves HEAD or rewrites history.\n"
@@ -607,6 +676,27 @@ def _build_task_prompt(
         "implementation candidate itself.\n"
         "- If no code change is needed, explain why and leave the tree unchanged.\n"
     )
+
+
+def _frontend_design_prompt(title: str, contract: object | None) -> str:
+    fields = [title]
+    for attr in ("objective",):
+        value = getattr(contract, attr, None)
+        if isinstance(value, str):
+            fields.append(value)
+    for attr in ("allowed_files", "acceptance_criteria", "public_api"):
+        value = getattr(contract, attr, ())
+        if isinstance(value, (list, tuple)):
+            fields.extend(str(item) for item in value)
+    text = "\n".join(fields).lower().replace("\\", "/")
+    if any(hint in text for hint in _FRONTEND_FILE_HINTS):
+        return FRONTEND_DESIGN_DISCIPLINE
+    if any(hint in text for hint in _FRONTEND_PATH_HINTS):
+        return FRONTEND_DESIGN_DISCIPLINE
+    words = set(re.findall(r"[a-z0-9]+", text))
+    if words.intersection(_FRONTEND_TEXT_HINTS):
+        return FRONTEND_DESIGN_DISCIPLINE
+    return ""
 
 
 def _remediation_prompt(remediation: dict[str, object]) -> str:

@@ -59,6 +59,27 @@ Expect `operational readiness: READY` (or only the informational lines above).
 
 A routine engineering failure is not an operator task. StageMesh classifies it, repairs it, validates and reviews the result again, and retries, within bounded budgets. Every choice is one of a fixed set of actions (`RETRY_SAME`, `REFRESH_REVALIDATE`, `REFRESH_REVALIDATE_REREVIEW`, `SWITCH_PROVIDER`, `REPAIR_WORKTREE`, `RETRY_INTEGRATION`, `BLOCK_EXTERNAL`, `BLOCK_HUMAN_DECISION`, `ABORT_UNSAFE`) made by deterministic rules in `recovery_decision.py`; an optional advisor (for example a decision model) is only asked about contexts the rules call ambiguous and cannot step outside the fixed set. Each decision is a `recovery.decision` audit event.
 
+## Worker discipline
+
+Every implementation provider receives a built-in discipline prompt before it edits. The rule is StageMesh-native, but borrows the useful parts of the Ponytail and pstack style:
+
+- Make the smallest complete change that satisfies the task and its change contract.
+- Identify the touched surfaces before editing: callers, tests, fixtures, config, docs, exports and migrations.
+- Prefer existing project helpers and patterns before platform features, installed dependencies or new abstractions.
+- Keep validation, error handling, security, accessibility, data-loss protection and requested behavior intact.
+- Prove non-trivial logic with a focused test, assertion or runnable check.
+- Leave out-of-contract discoveries as deferred work instead of expanding the diff.
+
+This discipline lives in `src/stagemesh/providers.py` so it applies to Codex, Claude, Grok, Agy and any configured command provider. It is covered by `tests/test_canary_regression.py`.
+
+When a task looks like frontend work (for example `.tsx`, `.jsx`, `.css`, `.html`, `web/`, `components/`, `styles/`, `ui/`, or an
+objective mentioning UI, screens, layout, theme, mobile, UX or frontend), StageMesh also injects a frontend design discipline inspired
+by Anthropic's `frontend-design` skill. The extra rule tells the provider to ground the UI in the product and audience, pick deliberate
+palette/type/layout choices, avoid generic AI-page defaults, use visual structure as information, keep interface copy functional, and
+preserve mobile responsiveness, focus, reduced motion and contrast.
+
+`no-mistakes` is not a replacement for this runtime discipline. Use it as an optional downstream ship gate after StageMesh has produced a committed feature branch: validate the branch in an isolated worktree, then publish the PR only if the external gate passes.
+
 **Integration** (3 recoveries per task):
 
 | Classification | What StageMesh does |
