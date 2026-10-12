@@ -395,6 +395,38 @@ def test_runtime_provider_prompt_skips_frontend_design_discipline_for_non_ui_con
     assert "Frontend design discipline:" not in prompt
 
 
+def test_runtime_provider_prompt_reads_project_local_specs(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    spec = project / "docs" / "specs" / "voice-intake.md"
+    spec.parent.mkdir(parents=True)
+    spec.write_text(
+        "Voice intake spec: record, stop, resume, append transcript, save audio as evidence.\n",
+        encoding="utf-8",
+    )
+    contract = ChangeContract(
+        objective="Implement voice intake",
+        spec_refs=("docs/specs/voice-intake.md",),
+        allowed_files=("apps/web/**",),
+    )
+
+    prompt = _build_task_prompt("task-1", {"title": "voice intake"}, project=project, contract=contract)
+
+    assert "Project-local specs from this installed project:" in prompt
+    assert "--- docs/specs/voice-intake.md ---" in prompt
+    assert "record, stop, resume, append transcript" in prompt
+    assert "Do not invent StageMesh-owned product specs" in prompt
+
+
+def test_runtime_provider_prompt_rejects_project_spec_escape(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    contract = ChangeContract(objective="Use spec", spec_refs=("../outside.md",), allowed_files=("src/**",))
+
+    prompt = _build_task_prompt("task-1", {"title": "use spec"}, project=project, contract=contract)
+
+    assert "[spec ref rejected: path must stay inside the project]" in prompt
+
+
 def test_runtime_provider_terminalizes_execution_when_post_start_exception_occurs(
     store: Store,
     tmp_path: Path,
