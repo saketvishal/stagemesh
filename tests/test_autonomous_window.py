@@ -209,3 +209,44 @@ def test_a_different_python_on_path_changes_the_runtime_fingerprint(tmp_path: Pa
     first = runtime_fingerprint(tmp_path)
     monkeypatch.setattr(shutil, "which", lambda name: "C:/two/python.exe")
     assert runtime_fingerprint(tmp_path) != first  # gates that failed under the wrong interpreter are reconsidered once it is fixed
+
+
+CONDITIONAL_SPEC_FINDING = (
+    "The wrapper adds a second copy of the evaluator's duplicate logic. If the precedence change is intended, it needs to be raised as a spec conflict "
+    "and implemented once in the pure evaluator. Otherwise the wrapper should just call `evaluate_materiality`."
+)
+
+
+def test_a_finding_that_only_mentions_a_spec_conflict_conditionally_is_a_defect_not_a_decision(tmp_path: Path) -> None:
+    from stagemesh.remediation_recovery import judgment_reason
+
+    assert judgment_reason([CONDITIONAL_SPEC_FINDING]) is None
+    assert judgment_reason(["This needs a product decision: 30 or 90 days?"]) is not None
+
+
+def test_a_human_block_inferred_from_finding_wording_is_reclassified_when_the_wording_no_longer_counts(tmp_path: Path) -> None:
+    store, _ = make_store(tmp_path, ["139"])
+    sha = "5" * 40
+    store.add_candidate("139", sha, "codex", True)
+    store.upsert_finding("f1", "139", sha, "error", CONDITIONAL_SPEC_FINDING)
+    record_block(store, "139", BlockKind.HUMAN_DECISION, f"REVIEW failed on {sha[:10]} (judgment_required): a finding states a decision is needed: x", candidate_sha=sha, runtime="old")
+
+    info = classify_block(store, "139")
+    assert info.kind is BlockKind.RECOVERABLE_OPERATIONAL and info.source == "reclassified"
+    assert reentry_refusal(store, "139", "new") is None  # picked up again by the next run-window without retry-task
+    genuine = "This needs a product decision: 30 or 90 days?"
+    store.upsert_finding("f2", "139", sha, "error", genuine)
+    assert classify_block(store, "139").kind is BlockKind.HUMAN_DECISION  # a stated decision stays a decision
+
+
+def test_a_recoverable_block_whose_source_issue_was_closed_is_not_picked_or_re_entered(tmp_path: Path) -> None:
+    store, _ = make_store(tmp_path, ["155"])
+    with store.conn:
+        store.conn.execute("UPDATE tasks SET source='github', source_id='155' WHERE id='155'")
+    store.cache_source("github", "155", {"state": "CLOSED", "eligible": False}, "CLOSED")
+    record_block(store, "155", BlockKind.RECOVERABLE_OPERATIONAL, "integration budget spent", runtime="old")
+
+    picked, skipped = rw.select_tasks(store, attempted=set(), limit=5, fingerprint="new")
+
+    assert picked == [] and skipped["155"] == "source closed"
+    assert reentries_used(store, "155") == 0

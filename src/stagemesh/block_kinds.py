@@ -121,7 +121,15 @@ def classify_block(store: Store, task_id: str) -> BlockInfo | None:
                 kind = BlockKind(str(payload.get("kind")))
             except ValueError:
                 return None
-            return BlockInfo(kind, str(payload.get("reason", "")), "recorded", payload.get("runtime"))
+            reason = str(payload.get("reason", ""))
+            if kind is BlockKind.HUMAN_DECISION and "(judgment_required)" in reason and payload.get("candidate_sha"):
+                # a decision inferred from finding wording is re-derived under today's markers: wording that no longer counts is a defect to repair
+                from .remediation_recovery import judgment_reason
+
+                open_findings = store.open_findings_for_candidate(task_id, str(payload["candidate_sha"]))
+                if open_findings and judgment_reason([str(f["message"]) for f in open_findings]) is None:
+                    return BlockInfo(BlockKind.RECOVERABLE_OPERATIONAL, f"{reason} [reclassified: the findings no longer state a decision]", "reclassified", payload.get("runtime"))
+            return BlockInfo(kind, reason, "recorded", payload.get("runtime"))
         if event == "task.remediation_exhausted" and payload.get("reason") == "repeated_failure_diagnosed":
             # the diagnosis that caused this stop was recorded just before it and says what kind of failure repeated
             for earlier_event, earlier in mine[index + 1 :]:

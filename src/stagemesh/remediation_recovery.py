@@ -27,12 +27,12 @@ ROUND_EVENT = "recovery.exhaustion_round"
 SWITCH_EVENT = "recovery.switch_provider"
 MAX_EXHAUSTION_ROUNDS = 2
 
-# Wording in a finding that says the open question is a choice, not a defect. Deliberately narrow: a false positive only makes a
-# person decide something StageMesh could have repaired, so the markers name an explicit decision rather than any hard problem.
+# Wording in a finding that says the open question is a choice, not a defect. Deliberately narrow: a false positive hands a person a
+# defect StageMesh could have repaired (a finding that merely mentions a "spec conflict" as a conditional is a defect, and says how to
+# fix it), so only an explicit statement that a product, legal or security decision is required counts.
 _JUDGMENT = re.compile(
     r"(needs? (a )?(product|legal|security) decision|requires? (a )?(product|legal|security) decision|"
-    r"(spec|specification|requirements?) (conflict|contradict)|contradicts? the (spec|specification|requirement)|"
-    r"ambiguous (spec|specification|requirement)|legal (advice|judg(e)?ment)|unauthori[sz]ed practice of law)",
+    r"legal (advice|judg(e)?ment)|unauthori[sz]ed practice of law)",
     re.IGNORECASE,
 )
 
