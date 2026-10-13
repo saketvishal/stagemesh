@@ -186,6 +186,14 @@ def _ensure_default_github_task_source(project: Path) -> bool:
             }
         )
         changed = True
+    else:
+        for source in github_sources:
+            if source.get("labels") == ["status:QUEUED"]:
+                source["labels"] = list(DEFAULT_GITHUB_SOURCE_LABELS)
+                changed = True
+            if "excluded_labels" not in source:
+                source["excluded_labels"] = list(DEFAULT_GITHUB_EXCLUDED_LABELS)
+                changed = True
     if changed:
         config_path.parent.mkdir(parents=True, exist_ok=True)
         config_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
@@ -829,12 +837,9 @@ def command_run_window(args: argparse.Namespace) -> int:
         print("--concurrency, --max-steps-per-task and --max-tasks must be at least 1", file=sys.stderr)
         return 2
     project = Path(args.project).resolve()
+    if _ensure_default_github_task_source(project):
+        print("migrated config: added GitHub task source for stagemesh:ready issues", file=sys.stderr)
     config = load_config(project)
-    if _missing_github_task_source_check(config) is not None:
-        # existing install: add the default GitHub source in place instead of asking the operator to run init
-        if _ensure_default_github_task_source(project):
-            print("migrated config: added GitHub task source for stagemesh:ready issues", file=sys.stderr)
-            config = load_config(project)
     missing_source = _missing_github_task_source_check(config)
     if missing_source is not None:
         payload = {"preflight": [missing_source], "would_run": [], "left_alone": {}, "ok": False}

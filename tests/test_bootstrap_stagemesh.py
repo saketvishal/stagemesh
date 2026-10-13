@@ -112,6 +112,29 @@ def test_agy_unattended_requires_agy_provider(tmp_path: Path) -> None:
         raise AssertionError("expected --agy-unattended without agy to fail")
 
 
+def test_queue_source_migration_preserves_ready_label(tmp_path: Path) -> None:
+    bootstrap = _load_bootstrap()
+    bootstrap.PROJECT = tmp_path
+    config_path = tmp_path / ".stagemesh" / "config.json"
+    config_path.parent.mkdir()
+    config_path.write_text(
+        json.dumps(
+            {
+                "task_sources": [
+                    {"name": "github", "type": "github", "labels": ["stagemesh:ready"]},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    bootstrap._configure_queue_source()
+
+    source = json.loads(config_path.read_text(encoding="utf-8"))["task_sources"][0]
+    assert source["labels"] == ["stagemesh:ready"]
+    assert source["excluded_labels"] == list(bootstrap.DEFAULT_EXCLUDED_QUEUE_LABELS)
+
+
 def test_source_version_reads_repo_package_version() -> None:
     bootstrap = _load_bootstrap()
     from stagemesh import __version__

@@ -105,16 +105,44 @@ def test_run_window_migrates_existing_install_in_place(tmp_path: Path, monkeypat
     assert json.loads(config_path.read_text(encoding="utf-8"))["task_sources"][0]["labels"] == ["stagemesh:ready"]
 
 
+def test_run_window_migrates_legacy_github_source_before_syncing_ready_issues(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    project = _github_project(tmp_path)
+    (project / ".stagemesh").mkdir()
+    config_path = project / ".stagemesh" / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "github": {"owner": "acme", "repo": "widgets"},
+                "task_sources": [{"name": "github", "type": "github", "labels": ["status:QUEUED"]}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        GitHubApiIssueSource,
+        "discover",
+        lambda self: ([DiscoveredTask("github", "4", "T", labels=("stagemesh:ready",))], "OK", None),
+    )
+
+    code = cli_module.main(["--project", str(project), "run-window", "--plan", "--json", "--report", str(tmp_path / "plan.json")])
+
+    assert code == 0
+    assert json.loads(capsys.readouterr().out)["would_run"] == ["4"]
+    assert json.loads(config_path.read_text(encoding="utf-8"))["task_sources"][0]["labels"] == ["stagemesh:ready"]
+
+
 @pytest.mark.parametrize(
     ("labels", "expected"),
     [
-        (["status:QUEUED"], ["status:QUEUED"]),
+        (["status:QUEUED"], ["stagemesh:ready"]),
         (["stagemesh:ready"], ["stagemesh:ready"]),
         (["status:QUEUED", "area:x"], ["status:QUEUED", "area:x"]),
         (["custom"], ["custom"]),
     ],
 )
-def test_migration_keeps_existing_github_source_labels(
+def test_migration_updates_only_the_legacy_default_github_source_label(
     tmp_path: Path, labels: list[str], expected: list[str]
 ) -> None:
     project = _github_project(tmp_path)
