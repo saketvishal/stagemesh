@@ -125,3 +125,38 @@ def test_configured_version_reads_repo_package_version() -> None:
 
     assert bootstrap._configured_version() == __version__
 
+
+def test_bootstrap_queue_source_migrates_legacy_queued_label_to_ready(tmp_path: Path) -> None:
+    bootstrap = _load_bootstrap()
+    bootstrap.PROJECT = tmp_path
+    config_path = tmp_path / ".stagemesh" / "config.json"
+    config_path.parent.mkdir()
+    config_path.write_text(
+        json.dumps(
+            {
+                "task_sources": [
+                    {"name": "github", "type": "github", "labels": ["status:QUEUED"]},
+                    {"name": "ready", "type": "github", "labels": ["stagemesh:ready"]},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    bootstrap._configure_queue_source()
+
+    assert json.loads(config_path.read_text(encoding="utf-8"))["task_sources"] == [
+        {
+            "name": "github",
+            "type": "github",
+            "labels": ["stagemesh:ready"],
+            "excluded_labels": list(bootstrap.DEFAULT_EXCLUDED_QUEUE_LABELS),
+        },
+        {
+            "name": "ready",
+            "type": "github",
+            "labels": ["stagemesh:ready"],
+            "excluded_labels": list(bootstrap.DEFAULT_EXCLUDED_QUEUE_LABELS),
+        },
+    ]
+
