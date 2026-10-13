@@ -107,6 +107,47 @@ def test_referenced_frontend_spec_selects_design_without_losing_project_spec_con
     assert FRONTEND in resources(prompt)
 
 
+def test_implementation_prompt_includes_scoped_research_brief(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    tests = tmp_path / "tests"
+    src.mkdir()
+    tests.mkdir()
+    (src / "provider.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (src / "unrelated.py").write_text("VALUE = 2\n", encoding="utf-8")
+    (tests / "test_provider.py").write_text("def test_provider(): pass\n", encoding="utf-8")
+    bound = ChangeContract(
+        objective="Fix provider behavior",
+        allowed_files=("src/provider.py",),
+    )
+
+    prompt = _build_task_prompt(
+        "research-task", task_row("Fix provider behavior"), project=tmp_path, contract=bound
+    )
+
+    assert "Contextual research brief (read-only; complete before editing):" in prompt
+    assert "  - src/provider.py" in prompt
+    assert "  - tests/test_provider.py" in prompt
+    assert "src/unrelated.py" not in prompt
+    assert "does not expand the change contract" in prompt
+
+
+def test_research_brief_is_loaded_for_project_contract_files(tmp_path: Path) -> None:
+    contracts = tmp_path / ".stagemesh" / "contracts"
+    app = tmp_path / "app"
+    contracts.mkdir(parents=True)
+    app.mkdir()
+    (app / "service.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (contracts / "42.json").write_text(
+        json.dumps({"objective": "Update service", "allowed_files": ["app/service.py"]}),
+        encoding="utf-8",
+    )
+
+    prompt = _build_task_prompt("42", task_row("Update service"), project=tmp_path)
+
+    assert "Contextual research brief" in prompt
+    assert "  - app/service.py" in prompt
+
+
 def test_missing_review_skill_returns_infrastructure_failure_before_launch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
