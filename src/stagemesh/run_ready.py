@@ -9,6 +9,7 @@ from typing import Any
 
 from .auto_plan import AutoPlanError, create_contract, refresh_stale_generated_contract
 from .config import TaskSelectionConfig
+from .contract_check import contract_section_sizes
 from .contracts import ContractError, canonical_contract_json, parse_contract, task_contract_path
 from .coordinator import Coordinator, TargetSelection, TargetSelectionError
 from .diagnosis import format_findings
@@ -238,16 +239,22 @@ def _ensure_contract(
     else:
         plan_info["reused_existing"] = True
     try:
-        size = len(canonical_contract_json(parse_contract(json.loads(path.read_text(encoding="utf-8")))))
+        contract = parse_contract(json.loads(path.read_text(encoding="utf-8")))
+        size = len(canonical_contract_json(contract))
     except (OSError, ValueError, ContractError) as exc:
         raise RunReadyRefusal("invalid_contract", f"contract for {task_id} is invalid: {exc}", task_id=task_id) from exc
     if size > MAX_CANONICAL_CONTRACT_CHARS:
+        largest = contract_section_sizes(contract)[:3]
+        top = ", ".join(f"{item['section']} ({item['chars']})" for item in largest)
         raise RunReadyRefusal(
             "invalid_contract",
-            f"contract for {task_id} is {size} characters canonicalized; the limit is {MAX_CANONICAL_CONTRACT_CHARS}. Shorten it.",
+            f"contract for {task_id} is {size} characters canonicalized; the limit is {MAX_CANONICAL_CONTRACT_CHARS} "
+            f"(over by {size - MAX_CANONICAL_CONTRACT_CHARS}). Shorten the largest sections: {top}. "
+            f"Check with `stagemesh contract-check --task {task_id}`.",
             task_id=task_id,
             size=size,
             limit=MAX_CANONICAL_CONTRACT_CHARS,
+            largest_sections=largest,
         )
 
 

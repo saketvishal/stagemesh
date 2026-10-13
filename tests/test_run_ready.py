@@ -1028,6 +1028,8 @@ def test_refuses_contract_larger_than_the_store_limit(tmp_path: Path) -> None:
     code, result = _run(project)
     assert code == 2 and result["stop_reason"] == "REFUSED:invalid_contract"
     assert result["detail"]["limit"] == 10000 and result["detail"]["size"] > 10000
+    assert result["detail"]["largest_sections"][0]["section"] == "objective"
+    assert "Shorten the largest sections: objective (" in json.dumps(result)
     assert Store(project / ".stagemesh" / "stagemesh.sqlite3").latest_candidate("T-1") is None
 
 
