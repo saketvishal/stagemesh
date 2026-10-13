@@ -128,7 +128,6 @@ from .workers import WorkerValidationError, heartbeat_worker, register_worker
 from .workspaces import legacy_worktree_roots, sweep_task_worktrees, worktree_root
 
 DEFAULT_GITHUB_SOURCE_LABELS = ("stagemesh:ready",)
-LEGACY_GITHUB_SOURCE_LABELS = ("status:QUEUED",)
 DEFAULT_GITHUB_EXCLUDED_LABELS = (
     "stagemesh:blocked",
     "stagemesh:deferred",
@@ -187,14 +186,6 @@ def _ensure_default_github_task_source(project: Path) -> bool:
             }
         )
         changed = True
-    else:
-        for source in github_sources:
-            if source.get("labels") == list(LEGACY_GITHUB_SOURCE_LABELS):
-                source["labels"] = list(DEFAULT_GITHUB_SOURCE_LABELS)
-                changed = True
-            if "excluded_labels" not in source:
-                source["excluded_labels"] = list(DEFAULT_GITHUB_EXCLUDED_LABELS)
-                changed = True
     if changed:
         config_path.parent.mkdir(parents=True, exist_ok=True)
         config_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
