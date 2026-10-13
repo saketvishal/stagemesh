@@ -13,7 +13,7 @@ from typing import Any
 from .capacity import CapacityKind, CapacityRegistry
 from .domain import ExecutionStatus, Stage
 from .execution import PROVIDER_TIMEOUT, ExecutionResult, kill_active_provider_processes
-from .git import GitWorkspace
+from .git import GitError, GitWorkspace
 from .persistence import Store
 from .providers import record_provider_capacity
 from .review import VERDICT_FAIL_WITH_FINDINGS, VERDICT_PASS, classify_review_response
@@ -162,7 +162,7 @@ def run_live_provider_smoke(
         adapter = dataclasses.replace(adapter, timeout_seconds=effective_timeout)
     elif hasattr(adapter, "timeout_seconds"):
         try:
-            setattr(adapter, "timeout_seconds", effective_timeout)
+            adapter.timeout_seconds = effective_timeout
         except (AttributeError, TypeError):
             pass
 
@@ -182,7 +182,7 @@ def run_live_provider_smoke(
             timed_out=False,
             timeout_seconds=effective_timeout,
         )
-    temp = tempfile.TemporaryDirectory(prefix="stagemesh-provider-smoke-")
+    temp = tempfile.TemporaryDirectory(prefix="stagemesh-provider-smoke-", ignore_cleanup_errors=True)
     project = Path(temp.name)
     try:
         _prepare_smoke_project(project)
@@ -211,6 +211,11 @@ def run_live_provider_smoke(
                     kill_active_provider_processes()
                     result = ExecutionResult(ExecutionStatus.FAILED, failure_reason=PROVIDER_TIMEOUT)
                     timed_out = True
+                except GitError as exc:
+                    result = ExecutionResult(
+                        ExecutionStatus.FAILED,
+                        failure_reason=_provider_smoke_git_failure_reason(exc),
+                    )
 
                 if result.failure_reason == PROVIDER_TIMEOUT or (
                     result.status is ExecutionStatus.FAILED and "timeout" in str(result.failure_reason or "").lower()
@@ -282,7 +287,7 @@ def run_live_provider_smoke(
         )
     finally:
         if keep_temp:
-            temp._finalizer.detach()  # noqa: SLF001 - explicit debug escape hatch for this short-lived CLI.
+            temp._finalizer.detach()
         else:
             temp.cleanup()
 
@@ -384,6 +389,13 @@ def _prepare_smoke_project(project: Path) -> None:
     git = GitWorkspace(project)
     git.init_if_needed()
     git.commit_all("Initial provider smoke fixture")
+
+
+def _provider_smoke_git_failure_reason(exc: GitError) -> str:
+    message = str(exc).lower()
+    if "permission denied" in message or "unable to index file" in message:
+        return "provider_smoke_git_permission_denied"
+    return "provider_smoke_git_error"
 
 
 def _candidate_file(project: Path, candidate_sha: str, path: str) -> str | None:
