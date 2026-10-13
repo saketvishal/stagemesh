@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from .contract_binding import contract_for_candidate
-from .contracts import ContractError, changed_files, evaluate_contract
+from .contracts import ContractError, changed_files, evaluate_contract, scope_classification
 from .domain import EvidenceKind, EvidenceStatus, ExecutionKind, ExecutionStatus
 from .git import GitError
 from .persistence import Store
@@ -70,6 +70,7 @@ class Validator:
                 "validation_plan": plan.to_dict(),
                 "objective": contract.objective,
                 "changed_files": list(evaluation.changed_files),
+                "scope": scope_classification(contract, evaluation.changed_files),
                 "findings": findings,
                 "validation_checks": {
                     "planned": list(plan.planned_checks),
