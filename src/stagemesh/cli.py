@@ -47,7 +47,7 @@ from .git import GitWorkspace
 from .blocked_recovery import can_auto_retry
 from .provider_cooldown import active_cooldowns, clear_cooldown, format_cooldowns
 from .git_identity import identity_report
-from .github import GitHubClient, UrlLibGitHubTransport
+from .github import GitHubClient, UrlLibGitHubTransport, detect_github_repository
 from .github_acceptance import run_github_acceptance
 from .handoff import HandoffError, build_handoff, write_handoff
 from .objectives import ObjectivePlanner, ObjectiveValidationError
@@ -127,6 +127,15 @@ from .work_transport import (
 from .workers import WorkerValidationError, heartbeat_worker, register_worker
 from .workspaces import legacy_worktree_roots, sweep_task_worktrees, worktree_root
 
+DEFAULT_GITHUB_SOURCE_LABELS = ("stagemesh:ready",)
+DEFAULT_GITHUB_EXCLUDED_LABELS = (
+    "stagemesh:blocked",
+    "stagemesh:deferred",
+    "status:BLOCKED",
+    "status:REMEDIATING",
+)
+LEGACY_GITHUB_SOURCE_LABELS = (("status:QUEUED",),)
+
 
 def runtime_dir(project: Path) -> Path:
     return project / ".stagemesh"
@@ -136,9 +145,81 @@ def db_path(project: Path) -> Path:
     return runtime_dir(project) / "stagemesh.sqlite3"
 
 
+def _ensure_default_github_task_source(project: Path) -> bool:
+    config_path = runtime_dir(project) / "config.json"
+    data: dict[str, object] = {}
+    if config_path.exists():
+        try:
+            loaded = json.loads(config_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise ConfigValidationError("config file must be valid JSON") from exc
+        if not isinstance(loaded, dict):
+            raise ConfigValidationError("config root must be an object")
+        data = loaded
+    detected = detect_github_repository(project)
+    github = data.setdefault("github", {})
+    if not isinstance(github, dict):
+        raise ConfigValidationError("github must be an object")
+    changed = False
+    if detected is not None:
+        if not github.get("owner"):
+            github["owner"] = detected.owner
+            changed = True
+        if not github.get("repo"):
+            github["repo"] = detected.repo
+            changed = True
+    if not (github.get("owner") and github.get("repo")):
+        if changed:
+            config_path.parent.mkdir(parents=True, exist_ok=True)
+            config_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        return changed
+    sources = data.setdefault("task_sources", [])
+    if not isinstance(sources, list):
+        raise ConfigValidationError("task_sources must be a list")
+    github_sources = [source for source in sources if isinstance(source, dict) and source.get("type") == "github"]
+    if not github_sources:
+        sources.append(
+            {
+                "name": "github",
+                "type": "github",
+                "labels": list(DEFAULT_GITHUB_SOURCE_LABELS),
+                "excluded_labels": list(DEFAULT_GITHUB_EXCLUDED_LABELS),
+            }
+        )
+        changed = True
+    else:
+        for source in github_sources:
+            labels = source.get("labels")
+            if isinstance(labels, list) and tuple(labels) in LEGACY_GITHUB_SOURCE_LABELS:
+                source["labels"] = list(DEFAULT_GITHUB_SOURCE_LABELS)
+                changed = True
+            if "excluded_labels" not in source:
+                source["excluded_labels"] = list(DEFAULT_GITHUB_EXCLUDED_LABELS)
+                changed = True
+    if changed:
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    return changed
+
+
+def _missing_github_task_source_check(config) -> dict[str, object] | None:
+    if not (config.github.owner and config.github.repo):
+        return None
+    if any(source.kind == "github" for source in config.task_sources):
+        return None
+    return {
+        "name": "task_sources",
+        "ok": False,
+        "detail": f"GitHub repository {config.github.owner}/{config.github.repo} has no GitHub task source configured",
+        "fatal": True,
+        "fix": "stagemesh init",
+    }
+
+
 def command_init(args: argparse.Namespace) -> int:
     project = Path(args.project).resolve()
     runtime_dir(project).mkdir(parents=True, exist_ok=True)
+    configured_github_source = _ensure_default_github_task_source(project)
     store = Store(db_path(project))
     store.migrate()
     if args.task:
@@ -167,6 +248,7 @@ def command_init(args: argparse.Namespace) -> int:
                     "schema_version": schema_version,
                     "registered": registered,
                     "profile": profile_status,
+                    "github_task_source": "configured" if configured_github_source else "unchanged",
                 },
                 indent=2,
                 sort_keys=True,
@@ -174,6 +256,8 @@ def command_init(args: argparse.Namespace) -> int:
         )
         return 0
     print(f"initialized StageMesh at {runtime_dir(project)}")
+    if configured_github_source:
+        print("configured GitHub task source for stagemesh:ready issues")
     if profile_status == "created":
         print(f"created default profile {profile_detail}")
         if is_placeholder(load_profile(project)):
@@ -756,6 +840,15 @@ def command_run_window(args: argparse.Namespace) -> int:
         return 2
     project = Path(args.project).resolve()
     config = load_config(project)
+    missing_source = _missing_github_task_source_check(config)
+    if missing_source is not None:
+        payload = {"preflight": [missing_source], "would_run": [], "left_alone": {}, "ok": False}
+        if args.json:
+            print(json.dumps(payload, indent=2, sort_keys=True))
+        else:
+            print(f"[FAIL] {missing_source['name']}: {missing_source['detail']}")
+            print(f"next: {missing_source['fix']}")
+        return 2
     local = args.integration == INTEGRATION_LOCAL
     base_ref = resolve_integration_ref(project, config.integration_ref) or "HEAD"
     if not local and not base_ref.startswith("refs/heads/"):
@@ -778,6 +871,7 @@ def command_run_window(args: argparse.Namespace) -> int:
     store = Store(db_path(project))
     store.migrate()
     try:
+        _sync_all_sources(store, project, config, None)
         staging_ref = None if local else STAGING_REF
         hooks = _wave_hooks(
             project, store, base_ref=base_ref, staging_ref=staging_ref, advance_ref=base_ref if local else STAGING_REF, local=local, no_pr=args.no_pr
