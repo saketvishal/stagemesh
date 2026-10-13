@@ -49,6 +49,20 @@ _QUOTA = re.compile(
 )
 _SECRET = re.compile(r"(?i)(bearer\s+)\S+|(\bgh[pousr]_|sk-|xai-)[A-Za-z0-9_\-]+")
 _RETRY = re.compile(r"(?i)(?:resets\s+[^\n]{1,80}|retry[- ]after[:\s]+[^\n]{1,40})")
+TOOL_EXECUTION_FAILURE = "tool_execution_failure"
+_TOOL_FAILURE = re.compile(
+    r"npm ERR!\s+Missing script|"
+    r"browser executable doesn't exist|"
+    r"playwright install|"
+    r"playwright.*command not found|"
+    r"puppeteer.*command not found|"
+    r"npx.*command not found|"
+    r"npm.*command not found|"
+    r"ModuleNotFoundError:\s+No module named|"
+    r"Error:\s+Cannot find module|"
+    r"No tests found",
+    re.IGNORECASE,
+)
 
 
 def capacity_evidence(stdout: str, stderr: str) -> tuple[str, str | None]:
@@ -72,6 +86,9 @@ def classify_failure(
         return True, "provider_unavailable"
 
     combined = f"{stdout}\n{stderr}".lower()
+
+    if _TOOL_FAILURE.search(f"{stdout}\n{stderr}"):
+        return False, TOOL_EXECUTION_FAILURE
 
     if any(m in combined for m in ["not found", "no such file or directory", "command not found", "cannot find"]):
         return True, "provider_unavailable"

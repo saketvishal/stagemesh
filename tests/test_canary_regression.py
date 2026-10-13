@@ -1181,13 +1181,14 @@ def test_capacity_failure_is_distinguishable_from_code_failure() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_failure_classification_all_five_categories() -> None:
+def test_failure_classification_categories() -> None:
     """StageMesh must classify failures into:
     1. Provider unavailable (missing executable or command not found)
     2. Authentication failure (unauthorized, invalid key, login required)
     3. Quota / rate limit (429, quota exceeded, too many requests)
     4. Transient provider failure (502, 503, service unavailable, overloaded)
     5. Implementation / code defect (syntax error, test failure, non-zero code)
+    6. Tool execution failure (provider ran, but a terminal/browser/test tool failed)
     """
     # 1. Provider unavailable
     is_cap, reason = classify_failure(1, exc=FileNotFoundError("not found"))
@@ -1233,6 +1234,15 @@ def test_failure_classification_all_five_categories() -> None:
     is_cap, reason = classify_failure(2, stderr="SyntaxError: invalid syntax at line 42")
     assert is_cap is False
     assert reason == "implementation_failure"
+
+    # 6. Tool execution failure
+    is_cap, reason = classify_failure(1, stderr="Error: browser executable doesn't exist. Please run npx playwright install")
+    assert is_cap is False
+    assert reason == "tool_execution_failure"
+
+    is_cap, reason = classify_failure(1, stderr='npm ERR! Missing script: "e2e:ui-gate"')
+    assert is_cap is False
+    assert reason == "tool_execution_failure"
 
 
 # ---------------------------------------------------------------------------
