@@ -7,14 +7,15 @@ import json
 import shlex
 import subprocess
 import sys
-from pathlib import Path
 import time
+from pathlib import Path
 
 import pytest
 
 import stagemesh.cli as cli_module
 from stagemesh.capacity import CapacityKind
 from stagemesh.domain import ExecutionStatus
+from stagemesh.git import GitError
 from stagemesh.persistence import Store
 from stagemesh.process_identity import process_identity
 from stagemesh.provider_acceptance import (
@@ -272,6 +273,27 @@ def test_run_live_provider_smoke_classifies_adapter_timeout_exception() -> None:
     assert result.timed_out is True
     assert result.failure_reason == "provider_timeout"
     assert result.implementation_ready is False
+
+
+def test_run_live_provider_smoke_reports_git_permission_failure_without_traceback() -> None:
+    class GitFailingAdapter:
+        name = "git-failing"
+        capabilities = frozenset({"code"})
+
+        def check_capacity(self) -> str:
+            return CapacityKind.AVAILABLE
+
+        def execute(self, store: Store, task_id: str, claim_id: str | None, project: Path):
+            raise GitError("error: open(\"provider-smoke.txt\"): Permission denied\nfatal: updating files failed")
+
+    result = run_live_provider_smoke(GitFailingAdapter(), timeout_seconds=1)
+
+    assert result.status == "FAIL"
+    assert result.execution_status == ExecutionStatus.FAILED
+    assert result.failure_reason == "provider_smoke_git_permission_denied"
+    assert result.implementation_checked is True
+    assert result.implementation_ready is False
+    assert result.review_ready is True
 
 
 def test_capacity_reports_command_availability_separately_from_live_readiness(tmp_path: Path) -> None:
