@@ -4,6 +4,8 @@ import json
 import subprocess
 from pathlib import Path
 
+import pytest
+
 import stagemesh.cli as cli_module
 from stagemesh.task_sources import DiscoveredTask, GitHubApiIssueSource
 
@@ -103,18 +105,17 @@ def test_run_window_migrates_existing_install_in_place(tmp_path: Path, monkeypat
     assert json.loads(config_path.read_text(encoding="utf-8"))["task_sources"][0]["labels"] == ["stagemesh:ready"]
 
 
-def test_migration_updates_legacy_queued_github_source_to_ready(tmp_path: Path) -> None:
+@pytest.mark.parametrize("labels", [["status:QUEUED"], ["stagemesh:ready"], ["status:QUEUED", "area:x"], ["custom"]])
+def test_migration_keeps_existing_github_source_labels(tmp_path: Path, labels: list[str]) -> None:
     project = _github_project(tmp_path)
     (project / ".stagemesh").mkdir()
     config_path = project / ".stagemesh" / "config.json"
-    source = {"name": "github", "type": "github", "labels": ["status:QUEUED"], "excluded_labels": ["x"]}
+    source = {"name": "github", "type": "github", "labels": list(labels), "excluded_labels": ["x"]}
     config_path.write_text(json.dumps({"github": {"owner": "acme", "repo": "widgets"}, "task_sources": [source]}), encoding="utf-8")
 
     assert cli_module.main(["--project", str(project), "init"]) == 0
 
-    assert json.loads(config_path.read_text(encoding="utf-8"))["task_sources"] == [
-        {"name": "github", "type": "github", "labels": ["stagemesh:ready"], "excluded_labels": ["x"]}
-    ]
+    assert json.loads(config_path.read_text(encoding="utf-8"))["task_sources"] == [source]
 
 
 def test_run_window_unmigratable_missing_source_refuses_with_one_fix_and_writes_report(
