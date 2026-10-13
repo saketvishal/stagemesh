@@ -16,6 +16,7 @@ from stagemesh.contracts import (
     evaluate_contract,
     parse_contract,
     run_gate,
+    scope_classification,
 )
 from stagemesh.coordinator import Coordinator
 from stagemesh.domain import EvidenceKind, EvidenceStatus, ExecutionStatus, Stage, TaskStatus
@@ -134,6 +135,39 @@ def test_contract_rejects_forbidden_and_out_of_scope_files(tmp_path: Path) -> No
         "outside_allowed_files",
         "forbidden_file_changed",
     }
+    assert scope_classification(contract, result.changed_files) == {
+        "dependency_manifest_without_gate": [],
+        "excluded": [],
+        "forbidden": ["README.md"],
+        "in_scope": ["src/app.py"],
+        "noise": [],
+        "outside_allowed": ["README.md"],
+        "protected": [],
+    }
+
+
+def test_validation_evidence_records_scope_classification_for_out_of_scope_paths(tmp_path: Path) -> None:
+    workspace = _repo(tmp_path / "repo")
+    project = workspace.path
+    store = _store(tmp_path)
+    task_id = store.upsert_task("scope task")
+    (project / "stagemesh.contract.json").write_text(
+        json.dumps({"objective": "Only source", "allowed_files": ["src/**", "stagemesh.contract.json"], "forbidden_files": ["README.md"]}),
+        encoding="utf-8",
+    )
+    (project / "README.md").write_text("scope bleed\n", encoding="utf-8")
+    sha = workspace.commit_all("candidate")
+    store.add_candidate(task_id, sha, "implementer", True)
+
+    status = Validator().validate(store, task_id, sha, project)
+    evidence = store.conn.execute("SELECT payload FROM evidence WHERE task_id=? AND candidate_sha=?", (task_id, sha)).fetchone()
+    payload = json.loads(evidence["payload"])
+
+    assert status is EvidenceStatus.FAILED
+    assert payload["scope"]["outside_allowed"] == ["README.md"]
+    assert payload["scope"]["forbidden"] == ["README.md"]
+    assert payload["scope"]["in_scope"] == ["stagemesh.contract.json"]
+    store.close()
 
 
 def test_contract_runs_required_gates_and_blocks_failures(tmp_path: Path) -> None:
@@ -676,6 +710,8 @@ def test_provider_prompt_includes_change_contract(tmp_path: Path) -> None:
     assert "Change contract:" in prompt
     assert "Only touch source" in prompt
     assert "Forbidden files: README.md" in prompt
+    assert "Treat the allowed files as the complete implementation context." in prompt
+    assert "request an audited scope expansion" in prompt
     assert not (project / "captured_prompt.txt").exists()
     store.close()
 

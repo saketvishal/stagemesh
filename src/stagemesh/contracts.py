@@ -577,8 +577,45 @@ def contract_prompt(contract: ChangeContract) -> str:
         lines.append(f"- Max changed files: {contract.max_changed_files}")
     if contract.max_diff_lines is not None:
         lines.append(f"- Max diff lines: {contract.max_diff_lines}")
-    lines.append("Stay strictly inside this contract; unrelated edits will be rejected.")
+    lines.extend(
+        [
+            "Scope discipline:",
+            "- Treat the allowed files as the complete implementation context.",
+            "- Do not edit unrelated files, broad refactors, generated noise, dependency manifests, or configuration outside this contract.",
+            "- If the task truly needs another path, stop and request an audited scope expansion instead of editing it.",
+            "- Out-of-scope edits are rejected before integration.",
+        ]
+    )
     return "\n".join(lines)
+
+
+def scope_classification(contract: ChangeContract, changed: tuple[str, ...] | list[str]) -> dict[str, list[str]]:
+    """Stable, operator-visible grouping of a candidate diff against its contract scope."""
+    result = {
+        "in_scope": [],
+        "outside_allowed": [],
+        "excluded": [],
+        "forbidden": [],
+        "protected": [],
+        "dependency_manifest_without_gate": [],
+        "noise": [],
+    }
+    for path in changed:
+        if _matches(path, contract.allowed_files):
+            result["in_scope"].append(path)
+        else:
+            result["outside_allowed"].append(path)
+        if _matches(path, contract.exclusions):
+            result["excluded"].append(path)
+        if _matches(path, contract.forbidden_files):
+            result["forbidden"].append(path)
+        if _matches(path, contract.protected_files):
+            result["protected"].append(path)
+        if _matches(path, DEPENDENCY_MANIFESTS) and not contract.dependency_checks:
+            result["dependency_manifest_without_gate"].append(path)
+        if is_noise_path(path):
+            result["noise"].append(path)
+    return {key: sorted(values) for key, values in result.items()}
 
 
 def _required_text(value: Any, field: str) -> str:
