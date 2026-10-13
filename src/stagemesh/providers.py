@@ -32,6 +32,7 @@ from .persistence import Store
 from .process_identity import popen_identity
 from .redaction import redact_command_secrets
 from .remediation import remediation_context
+from .research_context import build_research_brief
 from .workspace_guard import (
     EXTERNAL_WORKSPACE_MUTATION,
     WorkspaceLease,
@@ -629,6 +630,7 @@ def _build_task_prompt(
     effective_contract = contract
     frontend_text = _frontend_design_prompt(title, contract)
     spec_text = _project_specs_prompt(project, contract)
+    research_text = build_research_brief(project, contract) if project is not None else ""
     if contract is not None:
         contract_text = "\n\n" + contract_prompt(contract) + "\n"
     elif project is not None:
@@ -638,6 +640,7 @@ def _build_task_prompt(
             contract_text = "\n\n" + contract_prompt(loaded_contract) + "\n"
             frontend_text = _frontend_design_prompt(title, loaded_contract)
             spec_text = _project_specs_prompt(project, loaded_contract)
+            research_text = build_research_brief(project, loaded_contract)
         except ContractError as exc:
             contract_text = f"\n\nChange contract is invalid and must be fixed before coding: {exc}\n"
     remediation_text = _remediation_prompt(remediation) if remediation else ""
@@ -645,6 +648,7 @@ def _build_task_prompt(
         f"StageMesh task: {title}\n\n"
         f"{contract_text}"
         f"{spec_text}"
+        f"{research_text}"
         f"{remediation_text}"
         "Please implement the changes described above.\n\n"
         f"{IMPLEMENTATION_DISCIPLINE}"
