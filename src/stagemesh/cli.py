@@ -659,7 +659,7 @@ def command_contract_check(args: argparse.Namespace) -> int:
         print("contract-check needs --task or --file", file=sys.stderr)
         return 2
     project = Path(args.project).resolve()
-    report = check_contract(project, args.task, Path(args.file) if args.file else None)
+    report = check_contract(project, args.task, Path(args.file) if args.file else None, require_spec=args.require_spec)
     print(json.dumps(report, indent=2, sort_keys=True) if args.json else "\n".join(format_report(report)))
     return 0 if report["ok"] else 2
 
@@ -3090,6 +3090,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     contract_check.add_argument("--task", help="Check .stagemesh/contracts/<task>.json")
     contract_check.add_argument("--file", help="Check this contract file instead")
+    contract_check.add_argument("--require-spec", action="store_true", help="Fail unless the contract cites at least one existing non-empty spec_refs file")
     contract_check.add_argument("--json", action="store_true")
     contract_check.set_defaults(func=command_contract_check)
     rebase = sub.add_parser("rebaseline-task", help="Move a stale task baseline to the candidate's merge-base with the integration ref (audited)")

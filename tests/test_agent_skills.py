@@ -125,6 +125,8 @@ def test_implementation_prompt_includes_scoped_research_brief(tmp_path: Path) ->
     )
 
     assert "Contextual research brief (read-only; complete before editing):" in prompt
+    assert "Spec planning gate:" in prompt
+    assert "write a short private implementation spec" in prompt
     assert "  - src/provider.py" in prompt
     assert "  - tests/test_provider.py" in prompt
     assert "src/unrelated.py" not in prompt

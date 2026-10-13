@@ -64,6 +64,15 @@ IMPLEMENTATION_DISCIPLINE = (
     "- If you discover useful work outside the contract, leave it out of the diff and mention it as deferred work.\n\n"
 )
 
+SPEC_PLANNING_DISCIPLINE = (
+    "Spec planning gate:\n"
+    "- Before editing, write a short private implementation spec in your scratch notes: user-visible behavior, affected surfaces, "
+    "data/contracts, tests or checks, and risks.\n"
+    "- Base that spec only on the change contract, project specs, and contextual research brief above. Do not invent requirements.\n"
+    "- If the contract/specs are too vague to make a safe code change, stop and say what must be clarified instead of coding.\n"
+    "- After the scratch spec is clear, implement only the smallest diff that satisfies it.\n\n"
+)
+
 FRONTEND_DESIGN_DISCIPLINE = (
     "Frontend design discipline:\n"
     "- Ground UI choices in the product, audience, and job of the screen instead of default SaaS chrome.\n"
@@ -651,6 +660,7 @@ def _build_task_prompt(
         f"{research_text}"
         f"{remediation_text}"
         "Please implement the changes described above.\n\n"
+        f"{SPEC_PLANNING_DISCIPLINE}"
         f"{IMPLEMENTATION_DISCIPLINE}"
         f"{frontend_text}"
         f"{skill_prompt(title, effective_contract, remediation=bool(remediation))}"

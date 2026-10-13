@@ -32,7 +32,7 @@ def contract_section_sizes(contract: ChangeContract) -> list[dict[str, Any]]:
     return _section_sizes(_contract_payload(contract))
 
 
-def check_contract_text(text: str, limit: int = MAX_CANONICAL_CONTRACT_CHARS) -> dict[str, Any]:
+def check_contract_text(text: str, limit: int = MAX_CANONICAL_CONTRACT_CHARS, *, require_spec: bool = False) -> dict[str, Any]:
     """Fail-closed verdict for contract JSON text. `ok` is True only when it parses and fits the canonical limit."""
     report: dict[str, Any] = {"ok": False, "limit": limit, "size": None, "errors": [], "gates": [], "largest_sections": []}
     try:
@@ -47,6 +47,8 @@ def check_contract_text(text: str, limit: int = MAX_CANONICAL_CONTRACT_CHARS) ->
         return report
     if not contract.explicit:
         report["errors"].append("change contract must be explicit")
+    if require_spec and not contract.spec_refs:
+        report["errors"].append("strict spec mode requires at least one spec_refs entry")
     size = len(canonical_contract_json(contract))
     report["size"] = size
     report["gates"] = [gate.name for gate in contract.gates]
@@ -63,7 +65,12 @@ def check_contract_text(text: str, limit: int = MAX_CANONICAL_CONTRACT_CHARS) ->
 
 
 def check_contract(
-    project: Path, task_id: str | None = None, path: Path | None = None, limit: int = MAX_CANONICAL_CONTRACT_CHARS
+    project: Path,
+    task_id: str | None = None,
+    path: Path | None = None,
+    limit: int = MAX_CANONICAL_CONTRACT_CHARS,
+    *,
+    require_spec: bool = False,
 ) -> dict[str, Any]:
     if path is None:
         if task_id is None:
@@ -91,9 +98,31 @@ def check_contract(
             "largest_sections": [],
             "path": str(path),
         }
-    report = check_contract_text(text, limit=limit)
+    report = check_contract_text(text, limit=limit, require_spec=require_spec)
     report["path"] = str(path)
+    if require_spec and report["ok"]:
+        try:
+            contract = parse_contract(json.loads(text))
+        except (ValueError, ContractError):
+            return report
+        missing = _missing_spec_refs(project, contract)
+        if missing:
+            report["errors"].extend(f"spec ref is missing or empty: {ref}" for ref in missing)
+            report["ok"] = False
     return report
+
+
+def _missing_spec_refs(project: Path, contract: ChangeContract) -> list[str]:
+    root = project.resolve()
+    missing: list[str] = []
+    for ref in contract.spec_refs:
+        try:
+            target = (root / ref).resolve()
+            if root not in target.parents or not target.is_file() or not target.read_text(encoding="utf-8", errors="replace").strip():
+                missing.append(ref)
+        except OSError:
+            missing.append(ref)
+    return missing
 
 
 def format_report(report: dict[str, Any]) -> list[str]:

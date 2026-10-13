@@ -37,3 +37,25 @@ def test_check_contract_by_task_and_missing_file(tmp_path: Path) -> None:
     assert check_contract(tmp_path, "T-1")["ok"]
     missing = check_contract(tmp_path, "T-2")
     assert not missing["ok"] and "no contract file" in missing["errors"][0]
+
+
+def test_require_spec_fails_without_spec_ref() -> None:
+    report = check_contract_text(json.dumps(VALID), require_spec=True)
+
+    assert not report["ok"]
+    assert "requires at least one spec_refs" in report["errors"][0]
+
+
+def test_require_spec_checks_referenced_file_exists_and_has_content(tmp_path: Path) -> None:
+    contracts = tmp_path / ".stagemesh" / "contracts"
+    docs = tmp_path / "docs"
+    contracts.mkdir(parents=True)
+    docs.mkdir()
+    payload = dict(VALID, spec_refs=["docs/spec.md"])
+    (contracts / "T-1.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    missing = check_contract(tmp_path, "T-1", require_spec=True)
+    assert not missing["ok"] and "docs/spec.md" in missing["errors"][0]
+
+    (docs / "spec.md").write_text("Strict PRD\n", encoding="utf-8")
+    assert check_contract(tmp_path, "T-1", require_spec=True)["ok"]
