@@ -10,16 +10,24 @@ from test_parallel import Rig, ScriptedExecutor
 from test_provider_pool import IMPLEMENT, REVIEW
 from test_provider_pool import Rig as PoolRig
 from test_review_terminalization import TASK as UNIT_TASK
-from test_review_terminalization import JsonReviewAdapter, _project_with_candidate, _review_execution
+from test_review_terminalization import _project_with_candidate, _review_execution
 from test_single_task_stale_rebase import TASK, _advance_until
 
 from stagemesh.contract_binding import contract_for_candidate
 from stagemesh.coordinator import Coordinator
-from stagemesh.domain import EvidenceKind, EvidenceStatus, ExecutionKind, ExecutionStatus, Stage, TaskStatus
+from stagemesh.domain import (
+    EvidenceKind,
+    EvidenceStatus,
+    ExecutionKind,
+    ExecutionStatus,
+    Stage,
+    TaskStatus,
+)
 from stagemesh.git import GitWorkspace
 from stagemesh.integration import _has_exact_bound_evidence
 from stagemesh.provider_pool import _infrastructure_reason
 from stagemesh.review import (
+    ADVERSE_REVIEW_DISCIPLINE,
     INFRASTRUCTURE_FAILURE,
     REVIEW_INCOMPLETE_RETRIES,
     VERDICT_FAIL_WITH_FINDINGS,
@@ -40,8 +48,10 @@ class ScriptedReviewAdapter:
         self.name = name
         self.responses = list(responses)
         self.calls = 0
+        self.prompts: list[str] = []
 
     def review(self, prompt: str) -> str:
+        self.prompts.append(prompt)
         response = self.responses[min(self.calls, len(self.responses) - 1)]
         self.calls += 1
         return response
@@ -69,6 +79,18 @@ def test_complete_pass_is_accepted_and_bound_to_the_exact_candidate_and_contract
     assert (payload["candidate_sha"], payload["contract_hash"], payload["contract_version"]) == (candidate, bound.digest, bound.version)
     assert payload["independent_reviewer"] is True and payload["review_execution_invoked"] is True
     assert store.has_bound_evidence(UNIT_TASK, candidate, EvidenceKind.REVIEW, bound.digest, EvidenceStatus.PASSED)
+
+
+def test_reviewer_prompt_is_adverse_and_evidence_records_the_gate(tmp_path: Path) -> None:
+    project, store, candidate = _project_with_candidate(tmp_path)
+    adapter = ScriptedReviewAdapter('{"decision":"PASS"}')
+
+    assert Reviewer(adapter=adapter, require_independent=True).review(store, UNIT_TASK, candidate, project) == EvidenceStatus.PASSED
+
+    assert adapter.prompts and ADVERSE_REVIEW_DISCIPLINE.strip() in adapter.prompts[0]
+    assert "unnecessary complexity" in adapter.prompts[0]
+    payload = _evidence(store, EvidenceKind.REVIEW, EvidenceStatus.PASSED)[0]
+    assert payload["adverse_review_gate"] is True
 
 
 @pytest.mark.parametrize("decision", [VERDICT_FAIL_WITH_FINDINGS, "FAIL"])
