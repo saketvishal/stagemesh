@@ -14,6 +14,7 @@ from stagemesh.validation_plan import (
     CORE_LIFECYCLE_OR_SCHEMA_SECURITY,
     DOCS_ONLY,
     LOCALIZED_CODE,
+    contract_with_browser_e2e_gates,
     derive_validation_plan,
     planned_contract,
 )
@@ -115,6 +116,33 @@ def test_ci_inside_a_focused_test_path_does_not_make_gate_broad() -> None:
 
     assert plan.debug_checks == ("trial-review-tenant-isolation",)
     assert [gate.name for gate in scoped.gates] == ["trial-review-tenant-isolation"]
+
+
+def test_frontend_change_discovers_browser_e2e_script(tmp_path: Path) -> None:
+    web = tmp_path / "apps" / "web"
+    web.mkdir(parents=True)
+    (web / "package.json").write_text(
+        json.dumps({"scripts": {"e2e:ui-gate": "playwright test smoke.spec.ts"}}),
+        encoding="utf-8",
+    )
+    contract = ChangeContract(objective="Fix frontend flow", allowed_files=("apps/web/src/App.tsx",))
+
+    updated = contract_with_browser_e2e_gates(tmp_path, contract, ("apps/web/src/App.tsx",))
+    plan = derive_validation_plan(updated, ("apps/web/src/App.tsx",))
+
+    assert [gate.name for gate in updated.gates] == ["browser-e2e:apps/web"]
+    assert updated.gates[0].command == ("npm", "run", "e2e:ui-gate")
+    assert updated.gates[0].cwd == "apps/web"
+    assert "browser-e2e:apps/web" in plan.debug_checks
+
+
+def test_non_frontend_change_does_not_discover_browser_e2e_script(tmp_path: Path) -> None:
+    (tmp_path / "package.json").write_text(json.dumps({"scripts": {"e2e": "playwright test"}}), encoding="utf-8")
+    contract = ChangeContract(objective="Fix parser", allowed_files=("src/parser.py",))
+
+    updated = contract_with_browser_e2e_gates(tmp_path, contract, ("src/parser.py",))
+
+    assert updated.gates == ()
 
 
 def test_core_lifecycle_schema_security_records_escalation_reason() -> None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import fnmatch
+import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -53,6 +54,16 @@ _CORE_PATTERNS = (
     "**/schema/**",
     "**/security.py",
 )
+_FRONTEND_PATTERNS = (
+    "apps/web/**",
+    "frontend/**",
+    "web/**",
+    "src/**/*.jsx",
+    "src/**/*.tsx",
+    "**/*.jsx",
+    "**/*.tsx",
+)
+_BROWSER_E2E_SCRIPTS = ("e2e:ui-gate", "test:e2e", "e2e", "playwright")
 
 
 @dataclass(frozen=True)
@@ -125,6 +136,44 @@ def planned_contract(contract: ChangeContract, plan: ValidationPlan) -> ChangeCo
     )
 
 
+def contract_with_browser_e2e_gates(project: Path, contract: ChangeContract, changed_files: tuple[str, ...]) -> ChangeContract:
+    """Add discovered browser/API E2E gates for frontend-like changes.
+
+    The project opts in by having a conventional package script. StageMesh does not invent
+    a browser command when the repository has not declared one.
+    """
+    if not _looks_frontend(contract, changed_files):
+        return contract
+    discovered = _browser_e2e_gates(project)
+    if not discovered:
+        return contract
+    existing = {gate.name for gate in contract.gates}
+    additions = tuple(gate for gate in discovered if gate.name not in existing)
+    if not additions:
+        return contract
+    return ChangeContract(
+        objective=contract.objective,
+        explicit=contract.explicit,
+        validation_classification=contract.validation_classification,
+        validation_risk=contract.validation_risk,
+        validation_escalation_reasons=contract.validation_escalation_reasons,
+        acceptance_criteria=contract.acceptance_criteria,
+        allowed_files=contract.allowed_files,
+        forbidden_files=contract.forbidden_files,
+        exclusions=contract.exclusions,
+        invariants=contract.invariants,
+        required_tests=contract.required_tests + additions,
+        lint=contract.lint,
+        typecheck=contract.typecheck,
+        dependency_checks=contract.dependency_checks,
+        public_api=contract.public_api,
+        protected_files=contract.protected_files,
+        spec_refs=contract.spec_refs,
+        max_changed_files=contract.max_changed_files,
+        max_diff_lines=contract.max_diff_lines,
+    )
+
+
 _RISK_RANK = {
     DOCS_ONLY: 0,
     CONFIG_OR_PROVIDER_COMMAND: 1,
@@ -161,6 +210,54 @@ def _derived_classification(contract: ChangeContract, changed_files: tuple[str, 
     if any(_matches(path, _CONFIG_PROVIDER_PATTERNS) for path in scope):
         return CONFIG_OR_PROVIDER_COMMAND
     return LOCALIZED_CODE
+
+
+def _looks_frontend(contract: ChangeContract, changed_files: tuple[str, ...]) -> bool:
+    scope = changed_files or contract.allowed_files
+    text = f"{contract.objective} {' '.join(contract.acceptance_criteria)}".casefold()
+    return any(_matches(path, _FRONTEND_PATTERNS) for path in scope) or any(
+        token in text for token in ("ui", "browser", "frontend", "playwright", "puppeteer")
+    )
+
+
+def _browser_e2e_gates(project: Path) -> tuple[GateCommand, ...]:
+    gates: list[GateCommand] = []
+    for package in _package_json_files(project):
+        script = _preferred_e2e_script(package)
+        if script is None:
+            continue
+        rel = package.parent.relative_to(project).as_posix()
+        name = "browser-e2e" if rel == "." else f"browser-e2e:{rel}"
+        gates.append(GateCommand(name, ("npm", "run", script), cwd=rel))
+    return tuple(gates)
+
+
+def _package_json_files(project: Path) -> list[Path]:
+    root = project.resolve()
+    found: list[Path] = []
+    for package in sorted(root.rglob("package.json")):
+        try:
+            rel = package.relative_to(root).parts
+        except ValueError:
+            continue
+        if any(part in {"node_modules", ".stagemesh", ".git"} for part in rel):
+            continue
+        found.append(package)
+    return found
+
+
+def _preferred_e2e_script(package: Path) -> str | None:
+    try:
+        payload = json.loads(package.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    scripts = payload.get("scripts")
+    if not isinstance(scripts, dict):
+        return None
+    for name in _BROWSER_E2E_SCRIPTS:
+        if isinstance(scripts.get(name), str) and scripts[name].strip():
+            return name
+    return None
 
 
 def _escalation_reasons(contract: ChangeContract, changed_files: tuple[str, ...], classification: str) -> tuple[str, ...]:

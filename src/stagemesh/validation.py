@@ -9,7 +9,11 @@ from .git import GitError
 from .persistence import Store
 from .process_identity import owner_execution_fields
 from .remediation import finding_identity
-from .validation_plan import derive_validation_plan, planned_contract
+from .validation_plan import (
+    contract_with_browser_e2e_gates,
+    derive_validation_plan,
+    planned_contract,
+)
 
 
 class Validator:
@@ -29,6 +33,7 @@ class Validator:
                 inspected_files = tuple(changed_files(project, candidate_sha, bound.baseline_sha))
             except (GitError, OSError):
                 inspected_files = ()
+            contract = contract_with_browser_e2e_gates(project, contract, inspected_files)
             plan = derive_validation_plan(contract, inspected_files)
             evaluation = evaluate_contract(
                 project,
