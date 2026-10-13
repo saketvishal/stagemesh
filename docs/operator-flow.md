@@ -18,6 +18,19 @@ those guards, so plain `queue-run` now refuses and points here. It only runs wit
 not sweep worktrees unless you also pass `--sweep-worktrees`. `stagemesh queue-control resume` only opens admission; it does not make
 `queue-run` production-safe.
 
+## Queue Reconciliation
+
+When `doctor` shows old blocked work, duplicates or decision-only items, use `stagemesh queue reconcile` before starting another
+window. It syncs task sources, classifies every ledger task, and starts in dry-run mode. It does not run providers or clean worktrees.
+
+Use explicit write flags for cleanup:
+
+    stagemesh queue reconcile --write --park-design-decisions --unblock-retryable
+
+`--park-design-decisions` moves tasks blocked on unresolved review findings into audited retirement so they stop looking runnable.
+`--unblock-retryable` reopens blocked tasks that are not source-retired and not waiting on a design decision. Source-closed,
+source-ineligible, done and already retired tasks are only reported.
+
 ## 1. Check the checkout: `stagemesh doctor`
 
 `stagemesh doctor` ends with an **operational readiness** section. It is read-only (`--no-network` also skips the GitHub lookup).

@@ -89,6 +89,7 @@ from .provider_pool import (
     describe_verdicts,
 )
 from .providers import ProviderValidationError, adapters_from_config, stage_command_summary
+from .queue_reconcile import ReconcileOptions, reconcile_queue
 from .queue_run import QueueRunner
 from .queue_visibility import format_queue_control, queue_control_report
 from .recovery import RecoveryRefusal, advance_baseline, format_doctor, rebaseline_task, rebind_contract, task_doctor
@@ -2993,6 +2994,50 @@ def command_ci_wait(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_queue_reconcile(args: argparse.Namespace) -> int:
+    project = Path(args.project).resolve()
+    store = Store(db_path(project))
+    store.migrate()
+    config = load_config(project)
+    sync_sources = not args.no_sync
+    if sync_sources:
+        _sync_all_sources(store, project, config, None)
+    report = reconcile_queue(
+        store,
+        ReconcileOptions(
+            write=args.write,
+            park_design_decisions=args.park_design_decisions,
+            unblock_retryable=args.unblock_retryable,
+        ),
+        sync_sources=sync_sources,
+    )
+    store.close()
+    if args.json:
+        print(json.dumps(report.to_dict(), indent=2, sort_keys=True))
+        return 0
+
+    print(f"queue reconcile: {'WRITE' if args.write else 'DRY RUN'}")
+    print("counts: " + ", ".join(f"{key}={value}" for key, value in sorted(report.counts().items())))
+    actions = report.actions
+    if not actions:
+        print("actions: none")
+    else:
+        print("actions:")
+        for item in actions:
+            prefix = "applied" if item.applied else "would apply"
+            print(f"  {prefix}: {item.action} {item.task_id} - {item.reason}")
+    real = [item for item in report.items if item.classification in {"runnable", "retryable_blocked", "needs_decision"}]
+    if real:
+        print("real queue items:")
+        for item in real:
+            print(f"  {item.task_id} {item.stage}/{item.status}: {item.classification} - {item.title}")
+    else:
+        print("real queue items: none")
+    if not args.write and actions:
+        print("next: rerun with --write to apply listed actions")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="stagemesh")
     parser.add_argument("--project", default=".")
@@ -3089,6 +3134,26 @@ def build_parser() -> argparse.ArgumentParser:
     window.add_argument("--heartbeat", type=float, default=60.0, metavar="SECONDS", help="Seconds of silence before a running step prints a heartbeat line (default 60, 0 = off)")
     window.add_argument("--json", action="store_true")
     window.set_defaults(func=command_run_window)
+    queue = sub.add_parser("queue", help="Inspect and reconcile the StageMesh task queue without starting work")
+    queue_sub = queue.add_subparsers(dest="queue_command", required=True)
+    reconcile = queue_sub.add_parser(
+        "reconcile",
+        help="Classify queue entries and optionally apply audited cleanup actions (dry-run by default)",
+    )
+    reconcile.add_argument("--write", action="store_true", help="Apply the explicitly enabled reconciliation actions")
+    reconcile.add_argument(
+        "--park-design-decisions",
+        action="store_true",
+        help="Retire tasks blocked on unresolved review findings as audited decision items",
+    )
+    reconcile.add_argument(
+        "--unblock-retryable",
+        action="store_true",
+        help="Reopen blocked tasks that are not source-retired and not waiting on a design decision",
+    )
+    reconcile.add_argument("--no-sync", action="store_true", help="Do not sync configured task sources before reconciling")
+    reconcile.add_argument("--json", action="store_true")
+    reconcile.set_defaults(func=command_queue_reconcile)
     doctor_task = sub.add_parser("task-doctor", help="Read-only task summary: claims, candidate, baseline, contract, failures, findings, diagnosis, next command")
     doctor_task.add_argument("--task", required=True)
     doctor_task.add_argument("--to", metavar="INTEGRATION_REF", help="Integration ref to compare the baseline with (default: configured ref or current branch)")
