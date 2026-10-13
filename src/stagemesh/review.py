@@ -31,6 +31,13 @@ VERDICT_REVIEW_INCOMPLETE = "REVIEW_INCOMPLETE"
 LEGACY_FAIL = "FAIL"
 REVIEW_INCOMPLETE_RETRIES = 2  # extra attempts after an incomplete answer
 MAX_RECORDED_REVIEW_RESPONSE_CHARS = 4000
+ADVERSE_REVIEW_DISCIPLINE = (
+    "Adverse review gate:\n"
+    "- Act as a skeptical gatekeeper, not a rubber stamp. Try to find correctness, safety, scope, and maintainability defects.\n"
+    "- Prefer simpler designs. Fail concrete unnecessary complexity, broad rewrites, generic abstractions, or scope creep that the contract did not need.\n"
+    "- Check whether the candidate weakened validation, skipped the narrowest useful test, or changed behavior outside the stated objective.\n"
+    "- Report only actionable findings tied to the candidate and contract. Do not fail for style preferences or future work.\n\n"
+)
 
 # Progress chatter is not a verdict. _PRELIMINARY finds it anywhere in a short answer; findings are judged only by how they START
 # (or by being a bare filler word) so a concrete defect that merely mentions "in progress" is never discarded.
@@ -348,6 +355,7 @@ class Reviewer:
                 "review_provider": reviewer_provider,
                 "implementer_provider": implementer,
                 "independent_reviewer": independent,
+                "adverse_review_gate": True,
                 "deterministic_contract_gate": True,
                 "review_execution_provider": adapter_name,
                 "review_execution_invoked": False,
@@ -393,6 +401,7 @@ class Reviewer:
                 if adapter is not None and not findings and not (same_provider and self.require_independent):
                     review_payload["review_execution_invoked"] = True
                     prompt = (
+                        ADVERSE_REVIEW_DISCIPLINE +
                         f"Review candidate {candidate_sha} for task {task_id} under contract {bound.digest} (version {bound.version}).\n"
                         f"Objective: {contract.objective}\n"
                         "Inspect the candidate, then reply with ONE final JSON verdict and nothing else (no progress text): "
