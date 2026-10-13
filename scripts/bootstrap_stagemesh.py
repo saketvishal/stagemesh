@@ -22,8 +22,7 @@ DEFAULT_COMMANDS = {
     "agy": "agy --mode accept-edits",
 }
 AGY_UNATTENDED_COMMAND = "agy --mode accept-edits --dangerously-skip-permissions"
-DEFAULT_QUEUE_LABELS = ("stagemesh:ready",)
-LEGACY_QUEUE_LABELS = (("status:QUEUED",),)
+DEFAULT_QUEUE_LABELS = ("status:QUEUED",)
 DEFAULT_EXCLUDED_QUEUE_LABELS = (
     "stagemesh:blocked",
     "stagemesh:deferred",
@@ -250,25 +249,14 @@ def _configure_queue_source() -> None:
     if not path.exists():
         return
     data = json.loads(path.read_text(encoding="utf-8"))
-    github = data.get("github")
-    sources = data.setdefault("task_sources", [])
+    sources = data.get("task_sources")
     if not isinstance(sources, list):
         return
     changed = False
-    github_sources = [source for source in sources if isinstance(source, dict) and source.get("type") == "github"]
-    if isinstance(github, dict) and github.get("owner") and github.get("repo") and not github_sources:
-        source = {
-            "name": "github",
-            "type": "github",
-            "labels": list(DEFAULT_QUEUE_LABELS),
-            "excluded_labels": list(DEFAULT_EXCLUDED_QUEUE_LABELS),
-        }
-        sources.append(source)
-        github_sources.append(source)
-        changed = True
-    for source in github_sources:
-        labels = source.get("labels")
-        if isinstance(labels, list) and tuple(labels) in LEGACY_QUEUE_LABELS:
+    for source in sources:
+        if not isinstance(source, dict) or source.get("type") != "github":
+            continue
+        if source.get("labels") == ["stagemesh:ready"]:
             source["labels"] = list(DEFAULT_QUEUE_LABELS)
             changed = True
         if "excluded_labels" not in source:
@@ -276,7 +264,7 @@ def _configure_queue_source() -> None:
             changed = True
     if changed:
         path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-        print("queue source: stagemesh:ready excluding blocked/remediating labels")
+        print("queue source: status:QUEUED excluding blocked/remediating labels")
 
 
 def main(argv: list[str] | None = None) -> int:

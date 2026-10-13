@@ -134,7 +134,6 @@ DEFAULT_GITHUB_EXCLUDED_LABELS = (
     "status:BLOCKED",
     "status:REMEDIATING",
 )
-LEGACY_GITHUB_SOURCE_LABELS = (("status:QUEUED",),)
 
 
 def runtime_dir(project: Path) -> Path:
@@ -189,10 +188,6 @@ def _ensure_default_github_task_source(project: Path) -> bool:
         changed = True
     else:
         for source in github_sources:
-            labels = source.get("labels")
-            if isinstance(labels, list) and tuple(labels) in LEGACY_GITHUB_SOURCE_LABELS:
-                source["labels"] = list(DEFAULT_GITHUB_SOURCE_LABELS)
-                changed = True
             if "excluded_labels" not in source:
                 source["excluded_labels"] = list(DEFAULT_GITHUB_EXCLUDED_LABELS)
                 changed = True
@@ -840,9 +835,17 @@ def command_run_window(args: argparse.Namespace) -> int:
         return 2
     project = Path(args.project).resolve()
     config = load_config(project)
+    if _missing_github_task_source_check(config) is not None:
+        # existing install: add the default GitHub source in place instead of asking the operator to run init
+        if _ensure_default_github_task_source(project):
+            print("migrated config: added GitHub task source for stagemesh:ready issues", file=sys.stderr)
+            config = load_config(project)
     missing_source = _missing_github_task_source_check(config)
     if missing_source is not None:
         payload = {"preflight": [missing_source], "would_run": [], "left_alone": {}, "ok": False}
+        early_report = Path(args.report) if args.report else runtime_dir(project) / "reports" / "run-window" / f"{datetime.now():%Y%m%d-%H%M%S}.json"
+        early_report.parent.mkdir(parents=True, exist_ok=True)
+        early_report.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
         if args.json:
             print(json.dumps(payload, indent=2, sort_keys=True))
         else:

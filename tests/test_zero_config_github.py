@@ -85,57 +85,51 @@ def test_run_window_plan_syncs_ready_github_issues_from_zero_config(
     )
 
     payload = json.loads(capsys.readouterr().out)
-    assert code in {0, 2}
+    assert code == 0
     assert payload["would_run"] == ["17"]
 
 
-def test_run_window_missing_github_source_refuses_with_one_fix(tmp_path: Path, capsys) -> None:
+def test_run_window_migrates_existing_install_in_place(tmp_path: Path, monkeypatch, capsys) -> None:
+    project = _github_project(tmp_path)
+    (project / ".stagemesh").mkdir()
+    config_path = project / ".stagemesh" / "config.json"
+    config_path.write_text(json.dumps({"github": {"owner": "acme", "repo": "widgets"}}), encoding="utf-8")
+    monkeypatch.setattr(GitHubApiIssueSource, "discover", lambda self: ([DiscoveredTask("github", "3", "T", labels=("stagemesh:ready",))], "OK", None))
+
+    code = cli_module.main(["--project", str(project), "run-window", "--plan", "--json", "--report", str(tmp_path / "plan.json")])
+
+    assert code == 0
+    assert json.loads(capsys.readouterr().out)["would_run"] == ["3"]
+    assert json.loads(config_path.read_text(encoding="utf-8"))["task_sources"][0]["labels"] == ["stagemesh:ready"]
+
+
+def test_migration_keeps_existing_github_source_labels(tmp_path: Path) -> None:
+    project = _github_project(tmp_path)
+    (project / ".stagemesh").mkdir()
+    config_path = project / ".stagemesh" / "config.json"
+    source = {"name": "github", "type": "github", "labels": ["status:QUEUED"], "excluded_labels": ["x"]}
+    config_path.write_text(json.dumps({"github": {"owner": "acme", "repo": "widgets"}, "task_sources": [source]}), encoding="utf-8")
+
+    assert cli_module.main(["--project", str(project), "init"]) == 0
+
+    assert json.loads(config_path.read_text(encoding="utf-8"))["task_sources"] == [source]
+
+
+def test_run_window_unmigratable_missing_source_refuses_with_one_fix_and_writes_report(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
     project = _github_project(tmp_path)
     (project / ".stagemesh").mkdir()
     (project / ".stagemesh" / "config.json").write_text(
-        json.dumps({"github": {"owner": "acme", "repo": "widgets"}}),
-        encoding="utf-8",
+        json.dumps({"github": {"owner": "acme", "repo": "widgets"}}), encoding="utf-8"
     )
+    monkeypatch.setattr(cli_module, "_ensure_default_github_task_source", lambda project: False)
+    report = tmp_path / "plan.json"
 
-    code = cli_module.main(
-        [
-            "--project",
-            str(project),
-            "run-window",
-            "--plan",
-            "--json",
-            "--report",
-            str(tmp_path / "plan.json"),
-        ]
-    )
+    code = cli_module.main(["--project", str(project), "run-window", "--plan", "--json", "--report", str(report)])
 
     payload = json.loads(capsys.readouterr().out)
     failed = [check for check in payload["preflight"] if not check["ok"] and check["fatal"]]
     assert code == 2
-    assert failed == [
-        {
-            "name": "task_sources",
-            "ok": False,
-            "detail": "GitHub repository acme/widgets has no GitHub task source configured",
-            "fatal": True,
-            "fix": "stagemesh init",
-        }
-    ]
-
-
-def test_bootstrap_migrates_existing_github_config_to_ready_issue_source(tmp_path: Path) -> None:
-    from test_bootstrap_stagemesh import _load_bootstrap
-
-    bootstrap = _load_bootstrap()
-    bootstrap.PROJECT = tmp_path
-    (tmp_path / ".stagemesh").mkdir()
-    (tmp_path / ".stagemesh" / "config.json").write_text(
-        json.dumps({"github": {"owner": "acme", "repo": "widgets"}}),
-        encoding="utf-8",
-    )
-
-    bootstrap._configure_queue_source()
-
-    data = json.loads((tmp_path / ".stagemesh" / "config.json").read_text(encoding="utf-8"))
-    assert data["task_sources"][0]["type"] == "github"
-    assert data["task_sources"][0]["labels"] == ["stagemesh:ready"]
+    assert [check["fix"] for check in failed] == ["stagemesh init"]
+    assert json.loads(report.read_text(encoding="utf-8")) == payload
