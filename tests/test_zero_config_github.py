@@ -105,8 +105,18 @@ def test_run_window_migrates_existing_install_in_place(tmp_path: Path, monkeypat
     assert json.loads(config_path.read_text(encoding="utf-8"))["task_sources"][0]["labels"] == ["stagemesh:ready"]
 
 
-@pytest.mark.parametrize("labels", [["status:QUEUED"], ["stagemesh:ready"], ["status:QUEUED", "area:x"], ["custom"]])
-def test_migration_keeps_existing_github_source_labels(tmp_path: Path, labels: list[str]) -> None:
+@pytest.mark.parametrize(
+    ("labels", "expected"),
+    [
+        (["status:QUEUED"], ["stagemesh:ready"]),
+        (["stagemesh:ready"], ["stagemesh:ready"]),
+        (["status:QUEUED", "area:x"], ["status:QUEUED", "area:x"]),
+        (["custom"], ["custom"]),
+    ],
+)
+def test_migration_auto_updates_legacy_github_queue_label(
+    tmp_path: Path, labels: list[str], expected: list[str]
+) -> None:
     project = _github_project(tmp_path)
     (project / ".stagemesh").mkdir()
     config_path = project / ".stagemesh" / "config.json"
@@ -115,6 +125,7 @@ def test_migration_keeps_existing_github_source_labels(tmp_path: Path, labels: l
 
     assert cli_module.main(["--project", str(project), "init"]) == 0
 
+    source["labels"] = expected
     assert json.loads(config_path.read_text(encoding="utf-8"))["task_sources"] == [source]
 
 
