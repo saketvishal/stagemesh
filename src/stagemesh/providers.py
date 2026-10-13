@@ -260,7 +260,7 @@ class RuntimeCommandAdapter:
             if before_head != candidate_sha:
                 return _review_infrastructure_failure("review workspace did not checkout exact candidate")
             try:
-                review_prompt = prompt + skill_prompt("", stage="review")
+                review_prompt = prompt + skill_prompt(prompt, stage="review", project=review_path)
             except SkillPackError as exc:
                 return _review_infrastructure_failure(f"skill_pack_unavailable: {exc}")
             command, provider_input = _command_and_input(self.command_for("review"), review_prompt, structured_review=True)
@@ -663,7 +663,7 @@ def _build_task_prompt(
         f"{SPEC_PLANNING_DISCIPLINE}"
         f"{IMPLEMENTATION_DISCIPLINE}"
         f"{frontend_text}"
-        f"{skill_prompt(title, effective_contract, remediation=bool(remediation))}"
+        f"{skill_prompt(title, effective_contract, remediation=bool(remediation), project=project)}"
         "Workspace rules:\n"
         "- Edit files only. Do not run git commit, checkout, switch, reset, rebase, merge, cherry-pick, branch, tag, "
         "amend, or any command that moves HEAD or rewrites history.\n"

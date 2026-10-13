@@ -43,6 +43,22 @@ def resources(prompt: str) -> dict[str, Path]:
     }
 
 
+def project_resources(prompt: str) -> dict[str, Path]:
+    return {
+        name: Path(json.loads(path))
+        for line in prompt.splitlines()
+        if line.startswith("- Project skill ")
+        for name, path in [line.removeprefix("- Project skill ").split(": ", 1)]
+    }
+
+
+def write_project_skill(project: Path, name: str = "genui-architect") -> Path:
+    path = project / "agent-skills" / name / "SKILL.md"
+    path.parent.mkdir(parents=True)
+    path.write_text(f"---\nname: {name}\ndescription: Project guidance.\n---\n\n# Project skill\n", encoding="utf-8")
+    return path
+
+
 @pytest.mark.parametrize(
     ("title", "paths", "expected"),
     [
@@ -105,6 +121,66 @@ def test_referenced_frontend_spec_selects_design_without_losing_project_spec_con
 
     assert "Approved palette: green. Keep contextual menus." in prompt
     assert FRONTEND in resources(prompt)
+
+
+def test_ui_task_automatically_receives_project_genui_skill(tmp_path: Path) -> None:
+    skill = write_project_skill(tmp_path)
+    bound = ChangeContract(objective="Improve intake UI", allowed_files=("apps/web/Intake.tsx",))
+
+    prompt = _build_task_prompt("ui-task", task_row("Improve intake UI"), project=tmp_path, contract=bound)
+
+    assert project_resources(prompt) == {"genui-architect": skill.resolve()}
+    assert "do not expand the change contract" in prompt
+
+
+def test_non_ui_task_does_not_auto_load_project_genui_skill(tmp_path: Path) -> None:
+    write_project_skill(tmp_path)
+    bound = ChangeContract(objective="Fix API timeout", allowed_files=("src/api.py",))
+
+    prompt = _build_task_prompt("api-task", task_row("Fix API timeout"), project=tmp_path, contract=bound)
+
+    assert project_resources(prompt) == {}
+
+
+def test_explicit_project_skill_ref_loads_full_skill_for_non_ui_task(tmp_path: Path) -> None:
+    skill = write_project_skill(tmp_path, "domain-review")
+    bound = ChangeContract(
+        objective="Review domain mapping",
+        allowed_files=("src/domain.py",),
+        skill_refs=("agent-skills/domain-review/SKILL.md",),
+    )
+
+    prompt = _build_task_prompt("domain-task", task_row("Review domain mapping"), project=tmp_path, contract=bound)
+
+    assert project_resources(prompt) == {"domain-review": skill.resolve()}
+
+
+def test_missing_explicit_project_skill_fails_closed(tmp_path: Path) -> None:
+    from stagemesh.agent_skills import SkillPackError
+
+    bound = ChangeContract(
+        objective="Use required project skill",
+        skill_refs=("agent-skills/missing/SKILL.md",),
+    )
+    with pytest.raises(SkillPackError, match="unavailable project skill"):
+        _build_task_prompt("missing-skill", task_row("Use required project skill"), project=tmp_path, contract=bound)
+
+
+def test_project_skill_symlink_escape_is_rejected(tmp_path: Path) -> None:
+    from stagemesh.agent_skills import SkillPackError
+
+    outside = tmp_path.parent / "outside-project-skill" / "SKILL.md"
+    outside.parent.mkdir(exist_ok=True)
+    outside.write_text("---\nname: outside\ndescription: no\n---\n", encoding="utf-8")
+    link = tmp_path / "agent-skills" / "outside" / "SKILL.md"
+    link.parent.mkdir(parents=True)
+    try:
+        link.symlink_to(outside)
+    except OSError:
+        pytest.skip("symlinks unavailable")
+    bound = ChangeContract(objective="Use skill", skill_refs=("agent-skills/outside/SKILL.md",))
+    with pytest.raises(SkillPackError, match="inside the project"):
+        _build_task_prompt("escape", task_row("Use skill"), project=tmp_path, contract=bound)
 
 
 def test_implementation_prompt_includes_scoped_research_brief(tmp_path: Path) -> None:
