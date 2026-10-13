@@ -3,6 +3,12 @@
 StageMesh command workers receive selected full skill files automatically. Adding a skill to an operator's chat is optional and does
 not propagate it to a separate worker. After updating the installed StageMesh runtime, no per-task attachment is needed.
 
+Installed projects can also own skills. A change contract may list complete, project-relative `SKILL.md` paths in `skill_refs`.
+StageMesh validates that each path stays inside the task checkout and fails closed when an explicitly required skill is missing.
+For frontend tasks, StageMesh automatically uses `agent-skills/genui-architect/SKILL.md` when the project provides it, with generated
+runtime mirror locations as fallbacks. Project skills are read from the task's isolated checkout and never expand its allowed files,
+acceptance criteria, or authority.
+
 | Skill | Selection | Stage |
 | --- | --- | --- |
 | Anthropic `frontend-design` | UI file extensions, frontend JS/TS paths, or explicit UI intent; excludes documentation-only contracts | Implementation |

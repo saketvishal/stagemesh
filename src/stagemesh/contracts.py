@@ -53,6 +53,7 @@ class ChangeContract:
     validation_escalation_reasons: tuple[str, ...] = ()
     acceptance_criteria: tuple[str, ...] = ()
     spec_refs: tuple[str, ...] = ()
+    skill_refs: tuple[str, ...] = ()
     allowed_files: tuple[str, ...] = ("**",)
     forbidden_files: tuple[str, ...] = ()
     exclusions: tuple[str, ...] = ()
@@ -209,6 +210,7 @@ def parse_contract(payload: dict[str, Any]) -> ChangeContract:
         ),
         acceptance_criteria=_texts(payload.get("acceptance_criteria", ()), "acceptance_criteria"),
         spec_refs=_relative_paths(payload.get("spec_refs", ()), "spec_refs"),
+        skill_refs=_relative_paths(payload.get("skill_refs", ()), "skill_refs"),
         allowed_files=_texts(payload.get("allowed_files", ("**",)), "allowed_files") or ("**",),
         forbidden_files=_texts(payload.get("forbidden_files", ()), "forbidden_files"),
         exclusions=_texts(payload.get("exclusions", ()), "exclusions"),
@@ -573,6 +575,9 @@ def contract_prompt(contract: ChangeContract) -> str:
     if contract.spec_refs:
         lines.append("- Project specs:")
         lines.extend(f"  - {item}" for item in contract.spec_refs)
+    if contract.skill_refs:
+        lines.append("- Project skills:")
+        lines.extend(f"  - {item}" for item in contract.skill_refs)
     if contract.max_changed_files is not None:
         lines.append(f"- Max changed files: {contract.max_changed_files}")
     if contract.max_diff_lines is not None:
@@ -728,6 +733,8 @@ def _contract_payload(contract: ChangeContract) -> dict[str, Any]:
     }
     if contract.spec_refs:
         payload["spec_refs"] = list(contract.spec_refs)
+    if contract.skill_refs:
+        payload["skill_refs"] = list(contract.skill_refs)
     if contract.exclusive_resources:  # only when set, so existing contracts keep their digests
         payload["exclusive_resources"] = list(contract.exclusive_resources)
     if contract.max_changed_files is not None:

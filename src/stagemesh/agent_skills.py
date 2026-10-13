@@ -135,7 +135,7 @@ class SkillPackError(RuntimeError):
 
 def _task_text(title: str, contract: object | None) -> str:
     fields = [title, str(getattr(contract, "objective", ""))]
-    for attr in ("acceptance_criteria", "public_api", "spec_refs"):
+    for attr in ("acceptance_criteria", "public_api", "spec_refs", "skill_refs"):
         values = getattr(contract, attr, ())
         if isinstance(values, (tuple, list)):
             fields.extend(str(value) for value in values)
@@ -251,22 +251,65 @@ def _resolve_resources(skills: tuple[str, ...]) -> dict[str, Path]:
     return resolved
 
 
+_PROJECT_SKILL_ROOTS = ("agent-skills", ".agents/skills", ".claude/skills")
+
+
+def _resolve_project_skill(project: Path, relative: str) -> Path:
+    root = project.resolve()
+    candidate = (root / relative).resolve()
+    try:
+        inside = candidate.is_relative_to(root)
+    except ValueError:
+        inside = False
+    if not inside or candidate.name != "SKILL.md" or not candidate.is_file():
+        raise SkillPackError(
+            f"unavailable project skill {relative}: path must name an existing SKILL.md inside the project"
+        )
+    return candidate
+
+
+def _project_skills(
+    title: str,
+    contract: object | None,
+    project: Path | None,
+) -> dict[str, Path]:
+    if project is None:
+        return {}
+    selected: dict[str, Path] = {}
+    explicit = getattr(contract, "skill_refs", ())
+    if isinstance(explicit, (tuple, list)):
+        for relative in explicit:
+            path = _resolve_project_skill(project, str(relative))
+            selected[path.parent.name] = path
+    if is_frontend_task(title, contract) and "genui-architect" not in selected:
+        for skill_root in _PROJECT_SKILL_ROOTS:
+            relative = f"{skill_root}/genui-architect/SKILL.md"
+            candidate = (project / relative)
+            if candidate.is_file():
+                selected["genui-architect"] = _resolve_project_skill(project, relative)
+                break
+    return selected
+
+
 def skill_prompt(
     title: str,
     contract: object | None = None,
     *,
     remediation: bool = False,
     stage: str = "implementation",
+    project: Path | None = None,
 ) -> str:
     selected = select_skills(title, contract, remediation=remediation, stage=stage)
     files = _resolve_resources(selected)
+    project_files = _project_skills(title, contract, project)
     lines = [
         "\n" + _ADAPTER_POLICY,
         (
             "Read the selected full SKILL.md files below before starting this stage. "
             "Use ordinary file-reading tools (or Python Path.read_text) if your provider has no native Skill tool. "
             "Read linked companion files when applying their technique. "
-            "Apply them subject to the StageMesh adapter policy above; no network fetch is needed."
+            "Apply them subject to the StageMesh adapter policy above; no network fetch is needed. "
+            "Project skills guide only the bounded task and do not expand the change contract."
         ),
     ]
     if stage == "review":
@@ -276,5 +319,9 @@ def skill_prompt(
     lines.extend(
         f"- Skill {name}: {json.dumps(str(path), ensure_ascii=False)}"
         for name, path in files.items()
+    )
+    lines.extend(
+        f"- Project skill {name}: {json.dumps(str(path), ensure_ascii=False)}"
+        for name, path in project_files.items()
     )
     return "\n".join(lines) + "\n\n"

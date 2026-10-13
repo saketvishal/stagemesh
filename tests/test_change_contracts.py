@@ -542,6 +542,7 @@ def test_contract_parser_accepts_named_command_objects() -> None:
             "objective": "Ship safely",
             "acceptance_criteria": ["tests pass"],
             "spec_refs": ["docs/specs/voice-intake.md"],
+            "skill_refs": ["agent-skills/genui-architect/SKILL.md"],
             "allowed_files": ["src/**"],
             "required_tests": [{"name": "unit", "command": [sys.executable, "--version"], "timeout_seconds": 5}],
         }
@@ -550,6 +551,7 @@ def test_contract_parser_accepts_named_command_objects() -> None:
     assert contract.objective == "Ship safely"
     assert contract.acceptance_criteria == ("tests pass",)
     assert contract.spec_refs == ("docs/specs/voice-intake.md",)
+    assert contract.skill_refs == ("agent-skills/genui-architect/SKILL.md",)
     assert contract.required_tests[0].name == "unit"
 
 
@@ -557,6 +559,12 @@ def test_contract_parser_accepts_named_command_objects() -> None:
 def test_contract_parser_rejects_spec_refs_outside_project(ref: str) -> None:
     with pytest.raises(ContractError, match="spec_refs entries must be relative paths inside the project"):
         parse_contract({"objective": "Ship safely", "spec_refs": [ref]})
+
+
+@pytest.mark.parametrize("ref", ["../outside/SKILL.md", "/tmp/SKILL.md", "C:/tmp/SKILL.md"])
+def test_contract_parser_rejects_skill_refs_outside_project(ref: str) -> None:
+    with pytest.raises(ContractError, match="skill_refs entries must be relative paths inside the project"):
+        parse_contract({"objective": "Ship safely", "skill_refs": [ref]})
 
 
 def test_dependency_manifest_change_requires_dependency_gate(tmp_path: Path) -> None:
