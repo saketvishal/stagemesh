@@ -54,6 +54,7 @@ def test_provider_level_failures_are_classified_for_cooldown(message: str, expec
 
 def test_ordinary_code_failures_are_not_provider_cooldown_material() -> None:
     assert classify_failure(1, stderr="AssertionError: expected 1 got 2") == (False, "implementation_failure")
+    assert classify_failure(1, stderr='npm ERR! Missing script: "e2e"') == (False, "tool_execution_failure")
 
 
 def test_auth_failure_enters_cooldown_with_a_full_record_and_the_other_provider_carries_on(tmp_path: Path) -> None:
@@ -107,7 +108,7 @@ def test_all_providers_in_cooldown_says_so_clearly_and_burns_no_attempts(tmp_pat
         rig.pool.record_failure(rig.store, IMPLEMENT, TASK, name, "authentication_failure", provider_output="not logged in")
     executions = rig.store.conn.execute("SELECT COUNT(*) FROM executions").fetchone()[0]
 
-    ok, message, impl, _review = rig.pool.preflight(rig.store, TASK)
+    ok, message, _impl, _review = rig.pool.preflight(rig.store, TASK)
     rig.tick(3)
 
     assert not ok and "no implementation provider is available" in message
