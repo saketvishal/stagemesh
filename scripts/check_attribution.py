@@ -8,9 +8,24 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from stagemesh.git_identity import attribution_offences
+from stagemesh.git_identity import attribution_offences, is_non_human_email
 
 SHA = re.compile(r"[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?\Z")
+
+
+def publication_offences(sha: str, author: str, committer: str, message: str) -> list[str]:
+    findings = attribution_offences([(sha, author, committer, message)])
+    # Internal unconfigured lab repositories may use synthetic identities. Publishing
+    # them to GitHub is stricter and must not change StageMesh's internal fallback.
+    identities = [("author", author), ("committer", committer)]
+    identities.extend(("trailer", line) for line in message.splitlines()
+                      if re.match(r"^\s*co-authored-by\s*:", line, re.IGNORECASE))
+    for role, value in identities:
+        if any(is_non_human_email(email) for email in re.findall(r"<([^<>]*)>", value)):
+            marker = f"{sha[:10]} {role}"
+            if not any(finding.startswith(marker) for finding in findings):
+                findings.append(f"{marker} {value.strip()[:120]}")
+    return findings
 
 
 def git(repo: Path, *args: str) -> str:
@@ -28,16 +43,16 @@ def check_commits(repo: Path, revisions: list[str]) -> list[str]:
         author, committer, message = git(
             repo, "show", "-s", "--format=%an <%ae>%x00%cn <%ce>%x00%B", sha,
         ).split("\0", 2)
-        findings.extend(attribution_offences([(sha, author, committer, message)]))
+        findings.extend(publication_offences(sha, author, committer, message))
     return findings
 
 
 def check_message(repo: Path, path: Path) -> list[str]:
-    return attribution_offences([(
+    return publication_offences(
         "pending", git(repo, "var", "GIT_AUTHOR_IDENT").rsplit(">", 1)[0] + ">",
         git(repo, "var", "GIT_COMMITTER_IDENT").rsplit(">", 1)[0] + ">",
         path.read_text(encoding="utf-8"),
-    )])
+    )
 
 
 def main(argv: list[str] | None = None) -> int:

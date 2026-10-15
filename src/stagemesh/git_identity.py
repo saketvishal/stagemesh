@@ -286,12 +286,12 @@ def attribution_offences(commits: list[tuple[str, str, str, str]]) -> list[str]:
     for sha, author, committer, message in commits:
         for role, who in (("author", author), ("committer", committer)):
             email = who.rsplit("<", 1)[-1].rstrip(">").strip()
-            if is_non_human_email(email) or is_ai_or_placeholder_email(email):
+            if is_tool_email(email) or is_ai_or_placeholder_email(email):
                 offences.append(f"{sha[:10]} {role} {who}")
         for line in message.splitlines():
             trailer = _COAUTHOR_LINE.match(line)
             if trailer and any(
-                is_non_human_email(e) or is_ai_or_placeholder_email(e) for e in _EMAIL_IN_TRAILER.findall(trailer.group("who"))
+                is_tool_email(e) or is_ai_or_placeholder_email(e) for e in _EMAIL_IN_TRAILER.findall(trailer.group("who"))
             ):
                 offences.append(f"{sha[:10]} trailer {line.strip()[:120]}")
     return offences

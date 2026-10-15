@@ -35,7 +35,7 @@ For automation, validate an incoming range before publication:
 python scripts/check_attribution.py --base <full-base-sha> --head <full-candidate-sha>
 ```
 
-Exit 0 means accepted; 1 means an attribution violation; 2 means validation could not complete. Treat both nonzero results as a publication failure. StageMesh's existing integration gate uses the same identity policy; it now also rejects synthetic StageMesh identities consistently.
+Exit 0 means accepted; 1 means an attribution violation; 2 means validation could not complete. Treat both nonzero results as a publication failure. The publication checker reuses StageMesh's identity policy and additionally rejects synthetic identities at the publication boundary. Internal unconfigured lab repositories retain their existing synthetic fallback; they still must use an approved human identity before publication.
 
 ## Historical correction is separate
 
