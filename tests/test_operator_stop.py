@@ -464,6 +464,7 @@ def test_unread_large_stdin_has_an_independent_cleanup_deadline(tmp_path, monkey
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX process-group isolation")
 def test_provider_without_own_process_group_cannot_kill_the_runner_group(monkeypatch):
     from stagemesh import execution
+    from stagemesh.parallel import _kill_pid
 
     killed = []
 
@@ -477,6 +478,9 @@ def test_provider_without_own_process_group_cannot_kill_the_runner_group(monkeyp
     monkeypatch.setattr(execution.os, "killpg", lambda *args: pytest.fail("shared runner process group killed"))
     execution.kill_process_tree(Provider())
     assert killed == [123]
+    monkeypatch.setattr(execution.os, "kill", lambda pid, signal: killed.append(pid))
+    _kill_pid(123)
+    assert killed == [123, 123]
 
 
 @pytest.mark.parametrize("resume", [False, True])

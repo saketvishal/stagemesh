@@ -279,7 +279,11 @@ def _kill_pid(pid: int) -> None:
         subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], capture_output=True, check=False)
         return
     try:
-        os.killpg(os.getpgid(pid), signal.SIGKILL)
+        group = os.getpgid(pid)
+        if group == pid:
+            os.killpg(group, signal.SIGKILL)
+        else:
+            os.kill(pid, signal.SIGKILL)
     except OSError:
         try:
             os.kill(pid, signal.SIGKILL)
