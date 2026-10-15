@@ -392,8 +392,9 @@ def test_monitor_failure_cancels_the_owned_provider_instead_of_accepting_output(
     monkeypatch.setattr(control, "poll", unavailable_monitor)
     started = time.monotonic()
     try:
-        with provider_stop_scope(control), pytest.raises(OperatorStopRequested, match="monitoring failed"):
+        with provider_stop_scope(control), pytest.raises(OperatorStopRequested, match="monitoring failed") as caught:
             execution.communicate_bounded(proc, "", 8)
+        assert caught.value.monitor_failed and caught.value.cleanup_complete
         assert time.monotonic() - started < 5
         assert proc.poll() is not None
     finally:
@@ -481,6 +482,65 @@ def test_provider_without_own_process_group_cannot_kill_the_runner_group(monkeyp
     monkeypatch.setattr(execution.os, "kill", lambda pid, signal: killed.append(pid))
     _kill_pid(123)
     assert killed == [123, 123]
+
+
+def test_monitor_failure_stops_the_wave_without_a_queue_stop_event(tmp_path):
+    from test_survivor_wave import Rig, make_store
+
+    from stagemesh.coordinator import TargetSelection
+    from stagemesh.domain import ExecutionKind
+    from stagemesh.queue_control import OperatorStopRequested
+    from stagemesh.survivor_wave import RunResult, run_wave
+
+    store, project = make_store(tmp_path, ["1", "2"])
+    store.advance_task("1", Stage.IMPLEMENT)
+
+    class FailedMonitorExecutor:
+        name = "test-monitor"
+
+        def run(self, store, task_id, claim_id, project):
+            store.start_execution(task_id=task_id, claim_id=claim_id, kind=ExecutionKind.IMPLEMENTATION)
+            raise OperatorStopRequested("provider stop monitoring failed", monitor_failed=True)
+
+    def failed_monitor(rig, task_id):
+        worker = rig.worker_store()
+        try:
+            summary = RunSummary(True, "UNSET", task_id=task_id)
+            coordinator = Coordinator(worker, project, executor=FailedMonitorExecutor(), target=TargetSelection(task_id))
+            drive_task(worker, project, coordinator, task_id, summary, max_steps=1)
+            return RunResult(summary.stop_reason, summary.message)
+        finally:
+            worker.close()
+
+    rig = Rig(project, {"1": failed_monitor})
+    report = run_wave(store, ["1", "2"], rig.hooks(), concurrency=1, advance_baselines=False)
+    assert rig.runs == ["1"] and not rig.prs
+    assert report.stopped_early and report.tasks[0].stop_reason == "STOP_MONITOR_FAILED"
+    assert not list(store.running_executions()) and not store.has_active_claim("1")
+    assert not store.conn.execute("SELECT 1 FROM audit_events WHERE event_type='queue.admission_control'").fetchone()
+    store.close()
+
+
+def test_monitor_failure_stops_parallel_admission_after_verified_cleanup(tmp_path):
+    from test_parallel import Rig
+
+    from stagemesh.domain import ExecutionKind
+    from stagemesh.queue_control import OperatorStopRequested
+
+    rig = Rig(tmp_path, ["A", "B"])
+
+    class FailedMonitorExecutor:
+        name = "test-monitor"
+
+        def run(self, store, task_id, claim_id, project):
+            store.start_execution(task_id=task_id, claim_id=claim_id, kind=ExecutionKind.IMPLEMENTATION)
+            raise OperatorStopRequested("provider stop monitoring failed", monitor_failed=True)
+
+    summary = rig.runner(FailedMonitorExecutor(), concurrency=1, sweep_worktrees=False).run()
+    assert summary.stop_reason == "GLOBAL_SAFETY_FAILURE"
+    assert rig.outcomes(summary) == {"A": "STOP_MONITOR_FAILED"}
+    assert not list(rig.store.running_executions()) and not rig.store.has_active_claim("A")
+    rig.store.close()
 
 
 @pytest.mark.parametrize("resume", [False, True])

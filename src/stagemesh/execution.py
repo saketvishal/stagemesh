@@ -227,7 +227,9 @@ def _communicate_with_stop(
                     cleanup_complete=False,
                 )
             if monitor_failure is not None:
-                raise OperatorStopRequested("provider stop monitoring failed: " + type(monitor_failure).__name__)
+                raise OperatorStopRequested(
+                    "provider stop monitoring failed: " + type(monitor_failure).__name__, monitor_failed=True,
+                )
             if stop and stop["terminate_running"]:
                 raise OperatorStopRequested(str(stop.get("reason") or "operator stop"))
             stdout, stderr = outputs[0]

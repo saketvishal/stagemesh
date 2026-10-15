@@ -755,7 +755,7 @@ class ParallelRunner:
                 max_steps=self.max_steps, on_step=on_step, on_start=on_start, global_health=False, should_stop=self.stop.is_set,
                 worktree_root_path=self.runtime.worktree_root,
             )
-            if summary.stop_reason == "STOP_CLEANUP_INCOMPLETE":
+            if summary.stop_reason in {"STOP_CLEANUP_INCOMPLETE", "STOP_MONITOR_FAILED"}:
                 self.global_failure = f"task {task_id}: {summary.message}"
                 self.stop.set()
             elif summary.stop_reason == "OPERATOR_STOP":

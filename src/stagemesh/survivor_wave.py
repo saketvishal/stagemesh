@@ -42,7 +42,7 @@ INTEGRATION_MODES = (INTEGRATION_PR, INTEGRATION_LOCAL)
 STAGING_REF = "refs/heads/wave/staging"
 
 # `continue` stop reasons that say the environment, not the task, is the problem.
-INFRASTRUCTURE_STOP_REASONS = frozenset({"CURRENT_PROBLEM", "TARGET_ERROR", "RUNNER_CRASH", "STOP_CLEANUP_INCOMPLETE"})
+INFRASTRUCTURE_STOP_REASONS = frozenset({"CURRENT_PROBLEM", "TARGET_ERROR", "RUNNER_CRASH", "STOP_CLEANUP_INCOMPLETE", "STOP_MONITOR_FAILED"})
 INFRASTRUCTURE_MESSAGE_MARKERS = (
     "orphaned_builtin_stage_execution",
     "external_workspace_mutation",
@@ -416,6 +416,8 @@ def run_wave(
                 record.stop_reason = result.stop_reason
                 _snapshot(store, record, started_at[task_id])
                 _classify(store, record, result)
+                if result.stop_reason in {"STOP_MONITOR_FAILED", "STOP_CLEANUP_INCOMPLETE"}:
+                    halt(f"provider stop safety failure on task {task_id}: {result.message}")
                 if control.blocks_admission():
                     halt(f"queue admission {control.state_label()}")
                 if record.outcome == "infrastructure_failure" and record.infrastructure_signature:
@@ -449,7 +451,7 @@ def run_wave(
             continue
         if local:
             record.landing = "locally_integrated"
-        elif not publish or control.blocks_admission():
+        elif not publish or stop or control.blocks_admission():
             record.landing = "staged_not_published"
         else:
             try:
