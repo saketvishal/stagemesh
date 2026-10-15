@@ -144,7 +144,7 @@ def contract_with_browser_e2e_gates(project: Path, contract: ChangeContract, cha
     """
     if not _looks_frontend(contract, changed_files):
         return contract
-    discovered = _browser_e2e_gates(project)
+    discovered = _browser_e2e_gates(project, contract)
     if not discovered:
         return contract
     existing = {gate.name for gate in contract.gates}
@@ -220,9 +220,9 @@ def _looks_frontend(contract: ChangeContract, changed_files: tuple[str, ...]) ->
     )
 
 
-def _browser_e2e_gates(project: Path) -> tuple[GateCommand, ...]:
+def _browser_e2e_gates(project: Path, contract: ChangeContract | None = None) -> tuple[GateCommand, ...]:
     gates: list[GateCommand] = []
-    for package in _package_json_files(project):
+    for package in _package_json_files(project, contract):
         script = _preferred_e2e_script(package)
         if script is None:
             continue
@@ -232,18 +232,63 @@ def _browser_e2e_gates(project: Path) -> tuple[GateCommand, ...]:
     return tuple(gates)
 
 
-def _package_json_files(project: Path) -> list[Path]:
+def _package_json_files(project: Path, contract: ChangeContract | None = None) -> list[Path]:
     root = project.resolve()
     found: list[Path] = []
     for package in sorted(root.rglob("package.json")):
         try:
-            rel = package.relative_to(root).parts
+            rel_parts = package.relative_to(root).parts
         except ValueError:
             continue
-        if any(part in {"node_modules", ".stagemesh", ".git"} for part in rel):
+        if any(
+            part in {"node_modules", ".stagemesh", ".git"}
+            or (part.startswith(".") and part not in {".", ".."})
+            for part in rel_parts
+        ):
+            continue
+        parent_rel = package.parent.relative_to(root).as_posix()
+        package_rel = package.relative_to(root).as_posix()
+        if contract is not None and not _package_allowed_for_browser_e2e(parent_rel, package_rel, contract):
             continue
         found.append(package)
     return found
+
+
+def _package_allowed_for_browser_e2e(parent_rel: str, package_rel: str, contract: ChangeContract) -> bool:
+    if contract.forbidden_files:
+        test_paths = (
+            parent_rel,
+            f"{parent_rel}/",
+            f"{parent_rel}/**",
+            package_rel,
+            f"{parent_rel}/index.html",
+        )
+        if any(_matches(p, contract.forbidden_files) for p in test_paths):
+            return False
+    if parent_rel == "apps/web-old" or parent_rel.startswith("apps/web-old/"):
+        if not any("web-old" in pattern.casefold() for pattern in contract.allowed_files):
+            return False
+    if contract.allowed_files and contract.allowed_files != ("**",):
+        in_scope = False
+        for allowed in contract.allowed_files:
+            norm = allowed.replace("\\", "/").rstrip("/")
+            if norm == "**":
+                in_scope = True
+                break
+            if (
+                parent_rel == "."
+                or norm == parent_rel
+                or norm.startswith(f"{parent_rel}/")
+                or _matches(parent_rel, (norm, f"{norm}/**"))
+            ):
+                in_scope = True
+                break
+            if _matches(package_rel, (norm,)):
+                in_scope = True
+                break
+        if not in_scope:
+            return False
+    return True
 
 
 def _preferred_e2e_script(package: Path) -> str | None:
