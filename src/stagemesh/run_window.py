@@ -109,6 +109,8 @@ class WindowReport:
     selected: list[str] = field(default_factory=list)
     reentered: list[dict[str, Any]] = field(default_factory=list)  # recoverable blocks reconsidered this window
     merged_prs: list[dict[str, Any]] = field(default_factory=list)
+    landing_results: list[dict[str, Any]] = field(default_factory=list)
+    initial_repo_state: RepoState | None = None
     final_repo_state: RepoState | None = None
     continued: list[dict[str, Any]] = field(default_factory=list)  # step-capped tasks resumed from their recorded state
     not_selected: dict[str, str] = field(default_factory=dict)
@@ -191,9 +193,12 @@ class WindowReport:
             "counts": self.counts(),
             "orphan_events_before": None if first is None else first.orphan_events_before,
             "orphan_events_after": None if last is None else last.orphan_events_after,
-            "main_moved": bool(self.merged_prs) or any(wave.main_moved for wave in self.waves),
+            "main_moved": any(wave.main_moved for wave in self.waves) or bool(
+                self.initial_repo_state and self.final_repo_state
+                and self.initial_repo_state.main_sha != self.final_repo_state.main_sha),
             "merged_prs": self.merged_prs,
-            "repo_before": None if first is None or first.repo_before is None else first.repo_before.to_dict(),
+            "landing_results": self.landing_results,
+            "repo_before": self.initial_repo_state.to_dict() if self.initial_repo_state else (None if first is None or first.repo_before is None else first.repo_before.to_dict()),
             "repo_after": self.final_repo_state.to_dict() if self.final_repo_state else (None if last is None or last.repo_after is None else last.repo_after.to_dict()),
             "tasks": [task.to_dict() for task in self.tasks],
             "open_wave_prs": self.open_wave_prs,
@@ -524,6 +529,7 @@ def run_window(
     checkout_ref: Callable[[], str | None] | None = None,
     clock: Callable[[], float] = time.time,
     merge_pr: Callable[[Any, float], dict[str, Any]] | None = None,
+    merge_setup_error: str | None = None,
 ) -> WindowReport:
     local = options.integration_mode == INTEGRATION_LOCAL
     report = WindowReport(window_id=uuid.uuid4().hex[:8], options=options, started_at=clock())
@@ -534,10 +540,24 @@ def run_window(
         checkout_ref=checkout_ref,
     )
     if options.auto_merge_ff and merge_pr is None:
-        report.preflight.append(Check("merge_adapter", False, "no fast-forward merge adapter configured"))
+        report.preflight.append(Check("merge_adapter", False, merge_setup_error or "no fast-forward merge adapter configured"))
     pending_record = None
     if options.auto_merge_ff and list_prs is not None:
-        pending = list_prs(project)
+        pending = []
+        try:
+            if callable(getattr(merge_pr, "preflight", None)):
+                policy_error = merge_pr.preflight()
+                report.preflight.append(Check("hosted_landing_policy", policy_error is None, policy_error or "server-enforced guarded fast-forward policy"))
+            pending = list_prs(project)
+            if callable(getattr(merge_pr, "pending_records", None)):
+                for record in merge_pr.pending_records():
+                    if not any(pr.get("url") == record.pr_url for pr in pending):
+                        latest = store.latest_candidate(record.task_id)
+                        if not latest or latest["sha"] != record.integrated_candidate:
+                            raise RuntimeError("interrupted landing differs from the latest candidate; reconcile before continuing")
+                        pending.append({"url": record.pr_url, "headRefName": f"wave/task-{record.task_id}"})
+        except Exception as exc:  # noqa: BLE001 -- preflight failure must still finalize its report
+            report.preflight.append(Check("prior_pr_lookup", False, f"{type(exc).__name__}: {exc}"))
         owned = len(pending) <= 1
         if len(pending) == 1:
             pr = pending[0]
@@ -586,6 +606,8 @@ def run_window(
     attempted: set[str] = set()
     fingerprint = runtime_fingerprint(project)
     resume: dict[str, int] = {}  # step-capped tasks waiting for another run, and how many they have had
+    if options.auto_merge_ff:
+        report.initial_repo_state = hooks.repo_state()
     def land(record):
         if not record.ready_for_merge or not record.pr_url:
             report.stop_reason = "auto-merge stopped: completed task has no published PR"
@@ -594,7 +616,12 @@ def run_window(
             merged = merge_pr(record, deadline)
         except Exception as exc:  # noqa: BLE001 -- fail closed on any injected landing failure
             merged = {"merged": False, "reason": f"{type(exc).__name__}: {exc}"}
+        report.landing_results.append(merged)
+        if "remote_landed" in merged:
+            report.final_repo_state = hooks.repo_state()
         if not merged.get("merged"):
+            if merged.get("remote_landed") is True:
+                record.landing = "remote_landed_sync_blocked"
             report.stop_reason = "auto-merge stopped: " + str(merged.get("reason", "landing unverified"))
             return False
         report.merged_prs.append(merged)

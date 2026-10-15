@@ -812,6 +812,7 @@ def command_run_window(args: argparse.Namespace) -> int:
 
     from .baseline import resolve_integration_ref
     from .run_window import (
+        Check,
         WindowOptions,
         format_window_report,
         parse_duration,
@@ -882,11 +883,26 @@ def command_run_window(args: argparse.Namespace) -> int:
         hooks = _wave_hooks(
             project, store, base_ref=base_ref, staging_ref=staging_ref, advance_ref=base_ref if local else STAGING_REF, local=local, no_pr=args.no_pr
         )
+        merger = None
+        merger_error = None
+        if options.auto_merge_ff:
+            from .fast_forward import make_merger
+
+            try:
+                merger = make_merger(store, project, base_ref, options.required_checks)
+            except (OSError, RuntimeError, ValueError) as exc:
+                merger_error = f"fast-forward adapter unavailable: {exc}"
         if args.plan:  # read-only: the same preflight (without recovering anything) and the same selection, nothing started
             checks, _ = preflight(
                 store, project, config, options, base_ref=base_ref, provider_check=provider_pool_check, repo_state=hooks.repo_state, recover=False,
                 checkout_ref=lambda: _current_branch_ref(project),
             )
+            if options.auto_merge_ff:
+                try:
+                    policy_error = merger_error or merger.preflight()
+                except Exception as exc:  # noqa: BLE001 -- a read-only policy probe must fail closed
+                    policy_error = f"{type(exc).__name__}: {exc}"
+                checks.append(Check("hosted_landing_policy", policy_error is None, policy_error or "server-enforced guarded fast-forward policy"))
             picked, skipped = planned_selection(store, options, project)
             payload = {
                 "preflight": [c.to_dict() for c in checks],
@@ -907,10 +923,6 @@ def command_run_window(args: argparse.Namespace) -> int:
             from .progress import ProgressReporter, with_progress
 
             hooks = with_progress(hooks, db_path(project), ProgressReporter(), heartbeat_seconds=args.heartbeat)
-        merger = None
-        if options.auto_merge_ff:
-            from .fast_forward import make_merger
-            merger = make_merger(store, project, base_ref, options.required_checks)
         report = run_window(
             store,
             project,
@@ -920,6 +932,7 @@ def command_run_window(args: argparse.Namespace) -> int:
             base_ref=base_ref,
             staging_ref=staging_ref,
             merge_pr=merger,
+            merge_setup_error=merger_error,
             prepare_staging=None if local else (lambda: prepare_staging_ref(project, base_ref, STAGING_REF)),
             checkout_ref=lambda: _current_branch_ref(project),
         )

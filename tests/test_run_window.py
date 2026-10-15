@@ -685,3 +685,43 @@ def test_ff_window_honors_pause_after_landing_before_next_dispatch(tmp_path: Pat
     report = rw.run_window(store, project, config, options, hooks, base_ref="refs/heads/main", merge_pr=land, **kwargs)
     assert not report.ok and rig.runs == ["1"] and len(report.merged_prs) == 1
     assert report.stop_reason == "queue admission paused"
+
+
+def test_ff_lookup_failure_is_a_reported_preflight_refusal(tmp_path: Path) -> None:
+    store, project, rig, hooks, options, config, kwargs = window(
+        tmp_path, ["1"], auto_merge_ff=True, concurrency=1, required_checks=("web",))
+    kwargs["list_prs"] = lambda project: (_ for _ in ()).throw(OSError("GitHub unavailable"))
+    report = rw.run_window(store, project, config, options, hooks, base_ref="refs/heads/main",
+        merge_pr=lambda record, deadline: {"merged": True}, **kwargs)
+    assert report.refused and rig.runs == [] and "GitHub unavailable" in report.stop_reason
+    assert options.report_path.exists()
+
+
+def test_ff_partial_landing_is_not_reported_as_a_completed_merge(tmp_path: Path) -> None:
+    store, project, rig, hooks, options, config, kwargs = window(
+        tmp_path, ["1", "2"], auto_merge_ff=True, concurrency=1, required_checks=("web",))
+    report = rw.run_window(store, project, config, options, hooks, base_ref="refs/heads/main",
+        merge_pr=lambda record, deadline: {"merged": False, "remote_landed": True, "local_synced": False,
+            "pr": 7, "reason": "local sync blocked"}, **kwargs)
+    assert not report.ok and rig.runs == ["1"]
+    assert report.merged_prs == [] and report.landing_results[0]["remote_landed"] is True
+    assert report.tasks[0].landing == "remote_landed_sync_blocked"
+    assert "local sync blocked" in rw.format_window_report(report)
+
+
+def test_ff_recovers_journaled_landing_missing_from_open_pr_listing(tmp_path: Path) -> None:
+    from stagemesh.survivor_wave import TaskRecord
+    store, project, _rig, hooks, options, config, kwargs = window(
+        tmp_path, ["1", "2"], auto_merge_ff=True, concurrency=1, required_checks=("web",))
+    hooks.run_task("1", 8)
+    sha = store.latest_candidate("1")["sha"]
+    recovered = TaskRecord("1", outcome="done", ready_for_merge=True,
+        pr_url="https://github.com/x/y/pull/7", integrated_candidate=sha)
+    calls = []
+    def land(record, deadline):
+        calls.append(record.task_id)
+        return {"merged": True, "pr": 7, "candidate_sha": record.integrated_candidate}
+    land.pending_records = lambda: [recovered]
+    kwargs["list_prs"] = lambda project: []
+    report = rw.run_window(store, project, config, options, hooks, base_ref="refs/heads/main", merge_pr=land, **kwargs)
+    assert report.ok and calls == ["1", "2"] and report.merged_prs[0]["resumed"]
