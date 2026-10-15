@@ -20,6 +20,7 @@ from .diagnosis import (
     Diagnosis,
     DiagnosisPolicy,
     diagnose,
+    normalize,
 )
 from .domain import EvidenceKind, EvidenceStatus, ExecutionStatus, Stage, TaskStatus
 from .execution import Executor, FakeExecutor
@@ -765,13 +766,18 @@ class Coordinator:
         return 1
 
     def _reopen_budget_once(self, task_id: str, failed_stage: Stage, diagnosis: Diagnosis) -> bool:
-        signature = {"stage": str(failed_stage), "category": diagnosis.category, "summary": diagnosis.summary[:300]}
+        if diagnosis.category in {CONTRACT_SCOPE, STALE_BASELINE, VALIDATION_GATE}:
+            return False  # more code cannot fix an immutable scope or an unavailable validation environment
+        signature = {"stage": str(failed_stage), "category": diagnosis.category, "summary": normalize(diagnosis.summary[:300])}
         for row in self.store.conn.execute(
             "SELECT payload FROM audit_events WHERE event_type=? ORDER BY created_at DESC, rowid DESC",
             ("task.parent_budget_reopened",),
         ):
             payload = _loads(row["payload"])
-            if payload.get("task_id") == task_id and payload.get("signature") == signature:
+            previous = payload.get("signature")
+            if isinstance(previous, dict):
+                previous = {**previous, "summary": normalize(str(previous.get("summary", "")))}
+            if payload.get("task_id") == task_id and previous == signature:
                 return False
         cleared = self.store.clear_task_remediations(task_id, str(failed_stage))
         record_audit(

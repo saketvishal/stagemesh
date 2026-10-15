@@ -177,10 +177,7 @@ def communicate_bounded(proc: subprocess.Popen[str], input_text: str, timeout: f
     with _ACTIVE_LOCK:
         _ACTIVE_PROVIDER_PROCESSES.add(proc)
     try:
-        control = current_provider_stop()
-        if control is None:
-            return _communicate_bounded(proc, input_text, timeout)
-        return _communicate_with_stop(proc, input_text, timeout, control)
+        return _communicate_bounded(proc, input_text, timeout, current_provider_stop())
     finally:
         with _ACTIVE_LOCK:
             _ACTIVE_PROVIDER_PROCESSES.discard(proc)
@@ -189,8 +186,8 @@ def communicate_bounded(proc: subprocess.Popen[str], input_text: str, timeout: f
 STOP_CLEANUP_SECONDS = 5.0
 
 
-def _communicate_with_stop(
-    proc: subprocess.Popen[str], input_text: str, timeout: float, control: QueueStopControl,
+def _communicate_bounded(
+    proc: subprocess.Popen[str], input_text: str, timeout: float, control: QueueStopControl | None = None,
 ) -> tuple[str, str, bool]:
     identity = popen_identity(proc)
     done = threading.Event()
@@ -213,7 +210,7 @@ def _communicate_with_stop(
     timed_out, termination_attempted = False, False
     monitor_failure, stop = None, None
     while True:
-        if monitor_failure is None:
+        if control is not None and monitor_failure is None:
             try:
                 stop = control.poll()
             except Exception as exc:  # noqa: BLE001 -- stop observability failing must not accept provider output
@@ -248,7 +245,7 @@ def _communicate_with_stop(
                             control.note("queue.provider_stop_termination", pid=proc.pid, request_rowid=stop["rowid"])
                         except Exception as exc:  # noqa: BLE001 -- failed observability cannot accept provider output
                             monitor_failure = exc
-                elif monitor_failure is None:
+                elif control is not None and monitor_failure is None:
                     try:
                         control.note("queue.provider_stop_identity_unverified", pid=proc.pid)
                     except Exception as exc:  # noqa: BLE001 -- auditing failure also stops the wait
@@ -259,19 +256,6 @@ def _communicate_with_stop(
                     cleanup_complete=False,
                 )
         done.wait(0.05)
-
-
-def _communicate_bounded(proc: subprocess.Popen[str], input_text: str, timeout: float) -> tuple[str, str, bool]:
-    try:
-        stdout, stderr = proc.communicate(input=input_text, timeout=timeout)
-        return stdout, stderr, False
-    except subprocess.TimeoutExpired:
-        kill_process_tree(proc)
-        try:
-            stdout, stderr = proc.communicate(timeout=30)
-        except subprocess.TimeoutExpired:
-            stdout, stderr = "", ""
-        return stdout, stderr, True
 
 
 class Executor:
