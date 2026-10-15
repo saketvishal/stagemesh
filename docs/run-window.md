@@ -89,7 +89,7 @@ While running, the window monitors safety invariants and stops immediately (exit
 
 `stagemesh run-window` never merges pull requests.
 
-In PR mode:
+In default PR-only mode (without `--auto-merge-ff`):
 - Tasks landing work on `wave/staging` have pull requests opened against `main`.
 - Wave PR branches are stacked across tasks and windows.
 - PRs must be merged **oldest first** with a **normal merge commit** (never squash or rebase, which breaks the stacked branch history).
@@ -107,3 +107,39 @@ last run-window <id>: INTERRUPTED (started 1.2h ago, never finished). Rerun `sta
 ```
 
 Rerunning `stagemesh run-window` safely resolves the interruption: preflight automatically cleans up dead executions and resumes unfinished work where it stopped.
+
+
+## Opt-in fast-forward merge and continue
+
+The default remains PR-only. For a repository that authorizes fast-forward main
+updates, explicitly opt in to serial, hosted-CI-gated landing:
+
+```console
+stagemesh run-window --duration 2h --concurrency 1 --auto-merge-ff --required-checks backend,web,contracts
+```
+
+Use `--tasks` to restrict the queue and `--max-tasks` to bound work. Each task is
+implemented, validated and independently reviewed through the existing lifecycle,
+then published as a PR. The window waits within its deadline for every named
+hosted check and every observed check to pass on the exact candidate. The existing
+supervisor merge policy still checks bound evidence, freshness, dependencies,
+findings and independent review. Baseline CI failures are not waived in this mode.
+
+The landing adapter rechecks the PR head, base, mergeability, clean tracked
+checkout, queue admission and hosted results under the existing integration lock.
+It proves ancestry and uses a normal non-force push of the exact candidate to the
+integration branch. It never squashes, rebases, creates a merge commit, deletes
+branches or resets work. The supervisor verifies the remote landing; local main
+then fast-forwards before another task is selected. Reports separately record
+these authorized main movements and the merged PRs.
+
+This mode requires PR publishing, concurrency 1 and explicit required check names.
+One pending same-repository wave PR may be resumed before new tasks when its
+canonical task is DONE and has durable candidate, validation, review and staging
+evidence. It must be among `--tasks` when restricted. The same supervisor policy
+rechecks it; no candidate reconstruction or refresh is performed to resume it.
+Multiple legacy PRs, unknown tasks or changed heads fail closed for reconciliation. A failed/missing check, changed head/base, dirty checkout,
+queue pause, expired window or unverified landing retains the PR and stops the
+window before dependent work. True design/security decisions remain human gates.
+Review evidence must cover all repository-required checks, including relevant
+visual comparisons; this option never authorizes new screenshot baselines.

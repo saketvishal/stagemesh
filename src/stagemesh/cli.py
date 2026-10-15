@@ -764,6 +764,8 @@ def command_run_window(args: argparse.Namespace) -> int:
     report_path = Path(args.report) if args.report else runtime_dir(project) / "reports" / "run-window" / f"{datetime.now():%Y%m%d-%H%M%S}.json"
     options = WindowOptions(
         duration_seconds=duration,
+        auto_merge_ff=getattr(args, "auto_merge_ff", False),
+        required_checks=tuple(name.strip() for name in getattr(args, "required_checks", "").split(",") if name.strip()),
         concurrency=args.concurrency,
         max_steps_per_task=args.max_steps_per_task,
         max_tasks=args.max_tasks,
@@ -807,6 +809,10 @@ def command_run_window(args: argparse.Namespace) -> int:
             from .progress import ProgressReporter, with_progress
 
             hooks = with_progress(hooks, db_path(project), ProgressReporter(), heartbeat_seconds=args.heartbeat)
+        merger = None
+        if options.auto_merge_ff:
+            from .fast_forward import make_merger
+            merger = make_merger(store, project, base_ref, options.required_checks)
         report = run_window(
             store,
             project,
@@ -815,6 +821,7 @@ def command_run_window(args: argparse.Namespace) -> int:
             hooks,
             base_ref=base_ref,
             staging_ref=staging_ref,
+            merge_pr=merger,
             prepare_staging=None if local else (lambda: prepare_staging_ref(project, base_ref, STAGING_REF)),
             checkout_ref=lambda: _current_branch_ref(project),
         )
@@ -3134,9 +3141,10 @@ def build_parser() -> argparse.ArgumentParser:
     wave.set_defaults(func=command_survivor_wave)
     window = sub.add_parser(
         "run-window",
-        help="Unattended bounded run: pick eligible tasks, run them in PR mode until the time budget, stop safely, print one report (never merges)",
+        allow_abbrev=False,
+        help="Unattended bounded run: pick eligible tasks, run them in PR mode until the time budget, stop safely, print one report (merging requires --auto-merge-ff)",
         description="Safe by default: plain `stagemesh run-window` runs in PR mode for 45m with concurrency 2 and 8 steps per task, "
-        "never merges, and keeps the normal preflight and stop rules. Any flag overrides only itself.",
+        "does not merge unless --auto-merge-ff is explicit, and keeps the normal preflight and stop rules.",
     )
     window.add_argument("--duration", default="45m", help="Time budget, e.g. 2h, 90m, 45s (default 45m). Running tasks finish; nothing new starts after it")
     window.add_argument("--concurrency", type=int, default=2, help="Tasks running at once (default 2)")
@@ -3144,6 +3152,8 @@ def build_parser() -> argparse.ArgumentParser:
     window.add_argument("--max-tasks", type=int, default=10, help="Most tasks to attempt in one window (default 10)")
     window.add_argument("--tasks", help="Restrict the window to these comma-separated task ids (default: every eligible task)")
     window.add_argument("--integration", choices=("pr", "local"), default="pr", help="pr (default, recommended unattended): work goes to wave/staging and PRs, local main stays put")
+    window.add_argument("--auto-merge-ff", action="store_true", help="Opt in: serial PR workflow, wait for named green hosted checks, fast-forward origin and local integration branch, then continue")
+    window.add_argument("--required-checks", default="", help="Comma-separated hosted check names required by --auto-merge-ff; missing checks never count as green")
     window.add_argument("--no-pr", action="store_true", help="Do not open PRs (PR mode: finished work stays on the staging branch)")
     window.add_argument("--no-advance-baselines", action="store_true", help="Do not advance stale baselines")
     window.add_argument("--strict-live", action="store_true", help="Release mode: refuse to start unless providers have fresh passing live acceptance results")

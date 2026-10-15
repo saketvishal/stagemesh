@@ -489,17 +489,18 @@ def test_a_failing_staging_preparation_refuses_to_start(tmp_path: Path) -> None:
     assert report.refused and "has diverged" in report.stop_reason and rig.runs == []
 
 
-def test_the_window_has_no_merge_path(tmp_path: Path) -> None:
-    import inspect
-
-    from stagemesh import survivor_wave
-
-    source = inspect.getsource(rw) + inspect.getsource(survivor_wave.git_gh_pr_opener)
-    assert '"merge"' not in source and "pr merge" not in source and "--auto" not in source
-    parser = cli_module.build_parser()
+def test_window_never_merges_without_explicit_opt_in(tmp_path: Path) -> None:
+    store, project, _rig, hooks, options, config, kwargs = window(tmp_path, ["1"])
+    def forbidden_merge(record, deadline):
+        pytest.fail("default PR window invoked a merge")
+    report = rw.run_window(store, project, config, options, hooks,
+                           base_ref="refs/heads/main", merge_pr=forbidden_merge, **kwargs)
+    assert report.ok and report.merged_prs == []
+    assert report.tasks[0].pr_state != "MERGED"
+    assert not cli_module.build_parser().parse_args(["run-window"]).auto_merge_ff
     for flag in ("--merge", "--auto-merge"):
         with pytest.raises(SystemExit):
-            parser.parse_args(["run-window", flag])
+            cli_module.build_parser().parse_args(["run-window", flag])
 
 
 # --- CLI ---------------------------------------------------------------------------------------------------------------------------
@@ -605,3 +606,80 @@ def test_survivor_wave_pr_mode_also_refuses_from_the_wrong_branch(tmp_path: Path
 
     err = capsys.readouterr().err
     assert code == 2 and "project checkout is on" in err and "not refs/heads/other" in err and "git switch other" in err
+
+
+def test_ff_window_lands_each_task_before_dispatching_the_next(tmp_path: Path) -> None:
+    store, project, _rig, hooks, options, config, kwargs = window(
+        tmp_path, ["1", "2"], auto_merge_ff=True, required_checks=("web",), concurrency=1)
+    store.add_dependency("2", "1")
+    merged = []
+    original = hooks.run_task
+    def run(task, steps):
+        if task == "2":
+            assert merged == ["1"], "dependent task started before remote landing"
+        return original(task, steps)
+    hooks.run_task = run
+    def land(record, deadline):
+        merged.append(record.task_id)
+        return {"merged": True, "pr": len(merged), "candidate_sha": record.integrated_candidate}
+    report = rw.run_window(store, project, config, options, hooks,
+                           base_ref="refs/heads/main", merge_pr=land, **kwargs)
+    assert report.ok and merged == ["1", "2"]
+    assert all(t.pr_state == "MERGED" and not t.ready_for_merge for t in report.tasks)
+    assert len(report.to_dict()["merged_prs"]) == 2
+
+
+def test_ff_window_stops_before_dependents_when_merge_is_refused(tmp_path: Path) -> None:
+    store, project, rig, hooks, options, config, kwargs = window(
+        tmp_path, ["1", "2"], auto_merge_ff=True, required_checks=("web",), concurrency=1)
+    report = rw.run_window(store, project, config, options, hooks,
+        base_ref="refs/heads/main", merge_pr=lambda record, deadline: {"merged": False, "reason": "CI failed"}, **kwargs)
+    assert not report.ok and report.exit_code == 1 and rig.runs == ["1"]
+    assert "CI failed" in report.stop_reason and report.tasks[0].pr_state != "MERGED"
+
+
+@pytest.mark.parametrize("overrides", [{"concurrency": 2}, {"required_checks": ()}, {"open_prs": False}, {"integration_mode": "local"}])
+def test_ff_window_refuses_incompatible_options(tmp_path: Path, overrides) -> None:
+    opts = {"auto_merge_ff": True, "concurrency": 1, "required_checks": ("web",)}
+    opts.update(overrides)
+    store, project, rig, hooks, options, config, kwargs = window(tmp_path, ["1"], **opts)
+    report = rw.run_window(store, project, config, options, hooks,
+        base_ref="refs/heads/main", merge_pr=lambda r,d: {"merged": True}, **kwargs)
+    assert report.refused and rig.runs == []
+
+
+def test_ff_window_refuses_prior_unmerged_prs(tmp_path: Path) -> None:
+    store, project, rig, hooks, options, config, kwargs = window(
+        tmp_path, ["1"], auto_merge_ff=True, concurrency=1, required_checks=("web",))
+    kwargs["list_prs"] = lambda project: [{"number": 3}]
+    report = rw.run_window(store, project, config, options, hooks, base_ref="refs/heads/main",
+        merge_pr=lambda r,d: {"merged": True}, **kwargs)
+    assert report.refused and rig.runs == [] and "prior_prs" in report.stop_reason
+
+
+def test_ff_window_resumes_one_owned_evidenced_pr_before_new_work(tmp_path: Path) -> None:
+    store, project, rig, hooks, options, config, kwargs = window(
+        tmp_path, ["1", "2"], auto_merge_ff=True, concurrency=1, required_checks=("web",))
+    hooks.run_task("1", 8)
+    assert store.get_task("1")["stage"] == "DONE"
+    kwargs["list_prs"] = lambda project: [{"number": 7, "headRefName": "wave/task-1", "url": "https://github.com/x/y/pull/7"}]
+    landed = []
+    def land(record, deadline):
+        landed.append(record.task_id)
+        return {"merged": True, "pr": len(landed), "candidate_sha": record.integrated_candidate}
+    report = rw.run_window(store, project, config, options, hooks, base_ref="refs/heads/main", merge_pr=land, **kwargs)
+    assert report.ok and landed == ["1", "2"]
+    assert report.merged_prs[0]["resumed"] is True
+    assert rig.runs.count("1") == 1
+
+
+def test_ff_window_honors_pause_after_landing_before_next_dispatch(tmp_path: Path) -> None:
+    from stagemesh.parallel import request_queue_control
+    store, project, rig, hooks, options, config, kwargs = window(
+        tmp_path, ["1", "2"], auto_merge_ff=True, concurrency=1, required_checks=("web",))
+    def land(record, deadline):
+        request_queue_control(store, "paused", reason="pause after first landing")
+        return {"merged": True, "pr": 1, "candidate_sha": record.integrated_candidate}
+    report = rw.run_window(store, project, config, options, hooks, base_ref="refs/heads/main", merge_pr=land, **kwargs)
+    assert not report.ok and rig.runs == ["1"] and len(report.merged_prs) == 1
+    assert report.stop_reason == "queue admission paused"
