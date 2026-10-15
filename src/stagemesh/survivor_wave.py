@@ -583,6 +583,12 @@ def subprocess_task_runner(
     return run
 
 
+def is_task_pr_branch(head_ref: str, task_id: str, candidate_sha: str) -> bool:
+    """Match only the publisher's original or exact-candidate retry branch."""
+    base = f"wave/task-{task_id}"
+    return head_ref in {base, f"{base}-{candidate_sha[:7]}"}
+
+
 def git_gh_pr_opener(project: Path, base: str = "main") -> Callable[[TaskRecord], str]:
     """Push the task's integrated head to a branch and open a PR for it. Never force-pushes and never merges.
 

@@ -13,7 +13,8 @@
 * one operator report: what ran, what completed, which PRs (in merge order, including older wave PRs), what blocked and why, what
   stopped the window, claims and executions left, provider and ledger health, repo state, and the next command.
 
-It never merges. Nothing here talks to a provider: the hooks are injected, as for the wave.
+By default it never merges. Explicit serial fast-forward mode invokes the injected
+landing hook between tasks. Provider execution still uses injected wave hooks.
 """
 
 from __future__ import annotations
@@ -42,9 +43,12 @@ from .survivor_wave import (
     INTEGRATION_LOCAL,
     INTEGRATION_PR,
     STAGING_REF,
+    RepoState,
+    TaskRecord,
     WaveHooks,
     WaveReport,
     git_repo_state,
+    is_task_pr_branch,
     prepare_staging_ref,
     run_wave,
     skip_reason,
@@ -86,6 +90,8 @@ class WindowOptions:
     integration_mode: str = INTEGRATION_PR
     open_prs: bool = True
     advance_baselines: bool = True
+    auto_merge_ff: bool = False
+    required_checks: tuple[str, ...] = ()
     strict_live: bool = False
     allow_stale_runtime: bool = False
     tasks: list[str] | None = None  # None: pick every eligible task; a list restricts the window to exactly those
@@ -102,6 +108,10 @@ class WindowReport:
     recovered: list[dict[str, Any]] = field(default_factory=list)
     selected: list[str] = field(default_factory=list)
     reentered: list[dict[str, Any]] = field(default_factory=list)  # recoverable blocks reconsidered this window
+    merged_prs: list[dict[str, Any]] = field(default_factory=list)
+    landing_results: list[dict[str, Any]] = field(default_factory=list)
+    initial_repo_state: RepoState | None = None
+    final_repo_state: RepoState | None = None
     continued: list[dict[str, Any]] = field(default_factory=list)  # step-capped tasks resumed from their recorded state
     not_selected: dict[str, str] = field(default_factory=dict)
     waves: list[WaveReport] = field(default_factory=list)
@@ -134,7 +144,7 @@ class WindowReport:
 
     @property
     def ok(self) -> bool:
-        return not self.refused and not self.interrupted and all(wave.ok for wave in self.waves) and self.report_error is None
+        return not self.refused and not self.interrupted and self.stop_reason is None and all(wave.ok for wave in self.waves) and self.report_error is None
 
     @property
     def exit_code(self) -> int:
@@ -171,6 +181,8 @@ class WindowReport:
                 "integration_mode": self.options.integration_mode,
                 "open_prs": self.options.open_prs,
                 "strict_live": self.options.strict_live,
+                "auto_merge_ff": self.options.auto_merge_ff,
+                "required_checks": list(self.options.required_checks),
             },
             "preflight": [check.to_dict() for check in self.preflight],
             "recovered": self.recovered,
@@ -181,9 +193,13 @@ class WindowReport:
             "counts": self.counts(),
             "orphan_events_before": None if first is None else first.orphan_events_before,
             "orphan_events_after": None if last is None else last.orphan_events_after,
-            "main_moved": any(wave.main_moved for wave in self.waves),
-            "repo_before": None if first is None or first.repo_before is None else first.repo_before.to_dict(),
-            "repo_after": None if last is None or last.repo_after is None else last.repo_after.to_dict(),
+            "main_moved": any(wave.main_moved for wave in self.waves) or bool(
+                self.initial_repo_state and self.final_repo_state
+                and self.initial_repo_state.main_sha != self.final_repo_state.main_sha),
+            "merged_prs": self.merged_prs,
+            "landing_results": self.landing_results,
+            "repo_before": self.initial_repo_state.to_dict() if self.initial_repo_state else (None if first is None or first.repo_before is None else first.repo_before.to_dict()),
+            "repo_after": self.final_repo_state.to_dict() if self.final_repo_state else (None if last is None or last.repo_after is None else last.repo_after.to_dict()),
             "tasks": [task.to_dict() for task in self.tasks],
             "open_wave_prs": self.open_wave_prs,
             "readiness": self.readiness,
@@ -386,6 +402,9 @@ def preflight(
 ) -> tuple[list[Check], list[dict[str, Any]]]:
     """Everything that must be true before unattended work starts. Returns (checks, executions auto-recovered)."""
     checks: list[Check] = []
+    if options.auto_merge_ff:
+        valid = options.integration_mode == INTEGRATION_PR and options.open_prs and options.concurrency == 1 and bool(options.required_checks)
+        checks.append(Check("auto_merge_ff", valid, "explicit serial PR fast-forward mode with named hosted checks" if valid else "--auto-merge-ff requires PR mode, concurrency 1, PR publishing and --required-checks"))
     recovered: list[dict[str, Any]] = []
 
     fresh = runtime or check_runtime(project)
@@ -472,6 +491,8 @@ def preflight(
 
 
 def next_command(report: WindowReport) -> str:
+    if report.options.auto_merge_ff and report.stop_reason:
+        return "stagemesh doctor  # fast-forward delivery stopped; published work is retained"
     """The one thing an operator should do next, from what the window found."""
     failed = [check for check in report.preflight if not check.ok and check.fatal]
     if report.refused and failed:
@@ -507,6 +528,8 @@ def run_window(
     prepare_staging: Callable[[], object] | None = None,
     checkout_ref: Callable[[], str | None] | None = None,
     clock: Callable[[], float] = time.time,
+    merge_pr: Callable[[Any, float], dict[str, Any]] | None = None,
+    merge_setup_error: str | None = None,
 ) -> WindowReport:
     local = options.integration_mode == INTEGRATION_LOCAL
     report = WindowReport(window_id=uuid.uuid4().hex[:8], options=options, started_at=clock())
@@ -516,6 +539,52 @@ def run_window(
         store, project, config, options, base_ref=base_ref, runtime=runtime, provider_check=provider_check, repo_state=hooks.repo_state,
         checkout_ref=checkout_ref,
     )
+    if options.auto_merge_ff and merge_pr is None:
+        report.preflight.append(Check("merge_adapter", False, merge_setup_error or "no fast-forward merge adapter configured"))
+    pending_record = None
+    if options.auto_merge_ff and list_prs is not None:
+        pending = []
+        try:
+            if callable(getattr(merge_pr, "preflight", None)):
+                policy_error = merge_pr.preflight()
+                report.preflight.append(Check("hosted_landing_policy", policy_error is None, policy_error or "server-enforced guarded fast-forward policy"))
+            pending = list_prs(project)
+            if callable(getattr(merge_pr, "pending_records", None)):
+                for record in merge_pr.pending_records():
+                    if not any(pr.get("url") == record.pr_url for pr in pending):
+                        latest = store.latest_candidate(record.task_id)
+                        if not latest or latest["sha"] != record.integrated_candidate:
+                            raise RuntimeError("interrupted landing differs from the latest candidate; reconcile before continuing")
+                        pending.append({"url": record.pr_url, "headRefName": f"wave/task-{record.task_id}"})
+        except Exception as exc:  # noqa: BLE001 -- preflight failure must still finalize its report
+            report.preflight.append(Check("prior_pr_lookup", False, f"{type(exc).__name__}: {exc}"))
+        owned = len(pending) <= 1
+        if len(pending) == 1:
+            pr = pending[0]
+            head_ref = str(pr.get("headRefName", ""))
+            raw_id = head_ref.removeprefix("wave/task-")
+            possible_ids = {raw_id, raw_id.rsplit("-", 1)[0]} if head_ref.startswith("wave/task-") else set()
+            owners = []
+            for possible_id in possible_ids:
+                task = store.get_task(possible_id)
+                candidate = store.latest_candidate(possible_id) if task else None
+                if candidate and is_task_pr_branch(head_ref, possible_id, str(candidate["sha"])):
+                    owners.append((possible_id, task, candidate))
+            owned = len(owners) == 1
+            if owned:
+                task_id, task, candidate = owners[0]
+                owned = bool(task["status"] == TaskStatus.DONE and task["stage"] == Stage.DONE
+                             and (options.tasks is None or task_id in options.tasks))
+            if owned:
+                sha = str(candidate["sha"])
+                owned = all(store.has_evidence(task_id, sha, kind) for kind in
+                            (EvidenceKind.VALIDATION, EvidenceKind.REVIEW, EvidenceKind.INTEGRATION))
+                if owned:
+                    pending_record = TaskRecord(task_id, title=str(task["title"]), outcome="done",
+                        pr_url=pr.get("url"), ready_for_merge=True, integrated_candidate=sha)
+        report.preflight.append(Check("prior_prs", owned,
+            "no prior wave PR, or one owned evidenced PR to resume" if owned else
+            "prior PR is ambiguous, unowned, blocked or outside the selected tasks; resolve it before proceeding"))
     if prepare_staging is not None and not local and all(check.ok or not check.fatal for check in report.preflight):
         try:
             prepare_staging()
@@ -537,12 +606,41 @@ def run_window(
     attempted: set[str] = set()
     fingerprint = runtime_fingerprint(project)
     resume: dict[str, int] = {}  # step-capped tasks waiting for another run, and how many they have had
+    if options.auto_merge_ff:
+        report.initial_repo_state = hooks.repo_state()
+    def land(record):
+        if not record.ready_for_merge or not record.pr_url:
+            report.stop_reason = "auto-merge stopped: completed task has no published PR"
+            return False
+        try:
+            merged = merge_pr(record, deadline)
+        except Exception as exc:  # noqa: BLE001 -- fail closed on any injected landing failure
+            merged = {"merged": False, "reason": f"{type(exc).__name__}: {exc}"}
+        report.landing_results.append(merged)
+        if "remote_landed" in merged:
+            report.final_repo_state = hooks.repo_state()
+        if not merged.get("merged"):
+            if merged.get("remote_landed") is True:
+                record.landing = "remote_landed_sync_blocked"
+            report.stop_reason = "auto-merge stopped: " + str(merged.get("reason", "landing unverified"))
+            return False
+        report.merged_prs.append(merged)
+        record.pr_state, record.ready_for_merge, record.landing = "MERGED", False, "fast_forward_merged"
+        report.final_repo_state = hooks.repo_state()
+        return True
+
     try:
-        while True:
+        if pending_record is not None and land(pending_record):
+            report.merged_prs[-1]["resumed"] = True
+            attempted.add(pending_record.task_id)
+        while report.stop_reason is None:
+            if options.auto_merge_ff and queue_control_report(store)["paused"]:
+                report.stop_reason = "queue admission paused"
+                break
             if clock() >= deadline:
                 report.time_limit_reached = True
                 break
-            room = options.concurrency * 2
+            room = 1 if options.auto_merge_ff else options.concurrency * 2
             continuing = [task_id for task_id in resume if skip_reason(store, task_id) is None][:room]
             if len(attempted) >= options.max_tasks and not continuing:
                 report.task_limit_reached = True
@@ -598,6 +696,12 @@ def run_window(
             if wave.stopped_early or not wave.ok:
                 report.stop_reason = wave.stop_reason or "the wave reported a violation"
                 break
+            if options.auto_merge_ff:
+                for record in wave.tasks:
+                    if record.outcome == "done" and not land(record):
+                        break
+                if report.stop_reason:
+                    break
             if wave.time_limit_reached:
                 report.time_limit_reached = True
                 break
@@ -675,7 +779,7 @@ def format_window_report(report: WindowReport) -> str:
     counts = report.counts()
     lines.append(f"what ran: {len(report.tasks)} task(s)" + (" - " + ", ".join(f"{n} {k}" for k, n in sorted(counts.items())) if counts else ""))
     for task in report.tasks:
-        landing = {"pr_opened": " -> PR opened", "locally_integrated": " -> integrated locally", "staged_not_published": " -> staged, no PR", "pr_failed": " -> PR NOT opened"}.get(task.landing or "", "")
+        landing = {"pr_opened": " -> PR opened", "locally_integrated": " -> integrated locally", "staged_not_published": " -> staged, no PR", "pr_failed": " -> PR NOT opened", "fast_forward_merged": " -> fast-forward merged"}.get(task.landing or "", "")
         lines.append(f"  {task.task_id}: {task.outcome}{landing} - {task.title}")
         if task.reason and task.outcome not in ("done",):
             lines.append(f"      why: {task.reason}")
@@ -689,6 +793,8 @@ def format_window_report(report: WindowReport) -> str:
         lines.append(f"  resumed {entry['task_id']} after the step cap (run {entry['attempt'] + 1}): stage {entry['stage']}, candidate {str(entry['candidate_sha'])[:7]}")
     if report.not_selected:
         lines.append("left alone: " + "; ".join(f"{k} ({v})" for k, v in sorted(report.not_selected.items(), key=lambda kv: _task_sort_key(kv[0]))))
+    if report.merged_prs:
+        lines.append("fast-forward merged: " + ", ".join("#" + str(item["pr"]) for item in report.merged_prs))
     if report.open_wave_prs:
         lines.append("open wave PRs, merge in this order (stacked: each branch carries the ones before it; normal merge commit):")
         lines += [f"  {i}. #{pr['number']} {pr.get('headRefName', '')}{' (this window)' if pr.get('opened_this_window') else ''}: {pr.get('title', '')} {pr.get('url', '')}" for i, pr in enumerate(report.open_wave_prs, 1)]
@@ -698,7 +804,7 @@ def format_window_report(report: WindowReport) -> str:
     if first is not None and last is not None:
         lines.append(f"orphan-recovery events: {first.orphan_events_before} -> {last.orphan_events_after}")
         if last.repo_after is not None:
-            after = last.repo_after
+            after = report.final_repo_state or last.repo_after
             lines.append(f"repo: local {after.main_ref} {(after.main_sha or '-')[:7]} vs origin {(after.origin_sha or '-')[:7]}: {after.relation}; main moved: {'YES' if report.to_dict()['main_moved'] else 'no'}")
     ready = report.readiness or {}
     if ready.get("activity"):

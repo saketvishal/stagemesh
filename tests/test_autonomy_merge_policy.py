@@ -73,6 +73,17 @@ def test_merge_only_when_every_condition_holds() -> None:
     assert verdict.unsatisfied == []
 
 
+def test_exact_landing_recovery_is_opt_in_and_keeps_review_requirements() -> None:
+    landed = BaseState(Condition.CANDIDATE_ALREADY_INTEGRATED, B, C, C)
+    assert not _verdict(base=landed).may_merge
+    policy = IntegrationPolicy(verify_exact_landing=True)
+    assert _verdict(base=landed, policy=policy).may_merge
+    assert not _verdict(base=landed, policy=policy, review_independent=False).may_merge
+    assert not _verdict(base=landed, policy=policy, unresolved_blocking_findings=1).may_merge
+    advanced = BaseState(Condition.CANDIDATE_ALREADY_INTEGRATED, B, "d" * 40, C)
+    assert not _verdict(base=advanced, policy=policy).may_merge
+
+
 def test_each_unsatisfied_condition_blocks_with_a_specific_action() -> None:
     dep_pr = {1: PullRequest(1, "a" * 40, "x", "main", PRState.OPEN, CIRollup.PENDING, True), 2: PullRequest(2, C, "y", "x")}
     cases = {
