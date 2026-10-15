@@ -386,10 +386,10 @@ def test_monitor_failure_cancels_the_owned_provider_instead_of_accepting_output(
         text=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         **execution.popen_session_kwargs())
 
-    def unavailable_store(path):
+    def unavailable_monitor():
         raise OSError("disposable monitor failure")
 
-    monkeypatch.setattr(execution, "Store", unavailable_store)
+    monkeypatch.setattr(control, "poll", unavailable_monitor)
     started = time.monotonic()
     try:
         with provider_stop_scope(control), pytest.raises(OperatorStopRequested, match="monitoring failed"):
@@ -426,6 +426,57 @@ def test_incomplete_review_cleanup_retains_the_running_execution(tmp_path):
     assert [action.action for action in recover_stale(store, review_task)] == ["SKIPPED_UNKNOWN"]
     assert not store.conn.execute("SELECT 1 FROM evidence WHERE kind=?", (EvidenceKind.REVIEW,)).fetchall()
     store.close()
+
+
+@pytest.mark.parametrize("monitor_fails", [False, True])
+def test_unread_large_stdin_has_an_independent_cleanup_deadline(tmp_path, monkeypatch, monitor_fails):
+    from stagemesh import execution
+    from stagemesh.queue_control import OperatorStopRequested, QueueStopControl, provider_stop_scope
+
+    _project, store = _setup(tmp_path)
+    control = QueueStopControl(store, TASK)
+    proc = subprocess.Popen([sys.executable, "-c", "import time;time.sleep(60)"],
+        text=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        **execution.popen_session_kwargs())
+    monkeypatch.setattr(execution, "classify_process", lambda saved, current: "UNKNOWN")
+    monkeypatch.setattr(execution, "STOP_CLEANUP_SECONDS", 0.2)
+    if monitor_fails:
+        def failed_monitor():
+            raise OSError("disposable monitor failure")
+        monkeypatch.setattr(control, "poll", failed_monitor)
+    started = time.monotonic()
+    try:
+        with provider_stop_scope(control), pytest.raises(OperatorStopRequested) as caught:
+            execution.communicate_bounded(proc, "x" * (2 * 1024 * 1024), 0.05)
+        assert not caught.value.cleanup_complete
+        assert time.monotonic() - started < 2
+        assert proc.poll() is None, "unverified provider identity must not be killed"
+    finally:
+        execution.kill_process_tree(proc)
+        proc.wait(timeout=5)
+        for worker in threading.enumerate():
+            if worker.name == f"provider-io-{proc.pid}":
+                worker.join(timeout=5)
+                assert not worker.is_alive()
+        store.close()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process-group isolation")
+def test_provider_without_own_process_group_cannot_kill_the_runner_group(monkeypatch):
+    from stagemesh import execution
+
+    killed = []
+
+    class Provider:
+        pid = 123
+
+        def kill(self):
+            killed.append(self.pid)
+
+    monkeypatch.setattr(execution.os, "getpgid", lambda pid: 456)
+    monkeypatch.setattr(execution.os, "killpg", lambda *args: pytest.fail("shared runner process group killed"))
+    execution.kill_process_tree(Provider())
+    assert killed == [123]
 
 
 @pytest.mark.parametrize("resume", [False, True])

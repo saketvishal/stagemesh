@@ -6,6 +6,7 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -143,7 +144,9 @@ def kill_process_tree(proc: subprocess.Popen[str]) -> None:
             pass
     else:
         try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            group = os.getpgid(proc.pid)
+            if group == proc.pid:
+                os.killpg(group, signal.SIGKILL)
         except OSError:
             pass
     try:
@@ -183,67 +186,77 @@ def communicate_bounded(proc: subprocess.Popen[str], input_text: str, timeout: f
             _ACTIVE_PROVIDER_PROCESSES.discard(proc)
 
 
-def _communicate_with_stop(proc, input_text, timeout, control):
+STOP_CLEANUP_SECONDS = 5.0
+
+
+def _communicate_with_stop(
+    proc: subprocess.Popen[str], input_text: str, timeout: float, control: QueueStopControl,
+) -> tuple[str, str, bool]:
     identity = popen_identity(proc)
     done = threading.Event()
-    failures = []
-    cursor, state, request = control.cursor, control.state, control.request
+    outputs, failures = [], []
 
-    def watch():
-        connection = None
+    def communicate():
         try:
-            connection = Store(control.store.db_path)
-            observer = QueueStopControl(connection, control.task_id)
-            observer.cursor, observer.state, observer.request = cursor, state, request
-            while not done.is_set():
-                stop = observer.poll()
-                if stop and stop["terminate_running"] and proc.poll() is None:
-                    if classify_process(identity, process_identity(proc.pid)) == "LIVE":
-                        observer.note("queue.provider_stop_termination", pid=proc.pid, request_rowid=stop["rowid"])
-                        kill_process_tree(proc)
-                    else:
-                        observer.note("queue.provider_stop_identity_unverified", pid=proc.pid)
-                done.wait(0.1)
-        except Exception as exc:  # noqa: BLE001 -- report a failed monitor, never accept output silently
+            outputs.append(proc.communicate(input=input_text))
+        except BaseException as exc:  # noqa: BLE001 -- transport failures cannot silently become a provider verdict
             failures.append(exc)
-            if proc.poll() is None and classify_process(identity, process_identity(proc.pid)) == "LIVE":
-                kill_process_tree(proc)
         finally:
-            if connection is not None:
-                connection.close()
+            done.set()
 
-    watcher = threading.Thread(target=watch, name="provider-stop-watcher", daemon=True)
-    watcher.start()
-    try:
-        # Watching must run independently: communicate can block writing stdin on Windows.
-        try:
-            stdout, stderr = proc.communicate(input=input_text, timeout=timeout)
-            result = stdout, stderr, False
-        except subprocess.TimeoutExpired:
-            if classify_process(identity, process_identity(proc.pid)) == "LIVE":
-                kill_process_tree(proc)
+    # Windows may block inside the stdin write before communicate's own timeout.
+    # The caller enforces the deadline independently and retains ownership if I/O cannot be reaped.
+    worker = threading.Thread(target=communicate, name=f"provider-io-{proc.pid}", daemon=True)
+    worker.start()
+    deadline = time.monotonic() + timeout
+    cleanup_deadline = None
+    timed_out, termination_attempted = False, False
+    monitor_failure, stop = None, None
+    while True:
+        if monitor_failure is None:
             try:
-                stdout, stderr = proc.communicate(timeout=5)
-            except subprocess.TimeoutExpired as exc:
+                stop = control.poll()
+            except Exception as exc:  # noqa: BLE001 -- stop observability failing must not accept provider output
+                monitor_failure = exc
+        finished = done.is_set()
+        if finished:
+            worker.join(timeout=1)
+            if worker.is_alive() or failures or proc.poll() is None:
                 raise OperatorStopRequested(
                     "provider cleanup incomplete; execution ownership retained for recovery",
                     cleanup_complete=False,
-                ) from exc
-            result = stdout, stderr, True
-        stop = control.poll()
-        if stop and stop["terminate_running"]:
-            raise OperatorStopRequested(str(stop.get("reason") or "operator stop"))
-        if failures:
-            raise OperatorStopRequested("provider stop monitoring failed: " + type(failures[0]).__name__)
-        return result
-    finally:
-        done.set()
-        watcher.join(timeout=6)
-        if watcher.is_alive():
-            raise OperatorStopRequested(
-                "provider stop monitor did not exit; execution ownership retained for recovery",
-                cleanup_complete=False,
-            )
+                )
+            if monitor_failure is not None:
+                raise OperatorStopRequested("provider stop monitoring failed: " + type(monitor_failure).__name__)
+            if stop and stop["terminate_running"]:
+                raise OperatorStopRequested(str(stop.get("reason") or "operator stop"))
+            stdout, stderr = outputs[0]
+            return stdout, stderr, timed_out
+        timed_out = timed_out or time.monotonic() >= deadline
+        if timed_out or monitor_failure is not None or (stop and stop["terminate_running"]):
+            if cleanup_deadline is None:
+                cleanup_deadline = time.monotonic() + STOP_CLEANUP_SECONDS
+            if not termination_attempted and proc.poll() is None:
+                if classify_process(identity, process_identity(proc.pid)) == "LIVE":
+                    termination_attempted = True
+                    kill_process_tree(proc)
+                    cleanup_deadline = time.monotonic() + STOP_CLEANUP_SECONDS
+                    if stop and stop["terminate_running"] and monitor_failure is None:
+                        try:
+                            control.note("queue.provider_stop_termination", pid=proc.pid, request_rowid=stop["rowid"])
+                        except Exception as exc:  # noqa: BLE001 -- failed observability cannot accept provider output
+                            monitor_failure = exc
+                elif monitor_failure is None:
+                    try:
+                        control.note("queue.provider_stop_identity_unverified", pid=proc.pid)
+                    except Exception as exc:  # noqa: BLE001 -- auditing failure also stops the wait
+                        monitor_failure = exc
+            if time.monotonic() >= cleanup_deadline:
+                raise OperatorStopRequested(
+                    "provider cleanup incomplete; execution ownership retained for recovery",
+                    cleanup_complete=False,
+                )
+        done.wait(0.05)
 
 
 def _communicate_bounded(proc: subprocess.Popen[str], input_text: str, timeout: float) -> tuple[str, str, bool]:
