@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -10,6 +11,7 @@ from stagemesh.contracts import CONTRACT_VERSION, canonical_contract_json, parse
 from stagemesh.domain import EvidenceKind, EvidenceStatus, ExecutionKind, ExecutionStatus
 from stagemesh.git import GitWorkspace
 from stagemesh.persistence import Store
+from stagemesh.process_identity import classify_process, process_identity
 from stagemesh.review import Reviewer
 
 TASK = "T-146"
@@ -68,10 +70,16 @@ def _project_with_candidate(tmp_path: Path) -> tuple[Path, Store, str]:
 
 
 def _review_execution(store: Store):
-    return store.conn.execute(
+    execution = store.conn.execute(
         "SELECT * FROM executions WHERE kind=? ORDER BY started_at DESC LIMIT 1",
         (ExecutionKind.REVIEW,),
     ).fetchone()
+    assert execution is not None
+    assert execution["pid"] == os.getpid()
+    assert classify_process(store.execution_process_identity(execution["id"]), process_identity(os.getpid())) == "LIVE"
+    assert execution["candidate_sha"] == store.latest_candidate(TASK)["sha"]
+    assert execution["claim_id"] is None
+    return execution
 
 
 @pytest.mark.parametrize(
@@ -101,7 +109,6 @@ def test_builtin_review_execution_terminalizes_on_pass_and_fail(
 
     execution = _review_execution(store)
     assert status == evidence_status
-    assert execution["pid"] is None
     assert execution["actor"] == "reviewer"
     assert execution["status"] == execution_status
     assert execution["result"] == result
@@ -130,7 +137,6 @@ def test_builtin_review_execution_terminalizes_exception_and_timeout_as_capacity
     ).fetchone()
     payload = json.loads(evidence["payload"])
     assert status == EvidenceStatus.CAPACITY
-    assert execution["pid"] is None
     assert execution["status"] == ExecutionStatus.FAILED
     assert execution["result"] == reason
     assert payload["review_infrastructure_failure"] == reason
@@ -147,7 +153,6 @@ def test_builtin_malformed_review_output_terminalizes_as_capacity(tmp_path: Path
     ).fetchone()
     payload = json.loads(evidence["payload"])
     assert status == EvidenceStatus.CAPACITY
-    assert execution["pid"] is None
     assert execution["status"] == ExecutionStatus.FAILED
     assert execution["result"] == "malformed_review_output"
     assert payload["review_infrastructure_failure"] == "malformed_review_output"
@@ -164,6 +169,5 @@ def test_builtin_review_execution_terminalizes_before_interrupt_bubbles(tmp_path
         )
 
     execution = _review_execution(store)
-    assert execution["pid"] is None
     assert execution["status"] == ExecutionStatus.FAILED
     assert execution["result"] == "KeyboardInterrupt: operator stop"

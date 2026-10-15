@@ -18,6 +18,7 @@ from test_run_ready import _continue, _project
 
 import stagemesh.cli as cli_module
 from stagemesh.domain import ExecutionKind, Stage
+from stagemesh.execution import kill_process_tree, popen_session_kwargs
 from stagemesh.persistence import Store
 from stagemesh.process_identity import owner_execution_fields, popen_identity, process_identity
 from stagemesh.review import Reviewer
@@ -45,11 +46,11 @@ def _orphan_events(store: Store) -> list[dict]:
 @pytest.fixture
 def sibling():
     """A live process standing in for another runner."""
-    proc = subprocess.Popen(SLEEPER)
+    proc = subprocess.Popen(SLEEPER, **popen_session_kwargs())
     try:
         yield proc
     finally:
-        proc.kill()
+        kill_process_tree(proc)
         proc.wait()
 
 
@@ -66,9 +67,9 @@ def test_a_live_sibling_runners_builtin_stage_is_left_alone(tmp_path: Path, sibl
 @pytest.mark.parametrize("kind", BUILTIN_KINDS)
 def test_a_dead_owners_builtin_stage_is_marked_orphaned(tmp_path: Path, kind) -> None:
     _project_dir, store, _base = _with_baseline(tmp_path)
-    proc = subprocess.Popen(SLEEPER)
+    proc = subprocess.Popen(SLEEPER, **popen_session_kwargs())
     owner = _owned_by(proc)
-    proc.kill()
+    kill_process_tree(proc)
     proc.wait()
     assert process_identity(proc.pid) is None
     execution_id = store.start_execution(task_id=TASK, claim_id=None, kind=kind, actor="crashed-runner", **owner)

@@ -4,16 +4,17 @@ import argparse
 import json
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
 import pytest
 
 import stagemesh.cli as cli_module
-from stagemesh.diagnosis import DiagnosisPolicy
 from stagemesh.coordinator import Coordinator, TargetSelection, TargetSelectionError
+from stagemesh.diagnosis import DiagnosisPolicy
 from stagemesh.domain import ExecutionKind, ExecutionStatus, Stage, TaskStatus
-from stagemesh.execution import SubprocessExecutor
+from stagemesh.execution import SubprocessExecutor, kill_process_tree, popen_session_kwargs
 from stagemesh.git import GitWorkspace
 from stagemesh.persistence import Store
 from stagemesh.process_identity import classify_process, popen_identity, process_identity
@@ -106,6 +107,34 @@ def test_remediation_budget_survives_new_candidate_shas_and_blocks(tmp_path: Pat
     assert store.task_remediation_count(TASK, "VALIDATE") == 3
     assert store.get_task(TASK)["status"] == TaskStatus.BLOCKED
     assert len(_events(store, "task.remediation_exhausted")) == 1
+    assert not _events(store, "task.parent_budget_reopened")
+
+
+@pytest.mark.parametrize("legacy_record", [False, True])
+def test_parent_budget_reopens_only_once_for_changing_candidate_ids(tmp_path: Path, legacy_record: bool) -> None:
+    from stagemesh.audit import record_audit
+    from stagemesh.diagnosis import IMPLEMENTATION_DEFECT, Diagnosis
+
+    project, store = _setup(tmp_path)
+    coordinator = Coordinator(store, project)
+
+    def diagnosis(sha, repeat):
+        return Diagnosis(TASK, IMPLEMENTATION_DEFECT, "VALIDATE", True, repeat, 2, sha,
+            f"VALIDATE failed on candidate {sha[:10]}: unit; the same failure occurred on {repeat} consecutive candidates", "repair unit")
+
+    first = diagnosis("a" * 40, 4)
+    if legacy_record:
+        record_audit(store, "task.parent_budget_reopened", {
+            "task_id": TASK,
+            "signature": {"stage": "VALIDATE", "category": first.category, "summary": first.summary},
+        })
+    else:
+        assert coordinator._reopen_budget_once(TASK, Stage.VALIDATE, first)
+    store.add_task_remediation(TASK, "VALIDATE", "b" * 40)
+    assert not coordinator._reopen_budget_once(TASK, Stage.VALIDATE, diagnosis("b" * 40, 7))
+    assert store.task_remediation_count(TASK, "VALIDATE") == 1
+    assert len(_events(store, "task.parent_budget_reopened")) == 1
+    store.close()
 
 
 def test_blocked_task_is_unschedulable_and_receives_no_execution(tmp_path: Path) -> None:
@@ -216,7 +245,7 @@ def _launcher_marker(tmp_path: Path) -> tuple[SubprocessExecutor, Path]:
 def test_live_provider_prevents_second_implementation(tmp_path: Path) -> None:
     project, store = _setup(tmp_path)
     executor, marker = _launcher_marker(tmp_path)
-    proc = subprocess.Popen(SLEEPER)
+    proc = subprocess.Popen(SLEEPER, **popen_session_kwargs())
     try:
         _running_execution(store, proc)
 
@@ -226,7 +255,7 @@ def test_live_provider_prevents_second_implementation(tmp_path: Path) -> None:
         assert store.conn.execute("SELECT COUNT(*) FROM claims").fetchone()[0] == 1
         assert store.conn.execute("SELECT COUNT(*) FROM executions").fetchone()[0] == 1
     finally:
-        proc.kill()
+        kill_process_tree(proc)
         proc.wait()
 
 
@@ -245,9 +274,9 @@ def test_unknown_identity_fails_safe(tmp_path: Path) -> None:
 def test_dead_provider_is_recovered_and_task_retried(tmp_path: Path) -> None:
     project, store = _setup(tmp_path)
     executor, marker = _launcher_marker(tmp_path)
-    proc = subprocess.Popen(SLEEPER)
+    proc = subprocess.Popen(SLEEPER, **popen_session_kwargs())
     execution_id = _running_execution(store, proc)
-    proc.kill()
+    kill_process_tree(proc)
     proc.wait()
 
     assert Coordinator(store, project, executor=executor).tick() == 1
@@ -259,7 +288,7 @@ def test_dead_provider_is_recovered_and_task_retried(tmp_path: Path) -> None:
 
 
 def test_popen_identity_is_comparable_with_later_observation(tmp_path: Path) -> None:
-    proc = subprocess.Popen(SLEEPER)
+    proc = subprocess.Popen(SLEEPER, **popen_session_kwargs())
     try:
         saved = popen_identity(proc)
         assert saved.is_known and saved.executable
@@ -267,6 +296,36 @@ def test_popen_identity_is_comparable_with_later_observation(tmp_path: Path) -> 
         reused = type(saved)(saved.pid, (saved.create_time or 0) + 1e7, saved.boot_id, saved.executable)
         assert classify_process(reused, process_identity(proc.pid)) == "DEAD"  # same PID, different process
     finally:
-        proc.kill()
+        kill_process_tree(proc)
         proc.wait()
     assert classify_process(saved, process_identity(saved.pid)) == "DEAD"
+
+
+@pytest.mark.parametrize("known_identity", [False, True])
+def test_direct_provider_deadline_covers_unread_large_stdin(tmp_path: Path, monkeypatch, known_identity: bool) -> None:
+    from stagemesh import execution
+    from stagemesh.queue_control import OperatorStopRequested, current_provider_stop
+
+    assert current_provider_stop() is None
+    proc = subprocess.Popen([sys.executable, "-c", "import time;time.sleep(60)"], text=True,
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **popen_session_kwargs())
+    if not known_identity:
+        monkeypatch.setattr(execution, "classify_process", lambda saved, observed: "UNKNOWN")
+        monkeypatch.setattr(execution, "STOP_CLEANUP_SECONDS", 0.2)
+    started = time.monotonic()
+    try:
+        if known_identity:
+            _stdout, _stderr, timed_out = execution.communicate_bounded(proc, "x" * (2 * 1024 * 1024), 0.1)
+            assert timed_out and proc.poll() is not None
+        else:
+            with pytest.raises(OperatorStopRequested) as caught:
+                execution.communicate_bounded(proc, "x" * (2 * 1024 * 1024), 0.1)
+            assert not caught.value.cleanup_complete and proc.poll() is None
+        assert time.monotonic() - started < 10, "stdin write bypassed the provider deadline"
+    finally:
+        kill_process_tree(proc)
+        proc.wait(timeout=5)
+        for worker in threading.enumerate():
+            if worker.name == f"provider-io-{proc.pid}":
+                worker.join(timeout=5)
+                assert not worker.is_alive()
