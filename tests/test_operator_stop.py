@@ -323,7 +323,9 @@ def test_failed_pipe_cleanup_is_bounded_and_keeps_execution_ownership(tmp_path, 
 
         def run(self, store, task_id, claim_id, project):
             from stagemesh.domain import ExecutionKind
-            store.start_execution(task_id=task_id, claim_id=claim_id, kind=ExecutionKind.IMPLEMENTATION)
+            from stagemesh.process_identity import owner_execution_fields
+            store.start_execution(task_id=task_id, claim_id=claim_id, kind=ExecutionKind.IMPLEMENTATION,
+                                  **owner_execution_fields())
             raise OperatorStopRequested("cleanup incomplete", cleanup_complete=False)
 
     request_queue_control(store, "resumed", "test next run")
@@ -332,6 +334,8 @@ def test_failed_pipe_cleanup_is_bounded_and_keeps_execution_ownership(tmp_path, 
     assert summary.stop_reason == "STOP_CLEANUP_INCOMPLETE"
     assert list(store.running_executions())
     assert store.has_active_claim(TASK)
+    from stagemesh.operator_actions import recover_stale
+    assert [action.action for action in recover_stale(store, TASK)] == ["SKIPPED_UNKNOWN"]
     store.close()
 
 
@@ -418,6 +422,8 @@ def test_incomplete_review_cleanup_retains_the_running_execution(tmp_path):
     with pytest.raises(OperatorStopRequested):
         Reviewer(adapter=adapter, require_independent=True).review(store, review_task, candidate, project)
     assert list(store.running_executions())
+    from stagemesh.operator_actions import recover_stale
+    assert [action.action for action in recover_stale(store, review_task)] == ["SKIPPED_UNKNOWN"]
     assert not store.conn.execute("SELECT 1 FROM evidence WHERE kind=?", (EvidenceKind.REVIEW,)).fetchall()
     store.close()
 

@@ -413,7 +413,7 @@ class ParallelRunner:
         self._stop_control.complete_if_idle()
         latest = latest_queue_control(self.store)
         if latest is not None:
-            self._refresh_control_state(str(latest["state"]))
+            self._refresh_control_state(queue_control_state(self.store)["state"])
 
     def _active_execution_snapshot(self) -> list[dict[str, Any]]:
         snapshot = Store(self.store.db_path)
@@ -754,6 +754,8 @@ class ParallelRunner:
             if summary.stop_reason == "STOP_CLEANUP_INCOMPLETE":
                 self.global_failure = f"task {task_id}: {summary.message}"
                 self.stop.set()
+            elif summary.stop_reason == "OPERATOR_STOP":
+                summary.stop_reason = "INTERRUPTED" if self.summary.interrupted else "STOPPED"
             if self.wait_for_providers and summary.stop_reason == "NO_PROGRESS":
                 stage = str(store.get_task(task_id)["stage"])
                 pool = getattr(coordinator.executor, "pool", None) if stage == "IMPLEMENT" else getattr(coordinator.reviewer, "review_pool", None)
@@ -949,6 +951,8 @@ class ParallelRunner:
         final = Store(self.store.db_path)
         try:
             protected = {str(e["claim_id"]) for e in final.running_executions() if e["claim_id"]}
+            if any(str(e["task_id"]) in self._threads for e in final.running_executions()):
+                self.global_failure = "provider cleanup incomplete; execution ownership retained for recovery"
             for claim in final.conn.execute("SELECT id, task_id FROM claims WHERE active=1 AND worker_id LIKE ?", (f"{WORKER_PREFIX}{os.getpid()}-%",)).fetchall():
                 if str(claim["task_id"]) not in self._threads:
                     continue  # only tasks this run started; anything else is somebody else's claim

@@ -236,6 +236,9 @@ class Coordinator:
                 result = self.executor.run(self.store, task_id, claim_id, self.project)
             except OperatorStopRequested as exc:
                 if not exc.cleanup_complete:
+                    execution = self.store.latest_execution_for_claim(claim_id)
+                    if execution is not None:
+                        self.store.retain_execution_for_cleanup(str(execution["id"]), str(exc))
                     raise
                 execution = self.store.latest_execution_for_claim(claim_id)
                 if execution is not None and execution["status"] == ExecutionStatus.RUNNING:

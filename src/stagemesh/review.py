@@ -509,6 +509,7 @@ class Reviewer:
             return EvidenceStatus.PASSED
         except BaseException as exc:
             if isinstance(exc, OperatorStopRequested) and not exc.cleanup_complete:
+                store.retain_execution_for_cleanup(execution_id, str(exc))
                 raise
             finish_running(ExecutionStatus.FAILED, actor=reviewer_provider,
                            result="operator_stop" if isinstance(exc, OperatorStopRequested) else _review_exception_reason(exc))
