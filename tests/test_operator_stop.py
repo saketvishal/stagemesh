@@ -543,6 +543,28 @@ def test_monitor_failure_stops_parallel_admission_after_verified_cleanup(tmp_pat
     rig.store.close()
 
 
+@pytest.mark.parametrize("incomplete", [False, True])
+def test_concurrent_interrupt_cannot_overwrite_a_stop_safety_failure(tmp_path, monkeypatch, incomplete):
+    from stagemesh.queue_control import OperatorStopRequested, QueueStopControl
+
+    project, store = _setup(tmp_path)
+    interrupted = threading.Event()
+
+    def broken_monitor(self):
+        raise OSError("monitor remains unavailable")
+
+    class FailingCoordinator:
+        def tick(self):
+            interrupted.set()
+            monkeypatch.setattr(QueueStopControl, "poll", broken_monitor)
+            raise OperatorStopRequested("stop safety failure", cleanup_complete=not incomplete, monitor_failed=not incomplete)
+
+    summary = RunSummary(True, "UNSET", task_id=TASK)
+    drive_task(store, project, FailingCoordinator(), TASK, summary, max_steps=1, should_stop=interrupted.is_set)
+    assert summary.stop_reason == ("STOP_CLEANUP_INCOMPLETE" if incomplete else "STOP_MONITOR_FAILED")
+    store.close()
+
+
 @pytest.mark.parametrize("resume", [False, True])
 def test_parallel_finalization_keeps_incomplete_claim_and_never_overwrites_resume(tmp_path, resume):
     from stagemesh.domain import ExecutionKind
