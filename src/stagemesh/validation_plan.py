@@ -144,7 +144,7 @@ def contract_with_browser_e2e_gates(project: Path, contract: ChangeContract, cha
     """
     if not _looks_frontend(contract, changed_files):
         return contract
-    discovered = _browser_e2e_gates(project, contract)
+    discovered = _browser_e2e_gates(project, contract, changed_files)
     if not discovered:
         return contract
     existing = {gate.name for gate in contract.gates}
@@ -220,9 +220,9 @@ def _looks_frontend(contract: ChangeContract, changed_files: tuple[str, ...]) ->
     )
 
 
-def _browser_e2e_gates(project: Path, contract: ChangeContract | None = None) -> tuple[GateCommand, ...]:
+def _browser_e2e_gates(project: Path, contract: ChangeContract | None = None, changed_files: tuple[str, ...] = ()) -> tuple[GateCommand, ...]:
     gates: list[GateCommand] = []
-    for package in _package_json_files(project, contract):
+    for package in _package_json_files(project, contract, changed_files):
         script = _preferred_e2e_script(package)
         if script is None:
             continue
@@ -232,7 +232,7 @@ def _browser_e2e_gates(project: Path, contract: ChangeContract | None = None) ->
     return tuple(gates)
 
 
-def _package_json_files(project: Path, contract: ChangeContract | None = None) -> list[Path]:
+def _package_json_files(project: Path, contract: ChangeContract | None = None, changed_files: tuple[str, ...] = ()) -> list[Path]:
     root = project.resolve()
     found: list[Path] = []
     for package in sorted(root.rglob("package.json")):
@@ -246,12 +246,28 @@ def _package_json_files(project: Path, contract: ChangeContract | None = None) -
             for part in rel_parts
         ):
             continue
-        parent_rel = package.parent.relative_to(root).as_posix()
-        package_rel = package.relative_to(root).as_posix()
-        if contract is not None and not _package_allowed_for_browser_e2e(parent_rel, package_rel, contract):
-            continue
         found.append(package)
-    return found
+    permitted = [p for p in found if contract is None or _package_allowed_for_browser_e2e(
+        p.parent.relative_to(root).as_posix(), p.relative_to(root).as_posix(), contract)]
+    if contract is None or "**" in contract.allowed_files:
+        return permitted
+    # A source belongs to its nearest package, not every ancestor package.
+    directories = {p: p.parent.relative_to(root).as_posix() for p in found}
+    candidates = {p.replace("\\", "/") for p in contract.allowed_files if not any(c in p for c in "*?[")}
+    candidates.update(p for p in changed_files if _matches(p, contract.allowed_files))
+    candidates.update(
+        p.relative_to(root).as_posix() for p in root.rglob("*")
+        if p.is_file() and not any(part.startswith(".") or part == "node_modules" for part in p.relative_to(root).parts)
+        and _matches(p.relative_to(root).as_posix(), contract.allowed_files)
+    )
+    owners: set[Path] = set()
+    for path in candidates:
+        if _matches(path, contract.forbidden_files):
+            continue
+        containing = [p for p, directory in directories.items() if directory == "." or path == directory or path.startswith(directory + "/")]
+        if containing:
+            owners.add(max(containing, key=lambda p: len(directories[p])))
+    return [p for p in permitted if p in owners]
 
 
 def _package_allowed_for_browser_e2e(parent_rel: str, package_rel: str, contract: ChangeContract) -> bool:
@@ -264,29 +280,6 @@ def _package_allowed_for_browser_e2e(parent_rel: str, package_rel: str, contract
             f"{parent_rel}/index.html",
         )
         if any(_matches(p, contract.forbidden_files) for p in test_paths):
-            return False
-    if parent_rel == "apps/web-old" or parent_rel.startswith("apps/web-old/"):
-        if not any("web-old" in pattern.casefold() for pattern in contract.allowed_files):
-            return False
-    if contract.allowed_files and contract.allowed_files != ("**",):
-        in_scope = False
-        for allowed in contract.allowed_files:
-            norm = allowed.replace("\\", "/").rstrip("/")
-            if norm == "**":
-                in_scope = True
-                break
-            if (
-                parent_rel == "."
-                or norm == parent_rel
-                or norm.startswith(f"{parent_rel}/")
-                or _matches(parent_rel, (norm, f"{norm}/**"))
-            ):
-                in_scope = True
-                break
-            if _matches(package_rel, (norm,)):
-                in_scope = True
-                break
-        if not in_scope:
             return False
     return True
 

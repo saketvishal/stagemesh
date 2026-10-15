@@ -140,7 +140,12 @@ def _stagemesh_project(tmp_path: Path) -> Path:
     )
     tests = project / "tests"
     tests.mkdir()
-    for name in ("test_run_ready.py", "test_provider_pool.py", "test_canary_regression.py"):
+    for name in (
+        "test_run_ready.py",
+        "test_provider_pool.py",
+        "test_canary_regression.py",
+        "test_zero_config_github.py",
+    ):
         (tests / name).write_text("def test_placeholder():\n    pass\n", encoding="utf-8")
     GitWorkspace(project).commit_all("add stagemesh smoke harness")
     return project
@@ -181,13 +186,14 @@ def test_existing_legacy_generated_stagemesh_contract_refreshes_to_bounded_smoke
     assert refreshed["generated_by"] == "stagemesh-auto-plan"
     assert refreshed["required_tests"][0]["name"] == "stagemesh-lifecycle-smoke"
     assert refreshed["required_tests"][0]["command"] == [
-        "python",
+        sys.executable,
         "-m",
         "pytest",
         "-q",
         "tests/test_run_ready.py",
         "tests/test_provider_pool.py",
         "tests/test_canary_regression.py",
+        "tests/test_zero_config_github.py",
     ]
 
 
@@ -293,7 +299,12 @@ def test_stage_mesh_project_uses_bounded_lifecycle_smoke_instead_of_full_pytest(
     )
     tests = tmp_path / "tests"
     tests.mkdir()
-    for name in ("test_run_ready.py", "test_provider_pool.py", "test_canary_regression.py"):
+    for name in (
+        "test_run_ready.py",
+        "test_provider_pool.py",
+        "test_canary_regression.py",
+        "test_zero_config_github.py",
+    ):
         (tests / name).write_text("def test_placeholder():\n    pass\n", encoding="utf-8")
 
     gates = auto_plan_module.detect_gates(tmp_path)
@@ -302,13 +313,14 @@ def test_stage_mesh_project_uses_bounded_lifecycle_smoke_instead_of_full_pytest(
         {
             "name": "stagemesh-lifecycle-smoke",
             "command": [
-                "python",
+                sys.executable,
                 "-m",
                 "pytest",
                 "-q",
                 "tests/test_run_ready.py",
                 "tests/test_provider_pool.py",
                 "tests/test_canary_regression.py",
+                "tests/test_zero_config_github.py",
             ],
             "timeout_seconds": 360,
         }

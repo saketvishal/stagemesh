@@ -87,7 +87,7 @@ While running, the window monitors safety invariants and stops immediately (exit
 
 ## PR Merging
 
-`stagemesh run-window` never merges pull requests.
+`stagemesh run-window` does not merge pull requests unless explicitly opted in.
 
 In default PR-only mode (without `--auto-merge-ff`):
 - Tasks landing work on `wave/staging` have pull requests opened against `main`.
@@ -127,8 +127,12 @@ findings and independent review. Baseline CI failures are not waived in this mod
 
 The landing adapter rechecks the PR head, base, mergeability, clean tracked
 checkout, queue admission and hosted results under the existing integration lock.
-It proves ancestry and uses a normal non-force push of the exact candidate to the
-integration branch. It never squashes, rebases, creates a merge commit, deletes
+It proves ancestry and uses a literal-base Git lease (compare-and-swap) to push
+the exact candidate to the integration branch. The lease uses Git's
+`--force-with-lease=<ref>:<observed-base>` option, but history rewrites are prohibited
+both by an ancestry check and mandatory server-side no-rewrite rules. A competing
+push, even to an intermediate ancestor, refuses the update. It never squashes,
+rebases, creates a merge commit, deletes
 branches or resets work. The supervisor verifies the remote landing; local main
 then fast-forwards before another task is selected. Reports separately record
 these authorized main movements and the merged PRs.
@@ -167,3 +171,31 @@ pause leaves active work running. A subsequent `queue-control resume` enables a
 new run and cannot revive an existing stopping run. Workers already launched from
 an older installed runtime must finish before upgrading; installing this version
 does not retrofit cancellation into an existing process.
+
+### Required hosted protection
+
+This mode is intentionally unavailable unless GitHub exposes active repository
+rulesets with a visible empty bypass list, prohibiting non-fast-forward updates to
+the integration branch and prohibiting updates/deletions of published task-head
+branches. Fetch-and-merge exceptions on head branches are not accepted. Unknown,
+hidden, bypassable, inherited or incomplete policy refuses before task execution.
+StageMesh does not install or weaken rules. Classic protection must apply to
+administrators too. Server-required status checks, including their expected apps,
+remain enforced for the push credential. A required-PR/merge-queue rule is not
+bypassed: such repositories must keep using PR-only mode instead.
+Git URL rewriting (`insteadOf` or `pushInsteadOf`) and multiple push destinations
+are unsupported in this mode; they refuse before any landing write.
+
+This assumes trusted repository administrators keep protection policy stable
+during the window. StageMesh rechecks observed policy and rejects changes, but
+does not claim an atomic snapshot of all GitHub metadata, approvals or CI reruns.
+See [Git's explicit lease semantics](https://git-scm.com/docs/git-push) and
+[GitHub's active branch rules](https://docs.github.com/en/rest/repos/rules#get-rules-for-a-branch).
+
+A durable intent binds repository, base ref, task, PR, expected base and candidate.
+Restart discovery includes unfinished intents even when a landed PR disappeared
+from the open-PR list. Recovery rechecks named CI, independent review and findings;
+it never treats an external merge as proof those checks passed. Reports retain
+each `landing_results` entry, separating `remote_landed`, `local_synced` and a
+fully verified `merged` result. An uncertain acknowledgment or blocked local sync
+stops the window before dependent work and retains the journal for reconciliation.

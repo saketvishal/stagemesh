@@ -5,6 +5,7 @@ import json
 import platform
 import re
 import shlex
+import sqlite3
 import sys
 import threading
 from collections.abc import Callable
@@ -47,7 +48,7 @@ from .git import GitWorkspace
 from .blocked_recovery import can_auto_retry
 from .provider_cooldown import active_cooldowns, clear_cooldown, format_cooldowns
 from .git_identity import identity_report
-from .github import GitHubClient, UrlLibGitHubTransport
+from .github import GitHubClient, UrlLibGitHubTransport, detect_github_repository
 from .github_acceptance import run_github_acceptance
 from .handoff import HandoffError, build_handoff, write_handoff
 from .objectives import ObjectivePlanner, ObjectiveValidationError
@@ -127,6 +128,14 @@ from .work_transport import (
 from .workers import WorkerValidationError, heartbeat_worker, register_worker
 from .workspaces import legacy_worktree_roots, sweep_task_worktrees, worktree_root
 
+DEFAULT_GITHUB_SOURCE_LABELS = ("stagemesh:ready",)
+DEFAULT_GITHUB_EXCLUDED_LABELS = (
+    "stagemesh:blocked",
+    "stagemesh:deferred",
+    "status:BLOCKED",
+    "status:REMEDIATING",
+)
+
 
 def runtime_dir(project: Path) -> Path:
     return project / ".stagemesh"
@@ -136,9 +145,73 @@ def db_path(project: Path) -> Path:
     return runtime_dir(project) / "stagemesh.sqlite3"
 
 
+def _ensure_default_github_task_source(project: Path) -> bool:
+    config_path = runtime_dir(project) / "config.json"
+    data: dict[str, object] = {}
+    if config_path.exists():
+        try:
+            loaded = json.loads(config_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise ConfigValidationError("config file must be valid JSON") from exc
+        if not isinstance(loaded, dict):
+            raise ConfigValidationError("config root must be an object")
+        data = loaded
+    load_config(project)  # Validate existing settings before any migration write.
+    detected = detect_github_repository(project)
+    github = data.setdefault("github", {})
+    if not isinstance(github, dict):
+        raise ConfigValidationError("github must be an object")
+    for key in ("owner", "repo"):
+        if key in github and (not isinstance(github[key], str) or not github[key].strip()):
+            raise ConfigValidationError(f"github.{key} must be a non-empty string")
+    if "task_sources" in data:
+        return False  # Explicit sources, including an empty list, are operator policy.
+    changed = False
+    if detected is not None:
+        if "owner" not in github:
+            github["owner"] = detected.owner
+            changed = True
+        if "repo" not in github:
+            github["repo"] = detected.repo
+            changed = True
+    if not (github.get("owner") and github.get("repo")):
+        if changed:
+            config_path.parent.mkdir(parents=True, exist_ok=True)
+            config_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        return changed
+    data["task_sources"] = [{
+        "name": "github", "type": "github",
+        "labels": list(DEFAULT_GITHUB_SOURCE_LABELS),
+        "excluded_labels": list(DEFAULT_GITHUB_EXCLUDED_LABELS),
+    }]
+    changed = True
+    if changed:
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    return changed
+
+
+def _missing_github_task_source_check(config, project: Path) -> dict[str, object] | None:
+    if not (config.github.owner and config.github.repo):
+        return None
+    if any(source.kind == "github" for source in config.task_sources):
+        return None
+    config_path = runtime_dir(project) / "config.json"
+    if config_path.exists() and "task_sources" in json.loads(config_path.read_text(encoding="utf-8")):
+        return None  # Local-only and disabled-source projects remain supported.
+    return {
+        "name": "task_sources",
+        "ok": False,
+        "detail": f"GitHub repository {config.github.owner}/{config.github.repo} has no GitHub task source configured",
+        "fatal": True,
+        "fix": "stagemesh init",
+    }
+
+
 def command_init(args: argparse.Namespace) -> int:
     project = Path(args.project).resolve()
     runtime_dir(project).mkdir(parents=True, exist_ok=True)
+    configured_github_source = _ensure_default_github_task_source(project)
     store = Store(db_path(project))
     store.migrate()
     if args.task:
@@ -167,6 +240,7 @@ def command_init(args: argparse.Namespace) -> int:
                     "schema_version": schema_version,
                     "registered": registered,
                     "profile": profile_status,
+                    "github_task_source": "configured" if configured_github_source else "unchanged",
                 },
                 indent=2,
                 sort_keys=True,
@@ -174,6 +248,8 @@ def command_init(args: argparse.Namespace) -> int:
         )
         return 0
     print(f"initialized StageMesh at {runtime_dir(project)}")
+    if configured_github_source:
+        print("configured GitHub task source for stagemesh:ready issues")
     if profile_status == "created":
         print(f"created default profile {profile_detail}")
         if is_placeholder(load_profile(project)):
@@ -736,6 +812,7 @@ def command_run_window(args: argparse.Namespace) -> int:
 
     from .baseline import resolve_integration_ref
     from .run_window import (
+        Check,
         WindowOptions,
         format_window_report,
         parse_duration,
@@ -755,7 +832,22 @@ def command_run_window(args: argparse.Namespace) -> int:
         print("--concurrency, --max-steps-per-task and --max-tasks must be at least 1", file=sys.stderr)
         return 2
     project = Path(args.project).resolve()
+    if not args.plan and _ensure_default_github_task_source(project):
+        print("migrated config: added GitHub task source for stagemesh:ready issues", file=sys.stderr)
     config = load_config(project)
+    missing_source = _missing_github_task_source_check(config, project)
+    if missing_source is not None:
+        payload = {"preflight": [missing_source], "would_run": [], "left_alone": {}, "ok": False}
+        early_report = Path(args.report) if args.report else runtime_dir(project) / "reports" / "run-window" / f"{datetime.now():%Y%m%d-%H%M%S}.json"
+        if not args.plan or args.report:
+            early_report.parent.mkdir(parents=True, exist_ok=True)
+            early_report.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+        if args.json:
+            print(json.dumps(payload, indent=2, sort_keys=True))
+        else:
+            print(f"[FAIL] {missing_source['name']}: {missing_source['detail']}")
+            print(f"next: {missing_source['fix']}")
+        return 2
     local = args.integration == INTEGRATION_LOCAL
     base_ref = resolve_integration_ref(project, config.integration_ref) or "HEAD"
     if not local and not base_ref.startswith("refs/heads/"):
@@ -777,18 +869,40 @@ def command_run_window(args: argparse.Namespace) -> int:
         tasks=parse_task_ids(args.tasks) if args.tasks else None,
         report_path=report_path,
     )
-    store = Store(db_path(project))
+    store = Store(Path(":memory:") if args.plan else db_path(project))
+    if args.plan and db_path(project).exists():
+        persisted = sqlite3.connect(db_path(project).resolve().as_uri() + "?mode=ro", uri=True)
+        try:
+            persisted.backup(store.conn)
+        finally:
+            persisted.close()
     store.migrate()
     try:
+        _sync_all_sources(store, project, config, None)
         staging_ref = None if local else STAGING_REF
         hooks = _wave_hooks(
             project, store, base_ref=base_ref, staging_ref=staging_ref, advance_ref=base_ref if local else STAGING_REF, local=local, no_pr=args.no_pr
         )
+        merger = None
+        merger_error = None
+        if options.auto_merge_ff:
+            from .fast_forward import make_merger
+
+            try:
+                merger = make_merger(store, project, base_ref, options.required_checks)
+            except (OSError, RuntimeError, ValueError) as exc:
+                merger_error = f"fast-forward adapter unavailable: {exc}"
         if args.plan:  # read-only: the same preflight (without recovering anything) and the same selection, nothing started
             checks, _ = preflight(
                 store, project, config, options, base_ref=base_ref, provider_check=provider_pool_check, repo_state=hooks.repo_state, recover=False,
                 checkout_ref=lambda: _current_branch_ref(project),
             )
+            if options.auto_merge_ff:
+                try:
+                    policy_error = merger_error or merger.preflight()
+                except Exception as exc:  # noqa: BLE001 -- a read-only policy probe must fail closed
+                    policy_error = f"{type(exc).__name__}: {exc}"
+                checks.append(Check("hosted_landing_policy", policy_error is None, policy_error or "server-enforced guarded fast-forward policy"))
             picked, skipped = planned_selection(store, options, project)
             payload = {
                 "preflight": [c.to_dict() for c in checks],
@@ -809,10 +923,6 @@ def command_run_window(args: argparse.Namespace) -> int:
             from .progress import ProgressReporter, with_progress
 
             hooks = with_progress(hooks, db_path(project), ProgressReporter(), heartbeat_seconds=args.heartbeat)
-        merger = None
-        if options.auto_merge_ff:
-            from .fast_forward import make_merger
-            merger = make_merger(store, project, base_ref, options.required_checks)
         report = run_window(
             store,
             project,
@@ -822,6 +932,7 @@ def command_run_window(args: argparse.Namespace) -> int:
             base_ref=base_ref,
             staging_ref=staging_ref,
             merge_pr=merger,
+            merge_setup_error=merger_error,
             prepare_staging=None if local else (lambda: prepare_staging_ref(project, base_ref, STAGING_REF)),
             checkout_ref=lambda: _current_branch_ref(project),
         )

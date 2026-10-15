@@ -65,6 +65,7 @@ class IntegrationPolicy:
     allow_baseline_ci_failures: bool = True  # gates failing identically on base do not block, but are recorded
     baseline_requires_detail: bool = True  # gates classified baseline from conclusions alone (no logs/tests) do not make a candidate merge-ready
     require_mergeable: bool = True
+    verify_exact_landing: bool = False  # opt-in recovery: all other policy checks still apply
 
     def evaluate(self, facts: MergeFacts, *, task_id: str | None = None) -> MergeVerdict:
         prov = facts.provenance
@@ -89,10 +90,11 @@ class IntegrationPolicy:
                 Action.REVOKE_EVIDENCE_REQUIRE_REVALIDATION,
             )
         )
-        fresh = facts.base is not None and not facts.base.candidate_stale and facts.base.condition in {
-            Condition.BASE_UNCHANGED,
-            Condition.BASE_ADVANCED,
-        }
+        fresh = facts.base is not None and not facts.base.candidate_stale and (
+            facts.base.condition in {Condition.BASE_UNCHANGED, Condition.BASE_ADVANCED}
+            or (self.verify_exact_landing and facts.base.condition is Condition.CANDIDATE_ALREADY_INTEGRATED
+                and facts.base.new_base == prov.candidate_sha)
+        )
         checks.append(
             PolicyCheck(
                 "candidate_fresh",

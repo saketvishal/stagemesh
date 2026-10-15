@@ -4,6 +4,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 from stagemesh.contracts import ChangeContract, GateCommand
 from stagemesh.domain import EvidenceKind, EvidenceStatus
 from stagemesh.git import GitWorkspace
@@ -177,7 +179,7 @@ def test_localized_apps_web_task_excludes_historical_checkout_scripts(tmp_path: 
         json.dumps({"scripts": {"e2e:ui-gate": "playwright test web.spec.ts"}}),
         encoding="utf-8",
     )
-    historical = tmp_path / ".caventra_test" / "week1-canonical-checkout" / "apps" / "web"
+    historical = tmp_path / ".historical-checkouts" / "snapshot" / "apps" / "web"
     historical.mkdir(parents=True)
     (historical / "package.json").write_text(
         json.dumps({"scripts": {"e2e:ui-gate": "playwright test old.spec.ts"}}),
@@ -193,7 +195,7 @@ def test_localized_apps_web_task_excludes_historical_checkout_scripts(tmp_path: 
     assert [gate.name for gate in updated.gates] == ["browser-e2e:apps/web"]
 
 
-def test_legacy_web_old_excluded_unless_explicitly_allowed(tmp_path: Path) -> None:
+def test_archived_package_exclusion_is_owned_by_the_contract(tmp_path: Path) -> None:
     web_old = tmp_path / "apps" / "web-old"
     web_old.mkdir(parents=True)
     (web_old / "package.json").write_text(
@@ -201,15 +203,56 @@ def test_legacy_web_old_excluded_unless_explicitly_allowed(tmp_path: Path) -> No
         encoding="utf-8",
     )
 
-    # By default, apps/web-old is excluded even without forbidden_files
-    contract_default = ChangeContract(objective="General frontend UI", allowed_files=("**",))
+    contract_default = ChangeContract(objective="General frontend UI", allowed_files=("**",), forbidden_files=("apps/web-old/**",))
     updated_default = contract_with_browser_e2e_gates(tmp_path, contract_default, ())
     assert updated_default.gates == ()
 
-    # When explicitly targeted in allowed_files, it is discovered
+    # Directory names alone do not establish a package's authority or status.
     contract_explicit = ChangeContract(objective="Legacy frontend migration", allowed_files=("apps/web-old/**",))
     updated_explicit = contract_with_browser_e2e_gates(tmp_path, contract_explicit, ())
     assert [gate.name for gate in updated_explicit.gates] == ["browser-e2e:apps/web-old"]
+
+
+def test_localized_task_does_not_discover_root_package_gate(tmp_path: Path) -> None:
+    (tmp_path / "package.json").write_text(json.dumps({"scripts": {"e2e": "playwright test unrelated"}}), encoding="utf-8")
+    (tmp_path / "apps/widget").mkdir(parents=True)
+    (tmp_path / "apps/widget/package.json").write_text("{}", encoding="utf-8")
+    contract = ChangeContract(objective="Fix frontend", allowed_files=("apps/widget/src/**",))
+    assert contract_with_browser_e2e_gates(tmp_path, contract, ("apps/widget/src/main.tsx",)).gates == ()
+
+
+@pytest.mark.parametrize("scope", [("apps/*/src/**",), ("**/*.tsx",)])
+def test_wildcard_source_scope_keeps_owning_package_gate(tmp_path: Path, scope) -> None:
+    package = tmp_path / "apps/customer"
+    (package / "src").mkdir(parents=True)
+    (package / "package.json").write_text(json.dumps({"scripts": {"e2e": "playwright test"}}), encoding="utf-8")
+    (package / "src/App.tsx").write_text("export default 1", encoding="utf-8")
+    contract = ChangeContract(objective="Fix frontend", allowed_files=scope)
+    result = contract_with_browser_e2e_gates(tmp_path, contract, ("apps/customer/src/App.tsx",))
+    assert [g.name for g in result.gates] == ["browser-e2e:apps/customer"]
+
+
+def test_root_frontend_source_keeps_root_browser_gate(tmp_path: Path) -> None:
+    (tmp_path / "package.json").write_text(json.dumps({"scripts": {"e2e": "playwright test"}}), encoding="utf-8")
+    contract = ChangeContract(objective="Fix frontend", allowed_files=("src/App.tsx",))
+    assert [g.name for g in contract_with_browser_e2e_gates(tmp_path, contract, ("src/App.tsx",)).gates] == ["browser-e2e"]
+
+
+def test_deleted_source_keeps_owning_browser_gate(tmp_path: Path) -> None:
+    package = tmp_path / "apps/customer"
+    package.mkdir(parents=True)
+    (package / "package.json").write_text(json.dumps({"scripts": {"e2e": "playwright test"}}), encoding="utf-8")
+    contract = ChangeContract(objective="Fix frontend", allowed_files=("**/*.tsx",))
+    assert [g.name for g in contract_with_browser_e2e_gates(tmp_path, contract, ("apps/customer/src/deleted.tsx",)).gates] == ["browser-e2e:apps/customer"]
+
+
+def test_excluded_package_does_not_assign_its_sources_to_root(tmp_path: Path) -> None:
+    package = tmp_path / "apps/customer"
+    package.mkdir(parents=True)
+    for owner in (tmp_path, package):
+        (owner / "package.json").write_text(json.dumps({"scripts": {"e2e": "playwright test"}}), encoding="utf-8")
+    contract = ChangeContract(objective="Fix frontend", allowed_files=("apps/customer/src/App.tsx",), forbidden_files=("apps/customer/package.json",))
+    assert contract_with_browser_e2e_gates(tmp_path, contract, ("apps/customer/src/App.tsx",)).gates == ()
 
 
 def test_explicit_browser_gate_preserved(tmp_path: Path) -> None:
