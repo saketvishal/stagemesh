@@ -34,6 +34,7 @@ from .config import StageMeshConfig
 from .domain import EvidenceKind, Stage, TaskStatus
 from .operator_actions import recover_stale
 from .persistence import Store
+from .queue_control import QueueStopControl
 from .queue_visibility import queue_control_report
 from .readiness import PrLister, build_readiness, gh_open_wave_prs
 from .recovery_decision import STEP_BUDGET_EXHAUSTED, RecoveryAction, RecoveryContext, decide
@@ -528,6 +529,7 @@ def run_window(
     local = options.integration_mode == INTEGRATION_LOCAL
     report = WindowReport(window_id=uuid.uuid4().hex[:8], options=options, started_at=clock())
     deadline = report.started_at + options.duration_seconds
+    control = QueueStopControl(store)
 
     report.preflight, report.recovered = preflight(
         store, project, config, options, base_ref=base_ref, runtime=runtime, provider_check=provider_check, repo_state=hooks.repo_state,
@@ -587,6 +589,9 @@ def run_window(
     fingerprint = runtime_fingerprint(project)
     resume: dict[str, int] = {}  # step-capped tasks waiting for another run, and how many they have had
     def land(record):
+        if control.blocks_admission():
+            report.stop_reason = "queue admission " + control.state_label()
+            return False
         if not record.ready_for_merge or not record.pr_url:
             report.stop_reason = "auto-merge stopped: completed task has no published PR"
             return False
@@ -607,8 +612,8 @@ def run_window(
             report.merged_prs[-1]["resumed"] = True
             attempted.add(pending_record.task_id)
         while report.stop_reason is None:
-            if options.auto_merge_ff and queue_control_report(store)["paused"]:
-                report.stop_reason = "queue admission paused"
+            if control.blocks_admission():
+                report.stop_reason = "queue admission " + control.state_label()
                 break
             if clock() >= deadline:
                 report.time_limit_reached = True
@@ -696,6 +701,7 @@ def _finish(
     *,
     journal: bool,
 ) -> WindowReport:
+    QueueStopControl(store).complete_if_idle()
     report.finished_at = clock()
     try:
         report.readiness = build_readiness(store, project, config, list_prs=list_prs, strict_live=report.options.strict_live)

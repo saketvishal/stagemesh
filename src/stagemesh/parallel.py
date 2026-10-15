@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from .audit import record_audit
+from .blocked_recovery import auto_retry_blocked_provider_failures, exhaustion_message
 from .concurrency import IntegrationLockTimeout, ProviderLimiter, contract_conflict
 from .config import RuntimeConfig, TaskSelectionConfig, load_config
 from .contracts import ChangeContract, ContractError, parse_contract, task_contract_path
@@ -34,12 +35,12 @@ from .git import GitWorkspace
 from .persistence import Store
 from .process_identity import classify_process, process_identity
 from .provider_pool import ProviderLog
-from .blocked_recovery import auto_retry_blocked_provider_failures, exhaustion_message
+from .queue_control import QUEUE_CONTROL_EVENT, latest_queue_control
 from .recovery import (
     auto_rebaseline_blocked_stale_baselines,
     auto_rebind_blocked_missing_validation_gates,
-    auto_revalidate_blocked_validation_gates,
     auto_reintegrate_blocked_runtime_failures,
+    auto_revalidate_blocked_validation_gates,
 )
 from .run_ready import (
     RunReadyRefusal,
@@ -55,7 +56,6 @@ from .workspaces import remove_task_workspace, sweep_task_worktrees, task_worksp
 
 WORKER_PREFIX = "parallel-"
 _WORKER_PID = re.compile(r"^parallel-(\d+)-")
-QUEUE_CONTROL_EVENT = "queue.admission_control"
 
 
 class SetupRefused(Exception):
@@ -86,28 +86,6 @@ def _active_execution_rows(store: Store) -> list[dict[str, Any]]:
         }
         for row in store.running_executions()
     ]
-
-
-def latest_queue_control(store: Store) -> dict[str, Any] | None:
-    row = store.conn.execute(
-        """
-        SELECT payload, created_at, rowid
-        FROM audit_events
-        WHERE event_type=?
-        ORDER BY created_at DESC, rowid DESC
-        LIMIT 1
-        """,
-        (QUEUE_CONTROL_EVENT,),
-    ).fetchone()
-    if row is None:
-        return None
-    try:
-        payload = json.loads(row["payload"])
-    except (TypeError, ValueError):
-        return None
-    if not isinstance(payload, dict):
-        return None
-    return {**payload, "created_at": row["created_at"], "rowid": row["rowid"]}
 
 
 def queue_control_state(store: Store) -> dict[str, Any]:

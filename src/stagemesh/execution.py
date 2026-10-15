@@ -15,7 +15,8 @@ from .domain import ExecutionKind, ExecutionStatus
 from .git import GitWorkspace
 from .git_identity import provider_environment
 from .persistence import Store
-from .process_identity import popen_identity
+from .process_identity import classify_process, popen_identity, process_identity
+from .queue_control import OperatorStopRequested, QueueStopControl, current_provider_stop
 from .remediation import remediation_context
 from .workspace_guard import EXTERNAL_WORKSPACE_MUTATION, WorkspaceMutation, owned_workspace
 from .workspaces import (
@@ -136,7 +137,10 @@ def popen_session_kwargs() -> dict[str, object]:
 
 def kill_process_tree(proc: subprocess.Popen[str]) -> None:
     if sys.platform == "win32":
-        subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True, check=False)
+        try:
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True, check=False, timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
     else:
         try:
             os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
@@ -170,10 +174,63 @@ def communicate_bounded(proc: subprocess.Popen[str], input_text: str, timeout: f
     with _ACTIVE_LOCK:
         _ACTIVE_PROVIDER_PROCESSES.add(proc)
     try:
-        return _communicate_bounded(proc, input_text, timeout)
+        control = current_provider_stop()
+        if control is None:
+            return _communicate_bounded(proc, input_text, timeout)
+        return _communicate_with_stop(proc, input_text, timeout, control)
     finally:
         with _ACTIVE_LOCK:
             _ACTIVE_PROVIDER_PROCESSES.discard(proc)
+
+
+def _communicate_with_stop(proc, input_text, timeout, control):
+    identity = popen_identity(proc)
+    done = threading.Event()
+    failures = []
+    cursor, state, request = control.cursor, control.state, control.request
+
+    def watch():
+        connection = None
+        try:
+            connection = Store(control.store.db_path)
+            observer = QueueStopControl(connection, control.task_id)
+            observer.cursor, observer.state, observer.request = cursor, state, request
+            while not done.is_set():
+                stop = observer.poll()
+                if stop and stop["terminate_running"] and proc.poll() is None:
+                    if classify_process(identity, process_identity(proc.pid)) == "LIVE":
+                        observer.note("queue.provider_stop_termination", pid=proc.pid, request_rowid=stop["rowid"])
+                        kill_process_tree(proc)
+                    else:
+                        observer.note("queue.provider_stop_identity_unverified", pid=proc.pid)
+                done.wait(0.1)
+        except Exception as exc:  # noqa: BLE001 -- report a failed monitor, never accept output silently
+            failures.append(exc)
+        finally:
+            if connection is not None:
+                connection.close()
+
+    watcher = threading.Thread(target=watch, name="provider-stop-watcher", daemon=True)
+    watcher.start()
+    try:
+        # Watching must run independently: communicate can block writing stdin on Windows.
+        result = _communicate_bounded(proc, input_text, timeout)
+        stop = control.poll()
+        if stop and stop["terminate_running"]:
+            # Keep ownership until both the process and its inherited pipes are reaped.
+            while True:
+                try:
+                    proc.communicate(timeout=0.25)
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
+            raise OperatorStopRequested(str(stop.get("reason") or "operator stop"))
+        if failures:
+            raise OperatorStopRequested("provider stop monitoring failed: " + type(failures[0]).__name__)
+        return result
+    finally:
+        done.set()
+        watcher.join()
 
 
 def _communicate_bounded(proc: subprocess.Popen[str], input_text: str, timeout: float) -> tuple[str, str, bool]:

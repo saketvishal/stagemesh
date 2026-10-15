@@ -32,6 +32,7 @@ from typing import Any
 from .domain import EvidenceKind, Stage, TaskStatus
 from .objective_roots import objective_root_reason
 from .persistence import Store
+from .queue_control import QueueStopControl
 
 ORPHAN_EVENT = "recovery.orphan_execution_failed"
 
@@ -356,6 +357,7 @@ def run_wave(
     )
     report.orphan_events_after = report.orphan_events_before
     main_before = hooks.main_sha() if not local else None
+    control = QueueStopControl(store)
     eligible, skipped = select_eligible(store, task_ids)
     records = {task_id: TaskRecord(task_id, title=str((store.get_task(task_id) or {"title": ""})["title"])) for task_id in task_ids}
     for task_id, reason in skipped.items():
@@ -363,6 +365,8 @@ def run_wave(
     report.tasks = [records[task_id] for task_id in task_ids]
 
     for task_id in eligible:  # baselines first, in the calling thread: advancing writes the ledger and resets a worktree
+        if control.blocks_admission():
+            break
         record = records[task_id]
         record.baseline_before = store.task_baseline(task_id)
         task = store.get_task(task_id)
@@ -390,6 +394,8 @@ def run_wave(
 
     with ThreadPoolExecutor(max_workers=max(1, concurrency)) as pool:
         while pending or running:
+            if control.blocks_admission():
+                halt(f"queue admission {control.state_label()}")
             while pending and not stop and len(running) < max(1, concurrency):
                 if deadline is not None and clock() >= deadline:
                     report.time_limit_reached = True
@@ -410,6 +416,8 @@ def run_wave(
                 record.stop_reason = result.stop_reason
                 _snapshot(store, record, started_at[task_id])
                 _classify(store, record, result)
+                if control.blocks_admission():
+                    halt(f"queue admission {control.state_label()}")
                 if record.outcome == "infrastructure_failure" and record.infrastructure_signature:
                     signatures.setdefault(record.infrastructure_signature, []).append(task_id)
                     if len(signatures[record.infrastructure_signature]) >= 2:
@@ -436,12 +444,12 @@ def run_wave(
 
     publish = open_prs and hooks.open_pr is not None and not local  # local mode integrates into the branch itself; a PR would be a second path
     for record in report.tasks:
-        record.resumable = record.outcome == "open"
+        record.resumable = record.outcome in {"open", "stopped"}
         if record.outcome != "done":
             continue
         if local:
             record.landing = "locally_integrated"
-        elif not publish:
+        elif not publish or control.blocks_admission():
             record.landing = "staged_not_published"
         else:
             try:
@@ -463,11 +471,15 @@ def run_wave(
             state.orphan_events = count
     if report.orphan_events_after > report.orphan_events_before and not report.stopped_early:
         report.stopped_early, report.stop_reason = True, "orphan-recovery events increased during the wave"
+    control.complete_if_idle()
     report.finished_at = clock()
     return report
 
 
 def _classify(store: Store, record: TaskRecord, result: RunResult) -> None:
+    if result.stop_reason == "OPERATOR_STOP":
+        record.outcome, record.reason, record.resumable = "stopped", result.message, True
+        return
     signature = infrastructure_signature(result)
     if signature is not None:
         record.outcome, record.infrastructure_signature = "infrastructure_failure", signature

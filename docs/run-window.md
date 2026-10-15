@@ -148,3 +148,22 @@ Replacement task PRs use the publisher's `wave/task-<id>-<candidate[:7]>` branch
 when retaining an older task branch. Both delivery and pending-PR resume accept
 only that exact candidate-derived suffix or the original task branch. The full
 PR head SHA, latest durable candidate and normal supervisor gates still match.
+
+
+### Stopping active provider work
+
+From the project directory, `stagemesh --project . queue-control stop --terminate-running`
+requests an audited stop. Updated task workers observe it while waiting for an
+implementation or review provider, verify the identity of that worker's provider,
+terminate its process tree, and reap it before releasing execution ownership.
+An unverified identity is retained until the process exits; it is never killed by
+PID alone. Partial workspace edits and the last accepted candidate are preserved.
+Cancellation records `operator_stop`, without provider fallback, remediation, or
+review approval. New stages, task admission, publication, and fast-forward landing
+are blocked for the stopping run.
+
+Without `--terminate-running`, stop drains the current stage before stopping;
+pause leaves active work running. A subsequent `queue-control resume` enables a
+new run and cannot revive an existing stopping run. Workers already launched from
+an older installed runtime must finish before upgrading; installing this version
+does not retrofit cancellation into an existing process.

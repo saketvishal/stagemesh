@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .auto_plan import AutoPlanError, create_contract, refresh_stale_generated_contract
+from .blocked_recovery import auto_retry_blocked_provider_failures, exhaustion_message
 from .config import TaskSelectionConfig
 from .contract_check import contract_section_sizes
 from .contracts import ContractError, canonical_contract_json, parse_contract, task_contract_path
@@ -19,12 +20,12 @@ from .objective_roots import objective_root_reason
 from .observability import health
 from .operator_actions import recover_stale, task_details
 from .persistence import MAX_CANONICAL_CONTRACT_CHARS, Store
-from .blocked_recovery import auto_retry_blocked_provider_failures, exhaustion_message
+from .queue_control import OperatorStopRequested, QueueStopControl, provider_stop_scope
 from .recovery import (
     auto_rebaseline_blocked_stale_baselines,
     auto_rebind_blocked_missing_validation_gates,
-    auto_revalidate_blocked_validation_gates,
     auto_reintegrate_blocked_runtime_failures,
+    auto_revalidate_blocked_validation_gates,
 )
 from .scheduling import Scheduler
 from .task_selection import Candidate, Selection, SelectionRefusal, select_next_task
@@ -829,7 +830,11 @@ def drive_task(
     summary.detail["task"] = _task_heading(store, selected)
     if on_start is not None:
         on_start(format_start(summary))
+    control = QueueStopControl(store, selected)
     for number in range(1, max_steps + 1):
+        if control.poll() is not None:
+            summary.stop_reason, summary.message = "OPERATOR_STOP", "operator stop requested; current stage retained"
+            break
         if should_stop is not None and should_stop():
             summary.stop_reason, summary.message = "INTERRUPTED", "the run was interrupted; claims were released and the worktree kept"
             break
@@ -839,7 +844,11 @@ def drive_task(
             on_start(format_running(number, selected, previous))
         tick_started = time.time()
         try:
-            progressed = coordinator.tick()
+            with provider_stop_scope(control):
+                progressed = coordinator.tick()
+        except OperatorStopRequested as exc:
+            summary.stop_reason, summary.message = "OPERATOR_STOP", str(exc)
+            break
         except TargetSelectionError as exc:
             summary.stop_reason, summary.message = "TARGET_ERROR", str(exc)
             break
@@ -883,4 +892,7 @@ def drive_task(
         # A provider killed by the interrupt reports a failure; that is the interrupt, not a verdict on the task.
         # A task that already finished or was blocked keeps its own outcome and reason.
         summary.stop_reason, summary.message = "INTERRUPTED", "the run was interrupted; claims were released and the worktree kept"
+    if control.poll() is not None and summary.stop_reason != "DONE":
+        summary.stop_reason, summary.message = "OPERATOR_STOP", "operator stop requested; current stage retained"
+    control.complete_if_idle()
     summary.final = _snapshot(store, selected)
