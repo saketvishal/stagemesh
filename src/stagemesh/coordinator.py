@@ -41,6 +41,7 @@ from .outbound_lifecycle import outcomes, sync_outbound_outcomes
 from .persistence import Store
 from .process_identity import classify_process, process_identity
 from .provider_pool import pool_exhaustion_evidence
+from .queue_control import OperatorStopRequested
 from .recovery import RecoveryRefusal, advance_baseline, rebaseline_task
 from .recovery_decision import (
     ENVIRONMENT_BLOCKED,
@@ -233,6 +234,18 @@ class Coordinator:
             )
             try:
                 result = self.executor.run(self.store, task_id, claim_id, self.project)
+            except OperatorStopRequested as exc:
+                if not exc.cleanup_complete:
+                    execution = self.store.latest_execution_for_claim(claim_id)
+                    if execution is not None:
+                        self.store.retain_execution_for_cleanup(str(execution["id"]), str(exc))
+                    raise
+                execution = self.store.latest_execution_for_claim(claim_id)
+                if execution is not None and execution["status"] == ExecutionStatus.RUNNING:
+                    self.store.finish_execution(execution["id"], ExecutionStatus.FAILED, result="operator_stop")
+                self._release_unsuccessful_implementation(task_id, claim_id, status="STOPPED", reason="operator_stop",
+                    candidate_sha=None, durable_handoff=False)
+                raise
             except Exception as exc:  # noqa: BLE001 - provider crashes must release implementation claims.
                 self._release_unsuccessful_implementation(
                     task_id,
@@ -435,7 +448,7 @@ class Coordinator:
             )
         record_audit(
             self.store,
-            "task.implementation_unsuccessful",
+            "task.implementation_cancelled" if status == "STOPPED" else "task.implementation_unsuccessful",
             {
                 "task_id": task_id,
                 "claim_id": claim_id,

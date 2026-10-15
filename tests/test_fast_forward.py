@@ -131,12 +131,15 @@ def test_remote_operations_have_a_bounded_timeout(tmp_path, monkeypatch):
     assert "--force" not in calls[0][0]
 
 
-def test_pause_arriving_during_hosted_observation_prevents_push(tmp_path, monkeypatch):
+@pytest.mark.parametrize("state,resume", [("paused", False), ("stopping", False), ("stopping", True)])
+def test_pause_arriving_during_hosted_observation_prevents_push(tmp_path, monkeypatch, state, resume):
     _repo, remote, base, sha, store, ci, adapter, _pr = rig(tmp_path, monkeypatch)
     original = ci.run_for
     def observe(commit_sha):
         from stagemesh.parallel import request_queue_control
-        request_queue_control(store, "paused", reason="pause during CI")
+        request_queue_control(store, state, reason="control during CI")
+        if resume:
+            request_queue_control(store, "resumed", reason="new run only")
         return original(commit_sha)
     monkeypatch.setattr(ci, "run_for", observe)
     result = adapter.merge(7, sha, "ff-only")

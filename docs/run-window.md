@@ -153,6 +153,30 @@ when retaining an older task branch. Both delivery and pending-PR resume accept
 only that exact candidate-derived suffix or the original task branch. The full
 PR head SHA, latest durable candidate and normal supervisor gates still match.
 
+
+### Stopping active provider work
+
+From the project directory, `stagemesh --project . queue-control stop --terminate-running`
+requests an audited stop. Updated task workers observe it while waiting for an
+implementation or review provider, verify the identity of that worker's provider,
+terminate its process tree, and reap it before releasing execution ownership.
+An unverified identity is retained until the process exits; it is never killed by
+PID alone. Partial workspace edits and the last accepted candidate are preserved.
+Cancellation records `operator_stop`, without provider fallback, remediation, or
+review approval. New stages, task admission, publication, and fast-forward landing
+are blocked for the stopping run.
+
+Without `--terminate-running`, stop drains the current stage before stopping;
+pause leaves active work running. A subsequent `queue-control resume` enables a
+new run and cannot revive an existing stopping run. Workers already launched from
+an older installed runtime must finish before upgrading; installing this version
+does not retrofit cancellation into an existing process.
+
+If cleanup cannot be verified within its bounded wait, the runner reports a
+cleanup failure and keeps the execution and claim for recovery. It does not
+report a successful stop or admit more work; inspect `stagemesh doctor` before
+using the explicit recovery controls.
+
 ### Required hosted protection
 
 This mode is intentionally unavailable unless GitHub exposes active repository

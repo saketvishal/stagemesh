@@ -16,7 +16,7 @@ from .autonomy.merge_policy import IntegrationPolicy
 from .autonomy.supervisor import Supervisor
 from .concurrency import IntegrationLock
 from .git import GitWorkspace
-from .queue_visibility import queue_control_report
+from .queue_control import QueueStopControl
 from .survivor_wave import is_task_pr_branch
 
 
@@ -38,6 +38,7 @@ class FastForwardPullRequests(GitHubPullRequests):
         self.branch, self.required_checks, self.ci = branch, required_checks, ci
         self.expected_base = None
         self.deadline = float("inf")
+        self.stop_control = QueueStopControl(store)
         self.task_id = None
         self.policy_snapshot = None
         self.remote_url = "origin"
@@ -228,7 +229,7 @@ class FastForwardPullRequests(GitHubPullRequests):
             if policy_error:
                 return MergeOutcome(False, reason=policy_error)
             policy_snapshot = self.policy_snapshot
-            if queue_control_report(self.store)["paused"] or list(self.store.running_executions()) or any(self.store.has_active_claim(row["id"]) for row in self.store.tasks()):
+            if self.stop_control.blocks_admission() or list(self.store.running_executions()) or any(self.store.has_active_claim(row["id"]) for row in self.store.tasks()):
                 return MergeOutcome(False, reason="queue_paused_or_execution_active")
             if git.run("symbolic-ref", "HEAD").stdout.strip() != f"refs/heads/{self.branch}":
                 return MergeOutcome(False, reason="checkout_changed")
@@ -253,7 +254,7 @@ class FastForwardPullRequests(GitHubPullRequests):
             # the queue, checkout, PR head or base while CI was being observed.
             if time.time() >= self.deadline:
                 return MergeOutcome(False, reason="merge_deadline_reached")
-            if queue_control_report(self.store)["paused"]:
+            if self.stop_control.blocks_admission():
                 return MergeOutcome(False, reason="queue_paused")
             if git.run("symbolic-ref", "HEAD").stdout.strip() != f"refs/heads/{self.branch}" or git.run("status", "--porcelain", "--untracked-files=no").stdout.strip():
                 return MergeOutcome(False, reason="checkout_changed")
@@ -261,7 +262,7 @@ class FastForwardPullRequests(GitHubPullRequests):
                 return MergeOutcome(False, reason="base_modified")
             if self.remote_tip(f"refs/heads/{pr.head_ref}") != expected_head_sha:
                 return MergeOutcome(False, reason="head_sha_mismatch")
-            if queue_control_report(self.store)["paused"] or list(self.store.running_executions()) or any(self.store.has_active_claim(row["id"]) for row in self.store.tasks()):
+            if self.stop_control.blocks_admission() or list(self.store.running_executions()) or any(self.store.has_active_claim(row["id"]) for row in self.store.tasks()):
                 return MergeOutcome(False, reason="queue_paused_or_execution_active")
             if git.run("symbolic-ref", "HEAD").stdout.strip() != f"refs/heads/{self.branch}" or git.run("rev-parse", "HEAD").stdout.strip() != self.expected_base or git.run("status", "--porcelain", "--untracked-files=no").stdout.strip():
                 return MergeOutcome(False, reason="checkout_changed")
@@ -321,8 +322,8 @@ def make_merger(store, project: Path, base_ref: str, required_checks: tuple[str,
         pulls.deadline = deadline
         pulls.task_id = record.task_id
         while time.time() < deadline:
-            if queue_control_report(store)["paused"]:
-                return {"merged": False, "reason": "queue admission paused"}
+            if pulls.stop_control.blocks_admission():
+                return {"merged": False, "reason": "queue admission " + pulls.stop_control.state_label()}
             pr = pulls.get(number)
             if not pr or not is_task_pr_branch(pr.head_ref, record.task_id, record.integrated_candidate) or pr.head_sha != record.integrated_candidate:
                 return {"merged": False, "reason": "PR head no longer matches the staged candidate"}

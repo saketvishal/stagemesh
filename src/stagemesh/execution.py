@@ -6,6 +6,7 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -15,7 +16,8 @@ from .domain import ExecutionKind, ExecutionStatus
 from .git import GitWorkspace
 from .git_identity import provider_environment
 from .persistence import Store
-from .process_identity import popen_identity
+from .process_identity import classify_process, popen_identity, process_identity
+from .queue_control import OperatorStopRequested, QueueStopControl, current_provider_stop
 from .remediation import remediation_context
 from .workspace_guard import EXTERNAL_WORKSPACE_MUTATION, WorkspaceMutation, owned_workspace
 from .workspaces import (
@@ -136,10 +138,15 @@ def popen_session_kwargs() -> dict[str, object]:
 
 def kill_process_tree(proc: subprocess.Popen[str]) -> None:
     if sys.platform == "win32":
-        subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True, check=False)
+        try:
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True, check=False, timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
     else:
         try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            group = os.getpgid(proc.pid)
+            if group == proc.pid:
+                os.killpg(group, signal.SIGKILL)
         except OSError:
             pass
     try:
@@ -170,10 +177,88 @@ def communicate_bounded(proc: subprocess.Popen[str], input_text: str, timeout: f
     with _ACTIVE_LOCK:
         _ACTIVE_PROVIDER_PROCESSES.add(proc)
     try:
-        return _communicate_bounded(proc, input_text, timeout)
+        control = current_provider_stop()
+        if control is None:
+            return _communicate_bounded(proc, input_text, timeout)
+        return _communicate_with_stop(proc, input_text, timeout, control)
     finally:
         with _ACTIVE_LOCK:
             _ACTIVE_PROVIDER_PROCESSES.discard(proc)
+
+
+STOP_CLEANUP_SECONDS = 5.0
+
+
+def _communicate_with_stop(
+    proc: subprocess.Popen[str], input_text: str, timeout: float, control: QueueStopControl,
+) -> tuple[str, str, bool]:
+    identity = popen_identity(proc)
+    done = threading.Event()
+    outputs, failures = [], []
+
+    def communicate():
+        try:
+            outputs.append(proc.communicate(input=input_text))
+        except BaseException as exc:  # noqa: BLE001 -- transport failures cannot silently become a provider verdict
+            failures.append(exc)
+        finally:
+            done.set()
+
+    # Windows may block inside the stdin write before communicate's own timeout.
+    # The caller enforces the deadline independently and retains ownership if I/O cannot be reaped.
+    worker = threading.Thread(target=communicate, name=f"provider-io-{proc.pid}", daemon=True)
+    worker.start()
+    deadline = time.monotonic() + timeout
+    cleanup_deadline = None
+    timed_out, termination_attempted = False, False
+    monitor_failure, stop = None, None
+    while True:
+        if monitor_failure is None:
+            try:
+                stop = control.poll()
+            except Exception as exc:  # noqa: BLE001 -- stop observability failing must not accept provider output
+                monitor_failure = exc
+        finished = done.is_set()
+        if finished:
+            worker.join(timeout=1)
+            if worker.is_alive() or failures or proc.poll() is None:
+                raise OperatorStopRequested(
+                    "provider cleanup incomplete; execution ownership retained for recovery",
+                    cleanup_complete=False,
+                )
+            if monitor_failure is not None:
+                raise OperatorStopRequested(
+                    "provider stop monitoring failed: " + type(monitor_failure).__name__, monitor_failed=True,
+                )
+            if stop and stop["terminate_running"]:
+                raise OperatorStopRequested(str(stop.get("reason") or "operator stop"))
+            stdout, stderr = outputs[0]
+            return stdout, stderr, timed_out
+        timed_out = timed_out or time.monotonic() >= deadline
+        if timed_out or monitor_failure is not None or (stop and stop["terminate_running"]):
+            if cleanup_deadline is None:
+                cleanup_deadline = time.monotonic() + STOP_CLEANUP_SECONDS
+            if not termination_attempted and proc.poll() is None:
+                if classify_process(identity, process_identity(proc.pid)) == "LIVE":
+                    termination_attempted = True
+                    kill_process_tree(proc)
+                    cleanup_deadline = time.monotonic() + STOP_CLEANUP_SECONDS
+                    if stop and stop["terminate_running"] and monitor_failure is None:
+                        try:
+                            control.note("queue.provider_stop_termination", pid=proc.pid, request_rowid=stop["rowid"])
+                        except Exception as exc:  # noqa: BLE001 -- failed observability cannot accept provider output
+                            monitor_failure = exc
+                elif monitor_failure is None:
+                    try:
+                        control.note("queue.provider_stop_identity_unverified", pid=proc.pid)
+                    except Exception as exc:  # noqa: BLE001 -- auditing failure also stops the wait
+                        monitor_failure = exc
+            if time.monotonic() >= cleanup_deadline:
+                raise OperatorStopRequested(
+                    "provider cleanup incomplete; execution ownership retained for recovery",
+                    cleanup_complete=False,
+                )
+        done.wait(0.05)
 
 
 def _communicate_bounded(proc: subprocess.Popen[str], input_text: str, timeout: float) -> tuple[str, str, bool]:

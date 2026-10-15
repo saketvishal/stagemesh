@@ -380,6 +380,23 @@ class Store:
         )
         self.conn.commit()
 
+    def retain_execution_for_cleanup(self, execution_id: str, reason: str) -> None:
+        """An exited parent does not prove its inherited pipes/descendants were reaped."""
+        execution_id = _validate_text(execution_id, "execution id")
+        reason = _validate_text(reason, "cleanup reason")
+        row = self.conn.execute("SELECT * FROM executions WHERE id=? AND status='RUNNING'", (execution_id,)).fetchone()
+        if row is None:
+            return
+        with self.conn:
+            self.conn.execute(
+                "UPDATE executions SET process_create_time=NULL, result='cleanup_incomplete', updated_at=? WHERE id=?",
+                (time.time(), execution_id),
+            )
+            self.add_audit_event("execution.cleanup_incomplete", {
+                "execution_id": execution_id, "task_id": row["task_id"], "reason": reason,
+                "previous_process_identity": {key: row[key] for key in ("pid", "process_create_time", "boot_id", "executable")},
+            })
+
     def add_candidate(self, task_id: str, sha: str, produced_by: str, durable_handoff: bool) -> str:
         task_id = _validate_text(task_id, "task id")
         sha = _validate_text(sha, "candidate sha")

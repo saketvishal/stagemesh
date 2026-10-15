@@ -12,24 +12,34 @@ import time
 from pathlib import Path
 
 import pytest
+from test_parallel import Rig, ScriptedExecutor, contract_for
+from test_run_ready import _project
 
 import stagemesh.cli as cli_module
 from stagemesh.concurrency import IntegrationLock
 from stagemesh.config import load_config
 from stagemesh.contracts import parse_contract
 from stagemesh.coordinator import Coordinator
-from stagemesh.domain import ExecutionKind, ExecutionStatus
+from stagemesh.domain import ExecutionKind, ExecutionStatus, Stage
 from stagemesh.execution import ExecutionResult, communicate_bounded
 from stagemesh.git import GitWorkspace
-from stagemesh.parallel import queue_control_state, recover_orphaned_claims, request_queue_control, worker_id_for
+from stagemesh.parallel import (
+    queue_control_state,
+    recover_orphaned_claims,
+    request_queue_control,
+    worker_id_for,
+)
 from stagemesh.process_identity import boot_id, popen_identity
-from stagemesh.queue_run import QueueRunner, dirty_in_scope, dirty_paths, preflight, write_scope_overlap
+from stagemesh.queue_run import (
+    QueueRunner,
+    dirty_in_scope,
+    dirty_paths,
+    preflight,
+    write_scope_overlap,
+)
 from stagemesh.review import Reviewer
 from stagemesh.serialized_integration import SerializedIntegrator
 from stagemesh.workspaces import prepare_task_workspace, task_workspace
-
-from test_parallel import Rig, ScriptedExecutor, contract_for
-from test_run_ready import _project
 
 PY = sys.executable
 
@@ -312,15 +322,18 @@ def test_stop_during_implementation_releases_claims_and_next_run_resumes(tmp_pat
 
     class HangingImplementation(ScriptedExecutor):
         def run(self, store, task_id, claim_id, project):
-            execution_id = store.start_execution(task_id=task_id, claim_id=claim_id, kind=ExecutionKind.IMPLEMENTATION)
+            from stagemesh.queue_control import OperatorStopRequested
+
+            store.start_execution(task_id=task_id, claim_id=claim_id, kind=ExecutionKind.IMPLEMENTATION)
             run_path = prepare_task_workspace(project, task_id)
-            (run_path / "half.txt").write_text("partial\n", encoding="utf-8")
+            partial = run_path / self.files[task_id][0]
+            partial.parent.mkdir(parents=True, exist_ok=True)
+            partial.write_text("partial\n", encoding="utf-8")
             holder["runner"].stop_admission("operator stop", terminate_running=True)
             deadline = time.monotonic() + 10
             while not holder["runner"].stop.is_set() and time.monotonic() < deadline:
                 time.sleep(0.02)
-            store.finish_execution(execution_id, ExecutionStatus.FAILED)
-            return ExecutionResult(ExecutionStatus.FAILED, failure_reason="stopped")
+            raise OperatorStopRequested("operator stop")
 
     runner = queue(rig, HangingImplementation(rig.files), concurrency=1, interrupt_grace_seconds=5)
     holder["runner"] = runner
@@ -330,7 +343,7 @@ def test_stop_during_implementation_releases_claims_and_next_run_resumes(tmp_pat
     assert not rig.store.conn.execute("SELECT 1 FROM claims WHERE active=1").fetchall()
     assert not list(rig.store.running_executions())
     assert rig.store.get_task("A")["status"] == "OPEN"
-    assert task_workspace(rig.project, "A").exists() and not (task_workspace(rig.project, "A") / "half.txt").exists()
+    assert (task_workspace(rig.project, "A") / rig.files["A"][0]).read_text() == "partial\n"
     assert rig.store.conn.execute("SELECT 1 FROM audit_events WHERE event_type='queue.stop'").fetchone()
     assert queue_control_state(rig.store)["state"] == "stopped"
     assert outcomes(queue(rig, ScriptedExecutor(rig.files), concurrency=1).run()) == {"A": "DONE"}
@@ -354,8 +367,9 @@ def test_resume_after_stop_request_does_not_cancel_the_stop(tmp_path: Path) -> N
     request_queue_control(rig.store, "resumed", "resume does not undo stop")
     summary = runner.run()
     assert outcomes(summary) == {}
-    assert summary.control["state"] == "stopped"
-    assert queue_control_state(rig.store)["state"] == "stopped"
+    assert summary.stop_reason == "STOPPED"
+    assert summary.control["state"] == "running"  # resume applies only to a future run
+    assert queue_control_state(rig.store)["state"] == "running"
 
 
 def test_mid_run_stop_preserves_unknown_process_identity_until_recovery_override(tmp_path: Path) -> None:
@@ -381,7 +395,7 @@ def test_mid_run_stop_preserves_unknown_process_identity_until_recovery_override
     holder["runner"] = runner
     try:
         summary = runner.run()
-        assert summary.stop_reason == "STOPPED"
+        assert summary.stop_reason == "GLOBAL_SAFETY_FAILURE"
         row = rig.store.conn.execute("SELECT status FROM executions WHERE id=?", (seen["execution"],)).fetchone()
         assert row["status"] == "RUNNING"
         assert rig.store.conn.execute("SELECT active FROM claims WHERE id=?", (seen["claim"],)).fetchone()["active"] == 1
@@ -391,7 +405,7 @@ def test_mid_run_stop_preserves_unknown_process_identity_until_recovery_override
         ]
         assert [e["execution_id"] for e in skipped] == [seen["execution"]]
         for control in surfaced_queue_control(rig.project).values():
-            assert control["state"] == "stopped"
+            assert control["state"] == "stopping"  # an unknown live owner prevents stop completion
             assert [e["id"] for e in control["active_executions"]] == [seen["execution"]]
 
         # the next run must neither touch nor re-admit the protected task
@@ -654,7 +668,9 @@ def test_every_stop_path_ends_stopped_on_status_and_health(tmp_path: Path, mode:
     summary = runner.run()
 
     assert summary.stop_reason == ("INTERRUPTED" if mode == "ctrl-c" else "STOPPED")
-    assert outcomes(summary) == {"A": {"graceful": "DONE", "terminate": "STOPPED", "ctrl-c": "INTERRUPTED"}[mode]}
+    assert outcomes(summary) == {"A": "INTERRUPTED" if mode == "ctrl-c" else "STOPPED"}
+    if mode == "graceful":
+        assert rig.store.get_task("A")["stage"] == Stage.VALIDATE  # drain only the current stage
     for control in surfaced_queue_control(rig.project).values():
         assert control["state"] == "stopped"
         assert not control["paused"] and not control["stopping"]
@@ -853,7 +869,9 @@ def test_cli_stop_request_stops_a_live_runner(tmp_path: Path, terminate: bool) -
     summary = runner.run()
     assert not errors
     assert summary.stop_reason == "STOPPED"
-    assert outcomes(summary) == {"A": "STOPPED" if terminate else "DONE"}
+    assert outcomes(summary) == {"A": "STOPPED"}
+    if not terminate:
+        assert rig.store.get_task("A")["stage"] == Stage.VALIDATE
     assert not any(kind == "start" and task == "B" for kind, task, _ in executor.log)
     for control in surfaced_queue_control(rig.project).values():
         assert control["state"] == "stopped" and control["active_executions"] == []
