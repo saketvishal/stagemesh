@@ -155,3 +155,30 @@ def test_pause_arriving_in_final_remote_observation_prevents_push(tmp_path, monk
     result = adapter.merge(7, sha, "ff-only")
     assert not result.merged and "queue_paused" in result.reason
     assert git(remote, "rev-parse", "main") == base
+
+
+def test_supervised_ff_accepts_publisher_retry_branch(tmp_path, monkeypatch):
+    from dataclasses import replace
+    repo, remote, _base, sha, store, _ci, adapter, pr = rig(tmp_path, monkeypatch)
+    retry_branch = f"wave/task-{TASK}-{sha[:7]}"
+    git(repo, "push", "origin", f"{sha}:refs/heads/{retry_branch}")
+    monkeypatch.setattr(adapter, "get", lambda number: replace(pr, head_ref=retry_branch))
+    record = TaskRecord(TASK, pr_url="https://github.com/owner/repo/pull/7", integrated_candidate=sha)
+    result = ff.make_merger(store, repo, "refs/heads/main", ("web",))(record, time.time() + 20)
+    assert result["merged"], result
+    assert git(remote, "rev-parse", "main") == sha == git(repo, "rev-parse", "main")
+    assert git(remote, "rev-parse", retry_branch) == sha
+    assert git(remote, "rev-parse", f"wave/task-{TASK}") == sha
+
+
+@pytest.mark.parametrize("branch,expected", [
+    ("wave/task-123", True),
+    ("wave/task-123-abcdef0", True),
+    ("wave/task-123-deadbee", False),
+    ("wave/task-123-abcdef0-extra", False),
+    ("wave/task-1234-abcdef0", False),
+    ("other/task-123-abcdef0", False),
+])
+def test_task_pr_branch_requires_exact_publisher_identity(branch, expected):
+    from stagemesh.survivor_wave import is_task_pr_branch
+    assert is_task_pr_branch(branch, "123", "abcdef0123456789") is expected

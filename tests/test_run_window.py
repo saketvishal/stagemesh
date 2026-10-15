@@ -657,12 +657,14 @@ def test_ff_window_refuses_prior_unmerged_prs(tmp_path: Path) -> None:
     assert report.refused and rig.runs == [] and "prior_prs" in report.stop_reason
 
 
-def test_ff_window_resumes_one_owned_evidenced_pr_before_new_work(tmp_path: Path) -> None:
+@pytest.mark.parametrize("republished", [False, True])
+def test_ff_window_resumes_one_owned_evidenced_pr_before_new_work(tmp_path: Path, republished) -> None:
     store, project, rig, hooks, options, config, kwargs = window(
         tmp_path, ["1", "2"], auto_merge_ff=True, concurrency=1, required_checks=("web",))
     hooks.run_task("1", 8)
     assert store.get_task("1")["stage"] == "DONE"
-    kwargs["list_prs"] = lambda project: [{"number": 7, "headRefName": "wave/task-1", "url": "https://github.com/x/y/pull/7"}]
+    head_ref = "wave/task-1" + ("-" + store.latest_candidate("1")["sha"][:7] if republished else "")
+    kwargs["list_prs"] = lambda project: [{"number": 7, "headRefName": head_ref, "url": "https://github.com/x/y/pull/7"}]
     landed = []
     def land(record, deadline):
         landed.append(record.task_id)

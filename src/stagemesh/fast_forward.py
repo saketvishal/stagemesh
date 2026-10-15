@@ -16,6 +16,7 @@ from .autonomy.supervisor import Supervisor
 from .concurrency import IntegrationLock
 from .git import GitWorkspace
 from .queue_visibility import queue_control_report
+from .survivor_wave import is_task_pr_branch
 
 
 def checks_ready(ci, sha: str, required: tuple[str, ...]) -> bool:
@@ -161,7 +162,7 @@ def make_merger(store, project: Path, base_ref: str, required_checks: tuple[str,
             if queue_control_report(store)["paused"]:
                 return {"merged": False, "reason": "queue admission paused"}
             pr = pulls.get(number)
-            if not pr or pr.head_ref != f"wave/task-{record.task_id}" or pr.head_sha != record.integrated_candidate:
+            if not pr or not is_task_pr_branch(pr.head_ref, record.task_id, record.integrated_candidate) or pr.head_sha != record.integrated_candidate:
                 return {"merged": False, "reason": "PR head no longer matches the staged candidate"}
             if pr.state is PRState.CLOSED:
                 return {"merged": False, "reason": "PR closed without merging"}

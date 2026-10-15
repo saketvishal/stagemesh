@@ -48,6 +48,7 @@ from .survivor_wave import (
     WaveHooks,
     WaveReport,
     git_repo_state,
+    is_task_pr_branch,
     prepare_staging_ref,
     run_wave,
     skip_reason,
@@ -541,11 +542,19 @@ def run_window(
         if len(pending) == 1:
             pr = pending[0]
             head_ref = str(pr.get("headRefName", ""))
-            task_id = head_ref.removeprefix("wave/task-")
-            task = store.get_task(task_id) if head_ref.startswith("wave/task-") else None
-            candidate = store.latest_candidate(task_id) if task else None
-            owned = bool(task and task["status"] == TaskStatus.DONE and task["stage"] == Stage.DONE
-                         and candidate and (options.tasks is None or task_id in options.tasks))
+            raw_id = head_ref.removeprefix("wave/task-")
+            possible_ids = {raw_id, raw_id.rsplit("-", 1)[0]} if head_ref.startswith("wave/task-") else set()
+            owners = []
+            for possible_id in possible_ids:
+                task = store.get_task(possible_id)
+                candidate = store.latest_candidate(possible_id) if task else None
+                if candidate and is_task_pr_branch(head_ref, possible_id, str(candidate["sha"])):
+                    owners.append((possible_id, task, candidate))
+            owned = len(owners) == 1
+            if owned:
+                task_id, task, candidate = owners[0]
+                owned = bool(task["status"] == TaskStatus.DONE and task["stage"] == Stage.DONE
+                             and (options.tasks is None or task_id in options.tasks))
             if owned:
                 sha = str(candidate["sha"])
                 owned = all(store.has_evidence(task_id, sha, kind) for kind in

@@ -143,3 +143,8 @@ queue pause, expired window or unverified landing retains the PR and stops the
 window before dependent work. True design/security decisions remain human gates.
 Review evidence must cover all repository-required checks, including relevant
 visual comparisons; this option never authorizes new screenshot baselines.
+
+Replacement task PRs use the publisher's `wave/task-<id>-<candidate[:7]>` branch
+when retaining an older task branch. Both delivery and pending-PR resume accept
+only that exact candidate-derived suffix or the original task branch. The full
+PR head SHA, latest durable candidate and normal supervisor gates still match.
