@@ -172,6 +172,11 @@ new run and cannot revive an existing stopping run. Workers already launched fro
 an older installed runtime must finish before upgrading; installing this version
 does not retrofit cancellation into an existing process.
 
+If cleanup cannot be verified within its bounded wait, the runner reports a
+cleanup failure and keeps the execution and claim for recovery. It does not
+report a successful stop or admit more work; inspect `stagemesh doctor` before
+using the explicit recovery controls.
+
 ### Required hosted protection
 
 This mode is intentionally unavailable unless GitHub exposes active repository

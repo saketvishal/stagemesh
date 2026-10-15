@@ -234,7 +234,9 @@ class Coordinator:
             )
             try:
                 result = self.executor.run(self.store, task_id, claim_id, self.project)
-            except OperatorStopRequested:
+            except OperatorStopRequested as exc:
+                if not exc.cleanup_complete:
+                    raise
                 execution = self.store.latest_execution_for_claim(claim_id)
                 if execution is not None and execution["status"] == ExecutionStatus.RUNNING:
                     self.store.finish_execution(execution["id"], ExecutionStatus.FAILED, result="operator_stop")
@@ -443,7 +445,7 @@ class Coordinator:
             )
         record_audit(
             self.store,
-            "task.implementation_unsuccessful",
+            "task.implementation_cancelled" if status == "STOPPED" else "task.implementation_unsuccessful",
             {
                 "task_id": task_id,
                 "claim_id": claim_id,

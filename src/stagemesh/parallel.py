@@ -35,7 +35,7 @@ from .git import GitWorkspace
 from .persistence import Store
 from .process_identity import classify_process, process_identity
 from .provider_pool import ProviderLog
-from .queue_control import QUEUE_CONTROL_EVENT, latest_queue_control
+from .queue_control import QUEUE_CONTROL_EVENT, QueueStopControl, latest_queue_control
 from .recovery import (
     auto_rebaseline_blocked_stale_baselines,
     auto_rebind_blocked_missing_validation_gates,
@@ -308,6 +308,7 @@ class ParallelRunner:
         if concurrency < 1:
             raise ValueError("concurrency must be at least 1")
         self.store = store
+        self._stop_control = QueueStopControl(store)
         self.project = Path(project)
         self.make_coordinator = make_coordinator
         self.concurrency = concurrency
@@ -409,10 +410,10 @@ class ParallelRunner:
 
     def _record_stopped(self, reason: str, *, terminate_running: bool) -> None:
         """Close a stop with exactly one `stopped` control event, whichever path (graceful, terminate, Ctrl+C) finished it."""
+        self._stop_control.complete_if_idle()
         latest = latest_queue_control(self.store)
-        if latest is not None and latest.get("state") == "stopped":
-            return
-        self._record_control("stopped", reason, terminate_running=terminate_running)
+        if latest is not None:
+            self._refresh_control_state(str(latest["state"]))
 
     def _active_execution_snapshot(self) -> list[dict[str, Any]]:
         snapshot = Store(self.store.db_path)
@@ -750,6 +751,9 @@ class ParallelRunner:
                 max_steps=self.max_steps, on_step=on_step, on_start=on_start, global_health=False, should_stop=self.stop.is_set,
                 worktree_root_path=self.runtime.worktree_root,
             )
+            if summary.stop_reason == "STOP_CLEANUP_INCOMPLETE":
+                self.global_failure = f"task {task_id}: {summary.message}"
+                self.stop.set()
             if self.wait_for_providers and summary.stop_reason == "NO_PROGRESS":
                 stage = str(store.get_task(task_id)["stage"])
                 pool = getattr(coordinator.executor, "pool", None) if stage == "IMPLEMENT" else getattr(coordinator.reviewer, "review_pool", None)
@@ -941,13 +945,14 @@ class ParallelRunner:
         return killed
 
     def _finalize(self, summary: ParallelSummary) -> None:
-        # Defensive: whatever happened, no claim of this process may outlive the run.
+        # A live or incompletely reaped execution must keep its claim for recovery.
         final = Store(self.store.db_path)
         try:
+            protected = {str(e["claim_id"]) for e in final.running_executions() if e["claim_id"]}
             for claim in final.conn.execute("SELECT id, task_id FROM claims WHERE active=1 AND worker_id LIKE ?", (f"{WORKER_PREFIX}{os.getpid()}-%",)).fetchall():
                 if str(claim["task_id"]) not in self._threads:
                     continue  # only tasks this run started; anything else is somebody else's claim
-                if str(claim["id"]) in self._protected_claims:
+                if str(claim["id"]) in self._protected_claims | protected:
                     continue  # unknown process identity: stays claimed until `recover-stale --release-unknown`
                 final.release_claim(str(claim["id"]))
                 self.note(str(claim["task_id"]), "claim_released")
@@ -957,7 +962,10 @@ class ParallelRunner:
             summary.providers = {"limits": self.limiter.snapshot()}
         self._refresh_control_state()
         outcomes = [t.summary.stop_reason if t.summary else "UNSET" for t in summary.tasks]
-        if self.global_failure is not None:
+        if "STOP_CLEANUP_INCOMPLETE" in outcomes:
+            summary.stop_reason = "GLOBAL_SAFETY_FAILURE"
+            summary.message = "provider cleanup incomplete; ownership retained for recovery"
+        elif self.global_failure is not None:
             summary.stop_reason, summary.message = "GLOBAL_SAFETY_FAILURE", self.global_failure
         elif summary.interrupted:
             summary.stop_reason, summary.message = "INTERRUPTED", "interrupted; claims released, worktrees kept for resume"

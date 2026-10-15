@@ -206,6 +206,8 @@ def _communicate_with_stop(proc, input_text, timeout, control):
                 done.wait(0.1)
         except Exception as exc:  # noqa: BLE001 -- report a failed monitor, never accept output silently
             failures.append(exc)
+            if proc.poll() is None and classify_process(identity, process_identity(proc.pid)) == "LIVE":
+                kill_process_tree(proc)
         finally:
             if connection is not None:
                 connection.close()
@@ -214,23 +216,34 @@ def _communicate_with_stop(proc, input_text, timeout, control):
     watcher.start()
     try:
         # Watching must run independently: communicate can block writing stdin on Windows.
-        result = _communicate_bounded(proc, input_text, timeout)
+        try:
+            stdout, stderr = proc.communicate(input=input_text, timeout=timeout)
+            result = stdout, stderr, False
+        except subprocess.TimeoutExpired:
+            if classify_process(identity, process_identity(proc.pid)) == "LIVE":
+                kill_process_tree(proc)
+            try:
+                stdout, stderr = proc.communicate(timeout=5)
+            except subprocess.TimeoutExpired as exc:
+                raise OperatorStopRequested(
+                    "provider cleanup incomplete; execution ownership retained for recovery",
+                    cleanup_complete=False,
+                ) from exc
+            result = stdout, stderr, True
         stop = control.poll()
         if stop and stop["terminate_running"]:
-            # Keep ownership until both the process and its inherited pipes are reaped.
-            while True:
-                try:
-                    proc.communicate(timeout=0.25)
-                    break
-                except subprocess.TimeoutExpired:
-                    continue
             raise OperatorStopRequested(str(stop.get("reason") or "operator stop"))
         if failures:
             raise OperatorStopRequested("provider stop monitoring failed: " + type(failures[0]).__name__)
         return result
     finally:
         done.set()
-        watcher.join()
+        watcher.join(timeout=6)
+        if watcher.is_alive():
+            raise OperatorStopRequested(
+                "provider stop monitor did not exit; execution ownership retained for recovery",
+                cleanup_complete=False,
+            )
 
 
 def _communicate_bounded(proc: subprocess.Popen[str], input_text: str, timeout: float) -> tuple[str, str, bool]:

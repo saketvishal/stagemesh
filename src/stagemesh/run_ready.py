@@ -847,7 +847,8 @@ def drive_task(
             with provider_stop_scope(control):
                 progressed = coordinator.tick()
         except OperatorStopRequested as exc:
-            summary.stop_reason, summary.message = "OPERATOR_STOP", str(exc)
+            summary.stop_reason = "OPERATOR_STOP" if exc.cleanup_complete else "STOP_CLEANUP_INCOMPLETE"
+            summary.message = str(exc)
             break
         except TargetSelectionError as exc:
             summary.stop_reason, summary.message = "TARGET_ERROR", str(exc)
@@ -892,7 +893,7 @@ def drive_task(
         # A provider killed by the interrupt reports a failure; that is the interrupt, not a verdict on the task.
         # A task that already finished or was blocked keeps its own outcome and reason.
         summary.stop_reason, summary.message = "INTERRUPTED", "the run was interrupted; claims were released and the worktree kept"
-    if control.poll() is not None and summary.stop_reason != "DONE":
+    if control.poll() is not None and summary.stop_reason not in {"DONE", "BLOCKED", "STOP_CLEANUP_INCOMPLETE"}:
         summary.stop_reason, summary.message = "OPERATOR_STOP", "operator stop requested; current stage retained"
     control.complete_if_idle()
     summary.final = _snapshot(store, selected)

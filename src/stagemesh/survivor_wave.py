@@ -42,7 +42,7 @@ INTEGRATION_MODES = (INTEGRATION_PR, INTEGRATION_LOCAL)
 STAGING_REF = "refs/heads/wave/staging"
 
 # `continue` stop reasons that say the environment, not the task, is the problem.
-INFRASTRUCTURE_STOP_REASONS = frozenset({"CURRENT_PROBLEM", "TARGET_ERROR", "RUNNER_CRASH"})
+INFRASTRUCTURE_STOP_REASONS = frozenset({"CURRENT_PROBLEM", "TARGET_ERROR", "RUNNER_CRASH", "STOP_CLEANUP_INCOMPLETE"})
 INFRASTRUCTURE_MESSAGE_MARKERS = (
     "orphaned_builtin_stage_execution",
     "external_workspace_mutation",

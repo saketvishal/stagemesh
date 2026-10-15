@@ -5,6 +5,7 @@ import subprocess
 import sys
 import threading
 import time
+from pathlib import Path
 
 import pytest
 from test_bounded_execution import TASK, _setup
@@ -25,8 +26,9 @@ def test_terminate_stop_reaps_provider_tree_preserves_candidate_and_releases_cla
     script.write_text(
         "import json,os,subprocess,sys,time\nfrom pathlib import Path\n"
         "child=subprocess.Popen([sys.executable,'-c','import time;time.sleep(60)'])\n"
+        "Path('docs/a.md').write_text('unfinished work')\n"
         f"Path({str(marker)!r}).write_text(json.dumps({{'parent':os.getpid(),'child':child.pid}}))\n"
-        "Path('docs/a.md').write_text('unfinished work')\ntime.sleep(60)\n",
+        "time.sleep(60)\n",
         encoding="utf-8",
     )
     prior = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=project, text=True).strip()
@@ -95,7 +97,14 @@ def test_terminate_stop_reaps_provider_tree_preserves_candidate_and_releases_cla
     assert execution["result"] == "operator_stop"
     from stagemesh.process_identity import process_identity
     pids = json.loads(marker.read_text())
-    assert all(process_identity(pid) is None for pid in pids.values()), pids
+    def terminated(pid):
+        identity = process_identity(pid)
+        if identity is None:
+            return True
+        # Linux may briefly retain a terminated orphan as a zombie until init reaps it.
+        stat = Path(f"/proc/{pid}/stat")
+        return sys.platform.startswith("linux") and stat.exists() and stat.read_text().split()[2] == "Z"
+    assert all(terminated(pid) for pid in pids.values()), pids
     store.close()
 
 
@@ -282,3 +291,159 @@ def test_stop_is_project_scoped_and_never_completes_over_an_active_execution(tmp
     assert store.conn.execute("SELECT status FROM executions WHERE id=?", (execution,)).fetchone()["status"] == "RUNNING"
     store.close()
     other.close()
+
+
+def test_failed_pipe_cleanup_is_bounded_and_keeps_execution_ownership(tmp_path, monkeypatch):
+    from stagemesh import execution
+    from stagemesh.queue_control import OperatorStopRequested, QueueStopControl, provider_stop_scope
+
+    project, store = _setup(tmp_path)
+    control = QueueStopControl(store, TASK)
+    request_queue_control(store, "stopping", "cleanup test", terminate_running=True)
+
+    class UnreapableProvider:
+        pid = 123
+        args = ("test-provider",)
+
+        def poll(self):
+            return 0
+
+        def communicate(self, input=None, timeout=None):
+            raise subprocess.TimeoutExpired(self.args, timeout)
+
+    monkeypatch.setattr(execution, "classify_process", lambda saved, current: "UNKNOWN")
+    monkeypatch.setattr(execution, "popen_identity", lambda proc: None)
+    monkeypatch.setattr(execution, "process_identity", lambda pid: None)
+    with provider_stop_scope(control), pytest.raises(OperatorStopRequested) as caught:
+        execution.communicate_bounded(UnreapableProvider(), "", 1)
+    assert not caught.value.cleanup_complete
+
+    class IncompleteExecutor:
+        name = "test-incomplete"
+
+        def run(self, store, task_id, claim_id, project):
+            from stagemesh.domain import ExecutionKind
+            store.start_execution(task_id=task_id, claim_id=claim_id, kind=ExecutionKind.IMPLEMENTATION)
+            raise OperatorStopRequested("cleanup incomplete", cleanup_complete=False)
+
+    request_queue_control(store, "resumed", "test next run")
+    summary = RunSummary(True, "UNSET", task_id=TASK)
+    drive_task(store, project, Coordinator(store, project, executor=IncompleteExecutor()), TASK, summary, max_steps=1)
+    assert summary.stop_reason == "STOP_CLEANUP_INCOMPLETE"
+    assert list(store.running_executions())
+    assert store.has_active_claim(TASK)
+    store.close()
+
+
+def test_drain_stop_preserves_a_task_blocked_verdict(tmp_path):
+    project, store = _setup(tmp_path)
+
+    class BlockingCoordinator:
+        def tick(self):
+            request_queue_control(store, "stopping", "stop after stage")
+            store.block_task(TASK)
+            return 1
+
+    summary = RunSummary(True, "UNSET", task_id=TASK)
+    drive_task(store, project, BlockingCoordinator(), TASK, summary, max_steps=1)
+    assert summary.stop_reason == "BLOCKED"
+    store.close()
+
+
+def test_cancellation_does_not_consume_the_failure_budget(tmp_path):
+    from stagemesh.diagnosis import diagnose
+    from stagemesh.queue_control import OperatorStopRequested
+
+    project, store = _setup(tmp_path)
+
+    class CancelledExecutor:
+        name = "test-cancelled"
+
+        def run(self, store, task_id, claim_id, project):
+            raise OperatorStopRequested("operator requested stop")
+
+    coordinator = Coordinator(store, project, executor=CancelledExecutor())
+    for _ in range(2):
+        with pytest.raises(OperatorStopRequested):
+            coordinator.tick()
+    assert diagnose(store, TASK, project) is None
+    assert not store.has_active_claim(TASK)
+    assert sum(e["event_type"] == "task.implementation_cancelled" for e in store.audit_events()) == 2
+    store.close()
+
+
+def test_monitor_failure_cancels_the_owned_provider_instead_of_accepting_output(tmp_path, monkeypatch):
+    from stagemesh import execution
+    from stagemesh.queue_control import OperatorStopRequested, QueueStopControl, provider_stop_scope
+
+    _project, store = _setup(tmp_path)
+    control = QueueStopControl(store, TASK)
+    proc = subprocess.Popen([sys.executable, "-c", "import time;time.sleep(60)"],
+        text=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        **execution.popen_session_kwargs())
+
+    def unavailable_store(path):
+        raise OSError("disposable monitor failure")
+
+    monkeypatch.setattr(execution, "Store", unavailable_store)
+    started = time.monotonic()
+    try:
+        with provider_stop_scope(control), pytest.raises(OperatorStopRequested, match="monitoring failed"):
+            execution.communicate_bounded(proc, "", 8)
+        assert time.monotonic() - started < 5
+        assert proc.poll() is not None
+    finally:
+        if proc.poll() is None:
+            execution.kill_process_tree(proc)
+        proc.wait(timeout=5)
+        store.close()
+
+
+def test_incomplete_review_cleanup_retains_the_running_execution(tmp_path):
+    from test_review_terminalization import TASK as review_task
+    from test_review_terminalization import _project_with_candidate
+
+    from stagemesh.domain import EvidenceKind
+    from stagemesh.providers import RuntimeCommandAdapter
+    from stagemesh.queue_control import OperatorStopRequested
+    from stagemesh.review import Reviewer
+
+    project, store, candidate = _project_with_candidate(tmp_path)
+
+    class IncompleteReviewer(RuntimeCommandAdapter):
+        def review_candidate(self, *args):
+            raise OperatorStopRequested("cleanup incomplete", cleanup_complete=False)
+
+    adapter = IncompleteReviewer("reviewer", (sys.executable, "-c", "pass"))
+    with pytest.raises(OperatorStopRequested):
+        Reviewer(adapter=adapter, require_independent=True).review(store, review_task, candidate, project)
+    assert list(store.running_executions())
+    assert not store.conn.execute("SELECT 1 FROM evidence WHERE kind=?", (EvidenceKind.REVIEW,)).fetchall()
+    store.close()
+
+
+@pytest.mark.parametrize("resume", [False, True])
+def test_parallel_finalization_keeps_incomplete_claim_and_never_overwrites_resume(tmp_path, resume):
+    from stagemesh.domain import ExecutionKind
+    from stagemesh.parallel import ParallelRunner, TaskLifecycle, queue_control_state, worker_id_for
+
+    project, store = _setup(tmp_path)
+    runner = ParallelRunner(store, project, lambda *args: None, concurrency=1, sweep_worktrees=False)
+    runner._threads[TASK] = threading.Thread()
+    runner.summary.tasks.append(TaskLifecycle(TASK, summary=RunSummary(True, "STOP_CLEANUP_INCOMPLETE", task_id=TASK)))
+    claim = store.acquire_claim(TASK, worker_id_for(TASK))
+    execution = store.start_execution(task_id=TASK, claim_id=claim, kind=ExecutionKind.IMPLEMENTATION)
+    runner.stop_admission("test stop", terminate_running=True)
+    if resume:
+        request_queue_control(store, "resumed", "future run")
+    runner._finalize(runner.summary)
+    assert store.has_active_claim(TASK)
+    assert runner.summary.stop_reason == "GLOBAL_SAFETY_FAILURE"
+    runner._record_stopped("cleanup not yet complete", terminate_running=True)
+    assert queue_control_state(store)["state"] == ("running" if resume else "stopping")
+    from stagemesh.domain import ExecutionStatus
+    store.finish_execution(execution, ExecutionStatus.FAILED, result="test cleanup")
+    store.release_claim(claim)
+    runner._record_stopped("cleanup complete", terminate_running=True)
+    assert queue_control_state(store)["state"] == ("running" if resume else "stopped")
+    store.close()
