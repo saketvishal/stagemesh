@@ -164,6 +164,8 @@ StageMesh does not install or weaken rules. Classic protection must apply to
 administrators too. Server-required status checks, including their expected apps,
 remain enforced for the push credential. A required-PR/merge-queue rule is not
 bypassed: such repositories must keep using PR-only mode instead.
+Git URL rewriting (`insteadOf` or `pushInsteadOf`) and multiple push destinations
+are unsupported in this mode; they refuse before any landing write.
 
 This assumes trusted repository administrators keep protection policy stable
 during the window. StageMesh rechecks observed policy and rejects changes, but

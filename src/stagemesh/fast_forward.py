@@ -46,6 +46,7 @@ class FastForwardPullRequests(GitHubPullRequests):
     def bind_remote(self):
         from .github import parse_github_remote
 
+        self.reject_url_rewrites()
         fetch_urls = self.bounded_git("remote", "get-url", "--all", "origin").stdout.splitlines()
         push_urls = self.bounded_git("remote", "get-url", "--push", "--all", "origin").stdout.splitlines()
         if len(fetch_urls) != 1 or len(push_urls) != 1:
@@ -55,6 +56,11 @@ class FastForwardPullRequests(GitHubPullRequests):
             if repository is None or (repository.owner.casefold(), repository.repo.casefold()) != (self.owner.casefold(), self.repo.casefold()):
                 raise ValueError("fetch/push destination differs from the policy-verified GitHub repository")
         self.remote_url = push_urls[0]
+
+    def reject_url_rewrites(self):
+        rewrites = self.bounded_git("config", "--get-regexp", r"^url\..*\.(insteadof|pushinsteadof)$", check=False)
+        if rewrites.returncode != 1:
+            raise ValueError("fast-forward landing requires Git URL rewriting to be absent")
 
     def get(self, number):
         status, payload = self._request("GET", f"/pulls/{int(number)}", missing_ok=True)
@@ -265,6 +271,7 @@ class FastForwardPullRequests(GitHubPullRequests):
                 "pr": number, "candidate_sha": expected_head_sha, "base_sha": self.expected_base})
             if not all(re.fullmatch(r"[0-9a-f]{40}", value) for value in (self.expected_base, expected_head_sha)):
                 return MergeOutcome(False, reason="literal_commit_ids_required")
+            self.reject_url_rewrites()
             # The literal lease is compare-and-swap, not permission to rewrite:
             # ancestry was proved above and the server must also forbid rewrites.
             # An intermediate ancestor pushed by another writer must refuse too.

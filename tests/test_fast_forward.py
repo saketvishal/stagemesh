@@ -279,9 +279,19 @@ def test_crash_after_push_is_journaled_and_resumable_after_pr_disappears(tmp_pat
 @pytest.mark.parametrize("push_urls", ["https://github.com/owner/other.git\n", "https://github.com/owner/repo.git\nhttps://github.com/owner/other.git\n"])
 def test_effective_push_destination_must_be_one_policy_verified_repository(tmp_path, monkeypatch, push_urls):
     _repo, _remote, _base, _sha, _store, _ci, adapter, _pr = rig(tmp_path, monkeypatch)
-    monkeypatch.setattr(adapter, "bounded_git", lambda *args: SimpleNamespace(
+    monkeypatch.setattr(adapter, "bounded_git", lambda *args, **kwargs: SimpleNamespace(returncode=1 if args[0] == "config" else 0,
         stdout=push_urls if "--push" in args else "https://github.com/owner/repo.git\n"))
     with pytest.raises(ValueError):
+        type(adapter).bind_remote(adapter)
+
+
+def test_chained_git_url_rewrites_cannot_redirect_the_pinned_destination(tmp_path, monkeypatch):
+    repo, _remote, _base, _sha, _store, _ci, adapter, _pr = rig(tmp_path, monkeypatch)
+    git(repo, "remote", "set-url", "origin", "policy-verified:repo.git")
+    git(repo, "config", "url.https://github.com/owner/.insteadOf", "policy-verified:")
+    git(repo, "config", "url.https://github.com/unverified/repo.git.insteadOf", "https://github.com/owner/repo.git")
+    assert git(repo, "remote", "get-url", "--push", "origin") == "https://github.com/owner/repo.git"
+    with pytest.raises(ValueError, match="URL rewriting"):
         type(adapter).bind_remote(adapter)
 
 
