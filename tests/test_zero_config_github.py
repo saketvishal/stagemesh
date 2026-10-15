@@ -51,7 +51,7 @@ def test_init_persists_detected_github_origin_as_the_ready_issue_source(tmp_path
     ]
 
 
-def test_run_window_plan_syncs_ready_github_issues_from_zero_config(
+def test_run_window_plan_previews_ready_issues_without_persisting_them(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:
     project = _github_project(tmp_path)
@@ -89,23 +89,31 @@ def test_run_window_plan_syncs_ready_github_issues_from_zero_config(
     payload = json.loads(capsys.readouterr().out)
     assert code == 0
     assert payload["would_run"] == ["17"]
+    from stagemesh.persistence import Store
+    store = Store(project / ".stagemesh/stagemesh.sqlite3")
+    assert store.get_task("17") is None
+    store.close()
 
 
-def test_run_window_migrates_existing_install_in_place(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_init_migrates_existing_install_before_read_only_plan(tmp_path: Path, monkeypatch, capsys) -> None:
     project = _github_project(tmp_path)
     (project / ".stagemesh").mkdir()
     config_path = project / ".stagemesh" / "config.json"
     config_path.write_text(json.dumps({"github": {"owner": "acme", "repo": "widgets"}}), encoding="utf-8")
     monkeypatch.setattr(GitHubApiIssueSource, "discover", lambda self: ([DiscoveredTask("github", "3", "T", labels=("stagemesh:ready",))], "OK", None))
+    assert cli_module.main(["--project", str(project), "init"]) == 0
+    capsys.readouterr()
+    before = config_path.read_bytes()
 
     code = cli_module.main(["--project", str(project), "run-window", "--plan", "--json", "--report", str(tmp_path / "plan.json")])
 
     assert code == 0
     assert json.loads(capsys.readouterr().out)["would_run"] == ["3"]
     assert json.loads(config_path.read_text(encoding="utf-8"))["task_sources"][0]["labels"] == ["stagemesh:ready"]
+    assert config_path.read_bytes() == before
 
 
-def test_run_window_migrates_legacy_github_source_before_syncing_ready_issues(
+def test_run_window_plan_preserves_explicit_legacy_source_policy(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:
     project = _github_project(tmp_path)
@@ -129,20 +137,20 @@ def test_run_window_migrates_legacy_github_source_before_syncing_ready_issues(
     code = cli_module.main(["--project", str(project), "run-window", "--plan", "--json", "--report", str(tmp_path / "plan.json")])
 
     assert code == 0
-    assert json.loads(capsys.readouterr().out)["would_run"] == ["4"]
-    assert json.loads(config_path.read_text(encoding="utf-8"))["task_sources"][0]["labels"] == ["stagemesh:ready"]
+    assert json.loads(capsys.readouterr().out)["would_run"] == []
+    assert json.loads(config_path.read_text(encoding="utf-8"))["task_sources"][0]["labels"] == ["status:QUEUED"]
 
 
 @pytest.mark.parametrize(
     ("labels", "expected"),
     [
-        (["status:QUEUED"], ["stagemesh:ready"]),
+        (["status:QUEUED"], ["status:QUEUED"]),
         (["stagemesh:ready"], ["stagemesh:ready"]),
         (["status:QUEUED", "area:x"], ["status:QUEUED", "area:x"]),
         (["custom"], ["custom"]),
     ],
 )
-def test_migration_updates_only_the_legacy_default_github_source_label(
+def test_init_preserves_explicit_github_source_policy(
     tmp_path: Path, labels: list[str], expected: list[str]
 ) -> None:
     project = _github_project(tmp_path)
@@ -175,3 +183,36 @@ def test_run_window_unmigratable_missing_source_refuses_with_one_fix_and_writes_
     assert code == 2
     assert [check["fix"] for check in failed] == ["stagemesh init"]
     assert json.loads(report.read_text(encoding="utf-8")) == payload
+
+
+@pytest.mark.parametrize("sources", [[], [{"name": "local", "type": "json", "path": ".stagemesh/backlog.json"}]])
+def test_init_preserves_explicit_disabled_or_local_sources(tmp_path: Path, sources) -> None:
+    project = _github_project(tmp_path)
+    path = project / ".stagemesh/config.json"
+    path.parent.mkdir()
+    path.write_text(json.dumps({"task_sources": sources}), encoding="utf-8")
+    before = path.read_bytes()
+    assert cli_module.main(["--project", str(project), "init"]) == 0
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("value", [False, 0, [], ""])
+def test_init_rejects_invalid_github_fields_before_writing(tmp_path: Path, value) -> None:
+    project = _github_project(tmp_path)
+    path = project / ".stagemesh/config.json"
+    path.parent.mkdir()
+    path.write_text(json.dumps({"github": {"owner": value}}), encoding="utf-8")
+    before = path.read_bytes()
+    assert cli_module.main(["--project", str(project), "init"]) == 2
+    assert path.read_bytes() == before
+    assert not (path.parent / "stagemesh.sqlite3").exists()
+
+
+def test_plan_missing_source_does_not_create_an_implicit_report(tmp_path: Path, capsys) -> None:
+    project = _github_project(tmp_path)
+    path = project / ".stagemesh/config.json"
+    path.parent.mkdir()
+    path.write_text(json.dumps({"github": {"owner": "acme", "repo": "widgets"}}), encoding="utf-8")
+    assert cli_module.main(["--project", str(project), "run-window", "--plan", "--json"]) == 2
+    assert not (path.parent / "reports").exists()
+    assert not (path.parent / "stagemesh.sqlite3").exists()

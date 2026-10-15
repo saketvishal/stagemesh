@@ -5,6 +5,7 @@ import json
 import platform
 import re
 import shlex
+import sqlite3
 import sys
 import threading
 from collections.abc import Callable
@@ -155,16 +156,22 @@ def _ensure_default_github_task_source(project: Path) -> bool:
         if not isinstance(loaded, dict):
             raise ConfigValidationError("config root must be an object")
         data = loaded
+    load_config(project)  # Validate existing settings before any migration write.
     detected = detect_github_repository(project)
     github = data.setdefault("github", {})
     if not isinstance(github, dict):
         raise ConfigValidationError("github must be an object")
+    for key in ("owner", "repo"):
+        if key in github and (not isinstance(github[key], str) or not github[key].strip()):
+            raise ConfigValidationError(f"github.{key} must be a non-empty string")
+    if "task_sources" in data:
+        return False  # Explicit sources, including an empty list, are operator policy.
     changed = False
     if detected is not None:
-        if not github.get("owner"):
+        if "owner" not in github:
             github["owner"] = detected.owner
             changed = True
-        if not github.get("repo"):
+        if "repo" not in github:
             github["repo"] = detected.repo
             changed = True
     if not (github.get("owner") and github.get("repo")):
@@ -172,39 +179,26 @@ def _ensure_default_github_task_source(project: Path) -> bool:
             config_path.parent.mkdir(parents=True, exist_ok=True)
             config_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
         return changed
-    sources = data.setdefault("task_sources", [])
-    if not isinstance(sources, list):
-        raise ConfigValidationError("task_sources must be a list")
-    github_sources = [source for source in sources if isinstance(source, dict) and source.get("type") == "github"]
-    if not github_sources:
-        sources.append(
-            {
-                "name": "github",
-                "type": "github",
-                "labels": list(DEFAULT_GITHUB_SOURCE_LABELS),
-                "excluded_labels": list(DEFAULT_GITHUB_EXCLUDED_LABELS),
-            }
-        )
-        changed = True
-    else:
-        for source in github_sources:
-            if source.get("labels") == ["status:QUEUED"]:
-                source["labels"] = list(DEFAULT_GITHUB_SOURCE_LABELS)
-                changed = True
-            if "excluded_labels" not in source:
-                source["excluded_labels"] = list(DEFAULT_GITHUB_EXCLUDED_LABELS)
-                changed = True
+    data["task_sources"] = [{
+        "name": "github", "type": "github",
+        "labels": list(DEFAULT_GITHUB_SOURCE_LABELS),
+        "excluded_labels": list(DEFAULT_GITHUB_EXCLUDED_LABELS),
+    }]
+    changed = True
     if changed:
         config_path.parent.mkdir(parents=True, exist_ok=True)
         config_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
     return changed
 
 
-def _missing_github_task_source_check(config) -> dict[str, object] | None:
+def _missing_github_task_source_check(config, project: Path) -> dict[str, object] | None:
     if not (config.github.owner and config.github.repo):
         return None
     if any(source.kind == "github" for source in config.task_sources):
         return None
+    config_path = runtime_dir(project) / "config.json"
+    if config_path.exists() and "task_sources" in json.loads(config_path.read_text(encoding="utf-8")):
+        return None  # Local-only and disabled-source projects remain supported.
     return {
         "name": "task_sources",
         "ok": False,
@@ -837,15 +831,16 @@ def command_run_window(args: argparse.Namespace) -> int:
         print("--concurrency, --max-steps-per-task and --max-tasks must be at least 1", file=sys.stderr)
         return 2
     project = Path(args.project).resolve()
-    if _ensure_default_github_task_source(project):
+    if not args.plan and _ensure_default_github_task_source(project):
         print("migrated config: added GitHub task source for stagemesh:ready issues", file=sys.stderr)
     config = load_config(project)
-    missing_source = _missing_github_task_source_check(config)
+    missing_source = _missing_github_task_source_check(config, project)
     if missing_source is not None:
         payload = {"preflight": [missing_source], "would_run": [], "left_alone": {}, "ok": False}
         early_report = Path(args.report) if args.report else runtime_dir(project) / "reports" / "run-window" / f"{datetime.now():%Y%m%d-%H%M%S}.json"
-        early_report.parent.mkdir(parents=True, exist_ok=True)
-        early_report.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+        if not args.plan or args.report:
+            early_report.parent.mkdir(parents=True, exist_ok=True)
+            early_report.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
         if args.json:
             print(json.dumps(payload, indent=2, sort_keys=True))
         else:
@@ -871,7 +866,13 @@ def command_run_window(args: argparse.Namespace) -> int:
         tasks=parse_task_ids(args.tasks) if args.tasks else None,
         report_path=report_path,
     )
-    store = Store(db_path(project))
+    store = Store(Path(":memory:") if args.plan else db_path(project))
+    if args.plan and db_path(project).exists():
+        persisted = sqlite3.connect(db_path(project).resolve().as_uri() + "?mode=ro", uri=True)
+        try:
+            persisted.backup(store.conn)
+        finally:
+            persisted.close()
     store.migrate()
     try:
         _sync_all_sources(store, project, config, None)
