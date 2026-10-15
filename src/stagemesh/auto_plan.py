@@ -108,19 +108,21 @@ def _stagemesh_smoke_gate(project: Path) -> dict[str, Any] | None:
         project / "tests" / "test_run_ready.py",
         project / "tests" / "test_provider_pool.py",
         project / "tests" / "test_canary_regression.py",
+        project / "tests" / "test_zero_config_github.py",
     ]
     if not all(path.is_file() for path in required):
         return None
     return {
         "name": "stagemesh-lifecycle-smoke",
         "command": [
-            "python",
+            sys.executable,
             "-m",
             "pytest",
             "-q",
             "tests/test_run_ready.py",
             "tests/test_provider_pool.py",
             "tests/test_canary_regression.py",
+            "tests/test_zero_config_github.py",
         ],
         "timeout_seconds": 360,
     }
