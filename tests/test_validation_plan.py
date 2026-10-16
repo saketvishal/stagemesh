@@ -338,12 +338,13 @@ def test_localized_focused_pytest_executes_through_planned_contract(tmp_path: Pa
 
     assert payload["validation_plan"]["classification"] == LOCALIZED_CODE
     assert payload["validation_plan"]["debug_checks"] == ["focused-widget-pytest"]
-    assert [gate["name"] for gate in payload["gates"]] == ["focused-widget-pytest"]
+    assert [gate["name"] for gate in payload["gates"]] == ["focused-widget-pytest", "full pytest"]
+    assert payload["validation_plan"]["release_checks"] == ["full pytest"]
     assert payload["gates"][0]["returncode"] == 0
     store.close()
 
 
-def test_validator_persists_plan_and_runs_only_planned_gates(tmp_path: Path) -> None:
+def test_validator_preserves_required_gates_even_when_plan_prefers_focus(tmp_path: Path) -> None:
     project = tmp_path / "repo"
     project.mkdir()
     workspace = GitWorkspace(project)
@@ -375,7 +376,7 @@ def test_validator_persists_plan_and_runs_only_planned_gates(tmp_path: Path) -> 
     task_id = store.upsert_task("provider command", source_id="TASK-1")
     store.add_candidate(task_id, sha, "test", True)
 
-    assert Validator().validate(store, task_id, sha, project) is EvidenceStatus.PASSED
+    assert Validator().validate(store, task_id, sha, project) is EvidenceStatus.FAILED
     row = store.conn.execute(
         "SELECT payload FROM evidence WHERE task_id=? AND candidate_sha=? AND kind=?",
         (task_id, sha, EvidenceKind.VALIDATION),
@@ -383,7 +384,9 @@ def test_validator_persists_plan_and_runs_only_planned_gates(tmp_path: Path) -> 
     payload = json.loads(row["payload"])
 
     assert payload["validation_plan"]["classification"] == CONFIG_OR_PROVIDER_COMMAND
-    assert [gate["name"] for gate in payload["gates"]] == ["provider-smoke"]
+    assert [gate["name"] for gate in payload["gates"]] == ["provider-smoke", "full pytest"]
+    assert payload["gates"][1]["status"] == "FAILED"  # The declared suite found no tests (pytest exit 5).
+    assert payload["validation_checks"]["missing"] == []
     store.close()
 
 

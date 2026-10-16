@@ -27,6 +27,7 @@ from .execution import (
     popen_session_kwargs,
     provider_timeout_seconds,
 )
+from .focused_validation import focused_test_prompt
 from .git_identity import provider_environment
 from .persistence import Store
 from .process_identity import popen_identity
@@ -664,6 +665,7 @@ def _build_task_prompt(
         f"{IMPLEMENTATION_DISCIPLINE}"
         f"{frontend_text}"
         f"{skill_prompt(title, effective_contract, remediation=bool(remediation), project=project)}"
+        f"{focused_test_prompt(project, effective_contract)}"
         "Workspace rules:\n"
         "- Edit files only. Do not run git commit, checkout, switch, reset, rebase, merge, cherry-pick, branch, tag, "
         "amend, or any command that moves HEAD or rewrites history.\n"

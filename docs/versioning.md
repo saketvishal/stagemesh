@@ -3,7 +3,7 @@
 StageMesh uses git tags as reinstallable stable package points. The current known-good stable line is:
 
 ```powershell
-python -m pip install "stagemesh @ git+https://github.com/saketvishal/stagemesh.git@v0.2.2"
+python -m pip install "stagemesh @ git+https://github.com/saketvishal/stagemesh.git@v0.3.0"
 ```
 
 Use that tag when a project needs the last proven operating version. For example, a product repository can refresh its project-local StageMesh runtime from the stable tag instead of from `main`.
@@ -12,10 +12,11 @@ Development on `main` moves to the next dev version after a stable tag is cut. T
 
 Current lines:
 
-- `v0.2.2`: patch release point for execution ownership, launch-failure diagnosis and accurate fallback progress. Stable publication requires the reviewed annotated tag and GitHub release below.
+- `v0.3.0`: release point for generic focused-reading and relevant-test defaults. Stable publication requires the reviewed annotated tag and GitHub release.
+- `v0.2.2`: previous stable rollback release for execution ownership, launch-failure diagnosis and accurate fallback progress.
 - `v0.2.1`: previous stable rollback release, including candidate-environment and guarded delivery fixes.
 - `v0.1.0`: historical fallback tag at the post-task-266 operating baseline.
-- `main`: `0.2.2` release point; start the next development change by advancing to `0.2.3.dev0`.
+- `main`: `0.3.0` release point; start the next development change at `0.3.1.dev0`. Existing clients stay on their installed version until explicitly updated while idle.
 
 Release rule:
 
@@ -23,6 +24,21 @@ Release rule:
 2. Push the tag.
 3. Before starting new development, bump `main` to the next `.dev0` version.
 4. Refresh project-local runtimes from a tag when stability matters, or from `main` when testing new StageMesh features.
+
+## Version 0.3.0: focused defaults in every repository
+
+All implementation and review providers receive focused-reading and proportional
+testing guidance without per-client setup. Conventional nearby Python and
+Vitest/Jest checks are discovered using bounded path probes; validation reads the
+exact candidate tree. Declared gates and invariants are always executed and
+recorded, even when the advisory planner prefers a narrower check. Unknown
+frameworks retain declared validation rather than guessing an unsafe command.
+See `docs/focused-validation.md` for selection limits and package boundaries.
+
+Clients receive this behavior only after installing the published 0.3.0 wheel or
+annotated tag. Never overwrite a released 0.2.2 wheel or replace a live runtime.
+Keep the published 0.2.2 package for rollback. No client configuration or existing
+contract is rewritten by this release.
 
 ## Patch 0.2.2: execution ownership and failure handling
 
