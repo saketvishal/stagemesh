@@ -239,7 +239,7 @@ def test_classification_of_each_failure_kind(tmp_path: Path) -> None:
 def test_unavailable_gate_stops_before_any_code_remediation(tmp_path: Path, stop_on_repeat: bool, nested: bool) -> None:
     command = ["stagemesh-nonexistent-gate-executable"]
     if nested:
-        command = [PY, "-c", "import sys; print('FileNotFoundError: [WinError 2] The system cannot find the file specified', file=sys.stderr); sys.exit(1)"]
+        command = [PY, "-c", "import subprocess; subprocess.run(['stagemesh-nonexistent-nested-executable'], check=True)"]
     contract = dict(DOCS_CONTRACT, required_tests=[{"name": "docs-static-unit", "command": command}])
     project, store = _setup(tmp_path, contract)
     executor = Attempts()
@@ -253,10 +253,33 @@ def test_unavailable_gate_stops_before_any_code_remediation(tmp_path: Path, stop
     assert not events(store, "task.remediation_queued")
     assert not events(store, "task.recovery_round")
     stop, = events(store, "task.diagnosis_stop")
-    assert stop["category"] == VALIDATION_GATE and not stop["repeated"]
+    assert stop["category"] == VALIDATION_GATE and not stop["repeated"] and stop["environment_unavailable"]
     block = events(store, "task.block_classified")[-1]
     assert block["kind"] == "BLOCKED_RECOVERABLE_OPERATIONAL"
     assert "validation_environment_unavailable" in block["reason"]
+
+
+@pytest.mark.parametrize("stop_on_repeat", [False, True])
+@pytest.mark.parametrize("defect", ["timeout", "import", "missing_data", "launch_phrase_in_test"])
+def test_ambiguous_gate_failures_still_receive_code_remediation(tmp_path: Path, stop_on_repeat: bool, defect: str) -> None:
+    scripts = {
+        "timeout": "import time; time.sleep(2)",
+        "import": "import stagemesh_nonexistent_candidate_module",
+        "missing_data": "from pathlib import Path; Path('missing-candidate-data.json').read_text()",
+        "launch_phrase_in_test": "raise AssertionError('expected FileNotFoundError: [WinError 2] in subprocess.py _execute_child')",
+    }
+    gate = {"name": "docs-static-unit", "command": [PY, "-c", scripts[defect]], "timeout_seconds": 1 if defect == "timeout" else 15}
+    project, store = _setup(tmp_path, dict(DOCS_CONTRACT, required_tests=[gate]))
+    executor = Attempts()
+
+    drive(project, store, executor, DiagnosisPolicy(stop_on_repeat=stop_on_repeat), ticks=3)
+
+    assert executor.calls == 2
+    assert store.get_task(TASK)["status"] == TaskStatus.OPEN
+    assert store.task_remediation_count(TASK, "VALIDATE") == 1
+    assert len(events(store, "task.remediation_queued")) == 1
+    assert not events(store, "task.diagnosis_stop")
+    assert not diagnose(store, TASK).environment_unavailable
 
 
 def test_review_finding_repeats_are_matched_despite_rewording(tmp_path: Path) -> None:

@@ -207,8 +207,10 @@ stops the window before dependent work and retains the journal for reconciliatio
 
 ### Validation Environment Failures
 
-A validation gate that cannot run (for example, a missing nested executable)
-blocks the task on its first diagnosed environment failure. StageMesh preserves
+A validation gate with an established launch failure (for example, an uncaught
+missing nested executable) blocks the task on its first failure. Timeouts, missing
+candidate imports and missing data files still receive bounded code remediation.
+StageMesh preserves
 the candidate and failure output instead of spending coding attempts on tooling
 the task cannot change. Ordinary test assertions still follow code remediation.
 Fix the gate environment or its checked contract before retrying the task.
