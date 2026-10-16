@@ -1,0 +1,55 @@
+{
+  "schema_version": 1,
+  "name": "stagemesh-focused",
+  "forbidden_files": [".stagemesh/**", ".git/**", ".github/**", "**/.env", "**/.env.*", "**/*.pem", "**/*.key", "*.sqlite", "*.sqlite3", "*.db", ".venv/**", "**/node_modules/**", "**/__pycache__/**"],
+  "defaults": {"max_changed_files": 12, "max_diff_lines": 1500},
+  "gates": {
+    "lifecycle": {
+      "name": "stagemesh-acceptance-lifecycle",
+      "command": ["python", "-m", "pytest", "-q", "tests/test_run_ready.py", "tests/test_provider_pool.py", "tests/test_canary_regression.py", "tests/test_zero_config_github.py"],
+      "timeout_seconds": 360
+    },
+    "progress": {
+      "name": "focused-progress",
+      "command": ["python", "-m", "pytest", "-q", "tests/test_run_window_progress.py"],
+      "timeout_seconds": 180
+    },
+    "attribution": {
+      "name": "focused-attribution",
+      "command": ["python", "-m", "pytest", "-q", "tests/test_attribution_guards.py", "tests/test_check_attribution.py"],
+      "timeout_seconds": 180
+    }
+  },
+  "task_types": {
+    "core": {
+      "summary": "Safe fallback for unclassified, shared-lifecycle, security, schema or multi-area changes. Explicit contracts can require additional affected tests.",
+      "labels": ["validation:core"],
+      "allowed_files": ["**"],
+      "validation_level": "full",
+      "gates": ["lifecycle"]
+    },
+    "progress": {
+      "summary": "Progress rendering only; scheduler and lifecycle changes require core validation or an explicit contract.",
+      "labels": ["validation:progress"],
+      "allowed_files": ["src/stagemesh/progress.py", "tests/test_run_window_progress.py"],
+      "validation_level": "standard",
+      "gates": ["progress"]
+    },
+    "attribution": {
+      "summary": "Commit attribution only; shared execution or lifecycle edits require a wider explicit contract.",
+      "labels": ["validation:attribution"],
+      "allowed_files": ["src/stagemesh/attribution.py", "scripts/check_attribution.py", "tests/test_attribution_guards.py", "tests/test_check_attribution.py"],
+      "validation_level": "standard",
+      "gates": ["attribution"]
+    }
+  },
+  "type_selection": {"default_type": "core", "escalation_type": "core", "escalate_at_product_types": 2},
+  "smoke": {
+    "tasks": [
+      {"title": "Progress rendering", "labels": ["validation:progress"], "expect_type": "progress"},
+      {"title": "Commit attribution", "labels": ["validation:attribution"], "expect_type": "attribution"},
+      {"title": "Shared behavior", "labels": ["validation:progress", "validation:attribution"], "expect_type": "core"},
+      {"title": "Unknown work", "expect_type": "core"}
+    ]
+  }
+}
