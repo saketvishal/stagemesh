@@ -477,8 +477,7 @@ def run_wave(
             if open_prs:
                 reason = report.stop_reason or ("queue admission " + control.state_label() if control.blocks_admission() else "PR opener unavailable")
                 _defer_pr_delivery(store, record, reason)
-                if not publish:
-                    halt(reason)
+                halt(reason)
         else:
             try:
                 record.pr_url = hooks.open_pr(record)  # type: ignore[misc]
@@ -653,6 +652,9 @@ def git_gh_pr_opener(project: Path, base: str = "main") -> Callable[[TaskRecord]
         existing = subprocess.run(["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"], cwd=project, capture_output=True, text=True, check=False)
         if existing.returncode == 0 and existing.stdout.strip() != sha:
             branch = f"{branch}-{sha[:7]}"
+            existing = subprocess.run(["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"], cwd=project, capture_output=True, text=True, check=False)
+            if existing.returncode == 0 and existing.stdout.strip() != sha:
+                raise RuntimeError("existing fallback branch differs from the verified candidate; publication was not repeated")
         prior = json.loads(run("gh", "pr", "list", "--state", "all", "--head", branch,
                                "--json", "url,state,headRefOid,baseRefName"))
         if not isinstance(prior, list) or any(not isinstance(pr, dict) for pr in prior):
@@ -668,7 +670,7 @@ def git_gh_pr_opener(project: Path, base: str = "main") -> Callable[[TaskRecord]
             if not isinstance(pr.get("url"), str) or not pr["url"]:
                 raise RuntimeError("existing task PR has no valid URL")
             return pr["url"]
-        if existing.returncode != 0 or branch.endswith(sha[:7]):
+        if existing.returncode != 0:
             run("git", "branch", branch, sha)
         run("git", "push", "-u", "origin", branch)
         commits = run("git", "rev-list", "--reverse", f"origin/{base}..{sha}").splitlines()

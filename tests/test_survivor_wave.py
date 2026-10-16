@@ -820,6 +820,80 @@ def test_missing_pr_opener_keeps_verified_delivery_resumable(tmp_path: Path) -> 
     assert store.get_task("T-1")["stage"] == Stage.INTEGRATE
 
 
+def test_queue_stop_at_publication_boundary_is_not_reported_as_success(tmp_path: Path) -> None:
+    from stagemesh.queue_control import QUEUE_CONTROL_EVENT
+
+    store, project = make_store(tmp_path, ["T-1"])
+    rig = Rig(project)
+    hooks = rig.hooks()
+
+    def main_sha():
+        if rig.runs:
+            record_audit(store, QUEUE_CONTROL_EVENT, {"state": "paused", "reason": "late operator stop"})
+        return "a" * 40
+
+    hooks.main_sha = main_sha
+    report = run_wave(store, ["T-1"], hooks)
+    assert not report.ok and report.stopped_early
+    assert "queue admission paused" in report.stop_reason
+    assert rig.prs == []
+    assert report.tasks[0].resumable and report.tasks[0].landing == "staged_not_published"
+    assert store.get_task("T-1")["stage"] == Stage.INTEGRATE
+
+
+@pytest.mark.parametrize("conflicting_fallback", [False, True])
+def test_fallback_branch_retry_reuses_exact_ref_or_refuses_conflict(tmp_path: Path, monkeypatch, conflicting_fallback) -> None:
+    import subprocess as sp
+
+    from stagemesh import survivor_wave
+    from stagemesh.survivor_wave import TaskRecord, git_gh_pr_opener
+
+    _store, project = make_store(tmp_path, ["T-1"])
+    origin = _with_origin(tmp_path, project)
+    base_ref = _main_ref(project)
+    base = base_ref.removeprefix("refs/heads/")
+    before = _git(project, "rev-parse", base_ref)
+    survivor_wave.prepare_staging_ref(project, base_ref)
+    sha = _commit_on(project, survivor_wave.STAGING_REF, "verified fallback candidate")
+    _git(project, "branch", "wave/task-T-1", before)
+    fallback = f"wave/task-T-1-{sha[:7]}"
+    if conflicting_fallback:
+        _git(project, "branch", fallback, before)
+    calls = []
+    creates = 0
+    real_run = sp.run
+
+    def fake_run(argv, **kwargs):
+        nonlocal creates
+        calls.append(list(argv))
+        if list(argv[:3]) == ["gh", "pr", "list"]:
+            return sp.CompletedProcess(argv, 0, "[]", "")
+        if list(argv[:3]) == ["gh", "pr", "create"]:
+            creates += 1
+            return sp.CompletedProcess(argv, 1 if creates == 1 else 0,
+                                       "" if creates == 1 else "https://example.invalid/pr/1", "creation unavailable")
+        assert argv[0] != "gh"
+        return real_run(argv, **kwargs)
+
+    monkeypatch.setattr(survivor_wave.subprocess, "run", fake_run)
+    opener = git_gh_pr_opener(project, base=base)
+    record = TaskRecord("T-1", integrated_candidate=sha)
+    if conflicting_fallback:
+        with pytest.raises(RuntimeError, match="differs"):
+            opener(record)
+        assert _git(project, "rev-parse", f"refs/heads/{fallback}") == before
+        assert not any(argv[:2] == ["git", "push"] for argv in calls)
+        assert creates == 0
+    else:
+        with pytest.raises(RuntimeError, match="creation unavailable"):
+            opener(record)
+        assert opener(record) == "https://example.invalid/pr/1"
+        assert sum(argv[:3] == ["git", "branch", fallback] for argv in calls) == 1
+        assert creates == 2
+        assert _git(origin, "rev-parse", f"refs/heads/{fallback}") == sha
+    assert _git(project, "rev-parse", base_ref) == before
+
+
 def test_deferred_publication_never_clears_unknown_running_ownership(tmp_path: Path) -> None:
     from stagemesh.survivor_wave import store_leftover
 
