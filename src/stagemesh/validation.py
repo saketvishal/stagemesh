@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 from .contract_binding import contract_for_candidate
 from .contracts import ContractError, changed_files, evaluate_contract, scope_classification
 from .domain import EvidenceKind, EvidenceStatus, ExecutionKind, ExecutionStatus
+from .focused_validation import discover_focused_gates, with_focused_gates
 from .git import GitError
 from .persistence import Store
 from .process_identity import owner_execution_fields
@@ -12,7 +14,7 @@ from .remediation import finding_identity
 from .validation_plan import (
     contract_with_browser_e2e_gates,
     derive_validation_plan,
-    planned_contract,
+    with_required_checks,
 )
 
 
@@ -34,11 +36,14 @@ class Validator:
             except (GitError, OSError):
                 inspected_files = ()
             contract = contract_with_browser_e2e_gates(project, contract, inspected_files)
-            plan = derive_validation_plan(contract, inspected_files)
+            focused_gates = discover_focused_gates(project, inspected_files, contract, candidate_sha=candidate_sha)
+            contract = with_focused_gates(contract, focused_gates)
+            plan = with_required_checks(contract, derive_validation_plan(contract, inspected_files))
             evaluation = evaluate_contract(
                 project,
                 candidate_sha,
-                planned_contract(contract, plan),
+                replace(contract, validation_classification=plan.classification, validation_risk=plan.risk_level,
+                        validation_escalation_reasons=plan.escalation_reasons),
                 baseline_sha=bound.baseline_sha,
                 run_gates=True,
             )
@@ -73,6 +78,7 @@ class Validator:
                 "validator": "contract",
                 **bound.evidence_payload(),
                 "validation_plan": plan.to_dict(),
+                "focused_validation": {"discovered": [gate.name for gate in focused_gates], "required_gates_replaced": False},
                 "objective": contract.objective,
                 "changed_files": list(evaluation.changed_files),
                 "scope": scope_classification(contract, evaluation.changed_files),

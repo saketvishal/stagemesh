@@ -3,7 +3,7 @@ from __future__ import annotations
 import fnmatch
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from .contracts import ChangeContract, GateCommand
@@ -110,6 +110,17 @@ def derive_validation_plan(contract: ChangeContract, changed_files: tuple[str, .
         checks = _matching_gate_names(contract.gates, ("docs", "static", "lint", "spell"))
         return ValidationPlan(classification, "LOW", checks or ("docs-static",), (), reasons)
     return ValidationPlan(LOCALIZED_CODE, "MEDIUM", _non_broad_gate_names(contract) or ("focused-tests",), (), reasons)
+
+
+def with_required_checks(contract: ChangeContract, plan: ValidationPlan) -> ValidationPlan:
+    """Runtime planning may add focus, but every declared gate and invariant is mandatory."""
+    required = tuple(dict.fromkeys((*_gate_names(contract.gates), *(f"invariant:{item}" for item in contract.invariants))))
+    if not required:
+        return plan  # Keep missing-command diagnostics for an empty contract.
+    debug = tuple(name for name in plan.debug_checks if name in required)
+    release = tuple(dict.fromkeys((*(name for name in plan.release_checks if name in required),
+                                  *(name for name in required if name not in debug))))
+    return replace(plan, debug_checks=debug, release_checks=release)
 
 
 def planned_contract(contract: ChangeContract, plan: ValidationPlan) -> ChangeContract:
