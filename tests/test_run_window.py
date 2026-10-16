@@ -509,7 +509,7 @@ def test_window_never_merges_without_explicit_opt_in(tmp_path: Path) -> None:
 def test_cli_defaults_to_a_safe_45_minute_pr_mode_window() -> None:
     args = cli_module.build_parser().parse_args(["run-window"])
 
-    assert (args.duration, args.concurrency, args.max_steps_per_task, args.integration) == ("45m", 2, 8, "pr")
+    assert (args.duration, args.concurrency, args.max_steps_per_task, args.integration) == ("45m", None, 8, "pr")
     assert args.plan is False and args.no_pr is False and args.allow_stale_runtime is False and args.strict_live is False
     assert args.report is None and args.tasks is None
 

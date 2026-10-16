@@ -370,3 +370,51 @@ See `docs/profiles.md` and the Caventra profile in `docs/profiles/caventra.md`.
   `stagemesh.handoff.validate_handoff` checks a document. Secret-looking keys and values, URL credentials, environment secrets and
   absolute paths are redacted; gate environments and output, prompts, canonical contract JSON and configuration are never read in.
 
+
+
+### Project-controlled automatic merging
+
+Projects remain PR-only unless they explicitly opt in via command or `.stagemesh/config.json`:
+
+```json
+"merging": {
+  "mode": "stagemesh",
+  "required_checks": ["backend", "web", "contracts"],
+  "check_app_id": 15368
+}
+```
+
+The check names and publisher ID above are Caventra's verified GitHub Actions
+checks; other projects must specify their own reviewed values. Supported modes
+are `pr_only` (global default), `hosted` (requires the existing server-enforced
+branch safeguards), and `stagemesh` (explicit client-enforced landing policy).
+The latter works without paid private-repository branch protection. It requires
+verified repository identity/write access, independent review, latest successful candidate-and-contract-bound
+validation and review evidence, no unresolved blockers, all named hosted checks
+from the configured publisher, and every other observed CI gate to be green.
+Missing, skipped, pending, failed or uncertain required checks never count as green.
+
+`run-window` resolves the project policy automatically and defaults to concurrency
+1 when merging. `--pr-only` explicitly disables automatic merging for that window;
+`--merge-policy hosted|stagemesh` chooses a policy for one window. Existing
+`--auto-merge-ff` explicitly chooses the hosted policy. An explicit concurrency
+above 1 is refused for automatic merging. Command-line required check names add
+to the project's list and cannot remove its required gates.
+
+Both policies reuse supervised exact-candidate fast-forward landing. The client
+proves ancestry, pins repository URLs, and atomically compares the remote main
+with the previously verified base before updating it to the reviewed SHA. A
+concurrent base change refuses the push. Post-landing verification and local
+fast-forward synchronization must succeed before queue continuation. Unknown or
+partial landing is journaled for reconciliation, never blindly pushed again.
+
+The controlled policy governs StageMesh's own merges. It does not prevent other
+writers from rewriting branches or bypassing checks. A PR-head change during
+landing may be observed only after the reviewed commit has landed: the runtime
+then records partial success and stops, preserving the reviewed candidate and
+requiring reconciliation. This differs from globally enforced immutable branch
+heads. Existing GitHub restrictions are not changed; any server rejection remains
+fatal. There is no automatic fallback from hosted mode after a 403.
+
+Use `run-window --plan` to verify resolved defaults and access without starting
+providers or pushing. It does not prove a real unattended development cycle.

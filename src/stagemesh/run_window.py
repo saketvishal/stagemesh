@@ -94,10 +94,28 @@ class WindowOptions:
     advance_baselines: bool = True
     auto_merge_ff: bool = False
     required_checks: tuple[str, ...] = ()
+    merge_policy: str = "hosted"
+    check_app_id: int | None = None
     strict_live: bool = False
     allow_stale_runtime: bool = False
     tasks: list[str] | None = None  # None: pick every eligible task; a list restricts the window to exactly those
     report_path: Path | None = None
+
+
+def resolve_merge_defaults(config: StageMeshConfig, args: Any) -> dict[str, Any]:
+    """Explicit command options override reviewed project defaults; required checks accumulate."""
+    policy = getattr(args, "merge_policy", None)
+    manual = getattr(args, "pr_only", False)
+    if manual and policy is not None:
+        raise ValueError("--pr-only cannot be combined with --merge-policy")
+    mode = ("pr_only" if manual else policy or
+            ("hosted" if getattr(args, "auto_merge_ff", False) else config.merging.mode))
+    automatic = mode != "pr_only"
+    checks = tuple(dict.fromkeys((*config.merging.required_checks,
+        *(c.strip() for c in (getattr(args, "required_checks", "") or "").split(",") if c.strip()))))
+    concurrency = args.concurrency if args.concurrency is not None else (1 if automatic else 2)
+    return {"auto_merge_ff": automatic, "merge_policy": mode if automatic else "hosted",
+            "required_checks": checks, "check_app_id": config.merging.check_app_id, "concurrency": concurrency}
 
 
 @dataclass
@@ -185,6 +203,8 @@ class WindowReport:
                 "strict_live": self.options.strict_live,
                 "auto_merge_ff": self.options.auto_merge_ff,
                 "required_checks": list(self.options.required_checks),
+                "merge_policy": self.options.merge_policy,
+                "check_app_id": self.options.check_app_id,
             },
             "preflight": [check.to_dict() for check in self.preflight],
             "recovered": self.recovered,
@@ -415,8 +435,11 @@ def preflight(
     """Everything that must be true before unattended work starts. Returns (checks, executions auto-recovered)."""
     checks: list[Check] = []
     if options.auto_merge_ff:
-        valid = options.integration_mode == INTEGRATION_PR and options.open_prs and options.concurrency == 1 and bool(options.required_checks)
-        checks.append(Check("auto_merge_ff", valid, "explicit serial PR fast-forward mode with named hosted checks" if valid else "--auto-merge-ff requires PR mode, concurrency 1, PR publishing and --required-checks"))
+        valid = (options.integration_mode == INTEGRATION_PR and options.open_prs and options.concurrency == 1
+                 and bool(options.required_checks) and config.require_independent_review
+                 and options.merge_policy in {"hosted", "stagemesh"}
+                 and (options.merge_policy != "stagemesh" or (type(options.check_app_id) is int and options.check_app_id > 0)))
+        checks.append(Check("auto_merge_ff", valid, f"{options.merge_policy} serial PR fast-forward mode with named hosted checks" if valid else "automatic merging requires PR mode, concurrency 1, PR publishing, independent review, named checks and a trusted check app for stagemesh mode"))
     recovered: list[dict[str, Any]] = []
 
     fresh = runtime or check_runtime(project)
@@ -560,7 +583,7 @@ def run_window(
         try:
             if callable(getattr(merge_pr, "preflight", None)):
                 policy_error = merge_pr.preflight()
-                report.preflight.append(Check("hosted_landing_policy", policy_error is None, policy_error or "server-enforced guarded fast-forward policy"))
+                report.preflight.append(Check("hosted_landing_policy", policy_error is None, policy_error or f"{options.merge_policy} guarded exact-candidate landing policy"))
             pending = list_prs(project)
             if callable(getattr(merge_pr, "pending_records", None)):
                 for record in merge_pr.pending_records():
