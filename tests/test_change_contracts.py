@@ -810,3 +810,48 @@ def test_remediation_exhaustion_blocks_task(tmp_path: Path) -> None:
     assert task["stage"] == Stage.VALIDATE
     assert task["status"] == TaskStatus.BLOCKED
     store.close()
+
+
+
+def test_delivery_reentry_uses_exact_existing_evidence_without_provider_or_ref_changes(tmp_path: Path) -> None:
+    from stagemesh.coordinator import Coordinator
+    from stagemesh.domain import Stage
+
+    workspace = _repo(tmp_path / "repo")
+    project = workspace.path
+    baseline = workspace.head()
+    (project / "src" / "app.py").write_text("VALUE = 43\n", encoding="utf-8")
+    sha = workspace.commit_all("verified candidate")
+    workspace.run("branch", "wave/staging", sha)
+    store = _store(tmp_path)
+    task_id = store.upsert_task("delivery reentry")
+    store.add_candidate(task_id, sha, "implementer", True)
+    bound = contract_for_candidate(store, task_id, sha, project)
+    for kind in (EvidenceKind.VALIDATION, EvidenceKind.REVIEW, EvidenceKind.INTEGRATION):
+        payload = {**bound.evidence_payload(), "independent_reviewer": True, "review_execution_invoked": True,
+                   "review_execution_provider": "reviewer", "review_verdict": "PASS", "implementer_provider": "implementer"}
+        store.add_evidence(task_id, sha, kind, EvidenceStatus.PASSED, payload)
+    store.advance_task(task_id, Stage.INTEGRATE)
+    before_candidates = [tuple(row) for row in store.conn.execute("SELECT * FROM candidates")]
+    before_evidence = [tuple(row) for row in store.conn.execute("SELECT * FROM evidence")]
+
+    class NeverCallProvider:
+        def execute(self, *args, **kwargs):
+            raise AssertionError("implementation must not be replayed")
+        def validate(self, *args, **kwargs):
+            raise AssertionError("passing validation must be preserved")
+        def review(self, *args, **kwargs):
+            raise AssertionError("passing independent review must be preserved")
+
+    no_calls = NeverCallProvider()
+    coordinator = Coordinator(store, project, executor=no_calls, validator=no_calls, reviewer=no_calls,
+                              integrator=Integrator("refs/heads/wave/staging", require_independent_review=True),
+                              require_independent_review=True)
+    assert coordinator.tick() == 1
+    assert store.get_task(task_id)["stage"] == Stage.DONE
+    assert store.latest_candidate(task_id)["sha"] == sha
+    assert [tuple(row) for row in store.conn.execute("SELECT * FROM candidates")] == before_candidates
+    assert [tuple(row) for row in store.conn.execute("SELECT * FROM evidence")] == before_evidence
+    assert workspace.head() == sha and workspace.run("rev-parse", "wave/staging").stdout.strip() == sha
+    assert baseline != sha
+    store.close()

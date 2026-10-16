@@ -725,3 +725,58 @@ def test_ff_recovers_journaled_landing_missing_from_open_pr_listing(tmp_path: Pa
     kwargs["list_prs"] = lambda project: []
     report = rw.run_window(store, project, config, options, hooks, base_ref="refs/heads/main", merge_pr=land, **kwargs)
     assert report.ok and calls == ["1", "2"] and report.merged_prs[0]["resumed"]
+
+
+
+def test_unpublished_work_resumes_after_main_guard_without_reimplementation(tmp_path: Path) -> None:
+    store, project, rig, hooks, options, config, kwargs = window(tmp_path, ["241"], max_tasks=1, concurrency=1)
+    tip = {"sha": "a" * 40}
+    hooks.main_sha = lambda: tip["sha"]
+    hooks.repo_state = lambda: RepoState(main_ref="main", main_sha=tip["sha"], origin_sha=tip["sha"], relation="in_sync")
+
+    def finish_while_main_advances(rig, task_id):
+        result = rig.finish_done(task_id)
+        tip["sha"] = "b" * 40
+        return result
+
+    rig.behaviour["241"] = finish_while_main_advances
+    first = rw.run_window(store, project, config, options, hooks, base_ref="refs/heads/main", staging_ref="refs/heads/wave/staging", **kwargs)
+    assert not first.ok and first.to_dict()["main_moved"]
+    assert "local main moved in PR mode" in first.stop_reason
+    assert rig.prs == []
+    task = store.get_task("241")
+    assert (task["stage"], task["status"]) == ("INTEGRATE", "OPEN")
+    assert first.tasks[0].resumable and first.tasks[0].landing == "staged_not_published"
+    candidates = [tuple(row) for row in store.conn.execute("SELECT * FROM candidates WHERE task_id='241'")]
+    evidence = [tuple(row) for row in store.conn.execute("SELECT * FROM evidence WHERE task_id='241'")]
+    advances_before = list(rig.advanced)
+
+    def finish_integration_only(rig, task_id):
+        worker = rig.worker_store()
+        try:
+            assert worker.get_task(task_id)["stage"] == "INTEGRATE"
+            worker.advance_task(task_id, Stage.DONE)
+        finally:
+            worker.close()
+        return RunResult("DONE")
+
+    rig.behaviour["241"] = finish_integration_only
+    second = rw.run_window(store, project, config, options, hooks, base_ref="refs/heads/main", staging_ref="refs/heads/wave/staging", **kwargs)
+    assert second.ok and second.tasks[0].landing == "pr_opened"
+    assert rig.prs == ["241"] and rig.advanced == advances_before
+    assert candidates == [tuple(row) for row in store.conn.execute("SELECT * FROM candidates WHERE task_id='241'")]
+    assert evidence == [tuple(row) for row in store.conn.execute("SELECT * FROM evidence WHERE task_id='241'")]
+    third = rw.run_window(store, project, config, options, hooks, base_ref="refs/heads/main", staging_ref="refs/heads/wave/staging", **kwargs)
+    assert third.ok and third.selected == [] and rig.prs == ["241"]
+
+
+def test_failed_pr_publication_preserves_a_resumable_integration_stage(tmp_path: Path) -> None:
+    store, project, _rig, hooks, options, config, kwargs = window(tmp_path, ["241"], max_tasks=1, concurrency=1)
+    hooks.open_pr = lambda record: (_ for _ in ()).throw(RuntimeError("publication unavailable"))
+    report = rw.run_window(store, project, config, options, hooks, base_ref="refs/heads/main", staging_ref="refs/heads/wave/staging", **kwargs)
+    assert not report.ok
+    assert report.tasks[0].landing == "pr_failed" and report.tasks[0].resumable
+    assert report.tasks[0].integrated_candidate == store.latest_candidate("241")["sha"]
+    assert (store.get_task("241")["stage"], store.get_task("241")["status"]) == ("INTEGRATE", "OPEN")
+    assert report.tasks[0].validation == report.tasks[0].review == report.tasks[0].integration == "PASSED"
+    assert not store.has_active_claim("241") and not list(store.running_executions())
