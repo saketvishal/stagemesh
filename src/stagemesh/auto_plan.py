@@ -21,6 +21,7 @@ from .contracts import (
     CONTRACT_VERSION,
     ContractError,
     canonical_contract_json,
+    contract_admission_problem,
     parse_contract,
     task_contract_path,
 )
@@ -394,6 +395,12 @@ def profile_payload(store: Store, project: Path, task_id: str) -> tuple[dict[str
         profile = load_profile(project)
         if profile is None:
             return None
+        if profile.contract_generation == "explicit_only":
+            raise AutoPlanError(
+                "explicit_contract_required",
+                "project requires an explicit task contract; automatic contract generation is disabled",
+                f"prepare .stagemesh/contracts/{task_id}.json with approved scope and validation gates",
+            )
         title, body = task_text(store, task_id)
         task = store.get_task(task_id)
         decision = resolve_type(profile, task_labels(store, task), title, body)
@@ -402,6 +409,9 @@ def profile_payload(store: Store, project: Path, task_id: str) -> tuple[dict[str
         raise AutoPlanError(
             "invalid_profile", f"project profile is unusable: {exc}", "fix .stagemesh/profile.json (see `stagemesh profile`)"
         ) from exc
+    problem = contract_admission_problem(parse_contract(payload))
+    if problem:
+        raise AutoPlanError("placeholder_validation_gates", problem, "configure real gates or supply an explicit task contract")
     _fit_objective(payload)
     return payload, payload["profile"]
 
@@ -451,6 +461,9 @@ def create_contract(store: Store, project: Path, task_id: str, *, gate_detector=
             )
         payload = build_contract(store, project, task_id, gates)
     size = validate_generated(payload)
+    problem = contract_admission_problem(parse_contract(payload))
+    if problem:
+        raise AutoPlanError("placeholder_validation_gates", problem, "configure real gates or supply an explicit task contract")
     path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_suffix(".json.tmp")
     temp.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")

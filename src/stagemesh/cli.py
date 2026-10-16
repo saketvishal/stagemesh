@@ -1765,6 +1765,7 @@ def command_profile(args: argparse.Namespace) -> int:
         return 1
     report: dict[str, object] = {
         "name": profile.name,
+        "contract_generation": profile.contract_generation,
         "task_types": {
             t.id: {"level": t.level, "gates": [expand_gate(profile, g)["name"] for g in t.gates], "allowed_files": list(t.allowed_files)}
             for t in profile.types.values()

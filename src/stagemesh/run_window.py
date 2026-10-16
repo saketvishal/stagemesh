@@ -54,6 +54,7 @@ from .survivor_wave import (
     run_wave,
     skip_reason,
 )
+from .task_selection import contract_state
 from .window_journal import record_finished, record_refused, record_started
 
 EXIT_OK, EXIT_STOPPED, EXIT_REFUSED, EXIT_REPORT = 0, 1, 2, 3
@@ -217,7 +218,7 @@ def _task_sort_key(task_id: str) -> tuple[int, int, str]:
 
 
 def select_tasks(
-    store: Store, *, attempted: set[str], limit: int, only: list[str] | None = None, fingerprint: str | None = None
+    store: Store, *, attempted: set[str], limit: int, only: list[str] | None = None, fingerprint: str | None = None, project: Path | None = None
 ) -> tuple[list[str], dict[str, str]]:
     """Up to `limit` runnable tasks (oldest first) and why the others were left alone.
 
@@ -249,6 +250,11 @@ def select_tasks(
             if info is not None and refusal is None:
                 reason = skip_reason(store, task_id)  # claims, running executions, objective roots still apply
                 if reason is None:
+                    if project is not None:
+                        state = contract_state(store, project, task_id, auto_plan=True)
+                        if state.startswith("unplannable:"):
+                            skipped[task_id] = state.removeprefix("unplannable:")
+                            continue
                     picked.append(task_id)
                     if len(picked) >= limit:
                         break
@@ -270,6 +276,11 @@ def select_tasks(
         if reason is not None:
             skipped[task_id] = reason
             continue
+        if project is not None:
+            state = contract_state(store, project, task_id, auto_plan=True)
+            if state.startswith("unplannable:"):
+                skipped[task_id] = state.removeprefix("unplannable:")
+                continue
         picked.append(task_id)
         if len(picked) >= limit:
             break
@@ -657,6 +668,7 @@ def run_window(
                     limit=min(room - len(continuing), options.max_tasks - len(attempted)),
                     only=options.tasks,
                     fingerprint=fingerprint,
+                    project=project,
                 )
                 if len(attempted) < options.max_tasks and room - len(continuing) > 0
                 else ([], {})
@@ -839,7 +851,7 @@ def format_window_report(report: WindowReport) -> str:
 def planned_selection(store: Store, options: WindowOptions, project: Path | None = None) -> tuple[list[str], dict[str, str]]:
     """What a window would pick right now (`run-window --plan`): the same selection, nothing started."""
     fingerprint = None if project is None else runtime_fingerprint(project)
-    return select_tasks(store, attempted=set(), limit=options.max_tasks, only=options.tasks, fingerprint=fingerprint)
+    return select_tasks(store, attempted=set(), limit=options.max_tasks, only=options.tasks, fingerprint=fingerprint, project=project)
 
 
 __all__ = [

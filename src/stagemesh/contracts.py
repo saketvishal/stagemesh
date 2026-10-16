@@ -128,6 +128,23 @@ class ContractEvaluation:
 CONTRACT_VERSION = 1  # the only bound-contract schema version this build understands; never derived from stored rows or operator edits
 
 
+def contract_admission_problem(contract: ChangeContract) -> str | None:
+    """Whitespace hygiene alone is never an executable task's validation contract.
+
+    Check commands, not gate names or generation metadata: legacy canonical bindings
+    discard that metadata, and renaming the placeholder must not make it executable.
+    Structural parsing stays separate so historical contracts remain readable.
+    """
+    def whitespace_only(gate: GateCommand) -> bool:
+        command = gate.command
+        program = Path(command[0].replace("\\", "/")).name.casefold() if command else ""
+        return program in {"git", "git.exe"} and command[1:] == ["diff", "--check"]
+
+    if contract.gates and all(whitespace_only(gate) for gate in contract.gates):
+        return "contract only checks whitespace (git diff --check); supply a task contract with real validation gates"
+    return None
+
+
 def task_contract_path(project: Path, task_id: str) -> Path | None:
     for path in (
         project / ".stagemesh" / "contracts" / f"{task_id}.json",

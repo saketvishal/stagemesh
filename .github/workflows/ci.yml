@@ -17,7 +17,7 @@ jobs:
       - run: .stagemesh\tooling\venv\Scripts\python.exe -c "import stagemesh; print(stagemesh.__version__)"
       - run: .stagemesh\tooling\venv\Scripts\python.exe scripts/stabilization_gate.py
       - name: Delivery and window regressions
-        run: .stagemesh\tooling\venv\Scripts\python.exe -m pytest -q tests/test_fast_forward.py tests/test_run_window.py tests/test_autonomy_merge_policy.py tests/test_operator_stop.py
+        run: .stagemesh\tooling\venv\Scripts\python.exe -m pytest -q tests/test_fast_forward.py tests/test_run_window.py tests/test_contract_admission.py tests/test_autonomy_merge_policy.py tests/test_operator_stop.py
       - name: Existing queue stop compatibility
         run: .stagemesh\tooling\venv\Scripts\python.exe -m pytest -q tests/test_parallel.py tests/test_queue_run.py -k "stop or pause or interrupt"
       - name: Execution budgets and review ownership
@@ -34,7 +34,7 @@ jobs:
       - run: .stagemesh/tooling/venv/bin/python -c "import stagemesh; print(stagemesh.__version__)"
       - run: .stagemesh/tooling/venv/bin/python scripts/stabilization_gate.py
       - name: Delivery and window regressions
-        run: .stagemesh/tooling/venv/bin/python -m pytest -q tests/test_fast_forward.py tests/test_run_window.py tests/test_autonomy_merge_policy.py tests/test_operator_stop.py
+        run: .stagemesh/tooling/venv/bin/python -m pytest -q tests/test_fast_forward.py tests/test_run_window.py tests/test_contract_admission.py tests/test_autonomy_merge_policy.py tests/test_operator_stop.py
       - name: Existing queue stop compatibility
         run: .stagemesh/tooling/venv/bin/python -m pytest -q tests/test_parallel.py tests/test_queue_run.py -k "stop or pause or interrupt"
       - name: Execution budgets and review ownership
