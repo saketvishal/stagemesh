@@ -162,7 +162,7 @@ def test_cancel_does_not_kill_an_unverified_identity_or_unrelated_process(tmp_pa
         sentinel.kill()
         sentinel.wait(timeout=5)
         proc.wait(timeout=5)
-    assert any(r["event_type"] == "queue.provider_stop_identity_unverified" for r in store.audit_events())
+    assert sum(r["event_type"] == "queue.provider_stop_identity_unverified" for r in store.audit_events()) == 1
     store.close()
 
 

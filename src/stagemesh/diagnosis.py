@@ -138,8 +138,8 @@ class Diagnosis:
 
     @property
     def stops_remediation(self) -> bool:
-        """True when spending another implementation attempt is pointless: a stale baseline at once, other non-code failures on repeat."""
-        return self.category == STALE_BASELINE or (self.repeated and self.category in NON_CODE_CATEGORIES)
+        """Unavailable validation or stale baselines stop at once; other non-code failures stop on repeat."""
+        return self.category in {STALE_BASELINE, VALIDATION_GATE} or (self.repeated and self.category in NON_CODE_CATEGORIES)
 
     def to_dict(self) -> dict[str, Any]:
         return {

@@ -64,7 +64,7 @@ class TaskCursor:
 
     since: float
     seen: set[str] = field(default_factory=set)
-    running: dict[str, tuple[str, float]] = field(default_factory=dict)  # execution id -> (kind, started_at)
+    running: dict[str, tuple[str, float, str]] = field(default_factory=dict)  # execution id -> (kind, started_at, actor)
     provider: dict[str, str] = field(default_factory=dict)  # stage label -> latest known provider
 
 
@@ -97,18 +97,21 @@ def poll_task(conn: sqlite3.Connection, task_id: str, cursor: TaskCursor) -> lis
             cursor.provider[label] = provider
             events.append((row["created_at"], f"task {task_id}: {label} by {provider}: {payload.get('outcome')}"))
     for row in conn.execute(
-        "SELECT id, kind, status, started_at, updated_at FROM executions WHERE task_id=? AND started_at>=? ORDER BY started_at, rowid",
+        "SELECT id, kind, status, actor, result, started_at, updated_at FROM executions WHERE task_id=? AND started_at>=? ORDER BY started_at, rowid",
         (task_id, cursor.since),
     ):
         label = _STAGE_LABEL.get(row["kind"], row["kind"].lower())
+        actor = str(row["actor"] or cursor.provider.get(label) or "")
+        by = f" (provider {actor})" if actor else ""
         if fresh(f"start:{row['id']}"):
-            events.append((row["started_at"], f"task {task_id}: {label} started"))
-            cursor.running[row["id"]] = (row["kind"], row["started_at"])
+            events.append((row["started_at"], f"task {task_id}: {label} started{by}"))
+            cursor.running[row["id"]] = (row["kind"], row["started_at"], actor)
         if row["status"] != "RUNNING" and row["id"] in cursor.running:
             del cursor.running[row["id"]]
             if row["kind"] == "IMPLEMENTATION" and fresh(f"end:{row['id']}"):
                 took = _duration(row["updated_at"] - row["started_at"])
-                events.append((row["updated_at"], f"task {task_id}: {label} {str(row['status']).lower()} after {took}"))
+                reason = f": {row['result']}" if row["result"] else ""
+                events.append((row["updated_at"], f"task {task_id}: {label} {str(row['status']).lower()}{by} after {took}{reason}"))
     for row in conn.execute("SELECT id, sha, produced_by, created_at FROM candidates WHERE task_id=? AND created_at>=? ORDER BY created_at", (task_id, cursor.since)):
         if fresh(row["id"]):
             events.append((row["created_at"], f"task {task_id}: candidate {str(row['sha'])[:10]} created by {row['produced_by']}"))
@@ -125,9 +128,9 @@ def poll_task(conn: sqlite3.Connection, task_id: str, cursor: TaskCursor) -> lis
 
 def heartbeat_lines(task_id: str, cursor: TaskCursor, now: float) -> list[str]:
     lines = []
-    for kind, started in cursor.running.values():
+    for kind, started, actor in cursor.running.values():
         label = _STAGE_LABEL.get(kind, kind.lower())
-        provider = cursor.provider.get(label)
+        provider = actor
         by = f" (provider {provider})" if provider else ""
         lines.append(f"task {task_id}: {label} still running{by}, {_duration(now - started)} so far")
     return lines

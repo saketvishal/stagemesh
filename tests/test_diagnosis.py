@@ -128,9 +128,13 @@ def test_repeated_gate_failure_on_the_code_is_an_implementation_defect(tmp_path:
     project, store = _setup(tmp_path, contract)
     executor = Attempts()
     drive(project, store, executor)
-    stop = events(store, "task.diagnosis_stop")[-1]
-    # the repeat granted one recovery round (a clean, narrowed attempt) before the task stopped: 2 identical failures + 1 round
-    assert stop["category"] == IMPLEMENTATION_DEFECT and stop["failed_gates"] == ["docs-static-unit"] and executor.calls == 3
+    diagnosis = events(store, "task.diagnosis")[-1]
+    assert diagnosis["category"] == IMPLEMENTATION_DEFECT and diagnosis["failed_gates"] == ["docs-static-unit"]
+    assert diagnosis["repeated"] and not events(store, "task.diagnosis_stop")
+    # Code defects get the normal budget, one bounded reopening and one clean-worktree recovery.
+    assert executor.calls == 8 and store.get_task(TASK)["status"] == TaskStatus.BLOCKED
+    assert len(events(store, "task.parent_budget_reopened")) == 1
+    assert len(events(store, "recovery.exhaustion_round")) == 1
 
 def test_diagnose_and_stop_output_include_gate_excerpt(tmp_path: Path) -> None:
     script = "import sys; print('FAILED test_x - assert 1 == 2'); print('stderr: boom detail', file=sys.stderr); sys.exit(1)"
@@ -197,7 +201,10 @@ def test_a_different_failure_each_time_is_progress_not_a_repeat(tmp_path: Path) 
     project, store = _setup(tmp_path, contract)
     executor = Attempts()
     drive(project, store, executor)
-    assert executor.calls == 5 and not events(store, "task.diagnosis_stop")  # distinct failures keep the normal loop (4 attempts) plus one recovery round
+    assert executor.calls == 8 and not events(store, "task.diagnosis_stop")
+    assert store.get_task(TASK)["status"] == TaskStatus.BLOCKED
+    assert len(events(store, "task.parent_budget_reopened")) == 1
+    assert len(events(store, "recovery.exhaustion_round")) == 1
     assert all(d["repeated"] is False for d in events(store, "task.diagnosis"))
     assert diagnose(store, TASK).categories == {IMPLEMENTATION_DEFECT: 5}
 
@@ -225,6 +232,31 @@ def test_classification_of_each_failure_kind(tmp_path: Path) -> None:
     assert diagnose(store, TASK).category == IMPLEMENTATION_DEFECT
     store.add_evidence(TASK, "d" * 40, EvidenceKind.INTEGRATION, EvidenceStatus.FAILED, {"findings": [{"code": "integration_rebase_conflict", "message": "conflict in a.py"}]})
     assert diagnose(store, TASK).category == INTEGRATION_CONFLICT
+
+
+@pytest.mark.parametrize("stop_on_repeat", [False, True])
+@pytest.mark.parametrize("nested", [False, True])
+def test_unavailable_gate_stops_before_any_code_remediation(tmp_path: Path, stop_on_repeat: bool, nested: bool) -> None:
+    command = ["stagemesh-nonexistent-gate-executable"]
+    if nested:
+        command = [PY, "-c", "import sys; print('FileNotFoundError: [WinError 2] The system cannot find the file specified', file=sys.stderr); sys.exit(1)"]
+    contract = dict(DOCS_CONTRACT, required_tests=[{"name": "docs-static-unit", "command": command}])
+    project, store = _setup(tmp_path, contract)
+    executor = Attempts()
+
+    drive(project, store, executor, DiagnosisPolicy(stop_on_repeat=stop_on_repeat))
+
+    assert executor.calls == 1
+    assert store.get_task(TASK)["status"] == TaskStatus.BLOCKED
+    assert store.latest_candidate(TASK) is not None
+    assert store.task_remediation_count(TASK, "VALIDATE") == 0
+    assert not events(store, "task.remediation_queued")
+    assert not events(store, "task.recovery_round")
+    stop, = events(store, "task.diagnosis_stop")
+    assert stop["category"] == VALIDATION_GATE and not stop["repeated"]
+    block = events(store, "task.block_classified")[-1]
+    assert block["kind"] == "BLOCKED_RECOVERABLE_OPERATIONAL"
+    assert "validation_environment_unavailable" in block["reason"]
 
 
 def test_review_finding_repeats_are_matched_despite_rewording(tmp_path: Path) -> None:

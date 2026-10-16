@@ -106,6 +106,29 @@ def rig_without_pr(rig: Rig):
     return hooks
 
 
+def test_fallback_heartbeat_uses_execution_actor_not_preferred_provider(tmp_path: Path) -> None:
+    from stagemesh.progress import TaskCursor, heartbeat_lines, poll_task
+
+    store, _project = make_store(tmp_path, ["T-1"])
+    store.add_audit_event("provider.selection", {"task_id": "T-1", "stage": "IMPLEMENT", "order": ["claude", "grok", "agy"]})
+    cursor = TaskCursor(since=0)
+    first = store.start_execution(task_id="T-1", claim_id=None, kind=ExecutionKind.IMPLEMENTATION, actor="claude")
+    poll_task(store.conn, "T-1", cursor)
+    store.finish_execution(first, ExecutionStatus.FAILED, result="no_implementation_change")
+    second = store.start_execution(task_id="T-1", claim_id=None, kind=ExecutionKind.IMPLEMENTATION, actor="grok")
+    lines = poll_task(store.conn, "T-1", cursor)
+    assert any("implementation failed (provider claude)" in line and "no_implementation_change" in line for line in lines)
+    assert any("implementation started (provider grok)" in line for line in lines)
+    assert all("provider grok" in line for line in heartbeat_lines("T-1", cursor, 1e12))
+    store.finish_execution(second, ExecutionStatus.FAILED, result="no_implementation_change")
+    store.start_execution(task_id="T-1", claim_id=None, kind=ExecutionKind.IMPLEMENTATION, actor="agy")
+    lines = poll_task(store.conn, "T-1", cursor)
+    assert any("implementation started (provider agy)" in line for line in lines)
+    assert all("provider agy" in line for line in heartbeat_lines("T-1", cursor, 1e12))
+    assert poll_task(store.conn, "T-1", cursor) == []
+    store.close()
+
+
 def test_cli_json_stdout_stays_valid_and_progress_is_on_stderr(tmp_path: Path, capsys, monkeypatch) -> None:
     import stagemesh.cli as cli_module
     import stagemesh.run_window as rw

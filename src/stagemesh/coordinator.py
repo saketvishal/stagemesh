@@ -719,7 +719,9 @@ class Coordinator:
         diagnosis = self._diagnose(task_id, sha)
         if diagnosis is not None and self._auto_rebaseline(task_id, diagnosis):
             return 1
-        if diagnosis is not None and diagnosis.stops_remediation and self.diagnosis_policy.stop_on_repeat:
+        if diagnosis is not None and diagnosis.stops_remediation and (
+            diagnosis.category == VALIDATION_GATE or self.diagnosis_policy.stop_on_repeat
+        ):
             # The same failure again (or one a provider cannot fix, like a stale baseline): another identical attempt would only repeat
             # it. Record the diagnosis, then recover differently instead of stopping.
             record_audit(
@@ -727,7 +729,11 @@ class Coordinator:
                 DIAGNOSIS_STOP_EVENT,
                 {**diagnosis.audit_payload(), "remediation_attempts": self.store.task_remediation_count(task_id, str(failed_stage))},
             )
-            reason = "stale_baseline_diagnosed" if diagnosis.category == STALE_BASELINE else "repeated_failure_diagnosed"
+            reason = (
+                "validation_environment_unavailable" if diagnosis.category == VALIDATION_GATE
+                else "stale_baseline_diagnosed" if diagnosis.category == STALE_BASELINE
+                else "repeated_failure_diagnosed"
+            )
             return self._on_remediation_exhausted(task_id, sha, failed_stage, findings, diagnosis, reason)
         # The budget is scoped to task + failed stage so a new candidate SHA cannot reset it.
         if self.store.task_remediation_count(task_id, str(failed_stage)) >= self.remediation_policy.max_attempts:
