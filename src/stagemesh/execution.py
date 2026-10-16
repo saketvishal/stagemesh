@@ -208,6 +208,7 @@ def _communicate_bounded(
     deadline = time.monotonic() + timeout
     cleanup_deadline = None
     timed_out, termination_attempted = False, False
+    identity_unverified_reported = False
     monitor_failure, stop = None, None
     while True:
         if control is not None and monitor_failure is None:
@@ -236,7 +237,10 @@ def _communicate_bounded(
             if cleanup_deadline is None:
                 cleanup_deadline = time.monotonic() + STOP_CLEANUP_SECONDS
             if not termination_attempted and proc.poll() is None:
-                if classify_process(identity, process_identity(proc.pid)) == "LIVE":
+                observed = process_identity(proc.pid)
+                if observed is None or not observed.is_known:
+                    observed = popen_identity(proc)
+                if classify_process(identity, observed) == "LIVE":
                     termination_attempted = True
                     kill_process_tree(proc)
                     cleanup_deadline = time.monotonic() + STOP_CLEANUP_SECONDS
@@ -245,9 +249,14 @@ def _communicate_bounded(
                             control.note("queue.provider_stop_termination", pid=proc.pid, request_rowid=stop["rowid"])
                         except Exception as exc:  # noqa: BLE001 -- failed observability cannot accept provider output
                             monitor_failure = exc
-                elif control is not None and monitor_failure is None:
+                elif control is not None and monitor_failure is None and not identity_unverified_reported:
                     try:
-                        control.note("queue.provider_stop_identity_unverified", pid=proc.pid)
+                        control.note(
+                            "queue.provider_stop_identity_unverified", pid=proc.pid,
+                            saved_create_time=getattr(identity, "create_time", None),
+                            observed_create_time=getattr(observed, "create_time", None),
+                        )
+                        identity_unverified_reported = True
                     except Exception as exc:  # noqa: BLE001 -- auditing failure also stops the wait
                         monitor_failure = exc
             if time.monotonic() >= cleanup_deadline:

@@ -98,6 +98,7 @@ class Failure:
     tokens: frozenset[str]
     excerpt: str
     paths: tuple[str, ...] = ()
+    environment_unavailable: bool = False
 
     def same_as(self, other: Failure) -> bool:
         if self.stage != other.stage or self.codes != other.codes or self.gates != other.gates:
@@ -113,6 +114,7 @@ class Failure:
             "failed_gates": list(self.gates),
             "messages": [m[:400] for m in self.messages[:6]],
             "excerpt": self.excerpt,
+            "environment_unavailable": self.environment_unavailable,
             **({"paths": list(self.paths[:20])} if self.paths else {}),
         }
 
@@ -135,16 +137,18 @@ class Diagnosis:
     provider_analysis: dict[str, Any] | None = None
     review_findings: list[dict[str, Any]] = field(default_factory=list)
     baseline: dict[str, Any] | None = None
+    environment_unavailable: bool = False
 
     @property
     def stops_remediation(self) -> bool:
-        """True when spending another implementation attempt is pointless: a stale baseline at once, other non-code failures on repeat."""
-        return self.category == STALE_BASELINE or (self.repeated and self.category in NON_CODE_CATEGORIES)
+        """Proven launch outages or stale baselines stop at once; ambiguous gate failures retain bounded remediation."""
+        return self.environment_unavailable or self.category == STALE_BASELINE or (self.repeated and self.category in NON_CODE_CATEGORIES)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "task_id": self.task_id,
             "category": self.category,
+            "environment_unavailable": self.environment_unavailable,
             "stage": self.stage,
             "repeated": self.repeated,
             "repeat_count": self.repeat_count,
@@ -168,6 +172,7 @@ class Diagnosis:
             "task_id": self.task_id,
             "candidate_sha": self.candidate_sha,
             "category": self.category,
+            "environment_unavailable": self.environment_unavailable,
             "stage": self.stage,
             "repeated": self.repeated,
             "repeat_count": self.repeat_count,
@@ -245,6 +250,26 @@ def _gate_output(finding: dict[str, Any]) -> str:
     return f"{finding.get('stdout') or ''}\n{finding.get('stderr') or ''}"
 
 
+def _unavailable_launch(finding: dict[str, Any]) -> bool:
+    """Only established launch failures justify skipping the first code remediation.
+
+    Timeouts, application imports and missing data files can be candidate bugs.
+    For a nested command, require an uncaught OS launch exception in subprocess,
+    not merely an environment-like phrase somewhere in test output.
+    """
+    if finding.get("failure_kind") == "environment":
+        return True
+    if finding.get("failure_kind") == "timeout":
+        return False
+    stderr = str(finding.get("stderr") or "").strip()
+    last = stderr.splitlines()[-1] if stderr else ""
+    return (
+        bool(re.match(r"FileNotFoundError: \[(?:WinError 2|Errno 2)\]", last))
+        and "subprocess.py" in stderr
+        and ("_execute_child" in stderr or "CreateProcess" in stderr)
+    )
+
+
 def _key_lines(text: str, limit: int = 12) -> list[str]:
     lines = [normalize(line) for line in text.splitlines() if line.strip() and _KEY_LINE.search(line)]
     return list(dict.fromkeys(lines))[:limit]
@@ -262,7 +287,7 @@ def _classify(stage: str, codes: set[str], gate_findings: list[dict[str, Any]]) 
     if "gate_failed" in codes:
         for finding in gate_findings:
             output = _gate_output(finding).casefold()
-            if finding.get("failure_kind") in ("environment", "timeout") or finding.get("returncode") in (None, 126, 127) or any(hint in output for hint in _ENVIRONMENT_HINTS):
+            if _unavailable_launch(finding) or finding.get("failure_kind") in ("environment", "timeout") or finding.get("returncode") in (None, 126, 127) or any(hint in output for hint in _ENVIRONMENT_HINTS):
                 return VALIDATION_GATE
         return IMPLEMENTATION_DEFECT
     if stage == EvidenceKind.REVIEW:
@@ -313,7 +338,11 @@ def _failures(store: Store, task_id: str) -> list[Failure]:
         )[-700:]
         paths = tuple(dict.fromkeys(str(f["path"]) for f in findings if f.get("path")))
         failures.append(
-            Failure(stage, sha, float(row["created_at"]), _classify(kind, codes, gate_findings), tuple(sorted(codes)), gates, tuple(messages), tokens, excerpt, paths)
+            Failure(
+                stage, sha, float(row["created_at"]), _classify(kind, codes, gate_findings), tuple(sorted(codes)),
+                gates, tuple(messages), tokens, excerpt, paths,
+                environment_unavailable=any(_unavailable_launch(f) for f in gate_findings),
+            )
         )
     return failures
 
@@ -538,6 +567,7 @@ def diagnose(
         no_progress=no_progress,
         review_findings=latest_candidate_findings(store, task_id),
         baseline=baseline,
+        environment_unavailable=bool(latest and latest.environment_unavailable and category == VALIDATION_GATE),
     )
 
 

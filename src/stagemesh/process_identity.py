@@ -48,6 +48,13 @@ def owner_execution_fields() -> dict[str, object]:
 
 def popen_identity(proc: subprocess.Popen[str]) -> ProcessIdentity:
     """Capture the launched process's OS identity so it can be compared with a later observation."""
+    # Popen owns this handle for the original process, even if opening its PID
+    # again is denied. Never close it here: Popen still needs it to reap the child.
+    handle = getattr(proc, "_handle", None)
+    if sys.platform == "win32" and handle is not None:
+        observed = _windows_process_identity(proc.pid, owned_handle=int(handle))
+        if observed is not None and observed.is_known:
+            return observed
     observed = process_identity(proc.pid)
     if observed is not None and observed.is_known:
         return observed
@@ -96,7 +103,7 @@ def _posix_process_identity(pid: int) -> ProcessIdentity | None:
         return None
 
 
-def _windows_process_identity(pid: int) -> ProcessIdentity | None:
+def _windows_process_identity(pid: int, *, owned_handle: int | None = None) -> ProcessIdentity | None:
     import ctypes
     from ctypes import wintypes
 
@@ -115,7 +122,7 @@ def _windows_process_identity(pid: int) -> ProcessIdentity | None:
         wintypes.LPWSTR,
         ctypes.POINTER(wintypes.DWORD),
     ]
-    handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    handle = owned_handle if owned_handle is not None else kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
     if not handle:
         if ctypes.get_last_error() == ERROR_INVALID_PARAMETER:
             return None  # no such process
@@ -140,4 +147,5 @@ def _windows_process_identity(pid: int) -> ProcessIdentity | None:
             executable = buffer.value
         return ProcessIdentity(pid=pid, create_time=float(raw_creation), boot_id=boot_id(), executable=executable)
     finally:
-        kernel32.CloseHandle(handle)
+        if owned_handle is None:
+            kernel32.CloseHandle(handle)

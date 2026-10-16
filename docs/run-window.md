@@ -204,3 +204,18 @@ it never treats an external merge as proof those checks passed. Reports retain
 each `landing_results` entry, separating `remote_landed`, `local_synced` and a
 fully verified `merged` result. An uncertain acknowledgment or blocked local sync
 stops the window before dependent work and retains the journal for reconciliation.
+
+### Validation Environment Failures
+
+A validation gate with an established launch failure (for example, an uncaught
+missing nested executable) blocks the task on its first failure. Timeouts, missing
+candidate imports and missing data files still receive bounded code remediation.
+StageMesh preserves
+the candidate and failure output instead of spending coding attempts on tooling
+the task cannot change. Ordinary test assertions still follow code remediation.
+Fix the gate environment or its checked contract before retrying the task.
+
+Live start, result and heartbeat lines identify each execution's recorded actor,
+including fallback providers; the preferred provider order is not proof of which
+provider is currently running. If cleanup cannot verify ownership, the window
+stops and retains the execution and claim for inspected recovery.

@@ -329,3 +329,42 @@ def test_direct_provider_deadline_covers_unread_large_stdin(tmp_path: Path, monk
             if worker.name == f"provider-io-{proc.pid}":
                 worker.join(timeout=5)
                 assert not worker.is_alive()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows owned process handles")
+@pytest.mark.parametrize("operator_stop", [False, True])
+def test_owned_handle_verifies_cleanup_when_pid_query_is_unavailable(tmp_path: Path, monkeypatch, operator_stop: bool) -> None:
+    from stagemesh import execution
+    from stagemesh import process_identity as identities
+    from stagemesh.domain import ProcessIdentity
+    from stagemesh.parallel import request_queue_control
+    from stagemesh.queue_control import OperatorStopRequested, QueueStopControl, provider_stop_scope
+
+    _project, store = _setup(tmp_path)
+    control = QueueStopControl(store, TASK)
+    if operator_stop:
+        request_queue_control(store, "stopping", "test owned-handle stop", terminate_running=True)
+    proc = subprocess.Popen(SLEEPER, text=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    sentinel = subprocess.Popen(SLEEPER, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    unknown = lambda pid: ProcessIdentity(pid, None, identities.boot_id(), None)
+    monkeypatch.setattr(identities, "process_identity", unknown)
+    monkeypatch.setattr(execution, "process_identity", unknown)
+    try:
+        saved = popen_identity(proc)
+        assert saved.is_known
+        assert classify_process(saved, popen_identity(proc)) == "LIVE"
+        with provider_stop_scope(control):
+            if operator_stop:
+                with pytest.raises(OperatorStopRequested) as caught:
+                    execution.communicate_bounded(proc, "", 0.2)
+                assert caught.value.cleanup_complete
+            else:
+                assert execution.communicate_bounded(proc, "", 0.2)[2]
+        assert proc.poll() is not None  # the borrowed handle was neither closed nor replaced
+        assert sentinel.poll() is None
+        assert not _events(store, "queue.provider_stop_identity_unverified")
+    finally:
+        for child in (proc, sentinel):
+            kill_process_tree(child)
+            child.wait(timeout=5)
+        store.close()
