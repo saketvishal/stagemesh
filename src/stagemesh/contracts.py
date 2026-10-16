@@ -608,9 +608,10 @@ def contract_prompt(contract: ChangeContract) -> str:
     lines.extend(
         [
             "Scope discipline:",
-            "- Treat the allowed files as the complete implementation context.",
+            "- Allowed files constrain edits, not read-only investigation.",
+            "- Read directly relevant project source, tests, configuration, and specifications to understand the task; respect project access rules and never read secrets or unrelated private data.",
             "- Do not edit unrelated files, broad refactors, generated noise, dependency manifests, or configuration outside this contract.",
-            "- If the task truly needs another path, stop and request an audited scope expansion instead of editing it.",
+            "- If the task truly needs to edit another path, stop and request an audited scope expansion instead of editing it.",
             "- Out-of-scope edits are rejected before integration.",
         ]
     )

@@ -718,7 +718,7 @@ def test_provider_prompt_includes_change_contract(tmp_path: Path) -> None:
     assert "Change contract:" in prompt
     assert "Only touch source" in prompt
     assert "Forbidden files: README.md" in prompt
-    assert "Treat the allowed files as the complete implementation context." in prompt
+    assert "Allowed files constrain edits, not read-only investigation." in prompt
     assert "request an audited scope expansion" in prompt
     assert not (project / "captured_prompt.txt").exists()
     store.close()
