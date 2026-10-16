@@ -142,12 +142,19 @@ def test_cli_json_stdout_stays_valid_and_progress_is_on_stderr(tmp_path: Path, c
     monkeypatch.setattr(cli_module, "_wave_hooks", lambda *args, **kwargs: hooks)
     monkeypatch.setattr(cli_module, "_current_branch_ref", lambda project: "refs/heads/main")
     monkeypatch.setattr(rw, "check_runtime", lambda project: FRESH)
-    monkeypatch.setattr(rw, "provider_pool_check", OK_PROVIDERS)
+    actual_window = rw.run_window
+
+    def fake_window(*args, **kwargs):
+        # run_window's default function arguments were bound before monkeypatching.
+        return actual_window(*args, **kwargs, provider_check=OK_PROVIDERS, list_prs=lambda project: [])
+
+    monkeypatch.setattr(rw, "run_window", fake_window)
 
     cli_module.main(["--project", str(project), "run-window", "--integration", "local", "--tasks", "T-1", "--json", "--report", str(tmp_path / "r.json")])
 
     captured = capsys.readouterr()
     report = json.loads(captured.out)  # stdout is only the report
+    assert report["exit_code"] == 0, report
     assert "T-1" in json.dumps(report)
     assert "task T-1: started" in captured.err and "task T-1: finished: DONE" in captured.err
 
