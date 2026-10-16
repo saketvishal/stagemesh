@@ -218,3 +218,21 @@ def test_policy_changes_preserve_pending_landing_but_allow_completed_history(tmp
         merger.pending_records()
     store.add_audit_event("window.fast_forward_merged", payload)
     assert merger.pending_records() == []
+
+
+@pytest.mark.parametrize("verified", [True, False])
+def test_completed_legacy_intent_requires_remote_pr_identity_and_ancestry(tmp_path, monkeypatch, verified):
+    from stagemesh.autonomy.dependencies import PRState
+    values, _ = controlled(tmp_path, monkeypatch)
+    repo, remote, base, sha, store, _ci, adapter, pr = values
+    git(remote, "update-ref", "refs/heads/main", sha)
+    monkeypatch.setattr(adapter, "get", lambda number: replace(pr, state=PRState.MERGED,
+        merge_commit_sha=sha if verified else base))
+    store.add_audit_event("window.fast_forward_push_intent", {"pr":7,"candidate_sha":sha,"base_sha":base})
+    store.add_audit_event("window.fast_forward_merged", {"task_id":TASK,"pr":7,"candidate_sha":sha})
+    merger=ff.make_merger(store,repo,"refs/heads/main",("web",),policy="stagemesh",check_app_id=15368)
+    if verified:
+        assert merger.pending_records()==[] and merger.preflight() is None
+    else:
+        with pytest.raises(RuntimeError,match="legacy fast-forward intent"):
+            merger.preflight()

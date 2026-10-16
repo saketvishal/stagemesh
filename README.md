@@ -418,3 +418,9 @@ fatal. There is no automatic fallback from hosted mode after a 403.
 
 Use `run-window --plan` to verify resolved defaults and access without starting
 providers or pushing. It does not prove a real unattended development cycle.
+
+Completed legacy landing records without repository metadata are ignored only when
+GitHub confirms the same task PR was merged at that exact commit into the current
+integration branch and Git proves it remains an ancestor of remote main. Incomplete
+or unverifiable legacy intents still refuse admission, including in read-only plans.
+No historical records or approvals are synthesized or rewritten.

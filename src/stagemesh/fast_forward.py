@@ -433,12 +433,34 @@ def make_merger(store, project: Path, base_ref: str, required_checks: tuple[str,
 
         rows = store.conn.execute("SELECT event_type, payload FROM audit_events WHERE event_type IN (?, ?) ORDER BY created_at, rowid",
             ("window.fast_forward_push_intent", "window.fast_forward_merged"))
+        rows = list(rows)
+        completed_legacy = {}
+        for row in rows:
+            payload = json.loads(row["payload"])
+            if row["event_type"].endswith("merged") and not payload.get("repository"):
+                completed_legacy[(payload.get("pr"), payload.get("candidate_sha"))] = payload
+
+        def verified_legacy_history(payload):
+            sha, number = payload.get("candidate_sha"), payload.get("pr")
+            completed = completed_legacy.get((number, sha))
+            if not completed or not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{40}", sha) or type(number) is not int:
+                return False
+            pr = pulls.get(number)
+            if (not pr or pr.state is not PRState.MERGED or pr.base_ref != branch or pr.head_sha != sha
+                    or pr.merge_commit_sha != sha or not is_task_pr_branch(pr.head_ref, completed.get("task_id", ""), sha)):
+                return False
+            tip = pulls.remote_tip(base_ref)
+            return bool(tip and re.fullmatch(r"[0-9a-f]{40}", tip) and
+                GitWorkspace(project).run("merge-base", "--is-ancestor", sha, tip, check=False).returncode == 0)
+
         pending = {}
         pending_policies = {}
         for row in rows:
             payload = json.loads(row["payload"])
             if payload.get("repository") != f"{repository.owner}/{repository.repo}" or payload.get("base_ref") != base_ref:
                 if row["event_type"].endswith("push_intent") and not payload.get("repository"):
+                    if verified_legacy_history(payload):
+                        continue
                     raise RuntimeError("legacy fast-forward intent lacks repository identity; reconcile it before continuing")
                 continue
             key = (payload["task_id"], payload["pr"], payload["candidate_sha"])
@@ -484,6 +506,13 @@ def make_merger(store, project: Path, base_ref: str, required_checks: tuple[str,
             store.add_audit_event("window.fast_forward_partial", {"task_id": record.task_id, **result})
         return result
 
-    merge_record.preflight = lambda: pulls.host_policy()
+    def merge_preflight():
+        error = pulls.host_policy()
+        if error:
+            return error
+        pending_records()  # read-only: ambiguous historical/pending landings must be visible in --plan too
+        return None
+
+    merge_record.preflight = merge_preflight
     merge_record.pending_records = pending_records
     return merge_record
