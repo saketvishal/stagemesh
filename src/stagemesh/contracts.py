@@ -483,6 +483,12 @@ def candidate_workspace(project: Path, candidate_sha: str) -> Iterator[Path]:
         checkout = GitWorkspace(target)
         if checkout.head() != expected:
             raise GitError(f"candidate checkout is not exactly {expected}")
+        from .candidate_environments import prepare_candidate_environments
+
+        try:
+            prepare_candidate_environments(project, target)
+        except (TypeError, ValueError, subprocess.SubprocessError) as exc:
+            raise OSError(f"candidate validation environment unavailable: {exc}") from exc
         yield target
         if checkout.head() != expected:  # a gate moved HEAD: the tree that ran is no longer the candidate
             raise GitError(f"a gate moved the candidate checkout off {expected}")
