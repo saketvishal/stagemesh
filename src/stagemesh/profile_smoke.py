@@ -18,9 +18,14 @@ from typing import Any
 
 from .auto_plan import AutoPlanError, profile_payload, validate_generated
 from .config import StageMeshConfig
-from .contracts import ContractError, canonical_contract_json, parse_contract, task_contract_path
-from .persistence import Store
-from .profile_default import is_placeholder
+from .contracts import (
+    ContractError,
+    canonical_contract_json,
+    contract_admission_problem,
+    parse_contract,
+    task_contract_path,
+)
+from .persistence import MAX_CANONICAL_CONTRACT_CHARS, Store
 from .profile import (
     PROFILE_FILE,
     Profile,
@@ -31,6 +36,7 @@ from .profile import (
     load_profile,
     resolve_type,
 )
+from .profile_default import is_placeholder
 from .task_selection import SelectionRefusal, rank_batch_candidates, select_next_task
 
 SHELLS = {"sh", "bash", "zsh", "dash", "ksh", "fish", "cmd", "powershell", "pwsh"}
@@ -144,8 +150,9 @@ def run_smoke(
         return report
     report.profile = profile.name
     _check_types(report, profile)
+    report.add("contract generation policy", "pass", profile.contract_generation)
     if is_placeholder(profile):
-        report.add("validation gates are real", "warn", "only the generated placeholder gate (git diff --check) is defined; add the project's real test gates to "+str(PROFILE_FILE))
+        report.add("validation gates are real", "warn", "only the generated placeholder gate (git diff --check) is defined; auto-planning is blocked; supply explicit task contracts or add real gates to "+str(PROFILE_FILE))
     _check_forbidden(report, profile)
     _check_probes(report, profile)
     if task_ids or dry_run_selection:
@@ -187,6 +194,7 @@ def _load(report: SmokeReport, project: Path) -> Profile | None:
 
 def _check_types(report: SmokeReport, profile: Profile) -> None:
     bad_contracts: list[str] = []
+    blocked_types: list[str] = []
     unsafe: list[str] = []
     warned: list[str] = []
     seen_gates: dict[str, dict[str, Any]] = {}
@@ -195,7 +203,11 @@ def _check_types(report: SmokeReport, profile: Profile) -> None:
         try:
             payload = build_contract(profile, TypeDecision(type_id, "smoke", ()), f"smoke probe for {type_id}", "smoke-task", "")
             size = validate_generated(payload)
-            parse_contract(payload)
+            contract = parse_contract(payload)
+            problem = contract_admission_problem(contract)
+            info["executable"] = problem is None
+            if problem:
+                blocked_types.append(f"{type_id}: {problem}")
             info["contract_chars"] = size
         except (AutoPlanError, ProfileError, ContractError, ValueError) as exc:
             bad_contracts.append(f"{type_id}: {getattr(exc, 'message', exc)}")
@@ -212,6 +224,8 @@ def _check_types(report: SmokeReport, profile: Profile) -> None:
                 unsafe.extend(f"{gate['name']}: {problem}" for problem in failures)
                 warned.extend(f"{gate['name']}: {problem}" for problem in warnings)
         report.task_types[type_id] = info
+    if blocked_types:
+        report.add("task types have executable validation", "warn", "these task types cannot be auto-planned", blocked_types)
     report.add(
         "generated contracts parse",
         "fail" if bad_contracts else "pass",
@@ -293,11 +307,25 @@ def _check_task(report: SmokeReport, store: Store, project: Path, profile: Profi
         try:
             import json
 
-            canonical_contract_json(parse_contract(json.loads(path.read_text(encoding="utf-8"))))
+            contract = parse_contract(json.loads(path.read_text(encoding="utf-8")))
+            size = len(canonical_contract_json(contract))
+            if size > MAX_CANONICAL_CONTRACT_CHARS:
+                raise ContractError("contract exceeds the canonical size limit")
+            problem = contract_admission_problem(contract)
+            if problem:
+                raise ContractError(problem)
         except (OSError, ValueError, ContractError) as exc:
             report.tasks.append(entry)
-            report.add(name, "fail", f"hand-written contract {path.name} does not parse: {exc}")
+            report.add(name, "fail", f"hand-written contract {path.name} is not executable: {exc}")
             return
+        entry.update(
+            gates=[g.name for g in contract.gates], allowed_files=list(contract.allowed_files),
+            forbidden_files=list(contract.forbidden_files), max_changed_files=contract.max_changed_files,
+            max_diff_lines=contract.max_diff_lines, contract_chars=size,
+        )
+        report.tasks.append(entry)
+        report.add(name, "pass", f"existing task contract; {len(contract.gates)} gate(s); parses ({size} chars)")
+        return
     try:
         planned = profile_payload(store, project, task_id)
         assert planned is not None

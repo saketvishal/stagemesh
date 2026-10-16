@@ -17,6 +17,7 @@ and the gates, scope and limits its contract would get. A hand-written contract 
 ```jsonc
 {
   "schema_version": 1,
+  "contract_generation": "automatic",
   "name": "myproject",
   "variables": { "PYTHON": { "win32": "C:\\proj\\.venv\\Scripts\\python.exe", "default": "python3" }, "BASE_REF": "main" },
   "env_sets": { "test_db": { "DATABASE_URL": "postgresql://.../proj_test" } },   // explicit, per-gate environments
@@ -86,3 +87,29 @@ A profile may declare its own probes, which need no real issue:
 ```json
 "smoke": { "tasks": [ { "title": "Update the runbook", "labels": ["docs"], "expect_type": "prep" } ] }
 ```
+
+## Contract admission for unattended queues
+
+Set `"contract_generation": "explicit_only"` in the project profile when tasks
+must have a prepared, approved contract. The default for existing profiles is
+`"automatic"`. Explicit-only mode disables contract generation, not queue
+selection: prepared independent tasks still run normally and uncontracted tasks
+are skipped before claims or providers start, without spending a run-window task
+slot. `continue`, parallel admission, and `run-window --plan` use the same checks.
+Directly requesting an uncontracted task gives an actionable refusal.
+
+Initialization now chooses explicit-only mode when no real root test gate was
+detected. Existing profiles are never rewritten. In either mode, contracts whose
+only validation commands are `git diff --check` are not executable. This also
+protects old profiles, renamed placeholder gates, and frozen contracts in the
+ledger. Adding a real gate that the selected task type does not use cannot make
+that type executable. Contracts and historical evidence remain readable and are
+not silently repaired or overwritten.
+
+`project-smoke --task` reports the actual existing contract when one is present;
+it does not require a hypothetical fallback contract to be generatable. A
+placeholder profile still produces a warning in the profile-wide structural
+smoke, because it cannot generate executable contracts. A passing structural
+smoke is not evidence of implementation, review, or an unattended provider run.
+This safeguard detects the known whitespace-only fallback; it does not establish
+that arbitrary project-defined commands prove the task's requirements.

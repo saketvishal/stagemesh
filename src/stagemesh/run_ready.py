@@ -11,7 +11,13 @@ from .auto_plan import AutoPlanError, create_contract, refresh_stale_generated_c
 from .blocked_recovery import auto_retry_blocked_provider_failures, exhaustion_message
 from .config import TaskSelectionConfig
 from .contract_check import contract_section_sizes
-from .contracts import ContractError, canonical_contract_json, parse_contract, task_contract_path
+from .contracts import (
+    ContractError,
+    canonical_contract_json,
+    contract_admission_problem,
+    parse_contract,
+    task_contract_path,
+)
 from .coordinator import Coordinator, TargetSelection, TargetSelectionError
 from .diagnosis import format_findings
 from .domain import EvidenceKind, ExecutionKind, Stage, TaskStatus
@@ -28,7 +34,7 @@ from .recovery import (
     auto_revalidate_blocked_validation_gates,
 )
 from .scheduling import Scheduler
-from .task_selection import Candidate, Selection, SelectionRefusal, select_next_task
+from .task_selection import Candidate, Selection, SelectionRefusal, contract_state, select_next_task
 from .timing import execution_timings, format_duration, step_duration
 from .workspace_guard import EXTERNAL_WORKSPACE_MUTATION
 from .workspaces import task_workspace, worktree_root
@@ -210,6 +216,10 @@ def _ensure_contract(
         plan_info.update(occurred=True, refreshed_existing=True, **refreshed.to_dict())
         note(f"task {task_id}: refreshed generated contract at {refreshed.path} (gates: {', '.join(refreshed.gates)})")
     if store.task_contract(task_id) is not None:
+        state = contract_state(store, project, task_id, auto_plan=False)
+        if state != "valid":
+            raise RunReadyRefusal("invalid_contract", f"contract for {task_id} is invalid: {state}", task_id=task_id)
+    if store.task_contract(task_id) is not None:
         plan_info["reused_existing"] = True
         return  # already frozen for this task
     path = task_contract_path(project, task_id)
@@ -241,6 +251,9 @@ def _ensure_contract(
         plan_info["reused_existing"] = True
     try:
         contract = parse_contract(json.loads(path.read_text(encoding="utf-8")))
+        problem = contract_admission_problem(contract)
+        if problem:
+            raise ContractError(problem)
         size = len(canonical_contract_json(contract))
     except (OSError, ValueError, ContractError) as exc:
         raise RunReadyRefusal("invalid_contract", f"contract for {task_id} is invalid: {exc}", task_id=task_id) from exc

@@ -140,7 +140,7 @@ def test_default_profile_keeps_planner_forbidden_set(tmp_path: Path, capsys) -> 
 def test_stagemesh_shaped_project_gets_a_valid_profile(tmp_path: Path, capsys) -> None:
     (tmp_path / "pyproject.toml").write_text('[project]\nname = "stagemesh"\n', encoding="utf-8")
     (tmp_path / "tests").mkdir()
-    for name in ("test_run_ready.py", "test_provider_pool.py", "test_canary_regression.py"):
+    for name in ("test_run_ready.py", "test_provider_pool.py", "test_canary_regression.py", "test_zero_config_github.py"):
         (tmp_path / "tests" / name).write_text("", encoding="utf-8")
     code, out, _ = _init(tmp_path, capsys)
     assert code == 0 and "created default profile" in out

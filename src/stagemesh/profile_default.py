@@ -2,7 +2,7 @@
 
 It uses the normal profile schema (see profile.py) and only conventions StageMesh already knows: the gates `detect_gates` finds at the
 project root. When it finds none, the single gate is `git diff --check`, which is safe everywhere and proves nothing about behaviour;
-the task type's summary says so. An existing profile, valid or not, is never touched.
+the task type's summary says so and automatic contract generation is disabled. An existing profile, valid or not, is never touched.
 """
 
 from __future__ import annotations
@@ -54,6 +54,7 @@ def default_profile(project: Path) -> dict[str, Any]:
     )
     return {
         "schema_version": 1,
+        "contract_generation": "automatic" if detected else "explicit_only",
         "name": re.sub(r"[^A-Za-z0-9._-]+", "-", project.name) or "project",
         "forbidden_files": list(FORBIDDEN_FILES),
         "defaults": {"max_changed_files": 60, "max_diff_lines": 6000},

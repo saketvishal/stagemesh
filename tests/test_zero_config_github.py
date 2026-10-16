@@ -29,6 +29,13 @@ def _github_project(tmp_path: Path, remote: str = "git@github.com:acme/widgets.g
     return project
 
 
+def _prepared_contract(project: Path, task: str) -> None:
+    from test_run_ready import FAKE_CONTRACT
+    directory = project / ".stagemesh/contracts"
+    directory.mkdir(exist_ok=True)
+    (directory / f"{task}.json").write_text(json.dumps(FAKE_CONTRACT), encoding="utf-8")
+
+
 def test_init_persists_detected_github_origin_as_the_ready_issue_source(tmp_path: Path) -> None:
     project = _github_project(tmp_path)
 
@@ -56,6 +63,7 @@ def test_run_window_plan_previews_ready_issues_without_persisting_them(
 ) -> None:
     project = _github_project(tmp_path)
     assert cli_module.main(["--project", str(project), "init"]) == 0
+    _prepared_contract(project, "17")
     capsys.readouterr()
 
     def discover(self: GitHubApiIssueSource):
@@ -104,6 +112,7 @@ def test_init_migrates_existing_install_before_read_only_plan(tmp_path: Path, mo
     assert cli_module.main(["--project", str(project), "init"]) == 0
     capsys.readouterr()
     before = config_path.read_bytes()
+    _prepared_contract(project, "3")
 
     code = cli_module.main(["--project", str(project), "run-window", "--plan", "--json", "--report", str(tmp_path / "plan.json")])
 

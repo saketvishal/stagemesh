@@ -19,7 +19,14 @@ from typing import Any
 from .auto_plan import cached_state as _cached_state
 from .auto_plan import plannable, task_labels
 from .config import TaskSelectionConfig
-from .contracts import ContractError, canonical_contract_json, parse_contract, task_contract_path
+from .contracts import (
+    ContractError,
+    bound_contract_from_record,
+    canonical_contract_json,
+    contract_admission_problem,
+    parse_contract,
+    task_contract_path,
+)
 from .domain import EvidenceKind, EvidenceStatus, Stage, TaskStatus
 from .objective_roots import objective_root_reason
 from .persistence import MAX_CANONICAL_CONTRACT_CHARS, Store
@@ -173,15 +180,20 @@ def recent_provider_pool_exhaustion(store: Store, task_id: str) -> str | None:
     return None
 
 
-def _contract_state(store: Store, project: Path, task_id: str, auto_plan: bool) -> str:
-    if store.task_contract(task_id) is not None:
-        return "valid"
+def contract_state(store: Store, project: Path, task_id: str, auto_plan: bool) -> str:
+    """Shared read-only admission for selectors, window plans and execution entry points."""
+    record = store.task_contract(task_id)
     path = task_contract_path(project, task_id)
-    if path is not None:
+    if record is not None or path is not None:
         try:
-            size = len(canonical_contract_json(parse_contract(json.loads(path.read_text(encoding="utf-8")))))
+            contract = (bound_contract_from_record(dict(record)).contract if record is not None
+                        else parse_contract(json.loads(path.read_text(encoding="utf-8"))))
+            size = len(canonical_contract_json(contract))
         except (OSError, ValueError, ContractError):
-            return "unplannable:contract file is invalid"
+            return "unplannable:contract file or frozen binding is invalid"
+        problem = contract_admission_problem(contract)
+        if problem:
+            return f"unplannable:{problem}"
         return "valid" if size <= MAX_CANONICAL_CONTRACT_CHARS else "unplannable:contract exceeds the size limit"
     if not auto_plan:
         return "unplannable:no contract and auto-planning is disabled"
@@ -252,7 +264,7 @@ def _candidate_from_task(store: Store, project: Path, policy: TaskSelectionConfi
         priority_label=priority_label,
         preferred_rank=preferred_rank,
         preferred_label=preferred_label,
-        contract=_contract_state(store, project, task_id, auto_plan),
+        contract=contract_state(store, project, task_id, auto_plan),
         tie_value=_tie_value(store, task, policy.tie_breaker),
     )
 

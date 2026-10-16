@@ -61,6 +61,7 @@ class Profile:
     escalate_at: int
     task_selection: dict[str, Any] = field(default_factory=dict)
     smoke: tuple[SmokeProbe, ...] = ()
+    contract_generation: str = "automatic"
 
 
 @dataclass(frozen=True)
@@ -104,10 +105,13 @@ def parse_profile(raw: Any) -> Profile:
         raise ProfileError("profile must be an object with schema_version 1")
     unknown = set(raw) - {
         "schema_version", "name", "variables", "env_sets", "gates", "forbidden_files", "defaults",
-        "task_types", "type_selection", "task_selection", "smoke",
+        "task_types", "type_selection", "task_selection", "smoke", "contract_generation",
     }
     if unknown:
         raise ProfileError(f"profile has unsupported keys: {', '.join(sorted(unknown))}")
+    policy = raw.get("contract_generation", "automatic")
+    if policy not in ("automatic", "explicit_only"):
+        raise ProfileError("contract_generation must be automatic or explicit_only")
     name = _text(raw.get("name"), "name")
     defaults = raw.get("defaults") or {}
     gates = raw.get("gates")
@@ -142,6 +146,7 @@ def parse_profile(raw: Any) -> Profile:
         escalate_at=escalate_at,
         task_selection=dict(raw.get("task_selection") or {}),
         smoke=_smoke_probes(raw.get("smoke"), set(types)),
+        contract_generation=policy,
     )
     validate_profile(profile)
     return profile
