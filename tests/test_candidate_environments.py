@@ -159,4 +159,28 @@ def test_package_versions_agree():
         if isinstance(node, ast.Assign)
         and any(isinstance(target, ast.Name) and target.id == "VERSION" for target in node.targets)
     )
-    assert metadata["project"]["version"] == stagemesh.__version__ == backend_version == "0.2.1"
+    assert metadata["project"]["version"] == stagemesh.__version__ == backend_version
+
+
+def test_invalid_environment_config_fails_validation_without_running_gate(tmp_path):
+    from test_change_contracts import _repo
+
+    from stagemesh.contracts import ChangeContract, GateCommand, evaluate_contract
+
+    repo = tmp_path / "repo"
+    workspace = _repo(repo)
+    config = repo / ".stagemesh/validation-environments.json"
+    config.parent.mkdir()
+    config.write_text('{"schema_version":true,"python":{}}')
+    contract = ChangeContract(
+        objective="Validate exact candidate",
+        required_tests=(
+            GateCommand("must-not-run", [sys.executable, "-c", "raise SystemExit(0)"]),
+        ),
+    )
+    result = evaluate_contract(repo, workspace.head(), contract, baseline_sha=workspace.head())
+    assert not result.passed
+    assert any(f["code"] == "candidate_workspace_unavailable" for f in result.findings)
+    assert result.gates == ()
+    worktrees = workspace.run("worktree", "list", "--porcelain").stdout
+    assert worktrees.count("worktree ") == 1
