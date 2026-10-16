@@ -3,7 +3,7 @@
 StageMesh uses git tags as reinstallable stable package points. The current known-good stable line is:
 
 ```powershell
-python -m pip install "stagemesh @ git+https://github.com/saketvishal/stagemesh.git@v0.2.1"
+python -m pip install "stagemesh @ git+https://github.com/saketvishal/stagemesh.git@v0.2.2"
 ```
 
 Use that tag when a project needs the last proven operating version. For example, a product repository can refresh its project-local StageMesh runtime from the stable tag instead of from `main`.
@@ -12,24 +12,45 @@ Development on `main` moves to the next dev version after a stable tag is cut. T
 
 Current lines:
 
-- `v0.2.1`: published stable release including candidate-environment and guarded delivery fixes.
+- `v0.2.2`: patch release point for execution ownership, launch-failure diagnosis and accurate fallback progress. Stable publication requires the reviewed annotated tag and GitHub release below.
+- `v0.2.1`: previous stable rollback release, including candidate-environment and guarded delivery fixes.
 - `v0.1.0`: historical fallback tag at the post-task-266 operating baseline.
-- `main`: `0.2.2.dev0`, for continued StageMesh development.
+- `main`: `0.2.2` release point; start the next development change by advancing to `0.2.3.dev0`.
 
 Release rule:
 
 1. Cut an annotated tag from a clean, proven `main`.
 2. Push the tag.
-3. Bump `main` to the next `.dev0` version.
+3. Before starting new development, bump `main` to the next `.dev0` version.
 4. Refresh project-local runtimes from a tag when stability matters, or from `main` when testing new StageMesh features.
+
+## Patch 0.2.2: execution ownership and failure handling
+
+This patch contains the independently reviewed fixes in PR #364:
+
+- Verify Windows provider ownership using the process handle already owned by
+  StageMesh when querying the PID is unavailable. Unverified ownership still
+  refuses termination and retains the claim for inspected recovery.
+- Stop on established validation command-launch failures before spending coding
+  attempts. Candidate import failures, missing data and test timeouts retain
+  bounded remediation; no validation gate is skipped or weakened.
+- Attribute progress and heartbeat lines to the actual execution actor, including
+  fallback providers, and report terminal failure reasons.
+
+Clients receive these changes only after installing **0.2.2** from its annotated
+`v0.2.2` tag or the immutable wheel attached to that GitHub release. A local
+untagged build or an unpublished release draft is not stable publication. Do not
+replace an existing 0.2.1 package with different code under the same version.
+Keep the published 0.2.1 wheel available for rollback, and wait for owning
+StageMesh processes to exit before upgrading or rolling back a shared runtime.
 
 
 ## Patch 0.2.1: isolated gate dependencies
 
 Version 0.2.1 was reviewed and integrated through PR #363. The annotated
 `v0.2.1` tag and its GitHub release provide the stable wheel, source archive,
-manifest and checksums. Install that release for client operation; `main` is
-the next development line. Do not describe an untagged local wheel as a
+manifest and checksums. It remains available for client rollback after 0.2.2
+is published. Do not describe an untagged local wheel as a
 published stable release.
 
 Every shipped fix must change the package version in `pyproject.toml`,
