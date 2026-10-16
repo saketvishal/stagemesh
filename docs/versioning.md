@@ -3,7 +3,7 @@
 StageMesh uses git tags as reinstallable stable package points. The current known-good stable line is:
 
 ```powershell
-python -m pip install "stagemesh @ git+https://github.com/saketvishal/stagemesh.git@v0.1.0"
+python -m pip install "stagemesh @ git+https://github.com/saketvishal/stagemesh.git@v0.2.1"
 ```
 
 Use that tag when a project needs the last proven operating version. For example, a product repository can refresh its project-local StageMesh runtime from the stable tag instead of from `main`.
@@ -12,8 +12,9 @@ Development on `main` moves to the next dev version after a stable tag is cut. T
 
 Current lines:
 
-- `v0.1.0`: stable fallback tag at the post-task-266 operating baseline.
-- `main`: `0.2.0.dev0`, for continued StageMesh development.
+- `v0.2.1`: published stable release including candidate-environment and guarded delivery fixes.
+- `v0.1.0`: historical fallback tag at the post-task-266 operating baseline.
+- `main`: `0.2.2.dev0`, for continued StageMesh development.
 
 Release rule:
 
@@ -25,9 +26,11 @@ Release rule:
 
 ## Patch 0.2.1: isolated gate dependencies
 
-Version 0.2.1 is prepared on `codex/candidate-gate-environment`. It is a release
-candidate until its reviewed branch is integrated into main and the stable tag
-is published. Do not describe an untagged local wheel as a published stable release.
+Version 0.2.1 was reviewed and integrated through PR #363. The annotated
+`v0.2.1` tag and its GitHub release provide the stable wheel, source archive,
+manifest and checksums. Install that release for client operation; `main` is
+the next development line. Do not describe an untagged local wheel as a
+published stable release.
 
 Every shipped fix must change the package version in `pyproject.toml`,
 `src/stagemesh/__init__.py`, and `build_backend.py`. Use a patch version for
