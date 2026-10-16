@@ -386,6 +386,35 @@ def test_live_acceptance_mode_queue_default_skips_failed_only_and_required_flag_
     assert parser.parse_args(["queue-run", "--concurrency", "1", "--require-live-acceptance"]).require_live_acceptance is True
 
 
+@pytest.mark.parametrize("mode,required,block_unproven", [(None, False, False), ("skip_failed", True, False), ("required", True, True)])
+def test_child_coordinator_applies_live_acceptance_policy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                        mode: str | None, required: bool, block_unproven: bool) -> None:
+    project = _smoke_project(tmp_path)
+    argv = ["--project", str(project), "continue", "--task", "generic-task"]
+    if mode is not None:
+        argv += ["--live-acceptance", mode]
+    args = cli_module.build_parser().parse_args(argv)
+    seen = {}
+
+    class PoolReached(Exception):
+        pass
+
+    def pool(*args, **kwargs):
+        seen.update(kwargs)
+        raise PoolReached
+
+    monkeypatch.setattr(cli_module, "ProviderPool", pool)
+    store = Store(tmp_path / "child.sqlite3")
+    store.migrate()
+    try:
+        with pytest.raises(PoolReached):
+            cli_module._build_coordinator(args, project, cli_module.load_config(project), store, None)
+    finally:
+        store.close()
+    assert seen["require_live_acceptance"] is required
+    assert seen["block_unproven"] is block_unproven
+
+
 def test_live_provider_readiness_is_capability_specific_for_mixed_results(tmp_path: Path) -> None:
     store = Store(tmp_path / "stagemesh.sqlite3")
     store.migrate()

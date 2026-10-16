@@ -446,6 +446,8 @@ def _build_coordinator(
     `live_acceptance` is None (live acceptance is ignored), LIVE_ACCEPTANCE_SKIP_FAILED (skip a provider whose recorded live check
     failed; one that was never checked stays eligible) or LIVE_ACCEPTANCE_REQUIRED (also refuse a provider with no passing live check).
     """
+    if live_acceptance is None:
+        live_acceptance = getattr(args, "live_acceptance", None)
     # Wire real provider adapters unless --dry-run is requested.
     executor = None
     reviewer = None
@@ -773,7 +775,8 @@ def command_advance_baseline(args: argparse.Namespace) -> int:
     return _repair_command(args, run)
 
 
-def _wave_hooks(project: Path, store: Store, *, base_ref: str, staging_ref: str | None, advance_ref: str, local: bool, no_pr: bool):
+def _wave_hooks(project: Path, store: Store, *, base_ref: str, staging_ref: str | None, advance_ref: str, local: bool, no_pr: bool,
+                live_acceptance: str = LIVE_ACCEPTANCE_SKIP_FAILED):
     """The real hooks (child `continue` runs, baseline advance, PR opening, repo census, per-task safety checks) for a wave or window."""
     from .autonomy.gitfacts import GitFacts
     from .recovery import advance_baseline as advance_task_baseline
@@ -795,7 +798,7 @@ def _wave_hooks(project: Path, store: Store, *, base_ref: str, staging_ref: str 
         )
 
     return WaveHooks(
-        run_task=subprocess_task_runner(project, integration_ref=staging_ref),
+        run_task=subprocess_task_runner(project, integration_ref=staging_ref, live_acceptance=live_acceptance),
         advance_baseline=advance,
         open_pr=None if no_pr or local else git_gh_pr_opener(project, base=base_ref.removeprefix("refs/heads/")),
         target_sha=lambda: facts.resolve(advance_ref),
@@ -885,7 +888,8 @@ def command_run_window(args: argparse.Namespace) -> int:
         _sync_all_sources(store, project, config, None)
         staging_ref = None if local else STAGING_REF
         hooks = _wave_hooks(
-            project, store, base_ref=base_ref, staging_ref=staging_ref, advance_ref=base_ref if local else STAGING_REF, local=local, no_pr=args.no_pr
+            project, store, base_ref=base_ref, staging_ref=staging_ref, advance_ref=base_ref if local else STAGING_REF, local=local, no_pr=args.no_pr,
+            live_acceptance=LIVE_ACCEPTANCE_REQUIRED if options.strict_live else LIVE_ACCEPTANCE_SKIP_FAILED,
         )
         merger = None
         merger_error = None
@@ -3399,6 +3403,7 @@ def build_parser() -> argparse.ArgumentParser:
     cont.add_argument("--task", dest="task", help="Run exactly one selected task id")
     cont.add_argument("--task-id", dest="task", help=argparse.SUPPRESS)
     cont.add_argument("--integration-ref", dest="integration_ref", help=argparse.SUPPRESS)  # survivor-wave PR mode: land on the staging ref
+    cont.add_argument("--live-acceptance", choices=(LIVE_ACCEPTANCE_SKIP_FAILED, LIVE_ACCEPTANCE_REQUIRED), help=argparse.SUPPRESS)
     cont.set_defaults(func=command_continue)
     status = sub.add_parser("status")
     status.add_argument("--json", action="store_true")

@@ -542,6 +542,26 @@ def test_cli_default_report_path_is_auto_created(tmp_path: Path, monkeypatch: py
     assert len(reports) == 1
 
 
+@pytest.mark.parametrize("strict", [False, True])
+def test_window_passes_provider_policy_to_child_hooks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, strict: bool) -> None:
+    store, project = make_store(tmp_path, ["generic-task"])
+    store.close()
+    seen = {}
+    actual_hooks = cli_module._wave_hooks
+
+    def hooks(*args, **kwargs):
+        seen.update(kwargs)
+        return actual_hooks(*args, **kwargs)
+
+    monkeypatch.setattr(cli_module, "_wave_hooks", hooks)
+    monkeypatch.setattr(rw, "check_runtime", lambda project: FRESH)
+    argv = ["--project", str(project), "run-window", "--plan", "--json"]
+    if strict:
+        argv.append("--strict-live")
+    assert cli_module.main(argv) in (0, 2)
+    assert seen["live_acceptance"] == ("required" if strict else "skip_failed")
+
+
 def test_cli_plan_is_read_only_and_shows_the_selection(tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch) -> None:
     store, project = make_store(tmp_path, ["1", "2"])
     store.close()

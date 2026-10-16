@@ -30,7 +30,7 @@ up worktrees, closes no issues (only a PR merge does), and writes a report to `.
 | `--tasks` | All eligible | Comma-separated task IDs (e.g. `155,156`) to restrict the window to specific tasks instead of automatic selection. |
 | `--integration pr\|local` | `pr` | Integration mode: `pr` (default) lands work on `wave/staging`, opens PRs, and leaves local `main` untouched; `local` lands work directly on the integration branch (moving local `main`) without opening PRs. |
 | `--no-pr` | Off | In PR mode, do not open PRs for tasks reaching `DONE` (work remains on the staging branch). |
-| `--strict-live` | Off | Release mode check: refuse to start unless providers have fresh passing live acceptance test results. |
+| `--strict-live` | Off | Require fresh passing live acceptance results in preflight and in every child runner, for both implementation and review. Default windows still exclude providers with recorded live-check failures. |
 | `--allow-stale-runtime` | Off | Development bypass: allow starting even if the installed CLI runtime lacks commands present in source. |
 | `--plan` | Off | Read-only mode: run preflight checks and show which tasks would be picked or left alone without starting any work or recovering executions. |
 | `--report` | Auto-generated | Path to write the JSON report (defaults to `.stagemesh/reports/run-window/<timestamp>.json`, created automatically). |

@@ -600,7 +600,8 @@ def format_report(report: WaveReport) -> str:
 
 
 def subprocess_task_runner(
-    project: Path, *, python: str | None = None, integration_ref: str | None = None
+    project: Path, *, python: str | None = None, integration_ref: str | None = None,
+    live_acceptance: str | None = None,
 ) -> Callable[[str, int], RunResult]:
     """Run `continue --task N --json` in a child process, so each task gets its own connection and process identity.
 
@@ -613,6 +614,8 @@ def subprocess_task_runner(
         argv = [interpreter, "-c", bootstrap, "--project", str(project), "continue", "--task", task_id, "--max-steps", str(max_steps), "--json"]
         if integration_ref:
             argv += ["--integration-ref", integration_ref]
+        if live_acceptance is not None:
+            argv += ["--live-acceptance", live_acceptance]
         proc = subprocess.run(argv, capture_output=True, text=True, check=False)
         try:
             data = json.loads(proc.stdout)
