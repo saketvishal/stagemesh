@@ -157,7 +157,7 @@ def test_a_completed_task_gets_a_pr_request_but_nothing_is_merged(tmp_path: Path
     assert rig.prs == ["T-1"] and no_pr.tasks[0].pr_url is None
 
 
-def test_a_pr_failure_is_reported_and_does_not_hide_that_the_task_is_done(tmp_path: Path) -> None:
+def test_a_pr_failure_is_reported_and_preserves_the_verified_candidate(tmp_path: Path) -> None:
     store, project = make_store(tmp_path, ["T-1"])
     rig = Rig(project)
     hooks = rig.hooks()
@@ -165,8 +165,12 @@ def test_a_pr_failure_is_reported_and_does_not_hide_that_the_task_is_done(tmp_pa
 
     report = run_wave(store, ["T-1"], hooks)
 
-    assert report.tasks[0].outcome == "done" and report.tasks[0].pr_url is None
-    assert "gh is not installed" in report.tasks[0].pr_error and report.ok
+    task = report.tasks[0]
+    assert task.outcome == "open" and task.pr_url is None and task.resumable
+    assert "gh is not installed" in task.pr_error and not report.ok
+    assert task.validation == task.review == task.integration == "PASSED"
+    assert task.integrated_candidate == store.latest_candidate("T-1")["sha"]
+    assert (task.final_stage, task.final_status) == ("INTEGRATE", "OPEN")
 
 
 def test_the_same_infrastructure_failure_on_two_tasks_stops_the_wave(tmp_path: Path) -> None:
@@ -524,6 +528,8 @@ def test_the_pr_branch_contains_the_candidate_commit_and_nothing_is_merged(tmp_p
     def fake_run(argv, **kwargs):
         if argv[0] == "gh":
             gh_calls.append(list(argv))
+            if list(argv[1:3]) == ["pr", "list"]:
+                return sp.CompletedProcess(argv, 0, "[]", "")
             return sp.CompletedProcess(argv, 0, "https://example.invalid/pr/1\n", "")
         return real_run(argv, **kwargs)
 
@@ -536,7 +542,7 @@ def test_the_pr_branch_contains_the_candidate_commit_and_nothing_is_merged(tmp_p
     assert _git(project, "rev-parse", "refs/heads/wave/task-T-1") == candidate  # the PR branch is exactly the candidate
     assert _git(origin, "rev-parse", "refs/heads/wave/task-T-1") == candidate  # and it was pushed
     assert _git(project, "rev-parse", main_ref) == main_before and _git(origin, "rev-parse", main_ref) == main_before
-    assert [call[:3] for call in gh_calls] == [["gh", "pr", "create"]]  # create only: no merge call exists
+    assert [call[:3] for call in gh_calls] == [["gh", "pr", "list"], ["gh", "pr", "create"]]  # lookup and create; no merge call exists
     assert not any(call[1:3] == ["pr", "merge"] or "--auto" in call for call in gh_calls)
 
 
@@ -703,3 +709,211 @@ def test_the_installed_commands_are_read_from_the_subcommand_list_not_the_first_
     text = "usage: stagemesh [-h] [--mode {a,b}] {init,status,survivor-wave} ..."
 
     assert _help_commands(["x"], lambda argv, **kw: sp.CompletedProcess(argv, 0, text, "")) == ["init", "status", "survivor-wave"]
+
+
+
+@pytest.mark.parametrize("state", ["OPEN", "MERGED"])
+def test_pr_publication_retry_reuses_exact_existing_pr_without_mutations(tmp_path: Path, monkeypatch, state) -> None:
+    import subprocess as sp
+
+    from stagemesh import survivor_wave
+    from stagemesh.survivor_wave import TaskRecord, git_gh_pr_opener
+
+    _store, project = make_store(tmp_path, ["T-1"])
+    sha = _git(project, "rev-parse", "HEAD")
+    base = _main_ref(project).removeprefix("refs/heads/")
+    calls = []
+    real_run = sp.run
+
+    def fake_run(argv, **kwargs):
+        calls.append(list(argv))
+        if list(argv[:3]) == ["gh", "pr", "list"]:
+            return sp.CompletedProcess(argv, 0, json.dumps([{"url": "https://example.invalid/pr/1", "state": state, "headRefOid": sha, "baseRefName": base}]), "")
+        assert argv[0] != "gh" and argv[1] not in {"branch", "push", "merge", "update-ref"}
+        return real_run(argv, **kwargs)
+
+    monkeypatch.setattr(survivor_wave.subprocess, "run", fake_run)
+    record = TaskRecord("T-1", title="the task", integrated_candidate=sha)
+    assert git_gh_pr_opener(project, base=base)(record) == "https://example.invalid/pr/1"
+    assert git_gh_pr_opener(project, base=base)(record) == "https://example.invalid/pr/1"
+    assert sum(list(argv[:3]) == ["gh", "pr", "list"] for argv in calls) == 2
+    assert _git(project, "rev-parse", "HEAD") == sha
+
+
+@pytest.mark.parametrize("mismatch", ["closed", "head", "base", "ambiguous"])
+def test_pr_publication_retry_refuses_conflicting_or_closed_pr(tmp_path: Path, monkeypatch, mismatch) -> None:
+    import subprocess as sp
+
+    from stagemesh import survivor_wave
+    from stagemesh.survivor_wave import TaskRecord, git_gh_pr_opener
+
+    _store, project = make_store(tmp_path, ["T-1"])
+    sha = _git(project, "rev-parse", "HEAD")
+    base = _main_ref(project).removeprefix("refs/heads/")
+    prior = {"url": "https://example.invalid/pr/1", "state": "OPEN", "headRefOid": sha, "baseRefName": base}
+    prior.update({"closed": {"state": "CLOSED"}, "head": {"headRefOid": "f" * 40}, "base": {"baseRefName": "other"}}.get(mismatch, {}))
+    prs = [prior, dict(prior)] if mismatch == "ambiguous" else [prior]
+    real_run = sp.run
+
+    def fake_run(argv, **kwargs):
+        if list(argv[:3]) == ["gh", "pr", "list"]:
+            return sp.CompletedProcess(argv, 0, json.dumps(prs), "")
+        assert argv[0] != "gh" and argv[1] not in {"branch", "push", "merge", "update-ref"}
+        return real_run(argv, **kwargs)
+
+    monkeypatch.setattr(survivor_wave.subprocess, "run", fake_run)
+    with pytest.raises(RuntimeError):
+        git_gh_pr_opener(project, base=base)(TaskRecord("T-1", integrated_candidate=sha))
+    assert _git(project, "rev-parse", "HEAD") == sha
+
+
+
+def test_retry_after_ambiguous_create_does_not_push_or_create_twice(tmp_path: Path, monkeypatch) -> None:
+    import subprocess as sp
+
+    from stagemesh import survivor_wave
+    from stagemesh.survivor_wave import TaskRecord, git_gh_pr_opener
+
+    _store, project = make_store(tmp_path, ["T-1"])
+    origin = _with_origin(tmp_path, project)
+    base_ref = _main_ref(project)
+    base = base_ref.removeprefix("refs/heads/")
+    before = _git(project, "rev-parse", base_ref)
+    prepare_staging = survivor_wave.prepare_staging_ref
+    prepare_staging(project, base_ref)
+    sha = _commit_on(project, survivor_wave.STAGING_REF, "verified work")
+    created = {"value": False}
+    calls = []
+    real_run = sp.run
+
+    def fake_run(argv, **kwargs):
+        calls.append(list(argv))
+        if list(argv[:3]) == ["gh", "pr", "list"]:
+            prs = [{"url": "https://example.invalid/pr/1", "state": "OPEN", "headRefOid": sha, "baseRefName": base}] if created["value"] else []
+            return sp.CompletedProcess(argv, 0, json.dumps(prs), "")
+        if list(argv[:3]) == ["gh", "pr", "create"]:
+            created["value"] = True
+            return sp.CompletedProcess(argv, 1, "", "connection lost after server created PR")
+        assert argv[0] != "gh"
+        return real_run(argv, **kwargs)
+
+    monkeypatch.setattr(survivor_wave.subprocess, "run", fake_run)
+    record = TaskRecord("T-1", integrated_candidate=sha)
+    opener = git_gh_pr_opener(project, base=base)
+    with pytest.raises(RuntimeError, match="connection lost"):
+        opener(record)
+    assert opener(record) == "https://example.invalid/pr/1"
+    assert sum(argv[:3] == ["gh", "pr", "create"] for argv in calls) == 1
+    assert sum(argv[:2] == ["git", "push"] for argv in calls) == 1
+    assert _git(origin, "rev-parse", "refs/heads/wave/task-T-1") == sha
+    assert _git(project, "rev-parse", base_ref) == before
+
+
+def test_missing_pr_opener_keeps_verified_delivery_resumable(tmp_path: Path) -> None:
+    store, project = make_store(tmp_path, ["T-1"])
+    rig = Rig(project)
+    hooks = rig.hooks()
+    hooks.open_pr = None
+    report = run_wave(store, ["T-1"], hooks)
+    assert not report.ok and "PR opener unavailable" in report.stop_reason
+    assert report.tasks[0].resumable and report.tasks[0].integration == "PASSED"
+    assert store.get_task("T-1")["stage"] == Stage.INTEGRATE
+
+
+def test_queue_stop_at_publication_boundary_is_not_reported_as_success(tmp_path: Path) -> None:
+    from stagemesh.queue_control import QUEUE_CONTROL_EVENT
+
+    store, project = make_store(tmp_path, ["T-1"])
+    rig = Rig(project)
+    hooks = rig.hooks()
+
+    def main_sha():
+        if rig.runs:
+            record_audit(store, QUEUE_CONTROL_EVENT, {"state": "paused", "reason": "late operator stop"})
+        return "a" * 40
+
+    hooks.main_sha = main_sha
+    report = run_wave(store, ["T-1"], hooks)
+    assert not report.ok and report.stopped_early
+    assert "queue admission paused" in report.stop_reason
+    assert rig.prs == []
+    assert report.tasks[0].resumable and report.tasks[0].landing == "staged_not_published"
+    assert store.get_task("T-1")["stage"] == Stage.INTEGRATE
+
+
+@pytest.mark.parametrize("conflicting_fallback", [False, True])
+def test_fallback_branch_retry_reuses_exact_ref_or_refuses_conflict(tmp_path: Path, monkeypatch, conflicting_fallback) -> None:
+    import subprocess as sp
+
+    from stagemesh import survivor_wave
+    from stagemesh.survivor_wave import TaskRecord, git_gh_pr_opener
+
+    _store, project = make_store(tmp_path, ["T-1"])
+    origin = _with_origin(tmp_path, project)
+    base_ref = _main_ref(project)
+    base = base_ref.removeprefix("refs/heads/")
+    before = _git(project, "rev-parse", base_ref)
+    survivor_wave.prepare_staging_ref(project, base_ref)
+    sha = _commit_on(project, survivor_wave.STAGING_REF, "verified fallback candidate")
+    _git(project, "branch", "wave/task-T-1", before)
+    fallback = f"wave/task-T-1-{sha[:7]}"
+    if conflicting_fallback:
+        _git(project, "branch", fallback, before)
+    calls = []
+    creates = 0
+    real_run = sp.run
+
+    def fake_run(argv, **kwargs):
+        nonlocal creates
+        calls.append(list(argv))
+        if list(argv[:3]) == ["gh", "pr", "list"]:
+            return sp.CompletedProcess(argv, 0, "[]", "")
+        if list(argv[:3]) == ["gh", "pr", "create"]:
+            creates += 1
+            return sp.CompletedProcess(argv, 1 if creates == 1 else 0,
+                                       "" if creates == 1 else "https://example.invalid/pr/1", "creation unavailable")
+        assert argv[0] != "gh"
+        return real_run(argv, **kwargs)
+
+    monkeypatch.setattr(survivor_wave.subprocess, "run", fake_run)
+    opener = git_gh_pr_opener(project, base=base)
+    record = TaskRecord("T-1", integrated_candidate=sha)
+    if conflicting_fallback:
+        with pytest.raises(RuntimeError, match="differs"):
+            opener(record)
+        assert _git(project, "rev-parse", f"refs/heads/{fallback}") == before
+        assert not any(argv[:2] == ["git", "push"] for argv in calls)
+        assert creates == 0
+    else:
+        with pytest.raises(RuntimeError, match="creation unavailable"):
+            opener(record)
+        assert opener(record) == "https://example.invalid/pr/1"
+        assert sum(argv[:3] == ["git", "branch", fallback] for argv in calls) == 1
+        assert creates == 2
+        assert _git(origin, "rev-parse", f"refs/heads/{fallback}") == sha
+    assert _git(project, "rev-parse", base_ref) == before
+
+
+def test_deferred_publication_never_clears_unknown_running_ownership(tmp_path: Path) -> None:
+    from stagemesh.survivor_wave import store_leftover
+
+    store, project = make_store(tmp_path, ["T-1"])
+    rig = Rig(project)
+
+    def retain_unknown_execution(rig, task_id):
+        result = rig.finish_done(task_id)
+        worker = rig.worker_store()
+        try:
+            worker.start_execution(task_id=task_id, claim_id=None, kind=ExecutionKind.REVIEW)
+        finally:
+            worker.close()
+        return result
+
+    rig.behaviour["T-1"] = retain_unknown_execution
+    hooks = rig.hooks()
+    hooks.leftover = store_leftover(store)
+    report = run_wave(store, ["T-1"], hooks)
+    assert not report.ok and "cleanup failure" in report.stop_reason
+    assert rig.prs == [] and not report.tasks[0].ready_for_merge
+    assert len(list(store.running_executions())) == 1
+    assert store.get_task("T-1")["stage"] == Stage.DONE

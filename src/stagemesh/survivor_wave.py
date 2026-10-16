@@ -29,6 +29,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .audit import record_audit
 from .domain import EvidenceKind, Stage, TaskStatus
 from .objective_roots import objective_root_reason
 from .persistence import Store
@@ -159,7 +160,7 @@ class WaveReport:
         if any(task.ready_for_merge and task.pr_state != "MERGED" for task in self.tasks):
             return "needs_pr_merges"
         if any(task.landing in ("staged_not_published", "pr_failed") for task in self.tasks):
-            return "unpublished_work"  # DONE work sits on the staging ref with no open PR
+            return "unpublished_work"  # verified work sits on the staging ref with no published PR
         return "ready"
 
     def to_dict(self) -> dict[str, Any]:
@@ -325,6 +326,26 @@ def _snapshot(store: Store, record: TaskRecord, since: float) -> None:
         record.integrated_candidate = sha
 
 
+def _defer_pr_delivery(store: Store, record: TaskRecord, reason: str) -> None:
+    """Keep verified work selectable without discarding evidence or releasing uncertain ownership."""
+    task = store.get_task(record.task_id)
+    latest = store.latest_candidate(record.task_id)
+    if (task is None or task["stage"] != Stage.DONE or task["status"] != TaskStatus.DONE
+            or latest is None or latest["sha"] != record.integrated_candidate
+            or store.has_active_claim(record.task_id)
+            or any(row["task_id"] == record.task_id for row in store.running_executions())):
+        return  # existing ownership/state guards require inspection; never clear a retained claim
+    store.advance_task(record.task_id, Stage.INTEGRATE)
+    record.outcome, record.final_stage, record.final_status = "open", Stage.INTEGRATE.value, TaskStatus.OPEN.value
+    record.resumable, record.stop_reason, record.reason = True, "PR_DELIVERY_PENDING", reason
+    record_audit(store, "task.pr_delivery_pending", {
+        "task_id": record.task_id, "candidate_sha": record.integrated_candidate, "reason": reason,
+    })
+    from .task_completion import record_task_owner_state
+
+    record_task_owner_state(store, record.task_id, "pr_delivery_pending")
+
+
 # --- the wave ---------------------------------------------------------------------------------------------------------------------
 
 
@@ -453,12 +474,19 @@ def run_wave(
             record.landing = "locally_integrated"
         elif not publish or stop or control.blocks_admission():
             record.landing = "staged_not_published"
+            if open_prs:
+                reason = report.stop_reason or ("queue admission " + control.state_label() if control.blocks_admission() else "PR opener unavailable")
+                _defer_pr_delivery(store, record, reason)
+                halt(reason)
         else:
             try:
                 record.pr_url = hooks.open_pr(record)  # type: ignore[misc]
-            except Exception as exc:  # noqa: BLE001 - a failed PR must not hide that the task is done
+            except Exception as exc:  # noqa: BLE001 - retain verified work for a normal delivery retry
                 record.pr_error = f"{type(exc).__name__}: {exc}"
                 record.landing = "pr_failed"
+                reason = f"PR publication failed for task {record.task_id}: {record.pr_error}"
+                _defer_pr_delivery(store, record, reason)
+                halt(reason)
                 continue
             record.landing, record.ready_for_merge = "pr_opened", True
             try:
@@ -624,7 +652,25 @@ def git_gh_pr_opener(project: Path, base: str = "main") -> Callable[[TaskRecord]
         existing = subprocess.run(["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"], cwd=project, capture_output=True, text=True, check=False)
         if existing.returncode == 0 and existing.stdout.strip() != sha:
             branch = f"{branch}-{sha[:7]}"
-        if existing.returncode != 0 or branch.endswith(sha[:7]):
+            existing = subprocess.run(["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"], cwd=project, capture_output=True, text=True, check=False)
+            if existing.returncode == 0 and existing.stdout.strip() != sha:
+                raise RuntimeError("existing fallback branch differs from the verified candidate; publication was not repeated")
+        prior = json.loads(run("gh", "pr", "list", "--state", "all", "--head", branch,
+                               "--json", "url,state,headRefOid,baseRefName"))
+        if not isinstance(prior, list) or any(not isinstance(pr, dict) for pr in prior):
+            raise RuntimeError("PR lookup returned invalid metadata; publication was not repeated")
+        if prior:
+            opened = [pr for pr in prior if pr.get("state") == "OPEN"]
+            reusable = opened if opened else [pr for pr in prior if pr.get("state") == "MERGED"]
+            if len(reusable) != 1:
+                raise RuntimeError("existing task PR is closed or ambiguous; publication was not repeated")
+            pr = reusable[0]
+            if pr.get("headRefOid") != sha or pr.get("baseRefName") != base:
+                raise RuntimeError("existing task PR head or base differs from the verified candidate")
+            if not isinstance(pr.get("url"), str) or not pr["url"]:
+                raise RuntimeError("existing task PR has no valid URL")
+            return pr["url"]
+        if existing.returncode != 0:
             run("git", "branch", branch, sha)
         run("git", "push", "-u", "origin", branch)
         commits = run("git", "rev-list", "--reverse", f"origin/{base}..{sha}").splitlines()

@@ -25,7 +25,7 @@ def build_research_brief(project: Path | None, contract: ChangeContract | None) 
     """Return a scoped, deterministic pre-edit research brief for a provider prompt.
 
     This is deliberately local and read-only. It gives coding agents a bounded map of
-    the files they are allowed to inspect first, without broadening the change scope.
+    the files to inspect first, without broadening the change scope.
     """
     if project is None or contract is None:
         return ""
@@ -36,7 +36,7 @@ def build_research_brief(project: Path | None, contract: ChangeContract | None) 
         "Contextual research brief (read-only; complete before editing):",
         "- First inspect the existing code paths below and summarize the local pattern in your own scratch notes.",
         "- Use this brief to narrow context. It does not expand the change contract or authorize edits outside allowed files.",
-        "- If this brief is missing a path required for the task, stop and request a scope expansion instead of guessing.",
+        "- This brief is a starting map, not a read allowlist. Inspect directly relevant project context as needed, subject to project access rules; an edit outside allowed files still requires an audited scope expansion.",
     ]
     if allowed:
         lines.append("- In-scope existing files to inspect first:")

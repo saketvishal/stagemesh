@@ -219,3 +219,10 @@ Live start, result and heartbeat lines identify each execution's recorded actor,
 including fallback providers; the preferred provider order is not proof of which
 provider is currently running. If cleanup cannot verify ownership, the window
 stops and retains the execution and claim for inspected recovery.
+
+
+## Interrupted PR delivery
+
+When a PR was requested but publication fails or is stopped by a safety guard, verified work remains `INTEGRATE/OPEN` with its candidate and evidence intact. The next normal window can finish delivery through the existing integration path. An unchanged, already-integrated candidate reuses its passing evidence; a changed integration target still follows the existing promotion and verification rules.
+
+A publication retry reuses an existing open or merged PR only when its head and base match the verified candidate. Closed, conflicting, or ambiguous PRs are not recreated. A missing opener or publication failure is reported as a stopped window, not successful delivery. Explicit `--no-pr` and local integration retain their existing behavior. Main-movement, queue-control, and live or unknown ownership guards remain in force; retained ownership is never cleared to retry publication.
