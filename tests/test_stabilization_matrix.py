@@ -5,6 +5,7 @@ Run it with `python scripts/stabilization_gate.py` (the default StageMesh stabil
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -272,3 +273,54 @@ def test_parallel_recovers_stale_remediation_when_no_fresh_task_exists(tmp_path:
 
     assert recovered.stop == "DONE" and m.integrated("T-1"), recovered.brief
     recovered.assert_hands_off()
+
+
+def test_synthetic_window_skips_unknown_task_and_continues_prepared_queue(tmp_path):
+    from test_run_window import window
+
+    from stagemesh.run_window import run_window
+
+    store, project, rig, hooks, options, config, kwargs = window(
+        tmp_path, ["1", "2", "3"], concurrency=1, max_tasks=2)
+    (project / ".stagemesh/contracts/1.json").unlink()
+    from stagemesh.profile_default import default_profile
+    profile = default_profile(project)
+    profile["contract_generation"] = "explicit_only"
+    (project / ".stagemesh/profile.json").write_text(json.dumps(profile), encoding="utf-8")
+    try:
+        report = run_window(store, project, config, options, hooks,
+                            base_ref="refs/heads/main", staging_ref="refs/heads/wave/staging", **kwargs)
+        assert report.ok and rig.runs == ["2", "3"]
+        assert rig.prs == ["2", "3"]
+        assert "explicit" in report.not_selected["1"]
+        assert store.latest_candidate("1") is None
+        assert not store.has_active_claim("1") and list(store.running_executions()) == []
+    finally:
+        store.close()
+
+
+def test_controlled_merge_window_lands_before_continuing_and_reports_policy(tmp_path):
+    from test_run_window import window
+
+    from stagemesh.run_window import run_window
+
+    store, project, rig, hooks, options, config, kwargs = window(
+        tmp_path, ["1", "2"], auto_merge_ff=True, merge_policy="stagemesh", check_app_id=15368,
+        required_checks=("web",), concurrency=1)
+    landed = []
+    run_task = hooks.run_task
+    def run(task, steps):
+        if task == "2":
+            assert landed == ["1"]
+        return run_task(task, steps)
+    def land(record, deadline):
+        landed.append(record.task_id)
+        return {"merged": True, "candidate_sha":record.integrated_candidate, "pr":len(landed)}
+    hooks.run_task = run
+    try:
+        report = run_window(store, project, config, options, hooks, base_ref="refs/heads/main", merge_pr=land, **kwargs)
+        assert report.ok and rig.runs == landed == ["1", "2"]
+        assert report.to_dict()["options"]["merge_policy"] == "stagemesh"
+        assert not list(store.running_executions())
+    finally:
+        store.close()

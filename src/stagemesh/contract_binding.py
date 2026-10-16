@@ -6,12 +6,13 @@ from dataclasses import replace
 from pathlib import Path
 
 from .contracts import (
+    CONTRACT_VERSION,
     BoundChangeContract,
     ContractError,
     bind_contract,
     bound_contract_from_record,
-    CONTRACT_VERSION,
     canonical_contract_json,
+    contract_admission_problem,
     parse_contract,
     task_contract_path,
 )
@@ -31,7 +32,11 @@ def bind_task_contract(store: Store, project: Path, task_id: str, baseline_sha: 
     """Load, validate, canonicalize and freeze the task contract before the provider runs."""
     existing = store.task_contract(task_id)
     if existing is not None:
-        return bound_contract_from_record(dict(existing))
+        bound = bound_contract_from_record(dict(existing))
+        problem = contract_admission_problem(bound.contract)
+        if problem:
+            raise ContractRejected("placeholder_validation_gates", problem)
+        return bound
     path = task_contract_path(project, task_id)
     if path is None:
         raise ContractRejected("missing_explicit_contract", f"no task-specific contract exists for {task_id}")
@@ -41,6 +46,9 @@ def bind_task_contract(store: Store, project: Path, task_id: str, baseline_sha: 
         raise ContractRejected("invalid_contract", f"change contract is invalid: {exc}") from exc
     if not contract.explicit:
         raise ContractRejected("missing_explicit_contract", "change contract must be explicit")
+    problem = contract_admission_problem(contract)
+    if problem:
+        raise ContractRejected("placeholder_validation_gates", problem)
     canonical_json = canonical_contract_json(contract)
     digest = hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
     store.bind_task_contract(task_id, baseline_sha, CONTRACT_VERSION, digest, canonical_json)

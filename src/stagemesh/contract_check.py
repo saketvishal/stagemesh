@@ -11,6 +11,7 @@ from .contracts import (
     ContractError,
     _contract_payload,
     canonical_contract_json,
+    contract_admission_problem,
     parse_contract,
     task_contract_path,
 )
@@ -45,6 +46,9 @@ def check_contract_text(text: str, limit: int = MAX_CANONICAL_CONTRACT_CHARS, *,
     except ContractError as exc:
         report["errors"].append(f"contract is invalid: {exc}")
         return report
+    problem = contract_admission_problem(contract)
+    if problem:
+        report["errors"].append(problem)
     if not contract.explicit:
         report["errors"].append("change contract must be explicit")
     if require_spec and not contract.spec_refs:

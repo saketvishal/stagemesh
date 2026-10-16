@@ -98,6 +98,34 @@ class GitHubConfig:
 
 
 @dataclass(frozen=True)
+class MergeConfig:
+    mode: str = "pr_only"
+    required_checks: tuple[str, ...] = ()
+    check_app_id: int | None = None
+
+
+def _merging(data: dict[str, object], independent: bool) -> MergeConfig:
+    if set(data) - {"mode", "required_checks", "check_app_id"}:
+        raise ConfigValidationError("merging has unsupported keys")
+    mode = data.get("mode", "pr_only")
+    if mode not in ("pr_only", "hosted", "stagemesh"):
+        raise ConfigValidationError("merging.mode must be pr_only, hosted or stagemesh")
+    checks = data.get("required_checks", [])
+    if not isinstance(checks, list) or not all(isinstance(c, str) and c.strip() == c and c for c in checks):
+        raise ConfigValidationError("merging.required_checks must be a list of non-empty check names")
+    if len(set(checks)) != len(checks):
+        raise ConfigValidationError("merging.required_checks must not contain duplicates")
+    app = data.get("check_app_id")
+    if app is not None and (type(app) is not int or app <= 0):
+        raise ConfigValidationError("merging.check_app_id must be a positive integer")
+    if mode != "pr_only" and (not checks or not independent):
+        raise ConfigValidationError("automatic merging requires named checks and independent review")
+    if mode == "stagemesh" and app is None:
+        raise ConfigValidationError("StageMesh-controlled merging requires a trusted check_app_id")
+    return MergeConfig(str(mode), tuple(checks), app)
+
+
+@dataclass(frozen=True)
 class StageMeshConfig:
     project: Path
     github: GitHubConfig
@@ -121,6 +149,7 @@ class StageMeshConfig:
     parallel: ParallelConfig = field(default_factory=ParallelConfig)
     runtime: RuntimeConfig | None = None
     diagnosis: DiagnosisConfig = field(default_factory=DiagnosisConfig)
+    merging: MergeConfig = field(default_factory=MergeConfig)
 
 
 @dataclass(frozen=True)
@@ -237,6 +266,7 @@ def load_config(project: Path, config_path: Path | None = None) -> StageMeshConf
         parallel=_parallel(_optional_mapping(data, "parallel")),
         runtime=runtime,
         diagnosis=_diagnosis(_optional_mapping(data, "diagnosis"), known),
+        merging=_merging(_optional_mapping(data, "merging"), require_review),
     )
 
 

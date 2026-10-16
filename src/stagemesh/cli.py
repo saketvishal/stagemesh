@@ -819,6 +819,7 @@ def command_run_window(args: argparse.Namespace) -> int:
         planned_selection,
         preflight,
         provider_pool_check,
+        resolve_merge_defaults,
         run_window,
     )
     from .survivor_wave import INTEGRATION_LOCAL, STAGING_REF, parse_task_ids, prepare_staging_ref
@@ -828,7 +829,7 @@ def command_run_window(args: argparse.Namespace) -> int:
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 2
-    if args.concurrency < 1 or args.max_steps_per_task < 1 or args.max_tasks < 1:
+    if (args.concurrency is not None and args.concurrency < 1) or args.max_steps_per_task < 1 or args.max_tasks < 1:
         print("--concurrency, --max-steps-per-task and --max-tasks must be at least 1", file=sys.stderr)
         return 2
     project = Path(args.project).resolve()
@@ -848,6 +849,11 @@ def command_run_window(args: argparse.Namespace) -> int:
             print(f"[FAIL] {missing_source['name']}: {missing_source['detail']}")
             print(f"next: {missing_source['fix']}")
         return 2
+    try:
+        merge_defaults = resolve_merge_defaults(config, args)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
     local = args.integration == INTEGRATION_LOCAL
     base_ref = resolve_integration_ref(project, config.integration_ref) or "HEAD"
     if not local and not base_ref.startswith("refs/heads/"):
@@ -856,9 +862,7 @@ def command_run_window(args: argparse.Namespace) -> int:
     report_path = Path(args.report) if args.report else runtime_dir(project) / "reports" / "run-window" / f"{datetime.now():%Y%m%d-%H%M%S}.json"
     options = WindowOptions(
         duration_seconds=duration,
-        auto_merge_ff=getattr(args, "auto_merge_ff", False),
-        required_checks=tuple(name.strip() for name in getattr(args, "required_checks", "").split(",") if name.strip()),
-        concurrency=args.concurrency,
+        **merge_defaults,
         max_steps_per_task=args.max_steps_per_task,
         max_tasks=args.max_tasks,
         integration_mode=args.integration,
@@ -889,7 +893,9 @@ def command_run_window(args: argparse.Namespace) -> int:
             from .fast_forward import make_merger
 
             try:
-                merger = make_merger(store, project, base_ref, options.required_checks)
+                merger = (make_merger(store, project, base_ref, options.required_checks,
+                                      policy="stagemesh", check_app_id=options.check_app_id)
+                          if options.merge_policy == "stagemesh" else make_merger(store, project, base_ref, options.required_checks))
             except (OSError, RuntimeError, ValueError) as exc:
                 merger_error = f"fast-forward adapter unavailable: {exc}"
         if args.plan:  # read-only: the same preflight (without recovering anything) and the same selection, nothing started
@@ -902,7 +908,7 @@ def command_run_window(args: argparse.Namespace) -> int:
                     policy_error = merger_error or merger.preflight()
                 except Exception as exc:  # noqa: BLE001 -- a read-only policy probe must fail closed
                     policy_error = f"{type(exc).__name__}: {exc}"
-                checks.append(Check("hosted_landing_policy", policy_error is None, policy_error or "server-enforced guarded fast-forward policy"))
+                checks.append(Check("hosted_landing_policy", policy_error is None, policy_error or f"{options.merge_policy} guarded exact-candidate landing policy"))
             picked, skipped = planned_selection(store, options, project)
             payload = {
                 "preflight": [c.to_dict() for c in checks],
@@ -1765,6 +1771,7 @@ def command_profile(args: argparse.Namespace) -> int:
         return 1
     report: dict[str, object] = {
         "name": profile.name,
+        "contract_generation": profile.contract_generation,
         "task_types": {
             t.id: {"level": t.level, "gates": [expand_gate(profile, g)["name"] for g in t.gates], "allowed_files": list(t.allowed_files)}
             for t in profile.types.values()
@@ -3253,17 +3260,20 @@ def build_parser() -> argparse.ArgumentParser:
     window = sub.add_parser(
         "run-window",
         allow_abbrev=False,
-        help="Unattended bounded run: pick eligible tasks, run them in PR mode until the time budget, stop safely, print one report (merging requires --auto-merge-ff)",
+        help="Unattended bounded run: pick eligible tasks, run them in PR mode until the time budget, stop safely, print one report (merging requires command or project opt-in)",
         description="Safe by default: plain `stagemesh run-window` runs in PR mode for 45m with concurrency 2 and 8 steps per task, "
-        "does not merge unless --auto-merge-ff is explicit, and keeps the normal preflight and stop rules.",
+        "merges only with explicit command or project opt-in (override with --pr-only), and keeps the normal preflight and stop rules.",
     )
     window.add_argument("--duration", default="45m", help="Time budget, e.g. 2h, 90m, 45s (default 45m). Running tasks finish; nothing new starts after it")
-    window.add_argument("--concurrency", type=int, default=2, help="Tasks running at once (default 2)")
+    window.add_argument("--concurrency", type=int, default=None, help="Tasks running at once (PR-only default 2); automatic merging default 1")
     window.add_argument("--max-steps-per-task", type=int, default=8, help="Step budget for each task (default 8)")
     window.add_argument("--max-tasks", type=int, default=10, help="Most tasks to attempt in one window (default 10)")
     window.add_argument("--tasks", help="Restrict the window to these comma-separated task ids (default: every eligible task)")
     window.add_argument("--integration", choices=("pr", "local"), default="pr", help="pr (default, recommended unattended): work goes to wave/staging and PRs, local main stays put")
-    window.add_argument("--auto-merge-ff", action="store_true", help="Opt in: serial PR workflow, wait for named green hosted checks, fast-forward origin and local integration branch, then continue")
+    merge_choice = window.add_mutually_exclusive_group()
+    merge_choice.add_argument("--pr-only", action="store_true", help="Open PRs for manual merging; overrides the project automatic-merge default")
+    window.add_argument("--merge-policy", choices=("hosted", "stagemesh"), help="Explicit automatic-merge policy; stagemesh requires a configured trusted check app")
+    merge_choice.add_argument("--auto-merge-ff", action="store_true", help="Opt in: serial PR workflow, wait for named green hosted checks, fast-forward origin and local integration branch, then continue")
     window.add_argument("--required-checks", default="", help="Comma-separated hosted check names required by --auto-merge-ff; missing checks never count as green")
     window.add_argument("--no-pr", action="store_true", help="Do not open PRs (PR mode: finished work stays on the staging branch)")
     window.add_argument("--no-advance-baselines", action="store_true", help="Do not advance stale baselines")

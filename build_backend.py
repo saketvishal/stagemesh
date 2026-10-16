@@ -9,7 +9,7 @@ import zipfile
 from pathlib import Path
 
 NAME = "stagemesh"
-VERSION = "0.2.0"
+VERSION = "0.2.1"
 DIST_INFO = f"{NAME}-{VERSION}.dist-info"
 
 

@@ -13,10 +13,13 @@ from .autonomy.decisions import Action
 from .autonomy.dependencies import MergeOutcome, PRState
 from .autonomy.github_adapter import GitHubHostedCI, GitHubPullRequests
 from .autonomy.merge_policy import IntegrationPolicy
+from .autonomy.review_policy import severity_blocks
 from .autonomy.supervisor import Supervisor
 from .concurrency import IntegrationLock
+from .contracts import ContractError, bound_contract_from_record
 from .git import GitWorkspace
 from .queue_control import QueueStopControl
+from .review import independent_review_verified
 from .survivor_wave import is_task_pr_branch
 
 
@@ -26,14 +29,46 @@ def checks_ready(ci, sha: str, required: tuple[str, ...]) -> bool:
                 and all(g.conclusion is Conclusion.SUCCESS for g in run.gates.values()))
 
 
+def landing_evidence_problem(store, task_id, sha):
+    """Only the latest exact-bound successful evidence can authorize a landing."""
+    candidate = store.latest_candidate(task_id)
+    record = store.contract_binding(task_id, sha)
+    if candidate is None or candidate["sha"] != sha or record is None:
+        return "candidate_or_contract_binding_changed"
+    try:
+        bound = bound_contract_from_record(dict(record))
+        expected = bound.evidence_payload()
+        for kind in ("VALIDATION", "REVIEW"):
+            row = store.conn.execute(
+                "SELECT status,payload FROM evidence WHERE task_id=? AND candidate_sha=? AND kind=? "
+                "ORDER BY created_at DESC,rowid DESC LIMIT 1", (task_id, sha, kind)).fetchone()
+            if row is None or row["status"] != "PASSED":
+                return "latest_validation_or_review_not_passed"
+            payload = json.loads(row["payload"])
+            if not isinstance(payload, dict) or any(payload.get(key) != value for key, value in expected.items()):
+                return "latest_evidence_not_bound_to_candidate_contract"
+            if kind == "REVIEW" and not independent_review_verified(payload):
+                return "latest_review_not_independent"
+    except (ContractError, TypeError, ValueError):
+        return "latest_evidence_or_binding_invalid"
+    if any(severity_blocks(str(f["severity"])) for f in store.open_findings_for_candidate(task_id, sha)):
+        return "unresolved_blocking_findings"
+    return None
+
+
 class FastForwardPullRequests(GitHubPullRequests):
-    """Change only the landing operation: normal push of an ancestor-proven commit.
+    """Land an ancestor-proven exact candidate with an atomic compare-and-swap push.
 
     The supervisor still owns evidence, independent review, dependencies, freshness,
-    findings, CI diagnosis and post-merge verification. No squash/rebase/force push.
+    findings, CI diagnosis and post-merge verification. No squash, rebase or history rewrite.
     """
 
-    def configure_ff(self, project, store, branch, required_checks, ci):
+    def configure_ff(self, project, store, branch, required_checks, ci, *, policy="hosted", check_app_id=None):
+        if policy not in {"hosted", "stagemesh"}:
+            raise ValueError("unknown landing policy")
+        if policy == "stagemesh" and (not required_checks or type(check_app_id) is not int or check_app_id <= 0):
+            raise ValueError("StageMesh-controlled landing requires named checks and a trusted check app")
+        self.landing_policy, self.check_app_id = policy, check_app_id
         self.project, self.store = Path(project), store
         self.branch, self.required_checks, self.ci = branch, required_checks, ci
         self.expected_base = None
@@ -77,11 +112,23 @@ class FastForwardPullRequests(GitHubPullRequests):
         return self._to_pull_request(payload)
 
     def host_policy(self, head_ref=None):
-        """Require server-enforced no-rewrite policy and immutable published heads.
+        """Verify the explicitly selected landing policy; never fall back after a 403.
 
-        No rules are installed or relaxed. Unknown, inherited or bypassable policy
-        is deliberately unsupported rather than treated as an empty ruleset.
+        Hosted mode requires enforced no-rewrite policy and immutable published heads.
+        Controlled mode verifies repository access and pins locally required checks.
+        Neither mode installs, changes or relaxes GitHub rules.
         """
+        if self.landing_policy == "stagemesh":
+            status, repository = self._request("GET", "")
+            if (status != 200 or not isinstance(repository, dict)
+                    or str(repository.get("full_name", "")).casefold() != f"{self.owner}/{self.repo}".casefold()
+                    or repository.get("archived") is not False or repository.get("disabled") is not False
+                    or (repository.get("permissions") or {}).get("push") is not True):
+                return "controlled_repository_identity_or_write_access_unverified"
+            self.hosted_requirements = {(name, self.check_app_id) for name in self.required_checks}
+            self.policy_snapshot = json.dumps({"policy": "stagemesh", "repository": repository["full_name"].casefold(),
+                "checks": sorted(self.required_checks), "check_app_id": self.check_app_id}, sort_keys=True)
+            return None
         observed = []
         requirements = set()
         refs = [(self.branch, {"non_fast_forward"})]
@@ -266,15 +313,19 @@ class FastForwardPullRequests(GitHubPullRequests):
                 return MergeOutcome(False, reason="queue_paused_or_execution_active")
             if git.run("symbolic-ref", "HEAD").stdout.strip() != f"refs/heads/{self.branch}" or git.run("rev-parse", "HEAD").stdout.strip() != self.expected_base or git.run("status", "--porcelain", "--untracked-files=no").stdout.strip():
                 return MergeOutcome(False, reason="checkout_changed")
+            if self.task_id is not None:
+                problem = landing_evidence_problem(self.store, self.task_id, expected_head_sha)
+                if problem:
+                    return MergeOutcome(False, reason=problem)
             self.store.add_audit_event("window.fast_forward_push_intent", {
                 "repository": f"{self.owner}/{self.repo}", "base_ref": base_ref,
                 "task_id": self.task_id,
-                "pr": number, "candidate_sha": expected_head_sha, "base_sha": self.expected_base})
+                "pr": number, "candidate_sha": expected_head_sha, "base_sha": self.expected_base, "merge_policy": self.landing_policy})
             if not all(re.fullmatch(r"[0-9a-f]{40}", value) for value in (self.expected_base, expected_head_sha)):
                 return MergeOutcome(False, reason="literal_commit_ids_required")
             self.reject_url_rewrites()
             # The literal lease is compare-and-swap, not permission to rewrite:
-            # ancestry was proved above and the server must also forbid rewrites.
+            # ancestry is proved above; hosted mode additionally requires server no-rewrite policy.
             # An intermediate ancestor pushed by another writer must refuse too.
             pushed = self.bounded_git("push", "--atomic",
                 f"--force-with-lease={base_ref}:{self.expected_base}",
@@ -286,14 +337,14 @@ class FastForwardPullRequests(GitHubPullRequests):
             self.store.add_audit_event("window.fast_forward_remote_landed", {
                 "repository": f"{self.owner}/{self.repo}", "base_ref": base_ref,
                 "task_id": self.task_id,
-                "pr": number, "candidate_sha": expected_head_sha, "base_sha": self.expected_base})
+                "pr": number, "candidate_sha": expected_head_sha, "base_sha": self.expected_base, "merge_policy": self.landing_policy})
             # A fetch failure is a partial success, not permission to repeat a push.
             # The caller reports the journaled remote landing separately.
             self.bounded_git("fetch", self.remote_url, f"refs/heads/{self.branch}:refs/remotes/origin/{self.branch}", after_landing=True)
             return MergeOutcome(True, expected_head_sha)
 
 
-def make_merger(store, project: Path, base_ref: str, required_checks: tuple[str, ...]):
+def make_merger(store, project: Path, base_ref: str, required_checks: tuple[str, ...], *, policy="hosted", check_app_id=None):
     from .autonomy.cli import _github_token
     from .github import UrlLibGitHubTransport, detect_github_repository
 
@@ -304,7 +355,7 @@ def make_merger(store, project: Path, base_ref: str, required_checks: tuple[str,
     ci = GitHubHostedCI(repository.owner, repository.repo, transport)
     pulls = FastForwardPullRequests(repository.owner, repository.repo, transport, ci)
     branch = base_ref.removeprefix("refs/heads/")
-    pulls.configure_ff(project, store, branch, required_checks, ci)
+    pulls.configure_ff(project, store, branch, required_checks, ci, policy=policy, check_app_id=check_app_id)
     pulls.bind_remote()
     supervisor = Supervisor(store, project, integration_ref=f"refs/remotes/origin/{branch}",
                             hosted_ci=ci, pull_requests=pulls,
@@ -344,6 +395,9 @@ def make_merger(store, project: Path, base_ref: str, required_checks: tuple[str,
                 pulls.expected_base = supervisor.facts.resolve(supervisor.integration_ref)
                 if not supervisor.facts.is_ancestor(pulls.expected_base, record.integrated_candidate):
                     return {"merged": False, "reason": "base advanced; candidate needs revalidation"}
+                problem = landing_evidence_problem(store, record.task_id, record.integrated_candidate)
+                if problem:
+                    return {"merged": False, "reason": problem}
                 supervisor.assess_ci(record.task_id, record.integrated_candidate, pulls.expected_base, reruns_left=0)
                 # The supervisor's already-merged recovery path is intentionally
                 # permissive for ordinary observation. This opt-in workflow must
@@ -356,12 +410,19 @@ def make_merger(store, project: Path, base_ref: str, required_checks: tuple[str,
                 decision = supervisor.merge_when_ready(record.task_id, number, ci=supervisor.last_ci_diagnosis, method="ff-only")
                 if decision.action is not Action.MERGE or not decision.detail.get("verified"):
                     return {"merged": False, "reason": decision.trace_line()}
+                problem = landing_evidence_problem(store, record.task_id, record.integrated_candidate)
+                if problem:
+                    return {"merged": False, "reason": "remote landed but evidence changed: " + problem}
+                current_pr = pulls.get(number)
+                if (not current_pr or current_pr.head_sha != record.integrated_candidate or current_pr.base_ref != branch
+                        or current_pr.head_ref != pr.head_ref or current_pr.state is PRState.CLOSED):
+                    return {"merged": False, "reason": "remote landed but PR identity changed; reconcile before continuing"}
                 sync_error = pulls.sync_local(record.integrated_candidate)
                 if sync_error:
                     return {"merged": False, "reason": sync_error}
                 store.add_audit_event("window.fast_forward_merged", {"task_id": record.task_id,
                     "repository": f"{repository.owner}/{repository.repo}", "base_ref": base_ref,
-                    "pr": number, "candidate_sha": record.integrated_candidate, "required_checks": list(required_checks)})
+                    "pr": number, "candidate_sha": record.integrated_candidate, "required_checks": list(required_checks), "merge_policy": policy})
                 return {"merged": True, "remote_landed": True, "local_synced": True,
                     "pr": number, "candidate_sha": record.integrated_candidate}
             time.sleep(min(10, max(0, deadline - time.time())))
@@ -372,20 +433,47 @@ def make_merger(store, project: Path, base_ref: str, required_checks: tuple[str,
 
         rows = store.conn.execute("SELECT event_type, payload FROM audit_events WHERE event_type IN (?, ?) ORDER BY created_at, rowid",
             ("window.fast_forward_push_intent", "window.fast_forward_merged"))
+        rows = list(rows)
+        completed_legacy = {}
+        for row in rows:
+            payload = json.loads(row["payload"])
+            if row["event_type"].endswith("merged") and not payload.get("repository"):
+                completed_legacy[(payload.get("pr"), payload.get("candidate_sha"))] = payload
+
+        def verified_legacy_history(payload):
+            sha, number = payload.get("candidate_sha"), payload.get("pr")
+            completed = completed_legacy.get((number, sha))
+            if not completed or not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{40}", sha) or type(number) is not int:
+                return False
+            pr = pulls.get(number)
+            if (not pr or pr.state is not PRState.MERGED or pr.base_ref != branch or pr.head_sha != sha
+                    or pr.merge_commit_sha != sha or not is_task_pr_branch(pr.head_ref, completed.get("task_id", ""), sha)):
+                return False
+            tip = pulls.remote_tip(base_ref)
+            return bool(tip and re.fullmatch(r"[0-9a-f]{40}", tip) and
+                GitWorkspace(project).run("merge-base", "--is-ancestor", sha, tip, check=False).returncode == 0)
+
         pending = {}
+        pending_policies = {}
         for row in rows:
             payload = json.loads(row["payload"])
             if payload.get("repository") != f"{repository.owner}/{repository.repo}" or payload.get("base_ref") != base_ref:
                 if row["event_type"].endswith("push_intent") and not payload.get("repository"):
+                    if verified_legacy_history(payload):
+                        continue
                     raise RuntimeError("legacy fast-forward intent lacks repository identity; reconcile it before continuing")
                 continue
             key = (payload["task_id"], payload["pr"], payload["candidate_sha"])
             if row["event_type"].endswith("merged"):
                 pending.pop(key, None)
+                pending_policies.pop(key, None)
             else:
+                pending_policies[key] = payload.get("merge_policy", "hosted")
                 pending[key] = TaskRecord(payload["task_id"], outcome="done", ready_for_merge=True,
                     pr_url=f"https://github.com/{repository.owner}/{repository.repo}/pull/{payload['pr']}",
                     integrated_candidate=payload["candidate_sha"])
+        if any(value != policy for value in pending_policies.values()):
+            raise RuntimeError("pending landing uses a different merge policy; reconcile before changing policy")
         return list(pending.values())
 
     def merge_record(record, deadline):
@@ -418,6 +506,13 @@ def make_merger(store, project: Path, base_ref: str, required_checks: tuple[str,
             store.add_audit_event("window.fast_forward_partial", {"task_id": record.task_id, **result})
         return result
 
-    merge_record.preflight = lambda: pulls.host_policy()
+    def merge_preflight():
+        error = pulls.host_policy()
+        if error:
+            return error
+        pending_records()  # read-only: ambiguous historical/pending landings must be visible in --plan too
+        return None
+
+    merge_record.preflight = merge_preflight
     merge_record.pending_records = pending_records
     return merge_record
