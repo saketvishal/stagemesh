@@ -206,7 +206,7 @@ def test_a_different_failure_each_time_is_progress_not_a_repeat(tmp_path: Path) 
     assert len(events(store, "task.parent_budget_reopened")) == 1
     assert len(events(store, "recovery.exhaustion_round")) == 1
     assert all(d["repeated"] is False for d in events(store, "task.diagnosis"))
-    assert diagnose(store, TASK).categories == {IMPLEMENTATION_DEFECT: 5}
+    assert diagnose(store, TASK).categories == {IMPLEMENTATION_DEFECT: executor.calls}
 
 
 def test_stop_on_repeat_can_be_switched_off(tmp_path: Path) -> None:
