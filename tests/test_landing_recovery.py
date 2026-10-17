@@ -213,6 +213,112 @@ def test_recovery_resume_uses_journal_and_rejects_unowned_pending_pr(tmp_path, m
     assert result["ok"], result["reason"]
 
 
+def externally_completed_rig(tmp_path, monkeypatch, *, squash=False):
+    r = recovery_rig(tmp_path, monkeypatch)
+    r.hooks.retarget = lambda ref: (_ for _ in ()).throw(RuntimeError("fixture stopped before validation"))
+    assert not r.merger.recover(r.records, r.failure, time.time() + 60, r.hooks, WindowOptions())["ok"]
+    r.journal = r.merger.active_recovery()
+    r.candidate = r.store.latest_candidate("FIRST")["sha"]
+    bound = contract_for_candidate(r.store, "FIRST", r.candidate, r.repo)
+    r.store.add_evidence("FIRST", r.candidate, EvidenceKind.VALIDATION, EvidenceStatus.FAILED, bound.evidence_payload())
+    # An operator repairs and merges the existing PR outside StageMesh. This is
+    # observed completion, not permission to manufacture passing gate evidence.
+    git(r.repo, "checkout", "-b", "operator-repair", r.candidate)
+    r.repair = commit(r.repo, {"src/first.py": "VALUE = 2\n# external repair\n"}, "external repair", who=HUMAN)
+    landed = (git(r.repo, "commit-tree", f"{r.repair}^{{tree}}", "-p", r.target, "-m", "external squash")
+              if squash else r.repair)
+    git(r.repo, "push", "origin", f"{landed}:main")
+    git(r.repo, "checkout", "main")
+    git(r.repo, "merge", "--ff-only", landed)
+    r.landed = landed
+    r.prs[1] = replace(r.prs[1], head_sha=r.repair, state=PRState.MERGED, merge_commit_sha=landed)
+    r.store.advance_task("FIRST", Stage.DONE)
+    return r
+
+
+@pytest.mark.parametrize("squash", [False, True])
+def test_external_merged_repair_reconciles_without_certifying_failed_candidate(tmp_path, monkeypatch, squash):
+    r = externally_completed_rig(tmp_path, monkeypatch, squash=squash)
+    events = r.store.conn.execute("SELECT COUNT(*) FROM audit_events").fetchone()[0]
+    assert r.merger.recovery_preflight([]) is None
+    assert r.store.conn.execute("SELECT COUNT(*) FROM audit_events").fetchone()[0] == events
+    result = r.merger.resume_recovery(time.time() + 60, r.hooks, WindowOptions())
+    assert result["ok"], result["reason"]
+    assert result["waves"] == result["merged_prs"] == []
+    completion = result["landing_results"][0]["external_completion"]
+    assert not completion["stagemesh_verified_landing"]
+    assert completion["records"][0]["content_proof"] == ("identical_tree" if squash else "ancestry")
+    assert completion["records"][0]["evidence_problem"] == "latest_validation_or_review_not_passed"
+    assert not r.store.has_evidence("FIRST", r.candidate, EvidenceKind.VALIDATION)
+    assert r.merger.active_recovery() is None
+    assert git(r.repo, "rev-parse", STAGING_REF) == r.landed
+    assert git(r.repo, "rev-parse", r.journal["ref"]) == r.target
+    root = f"refs/stagemesh/preserved/landing-{r.journal['id']}"
+    assert git(r.repo, "rev-parse", f"{root}/0") == r.originals[0]
+    assert git(r.repo, "rev-parse", f"{root}/external-0") == r.candidate
+    assert r.store.latest_candidate("FIRST")["sha"] == r.candidate
+    assert r.prs[1].head_sha == r.repair
+
+
+@pytest.mark.parametrize("problem", ["open", "wrong_base", "foreign_branch", "unrelated_head", "staging", "pending",
+                                    "lineage", "missing_binding", "different_tree"])
+def test_external_completion_refuses_unknown_or_unfinished_work(tmp_path, monkeypatch, problem):
+    r = externally_completed_rig(tmp_path, monkeypatch)
+    pending = []
+    if problem == "open":
+        # Keep the test adapter from inferring MERGED from remote main.
+        monkeypatch.setattr(r.adapter, "get", lambda number: replace(r.prs[number], state=PRState.OPEN))
+    elif problem == "wrong_base":
+        r.prs[1] = replace(r.prs[1], base_ref="other")
+    elif problem == "foreign_branch":
+        r.prs[1] = replace(r.prs[1], head_ref="wave/task-OTHER")
+    elif problem == "unrelated_head":
+        r.prs[1] = replace(r.prs[1], head_sha=r.target)
+    elif problem == "staging":
+        git(r.repo, "update-ref", STAGING_REF, r.candidate)
+    elif problem == "lineage":
+        r.store.conn.execute("UPDATE contract_bindings SET baseline_sha=? WHERE task_id=? AND candidate_sha=?",
+                             (r.repair, "FIRST", r.candidate))
+        r.store.conn.commit()
+    elif problem == "missing_binding":
+        r.store.conn.execute("DELETE FROM contract_bindings WHERE task_id=? AND candidate_sha=?", ("FIRST", r.candidate))
+        r.store.conn.commit()
+    elif problem == "different_tree":
+        git(r.repo, "checkout", "operator-repair")
+        extra = commit(r.repo, {"src/first.py": "VALUE = 99\n"}, "unmerged repair", who=HUMAN)
+        git(r.repo, "checkout", "main")
+        r.prs[1] = replace(r.prs[1], head_sha=extra)
+    else:
+        pending = [{"url": "https://github.com/owner/repo/pull/99", "headRefName": "wave/task-OTHER"}]
+    before = git(r.repo, "rev-parse", STAGING_REF)
+    assert r.merger.recovery_preflight(pending) is not None
+    assert r.merger.active_recovery() is not None
+    assert git(r.repo, "rev-parse", STAGING_REF) == before
+    if problem != "pending":
+        result = r.merger.resume_recovery(time.time() + 60, r.hooks, WindowOptions())
+        assert not result["ok"]
+        assert r.merger.active_recovery() is not None
+        assert git(r.repo, "rev-parse", STAGING_REF) == before
+
+
+def test_partial_external_completion_after_preflight_never_runs_a_task(tmp_path, monkeypatch):
+    r = recovery_rig(tmp_path, monkeypatch, stacked=True)
+    r.hooks.retarget = lambda ref: (_ for _ in ()).throw(RuntimeError("fixture stopped before validation"))
+    assert not r.merger.recover(r.records, r.failure, time.time() + 60, r.hooks, WindowOptions())["ok"]
+    assert r.merger.recovery_preflight([]) is None
+    # A sibling is externally merged after preflight; resume must refuse before
+    # making progress on the still-open first task.
+    r.prs[2] = replace(r.prs[2], state=PRState.MERGED, merge_commit_sha=r.originals[1])
+    before = r.store.conn.execute("SELECT COUNT(*) FROM audit_events").fetchone()[0]
+    candidate = r.store.latest_candidate("FIRST")["sha"]
+    result = r.merger.resume_recovery(time.time() + 60, r.hooks, WindowOptions())
+    assert not result["ok"] and "partial or unknown external" in result["reason"]
+    assert result["waves"] == []
+    assert r.store.conn.execute("SELECT COUNT(*) FROM audit_events").fetchone()[0] == before
+    assert r.store.latest_candidate("FIRST")["sha"] == candidate
+    assert git(r.repo, "rev-parse", STAGING_REF) == r.originals[-1]
+
+
 @pytest.mark.parametrize("problem", ["generation", "checks", "trusted_app"])
 def test_resume_refuses_unowned_generation_or_changed_policy(tmp_path, monkeypatch, problem):
     r = recovery_rig(tmp_path, monkeypatch)
