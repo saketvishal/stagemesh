@@ -163,6 +163,18 @@ class WindowReport:
         return self.refused or any(wave.stopped_early for wave in self.waves)
 
     @property
+    def no_progress_reason(self) -> str | None:
+        """Set when the window attempted tasks, delivered none, and every attempted task ended NO_PROGRESS."""
+        attempted = [task for task in self.tasks if task.outcome not in ("skipped", "not_started")]
+        if not attempted or self.merged_prs or any(task.outcome == "done" for task in attempted):
+            return None
+        if not all(task.outcome == "open" and task.stop_reason == "NO_PROGRESS" for task in attempted):
+            return None
+        return (f"no task delivered: {len(attempted)} attempted task(s) ended NO_PROGRESS ("
+                + ", ".join(task.task_id for task in attempted)
+                + "); the provider made no usable change - inspect with `stagemesh doctor`, then rerun")
+
+    @property
     def ok(self) -> bool:
         return not self.refused and not self.interrupted and self.stop_reason is None and all(wave.ok for wave in self.waves) and self.report_error is None
 
@@ -535,6 +547,8 @@ def next_command(report: WindowReport) -> str:
     if report.report_error:
         return "stagemesh doctor  # the report could not be written; fix the --report path and rerun"
     reason = (report.stop_reason or "").lower()
+    if report.no_progress_reason:
+        return "stagemesh doctor  # every attempted task made no progress: inspect the provider pool before rerunning"
     if "main moved" in reason or "orphan" in reason or "cleanup" in reason or "infrastructure" in reason:
         return "stagemesh doctor  # a shared fault stopped the window: inspect it before running again"
     prs = [t for t in report.tasks if getattr(t, "ready_for_merge", False)]
@@ -765,6 +779,8 @@ def _finish(
 ) -> WindowReport:
     QueueStopControl(store).complete_if_idle()
     report.finished_at = clock()
+    if report.stop_reason is None:
+        report.stop_reason = report.no_progress_reason
     try:
         report.readiness = build_readiness(store, project, config, list_prs=list_prs, strict_live=report.options.strict_live)
     except Exception as exc:  # noqa: BLE001 - the report must still be written

@@ -462,6 +462,26 @@ def test_blocked_tasks_are_reported_with_the_reason_and_the_window_carries_on(tm
     assert "why: task exhausted its remediation budget" in rw.format_window_report(report)
 
 
+def test_a_window_where_every_task_made_no_progress_is_incomplete_but_runs_all_eligible_work(tmp_path: Path) -> None:
+    report, _s, _rig, _ = go(tmp_path, ["1", "2"], {"1": RunResult("NO_PROGRESS", "no change"), "2": RunResult("NO_PROGRESS", "no change")}, concurrency=1)
+
+    assert {t.task_id: t.outcome for t in report.tasks} == {"1": "open", "2": "open"}
+    assert not report.ok and report.exit_code == rw.EXIT_STOPPED
+    assert "no task delivered" in (report.stop_reason or "") and "1, 2" in report.stop_reason
+    text = rw.format_window_report(report)
+    assert "STOPPED" in text and "OK (" not in text
+    assert json.loads(report.options.report_path.read_text(encoding="utf-8"))["ok"] is False
+    assert report.next_command.startswith("stagemesh doctor")
+
+
+def test_no_progress_beside_a_delivered_task_or_no_work_stays_ok(tmp_path: Path) -> None:
+    report, *_ = go(tmp_path, ["1", "2"], {"1": RunResult("NO_PROGRESS", "no change")}, concurrency=1)
+    assert report.ok and report.stop_reason is None and {t.outcome for t in report.tasks} == {"open", "done"}
+
+    empty, *_ = go(tmp_path / "empty", [])
+    assert empty.ok and empty.stop_reason is None
+
+
 def test_step_cap_tasks_are_resumable_and_the_report_says_how_to_resume(tmp_path: Path) -> None:
     report, _s, _rig, _ = go(tmp_path, ["1"], {"1": RunResult("MAX_STEPS", "stopped after 4 steps")})
 
