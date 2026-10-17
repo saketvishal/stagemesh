@@ -840,8 +840,9 @@ def command_run_window(args: argparse.Namespace) -> int:
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 2
-    if (args.concurrency is not None and args.concurrency < 1) or args.max_steps_per_task < 1 or args.max_tasks < 1:
-        print("--concurrency, --max-steps-per-task and --max-tasks must be at least 1", file=sys.stderr)
+    if ((args.concurrency is not None and args.concurrency < 1) or args.max_steps_per_task < 1
+            or args.max_tasks < 1 or getattr(args, "verification_concurrency", 2) < 1):
+        print("--concurrency, --verification-concurrency, --max-steps-per-task and --max-tasks must be at least 1", file=sys.stderr)
         return 2
     project = Path(args.project).resolve()
     if not args.plan and _ensure_default_github_task_source(project):
@@ -874,6 +875,7 @@ def command_run_window(args: argparse.Namespace) -> int:
     options = WindowOptions(
         duration_seconds=duration,
         **merge_defaults,
+        verification_concurrency=getattr(args, "verification_concurrency", 2),
         max_steps_per_task=args.max_steps_per_task,
         max_tasks=args.max_tasks,
         integration_mode=args.integration,
@@ -3281,7 +3283,8 @@ def build_parser() -> argparse.ArgumentParser:
         "merges only with explicit command or project opt-in (override with --pr-only), and keeps the normal preflight and stop rules.",
     )
     window.add_argument("--duration", default="45m", help="Time budget, e.g. 2h, 90m, 45s (default 45m). Running tasks finish; nothing new starts after it")
-    window.add_argument("--concurrency", type=int, default=None, help="Tasks running at once (PR-only default 2); automatic merging default 1")
+    window.add_argument("--concurrency", type=int, default=None, help="Coding processes to keep busy when independent work is ready (PR-only default 2; automatic merging default 1)")
+    window.add_argument("--verification-concurrency", type=int, default=2, help="Separate planning, validation, review and integration process capacity (default 2)")
     window.add_argument("--max-steps-per-task", type=int, default=8, help="Step budget for each task (default 8)")
     window.add_argument("--max-tasks", type=int, default=10, help="Most tasks to attempt in one window (default 10)")
     window.add_argument("--tasks", help="Restrict the window to these comma-separated task ids (default: every eligible task)")

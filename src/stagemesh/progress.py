@@ -216,4 +216,14 @@ def with_progress(hooks: Any, db_path: Path, reporter: ProgressReporter, *, hear
         reporter.line(f"task {record.task_id}: PR opened {url}")
         return url
 
-    return replace(hooks, run_task=run, open_pr=None if open_pr is None else pr)
+    def capacity(state: dict[str, Any]) -> None:
+        waiting = "; ".join(f"task {task}: {why}" for task, why in list(state.get("waiting", {}).items())[:3])
+        reporter.line(
+            f"capacity: coding {state['coding']}/{state['coding_limit']}; "
+            f"verification {state['verification']}/{state['verification_limit']}; "
+            f"{state['coding_idle_reason']}" + (f"; {waiting}" if waiting else "")
+        )
+        if hooks.on_capacity is not None:
+            hooks.on_capacity(state)
+
+    return replace(hooks, run_task=run, open_pr=None if open_pr is None else pr, on_capacity=capacity)
