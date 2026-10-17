@@ -142,9 +142,32 @@ def classify_block(store: Store, task_id: str) -> BlockInfo | None:
 def _legacy(event: str, payload: dict[str, Any]) -> BlockInfo:
     """Blocks written before kinds were recorded: remediation budgets and integration states are operational, scope and safety are not."""
     if event == "task.blocked":
-        if payload.get("reason") == EXTERNAL_WORKSPACE_MUTATION:
+        reason = str(payload.get("reason", "blocked by a safety rule"))
+        if reason == EXTERNAL_WORKSPACE_MUTATION:
             return BlockInfo(BlockKind.POLICY_SAFETY, "a workspace was changed outside StageMesh", f"legacy:{event}")
-        return BlockInfo(BlockKind.POLICY_SAFETY, str(payload.get("reason", "blocked by a safety rule")), f"legacy:{event}")
+        lower = reason.lower()
+        if any(
+            term in lower
+            for term in (
+                "integration_ref_state",
+                "stale_baseline",
+                "stale integration",
+                "candidate_environment_unavailable",
+                "environment",
+                "provider_unavailable",
+                "transient_provider_failure",
+                "quota",
+                "timeout",
+                "stale_claim",
+                "stale_execution",
+                "expired_claim",
+                "dead_execution",
+                "task_synchronization",
+                "source_sync",
+            )
+        ):
+            return BlockInfo(BlockKind.RECOVERABLE_OPERATIONAL, reason, f"legacy:{event}")
+        return BlockInfo(BlockKind.POLICY_SAFETY, reason, f"legacy:{event}")
     if event == "task.diagnosis_stop":
         if payload.get("category") == CONTRACT_SCOPE:
             return BlockInfo(BlockKind.HUMAN_DECISION, "the contract's allowed files and the work disagree: should the contract be widened (stagemesh rebind-contract) to include what the work needed, or must the work stay inside it?", f"legacy:{event}")

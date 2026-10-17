@@ -20,7 +20,18 @@ _CLASSIFICATIONS = {
     CORE_LIFECYCLE_OR_SCHEMA_SECURITY,
 }
 
-_BROAD_GATE_TOKENS = ("full pytest", "invariant", "clean acceptance", "acceptance", "full ci", "ci")
+_BROAD_GATE_TOKENS = (
+    "full pytest",
+    "invariant",
+    "clean acceptance",
+    "acceptance",
+    "full ci",
+    "ci",
+    "ui:quality",
+    "ui-quality",
+    "full-ui",
+    "promoted",
+)
 _TOKEN_SPLIT = re.compile(r"[^a-z0-9]+")
 _DOC_PATTERNS = ("README*", "docs/**", "*.md", "**/*.md", "*.rst", "**/*.rst")
 _DEPENDENCY_PATTERNS = (
@@ -109,7 +120,13 @@ def derive_validation_plan(contract: ChangeContract, changed_files: tuple[str, .
     if classification == DOCS_ONLY:
         checks = _matching_gate_names(contract.gates, ("docs", "static", "lint", "spell"))
         return ValidationPlan(classification, "LOW", checks or ("docs-static",), (), reasons)
-    return ValidationPlan(LOCALIZED_CODE, "MEDIUM", _non_broad_gate_names(contract) or ("focused-tests",), (), reasons)
+    return ValidationPlan(
+        LOCALIZED_CODE,
+        "MEDIUM",
+        _non_broad_gate_names(contract) or ("focused-tests",),
+        (),
+        reasons,
+    )
 
 
 def with_required_checks(contract: ChangeContract, plan: ValidationPlan) -> ValidationPlan:
@@ -358,6 +375,9 @@ def _is_broad_gate(value: str) -> bool:
 
 def _is_broad_command(command: tuple[str, ...]) -> bool:
     if any(_is_broad_gate(part) for part in command):
+        return True
+    joined = " ".join(command).casefold()
+    if any(token in joined for token in ("ui:quality", "ui-quality", "playwright test", "playwright.config")):
         return True
     pytest_index = _pytest_index(command)
     if pytest_index is None:

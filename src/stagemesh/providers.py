@@ -107,6 +107,24 @@ class ProviderAdapter(Protocol):
         ...
 
 
+def resolve_executable(executable: str, provider_name: str | None = None) -> str | None:
+    if not executable:
+        return None
+    found = shutil.which(executable)
+    if found:
+        return found
+    p = Path(executable)
+    if p.name and p.name != executable:
+        found = shutil.which(p.name)
+        if found:
+            return found
+    if p.stem and p.stem != executable and p.stem != p.name:
+        found = shutil.which(p.stem)
+        if found:
+            return found
+    return None
+
+
 @dataclass(frozen=True)
 class RuntimeCommandAdapter:
     """SDK adapter for command-line coding agents such as Codex, Claude, or Grok."""
@@ -131,17 +149,26 @@ class RuntimeCommandAdapter:
 
     def command_for(self, capability: str) -> tuple[str, ...]:
         """The command this provider runs for a stage: "code" (implementation) or "review"; anything else uses the default."""
+        cmd = self.command
         if capability == "code" and self.implement_command is not None:
-            return self.implement_command
-        if capability == "review" and self.review_command is not None:
-            return self.review_command
-        return self.command
+            cmd = self.implement_command
+        elif capability == "review" and self.review_command is not None:
+            cmd = self.review_command
+        if not cmd:
+            return cmd
+        exe = cmd[0]
+        if not shutil.which(exe):
+            relocated = resolve_executable(exe, self.name)
+            if relocated:
+                return (relocated, *cmd[1:])
+        return cmd
 
     def all_commands(self) -> tuple[tuple[str, ...], ...]:
-        return tuple(dict.fromkeys(c for c in (self.command, self.implement_command, self.review_command) if c is not None))
+        return tuple(dict.fromkeys(c for c in (self.command_for("code"), self.command_for("review"), self.command, self.implement_command, self.review_command) if c is not None))
 
     def check_capacity(self) -> str:
-        executable = self.command[0] if self.command else ""
+        cmd = self.command_for("code") if "code" in self.capabilities else self.command
+        executable = cmd[0] if cmd else ""
         return CapacityKind.AVAILABLE if executable and shutil.which(executable) else CapacityKind.UNKNOWN
 
     def check_stage_capacity(self, capability: str) -> str:

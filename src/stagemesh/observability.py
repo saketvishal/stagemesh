@@ -111,9 +111,18 @@ def _blocked_reason_buckets(store: Store, blocked: list[Any]) -> dict[str, int]:
 
 
 def _latest_blocked_reason(store: Store, task_id: str) -> str:
-    """Why the task is blocked, from the newest stop event: an explicit block, a diagnosis stop, or an exhausted remediation."""
+    """Why the task is blocked, from the newest stop or retirement event."""
+    task = store.get_task(task_id)
+    if task is not None and task["source"] is not None and task["source_id"] is not None:
+        source_state = store.source_state(str(task["source"]), str(task["source_id"]))
+        retirement = source_state.get("retirement_reason")
+        if isinstance(retirement, str) and retirement:
+            return retirement
+        op_retirement = store.operator_retirement_reason(str(task["source"]), str(task["source_id"]))
+        if op_retirement:
+            return op_retirement
     rows = store.conn.execute(
-        "SELECT event_type, payload FROM audit_events WHERE event_type IN ('task.blocked', 'task.diagnosis_stop', 'task.remediation_exhausted') "
+        "SELECT event_type, payload FROM audit_events WHERE event_type IN ('task.source_retired', 'task.block_classified', 'task.blocked', 'task.diagnosis_stop', 'task.remediation_exhausted') "
         "ORDER BY created_at DESC, rowid DESC LIMIT 400"
     ).fetchall()
     for row in rows:
@@ -123,6 +132,10 @@ def _latest_blocked_reason(store: Store, task_id: str) -> str:
             continue
         if str(payload.get("task_id") or "") != task_id:
             continue
+        if row["event_type"] == "task.source_retired":
+            return str(payload.get("reason") or "source_retired")
+        if row["event_type"] == "task.block_classified":
+            return str(payload.get("reason") or payload.get("kind") or "blocked")
         if row["event_type"] == "task.blocked":
             return str(payload.get("reason") or "blocked")
         if row["event_type"] == "task.diagnosis_stop":

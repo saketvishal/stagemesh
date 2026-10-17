@@ -19,6 +19,7 @@ from stagemesh.validation_plan import (
     contract_with_browser_e2e_gates,
     derive_validation_plan,
     planned_contract,
+    with_required_checks,
 )
 
 
@@ -420,3 +421,27 @@ def test_forbidden_browser_package_wins_but_explicit_gate_is_retained(tmp_path: 
     updated = contract_with_browser_e2e_gates(tmp_path, contract, ("apps/other/Page.tsx",))
 
     assert updated.gates == (explicit,)
+
+
+def test_promoted_full_ui_quality_classified_as_broad_release_gate() -> None:
+    contract = ChangeContract(
+        objective="Deliver typed read-only adapter",
+        allowed_files=("apps/web/src/api/timeline.ts",),
+        required_tests=(
+            GateCommand("focused-timeline-adapter", ("npm", "test", "timeline-api.test.ts")),
+            GateCommand("promoted-full-ui-quality", ("npm", "run", "ui:quality")),
+            GateCommand("spec-integrity", (sys.executable, "scripts/spec_integrity.py")),
+        ),
+    )
+
+    plan = derive_validation_plan(contract, ("apps/web/src/api/timeline.ts",))
+    scoped = planned_contract(contract, plan)
+    required_plan = with_required_checks(contract, plan)
+
+    assert plan.classification == LOCALIZED_CODE
+    assert "focused-timeline-adapter" in plan.debug_checks
+    assert "spec-integrity" in plan.debug_checks
+    assert "promoted-full-ui-quality" not in plan.debug_checks
+    assert "promoted-full-ui-quality" in required_plan.release_checks
+    assert [gate.name for gate in scoped.gates] == ["focused-timeline-adapter", "spec-integrity"]
+

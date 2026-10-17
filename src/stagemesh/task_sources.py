@@ -39,6 +39,7 @@ class DiscoveredTask:
     labels: tuple[str, ...] = ()
     body: str = ""
     created_at: str = ""
+    eligibility_reason: str = ""
 
 
 class LocalBacklogSource:
@@ -215,17 +216,28 @@ class ConfiguredGitHubTaskSource:
         self.labels = labels
         self.excluded_labels = excluded_labels
         self.source = GitHubApiIssueSource(owner, repo, token)
+        self.last_status: str | None = None
+        self.last_error: str | None = None
+
+    def check_source(self) -> tuple[bool, str]:
+        if self.last_status is None:
+            self.discover()
+        if self.last_status == "OK":
+            return True, "OK"
+        return False, self.last_error or f"source {self.name} unavailable ({self.last_status})"
 
     def discover(self) -> list[DiscoveredTask]:
         tasks, status, _retry_after = self.source.discover()
+        self.last_status = status
         if status != "OK":
-            # Never let an unreachable/unauthorized source look like an empty backlog.
+            self.last_error = f"github task source {self.name} unavailable ({status})"
             print(
                 f"warning: github task source {self.name} unavailable ({status}); "
                 "set STAGEMESH_GITHUB_TOKEN for private repositories",
                 file=sys.stderr,
             )
             return []
+        self.last_error = None
         if not self.labels and not self.excluded_labels:
             return tasks
         required = {label.casefold() for label in self.labels}
@@ -234,6 +246,14 @@ class ConfiguredGitHubTaskSource:
         for task in tasks:
             labels = {label.casefold() for label in task.labels}
             matches = required.issubset(labels) and not bool(excluded & labels)
+            reason = task.eligibility_reason
+            if not matches and task.eligible:
+                if not required.issubset(labels):
+                    missing = sorted(required - labels)
+                    reason = f"missing required label(s): {', '.join(missing)}"
+                elif bool(excluded & labels):
+                    present_excluded = sorted(excluded & labels)
+                    reason = f"has excluded label(s): {', '.join(present_excluded)}"
             discovered.append(
                 DiscoveredTask(
                     task.source,
@@ -245,6 +265,7 @@ class ConfiguredGitHubTaskSource:
                     labels=task.labels,
                     body=task.body,
                     created_at=task.created_at,
+                    eligibility_reason=reason,
                 )
             )
         return discovered
@@ -278,16 +299,25 @@ def _github_issue_to_task(issue: dict[str, object]) -> DiscoveredTask:
         "status:blocked",
         "status:remediating",
     }.intersection(label.casefold() for label in label_names)
+    eligible = not blocked and not objective_root and state.lower() == "open"
+    reason = ""
+    if state.lower() != "open":
+        reason = f"source issue is {state.lower()}"
+    elif objective_root:
+        reason = "source objective root"
+    elif blocked:
+        reason = f"blocked by label: {', '.join(sorted(blocked))}"
     return DiscoveredTask(
         source=GitHubIssueSource.name,
         source_id=str(number),
         title=title,
-        eligible=not blocked and not objective_root and state.lower() == "open",
+        eligible=eligible,
         state="OPEN" if state.lower() == "open" else state.upper(),
         labels=tuple(label_names),
         body=body,
         dependencies=_github_dependencies(body),
         created_at=issue.get("created_at") if isinstance(issue.get("created_at"), str) else "",
+        eligibility_reason=reason,
     )
 
 
@@ -368,6 +398,12 @@ def sync_source(store: Store, tasks: list[DiscoveredTask]) -> list[str]:
         elif task.eligible and state == "OPEN":
             task_id = store.upsert_task(task.title, task.source, task.source_id)
             previous_retirement_reason = previous_source_state.get("retirement_reason")
+            if not previous_retirement_reason and hasattr(store, "operator_retirement_reason"):
+                previous_retirement_reason = store.operator_retirement_reason(task.source, task.source_id)
+            if not previous_retirement_reason:
+                row = store.get_task(task_id)
+                if row is not None and row["status"] == TaskStatus.BLOCKED:
+                    previous_retirement_reason = "source became eligible"
             if is_github and isinstance(previous_retirement_reason, str):
                 store.restore_source_task(
                     task.source,
@@ -376,9 +412,18 @@ def sync_source(store: Store, tasks: list[DiscoveredTask]) -> list[str]:
                     {"source_state": state, "eligible": task.eligible},
                 )
             ids.append(task_id)
-            for dependency in task.dependencies:
+            declared_deps = set(task.dependencies)
+            if hasattr(store, "conn"):
+                rows = store.conn.execute("SELECT depends_on_task_id FROM task_dependencies WHERE task_id=?", (task_id,)).fetchall()
+                existing_deps = {str(r[0]) for r in rows}
+                removed_deps = existing_deps - declared_deps
+                if removed_deps:
+                    for removed_dep in removed_deps:
+                        store.conn.execute("DELETE FROM task_dependencies WHERE task_id=? AND depends_on_task_id=?", (task_id, removed_dep))
+                    store.conn.commit()
+            for dependency in declared_deps:
                 if store.get_task(dependency) is not None:
-                    store.add_dependency(task.source_id, dependency)
+                    store.add_dependency(task_id, dependency)
     return ids
 
 

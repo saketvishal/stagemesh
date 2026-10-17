@@ -813,6 +813,16 @@ def run_window(
             if len(attempted) >= options.max_tasks and not continuing:
                 report.task_limit_reached = True
                 break
+            if room - len(continuing) > 0:
+                try:
+                    from .task_sources import LocalBacklogSource, sync_source, task_sources_from_config
+                    backlog = project / ".stagemesh" / "backlog.json"
+                    if backlog.is_file():
+                        sync_source(store, LocalBacklogSource(backlog).discover())
+                    for source in task_sources_from_config(config):
+                        sync_source(store, source.discover())
+                except Exception:
+                    pass
             fresh, skipped = (
                 select_tasks(
                     store,

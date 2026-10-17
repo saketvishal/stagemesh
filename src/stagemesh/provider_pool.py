@@ -248,6 +248,10 @@ class ProviderPool:
                 verdicts.append(Verdict(name, False, str(self.limiter.cooling(name))))
             else:
                 recent = self._recent_failure(store, stage, task_id, name)
+                if recent is not None and "provider_unavailable" in recent and _stage_capacity(adapter, capability) == CapacityKind.AVAILABLE:
+                    from .provider_cooldown import clear_cooldown
+                    clear_cooldown(store, name, self.cooldown_seconds)
+                    recent = self._recent_failure(store, stage, task_id, name)
                 if recent is not None:
                     verdicts.append(Verdict(name, False, recent))
                 elif (
