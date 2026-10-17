@@ -395,9 +395,14 @@ def test_legacy_classification_cli_plan_is_non_mutating(tmp_path, capsys):
 
 
 def test_legacy_original_survives_failure_after_binding_write(tmp_path, monkeypatch):
+    import hashlib
     from stagemesh.recovery import REBIND_EVENT, rebind_contract
 
     project, store, _, canonical = _legacy_contract(tmp_path)
+    # Older bindings may omit newer defaults or use a different serialization.
+    payload = json.loads(canonical)
+    canonical = json.dumps({key: payload[key] for key in ("objective", "allowed_files", "invariants", "required_tests")}, indent=2)
+    store.rebind_task_contract("1", 1, hashlib.sha256(canonical.encode()).hexdigest(), canonical)
     write = store.rebind_task_contract
 
     def interrupted(*args, **kwargs):
@@ -412,5 +417,22 @@ def test_legacy_original_survives_failure_after_binding_write(tmp_path, monkeypa
         assert json.loads(saved[0])["old_canonical_json"] == canonical
         assert json.loads(saved[0])["new_canonical_json"] == store.task_contract("1")["canonical_json"]
         assert not store.conn.execute("SELECT 1 FROM audit_events WHERE event_type=?", (REBIND_EVENT,)).fetchone()
+    finally:
+        store.close()
+
+
+def test_legacy_classification_refuses_unknown_requirement_fields(tmp_path):
+    import hashlib
+    from stagemesh.recovery import RecoveryRefusal, rebind_contract
+
+    project, store, _, canonical = _legacy_contract(tmp_path)
+    payload = json.loads(canonical)
+    payload["future_requirements"] = ["Do not discard this requirement"]
+    canonical = json.dumps(payload)
+    store.rebind_task_contract("1", 1, hashlib.sha256(canonical.encode()).hexdigest(), canonical)
+    try:
+        with pytest.raises(RecoveryRefusal, match="unknown fields"):
+            rebind_contract(store, project, "1", review_invariants=(1,), reason="Classify legacy prose")
+        assert store.task_contract("1")["canonical_json"] == canonical
     finally:
         store.close()

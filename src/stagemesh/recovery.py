@@ -127,17 +127,23 @@ def rebind_contract(store: Store, project: Path, task_id: str, *, validate: bool
     try:
         # Classification starts from the verified frozen payload, never a possibly
         # edited file. Only selected prefixes may change; all requirements survive.
-        contract = (bound_contract_from_record(dict(old)).contract if classifying and old is not None
-                    else parse_contract(json.loads(path.read_text(encoding="utf-8"))))
+        if classifying and old is not None:
+            original_canonical = str(old["canonical_json"])
+            contract = bound_contract_from_record(dict(old)).contract
+        else:
+            original_canonical = path.read_text(encoding="utf-8")
+            contract = parse_contract(json.loads(original_canonical))
     except (OSError, ValueError) as exc:
         raise RecoveryRefusal("invalid_contract", f"contract file is invalid: {exc}") from exc
     if not contract.explicit:
         raise RecoveryRefusal("invalid_contract", "change contract must be explicit")
     if old is None and store.task_baseline(task_id) is None:
         raise RecoveryRefusal("missing_baseline", "task has no recorded baseline; establish its baseline before rebinding rather than guessing from the checkout")
-    original_canonical = canonical_contract_json(contract)
     classification = []
     if classifying:
+        unknown = set(json.loads(original_canonical)) - set(json.loads(canonical_contract_json(contract)))
+        if unknown:
+            raise RecoveryRefusal("unknown_contract_fields", "cannot safely classify a legacy contract with unknown fields: " + ", ".join(sorted(unknown)))
         indices = (*review_invariants, *command_invariants)
         if len(set(indices)) != len(indices) or any(type(i) is not int or i < 1 or i > len(contract.invariants) for i in indices):
             raise RecoveryRefusal("invalid_classification", "invariant indices are unique, one-based positions in the frozen contract")
@@ -220,7 +226,7 @@ def rebind_contract(store: Store, project: Path, task_id: str, *, validate: bool
         "new_digest": digest,
         "old_version": old_version,
         "new_version": CONTRACT_VERSION,
-        "old_canonical_json": str(old["canonical_json"]) if old is not None else None,
+        "old_canonical_json": original_canonical,
         "new_canonical_json": canonical,
         "invariant_classification": classification,
         "candidate_sha": candidate_sha,
