@@ -19,6 +19,7 @@ CLEARED_EVENT = "provider.cooldown_cleared"
 REPEATED_NO_PROGRESS = "repeated_no_progress"
 NO_PROGRESS_THRESHOLD = 3  # consecutive no-progress invocations by one provider before it is rested
 DEFAULT_QUOTA_COOLDOWN_SECONDS = 21600.0
+DEFAULT_FAILURE_COOLDOWN_SECONDS = 900.0
 
 _HINTS = {
     "quota_rate_limit": "out of quota or rate limited: wait for the reset{reset}, or clear once it has reset",

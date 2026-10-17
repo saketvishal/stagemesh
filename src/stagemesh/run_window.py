@@ -692,7 +692,7 @@ def run_window(
             )
             refreshed = provider_check(store, config, strict_live=options.strict_live)
         except Exception as exc:
-            refreshed = Check("providers", False, f"quota recheck unavailable: {type(exc).__name__}", fix="stagemesh capacity")
+            refreshed = Check("providers", False, f"provider recheck unavailable: {type(exc).__name__}", fix="stagemesh capacity")
         report.preflight = [refreshed if check.name == "providers" else check for check in report.preflight]
     failed = [check for check in report.preflight if not check.ok and check.fatal]
     if failed:

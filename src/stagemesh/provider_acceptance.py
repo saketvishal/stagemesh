@@ -18,18 +18,18 @@ from .domain import ExecutionStatus, Stage
 from .execution import PROVIDER_TIMEOUT, ExecutionResult, kill_active_provider_processes
 from .git import GitError, GitWorkspace
 from .persistence import Store
-from .provider_cooldown import DEFAULT_QUOTA_COOLDOWN_SECONDS
+from .provider_cooldown import DEFAULT_FAILURE_COOLDOWN_SECONDS, DEFAULT_QUOTA_COOLDOWN_SECONDS
 from .providers import record_provider_capacity
 from .review import VERDICT_FAIL_WITH_FINDINGS, VERDICT_PASS, classify_review_response
 from .routing import Provider, Router
 
 LIVE_PROVIDER_ACCEPTANCE_EVENT = "provider.live_acceptance"
-DEFAULT_LIVE_SMOKE_TIMEOUT_SECONDS = 30.0
+DEFAULT_LIVE_SMOKE_TIMEOUT_SECONDS = 180.0
 DEFAULT_LIVE_ACCEPTANCE_TTL_SECONDS = 7 * 24 * 60 * 60  # same default as config.DEFAULT_LIVE_ACCEPTANCE_TTL_SECONDS
 
 
 def provider_smoke_timeout_seconds(configured: float | None = None) -> float:
-    """Wall-clock limit for one provider smoke check: explicit value, STAGEMESH_PROVIDER_SMOKE_TIMEOUT_SECONDS, or 30s."""
+    """Wall-clock limit per smoke stage: explicit value, environment override, or 180s."""
     if configured is not None and configured > 0:
         return float(configured)
     try:
@@ -195,8 +195,8 @@ def run_live_provider_smoke(
         store.migrate()
         result = ExecutionResult(ExecutionStatus.SUCCEEDED)
         candidate_sha: str | None = None
-        file_ok = True
         implementation_checked = "code" in adapter.capabilities
+        file_ok = not implementation_checked
         review_checked = "review" in adapter.capabilities
         implementation_ready = "code" not in adapter.capabilities
         review_ready = "review" not in adapter.capabilities
@@ -308,16 +308,24 @@ def record_live_provider_acceptance(store: Store, result: LiveProviderSmokeResul
     store.add_audit_event(LIVE_PROVIDER_ACCEPTANCE_EVENT, result.to_payload())
 
 
-def _quota_check_expired(payload: dict[str, Any]) -> bool:
+def _temporary_check_expired(payload: dict[str, Any]) -> bool:
     checked_at = payload.get("checked_at")
+    reason = payload.get("failure_reason")
+    if not isinstance(reason, str):
+        return False
+    delay = {
+        "quota_rate_limit": DEFAULT_QUOTA_COOLDOWN_SECONDS,
+        PROVIDER_TIMEOUT: DEFAULT_FAILURE_COOLDOWN_SECONDS,
+        "transient_provider_failure": DEFAULT_FAILURE_COOLDOWN_SECONDS,
+    }.get(reason)
     return (
         payload.get("status") == "FAIL"
-        and payload.get("failure_reason") == "quota_rate_limit"
+        and delay is not None
         and isinstance(checked_at, (int, float))
         and not isinstance(checked_at, bool)
         and math.isfinite(checked_at)
         and checked_at > 0
-        and time.time() >= checked_at + DEFAULT_QUOTA_COOLDOWN_SECONDS
+        and time.time() >= checked_at + delay
     )
 
 
@@ -330,19 +338,39 @@ def refresh_expired_quota_checks(
     should_stop: Callable[[], bool] = lambda: False,
     clock: Callable[[], float] = time.time,
 ) -> None:
-    """Recheck temporary quota failures before a real window, never during diagnostics.
+    """Recheck quota, timeout and transient failures before a real window, never during diagnostics.
 
     The existing bounded smoke runs in a disposable repository, not the client checkout.
     An OS lock coalesces checks from concurrent starters; fresh failures renew the backoff.
     """
-    from .provider_cooldown import active_cooldowns
+    from .provider_cooldown import active_cooldowns, cleared_at
+    from .provider_pool import PROVIDER_FAILURE_EVENT
 
     def due(name: str) -> bool:
         payload = _latest_live_acceptance_payload(store, name)
-        cooling = active_cooldowns(store, DEFAULT_QUOTA_COOLDOWN_SECONDS)
-        return payload is not None and _quota_check_expired(payload) and not any(
+        cooling = active_cooldowns(store, DEFAULT_FAILURE_COOLDOWN_SECONDS)
+        if payload is None or not _temporary_check_expired(payload) or any(
             item["provider"] == name for item in cooling
-        )
+        ):
+            return False
+        # Task-scoped timeout routing stays unchanged, but a provider smoke must
+        # not bypass a newer timeout's backoff on any task or stage.
+        for row in store.conn.execute(
+            "SELECT payload, created_at FROM audit_events WHERE event_type=? AND created_at>?",
+            (PROVIDER_FAILURE_EVENT, cleared_at(store, name)),
+        ):
+            try:
+                failure = json.loads(row["payload"])
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(failure, dict) or failure.get("provider") != name or failure.get("reason") != PROVIDER_TIMEOUT:
+                continue
+            retry_at = failure.get("retry_at")
+            if not isinstance(retry_at, (int, float)) or not math.isfinite(retry_at):
+                retry_at = float(row["created_at"]) + DEFAULT_FAILURE_COOLDOWN_SECONDS
+            if time.time() < retry_at:
+                return False
+        return True
 
     for adapter in adapters:
         if should_stop() or (deadline is not None and clock() >= deadline):
@@ -362,7 +390,7 @@ def refresh_expired_quota_checks(
                     timeout = min(timeout, max(0.0, deadline - clock()) / 2)
                     if timeout <= 0:
                         return
-                print(f"[stagemesh] {adapter.name}: refreshing expired quota check", file=sys.stderr, flush=True)
+                print(f"[stagemesh] {adapter.name}: refreshing expired provider check", file=sys.stderr, flush=True)
                 try:
                     result = run_live_provider_smoke(
                         adapter, timeout_seconds=timeout,
@@ -377,7 +405,7 @@ def refresh_expired_quota_checks(
                 if result.failure_reason == "provider_smoke_cancelled":
                     return  # interruption is not new provider readiness evidence
                 record_live_provider_acceptance(store, result)
-                print(f"[stagemesh] {adapter.name}: quota recheck {result.status}", file=sys.stderr, flush=True)
+                print(f"[stagemesh] {adapter.name}: provider recheck {result.status}", file=sys.stderr, flush=True)
         except IntegrationLockTimeout:
             continue  # another starter owns the probe; never duplicate it or assume a pass
 
@@ -394,9 +422,9 @@ def live_provider_readiness(
         and payload.get(f"{capability_prefix}_ready") is True
     )
     # Expiry requests a real recheck; it never establishes readiness on its own.
-    if not capability_ready and _quota_check_expired(payload):
+    if not capability_ready and _temporary_check_expired(payload):
         return False, (
-            "live_acceptance_retry_due: quota cooldown elapsed; a real run-window refreshes this check; "
+            "live_acceptance_retry_due: temporary failure cooldown elapsed; a real run-window refreshes this check; "
             "or run stagemesh provider-acceptance --live --provider " + provider
         )
     if capability == "code" and (

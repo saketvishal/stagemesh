@@ -6,12 +6,16 @@ from dataclasses import replace
 import pytest
 
 from stagemesh.domain import ExecutionStatus
+from stagemesh.capacity import CapacityKind
+from stagemesh.execution import ExecutionResult
 from stagemesh.provider_acceptance import (
     LiveProviderSmokeResult,
     live_acceptance_status,
     live_provider_readiness,
     record_live_provider_acceptance,
     refresh_expired_quota_checks,
+    provider_smoke_timeout_seconds,
+    run_live_provider_smoke,
 )
 from stagemesh.provider_cooldown import DEFAULT_QUOTA_COOLDOWN_SECONDS
 from stagemesh.provider_pool import IMPLEMENT, REVIEW
@@ -58,7 +62,8 @@ def test_expired_quota_check_requires_fresh_probe_before_routing(tmp_path, monke
 @pytest.mark.parametrize("reason,age", [
     ("quota_rate_limit", 60),
     ("authentication_failure", 8 * 86400),
-    ("provider_timeout", 8 * 86400),
+    ("provider_timeout", 60),
+    ("transient_provider_failure", 60),
     ("invalid_review_json", 8 * 86400),
 ])
 def test_quota_retry_does_not_bypass_fresh_or_nonquota_failures(tmp_path, reason, age):
@@ -68,6 +73,49 @@ def test_quota_retry_does_not_bypass_fresh_or_nonquota_failures(tmp_path, reason
         assert not rig.pool.evaluate(rig.store, IMPLEMENT, TASK)[0].eligible
     finally:
         rig.store.close()
+
+
+@pytest.mark.parametrize("reason", ["provider_timeout", "transient_provider_failure"])
+def test_temporary_failure_is_refreshed_after_fifteen_minutes(tmp_path, monkeypatch, reason):
+    rig = Rig(tmp_path, {"provider-a": "ok"}, require_live_acceptance=True, block_unproven=False)
+    quota_failure(rig, age=901, reason=reason)
+    calls = []
+    def smoke(adapter, *, timeout_seconds, **kwargs):
+        calls.append(adapter.name)
+        assert timeout_seconds == 180
+        return _live_result(adapter.name, True)
+    monkeypatch.delenv("STAGEMESH_PROVIDER_SMOKE_TIMEOUT_SECONDS", raising=False)
+    monkeypatch.setattr("stagemesh.provider_acceptance.run_live_provider_smoke", smoke)
+    try:
+        assert not rig.pool.evaluate(rig.store, IMPLEMENT, TASK)[0].eligible
+        refresh_expired_quota_checks(rig.store, rig.project, list(rig.pool.adapters.values()))
+        assert calls == ["provider-a"]
+        assert rig.pool.evaluate(rig.store, IMPLEMENT, TASK)[0].eligible
+    finally:
+        rig.store.close()
+
+
+def test_smoke_timeout_default_and_explicit_overrides(monkeypatch):
+    monkeypatch.delenv("STAGEMESH_PROVIDER_SMOKE_TIMEOUT_SECONDS", raising=False)
+    assert provider_smoke_timeout_seconds() == 180
+    monkeypatch.setenv("STAGEMESH_PROVIDER_SMOKE_TIMEOUT_SECONDS", "45")
+    assert provider_smoke_timeout_seconds() == 45
+    assert provider_smoke_timeout_seconds(12) == 12
+
+
+def test_timed_out_implementation_does_not_report_verified_file():
+    class TimedOutAdapter:
+        name = "timed-out"
+        capabilities = frozenset({"code"})
+        def check_capacity(self):
+            return CapacityKind.AVAILABLE
+        def execute(self, *args):
+            return ExecutionResult(ExecutionStatus.FAILED, failure_reason="provider_timeout")
+
+    result = run_live_provider_smoke(TimedOutAdapter(), timeout_seconds=1)
+    assert result.timed_out
+    assert not result.file_ok
+    assert not result.implementation_ready
 
 
 def test_strict_acceptance_does_not_treat_expired_quota_as_a_pass(tmp_path):
@@ -128,6 +176,27 @@ def test_active_cooldown_prevents_recheck(tmp_path, monkeypatch):
         before = rig.store.conn.total_changes
         refresh_expired_quota_checks(rig.store, rig.project, list(rig.pool.adapters.values()))
         assert rig.store.conn.total_changes == before
+    finally:
+        rig.store.close()
+
+
+def test_new_timeout_backoff_is_respected_until_cleared(tmp_path, monkeypatch):
+    from stagemesh.provider_cooldown import clear_cooldown
+
+    rig = Rig(tmp_path, {"provider-a": "ok"})
+    quota_failure(rig, age=901, reason="provider_timeout")
+    rig.pool.record_failure(rig.store, REVIEW, TASK, "provider-a", "provider_timeout")
+    calls = []
+    def smoke(adapter, **kwargs):
+        calls.append(adapter.name)
+        return _live_result(adapter.name, True)
+    monkeypatch.setattr("stagemesh.provider_acceptance.run_live_provider_smoke", smoke)
+    try:
+        refresh_expired_quota_checks(rig.store, rig.project, list(rig.pool.adapters.values()))
+        assert calls == []
+        clear_cooldown(rig.store, "provider-a", rig.pool.cooldown_seconds)
+        refresh_expired_quota_checks(rig.store, rig.project, list(rig.pool.adapters.values()))
+        assert calls == ["provider-a"]
     finally:
         rig.store.close()
 
