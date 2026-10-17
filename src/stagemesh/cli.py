@@ -216,6 +216,11 @@ def command_init(args: argparse.Namespace) -> int:
     store.migrate()
     if args.task:
         store.upsert_task(args.task)
+    try:
+        config = load_config(project)
+        _sync_all_sources(store, project, config, getattr(args, "task", None))
+    except Exception:
+        pass
     schema_version = store.schema_version()
     store.close()
     profile_status, profile_detail = ensure_profile(project)

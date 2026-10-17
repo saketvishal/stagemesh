@@ -104,7 +104,8 @@ def _probe_python(python: Path) -> dict:
 def _detach_legacy_alias(target: Path, source: Path) -> None:
     if not _is_link(target):
         return
-    if target.resolve() != source:
+    resolved = target.resolve()
+    if resolved != source and not any(resolved.is_relative_to(parent) for parent in (source.parent, target.parent.resolve())):
         raise ValueError("candidate environment changed during provisioning")
     if target.is_symlink():
         target.unlink()
@@ -194,10 +195,20 @@ def prepare_candidate_environments(project: Path, checkout: Path) -> None:
             target_rel, source_rel = _relative(raw_target, ".venv"), _relative(raw_source, ".venv")
             source = (project / source_rel).resolve()
             target = checkout / target_rel
-            legacy_link = _is_link(target) and target.resolve() == source
-            if not source.is_relative_to(project) or not target.parent.resolve().is_relative_to(
-                checkout
-            ) or (not legacy_link and not target.resolve().is_relative_to(checkout)) or (_is_link(target) and not legacy_link):
+            resolved_target = target.resolve()
+            resolved_checkout = checkout.resolve()
+            resolved_project = project.resolve()
+            legacy_link = _is_link(target) and (
+                resolved_target == source
+                or resolved_target.is_relative_to(resolved_checkout)
+                or resolved_target.is_relative_to(resolved_project)
+            )
+            if (
+                not source.is_relative_to(resolved_project)
+                or not target.parent.resolve().is_relative_to(resolved_checkout)
+                or (not legacy_link and not resolved_target.is_relative_to(resolved_checkout))
+                or (_is_link(target) and not legacy_link)
+            ):
                 raise ValueError("validation environment escapes its repository")
             if target in targets:
                 raise ValueError("duplicate candidate environment target")
@@ -299,9 +310,16 @@ def prepare_candidate_environments(project: Path, checkout: Path) -> None:
             source_rel = _relative(raw_source, "node_modules")
             source = (project / source_rel).resolve()
             target = checkout / target_rel
-            legacy_link = _is_link(target) and target.resolve() == source
-            if not source.is_relative_to(project.resolve()) or not target.parent.resolve().is_relative_to(
-                checkout.resolve()
+            resolved_target = target.resolve()
+            resolved_checkout = checkout.resolve()
+            resolved_project = project.resolve()
+            legacy_link = _is_link(target) and (
+                resolved_target == source
+                or resolved_target.is_relative_to(resolved_checkout)
+                or resolved_target.is_relative_to(resolved_project)
+            )
+            if not source.is_relative_to(resolved_project) or not target.parent.resolve().is_relative_to(
+                resolved_checkout
             ) or (_is_link(target) and not legacy_link):
                 raise ValueError("validation environment escapes its repository")
             if target in targets:
