@@ -174,6 +174,72 @@ def test_rebind_refuses_to_silently_invalidate_passed_evidence_and_keeps_it_when
     assert store.conn.execute("SELECT COUNT(*) FROM evidence WHERE task_id=?", (TASK,)).fetchone()[0] == 1  # evidence kept
 
 
+@pytest.mark.parametrize("stage", [Stage.REVIEW, Stage.INTEGRATE])
+@pytest.mark.parametrize("evidence", ["missing", "failed", "other_candidate", "unbound", "review", "changed", "valid"])
+def test_rebind_requires_current_passed_validation(tmp_path: Path, stage: Stage, evidence: str) -> None:
+    project, store, _, sha = frozen_task_with_candidate(tmp_path)
+    bound = contract_for_candidate(store, TASK, sha, project)
+    if evidence in {"changed", "valid"}:
+        assert Validator().validate(store, TASK, sha, project) is EvidenceStatus.PASSED
+    elif evidence != "missing":
+        store.add_evidence(
+            TASK,
+            "a" * 40 if evidence == "other_candidate" else sha,
+            EvidenceKind.REVIEW if evidence == "review" else EvidenceKind.VALIDATION,
+            EvidenceStatus.FAILED if evidence == "failed" else EvidenceStatus.PASSED,
+            {} if evidence == "unbound" else {"contract_hash": bound.digest},
+        )
+    store.advance_task(TASK, stage)
+    if evidence == "changed":
+        write_contract(project, {**DOCS_CONTRACT, "allowed_files": ["docs/**", "src/**"]})
+        with pytest.raises(RecoveryRefusal) as refused:
+            rebind_contract(store, project, TASK)
+        assert refused.value.code == "history_invalidated"
+        assert store.get_task(TASK)["stage"] == stage
+
+    report = rebind_contract(store, project, TASK, force=evidence == "changed", validate=evidence == "valid")
+
+    expected = stage if evidence == "valid" else Stage.VALIDATE
+    assert report["stage"] == store.get_task(TASK)["stage"] == expected
+    assert report["stage_reset"] is (evidence != "valid")
+    assert report["digest_changed"] is (evidence == "changed")
+    assert events(store, "task.contract_rebound")[-1]["stage_reset"] is (evidence != "valid")
+    if evidence == "valid":
+        assert report["validation"]["ran"] is False
+    else:
+        assert events(store, "task.advance")[-1]["stage"] == Stage.VALIDATE
+    if evidence == "changed":
+        assert store.has_bound_evidence(TASK, sha, EvidenceKind.VALIDATION, bound.digest, EvidenceStatus.PASSED)
+        assert not store.has_bound_evidence(TASK, sha, EvidenceKind.VALIDATION, report["new_digest"], EvidenceStatus.PASSED)
+
+
+@pytest.mark.parametrize("stage", [Stage.REVIEW, Stage.INTEGRATE])
+@pytest.mark.parametrize("changed", [False, True])
+@pytest.mark.parametrize("exit_code", [0, 1])
+def test_rebind_validate_runs_current_gates_before_review(tmp_path: Path, stage: Stage, changed: bool, exit_code: int) -> None:
+    marker = tmp_path / "gate-ran.txt"
+    current = {
+        **DOCS_CONTRACT,
+        "required_tests": [{"name": "docs-static", "command": [PY, "-c", f"from pathlib import Path; Path({str(marker)!r}).write_text('ran'); raise SystemExit({exit_code})"]}],
+    }
+    project, store, _, sha = frozen_task_with_candidate(tmp_path, DOCS_CONTRACT if changed else current)
+    if changed:
+        assert Validator().validate(store, TASK, sha, project) is EvidenceStatus.PASSED
+        write_contract(project, current)
+    store.advance_task(TASK, stage)
+
+    report = rebind_contract(store, project, TASK, force=changed, validate=True)
+
+    assert marker.read_text() == "ran"
+    assert report["stage_reset"] is True
+    assert report["validation"]["ran"] is True
+    assert report["validation"]["advanced"] is (exit_code == 0)
+    assert report["stage"] == (Stage.REVIEW if exit_code == 0 else Stage.VALIDATE)
+    status = EvidenceStatus.PASSED if exit_code == 0 else EvidenceStatus.FAILED
+    assert report["validation"]["status"] == status
+    assert store.has_bound_evidence(TASK, sha, EvidenceKind.VALIDATION, report["new_digest"], status)
+
+
 def test_rebind_refuses_missing_or_invalid_contract_file(tmp_path: Path) -> None:
     project, store, _, _ = frozen_task_with_candidate(tmp_path)
     (project / ".stagemesh" / "contracts" / f"{TASK}.json").write_text("{not json", encoding="utf-8")
