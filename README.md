@@ -330,6 +330,9 @@ findings, evidence or audit events, and write an audit event (`task.contract_reb
   Passed evidence needs `--force` to stop counting and is retained as history. The current candidate must pass fresh validation
   and review under the new hash; review requirements cannot pass via the builtin fallback. Only a fresh passed validation
   resolves prior parser-error findings, never substantive code or review findings. `--plan` runs no checks or providers.
+  Older missing-program failures caused by executing the explicitly reclassified prose are resolved only after fresh
+  independent review passes, with matching candidate, old/new contract hashes, original command and audit provenance.
+  Unrelated gate failures and real code/review findings remain open.
 * `stagemesh rebaseline-task --task <id> --to <integration-ref> [--validate] [--force] [--json]` moves a stale baseline to the
   candidate's merge-base with the integration ref, removing files integrated by other work from the task diff. It refuses when the
   baseline is not stale, the candidate is already integrated, or the history is ambiguous (`--force` only overrides the ambiguous

@@ -6,8 +6,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from .audit import record_audit
 from .contract_binding import contract_for_candidate
-from .contracts import ContractError, contract_prompt, declarative_invariants, evaluate_contract
+from .contracts import ContractError, _split_command, contract_prompt, declarative_invariants, evaluate_contract
 from .domain import EvidenceKind, EvidenceStatus, ExecutionKind, ExecutionStatus
 from .persistence import Store
 from .process_identity import owner_execution_fields
@@ -24,6 +25,55 @@ class ReviewFinding:
 
 INFRASTRUCTURE_FAILURE = "INFRASTRUCTURE_FAILURE"
 MAX_REVIEW_EXECUTION_RESULT_CHARS = 200
+
+
+def _resolve_classified_prose_failures(store: Store, task_id: str, sha: str, payload: dict, review_id: str) -> None:
+    """Only an actual independent review can retire obsolete legacy prose execution failures."""
+    digest = payload.get("contract_hash")
+    if not (payload.get("independent_reviewer") and payload.get("review_execution_invoked") and digest
+            and store.has_bound_evidence(task_id, sha, EvidenceKind.VALIDATION, digest, EvidenceStatus.PASSED)):
+        return
+    row = store.conn.execute(
+        "SELECT payload FROM audit_events WHERE event_type='task.contract_rebound' "
+        "AND json_extract(payload, '$.task_id')=? AND json_extract(payload, '$.candidate_sha')=? "
+        "AND json_extract(payload, '$.new_digest')=? ORDER BY rowid DESC LIMIT 1", (task_id, sha, digest),
+    ).fetchone()
+    if row is None:
+        return
+    repair = json.loads(row["payload"])
+    if not repair.get("old_digest") or repair["old_digest"] == digest:
+        return
+    selected = {}
+    for item in repair.get("invariant_classification", []):
+        if item.get("kind") != "review" or item.get("replacement") not in payload.get("review_invariants", []):
+            continue
+        try:
+            selected[f"invariant:{item['original']} failed"] = _split_command(item["original"])
+        except (KeyError, ValueError):
+            continue
+    for previous in store.conn.execute(
+        "SELECT id, payload FROM evidence WHERE task_id=? AND candidate_sha=? AND kind='VALIDATION' AND status='FAILED'",
+        (task_id, sha),
+    ).fetchall():
+        failed = json.loads(previous["payload"])
+        if failed.get("contract_hash") != repair["old_digest"]:
+            continue
+        for item in failed.get("findings", []):
+            message = item.get("message", "")
+            if not (item.get("code") == "gate_failed" and message in selected
+                    and item.get("command") == selected[message] and item.get("failure_kind") == "environment"
+                    and item.get("returncode") is None):
+                continue
+            identity = finding_identity(sha, message, item.get("path"))
+            finding = store.get_finding(identity)
+            if finding is not None and finding["status"] == "OPEN" and finding["task_id"] == task_id:
+                store.close_finding(identity)
+                record_audit(store, "contract.obsolete_gate_finding_resolved", {
+                    "task_id": task_id, "candidate_sha": sha, "contract_hash": digest, "old_digest": repair["old_digest"],
+                    "finding_id": identity, "previous_evidence_id": previous["id"], "review_evidence_id": review_id,
+                    "review_provider": payload.get("review_provider"),
+                    "reason": "explicitly classified legacy prose passed fresh validation and independent review",
+                })
 
 # The strict final verdict vocabulary. "FAIL" is accepted as a legacy alias of FAIL_WITH_FINDINGS and is held to the same rules.
 VERDICT_PASS = "PASS"
@@ -529,7 +579,8 @@ class Reviewer:
                 )
                 finish_running(ExecutionStatus.FAILED, actor=reviewer_provider, result="findings")
                 return EvidenceStatus.FAILED
-            store.add_evidence(task_id, candidate_sha, EvidenceKind.REVIEW, EvidenceStatus.PASSED, review_payload)
+            review_id = store.add_evidence(task_id, candidate_sha, EvidenceKind.REVIEW, EvidenceStatus.PASSED, review_payload)
+            _resolve_classified_prose_failures(store, task_id, candidate_sha, review_payload, review_id)
             finish_running(ExecutionStatus.SUCCEEDED, actor=reviewer_provider)
             return EvidenceStatus.PASSED
         except BaseException as exc:

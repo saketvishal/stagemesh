@@ -169,7 +169,8 @@ def test_prose_constraints_require_actual_review_and_reach_reviewer(tmp_path):
         store.close()
 
 
-def test_repaired_legacy_contract_needs_fresh_validation_and_independent_review(tmp_path):
+@pytest.mark.parametrize("matching_history", [True, False])
+def test_repaired_legacy_contract_needs_fresh_validation_and_independent_review(tmp_path, matching_history):
     from stagemesh.contracts import bound_contract_from_record
     from stagemesh.recovery import rebind_contract
     from stagemesh.remediation import finding_identity
@@ -187,16 +188,36 @@ def test_repaired_legacy_contract_needs_fresh_validation_and_independent_review(
         invalid_id = finding_identity(sha, invalid_message)
         real_id = finding_identity(sha, "Real review finding must remain open")
         store.upsert_finding(real_id, task_id, sha, "error", "Real review finding must remain open")
+        legacy_message = f"invariant:{original} failed"
+        legacy_id = finding_identity(sha, legacy_message)
+        store.upsert_finding(legacy_id, task_id, sha, "error", legacy_message)
+        store.add_evidence(task_id, sha, EvidenceKind.VALIDATION, EvidenceStatus.FAILED, {
+            "contract_hash": binding["digest"] if matching_history else "unrelated-contract",
+            "findings": [{"code": "gate_failed", "message": legacy_message, "command": original.split(),
+                          "returncode": None, "failure_kind": "environment"}],
+        })
         report = rebind_contract(store, project, task_id, review_invariants=(1,), reason="Keep the legacy requirement under explicit review")
         assert store.get_finding(invalid_id)["status"] == "OPEN"
         assert Validator().validate(store, task_id, sha, project) is EvidenceStatus.PASSED
         assert store.get_finding(invalid_id)["status"] == "RESOLVED"
         assert store.get_finding(real_id)["status"] == "OPEN"
         assert Reviewer().review(store, task_id, sha, project) is EvidenceStatus.CAPACITY
+        assert store.get_finding(legacy_id)["status"] == "OPEN"
         bound = bound_contract_from_record(dict(store.contract_binding(task_id, sha)))
         assert bound.digest == report["new_digest"] != binding["digest"]
         assert bound.contract.invariants == ("review: " + original,)
         assert evidence(store, task_id, sha, EvidenceKind.VALIDATION)["review_invariants"] == ["review: " + original]
         assert not store.has_bound_evidence(task_id, sha, EvidenceKind.REVIEW, bound.digest, EvidenceStatus.PASSED)
+
+        class Adapter:
+            name = "independent-reviewer"
+
+            def review(self, prompt):
+                assert "review: " + original in prompt
+                return '{"decision":"PASS"}'
+
+        assert Reviewer(adapter=Adapter(), require_independent=True).review(store, task_id, sha, project) is EvidenceStatus.PASSED
+        assert store.get_finding(legacy_id)["status"] == ("RESOLVED" if matching_history else "OPEN")
+        assert store.get_finding(real_id)["status"] == "OPEN"
     finally:
         store.close()
