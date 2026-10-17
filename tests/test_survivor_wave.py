@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import threading
 import time
@@ -37,6 +38,10 @@ def make_store(tmp_path: Path, ids: list[str]) -> tuple[Store, Path]:
     cli_module._sync_all_sources(store, project, cli_module.load_config(project), None)
     for task_id in ids:
         store.set_task_baseline(task_id, OLD)
+        path = project / ".stagemesh/contracts" / f"{task_id}.json"
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["allowed_files"] = [f"docs/{task_id}.md"]
+        path.write_text(json.dumps(payload), encoding="utf-8")
     return store, project
 
 
@@ -117,6 +122,7 @@ def test_finished_batch_defers_publication_after_deadline(tmp_path: Path) -> Non
 
 def test_publication_commands_are_bounded_and_stop_at_deadline(tmp_path: Path, monkeypatch) -> None:
     import subprocess
+
     from stagemesh import survivor_wave
 
     now = [100.0]
@@ -978,3 +984,41 @@ def test_deferred_publication_never_clears_unknown_running_ownership(tmp_path: P
     assert rig.prs == [] and not report.tasks[0].ready_for_merge
     assert len(list(store.running_executions())) == 1
     assert store.get_task("T-1")["stage"] == Stage.DONE
+
+
+def test_survivor_wave_serializes_exclusive_resource_conflicts(tmp_path: Path) -> None:
+    from stagemesh.contracts import ChangeContract, canonical_contract_json
+
+    task_ids = ["task-242", "task-270", "task-300"]
+    store, project = make_store(tmp_path, task_ids)
+
+    # Bind contracts: 242 and 270 share exclusive resource; 300 does not
+    c242 = ChangeContract(objective="task 242", explicit=True, exclusive_resources=("shared-browser-port",))
+    c270 = ChangeContract(objective="task 270", explicit=True, exclusive_resources=("shared-browser-port",))
+    c300 = ChangeContract(objective="task 300", explicit=True, exclusive_resources=())
+
+    for tid, contract in [("task-242", c242), ("task-270", c270), ("task-300", c300)]:
+        canonical = canonical_contract_json(contract)
+        store.bind_task_contract(tid, OLD, 1, hashlib.sha256(canonical.encode()).hexdigest(), canonical)
+
+    active_tasks: set[str] = set()
+    overlaps: list[tuple[str, str]] = []
+    lock = threading.Lock()
+
+    def work(rig, task_id):
+        with lock:
+            if "task-242" in active_tasks and task_id == "task-270":
+                overlaps.append(("task-242", "task-270"))
+            if "task-270" in active_tasks and task_id == "task-242":
+                overlaps.append(("task-270", "task-242"))
+            active_tasks.add(task_id)
+        time.sleep(0.05)
+        with lock:
+            active_tasks.remove(task_id)
+        return rig.finish_done(task_id)
+
+    rig = Rig(project, {"task-242": work, "task-270": work, "task-300": work})
+    report = run_wave(store, task_ids, rig.hooks(), concurrency=2, project=project)
+
+    assert overlaps == [], "Tasks sharing exclusive resource ran concurrently!"
+    assert all(task.outcome == "done" for task in report.tasks)

@@ -42,6 +42,7 @@ from .workspace_guard import (
 )
 from .workspaces import (
     NO_IMPLEMENTATION_CHANGE,
+    WorkspaceEnvironmentError,
     commit_implementation_candidate,
     record_task_baseline,
 )
@@ -156,6 +157,8 @@ class RuntimeCommandAdapter:
                 return self._execute_owned(store, task_id, claim_id, project, lease)
         except WorkspaceMutation:
             return ExecutionResult(ExecutionStatus.FAILED, failure_reason=EXTERNAL_WORKSPACE_MUTATION)
+        except WorkspaceEnvironmentError as exc:
+            return ExecutionResult(ExecutionStatus.FAILED, failure_reason=str(exc))
 
     def _execute_owned(self, store: Store, task_id: str, claim_id: str | None, project: Path, lease: WorkspaceLease) -> ExecutionResult:
         run_path = lease.path

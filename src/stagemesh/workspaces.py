@@ -19,6 +19,10 @@ _GENERATION_DIR = re.compile(r"^[0-9a-f]{12}-g\d+$")
 _WORKTREE_CREATION = threading.Lock()
 
 
+class WorkspaceEnvironmentError(GitError):
+    """A worktree must not be handed to a provider without its declared dependencies."""
+
+
 def _task_key(task_id: str) -> str:
     return hashlib.sha1(task_id.encode("utf-8")).hexdigest()[:12]
 
@@ -72,17 +76,25 @@ def prepare_task_workspace(project: Path, task_id: str) -> Path:
             f"{target} overlaps {root}"
         )
     with _WORKTREE_CREATION:
-        if target.exists() and (target / ".git").exists():
-            return target
-        if target.exists():
-            shutil.rmtree(target, ignore_errors=True)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        workspace.run("worktree", "add", "--detach", str(target), "HEAD")
+        if not (target.exists() and (target / ".git").exists()):
+            if target.exists():
+                shutil.rmtree(target, ignore_errors=True)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            workspace.run("worktree", "add", "--detach", str(target), "HEAD")
         if not target.exists() or not (target / ".git").exists():
             raise GitError(f"git worktree was not created at {target}")
         # Deliberately no `git config user.*` here: a worktree shares the repository config, so writing one would replace the owner's
         # identity in their real checkout. Commits resolve their identity per command (git_identity).
     return target
+
+
+def prepare_task_environment(project: Path, task_id: str, target: Path) -> None:
+    from .candidate_environments import prepare_candidate_environments
+
+    try:
+        prepare_candidate_environments(project, target)
+    except Exception as exc:
+        raise WorkspaceEnvironmentError(f"candidate_environment_unavailable: task {task_id}: {exc}") from exc
 
 
 def remove_task_workspace(project: Path, task_id: str) -> None:
@@ -273,7 +285,9 @@ NO_IMPLEMENTATION_CHANGE = "no_implementation_change"
 
 def record_task_baseline(store: Store, task_id: str, run_path: Path) -> str:
     """Capture the task's starting SHA before the first provider run; it never changes afterwards."""
-    from .autonomy.hooks import workspace_handed_to_execution  # opt-in supervisor; a no-op unless the project enabled it
+    from .autonomy.hooks import (
+        workspace_handed_to_execution,  # opt-in supervisor; a no-op unless the project enabled it
+    )
 
     workspace_handed_to_execution(store, task_id, run_path)
     existing = store.task_baseline(task_id)
@@ -291,7 +305,9 @@ def commit_implementation_candidate(
     attribution: GitAttribution | None = None,
 ) -> str | None:
     """Commit the worktree and return the candidate SHA, or None when it is not a real new change."""
-    from .autonomy.hooks import before_candidate_commit  # opt-in supervisor; a no-op unless the project enabled it
+    from .autonomy.hooks import (
+        before_candidate_commit,  # opt-in supervisor; a no-op unless the project enabled it
+    )
 
     before_candidate_commit(store, task_id, run_path)  # a second writer's commit is never adopted into the candidate
     workspace = GitWorkspace(run_path)

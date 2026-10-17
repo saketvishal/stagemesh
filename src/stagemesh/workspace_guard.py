@@ -679,6 +679,9 @@ def acquire_workspace(store: Store, project: Path, task_id: str, kind: str, *, c
     try:
         lease = WorkspaceLease(store, task_id, kind, path, gitdir, token, claim_id, recovered)
         _establish(lease, existed)
+        from .workspaces import prepare_task_environment
+
+        prepare_task_environment(root, task_id, path)
         return lease
     except BaseException:
         if lease is not None:

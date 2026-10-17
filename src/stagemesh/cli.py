@@ -1019,6 +1019,7 @@ def command_survivor_wave(args: argparse.Namespace) -> int:
             stop_on_blocked=args.stop_on_blocked,
             integration_mode=args.integration,
             staging_ref=staging_ref,
+            project=project,
         )
     finally:
         store.close()

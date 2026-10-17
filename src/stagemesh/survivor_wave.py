@@ -30,6 +30,15 @@ from pathlib import Path
 from typing import Any
 
 from .audit import record_audit
+from .concurrency import contract_conflict
+from .contracts import (
+    ChangeContract,
+    ContractError,
+    bound_contract_from_record,
+    contract_admission_problem,
+    parse_contract,
+    task_contract_path,
+)
 from .domain import EvidenceKind, Stage, TaskStatus
 from .objective_roots import objective_root_reason
 from .persistence import Store
@@ -370,6 +379,26 @@ def ordered_candidate_records(records: list[TaskRecord], is_ancestor: Callable[[
     return ordered
 
 
+def load_wave_contract(store: Store, project: Path | None, task_id: str) -> ChangeContract:
+    record = store.task_contract(task_id)
+    try:
+        if record is not None:
+            contract = bound_contract_from_record(dict(record)).contract
+        elif project is not None:
+            path = task_contract_path(project, task_id)
+            if path is None:
+                raise ContractError("task-specific contract is missing")
+            contract = parse_contract(json.loads(path.read_text(encoding="utf-8")))
+        else:
+            raise ContractError("cannot locate task-specific contract")
+        problem = contract_admission_problem(contract)
+        if not contract.explicit or problem:
+            raise ContractError(problem or "task-specific contract must be explicit")
+        return contract
+    except (OSError, ValueError, ContractError, KeyError, IndexError) as exc:
+        raise ContractError(f"cannot safely schedule task {task_id}: {exc}") from exc
+
+
 def run_wave(
     store: Store,
     task_ids: list[str],
@@ -386,6 +415,7 @@ def run_wave(
     deadline: float | None = None,
     clock: Callable[[], float] = time.time,
     ordered_publication: bool = False,
+    project: Path | None = None,
 ) -> WaveReport:
     """Run `task_ids` with at most `concurrency` running at once. The store is only touched from the calling thread."""
     if integration_mode not in INTEGRATION_MODES:
@@ -400,8 +430,33 @@ def run_wave(
     )
     report.orphan_events_after = report.orphan_events_before
     main_before = hooks.main_sha() if not local else None
+    if project is None:
+        project = getattr(hooks, "project", None)
+    if project is None and getattr(store, "db_path", None) and str(store.db_path) != ":memory:":
+        try:
+            db_p = Path(store.db_path).resolve()
+            if db_p.parent.name == ".stagemesh":
+                project = db_p.parent.parent
+        except Exception:
+            pass
+    cached_contracts: dict[str, ChangeContract] = {}
+
+    def _contract(tid: str) -> ChangeContract:
+        if tid not in cached_contracts:
+            cached_contracts[tid] = load_wave_contract(store, project, tid)
+        return cached_contracts[tid]
+
     control = QueueStopControl(store)
     eligible, skipped = select_eligible(store, task_ids)
+    safe = []
+    for task_id in eligible:
+        try:
+            _contract(task_id)
+        except ContractError as exc:
+            skipped[task_id] = f"invalid_contract: {exc}"
+        else:
+            safe.append(task_id)
+    eligible = safe
     records = {task_id: TaskRecord(task_id, title=str((store.get_task(task_id) or {"title": ""})["title"])) for task_id in task_ids}
     for task_id, reason in skipped.items():
         records[task_id].outcome, records[task_id].reason = "skipped", reason
@@ -443,7 +498,21 @@ def run_wave(
                 if deadline is not None and clock() >= deadline:
                     report.time_limit_reached = True
                     break
-                task_id = pending.pop(0)
+                chosen_idx: int | None = None
+                for idx, candidate_id in enumerate(pending):
+                    cand_contract = _contract(candidate_id)
+                    conflict = False
+                    for running_id in running.values():
+                        running_contract = _contract(running_id)
+                        if contract_conflict(cand_contract, running_contract) is not None:
+                            conflict = True
+                            break
+                    if not conflict:
+                        chosen_idx = idx
+                        break
+                if chosen_idx is None:
+                    break
+                task_id = pending.pop(chosen_idx)
                 started_at[task_id] = clock()
                 running[pool.submit(hooks.run_task, task_id, max_steps)] = task_id
             if not running:
