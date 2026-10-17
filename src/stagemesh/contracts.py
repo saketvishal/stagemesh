@@ -174,6 +174,10 @@ def contract_admission_problem(contract: ChangeContract) -> str | None:
     discard that metadata, and renaming the placeholder must not make it executable.
     Structural parsing stays separate so historical contracts remain readable.
     """
+    try:
+        invariant_gates(contract)
+    except ContractError as exc:
+        return f"invalid invariant: {exc}; classify legacy requirements explicitly with rebind-contract --review-invariant INDEX or --command-invariant INDEX"
     # A concrete edit target must not also be immutable. Broad allow patterns
     # may legitimately contain protected exceptions, so do not reject those.
     for path in contract.allowed_files:
@@ -244,7 +248,10 @@ def bound_contract_from_record(record: dict[str, Any]) -> BoundChangeContract:
     actual = hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
     if actual != digest:
         raise ContractError("bound contract hash does not match payload")
-    payload = json.loads(canonical_json)
+    try:
+        payload = json.loads(canonical_json)
+    except ValueError as exc:
+        raise ContractError("bound contract payload is not valid JSON") from exc
     contract = parse_contract(payload)
     return BoundChangeContract(
         contract=contract,

@@ -318,6 +318,21 @@ findings, evidence or audit events, and write an audit event (`task.contract_reb
   supported version, never copied from the old row (this repairs `unsupported bound contract version: 2`). It refuses when passed
   evidence bound to the old contract would stop counting, unless `--force` (the evidence is kept). `--validate` validates the
   latest candidate and advances the task if it passes.
+  Invalid invariants are refused before implementation, validation or review provider calls; they are not code-remediation work.
+  Legacy strings are never guessed to be prose. To classify selected requirements, use repeatable one-based
+  `--review-invariant INDEX` or `--command-invariant INDEX` with `--reason`. First add `--plan` to preview the exact
+  original text, new hash and evidence invalidation. Classification uses the verified frozen contract when present,
+  adds only the selected type prefixes, preserves all other requirements and gates, and never edits contract files.
+  Recognized executable checks cannot be downgraded to review. Unselected ambiguous invariants still refuse admission.
+  Applying the plan snapshots the exact original payload, new canonical contract and each explicit classification in
+  a durable authorization event before any binding write, followed by a completion event. Unknown contract fields
+  refuse classification rather than risk losing requirements.
+  Passed evidence needs `--force` to stop counting and is retained as history. The current candidate must pass fresh validation
+  and review under the new hash; review requirements cannot pass via the builtin fallback. Only a fresh passed validation
+  resolves prior parser-error findings, never substantive code or review findings. `--plan` runs no checks or providers.
+  Older missing-program failures caused by executing the explicitly reclassified prose are resolved only after fresh
+  independent review passes, with matching candidate, old/new contract hashes, original command and audit provenance.
+  Unrelated gate failures and real code/review findings remain open.
 * `stagemesh rebaseline-task --task <id> --to <integration-ref> [--validate] [--force] [--json]` moves a stale baseline to the
   candidate's merge-base with the integration ref, removing files integrated by other work from the task diff. It refuses when the
   baseline is not stale, the candidate is already integrated, or the history is ambiguous (`--force` only overrides the ambiguous

@@ -25,6 +25,8 @@ from .git import GitError, GitWorkspace
 from .persistence import Store
 from .provider_acceptance import live_provider_readiness
 from .provider_cooldown import (
+    DEFAULT_FAILURE_COOLDOWN_SECONDS,
+    DEFAULT_QUOTA_COOLDOWN_SECONDS,
     NO_PROGRESS_THRESHOLD,
     REPEATED_NO_PROGRESS,
     cleared_at,
@@ -52,8 +54,6 @@ REVIEW = "REVIEW"
 STAGE_CAPABILITY = {IMPLEMENT: "code", REVIEW: "review"}
 DEFAULT_PROVIDER_ORDER = BUILTIN_PROVIDERS  # built-ins sort ahead of custom providers when no priority says otherwise
 DEFAULT_PRIORITY = 100
-DEFAULT_FAILURE_COOLDOWN_SECONDS = 900.0
-DEFAULT_QUOTA_COOLDOWN_SECONDS = 21600.0
 PROVIDER_FAILURE_EVENT = "provider.failure"
 PROVIDER_SELECTION_EVENT = "provider.selection"
 PROVIDER_USED_EVENT = "provider.used"

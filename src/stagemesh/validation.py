@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from pathlib import Path
 
+from .audit import record_audit
 from .contract_binding import contract_for_candidate
 from .contracts import (
     ContractError,
@@ -34,6 +36,7 @@ class Validator:
             actor="stagemesh-validator",
             **owner_execution_fields(),
         )
+        bound = None
         try:
             bound = contract_for_candidate(store, task_id, candidate_sha, project)
             contract = bound.contract
@@ -108,7 +111,9 @@ class Validator:
             }
         except ContractError as exc:
             status = EvidenceStatus.FAILED
-            payload = {"validator": "contract", "findings": [{"code": "invalid_contract", "message": str(exc)}]}
+            payload = {"validator": "contract", **(bound.evidence_payload() if bound else {}),
+                       "findings": [{"code": "invalid_contract", "message": str(exc)}]}
+        store.add_evidence(task_id, candidate_sha, EvidenceKind.VALIDATION, status, payload)
         if status is EvidenceStatus.FAILED:
             for item in payload.get("findings", []):
                 message = str(item.get("message", "validation failed"))
@@ -119,7 +124,24 @@ class Validator:
                     str(item.get("severity", "error")),
                     message,
                 )
-        store.add_evidence(task_id, candidate_sha, EvidenceKind.VALIDATION, status, payload)
+        elif status is EvidenceStatus.PASSED:
+            # Only a fresh passed validation can supersede old parser errors.
+            # Other validation/review findings remain open for actual remediation.
+            for previous in store.conn.execute(
+                "SELECT id, payload FROM evidence WHERE task_id=? AND candidate_sha=? AND kind='VALIDATION' AND status='FAILED'",
+                (task_id, candidate_sha),
+            ).fetchall():
+                for item in json.loads(previous["payload"]).get("findings", []):
+                    if item.get("code") != "invalid_contract":
+                        continue
+                    identity = finding_identity(candidate_sha, str(item.get("message", "")), item.get("path"))
+                    if any(str(f["id"]) == identity for f in store.open_findings_for_candidate(task_id, candidate_sha)):
+                        store.close_finding(identity)
+                        record_audit(store, "contract.invalid_finding_resolved", {
+                            "task_id": task_id, "candidate_sha": candidate_sha, "finding_id": identity,
+                            "previous_evidence_id": previous["id"], **bound.evidence_payload(),
+                            "reason": "fresh validation passed the explicitly repaired contract",
+                        })
         store.finish_execution(
             execution_id,
             ExecutionStatus.SUCCEEDED if status is EvidenceStatus.PASSED else ExecutionStatus.FAILED,

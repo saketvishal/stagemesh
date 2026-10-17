@@ -671,12 +671,29 @@ def run_window(
         report.preflight.append(Check("prior_prs", owned,
             "no prior wave PR, or an owned evidenced candidate chain to resume" if owned else
             "prior PR is ambiguous, unowned, blocked or outside the selected tasks; resolve it before proceeding"))
-    if prepare_staging is not None and not local and all(check.ok or not check.fatal for check in report.preflight):
+    if prepare_staging is not None and not local and all(check.name == "providers" or check.ok or not check.fatal for check in report.preflight):
         try:
             prepare_staging()
             report.preflight.append(Check("staging", True, f"{staging_ref or STAGING_REF} is ready for this window"))
         except RuntimeError as exc:
             report.preflight.append(Check("staging", False, str(exc), fix="merge or delete the old wave/staging branch, then rerun"))
+    # Refresh only after every non-provider admission check has passed. Plans and
+    # diagnostics use preflight alone and never spend provider calls.
+    if provider_check is provider_pool_check and all(
+        check.name == "providers" or check.ok or not check.fatal for check in report.preflight
+    ):
+        from .provider_acceptance import refresh_expired_quota_checks
+        from .providers import adapters_from_config
+
+        try:
+            refresh_expired_quota_checks(
+                store, project, adapters_from_config(config), deadline=deadline,
+                should_stop=control.blocks_admission, clock=clock,
+            )
+            refreshed = provider_check(store, config, strict_live=options.strict_live)
+        except Exception as exc:
+            refreshed = Check("providers", False, f"provider recheck unavailable: {type(exc).__name__}", fix="stagemesh capacity")
+        report.preflight = [refreshed if check.name == "providers" else check for check in report.preflight]
     failed = [check for check in report.preflight if not check.ok and check.fatal]
     if failed:
         report.refused = True

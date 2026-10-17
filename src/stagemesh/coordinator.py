@@ -7,9 +7,9 @@ from typing import Any
 
 from .audit import record_audit
 from .baseline import resolve_integration_ref
-from .block_kinds import block_kind_for, record_block, runtime_fingerprint
+from .block_kinds import BlockKind, block_kind_for, record_block, runtime_fingerprint
 from .contract_binding import contract_for_candidate
-from .contracts import _matches
+from .contracts import _matches, task_contract_path
 from .diagnosis import (
     CONTRACT_SCOPE,
     DIAGNOSIS_EVENT,
@@ -68,6 +68,7 @@ from .remediation_recovery import (
 from .review import Reviewer, independent_review_verified
 from .scheduling import Scheduler
 from .task_completion import record_task_owner_state
+from .task_selection import contract_state
 from .validation import Validator
 from .workspace_guard import (
     EXTERNAL_WORKSPACE_MUTATION,
@@ -208,6 +209,13 @@ class Coordinator:
         if task is None:
             return 0
         stage = Stage(task["stage"])
+        if self.store.task_contract(task_id) is not None or task_contract_path(self.project, task_id) is not None:
+            state = contract_state(self.store, self.project, task_id, auto_plan=False)
+            if state != "valid":
+                record_block(self.store, task_id, BlockKind.HUMAN_DECISION,
+                    f"invalid_contract: {state}; code remediation cannot change the frozen contract",
+                    stage=str(stage), detail={"failure_code": "invalid_contract"})
+                return 1
         if stage is Stage.PLAN:
             self.store.advance_task(task_id, Stage.IMPLEMENT)
             record_audit(self.store, "task.advance", {"task_id": task_id, "stage": Stage.IMPLEMENT})
@@ -699,6 +707,23 @@ class Coordinator:
         return True
 
     def _remediate_or_block(self, task_id: str, sha: str, failed_stage: Stage) -> int:
+        kind = {Stage.VALIDATE: EvidenceKind.VALIDATION, Stage.REVIEW: EvidenceKind.REVIEW,
+                Stage.INTEGRATE: EvidenceKind.INTEGRATION}[failed_stage]
+        evidence = self.store.conn.execute(
+            "SELECT payload FROM evidence WHERE task_id=? AND candidate_sha=? AND kind=? ORDER BY rowid DESC LIMIT 1",
+            (task_id, sha, kind),
+        ).fetchone()
+        if evidence is not None:
+            try:
+                invalid = next((item for item in json.loads(evidence["payload"]).get("findings", [])
+                                if item.get("code") == "invalid_contract"), None)
+            except (TypeError, ValueError):
+                invalid = None
+            if invalid is not None:
+                record_block(self.store, task_id, BlockKind.HUMAN_DECISION,
+                    f"invalid_contract: {invalid.get('message', 'contract repair required')}; no implementation retry",
+                    stage=str(failed_stage), candidate_sha=sha, detail={"failure_code": "invalid_contract"})
+                return 1
         findings = self.store.open_findings_for_candidate(task_id, sha)
         if not findings:
             self.store.upsert_finding(
