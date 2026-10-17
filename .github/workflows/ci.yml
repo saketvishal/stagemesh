@@ -21,7 +21,7 @@ jobs:
       - name: Declarative and executable contract invariants
         run: .stagemesh\tooling\venv\Scripts\python.exe -m pytest -q tests/test_invariant_semantics.py
       - name: Delivery and window regressions
-        run: .stagemesh\tooling\venv\Scripts\python.exe -m pytest -q tests/test_fast_forward.py tests/test_run_window.py tests/test_survivor_wave.py tests/test_contract_admission.py tests/test_controlled_merge.py tests/test_candidate_environments.py tests/test_autonomy_merge_policy.py tests/test_operator_stop.py
+        run: .stagemesh\tooling\venv\Scripts\python.exe -m pytest -q tests/test_fast_forward.py tests/test_run_window.py tests/test_survivor_wave.py tests/test_contract_admission.py tests/test_controlled_merge.py tests/test_candidate_environments.py tests/test_workspace_environment_repair.py tests/test_autonomy_merge_policy.py tests/test_operator_stop.py
       - name: Isolated validation temporary directories
         run: .stagemesh\tooling\venv\Scripts\python.exe -m pytest -q tests/test_gate_temp_isolation.py
       - name: Missing provider tool host
@@ -52,7 +52,7 @@ jobs:
       - name: Declarative and executable contract invariants
         run: .stagemesh/tooling/venv/bin/python -m pytest -q tests/test_invariant_semantics.py
       - name: Delivery and window regressions
-        run: .stagemesh/tooling/venv/bin/python -m pytest -q tests/test_fast_forward.py tests/test_run_window.py tests/test_survivor_wave.py tests/test_contract_admission.py tests/test_controlled_merge.py tests/test_candidate_environments.py tests/test_autonomy_merge_policy.py tests/test_operator_stop.py
+        run: .stagemesh/tooling/venv/bin/python -m pytest -q tests/test_fast_forward.py tests/test_run_window.py tests/test_survivor_wave.py tests/test_contract_admission.py tests/test_controlled_merge.py tests/test_candidate_environments.py tests/test_workspace_environment_repair.py tests/test_autonomy_merge_policy.py tests/test_operator_stop.py
       - name: Isolated validation temporary directories
         run: .stagemesh/tooling/venv/bin/python -m pytest -q tests/test_gate_temp_isolation.py
       - name: Missing provider tool host

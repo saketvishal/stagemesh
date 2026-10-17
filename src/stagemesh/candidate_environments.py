@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import shutil
+import stat
 import subprocess
+import tempfile
+import time
 from pathlib import Path, PurePosixPath
 
 
@@ -28,32 +33,136 @@ def _relative(raw: object, expected_name: str = ".venv") -> Path:
     return Path(*path.parts)
 
 
-def _link_node_environment(source: Path, target: Path) -> None:
-    if os.name == "nt":
-        try:
-            import _winapi
+def _is_link(path: Path) -> bool:
+    if not os.path.lexists(path):
+        return False
+    return path.is_symlink() or bool(
+        getattr(path.lstat(), "st_file_attributes", 0)
+        & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    )
 
-            _winapi.CreateJunction(str(source), str(target))
-            return
-        except (ImportError, OSError):
-            pass
+
+def _marker(source: Path, declarations: Path, names: tuple[str, ...]) -> dict[str, str]:
+    digest = hashlib.sha256()
+    for name in names:
+        file = declarations / name
+        digest.update(name.encode() + b"\0")
+        digest.update(file.read_text(encoding="utf-8").encode() if file.exists() else b"<absent>")
+    return {"source": str(source), "declarations": digest.hexdigest()}
+
+
+def _managed(target: Path, expected: dict[str, str]) -> bool:
+    marker = target / ".stagemesh-environment.json"
     try:
-        target.symlink_to(source, target_is_directory=True)
-    except OSError:
-        if os.name == "nt":
-            subprocess.run(
-                ["cmd", "/c", "mklink", "/J", str(target), str(source)],
-                check=True,
-                capture_output=True,
-            )
-        else:
+        return not _is_link(marker) and json.loads(marker.read_text(encoding="utf-8")) == expected
+    except (OSError, ValueError):
+        return False
+
+
+def _write_marker(target: Path, marker: dict[str, str]) -> None:
+    destination = target / ".stagemesh-environment.json"
+    if _is_link(destination):
+        raise ValueError("candidate environment marker must not be a link")
+    fd, name = tempfile.mkstemp(prefix=".stagemesh-marker-", dir=target)
+    temporary = Path(name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as output:
+            json.dump(marker, output)
+        temporary.replace(destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _dependency_link(entry: Path, root: Path) -> Path:
+    try:
+        resolved = entry.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise ValueError(f"cannot resolve dependency link: {entry}") from exc
+    if not resolved.is_relative_to(root):
+        raise ValueError(f"dependency link escapes its environment: {entry}")
+    return resolved
+
+
+def _check_node_links(target: Path) -> None:
+    for directory, dirs, files in os.walk(target, followlinks=False):
+        for name in [*dirs, *files]:
+            entry = Path(directory) / name
+            if _is_link(entry):
+                _dependency_link(entry, target)
+                if name in dirs:
+                    dirs.remove(name)  # os.walk may otherwise follow Windows junctions
+
+
+def _probe_python(python: Path) -> dict:
+    result = subprocess.run(
+        [str(python), "-I", "-S", "-c",
+         "import json,sys; print(json.dumps({'version':list(sys.version_info[:3]),'base':sys.base_prefix}))"],
+        check=True, text=True, capture_output=True, timeout=30,
+    )
+    return json.loads(result.stdout)
+
+
+def _copy_node_environment(source: Path, target: Path, marker: dict[str, str]) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = Path(tempfile.mkdtemp(prefix=".stagemesh-node-", dir=target.parent))
+    links: list[tuple[Path, Path, bool]] = []
+
+    def skip_links(directory: str, names: list[str]) -> list[str]:
+        skipped = []
+        for name in names:
+            entry = Path(directory) / name
+            if _is_link(entry):
+                resolved = _dependency_link(entry, source)
+                links.append((entry.relative_to(source), resolved.relative_to(source), resolved.is_dir()))
+                skipped.append(name)
+        return skipped
+
+    try:
+        shutil.copytree(source, temporary, ignore=skip_links, dirs_exist_ok=True)
+        for relative, destination, is_dir in links:
+            link, private = temporary / relative, temporary / destination
+            if os.name == "nt" and is_dir:
+                continue  # junctions store absolute paths; create them after the atomic move
+            else:
+                link.symlink_to(os.path.relpath(private, link.parent), target_is_directory=is_dir)
+        if _is_link(target):
+            # Only the validated legacy alias is removed, never its source contents.
+            if target.resolve() != source:
+                raise ValueError("candidate environment changed during provisioning")
+            if target.is_symlink():
+                target.unlink()
+            else:
+                target.rmdir()
+        for attempt in range(6):
+            try:
+                temporary.rename(target)
+                break
+            except PermissionError:
+                if os.name != "nt" or attempt == 5:
+                    raise
+                time.sleep(0.1 * (attempt + 1))
+        try:
+            if os.name == "nt":
+                import _winapi
+                for relative, destination, is_dir in links:
+                    if is_dir:
+                        _winapi.CreateJunction(str(target / destination), str(target / relative))
+            _write_marker(target, marker)
+        except BaseException:
+            shutil.rmtree(target)
             raise
+    finally:
+        if temporary.exists():
+            shutil.rmtree(temporary)
 
 
 def prepare_candidate_environments(project: Path, checkout: Path) -> None:
+    project, checkout = Path(project).resolve(), Path(checkout).resolve()
     config = project / ".stagemesh/validation-environments.json"
     if not config.exists():
         return
+    if project == checkout:
+        raise ValueError("candidate environments require an isolated checkout")
     data = json.loads(config.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
         raise ValueError("invalid validation-environments configuration")
@@ -81,23 +190,9 @@ def prepare_candidate_environments(project: Path, checkout: Path) -> None:
             if target in targets:
                 raise ValueError("duplicate candidate environment target")
             targets.add(target)
-            if target.exists():
-                raise ValueError("refusing to replace an existing candidate environment")
             source_python = source / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
-            probe = subprocess.run(
-                [
-                    str(source_python),
-                    "-I",
-                    "-S",
-                    "-c",
-                    "import json,sys; print(json.dumps(list(sys.version_info[:2])))",
-                ],
-                check=True,
-                text=True,
-                capture_output=True,
-                timeout=30,
-            )
-            version = json.loads(probe.stdout)
+            identity = _probe_python(source_python)
+            version = identity["version"]
             packages = (
                 source
                 / (
@@ -144,8 +239,20 @@ def prepare_candidate_environments(project: Path, checkout: Path) -> None:
                     raise ValueError(
                         "candidate dependencies differ; install a matching environment explicitly"
                     )
-            plans.append((target, packages, source_python, version))
-        for target, packages, source_python, version in plans:
+            marker = _marker(source, checkout / source_rel.parent, ("pyproject.toml", "requirements.txt", "requirements-dev.txt", "uv.lock", "poetry.lock"))
+            marker["interpreter"] = json.dumps(identity, sort_keys=True)
+            if target.exists():
+                pth = target / ("Lib/site-packages" if os.name == "nt" else f"lib/python{version[0]}.{version[1]}/site-packages") / "stagemesh_dependencies.pth"
+                legacy = pth.parent.resolve().is_relative_to(target) and pth.is_file() and not _is_link(pth) and pth.read_text(encoding="utf-8") == str(packages) + "\n"
+                if not legacy:
+                    raise ValueError("refusing to replace an existing candidate environment")
+                target_python = target / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+                if _probe_python(target_python) != identity:
+                    raise ValueError("candidate environment interpreter differs from its source")
+                _write_marker(target, marker)
+                continue
+            plans.append((target, packages, source_python, version, marker))
+        for target, packages, source_python, version, marker in plans:
             # A private environment avoids junctions into the source tree. Only the
             # dependency search path is shared; source .pth files are never executed,
             # so editable installs cannot redirect imports to the operator checkout.
@@ -162,6 +269,7 @@ def prepare_candidate_environments(project: Path, checkout: Path) -> None:
                 else f"lib/python{version[0]}.{version[1]}/site-packages"
             )
             (purelib / "stagemesh_dependencies.pth").write_text(str(packages) + "\n", encoding="utf-8")
+            _write_marker(target, marker)
 
     if "node" in data:
         node_mapping = data["node"]
@@ -172,20 +280,19 @@ def prepare_candidate_environments(project: Path, checkout: Path) -> None:
             target_rel = _relative(raw_target, "node_modules")
             source_rel = _relative(raw_source, "node_modules")
             source = (project / source_rel).resolve()
-            target = (checkout / target_rel).resolve()
-            if not source.is_relative_to(project.resolve()) or not target.is_relative_to(
+            target = checkout / target_rel
+            legacy_link = _is_link(target) and target.resolve() == source
+            if not source.is_relative_to(project.resolve()) or not target.parent.resolve().is_relative_to(
                 checkout.resolve()
-            ):
+            ) or (_is_link(target) and not legacy_link):
                 raise ValueError("validation environment escapes its repository")
             if target in targets:
                 raise ValueError("duplicate candidate environment target")
             targets.add(target)
-            if target.exists():
-                raise ValueError("refusing to replace an existing candidate environment")
             if not source.is_dir():
                 raise ValueError("validation node dependency environment does not exist")
             for name in ("package.json", "package-lock.json", "npm-shrinkwrap.json"):
-                original, candidate = source.parent / name, checkout / source_rel.parent / name
+                original, candidate = source.parent / name, checkout / target_rel.parent / name
                 if original.exists() and not candidate.exists() and name in {"package-lock.json", "npm-shrinkwrap.json"}:
                     tracked = subprocess.run(
                         [
@@ -209,7 +316,12 @@ def prepare_candidate_environments(project: Path, checkout: Path) -> None:
                     raise ValueError(
                         "candidate dependencies differ; install a matching environment explicitly"
                     )
-            node_plans.append((source, target))
-        for source, target in node_plans:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            _link_node_environment(source, target)
+            marker = _marker(source, target.parent, ("package.json", "package-lock.json", "npm-shrinkwrap.json"))
+            if target.exists() and not legacy_link:
+                if not _managed(target, marker):
+                    raise ValueError("refusing to replace an existing candidate environment")
+                _check_node_links(target)
+                continue
+            node_plans.append((source, target, marker))
+        for source, target, marker in node_plans:
+            _copy_node_environment(source, target, marker)

@@ -31,7 +31,14 @@ from typing import Any
 
 from .audit import record_audit
 from .concurrency import contract_conflict
-from .contracts import ChangeContract, ContractError, parse_contract, task_contract_path
+from .contracts import (
+    ChangeContract,
+    ContractError,
+    bound_contract_from_record,
+    contract_admission_problem,
+    parse_contract,
+    task_contract_path,
+)
 from .domain import EvidenceKind, Stage, TaskStatus
 from .objective_roots import objective_root_reason
 from .persistence import Store
@@ -376,14 +383,20 @@ def load_wave_contract(store: Store, project: Path | None, task_id: str) -> Chan
     record = store.task_contract(task_id)
     try:
         if record is not None:
-            return parse_contract(json.loads(record["canonical_json"]))
-        if project is not None:
+            contract = bound_contract_from_record(dict(record)).contract
+        elif project is not None:
             path = task_contract_path(project, task_id)
-            if path is not None:
-                return parse_contract(json.loads(path.read_text(encoding="utf-8")))
-    except (OSError, ValueError, ContractError, KeyError, IndexError):
-        pass
-    return ChangeContract(objective=task_id)
+            if path is None:
+                raise ContractError("task-specific contract is missing")
+            contract = parse_contract(json.loads(path.read_text(encoding="utf-8")))
+        else:
+            raise ContractError("cannot locate task-specific contract")
+        problem = contract_admission_problem(contract)
+        if not contract.explicit or problem:
+            raise ContractError(problem or "task-specific contract must be explicit")
+        return contract
+    except (OSError, ValueError, ContractError, KeyError, IndexError) as exc:
+        raise ContractError(f"cannot safely schedule task {task_id}: {exc}") from exc
 
 
 def run_wave(
@@ -435,6 +448,15 @@ def run_wave(
 
     control = QueueStopControl(store)
     eligible, skipped = select_eligible(store, task_ids)
+    safe = []
+    for task_id in eligible:
+        try:
+            _contract(task_id)
+        except ContractError as exc:
+            skipped[task_id] = f"invalid_contract: {exc}"
+        else:
+            safe.append(task_id)
+    eligible = safe
     records = {task_id: TaskRecord(task_id, title=str((store.get_task(task_id) or {"title": ""})["title"])) for task_id in task_ids}
     for task_id, reason in skipped.items():
         records[task_id].outcome, records[task_id].reason = "skipped", reason

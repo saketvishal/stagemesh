@@ -22,6 +22,7 @@ from .remediation import remediation_context
 from .workspace_guard import EXTERNAL_WORKSPACE_MUTATION, WorkspaceMutation, owned_workspace
 from .workspaces import (
     NO_IMPLEMENTATION_CHANGE,
+    WorkspaceEnvironmentError,
     commit_implementation_candidate,
     record_task_baseline,
 )
@@ -300,6 +301,8 @@ class FakeExecutor(Executor):
                 return ExecutionResult(ExecutionStatus.SUCCEEDED, sha, durable_handoff=True)
         except WorkspaceMutation:
             return ExecutionResult(ExecutionStatus.FAILED, failure_reason=EXTERNAL_WORKSPACE_MUTATION)
+        except WorkspaceEnvironmentError as exc:
+            return ExecutionResult(ExecutionStatus.FAILED, failure_reason=str(exc))
 
 
 class SubprocessExecutor(Executor):
@@ -329,6 +332,8 @@ class SubprocessExecutor(Executor):
                 return self._run_owned(store, task_id, claim_id, project, task, lease, _build_task_prompt)
         except WorkspaceMutation:
             return ExecutionResult(ExecutionStatus.FAILED, failure_reason=EXTERNAL_WORKSPACE_MUTATION)
+        except WorkspaceEnvironmentError as exc:
+            return ExecutionResult(ExecutionStatus.FAILED, failure_reason=str(exc))
 
     def _run_owned(self, store, task_id, claim_id, project, task, lease, build_prompt) -> ExecutionResult:  # type: ignore[no-untyped-def]
         run_path = lease.path
