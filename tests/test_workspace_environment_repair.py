@@ -91,6 +91,177 @@ def test_python_environments_can_be_prepared_twice(tmp_path):
     prepare_candidate_environments(project, checkout)
 
 
+def test_declared_legacy_python_aliases_become_private_without_source_changes(tmp_path):
+    from test_candidate_environments import _fixture
+
+    project, checkout, packages = _fixture(tmp_path)
+    source = project / "backend/.venv"
+    before = (packages / "dependency.py").read_bytes()
+    for relative in (".venv", "backend/.venv"):
+        target = checkout / relative
+        if os.name == "nt":
+            import _winapi
+            _winapi.CreateJunction(str(source), str(target))
+        else:
+            target.symlink_to(source, target_is_directory=True)
+    prepare_candidate_environments(project, checkout)
+    prepare_candidate_environments(project, checkout)
+    for relative in (".venv", "backend/.venv"):
+        target = checkout / relative
+        assert not _is_link(target)
+        assert target.resolve().is_relative_to(checkout)
+        assert (target / ".stagemesh-environment.json").is_file()
+    assert (packages / "dependency.py").read_bytes() == before
+    assert not (source / ".stagemesh-environment.json").exists()
+    assert not (project / "pth-ran").exists()
+
+
+def test_unrelated_python_alias_is_preserved_and_refused(tmp_path):
+    from test_candidate_environments import _fixture
+
+    project, checkout, _packages = _fixture(tmp_path)
+    outside = tmp_path / "unrelated"
+    outside.mkdir()
+    (outside / "keep").write_text("untouched")
+    target = checkout / ".venv"
+    if os.name == "nt":
+        import _winapi
+        _winapi.CreateJunction(str(outside), str(target))
+    else:
+        target.symlink_to(outside, target_is_directory=True)
+    with pytest.raises(ValueError, match="escapes"):
+        prepare_candidate_environments(project, checkout)
+    assert _is_link(target)
+    assert (outside / "keep").read_text() == "untouched"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Real Windows directory sharing semantics")
+def test_windows_setup_succeeds_with_directory_handle_that_denies_rename(tmp_path, monkeypatch):
+    import ctypes
+    from ctypes import wintypes
+
+    import stagemesh.candidate_environments as environments
+
+    project, _git, modules, _config = node_repo(tmp_path)
+    checkout = prepare_task_workspace(project, "windows-open-directory")
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                                  wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    kernel.CreateFileW.restype = wintypes.HANDLE
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel.CloseHandle.restype = wintypes.BOOL
+    handles = []
+    copytree = environments.shutil.copytree
+
+    def copy_with_reader(src, dst, *args, **kwargs):
+        copied = copytree(src, dst, *args, **kwargs)
+        if os.path.samefile(src, modules):
+            handle = kernel.CreateFileW(str(dst), 0x80000000, 3, None, 3, 0x02000000, None)
+            assert handle != ctypes.c_void_p(-1).value, ctypes.get_last_error()
+            handles.append(handle)
+            # Negative control: this actual Windows handle forbids the old operation.
+            with pytest.raises(PermissionError):
+                os.rename(dst, str(dst) + "-renamed")
+        return copied
+
+    monkeypatch.setattr(environments.shutil, "copytree", copy_with_reader)
+    try:
+        prepare_candidate_environments(project, checkout)
+        prepare_candidate_environments(project, checkout)
+        target = checkout / "apps/web/node_modules"
+        assert (target / ".bin/tsc.cmd").is_file()
+        assert (target / ".stagemesh-environment.json").is_file()
+        assert not os.path.samefile(target / "dependency.txt", modules / "dependency.txt")
+    finally:
+        for handle in handles:
+            kernel.CloseHandle(handle)
+
+
+def test_failed_node_copy_leaves_no_ready_environment_and_can_retry(tmp_path, monkeypatch):
+    import stagemesh.candidate_environments as environments
+
+    project, _git, modules, _config = node_repo(tmp_path)
+    checkout = prepare_task_workspace(project, "copy-failed")
+    copytree = environments.shutil.copytree
+    def fail(src, dst, *args, **kwargs):
+        from pathlib import Path
+        (Path(dst) / "partial").write_text("incomplete")
+        raise PermissionError("fixture copy denied")
+    monkeypatch.setattr(environments.shutil, "copytree", fail)
+    with pytest.raises(PermissionError, match="copy denied"):
+        prepare_candidate_environments(project, checkout)
+    assert not (checkout / "apps/web/node_modules").exists()
+    assert (modules / "dependency.txt").read_text() == "operator original"
+    monkeypatch.setattr(environments.shutil, "copytree", copytree)
+    prepare_candidate_environments(project, checkout)
+    assert (checkout / "apps/web/node_modules/.stagemesh-environment.json").is_file()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows publishes directly under its workspace lease")
+def test_windows_interruption_cannot_inherit_source_readiness_marker(tmp_path):
+    import subprocess
+
+    from stagemesh.candidate_environments import _marker
+
+    project, _git, modules, _config = node_repo(tmp_path)
+    checkout = prepare_task_workspace(project, "interrupted-copy")
+    marker = _marker(modules, checkout / "apps/web", ("package.json", "package-lock.json", "npm-shrinkwrap.json"))
+    (modules / ".stagemesh-environment.json").write_text(json.dumps(marker))
+    code = (
+        "import os; from pathlib import Path; import stagemesh.candidate_environments as e\n"
+        "original=e.shutil.copytree\n"
+        "def interrupted(*args,**kwargs):\n"
+        "    original(*args,**kwargs)\n"
+        f"    if Path(args[0]) == Path({str(modules)!r}):\n"
+        "        os._exit(23)\n"
+        "e.shutil.copytree=interrupted\n"
+        f"e.prepare_candidate_environments(Path({str(project)!r}),Path({str(checkout)!r}))\n"
+    )
+    result = subprocess.run([sys.executable, "-c", code], timeout=30, capture_output=True)
+    assert result.returncode == 23, result.stderr
+    target = checkout / "apps/web/node_modules"
+    assert target.is_dir()
+    assert not (target / ".stagemesh-environment.json").exists()
+    with pytest.raises(ValueError, match="existing"):
+        prepare_candidate_environments(project, checkout)
+    assert json.loads((modules / ".stagemesh-environment.json").read_text()) == marker
+
+
+def test_pool_reports_setup_failure_without_provider_use_or_fallback(tmp_path):
+    from test_provider_pool import TASK, Rig
+
+    from stagemesh.progress import TaskCursor, poll_task
+    from stagemesh.provider_pool import PooledExecutor
+
+    rig = Rig(tmp_path, {"first": "ok", "second": "ok"})
+    mapping = rig.project / ".stagemesh/validation-environments.json"
+    mapping.write_text('{"schema_version":1,"node":{"node_modules":"missing/node_modules"}}')
+    try:
+        result = PooledExecutor(rig.pool).run(rig.store, TASK, None, rig.project)
+        assert result.status == ExecutionStatus.FAILED
+        assert result.failure_reason.startswith("candidate_environment_unavailable:")
+        assert not result.capacity_failure
+        rows = rig.store.conn.execute('select event_type,payload from audit_events').fetchall()
+        types = [row["event_type"] for row in rows]
+        assert "provider.used" not in types
+        assert "provider.failure" not in types
+        assert "provider.no_progress" not in types
+        events = [json.loads(row["payload"]) for row in rows if row["event_type"] == "workspace.setup_failed"]
+        assert len(events) == 1
+        assert events[0]["provider_invoked"] is False
+        assert list(rig.store.running_executions()) == []
+        assert not rig.store.has_active_claim(TASK)
+        cursor = TaskCursor(since=0)
+        lines = poll_task(rig.store.conn, TASK, cursor)
+        assert any("environment setup failed; provider not invoked:" in line for line in lines)
+        assert not any("implementation by" in line for line in lines)
+        assert poll_task(rig.store.conn, TASK, cursor) == []
+        from stagemesh.survivor_wave import RunResult, infrastructure_signature
+        assert infrastructure_signature(RunResult("NO_PROGRESS", result.failure_reason)) == "message:candidate_environment_unavailable:"
+    finally:
+        rig.store.close()
+
+
 def test_python_reuse_checks_current_interpreter(tmp_path, monkeypatch):
     from test_candidate_environments import _fixture
 

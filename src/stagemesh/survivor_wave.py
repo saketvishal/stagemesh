@@ -58,6 +58,7 @@ INFRASTRUCTURE_MESSAGE_MARKERS = (
     "external_workspace_mutation",
     "database is locked",
     "provider setup failed",
+    "candidate_environment_unavailable:",
     "health has current problems",
 )
 

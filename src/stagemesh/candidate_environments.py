@@ -9,7 +9,6 @@ import shutil
 import stat
 import subprocess
 import tempfile
-import time
 from pathlib import Path, PurePosixPath
 
 
@@ -102,14 +101,38 @@ def _probe_python(python: Path) -> dict:
     return json.loads(result.stdout)
 
 
+def _detach_legacy_alias(target: Path, source: Path) -> None:
+    if not _is_link(target):
+        return
+    if target.resolve() != source:
+        raise ValueError("candidate environment changed during provisioning")
+    if target.is_symlink():
+        target.unlink()
+    else:
+        target.rmdir()
+
+
 def _copy_node_environment(source: Path, target: Path, marker: dict[str, str]) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
-    temporary = Path(tempfile.mkdtemp(prefix=".stagemesh-node-", dir=target.parent))
+    # Windows readers may hold directory handles without delete sharing. Publish
+    # under the workspace lease, with an exclusive directory and readiness marker
+    # written last, instead of requiring a whole-directory rename.
+    direct = os.name == "nt"
+    if direct:
+        _detach_legacy_alias(target, source)
+        target.mkdir()
+        temporary = target
+    else:
+        temporary = Path(tempfile.mkdtemp(prefix=".stagemesh-node-", dir=target.parent))
+    owned_target = direct
     links: list[tuple[Path, Path, bool]] = []
 
     def skip_links(directory: str, names: list[str]) -> list[str]:
         skipped = []
         for name in names:
+            if Path(directory) == source and name == ".stagemesh-environment.json":
+                skipped.append(name)
+                continue  # readiness belongs to this completed copy, never the source
             entry = Path(directory) / name
             if _is_link(entry):
                 resolved = _dependency_link(entry, source)
@@ -125,34 +148,22 @@ def _copy_node_environment(source: Path, target: Path, marker: dict[str, str]) -
                 continue  # junctions store absolute paths; create them after the atomic move
             else:
                 link.symlink_to(os.path.relpath(private, link.parent), target_is_directory=is_dir)
-        if _is_link(target):
-            # Only the validated legacy alias is removed, never its source contents.
-            if target.resolve() != source:
-                raise ValueError("candidate environment changed during provisioning")
-            if target.is_symlink():
-                target.unlink()
-            else:
-                target.rmdir()
-        for attempt in range(6):
-            try:
-                temporary.rename(target)
-                break
-            except PermissionError:
-                if os.name != "nt" or attempt == 5:
-                    raise
-                time.sleep(0.1 * (attempt + 1))
-        try:
-            if os.name == "nt":
-                import _winapi
-                for relative, destination, is_dir in links:
-                    if is_dir:
-                        _winapi.CreateJunction(str(target / destination), str(target / relative))
-            _write_marker(target, marker)
-        except BaseException:
+        if not direct:
+            _detach_legacy_alias(target, source)
+            temporary.rename(target)
+            owned_target = True
+        if os.name == "nt":
+            import _winapi
+            for relative, destination, is_dir in links:
+                if is_dir:
+                    _winapi.CreateJunction(str(target / destination), str(target / relative))
+        _write_marker(target, marker)
+    except BaseException:
+        if owned_target:
             shutil.rmtree(target)
-            raise
+        raise
     finally:
-        if temporary.exists():
+        if temporary != target and temporary.exists():
             shutil.rmtree(temporary)
 
 
@@ -182,10 +193,11 @@ def prepare_candidate_environments(project: Path, checkout: Path) -> None:
         for raw_target, raw_source in mapping.items():
             target_rel, source_rel = _relative(raw_target, ".venv"), _relative(raw_source, ".venv")
             source = (project / source_rel).resolve()
-            target = (checkout / target_rel).resolve()
-            if not source.is_relative_to(project.resolve()) or not target.is_relative_to(
-                checkout.resolve()
-            ):
+            target = checkout / target_rel
+            legacy_link = _is_link(target) and target.resolve() == source
+            if not source.is_relative_to(project) or not target.parent.resolve().is_relative_to(
+                checkout
+            ) or (not legacy_link and not target.resolve().is_relative_to(checkout)) or (_is_link(target) and not legacy_link):
                 raise ValueError("validation environment escapes its repository")
             if target in targets:
                 raise ValueError("duplicate candidate environment target")
@@ -241,7 +253,7 @@ def prepare_candidate_environments(project: Path, checkout: Path) -> None:
                     )
             marker = _marker(source, checkout / source_rel.parent, ("pyproject.toml", "requirements.txt", "requirements-dev.txt", "uv.lock", "poetry.lock"))
             marker["interpreter"] = json.dumps(identity, sort_keys=True)
-            if target.exists():
+            if target.exists() and not legacy_link:
                 pth = target / ("Lib/site-packages" if os.name == "nt" else f"lib/python{version[0]}.{version[1]}/site-packages") / "stagemesh_dependencies.pth"
                 legacy = pth.parent.resolve().is_relative_to(target) and pth.is_file() and not _is_link(pth) and pth.read_text(encoding="utf-8") == str(packages) + "\n"
                 if not legacy:
@@ -256,20 +268,26 @@ def prepare_candidate_environments(project: Path, checkout: Path) -> None:
             # A private environment avoids junctions into the source tree. Only the
             # dependency search path is shared; source .pth files are never executed,
             # so editable installs cannot redirect imports to the operator checkout.
-            subprocess.run(
-                [str(source_python), "-I", "-S", "-m", "venv", "--without-pip", str(target)],
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=60,
-            )
-            purelib = target / (
-                "Lib/site-packages"
-                if os.name == "nt"
-                else f"lib/python{version[0]}.{version[1]}/site-packages"
-            )
-            (purelib / "stagemesh_dependencies.pth").write_text(str(packages) + "\n", encoding="utf-8")
-            _write_marker(target, marker)
+            _detach_legacy_alias(target, source_python.parent.parent)
+            target.mkdir(parents=True)
+            try:
+                subprocess.run(
+                    [str(source_python), "-I", "-S", "-m", "venv", "--without-pip", str(target)],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                )
+                purelib = target / (
+                    "Lib/site-packages"
+                    if os.name == "nt"
+                    else f"lib/python{version[0]}.{version[1]}/site-packages"
+                )
+                (purelib / "stagemesh_dependencies.pth").write_text(str(packages) + "\n", encoding="utf-8")
+                _write_marker(target, marker)
+            except BaseException:
+                shutil.rmtree(target)
+                raise
 
     if "node" in data:
         node_mapping = data["node"]
