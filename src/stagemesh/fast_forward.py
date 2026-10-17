@@ -117,6 +117,26 @@ class FastForwardPullRequests(GitHubPullRequests):
             raise RuntimeError("pull request full head SHA unavailable")
         return self._to_pull_request(payload)
 
+    def close_superseded(self, number, expected_head, replacement_url):
+        """Close only an observed old owned head; never rewrite its branch or commits."""
+        old = self.get(number)
+        if old is None or old.head_sha != expected_head or old.base_ref != self.branch:
+            raise RuntimeError("superseded PR identity changed; not closing it")
+        if old.state is PRState.MERGED:
+            raise RuntimeError("superseded candidate already landed; reconcile before refresh")
+        if old.state is PRState.CLOSED:
+            return
+        status, payload = self._request("PATCH", f"/pulls/{number}", {"state": "closed"})
+        if status != 200 or not isinstance(payload, dict):
+            raise RuntimeError("could not close superseded PR; preserved for retry")
+        observed = self.get(number)
+        if observed is None or observed.state is not PRState.CLOSED or observed.head_sha != expected_head:
+            raise RuntimeError("superseded PR closure could not be verified")
+        self.store.add_audit_event("window.landing_pr_superseded", {
+            "task_id": self.task_id, "pr": number, "candidate_sha": expected_head,
+            "replacement_url": replacement_url,
+        })
+
     def host_policy(self, head_ref=None):
         """Verify the explicitly selected landing policy; never fall back after a 403.
 
@@ -367,6 +387,23 @@ def make_merger(store, project: Path, base_ref: str, required_checks: tuple[str,
                             hosted_ci=ci, pull_requests=pulls,
                             integration_policy=IntegrationPolicy(allow_baseline_ci_failures=False, verify_exact_landing=True))
 
+    def progress(record, state, detail, *, heartbeat=False):
+        now = time.time()
+        previous, at = notices.get(record.task_id, (None, 0.0))
+        if previous == (state, detail) and (not heartbeat or now - at < 60):
+            return
+        notices[record.task_id] = ((state, detail), now)
+        if previous != (state, detail):
+            store.add_audit_event("window.landing_status", {
+                "task_id": record.task_id, "candidate_sha": record.integrated_candidate,
+                "pr_url": record.pr_url, "state": state, "reason": detail,
+            })
+        emit = getattr(merge_record, "progress", None)
+        if callable(emit):
+            emit(f"task {record.task_id}: landing {state} ({record.pr_url}): {detail}")
+
+    notices = {}
+
     def validate_records(records, deadline):
         """Observe the entire stack before any member can move the integration ref."""
         for record in records:
@@ -406,6 +443,9 @@ def make_merger(store, project: Path, base_ref: str, required_checks: tuple[str,
         number = int(number_text)
         pulls.deadline = deadline
         pulls.task_id = record.task_id
+        observed_base = None
+        unknown_since = None
+        missing_since = None
         while time.time() < deadline:
             if pulls.stop_control.blocks_admission():
                 return {"merged": False, "reason": "queue admission " + pulls.stop_control.state_label()}
@@ -414,16 +454,46 @@ def make_merger(store, project: Path, base_ref: str, required_checks: tuple[str,
                 return {"merged": False, "reason": "PR head no longer matches the staged candidate"}
             if pr.state is PRState.CLOSED:
                 return {"merged": False, "reason": "PR closed without merging"}
-            if pr.state is PRState.OPEN and pr.mergeable is None:
-                # GitHub recomputes mergeability when the preceding stack member lands.
-                time.sleep(min(2, max(0, deadline - time.time())))
-                continue
+            if pr.base_ref != branch:
+                return {"merged": False, "reason": "PR base branch changed; automatic refresh refused"}
             policy_error = pulls.host_policy(pr.head_ref)
             if policy_error:
                 return {"merged": False, "reason": policy_error}
+            if pr.state is PRState.OPEN and (observed_base is None or pr.mergeable is False):
+                fetched = pulls.bounded_git("fetch", pulls.remote_url, f"refs/heads/{branch}:refs/remotes/origin/{branch}", check=False)
+                if fetched.returncode:
+                    return {"merged": False, "reason": "remote base could not be fetched"}
+                observed_base = supervisor.facts.resolve(supervisor.integration_ref)
+                if not observed_base:
+                    return {"merged": False, "reason": "remote base SHA unavailable"}
+                if not supervisor.facts.is_ancestor(observed_base, record.integrated_candidate):
+                    reason = "PR conflicts with current base" if pr.mergeable is False else "base advanced; candidate needs fresh validation and review"
+                    progress(record, "refresh required", reason)
+                    return {"merged": False, "refresh_required": True, "base_sha": observed_base,
+                            "reason": reason}
+            if pr.state is PRState.OPEN and pr.mergeable is None:
+                # GitHub recomputes mergeability when the preceding stack member lands.
+                unknown_since = time.time() if unknown_since is None else unknown_since
+                progress(record, "waiting", "GitHub is computing mergeability", heartbeat=True)
+                if time.time() - unknown_since >= 60:
+                    return {"merged": False, "reason": "GitHub mergeability remained unknown for 60s; no merge attempted"}
+                time.sleep(min(2, max(0, deadline - time.time())))
+                continue
+            if pr.state is PRState.OPEN and pr.mergeable is False:
+                reason = "GitHub reports a conflict although the observed base is already ancestral; refusing an unsafe refresh"
+                progress(record, "blocked", reason)
+                return {"merged": False, "reason": reason}
             run = ci.run_for(record.integrated_candidate)
             if run and any(g.conclusion.failed for g in run.gates.values()):
                 return {"merged": False, "reason": "hosted CI failed; candidate not merged"}
+            missing = sorted(set(required_checks) - set(run.gates if run and run.sha == record.integrated_candidate else ()))
+            if missing:
+                missing_since = time.time() if missing_since is None else missing_since
+                progress(record, "waiting", "hosted checks not reported: " + ", ".join(missing), heartbeat=True)
+                if time.time() - missing_since >= 60:
+                    return {"merged": False, "reason": "hosted checks missing after 60s: " + ", ".join(missing)}
+            else:
+                missing_since = None
             if checks_ready(ci, record.integrated_candidate, required_checks):
                 if not pulls.required_statuses_ready(record.integrated_candidate):
                     return {"merged": False, "reason": "server-required checks are missing, pending or red"}
@@ -432,7 +502,8 @@ def make_merger(store, project: Path, base_ref: str, required_checks: tuple[str,
                     return {"merged": False, "reason": "remote base could not be fetched"}
                 pulls.expected_base = supervisor.facts.resolve(supervisor.integration_ref)
                 if not supervisor.facts.is_ancestor(pulls.expected_base, record.integrated_candidate):
-                    return {"merged": False, "reason": "base advanced; candidate needs revalidation"}
+                    return {"merged": False, "refresh_required": True, "base_sha": pulls.expected_base,
+                            "reason": "base advanced; candidate needs revalidation"}
                 problem = landing_evidence_problem(store, record.task_id, record.integrated_candidate)
                 if problem:
                     return {"merged": False, "reason": problem}
@@ -463,6 +534,8 @@ def make_merger(store, project: Path, base_ref: str, required_checks: tuple[str,
                     "pr": number, "candidate_sha": record.integrated_candidate, "required_checks": list(required_checks), "merge_policy": policy})
                 return {"merged": True, "remote_landed": True, "local_synced": True,
                     "pr": number, "candidate_sha": record.integrated_candidate}
+            if not missing:
+                progress(record, "waiting", "hosted checks pending for this exact candidate", heartbeat=True)
             time.sleep(min(10, max(0, deadline - time.time())))
         return {"merged": False, "reason": "hosted CI deadline reached; PR retained for retry"}
 
@@ -533,15 +606,25 @@ def make_merger(store, project: Path, base_ref: str, required_checks: tuple[str,
                 attempted = any(r.integrated_candidate == record.integrated_candidate and r.task_id == record.task_id for r in pending_records())
                 verified_pr = bool(pr and pr.state is PRState.MERGED and pr.base_ref == branch
                     and pr.head_sha == record.integrated_candidate and pr.merge_commit_sha == record.integrated_candidate)
-                result["remote_landed"] = True if tip == record.integrated_candidate or verified_pr else (None if attempted else False)
+                if tip == record.integrated_candidate or verified_pr:
+                    result["remote_landed"] = True
+                elif not tip or supervisor.facts.resolve(tip) is None:
+                    result["remote_landed"] = None
+                elif supervisor.facts.is_ancestor(record.integrated_candidate, tip):
+                    result["remote_landed"] = True
+                else:
+                    result["remote_landed"] = None if attempted else False
             except Exception:  # noqa: BLE001 -- unknown must not be misreported as no remote change
                 result["remote_landed"] = None
             if historical:
                 result["remote_landed"] = True
+            if result.get("remote_landed") is not False:
+                result.pop("refresh_required", None)
             result["local_synced"] = False
             if result["remote_landed"] is not False:
                 result["reason"] = "remote landing " + ("observed; verification/sync blocked: " if result["remote_landed"] else "unknown; reconcile before retry: ") + result["reason"]
             store.add_audit_event("window.fast_forward_partial", {"task_id": record.task_id, **result})
+            progress(record, "refresh required" if result.get("refresh_required") else "blocked", str(result["reason"]))
         return result
 
     def merge_preflight():
@@ -554,4 +637,10 @@ def make_merger(store, project: Path, base_ref: str, required_checks: tuple[str,
     merge_record.preflight = merge_preflight
     merge_record.pending_records = pending_records
     merge_record.validate_records = validate_records
+    from .landing_recovery import LandingRecovery
+    recovery = LandingRecovery(store, project, pulls, base_ref, required_checks, merge_record)
+    merge_record.recover = recovery.recover
+    merge_record.resume_recovery = recovery.resume
+    merge_record.active_recovery = recovery.active
+    merge_record.recovery_preflight = recovery.preflight
     return merge_record

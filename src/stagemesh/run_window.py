@@ -617,6 +617,7 @@ def run_window(
     if options.auto_merge_ff and merge_pr is None:
         report.preflight.append(Check("merge_adapter", False, merge_setup_error or "no fast-forward merge adapter configured"))
     pending_records: list[TaskRecord] = []
+    active_landing_recovery = None
     if options.auto_merge_ff and list_prs is not None:
         pending = []
         try:
@@ -624,8 +625,20 @@ def run_window(
                 policy_error = merge_pr.preflight()
                 report.preflight.append(Check("hosted_landing_policy", policy_error is None, policy_error or f"{options.merge_policy} guarded exact-candidate landing policy"))
             pending = list_prs(project)
+            active_probe = getattr(merge_pr, "active_recovery", None)
+            active_landing_recovery = active_probe() if callable(active_probe) else None
+            if active_landing_recovery:
+                problem = merge_pr.recovery_preflight(pending)
+                if problem:
+                    raise RuntimeError(problem)
+                if options.tasks is not None and any(
+                    record["task_id"] not in options.tasks
+                    for record in active_landing_recovery["records"]
+                ):
+                    raise RuntimeError("active landing recovery is outside selected tasks")
+                pending = []  # only the precisely journaled recovery owns these PRs
             if callable(getattr(merge_pr, "pending_records", None)):
-                for record in merge_pr.pending_records():
+                for record in ([] if active_landing_recovery else merge_pr.pending_records()):
                     if not any(pr.get("url") == record.pr_url for pr in pending):
                         latest = store.latest_candidate(record.task_id)
                         if not latest or latest["sha"] != record.integrated_candidate:
@@ -671,7 +684,7 @@ def run_window(
         report.preflight.append(Check("prior_prs", owned,
             "no prior wave PR, or an owned evidenced candidate chain to resume" if owned else
             "prior PR is ambiguous, unowned, blocked or outside the selected tasks; resolve it before proceeding"))
-    if prepare_staging is not None and not local and all(check.name == "providers" or check.ok or not check.fatal for check in report.preflight):
+    if prepare_staging is not None and not active_landing_recovery and not local and all(check.name == "providers" or check.ok or not check.fatal for check in report.preflight):
         try:
             prepare_staging()
             report.preflight.append(Check("staging", True, f"{staging_ref or STAGING_REF} is ready for this window"))
@@ -711,7 +724,26 @@ def run_window(
     resume: dict[str, int] = {}  # step-capped tasks waiting for another run, and how many they have had
     if options.auto_merge_ff:
         report.initial_repo_state = hooks.repo_state()
-    def land(record):
+    recovered_suffix = False
+
+    def accept_recovery(result):
+        nonlocal recovered_suffix
+        report.waves.extend(result.get("waves", []))
+        report.merged_prs.extend(result.get("merged_prs", []))
+        report.landing_results.extend(result.get("landing_results", []))
+        for wave in result.get("waves", []):
+            for task in wave.tasks:
+                if task.task_id not in report.selected:
+                    report.selected.append(task.task_id)
+                attempted.add(task.task_id)
+        report.final_repo_state = hooks.repo_state()
+        recovered_suffix = True
+        if not result.get("ok"):
+            report.stop_reason = "auto-merge recovery stopped: " + str(result.get("reason", "recovery unverified"))
+            return False
+        return True
+
+    def land(record, suffix):
         if clock() >= deadline:
             report.time_limit_reached = True
             return False
@@ -734,6 +766,17 @@ def run_window(
         if "remote_landed" in merged:
             report.final_repo_state = hooks.repo_state()
         if not merged.get("merged"):
+            recover = getattr(merge_pr, "recover", None)
+            if merged.get("refresh_required") and merged.get("remote_landed") is False and callable(recover):
+                if len(attempted | {task.task_id for task in suffix}) > options.max_tasks:
+                    report.task_limit_reached = True
+                    report.stop_reason = "landing recovery suffix exceeds this window's task budget; published work retained"
+                    return False
+                try:
+                    return accept_recovery(recover(suffix, merged, deadline, hooks, options))
+                except Exception as exc:
+                    report.stop_reason = f"auto-merge recovery stopped: {type(exc).__name__}: {exc}"
+                    return False
             if merged.get("remote_landed") is True:
                 record.landing = "remote_landed_sync_blocked"
             report.stop_reason = "auto-merge stopped: " + str(merged.get("reason", "landing unverified"))
@@ -744,11 +787,17 @@ def run_window(
         return True
 
     try:
-        for pending_record in pending_records:
+        if active_landing_recovery:
+            accept_recovery(merge_pr.resume_recovery(deadline, hooks, options))
+        for index, pending_record in enumerate(pending_records):
+            if report.stop_reason:
+                break
             if len(attempted) >= options.max_tasks:
                 report.task_limit_reached = True
                 break
-            if not land(pending_record):
+            if not land(pending_record, pending_records[index:]):
+                break
+            if recovered_suffix:
                 break
             report.merged_prs[-1]["resumed"] = True
             attempted.add(pending_record.task_id)
@@ -829,8 +878,11 @@ def run_window(
                 except Exception as exc:
                     report.stop_reason = f"auto-merge stopped: cannot verify candidate order: {exc}"
                     break
-                for record in ready:
-                    if not land(record):
+                for index, record in enumerate(ready):
+                    recovered_suffix = False
+                    if not land(record, ready[index:]):
+                        break
+                    if recovered_suffix:
                         break
                 if report.stop_reason:
                     break

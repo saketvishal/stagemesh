@@ -815,6 +815,10 @@ def _wave_hooks(project: Path, store: Store, *, base_ref: str, staging_ref: str 
         pr_state=gh_pr_state(project),
         main_sha=branch_tip(project, base_ref),
         leftover=store_leftover(store),
+        retarget=lambda ref: _wave_hooks(
+            project, store, base_ref=base_ref, staging_ref=ref, advance_ref=ref,
+            local=local, no_pr=no_pr, live_acceptance=live_acceptance,
+        ),
     )
 
 
@@ -940,7 +944,10 @@ def command_run_window(args: argparse.Namespace) -> int:
         if not args.no_progress:  # progress goes to stderr, so the report (and --json) on stdout is unchanged
             from .progress import ProgressReporter, with_progress
 
-            hooks = with_progress(hooks, db_path(project), ProgressReporter(), heartbeat_seconds=args.heartbeat)
+            reporter = ProgressReporter()
+            hooks = with_progress(hooks, db_path(project), reporter, heartbeat_seconds=args.heartbeat)
+            if merger is not None:
+                merger.progress = reporter.line
         report = run_window(
             store,
             project,
