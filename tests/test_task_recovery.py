@@ -637,14 +637,16 @@ def test_continue_recovers_previously_blocked_stale_baseline_without_operator_co
     assert "rebaseline-task" not in json.dumps(result)
 
 
-def test_repeated_validation_gate_failures_stop_without_calling_the_provider_again(tmp_path: Path) -> None:
+def test_unavailable_validation_gate_stops_without_calling_the_provider_again(tmp_path: Path) -> None:
     broken = {**DOCS_CONTRACT, "required_tests": [{"name": "unit", "command": ["stagemesh-no-such-tool-xyz", "--run"]}]}
     project, store = _setup(tmp_path, broken)
     executor = Attempts(path="docs/a.md")
     drive(project, store, executor)
-    assert executor.calls == 2 and store.get_task(TASK)["status"] == TaskStatus.BLOCKED  # the budget of 3 was not spent
+    assert executor.calls == 1 and store.get_task(TASK)["status"] == TaskStatus.BLOCKED
+    assert store.task_remediation_count(TASK, "VALIDATE") == 0
+    assert not events(store, "task.remediation_queued")
     (stop,) = events(store, "task.diagnosis_stop")
-    assert stop["category"] == VALIDATION_GATE and stop["repeated"]
+    assert stop["category"] == VALIDATION_GATE and not stop["repeated"] and stop["environment_unavailable"]
     assert f"stagemesh rebind-contract --task {TASK} --validate" in stop["recommendation"]
 
 
