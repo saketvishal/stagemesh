@@ -415,12 +415,16 @@ def _prepare_review_checkout(project: Path, review_path: Path, candidate_sha: st
         detail = _bounded_process_output(init)
         return _review_infrastructure_failure("review workspace setup failed" + (f": {detail}" if detail else ""))
 
-    objects = _source_object_store(project)
-    if objects is None:
-        return _review_infrastructure_failure("review workspace setup failed: source object store unavailable")
-    alternates = review_path / ".git" / "objects" / "info" / "alternates"
-    alternates.parent.mkdir(parents=True, exist_ok=True)
-    alternates.write_bytes((objects.as_posix() + "\n").encode("utf-8"))
+    # A sandboxed reviewer cannot read an alternate object directory outside
+    # its workspace. Import candidate history locally so diff/log remain usable.
+    imported = subprocess.run(
+        ["git", "-c", "protocol.file.allow=always", "fetch", "--quiet", "--no-tags",
+         "--no-recurse-submodules", "--no-auto-maintenance", project.resolve().as_uri(), candidate_sha],
+        cwd=review_path, text=True, capture_output=True, check=False,
+    )
+    if imported.returncode != 0:
+        detail = _bounded_process_output(imported)
+        return _review_infrastructure_failure("review object import failed" + (f": {detail}" if detail else ""))
 
     # Reviewers must inspect the committed candidate bytes, not a platform-normalized
     # checkout shaped by the machine's global Git config.
