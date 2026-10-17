@@ -882,6 +882,15 @@ class PooledExecutor(Executor):
                     self.pool.release_reservation(IMPLEMENT, reserved)
             previous_name = adapter.name
             index += 1
+            if (result.failure_reason or "").startswith("candidate_environment_unavailable:"):
+                store.add_audit_event(
+                    "workspace.setup_failed",
+                    {"task_id": task_id, "stage": IMPLEMENT,
+                     "selected_provider": adapter.name, "provider_invoked": False,
+                     "reason": result.failure_reason},
+                )
+                log(f"  environment setup failed; provider not invoked: {result.failure_reason}")
+                return result
             if _is_workspace_mutation_reason(result.failure_reason):
                 reason = EXTERNAL_WORKSPACE_MUTATION
                 nxt = remaining[0].name if remaining else None

@@ -79,7 +79,7 @@ def poll_task(conn: sqlite3.Connection, task_id: str, cursor: TaskCursor) -> lis
         return True
 
     for row in conn.execute(
-        "SELECT id, event_type, payload, created_at FROM audit_events WHERE event_type IN ('provider.selection', 'provider.used') "
+        "SELECT id, event_type, payload, created_at FROM audit_events WHERE event_type IN ('provider.selection', 'provider.used', 'workspace.setup_failed') "
         "AND created_at>=? ORDER BY created_at, rowid",
         (cursor.since,),
     ):
@@ -87,7 +87,9 @@ def poll_task(conn: sqlite3.Connection, task_id: str, cursor: TaskCursor) -> lis
         if payload.get("task_id") != task_id or not fresh(row["id"]):
             continue
         label = _STAGE_LABEL.get(str(payload.get("stage")), str(payload.get("stage") or "").lower())
-        if row["event_type"] == "provider.selection":
+        if row["event_type"] == "workspace.setup_failed":
+            events.append((row["created_at"], f"task {task_id}: environment setup failed; provider not invoked: {payload.get('reason')}"))
+        elif row["event_type"] == "provider.selection":
             order = payload.get("order") or []
             if order:
                 cursor.provider[label] = str(order[0])
