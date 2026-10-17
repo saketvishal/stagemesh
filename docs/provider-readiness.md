@@ -24,7 +24,7 @@ cooldown from the next failed attempt.
 ## Live Acceptance States
 
 Live acceptance is provider evidence from a real `provider-acceptance --live` run. `stagemesh doctor` and `stagemesh capacity` report one
-of four states for each provider:
+of these states for each provider:
 
 | State | Meaning |
 | --- | --- |
@@ -32,8 +32,14 @@ of four states for each provider:
 | `failed` | The latest recorded live acceptance result did not pass. StageMesh treats this as a real provider readiness problem. |
 | `stale` | The latest passing result is older than the configured freshness window. The provider has proven live behavior before, but the proof is no longer fresh. |
 | `passing` | The provider has a passing live acceptance result inside the freshness window. |
+| `retry_due` | A quota failure is older than its retry interval. A real window rechecks it before routing work; expiry alone is not a pass. |
 
 The freshness window is controlled by `routing.live_acceptance_ttl_seconds`. The default is 7 days.
+
+Quota failures do not wait for that seven-day window. After the six-hour quota cooldown has elapsed, a real `run-window` automatically
+runs a bounded live check in a disposable repository and records the fresh result. An active cooldown still takes precedence. Another
+quota refusal renews the wait; authentication and other failures remain blocked. `doctor`, `capacity` and `run-window --plan` never
+call providers. Concurrent starters do not duplicate the same provider check.
 
 ## Optional By Default
 

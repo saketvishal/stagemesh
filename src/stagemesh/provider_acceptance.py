@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import math
 import os
 import subprocess
 import sys
@@ -8,13 +10,15 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .capacity import CapacityKind, CapacityRegistry
+from .concurrency import IntegrationLock, IntegrationLockTimeout
 from .domain import ExecutionStatus, Stage
 from .execution import PROVIDER_TIMEOUT, ExecutionResult, kill_active_provider_processes
 from .git import GitError, GitWorkspace
 from .persistence import Store
+from .provider_cooldown import DEFAULT_QUOTA_COOLDOWN_SECONDS
 from .providers import record_provider_capacity
 from .review import VERDICT_FAIL_WITH_FINDINGS, VERDICT_PASS, classify_review_response
 from .routing import Provider, Router
@@ -151,6 +155,7 @@ def run_live_provider_smoke(
     *,
     timeout_seconds: float | None = None,
     keep_temp: bool = False,
+    should_stop: Callable[[], bool] = lambda: False,
 ) -> LiveProviderSmokeResult:
     """Run one configured provider against a throwaway one-file repository."""
     import dataclasses
@@ -232,6 +237,12 @@ def run_live_provider_smoke(
                     implementation_ready = result.status is ExecutionStatus.SUCCEEDED and file_ok
                     if not implementation_ready and failure_reason is None:
                         failure_reason = result.failure_reason
+            if should_stop():
+                return LiveProviderSmokeResult(
+                    "FAIL", adapter.name, ExecutionStatus.FAILED, candidate_sha,
+                    file_ok, implementation_checked, False, implementation_ready,
+                    False, False, "provider_smoke_cancelled",
+                )
             if "review" in adapter.capabilities:
                 if candidate_sha is None:
                     candidate_sha = _manual_review_candidate(project)
@@ -297,12 +308,97 @@ def record_live_provider_acceptance(store: Store, result: LiveProviderSmokeResul
     store.add_audit_event(LIVE_PROVIDER_ACCEPTANCE_EVENT, result.to_payload())
 
 
+def _quota_check_expired(payload: dict[str, Any]) -> bool:
+    checked_at = payload.get("checked_at")
+    return (
+        payload.get("status") == "FAIL"
+        and payload.get("failure_reason") == "quota_rate_limit"
+        and isinstance(checked_at, (int, float))
+        and not isinstance(checked_at, bool)
+        and math.isfinite(checked_at)
+        and checked_at > 0
+        and time.time() >= checked_at + DEFAULT_QUOTA_COOLDOWN_SECONDS
+    )
+
+
+def refresh_expired_quota_checks(
+    store: Store,
+    project: Path,
+    adapters: list[Any],
+    *,
+    deadline: float | None = None,
+    should_stop: Callable[[], bool] = lambda: False,
+    clock: Callable[[], float] = time.time,
+) -> None:
+    """Recheck temporary quota failures before a real window, never during diagnostics.
+
+    The existing bounded smoke runs in a disposable repository, not the client checkout.
+    An OS lock coalesces checks from concurrent starters; fresh failures renew the backoff.
+    """
+    from .provider_cooldown import active_cooldowns
+
+    def due(name: str) -> bool:
+        payload = _latest_live_acceptance_payload(store, name)
+        cooling = active_cooldowns(store, DEFAULT_QUOTA_COOLDOWN_SECONDS)
+        return payload is not None and _quota_check_expired(payload) and not any(
+            item["provider"] == name for item in cooling
+        )
+
+    for adapter in adapters:
+        if should_stop() or (deadline is not None and clock() >= deadline):
+            return
+        if not due(adapter.name):
+            continue
+        key = hashlib.sha256(adapter.name.encode("utf-8")).hexdigest()
+        lock = IntegrationLock(project / ".stagemesh" / "provider-checks" / f"{key}.lock", timeout_seconds=0)
+        try:
+            with lock.hold(adapter.name):
+                if should_stop() or (deadline is not None and clock() >= deadline):
+                    return
+                if not due(adapter.name):
+                    continue
+                timeout = provider_smoke_timeout_seconds()
+                if deadline is not None:
+                    timeout = min(timeout, max(0.0, deadline - clock()) / 2)
+                    if timeout <= 0:
+                        return
+                print(f"[stagemesh] {adapter.name}: refreshing expired quota check", file=sys.stderr, flush=True)
+                try:
+                    result = run_live_provider_smoke(
+                        adapter, timeout_seconds=timeout,
+                        should_stop=lambda: should_stop() or (deadline is not None and clock() >= deadline),
+                    )
+                except Exception:  # fail closed without persisting provider output or secrets
+                    result = LiveProviderSmokeResult(
+                        "FAIL", adapter.name, ExecutionStatus.FAILED, None,
+                        False, "code" in adapter.capabilities, "review" in adapter.capabilities,
+                        False, False, False, "provider_refresh_failure",
+                    )
+                if result.failure_reason == "provider_smoke_cancelled":
+                    return  # interruption is not new provider readiness evidence
+                record_live_provider_acceptance(store, result)
+                print(f"[stagemesh] {adapter.name}: quota recheck {result.status}", file=sys.stderr, flush=True)
+        except IntegrationLockTimeout:
+            continue  # another starter owns the probe; never duplicate it or assume a pass
+
+
 def live_provider_readiness(
     store: Store, provider: str, capability: str, *, ttl_seconds: float | None = None
 ) -> tuple[bool, str]:
     payload = _latest_live_acceptance_payload(store, provider)
     if payload is None:
         return False, "live_acceptance_unproven: run stagemesh provider-acceptance --live --provider " + provider
+    capability_prefix = {"code": "implementation", "review": "review"}.get(capability)
+    capability_ready = capability_prefix is not None and (
+        payload.get(f"{capability_prefix}_checked") is True
+        and payload.get(f"{capability_prefix}_ready") is True
+    )
+    # Expiry requests a real recheck; it never establishes readiness on its own.
+    if not capability_ready and _quota_check_expired(payload):
+        return False, (
+            "live_acceptance_retry_due: quota cooldown elapsed; a real run-window refreshes this check; "
+            "or run stagemesh provider-acceptance --live --provider " + provider
+        )
     if capability == "code" and (
         payload.get("implementation_checked") is not True or payload.get("implementation_ready") is not True
     ):
@@ -334,6 +430,7 @@ def _live_acceptance_is_stale(payload: dict[str, Any], *, now: float | None = No
 
 
 LIVE_MISSING, LIVE_FAILED, LIVE_STALE, LIVE_PASSING = "missing", "failed", "stale", "passing"
+LIVE_RETRY_DUE = "retry_due"
 
 
 def live_acceptance_status(
@@ -344,6 +441,8 @@ def live_acceptance_status(
     payload = _latest_live_acceptance_payload(store, provider)
     ready, reason = live_provider_readiness(store, provider, capability, ttl_seconds=ttl_seconds)
     state = LIVE_PASSING if ready else LIVE_MISSING if payload is None else LIVE_STALE if reason.startswith("live_acceptance_stale") else LIVE_FAILED
+    if reason.startswith("live_acceptance_retry_due"):
+        state = LIVE_RETRY_DUE
     checked_at = None if payload is None else payload.get("checked_at")
     current = time.time() if now is None else now
     age = None if not isinstance(checked_at, (int, float)) else max(0.0, current - float(checked_at))
