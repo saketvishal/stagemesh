@@ -28,6 +28,31 @@ from stagemesh.provider_acceptance import (
 from stagemesh.providers import RuntimeCommandAdapter
 
 
+def test_missing_tool_host_is_not_treated_as_a_working_provider(tmp_path):
+    provider = tmp_path / "broken_provider.py"
+    provider.write_text(
+        "import sys\n"
+        "sys.stdin.read()\n"
+        "print('warning: failed to spawn code-mode host: host executable was not found', file=sys.stderr)\n"
+        "print('{\"decision\":\"PASS\"}')\n",
+        encoding="utf-8",
+    )
+    adapter = RuntimeCommandAdapter("broken", (sys.executable, str(provider)))
+    result = run_live_provider_smoke(adapter, timeout_seconds=20)
+    assert result.status == "FAIL"
+    assert result.failure_reason == "provider_unavailable"
+    assert not result.implementation_ready
+    assert not result.review_ready
+    assert not result.review_json_ok
+
+
+def test_missing_tool_host_detection_ignores_ordinary_review_text():
+    from stagemesh.providers import _missing_provider_tool_host
+
+    assert not _missing_provider_tool_host("review found a missing executable in the candidate")
+    assert not _missing_provider_tool_host("failed to spawn code-mode host: access denied")
+
+
 def test_provider_smoke_runs_selected_provider_in_temporary_fixture(tmp_path: Path) -> None:
     project = tmp_path / "project"
     runtime = project / ".stagemesh"
