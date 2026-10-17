@@ -4,6 +4,7 @@ import fnmatch
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -71,6 +72,44 @@ class ChangeContract:
     @property
     def gates(self) -> tuple[GateCommand, ...]:
         return self.required_tests + self.lint + self.typecheck + self.dependency_checks
+
+
+_INVARIANT_RUNNERS = frozenset({
+    "py", "pytest", "uv", "ruff", "node", "npm", "npx", "pnpm", "yarn", "bun",
+    "bash", "sh", "cmd", "powershell", "pwsh", "make", "cmake", "cargo", "go",
+    "dotnet", "java", "mvn", "gradle", "git",
+})
+
+
+def _invariant_gate(text: str) -> GateCommand | None:
+    if text.startswith("review:"):
+        _required_text(text.removeprefix("review:"), "review invariant")
+        return None
+    explicit = text.startswith("command:")
+    command = text.removeprefix("command:").strip() if explicit else text
+    # Text alone cannot distinguish prose from a custom program's positional
+    # arguments. Preserve clear legacy commands and reject ambiguous strings.
+    first, _, rest = command.partition(" ")
+    executable = first.strip("\"'").replace("\\", "/").rsplit("/", 1)[-1].lower()
+    stem = executable.removesuffix(".exe").removesuffix(".cmd")
+    legacy = (stem in _INVARIANT_RUNNERS or re.fullmatch(r"python(?:\d+(?:\.\d+)*)?", stem)
+              or "/" in first or "\\" in first or not rest
+              or rest.lstrip().startswith("-")
+              or executable.endswith((".exe", ".cmd", ".bat", ".py", ".sh", ".ps1")))
+    if not explicit and not legacy:
+        raise ContractError("ambiguous invariant: use 'review:' for prose or put an executable check in required_tests (or prefix it with 'command:')")
+    try:
+        return GateCommand(f"invariant:{text}", _split_command(command))
+    except ValueError as exc:
+        raise ContractError(f"invalid executable invariant: {text}") from exc
+
+
+def invariant_gates(contract: ChangeContract) -> tuple[GateCommand, ...]:
+    return tuple(gate for text in contract.invariants if (gate := _invariant_gate(text)) is not None)
+
+
+def declarative_invariants(contract: ChangeContract) -> tuple[str, ...]:
+    return tuple(text for text in contract.invariants if _invariant_gate(text) is None)
 
 
 @dataclass(frozen=True)
@@ -362,8 +401,8 @@ def evaluate_contract(
             with candidate_workspace(project, candidate_sha) as gate_project:
                 for gate in contract.gates:
                     gates.append(run_gate(gate_project, gate))
-                for invariant in contract.invariants:
-                    gates.append(run_gate(gate_project, GateCommand(f"invariant:{invariant}", _split_command(invariant))))
+                for gate in invariant_gates(contract):
+                    gates.append(run_gate(gate_project, gate))
         except (GitError, OSError) as exc:
             findings.append(
                 {
@@ -595,6 +634,9 @@ def contract_prompt(contract: ChangeContract) -> str:
     if contract.acceptance_criteria:
         lines.append("- Acceptance criteria:")
         lines.extend(f"  - {item}" for item in contract.acceptance_criteria)
+    if contract.invariants:
+        lines.append("- Required invariants (prose constraints must be checked during review, not executed as commands):")
+        lines.extend(f"  - {item}" for item in contract.invariants)
     if contract.spec_refs:
         lines.append("- Project specs:")
         lines.extend(f"  - {item}" for item in contract.spec_refs)

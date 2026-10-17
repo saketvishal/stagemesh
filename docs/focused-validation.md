@@ -29,6 +29,29 @@ the selection code. Clients receive it when their installed StageMesh package is
 updated, not merely because this repository's profile changed. Running processes
 must finish before a shared installation is upgraded.
 
+## Invariants Are Not All Commands
+
+Prefix natural-language contract invariants with `review:`. These are mandatory
+review constraints, not shell programs. Validation records them as
+`review_invariants`, and implementation and
+review prompts retain their original text. They require an actual reviewer; the
+builtin deterministic fallback cannot approve them on its own. Frozen contract
+text and hashes are not rewritten by this interpretation.
+
+Executable checks belong in `required_tests`, `lint`, `typecheck` or
+`dependency_checks`. Clear legacy command-shaped invariant strings (runners such as
+`python`, executable paths and script filenames, bare commands, or a command
+followed immediately by a flag) still execute and must
+pass. Use `command: validator check` for an otherwise ambiguous custom command,
+or `review: python compatibility must remain unchanged` for prose that begins
+with a command name. Unprefixed ambiguous strings, including complete English
+sentences and positional commands such as `validator check`, are rejected with
+an actionable contract error, not executed or silently converted to prose. An
+existing frozen contract needs an approved audited rebind to classify such text;
+the runtime never rewrites historical bindings or evidence automatically. Missing
+executables and malformed explicit commands fail closed; no required command is
+converted into a passing result.
+
 ## Optional StageMesh Self-Development Profile
 
 `AGENTS.md` controls investigation and discretionary testing. Required automated

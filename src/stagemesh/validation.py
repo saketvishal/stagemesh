@@ -4,7 +4,13 @@ from dataclasses import replace
 from pathlib import Path
 
 from .contract_binding import contract_for_candidate
-from .contracts import ContractError, changed_files, evaluate_contract, scope_classification
+from .contracts import (
+    ContractError,
+    changed_files,
+    declarative_invariants,
+    evaluate_contract,
+    scope_classification,
+)
 from .domain import EvidenceKind, EvidenceStatus, ExecutionKind, ExecutionStatus
 from .focused_validation import discover_focused_gates, with_focused_gates
 from .git import GitError
@@ -80,6 +86,7 @@ class Validator:
                 "validation_plan": plan.to_dict(),
                 "focused_validation": {"discovered": [gate.name for gate in focused_gates], "required_gates_replaced": False},
                 "objective": contract.objective,
+                "review_invariants": list(declarative_invariants(contract)),
                 "changed_files": list(evaluation.changed_files),
                 "scope": scope_classification(contract, evaluation.changed_files),
                 "findings": findings,

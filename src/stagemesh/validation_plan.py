@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from .contracts import ChangeContract, GateCommand
+from .contracts import ChangeContract, GateCommand, declarative_invariants, invariant_gates
 
 CONFIG_OR_PROVIDER_COMMAND = "CONFIG_OR_PROVIDER_COMMAND"
 DOCS_ONLY = "DOCS_ONLY"
@@ -113,8 +113,8 @@ def derive_validation_plan(contract: ChangeContract, changed_files: tuple[str, .
 
 
 def with_required_checks(contract: ChangeContract, plan: ValidationPlan) -> ValidationPlan:
-    """Runtime planning may add focus, but every declared gate and invariant is mandatory."""
-    required = tuple(dict.fromkeys((*_gate_names(contract.gates), *(f"invariant:{item}" for item in contract.invariants))))
+    """Every declared executable gate is mandatory; prose invariants remain review obligations."""
+    required = tuple(dict.fromkeys((*_gate_names(contract.gates), *_gate_names(invariant_gates(contract)))))
     if not required:
         return plan  # Keep missing-command diagnostics for an empty contract.
     debug = tuple(name for name in plan.debug_checks if name in required)
@@ -135,7 +135,7 @@ def planned_contract(contract: ChangeContract, plan: ValidationPlan) -> ChangeCo
         allowed_files=contract.allowed_files,
         forbidden_files=contract.forbidden_files,
         exclusions=contract.exclusions,
-        invariants=contract.invariants if plan.allows_broad_validation else (),
+        invariants=contract.invariants if plan.allows_broad_validation else declarative_invariants(contract),
         required_tests=tuple(gate for gate in contract.required_tests if _gate_allowed(gate, allowed, plan)),
         lint=tuple(gate for gate in contract.lint if _gate_allowed(gate, allowed, plan)),
         typecheck=tuple(gate for gate in contract.typecheck if _gate_allowed(gate, allowed, plan)),
@@ -341,7 +341,7 @@ def _non_broad_gate_names(contract: ChangeContract) -> tuple[str, ...]:
 
 def _broad_gate_names(contract: ChangeContract) -> tuple[str, ...]:
     names = [gate.name for gate in contract.gates if _is_broad_gate(gate.name) or _is_broad_command(gate.command)]
-    names.extend(f"invariant:{item}" for item in contract.invariants)
+    names.extend(_gate_names(invariant_gates(contract)))
     return tuple(names)
 
 
