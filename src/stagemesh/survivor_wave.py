@@ -140,6 +140,7 @@ class WaveReport:
     repo_after: RepoState | None = None
     runtime: dict[str, Any] | None = None
     time_limit_reached: bool = False  # the deadline passed with tasks still unstarted: a clean stop, not a failure
+    capacity: dict[str, Any] = field(default_factory=dict)
 
     @property
     def main_moved(self) -> bool:
@@ -188,6 +189,7 @@ class WaveReport:
             "repo_after": None if self.repo_after is None else self.repo_after.to_dict(),
             "runtime": self.runtime,
             "time_limit_reached": self.time_limit_reached,
+            "capacity": self.capacity,
             "tasks": [task.to_dict() for task in self.tasks],
         }
 
@@ -207,6 +209,7 @@ class WaveHooks:
     # executions and active claims a task still has after its runner exited (a provider process that was not cleaned up).
     main_sha: Callable[[], str | None] = lambda: None
     leftover: Callable[[str], tuple[int, int]] = lambda task_id: (0, 0)
+    on_capacity: Callable[[dict[str, Any]], None] | None = None
 
 
 def _safe_state(hooks: WaveHooks) -> RepoState | None:
@@ -417,10 +420,20 @@ def run_wave(
     clock: Callable[[], float] = time.time,
     ordered_publication: bool = False,
     project: Path | None = None,
+    verification_concurrency: int | None = None,
+    admit_tasks: Callable[[], list[str]] | None = None,
 ) -> WaveReport:
-    """Run `task_ids` with at most `concurrency` running at once. The store is only touched from the calling thread."""
+    """Dispatch bounded task runs; windows may reserve separate verification capacity.
+
+    With verification capacity, each child performs one step and yields its
+    process slot. The original task budget and scope ownership span those steps.
+    Discovery and ledger access stay on the calling thread.
+    """
     if integration_mode not in INTEGRATION_MODES:
         raise ValueError(f"integration_mode must be one of {', '.join(INTEGRATION_MODES)}")
+    if verification_concurrency is not None and verification_concurrency < 1:
+        raise ValueError("verification_concurrency must be at least 1")
+    staged = verification_concurrency is not None
     local = integration_mode == INTEGRATION_LOCAL
     report = WaveReport(
         started_at=clock(),
@@ -463,9 +476,8 @@ def run_wave(
         records[task_id].outcome, records[task_id].reason = "skipped", reason
     report.tasks = [records[task_id] for task_id in task_ids]
 
-    for task_id in eligible:  # baselines first, in the calling thread: advancing writes the ledger and resets a worktree
-        if control.blocks_admission():
-            break
+    def prepare_task(task_id: str) -> None:
+        # Called once, immediately before dispatch; discovery never resets worktrees.
         record = records[task_id]
         record.baseline_before = store.task_baseline(task_id)
         task = store.get_task(task_id)
@@ -484,6 +496,64 @@ def run_wave(
     pending = list(eligible)
     running: dict[Future[RunResult], str] = {}
     started_at: dict[str, float] = {}
+    prepared: set[str] = set()
+    phases: dict[str, str] = {}
+    owners: set[str] = set()
+    steps: dict[str, int] = {}
+    waiting: dict[str, str] = {}
+    last_capacity: dict[str, Any] = {}
+    report.capacity = {"coding_limit": concurrency, "verification_limit": verification_concurrency,
+                       "peak_coding": 0, "peak_verification": 0} if staged else {}
+
+    def task_state(task_id: str) -> tuple[Any, ...]:
+        task = store.get_task(task_id)
+        candidate = store.latest_candidate(task_id)
+        return (task["stage"], task["status"], candidate["sha"] if candidate else None)
+
+    def phase(task_id: str) -> str:
+        return "coding" if task_state(task_id)[0] == Stage.IMPLEMENT else "verification"
+
+    def capacity_notice() -> None:
+        nonlocal last_capacity
+        if not staged:
+            return
+        counts = {name: sum(phases[t] == name for t in running.values()) for name in ("coding", "verification")}
+        for name, count in counts.items():
+            report.capacity["peak_" + name] = max(report.capacity["peak_" + name], count)
+        reason = "coding capacity occupied"
+        if counts["coding"] < concurrency:
+            reason = "scope/resource conflicts" if any(phase(t) == "coding" for t in pending) else "no ready coding task"
+        if stop:
+            reason = report.stop_reason or "admission stopped"
+        elif report.time_limit_reached:
+            reason = "time budget reached"
+        state = {**report.capacity, **counts, "coding_idle_reason": reason, "waiting": dict(waiting)}
+        if state != last_capacity:
+            record_audit(store, "scheduler.capacity", state)
+            if hooks.on_capacity is not None:
+                hooks.on_capacity(dict(state))
+            last_capacity = state
+        report.capacity.update(counts, coding_idle_reason=reason, waiting=dict(waiting))
+
+    def discover() -> None:
+        if admit_tasks is None or stop or control.blocks_admission() or (deadline is not None and clock() >= deadline):
+            return
+        for task_id in admit_tasks():
+            if task_id in records:
+                continue
+            task = store.get_task(task_id)
+            record = TaskRecord(task_id, title=str(task["title"]) if task else "")
+            records[task_id] = record
+            report.tasks.append(record)
+            reason = skip_reason(store, task_id)
+            try:
+                _contract(task_id)
+            except ContractError as exc:
+                reason = f"invalid_contract: {exc}"
+            if reason:
+                record.outcome, record.reason = "skipped", reason
+            else:
+                pending.append(task_id)
 
     def halt(reason: str) -> None:
         nonlocal stop
@@ -491,21 +561,33 @@ def run_wave(
             stop = True
             report.stopped_early, report.stop_reason = True, reason
 
-    with ThreadPoolExecutor(max_workers=max(1, concurrency)) as pool:
+    worker_limit = max(1, concurrency) + (verification_concurrency or 0)
+    with ThreadPoolExecutor(max_workers=worker_limit) as pool:
         while pending or running:
             if control.blocks_admission():
                 halt(f"queue admission {control.state_label()}")
-            while pending and not stop and len(running) < max(1, concurrency):
+            discover()
+            waiting.clear()
+            while pending and not stop and len(running) < worker_limit:
                 if deadline is not None and clock() >= deadline:
                     report.time_limit_reached = True
                     break
                 chosen_idx: int | None = None
                 for idx, candidate_id in enumerate(pending):
+                    bucket = phase(candidate_id) if staged else "coding"
+                    limit = concurrency if bucket == "coding" else verification_concurrency
+                    if staged and sum(phases[t] == bucket for t in running.values()) >= limit:
+                        waiting[candidate_id] = f"{bucket} capacity occupied"
+                        continue
                     cand_contract = _contract(candidate_id)
                     conflict = False
-                    for running_id in running.values():
+                    for running_id in (owners if staged else running.values()):
+                        if running_id == candidate_id:
+                            continue
                         running_contract = _contract(running_id)
-                        if contract_conflict(cand_contract, running_contract) is not None:
+                        problem = contract_conflict(cand_contract, running_contract)
+                        if problem is not None:
+                            waiting[candidate_id] = f"waiting for task {running_id}: {problem}"
                             conflict = True
                             break
                     if not conflict:
@@ -514,8 +596,33 @@ def run_wave(
                 if chosen_idx is None:
                     break
                 task_id = pending.pop(chosen_idx)
-                started_at[task_id] = clock()
-                running[pool.submit(hooks.run_task, task_id, max_steps)] = task_id
+                waiting.pop(task_id, None)
+                if task_id not in prepared:
+                    prepare_task(task_id)
+                    prepared.add(task_id)
+                    if control.blocks_admission():
+                        pending.insert(0, task_id)
+                        halt(f"queue admission {control.state_label()}")
+                        break
+                # Preparation can be slow and may move stale verification back
+                # to IMPLEMENT. Recheck both boundaries against the actual stage.
+                if deadline is not None and clock() >= deadline:
+                    pending.insert(0, task_id)
+                    report.time_limit_reached = True
+                    break
+                if staged:
+                    bucket = phase(task_id)
+                    limit = concurrency if bucket == "coding" else verification_concurrency
+                    if sum(phases[t] == bucket for t in running.values()) >= limit:
+                        waiting[task_id] = f"{bucket} capacity occupied after baseline preparation"
+                        pending.append(task_id)
+                        continue
+                started_at.setdefault(task_id, clock())
+                phases[task_id] = phase(task_id) if staged else "coding"
+                owners.add(task_id)
+                steps[task_id] = steps.get(task_id, 0) + 1
+                running[pool.submit(hooks.run_task, task_id, 1 if staged else max_steps)] = task_id
+            capacity_notice()
             if not running:
                 break
             done, _ = wait(list(running), return_when=FIRST_COMPLETED)
@@ -552,9 +659,17 @@ def run_wave(
                     main_now = hooks.main_sha()
                     if main_now is not None and main_now != main_before:
                         halt(f"local main moved in PR mode ({main_before[:7]} -> {main_now[:7]}) after task {task_id}")
+                if (staged and not stop and result.stop_reason == "MAX_STEPS" and steps[task_id] < max_steps
+                        and record.final_status == TaskStatus.OPEN):
+                    pending.append(task_id)
+                else:
+                    owners.discard(task_id)
+            discover()
+            capacity_notice()
     for task_id in pending:
-        why = "time budget reached before this task started" if report.time_limit_reached else "wave stopped before this task started"
-        records[task_id].outcome, records[task_id].reason = "not_started", why
+        target = "next stage" if task_id in started_at else "this task started"
+        why = f"time budget reached before {target}" if report.time_limit_reached else f"wave stopped before {target}"
+        records[task_id].outcome, records[task_id].reason = ("open" if task_id in started_at else "not_started"), why
         _snapshot(store, records[task_id], report.started_at)
 
     publish = open_prs and hooks.open_pr is not None and not local  # local mode integrates into the branch itself; a PR would be a second path

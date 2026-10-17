@@ -6,7 +6,7 @@
 
 `stagemesh run-window` provides an unattended bounded work window in PR mode:
 - **Automatic task selection:** Automatically selects runnable tasks (`OPEN`, not `DONE`, eligible under the scheduler, not parked, not blocked, not waiting on dependencies or an objective root, with no active claim or running execution).
-- **Time-bounded operation:** Runs work within a bounded time duration. When the time budget expires, executing tasks finish within their step budget, but no new tasks are started (clean stop).
+- **Time-bounded operation:** When the time budget expires, executing stages finish, while queued tasks and later stages remain resumable. No new stage starts after the deadline.
 - **Safe PR integration:** Integrates finished work onto `wave/staging` and opens pull requests against `main` for completed tasks without moving local `main`.
 - **Never merges:** The command never merges PRs. Merging remains an explicit operator action.
 
@@ -23,8 +23,9 @@ up worktrees, closes no issues (only a PR merge does), and writes a report to `.
 
 | Option | Default | Description |
 | --- | --- | --- |
-| `--duration` | `45m` | Time budget for the window, e.g. `2h`, `90m`, `45s`, `1.5h`, or bare seconds. Running tasks finish within their step budget; nothing new starts after it. |
-| `--concurrency` | `2` | Number of tasks running concurrently. |
+| `--duration` | `45m` | Time budget, e.g. `2h`, `90m`, `45s` or `1.5h`. Running stages finish; no new stage starts after it. |
+| `--concurrency` | `2` | Coding-process capacity to keep occupied while independent coding work is ready. |
+| `--verification-concurrency` | `2` | Separate bounded process capacity for planning, validation, review and integration. |
 | `--max-steps-per-task` | `8` | Step budget for each task. Tasks reaching this cap remain `OPEN` and marked `resumable`. |
 | `--max-tasks` | `10` | Maximum number of tasks to attempt during the window. |
 | `--tasks` | All eligible | Comma-separated task IDs (e.g. `155,156`) to restrict the window to specific tasks instead of automatic selection. |
@@ -36,6 +37,38 @@ up worktrees, closes no issues (only a PR merge does), and writes a report to `.
 | `--report` | Auto-generated | Path to write the JSON report (defaults to `.stagemesh/reports/run-window/<timestamp>.json`, created automatically). |
 
 ## Live Progress
+
+### Continuous coding capacity
+
+`--concurrency 5` gives coding its own five-process capacity. Planning,
+validation, review and integration use the separate verification capacity
+(default two), so a task moving to validation releases its coding slot.
+The existing worker engine dispatches one bounded lifecycle step per child
+process, retaining the task's total step budget, isolated worktree and evidence.
+It refills free coding slots and reconsiders newly ready dependencies after
+each completion, without waiting for an unrelated slow task or a fixed batch.
+
+The live stream and JSON report show coding/verification occupancy and coding
+idle reasons. A source shortage or a scope/exclusive-resource conflict is
+reported rather than bypassed. Protected paths, named resources, claims,
+provider eligibility, stop controls and exact-candidate validation/review
+remain enforced. Ownership persists across stage yields. Main landing still
+waits for workers to quiesce and uses the existing serialized integration path.
+The dispatcher starts no new lifecycle step after the window deadline. In
+automatic-merge mode, a downstream task waits for its prerequisite to land
+remotely; unrelated ready tasks can continue developing in parallel.
+
+For five coding processes and two verification processes:
+
+```powershell
+stagemesh run-window --duration 2h --concurrency 5 --verification-concurrency 2 --max-tasks 100 --merge-policy stagemesh
+```
+
+These are process limits, so this example can run seven child processes at
+once. Five coders can be sustained only while five independent coding tasks
+and their required providers are available. Validation work does not count
+as a coder. A failed task releases its process slot while its evidence and
+resumable candidate are preserved.
 
 While the window runs, one line per event is written to stderr and flushed immediately, for example:
 
