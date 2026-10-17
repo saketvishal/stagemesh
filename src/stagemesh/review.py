@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Protocol
 
 from .contract_binding import contract_for_candidate
-from .contracts import ContractError, evaluate_contract
+from .contracts import ContractError, contract_prompt, declarative_invariants, evaluate_contract
 from .domain import EvidenceKind, EvidenceStatus, ExecutionKind, ExecutionStatus
 from .persistence import Store
 from .process_identity import owner_execution_fields
@@ -376,6 +376,9 @@ class Reviewer:
             try:
                 bound = contract_for_candidate(store, task_id, candidate_sha, project)
                 contract = bound.contract
+                review_payload["review_invariants"] = list(declarative_invariants(contract))
+                if adapter is None and review_payload["review_invariants"]:
+                    infrastructure_failure = "invariant_review_unavailable"
                 evaluation = evaluate_contract(
                     project,
                     candidate_sha,
@@ -405,6 +408,7 @@ class Reviewer:
                         ADVERSE_REVIEW_DISCIPLINE +
                         f"Review candidate {candidate_sha} for task {task_id} under contract {bound.digest} (version {bound.version}).\n"
                         f"Objective: {contract.objective}\n"
+                        f"{contract_prompt(contract)}\n"
                         "Inspect the candidate, then reply with ONE final JSON verdict and nothing else (no progress text): "
                         "{\"decision\":\"PASS\"}, or "
                         "{\"decision\":\"FAIL_WITH_FINDINGS\",\"findings\":[{\"severity\":\"error\",\"message\":\"concrete defect\","
