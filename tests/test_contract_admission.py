@@ -164,3 +164,44 @@ def test_contract_check_rejects_whitespace_placeholder_before_labelling_ready():
         {"name": "acceptance", "command": ["git", "diff", "--check"]}])
     report = check_contract_text(json.dumps(payload))
     assert not report["ok"] and "whitespace" in report["errors"][0]
+
+
+@pytest.mark.parametrize("restriction", ["protected_files", "forbidden_files"])
+@pytest.mark.parametrize("frozen", [False, True])
+def test_conflicting_edit_target_is_refused_before_provider_work(tmp_path, restriction, frozen):
+    import hashlib
+
+    project = _project(tmp_path, ["1", "2"])
+    payload = dict(FAKE_CONTRACT, allowed_files=["src/feature.py"], **{restriction: ["src/*.py"]})
+    path = project / ".stagemesh/contracts/1.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    before = path.read_bytes()
+    store = _synced(project)
+    try:
+        if frozen:
+            canonical = canonical_contract_json(parse_contract(payload))
+            store.bind_task_contract("1", "a" * 40, 1, hashlib.sha256(canonical.encode()).hexdigest(), canonical)
+        assert select_next_task(store, project, TaskSelectionConfig()).task_id == "2"
+        with pytest.raises(RunReadyRefusal, match="scope conflict"):
+            _ensure_contract(store, project, "1", True, {}, lambda _: None)
+        assert path.read_bytes() == before
+        assert not store.has_active_claim("1")
+        assert list(store.running_executions()) == []
+    finally:
+        store.close()
+
+
+def test_broad_allowed_scope_can_keep_protected_exceptions():
+    from stagemesh.contracts import contract_admission_problem
+
+    contract = parse_contract(dict(FAKE_CONTRACT, allowed_files=["src/**"], protected_files=["src/secret.py"]))
+    assert contract_admission_problem(contract) is None
+
+
+def test_contract_authoring_reports_conflicting_scope():
+    from stagemesh.contract_check import check_contract_text
+
+    report = check_contract_text(json.dumps(dict(FAKE_CONTRACT, allowed_files=["src/feature.py"],
+                                                protected_files=["src/feature.py"])))
+    assert not report["ok"]
+    assert "scope conflict" in report["errors"][0]

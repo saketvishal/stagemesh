@@ -174,6 +174,14 @@ def contract_admission_problem(contract: ChangeContract) -> str | None:
     discard that metadata, and renaming the placeholder must not make it executable.
     Structural parsing stays separate so historical contracts remain readable.
     """
+    # A concrete edit target must not also be immutable. Broad allow patterns
+    # may legitimately contain protected exceptions, so do not reject those.
+    for path in contract.allowed_files:
+        if not any(char in path for char in "*?[") and (
+            _matches(path, contract.protected_files) or _matches(path, contract.forbidden_files)
+        ):
+            return f"contract scope conflict: allowed edit target {path} is protected or forbidden; correct the contract before implementation"
+
     def whitespace_only(gate: GateCommand) -> bool:
         command = gate.command
         program = Path(command[0].replace("\\", "/")).name.casefold() if command else ""
