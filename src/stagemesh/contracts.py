@@ -9,7 +9,7 @@ import shutil
 import subprocess
 import tempfile
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -551,17 +551,26 @@ def run_gate(project: Path, gate: GateCommand) -> GateResult:
     command = _gate_runtime_command(list(gate.command))
     environment = _gate_environment(run_dir, gate)
     try:
-        result = subprocess.run(
-            command,
-            cwd=run_dir,
-            env=environment,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            capture_output=True,
-            check=False,
-            timeout=gate.timeout_seconds,
-        )
+        with ExitStack() as resources:
+            # Provider sandboxes can create pytest temp roots unreadable by the
+            # validator. Each gate needs its own host-owned temporary directory.
+            temp_keys = ("TMPDIR", "TEMP", "TMP")
+            if not set(temp_keys).intersection(dict(gate.env)):
+                temp_root = resources.enter_context(
+                    tempfile.TemporaryDirectory(prefix="stagemesh-gate-", ignore_cleanup_errors=True)
+                )
+                environment = {**(environment or os.environ), **dict.fromkeys(temp_keys, temp_root)}
+            result = subprocess.run(
+                command,
+                cwd=run_dir,
+                env=environment,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                capture_output=True,
+                check=False,
+                timeout=gate.timeout_seconds,
+            )
     except OSError as exc:
         return GateResult(gate.name, "FAILED", tuple(gate.command), None, "", str(exc), "environment")
     except subprocess.TimeoutExpired as exc:
