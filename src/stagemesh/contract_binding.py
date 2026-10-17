@@ -32,10 +32,13 @@ def bind_task_contract(store: Store, project: Path, task_id: str, baseline_sha: 
     """Load, validate, canonicalize and freeze the task contract before the provider runs."""
     existing = store.task_contract(task_id)
     if existing is not None:
-        bound = bound_contract_from_record(dict(existing))
+        try:
+            bound = bound_contract_from_record(dict(existing))
+        except ContractError as exc:
+            raise ContractRejected("invalid_contract", str(exc)) from exc
         problem = contract_admission_problem(bound.contract)
         if problem:
-            raise ContractRejected("placeholder_validation_gates", problem)
+            raise ContractRejected("invalid_contract" if problem.startswith("invalid invariant:") else "placeholder_validation_gates", problem)
         return bound
     path = task_contract_path(project, task_id)
     if path is None:
@@ -48,7 +51,7 @@ def bind_task_contract(store: Store, project: Path, task_id: str, baseline_sha: 
         raise ContractRejected("missing_explicit_contract", "change contract must be explicit")
     problem = contract_admission_problem(contract)
     if problem:
-        raise ContractRejected("placeholder_validation_gates", problem)
+        raise ContractRejected("invalid_contract" if problem.startswith("invalid invariant:") else "placeholder_validation_gates", problem)
     canonical_json = canonical_contract_json(contract)
     digest = hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
     store.bind_task_contract(task_id, baseline_sha, CONTRACT_VERSION, digest, canonical_json)

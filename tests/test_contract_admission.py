@@ -205,3 +205,190 @@ def test_contract_authoring_reports_conflicting_scope():
                                                 protected_files=["src/feature.py"])))
     assert not report["ok"]
     assert "scope conflict" in report["errors"][0]
+
+
+def _legacy_contract(tmp_path, *, frozen=True):
+    import hashlib
+    from stagemesh.git import GitWorkspace
+
+    project = _project(tmp_path, ["1", "2"])
+    payload = dict(FAKE_CONTRACT, invariants=["Preserve the existing public API behavior.", "project-check --strict"])
+    path = project / ".stagemesh/contracts/1.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    store = _synced(project)
+    baseline = GitWorkspace(project).head()
+    store.set_task_baseline("1", baseline)
+    canonical = canonical_contract_json(parse_contract(payload))
+    if frozen:
+        store.bind_task_contract("1", baseline, 1, hashlib.sha256(canonical.encode()).hexdigest(), canonical)
+    return project, store, path, canonical
+
+
+@pytest.mark.parametrize("frozen", [False, True])
+def test_invalid_invariants_refused_by_selection_binding_and_runner(tmp_path, frozen):
+    from stagemesh.contract_binding import ContractRejected, bind_task_contract
+    from stagemesh.git import GitWorkspace
+
+    project, store, path, _ = _legacy_contract(tmp_path, frozen=frozen)
+    before = path.read_bytes()
+    try:
+        assert select_next_task(store, project, TaskSelectionConfig()).task_id == "2"
+        picked, skipped = planned_selection(store, WindowOptions(max_tasks=1), project)
+        assert picked == ["2"] and "ambiguous invariant" in skipped["1"]
+        with pytest.raises(RunReadyRefusal, match="ambiguous invariant"):
+            _ensure_contract(store, project, "1", True, {}, lambda _: None)
+        with pytest.raises(ContractRejected, match="ambiguous invariant") as exc:
+            bind_task_contract(store, project, "1", GitWorkspace(project).head())
+        assert exc.value.reason == "invalid_contract"
+        assert path.read_bytes() == before
+        assert not list(store.running_executions()) and not store.has_active_claim("1")
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("stage", ["IMPLEMENT", "VALIDATE", "REVIEW", "INTEGRATE"])
+def test_coordinator_blocks_invalid_contract_before_any_stage_or_provider(tmp_path, stage):
+    from stagemesh.block_kinds import BlockKind, classify_block
+    from stagemesh.coordinator import Coordinator, TargetSelection
+    from stagemesh.domain import Stage
+
+    class Never:
+        name = "must-not-be-called"
+
+        def run(self, *args):
+            pytest.fail("invalid contract reached a provider")
+
+        validate = review = integrate = run
+
+    project, store, _, _ = _legacy_contract(tmp_path)
+    try:
+        store.advance_task("1", Stage(stage))
+        coordinator = Coordinator(store, project, executor=Never(), validator=Never(), reviewer=Never(),
+                                  integrator=Never(), target=TargetSelection("1"))
+        assert coordinator.tick() == 1
+        block = classify_block(store, "1")
+        assert block.kind == BlockKind.HUMAN_DECISION and "invalid_contract" in block.reason
+        assert store.task_remediation_count("1", stage) == 0
+        assert not list(store.running_executions()) and not store.has_active_claim("1")
+    finally:
+        store.close()
+
+
+def test_legacy_classification_plan_and_audited_rebind_preserve_every_requirement(tmp_path):
+    from stagemesh.recovery import REBIND_EVENT, rebind_contract
+
+    project, store, path, canonical = _legacy_contract(tmp_path)
+    before = path.read_bytes()
+    try:
+        old = dict(store.task_contract("1"))
+        count = store.conn.execute("SELECT COUNT(*) FROM audit_events").fetchone()[0]
+        plan = rebind_contract(store, project, "1", review_invariants=(1,), reason="Classify the legacy prose requirement", plan=True)
+        assert plan["plan"] and plan["classification"][0]["original"] == json.loads(canonical)["invariants"][0]
+        assert dict(store.task_contract("1")) == old
+        assert store.conn.execute("SELECT COUNT(*) FROM audit_events").fetchone()[0] == count
+        # The repair must not import unrelated edits from a mutable contract file.
+        path.write_text(json.dumps(dict(FAKE_CONTRACT, required_tests=[])), encoding="utf-8")
+        file_before_apply = path.read_bytes()
+        report = rebind_contract(store, project, "1", review_invariants=(1,), reason="Classify the legacy prose requirement")
+        new = json.loads(store.task_contract("1")["canonical_json"])
+        expected = json.loads(canonical)
+        expected["invariants"][0] = "review: " + expected["invariants"][0]
+        assert new == expected and path.read_bytes() == file_before_apply
+        assert report["new_digest"] != report["old_digest"] and report["invariant_classification"] == plan["classification"]
+        audit = json.loads(store.conn.execute("SELECT payload FROM audit_events WHERE event_type=? ORDER BY rowid DESC LIMIT 1", (REBIND_EVENT,)).fetchone()[0])
+        assert audit["old_canonical_json"] == canonical
+        assert audit["new_canonical_json"] == store.task_contract("1")["canonical_json"]
+        assert before != file_before_apply  # only this test changed the file
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"review_invariants": (0,)}, {"review_invariants": (3,)}, {"review_invariants": (1, 1)},
+    {"review_invariants": (1,), "command_invariants": (1,)}, {"review_invariants": (2,)},
+])
+def test_legacy_classification_refuses_invalid_indices_and_executable_downgrades(tmp_path, kwargs):
+    from stagemesh.recovery import RecoveryRefusal, rebind_contract
+
+    project, store, path, canonical = _legacy_contract(tmp_path)
+    before = path.read_bytes()
+    try:
+        with pytest.raises(RecoveryRefusal):
+            rebind_contract(store, project, "1", reason="Explicit classification", **kwargs)
+        assert store.task_contract("1")["canonical_json"] == canonical and path.read_bytes() == before
+    finally:
+        store.close()
+
+
+def test_legacy_rebind_requires_reason_and_retains_explicit_custom_commands(tmp_path):
+    from stagemesh.recovery import RecoveryRefusal, rebind_contract
+
+    project, store, _, _ = _legacy_contract(tmp_path)
+    try:
+        with pytest.raises(RecoveryRefusal, match="reason"):
+            rebind_contract(store, project, "1", command_invariants=(1,))
+        rebind_contract(store, project, "1", command_invariants=(1,), reason="This is an actual custom check")
+        invariant = json.loads(store.task_contract("1")["canonical_json"])["invariants"][0]
+        assert invariant == "command: Preserve the existing public API behavior."
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("stage,kind", [("VALIDATE", "VALIDATION"), ("REVIEW", "REVIEW")])
+def test_validator_invalid_contract_never_requests_code_remediation(tmp_path, stage, kind):
+    from stagemesh.coordinator import Coordinator
+    from stagemesh.domain import EvidenceKind, EvidenceStatus, Stage
+
+    project, store, _, _ = _legacy_contract(tmp_path)
+    try:
+        sha = "f" * 40
+        store.add_evidence("1", sha, EvidenceKind(kind), EvidenceStatus.FAILED,
+                           {"findings": [{"code": "invalid_contract", "message": "bad contract binding"}]})
+        assert Coordinator(store, project)._remediate_or_block("1", sha, Stage(stage)) == 1
+        assert store.get_task("1")["status"] == "BLOCKED"
+        assert store.task_remediation_count("1", stage) == 0
+        assert not list(store.running_executions())
+    finally:
+        store.close()
+
+
+def test_legacy_rebind_requires_force_for_old_passed_evidence_and_resets_validation(tmp_path):
+    from stagemesh.domain import EvidenceKind, EvidenceStatus, Stage
+    from stagemesh.recovery import RecoveryRefusal, rebind_contract
+
+    project, store, _, canonical = _legacy_contract(tmp_path)
+    try:
+        sha = "c" * 40
+        old = dict(store.task_contract("1"))
+        store.add_candidate("1", sha, "implementer", True)
+        store.bind_contract("1", sha, old["baseline_sha"], old["version"], old["digest"], canonical)
+        store.advance_task("1", Stage.INTEGRATE)
+        for kind in (EvidenceKind.VALIDATION, EvidenceKind.REVIEW, EvidenceKind.INTEGRATION):
+            store.add_evidence("1", sha, kind, EvidenceStatus.PASSED,
+                               {"contract_hash": old["digest"], "contract_version": 1, "candidate_sha": sha, "baseline_sha": old["baseline_sha"]})
+        with pytest.raises(RecoveryRefusal, match="evidence"):
+            rebind_contract(store, project, "1", review_invariants=(1,), reason="Classify legacy prose")
+        assert dict(store.task_contract("1")) == old
+        report = rebind_contract(store, project, "1", review_invariants=(1,), reason="Classify legacy prose", force=True)
+        assert len(report["invalidated_evidence"]) == 3 and report["stage"] == "VALIDATE"
+        for kind in (EvidenceKind.VALIDATION, EvidenceKind.REVIEW, EvidenceKind.INTEGRATION):
+            assert not store.has_bound_evidence("1", sha, kind, report["new_digest"], EvidenceStatus.PASSED)
+        assert store.conn.execute("SELECT COUNT(*) FROM evidence WHERE task_id='1'").fetchone()[0] == 3
+        assert store.latest_candidate("1")["sha"] == sha
+    finally:
+        store.close()
+
+
+def test_legacy_classification_cli_plan_is_non_mutating(tmp_path, capsys):
+    import stagemesh.cli as cli
+
+    project, store, _, canonical = _legacy_contract(tmp_path)
+    try:
+        assert cli.main(["--project", str(project), "rebind-contract", "--task", "1", "--review-invariant", "1",
+                         "--reason", "Classify prose explicitly", "--plan", "--json"]) == 0
+        report = json.loads(capsys.readouterr().out)
+        assert report["plan"] and report["classification"][0]["kind"] == "review"
+        assert store.task_contract("1")["canonical_json"] == canonical
+        assert not list(store.running_executions()) and not store.has_active_claim("1")
+    finally:
+        store.close()

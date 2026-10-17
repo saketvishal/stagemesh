@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -18,8 +19,11 @@ from .contract_binding import contract_for_candidate
 from .contracts import (
     CONTRACT_VERSION,
     ContractError,
+    _invariant_gate,
+    bound_contract_from_record,
     canonical_contract_json,
     changed_files,
+    contract_admission_problem,
     parse_contract,
     task_contract_path,
 )
@@ -104,28 +108,64 @@ def _revalidate(store: Store, project: Path, task_id: str) -> dict[str, Any]:
 # --- rebind-contract -------------------------------------------------------------------------------------------------------------
 
 
-def rebind_contract(store: Store, project: Path, task_id: str, *, validate: bool = False, reason: str | None = None, force: bool = False) -> dict[str, Any]:
+def rebind_contract(store: Store, project: Path, task_id: str, *, validate: bool = False, reason: str | None = None,
+                    force: bool = False, review_invariants: tuple[int, ...] = (), command_invariants: tuple[int, ...] = (),
+                    plan: bool = False) -> dict[str, Any]:
     """Re-read .stagemesh/contracts/<id>.json, canonicalize it and replace the task's frozen contract with it.
 
     The stored version is always this build's CONTRACT_VERSION: it is not read from the old row, so a hand-edited row
     (`unsupported bound contract version: 2`) is repaired by the rebind rather than propagated.
     """
     task = _require_repairable(store, task_id)
+    old = store.task_contract(task_id)
     path = task_contract_path(project, task_id)
-    if path is None:
+    classifying = bool(review_invariants or command_invariants)
+    if classifying and not (reason or "").strip():
+        raise RecoveryRefusal("reason_required", "classifying legacy invariants requires --reason")
+    if path is None and not (classifying and old is not None):
         raise RecoveryRefusal("missing_contract_file", f"no contract file at .stagemesh/contracts/{task_id}.json to rebind")
     try:
-        contract = parse_contract(json.loads(path.read_text(encoding="utf-8")))
+        # Classification starts from the verified frozen payload, never a possibly
+        # edited file. Only selected prefixes may change; all requirements survive.
+        contract = (bound_contract_from_record(dict(old)).contract if classifying and old is not None
+                    else parse_contract(json.loads(path.read_text(encoding="utf-8"))))
     except (OSError, ValueError) as exc:
         raise RecoveryRefusal("invalid_contract", f"contract file is invalid: {exc}") from exc
     if not contract.explicit:
         raise RecoveryRefusal("invalid_contract", "change contract must be explicit")
+    if old is None and store.task_baseline(task_id) is None:
+        raise RecoveryRefusal("missing_baseline", "task has no recorded baseline; establish its baseline before rebinding rather than guessing from the checkout")
+    classification = []
+    if classifying:
+        indices = (*review_invariants, *command_invariants)
+        if len(set(indices)) != len(indices) or any(type(i) is not int or i < 1 or i > len(contract.invariants) for i in indices):
+            raise RecoveryRefusal("invalid_classification", "invariant indices are unique, one-based positions in the frozen contract")
+        invariants = list(contract.invariants)
+        for index in indices:
+            original = invariants[index - 1]
+            if original.startswith(("review:", "command:")):
+                raise RecoveryRefusal("invalid_classification", f"invariant {index} already has an explicit type")
+            try:
+                gate = _invariant_gate(original)
+            except ContractError as exc:
+                if not str(exc).startswith("ambiguous invariant:"):
+                    raise RecoveryRefusal("invalid_classification", str(exc)) from exc
+                gate = None
+            kind = "review" if index in review_invariants else "command"
+            if kind == "review" and gate is not None:
+                raise RecoveryRefusal("executable_invariant", f"invariant {index} is an executable check; it cannot be downgraded to review")
+            updated = f"{kind}: {original}"
+            invariants[index - 1] = updated
+            classification.append({"index": index, "kind": kind, "original": original, "replacement": updated})
+        contract = replace(contract, invariants=tuple(invariants))
+    problem = contract_admission_problem(contract)
+    if problem:
+        raise RecoveryRefusal("invalid_contract", problem)
     canonical = canonical_contract_json(contract)
     if len(canonical) > MAX_CANONICAL_CONTRACT_CHARS:
         raise RecoveryRefusal("invalid_contract", f"contract is {len(canonical)} characters canonicalized; the limit is {MAX_CANONICAL_CONTRACT_CHARS}")
     digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
-    old = store.task_contract(task_id)
     old_digest = str(old["digest"]) if old is not None else None
     old_version = int(old["version"]) if old is not None else None
     candidate = store.latest_candidate(task_id)
@@ -134,6 +174,11 @@ def rebind_contract(store: Store, project: Path, task_id: str, *, validate: bool
     stale_digests = {str(b["digest"]) for b in store.contract_bindings_for_task(task_id)} | ({old_digest} if old_digest else set())
     stale_digests.discard(digest)
     at_risk = [row for d in sorted(stale_digests) for row in store.passed_evidence_for_digest(task_id, d)]
+    if plan:
+        return {"plan": True, "task_id": task_id, "old_digest": old_digest, "new_digest": digest,
+                "classification": classification, "invalidated_evidence": [str(r["id"]) for r in at_risk],
+                "requires_force": bool(at_risk), "new_canonical_json": canonical,
+                "stage": task["stage"], "status": task["status"]}
     if at_risk and not force:
         kinds = sorted({str(r["kind"]) for r in at_risk})
         raise RecoveryRefusal(
@@ -166,6 +211,8 @@ def rebind_contract(store: Store, project: Path, task_id: str, *, validate: bool
         "old_version": old_version,
         "new_version": CONTRACT_VERSION,
         "old_canonical_json": str(old["canonical_json"]) if old is not None else None,
+        "new_canonical_json": canonical,
+        "invariant_classification": classification,
         "candidate_sha": candidate_sha,
         "binding_updated": binding is not None,
         "invalidated_evidence": [str(r["id"]) for r in at_risk],

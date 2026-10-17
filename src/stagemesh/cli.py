@@ -715,7 +715,15 @@ def _repair_command(args: argparse.Namespace, action) -> int:  # type: ignore[no
 
 def command_rebind_contract(args: argparse.Namespace) -> int:
     def run(store, project):  # type: ignore[no-untyped-def]
-        report = rebind_contract(store, project, args.task, validate=args.validate, reason=args.reason, force=args.force)
+        report = rebind_contract(store, project, args.task, validate=args.validate, reason=args.reason, force=args.force,
+                                 review_invariants=tuple(args.review_invariant), command_invariants=tuple(args.command_invariant), plan=args.plan)
+        if report.get("plan"):
+            if not args.json:
+                print(f"task {args.task}: rebind plan only; no task, contract file, evidence or binding changed")
+                for item in report["classification"]:
+                    print(f"  invariant {item['index']} -> {item['kind']}: {item['original']}")
+                print(f"  {len(report['invalidated_evidence'])} passed evidence row(s) would stop counting; --force required: {report['requires_force']}")
+            return report
         if not args.json:
             old, new = (report["old_digest"] or "none")[:12], report["new_digest"][:12]
             print(f"task {args.task}: contract rebound {old} -> {new} (version {report['old_version']} -> {report['new_version']})")
@@ -3211,6 +3219,9 @@ def build_parser() -> argparse.ArgumentParser:
     rebind.add_argument("--validate", action="store_true", help="Validate the latest candidate against the new contract and advance if it passes")
     rebind.add_argument("--force", action="store_true", help="Accept that passed evidence bound to the old contract stops counting (it is kept as history)")
     rebind.add_argument("--reason", help="Why the contract changed (recorded in the audit event)")
+    rebind.add_argument("--review-invariant", type=int, action="append", default=[], metavar="INDEX", help="Explicitly classify an ambiguous legacy invariant as a review requirement (one-based frozen index; repeatable; --reason required)")
+    rebind.add_argument("--command-invariant", type=int, action="append", default=[], metavar="INDEX", help="Explicitly classify a legacy invariant as an executable command (one-based frozen index; repeatable)")
+    rebind.add_argument("--plan", action="store_true", help="Preview the rebind and evidence invalidation without changing task bindings or running validation")
     rebind.add_argument("--json", action="store_true")
     rebind.set_defaults(func=command_rebind_contract)
     contract_check = sub.add_parser(
