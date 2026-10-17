@@ -392,3 +392,25 @@ def test_legacy_classification_cli_plan_is_non_mutating(tmp_path, capsys):
         assert not list(store.running_executions()) and not store.has_active_claim("1")
     finally:
         store.close()
+
+
+def test_legacy_original_survives_failure_after_binding_write(tmp_path, monkeypatch):
+    from stagemesh.recovery import REBIND_EVENT, rebind_contract
+
+    project, store, _, canonical = _legacy_contract(tmp_path)
+    write = store.rebind_task_contract
+
+    def interrupted(*args, **kwargs):
+        write(*args, **kwargs)
+        raise RuntimeError("simulated interruption after binding commit")
+
+    try:
+        monkeypatch.setattr(store, "rebind_task_contract", interrupted)
+        with pytest.raises(RuntimeError, match="interruption"):
+            rebind_contract(store, project, "1", review_invariants=(1,), reason="Explicit legacy classification")
+        saved = store.conn.execute("SELECT payload FROM audit_events WHERE event_type='task.contract_classification_authorized'").fetchone()
+        assert json.loads(saved[0])["old_canonical_json"] == canonical
+        assert json.loads(saved[0])["new_canonical_json"] == store.task_contract("1")["canonical_json"]
+        assert not store.conn.execute("SELECT 1 FROM audit_events WHERE event_type=?", (REBIND_EVENT,)).fetchone()
+    finally:
+        store.close()

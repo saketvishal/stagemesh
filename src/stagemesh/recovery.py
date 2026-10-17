@@ -135,6 +135,7 @@ def rebind_contract(store: Store, project: Path, task_id: str, *, validate: bool
         raise RecoveryRefusal("invalid_contract", "change contract must be explicit")
     if old is None and store.task_baseline(task_id) is None:
         raise RecoveryRefusal("missing_baseline", "task has no recorded baseline; establish its baseline before rebinding rather than guessing from the checkout")
+    original_canonical = canonical_contract_json(contract)
     classification = []
     if classifying:
         indices = (*review_invariants, *command_invariants)
@@ -188,6 +189,15 @@ def rebind_contract(store: Store, project: Path, task_id: str, *, validate: bool
             evidence_ids=[str(r["id"]) for r in at_risk],
         )
     binding = store.contract_binding(task_id, candidate_sha) if candidate_sha else None
+    if classifying:
+        # Preserve the original before the first binding write. A crash may leave
+        # authorization without completion, but can never erase requirements.
+        record_audit(store, "task.contract_classification_authorized", {
+            "task_id": task_id, "old_digest": old_digest, "new_digest": digest,
+            "old_canonical_json": original_canonical, "new_canonical_json": canonical,
+            "invariant_classification": classification, "candidate_sha": candidate_sha,
+            "reason": reason.strip(), "operator": _operator(), "forced": bool(force),
+        })
     store.rebind_task_contract(task_id, CONTRACT_VERSION, digest, canonical, candidate_sha if binding is not None else None)
     changes = _resume_at_validate(store, task_id, task)
     # Even an unchanged rebind must repair a stage that has no current validation.

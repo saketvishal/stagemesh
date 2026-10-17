@@ -325,7 +325,8 @@ findings, evidence or audit events, and write an audit event (`task.contract_reb
   adds only the selected type prefixes, preserves all other requirements and gates, and never edits contract files.
   Recognized executable checks cannot be downgraded to review. Unselected ambiguous invariants still refuse admission.
   Applying the plan records both canonical contracts and each explicit classification in the audit event; old passed
-  evidence needs `--force` to stop counting and is retained as history. The current candidate must pass fresh validation
+  contracts are snapshotted in a durable authorization event before any binding write, followed by a completion event.
+  Passed evidence needs `--force` to stop counting and is retained as history. The current candidate must pass fresh validation
   and review under the new hash; review requirements cannot pass via the builtin fallback. Only a fresh passed validation
   resolves prior parser-error findings, never substantive code or review findings. `--plan` runs no checks or providers.
 * `stagemesh rebaseline-task --task <id> --to <integration-ref> [--validate] [--force] [--json]` moves a stale baseline to the
