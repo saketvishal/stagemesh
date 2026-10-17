@@ -212,7 +212,8 @@ def test_windows_interruption_cannot_inherit_source_readiness_marker(tmp_path):
         "original=e.shutil.copytree\n"
         "def interrupted(*args,**kwargs):\n"
         "    original(*args,**kwargs)\n"
-        "    os._exit(23)\n"
+        f"    if Path(args[0]) == Path({str(modules)!r}):\n"
+        "        os._exit(23)\n"
         "e.shutil.copytree=interrupted\n"
         f"e.prepare_candidate_environments(Path({str(project)!r}),Path({str(checkout)!r}))\n"
     )
