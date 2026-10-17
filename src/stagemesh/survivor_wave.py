@@ -143,6 +143,7 @@ class WaveReport:
     duplicate_runs_avoided: int = 0
     ci_wait_seconds: float = 0.0
     batch_results: list[dict[str, Any]] = field(default_factory=list)
+    ci_mode: str = "immediate"
 
     @property
     def main_moved(self) -> bool:
@@ -194,6 +195,7 @@ class WaveReport:
             "duplicate_runs_avoided": self.duplicate_runs_avoided,
             "ci_wait_seconds": self.ci_wait_seconds,
             "batch_results": self.batch_results,
+            "ci_mode": self.ci_mode,
             "tasks": [task.to_dict() for task in self.tasks],
         }
 
@@ -424,18 +426,25 @@ def run_wave(
     clock: Callable[[], float] = time.time,
     ordered_publication: bool = False,
     project: Path | None = None,
+    ci_mode: str = "immediate",
     batch_ci: bool = False,
 ) -> WaveReport:
     """Run `task_ids` with at most `concurrency` running at once. The store is only touched from the calling thread."""
     if integration_mode not in INTEGRATION_MODES:
         raise ValueError(f"integration_mode must be one of {', '.join(INTEGRATION_MODES)}")
     local = integration_mode == INTEGRATION_LOCAL
+    if ci_mode == "batch" or batch_ci:
+        batch_ci = True
+        effective_ci_mode = "batch"
+    else:
+        effective_ci_mode = "immediate"
     report = WaveReport(
         started_at=clock(),
         orphan_events_before=orphan_event_count(store),
         integration_mode=integration_mode,
         staging_ref=None if local else staging_ref,
         repo_before=_safe_state(hooks),
+        ci_mode=effective_ci_mode,
     )
     report.orphan_events_after = report.orphan_events_before
     main_before = hooks.main_sha() if not local else None
@@ -572,13 +581,13 @@ def run_wave(
     for record in report.tasks:
         record.resumable = record.outcome in {"open", "stopped"}
     publication_records = report.tasks
-    if publish and ordered_publication:
+    if publish and (ordered_publication or batch_ci):
         try:
             publication_records = ordered_candidate_records([record for record in report.tasks if record.outcome == "done"], hooks.is_ancestor)
         except Exception as exc:
             halt(f"cannot verify publication order: {exc}")
     done_records = [record for record in publication_records if record.outcome == "done"]
-    if publish and batch_ci and ordered_publication and len(done_records) > 1:
+    if publish and batch_ci and len(done_records) > 1:
         # Bounded batch integration: avoid pushing incomplete intermediate states that trigger redundant hosted CI.
         combined = done_records[-1]
         if deadline is not None and clock() >= deadline:
@@ -772,7 +781,7 @@ def format_report(report: WaveReport) -> str:
             lines.append(f"      PR: {task.pr_url}")
         if task.pr_error:
             lines.append(f"      PR not opened: {task.pr_error}")
-    if report.batch_results:
+    if report.ci_mode == "batch" or report.batch_results:
         lines.append(f"  batched CI: {report.duplicate_runs_avoided} duplicate run(s) avoided; {report.ci_wait_seconds:.1f}s spent waiting for CI")
     return "\n".join(lines)
 

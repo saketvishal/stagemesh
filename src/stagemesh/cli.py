@@ -888,7 +888,8 @@ def command_run_window(args: argparse.Namespace) -> int:
         integration_mode=args.integration,
         open_prs=not args.no_pr,
         advance_baselines=not args.no_advance_baselines,
-        batch_ci=bool(getattr(args, "batch_ci", False)),
+        ci_mode=getattr(args, "ci_mode", "batch" if getattr(args, "batch_ci", False) else "immediate"),
+        batch_ci=getattr(args, "ci_mode", "") == "batch" or bool(getattr(args, "batch_ci", False)),
         strict_live=args.strict_live,
         allow_stale_runtime=args.allow_stale_runtime,
         tasks=parse_task_ids(args.tasks) if args.tasks else None,
@@ -3305,7 +3306,8 @@ def build_parser() -> argparse.ArgumentParser:
     merge_choice.add_argument("--auto-merge-ff", action="store_true", help="Opt in: parallel development, then serialized PR landing after named green hosted checks; fast-forward origin and local integration branch")
     window.add_argument("--required-checks", default="", help="Comma-separated hosted check names required by --auto-merge-ff; missing checks never count as green")
     window.add_argument("--no-pr", action="store_true", help="Do not open PRs (PR mode: finished work stays on the staging branch)")
-    window.add_argument("--batch-ci", action="store_true", default=False, help="Batch CI: combine compatible tasks into an integration batch and trigger hosted CI only on the terminal combined candidate")
+    window.add_argument("--ci-mode", choices=("immediate", "batch"), default="immediate", help="CI publishing mode: immediate (default: publish each task PR individually) or batch (combine compatible tasks and publish only the terminal candidate)")
+    window.add_argument("--batch-ci", action="store_true", default=False, help=argparse.SUPPRESS)
     window.add_argument("--no-advance-baselines", action="store_true", help="Do not advance stale baselines")
     window.add_argument("--strict-live", action="store_true", help="Release mode: refuse to start unless providers have fresh passing live acceptance results")
     window.add_argument("--allow-stale-runtime", action="store_true", help="Start even though the installed CLI is stale (development only; reported in the output)")

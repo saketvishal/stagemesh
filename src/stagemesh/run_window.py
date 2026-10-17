@@ -100,8 +100,15 @@ class WindowOptions:
     strict_live: bool = False
     allow_stale_runtime: bool = False
     tasks: list[str] | None = None  # None: pick every eligible task; a list restricts the window to exactly those
+    ci_mode: str = "immediate"
     batch_ci: bool = False
     report_path: Path | None = None
+
+    def __post_init__(self) -> None:
+        if self.ci_mode == "batch":
+            self.batch_ci = True
+        elif self.batch_ci:
+            self.ci_mode = "batch"
 
 
 def resolve_merge_defaults(config: StageMeshConfig, args: Any) -> dict[str, Any]:
@@ -219,6 +226,7 @@ class WindowReport:
                 "open_prs": self.options.open_prs,
                 "strict_live": self.options.strict_live,
                 "auto_merge_ff": self.options.auto_merge_ff,
+                "ci_mode": self.options.ci_mode,
                 "batch_ci": self.options.batch_ci,
                 "required_checks": list(self.options.required_checks),
                 "merge_policy": self.options.merge_policy,
@@ -868,8 +876,9 @@ def run_window(
                 staging_ref=None if local else staging_ref,
                 deadline=deadline,
                 clock=clock,
-                ordered_publication=options.auto_merge_ff,
+                ordered_publication=options.auto_merge_ff or options.batch_ci,
                 project=project,
+                ci_mode=options.ci_mode,
                 batch_ci=options.batch_ci,
             )
             attempted.update(fresh)
@@ -1019,7 +1028,7 @@ def _finish(
 def format_window_report(report: WindowReport) -> str:
     verdict = "REFUSED TO START" if report.refused else "OK" if report.ok else "STOPPED"
     minutes = max(0.0, report.finished_at - report.started_at) / 60
-    lines = [f"run window {report.window_id}: {verdict} ({minutes:.1f} min of {report.options.duration_seconds / 60:.0f}, mode {report.options.integration_mode})"]
+    lines = [f"run window {report.window_id}: {verdict} ({minutes:.1f} min of {report.options.duration_seconds / 60:.0f}, mode {report.options.integration_mode}, ci-mode {report.options.ci_mode})"]
     if report.stop_reason:
         lines.append(f"  stopped by: {report.stop_reason}")
     elif report.time_limit_reached:
