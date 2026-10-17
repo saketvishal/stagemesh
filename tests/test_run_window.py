@@ -714,7 +714,12 @@ def test_parallel_ff_finishes_workers_then_lands_in_ancestry_not_task_order(tmp_
         tmp_path, ids, {task_id: work for task_id in ids},
         auto_merge_ff=True, required_checks=("web",), concurrency=workers)
     # Integration order is the reverse of task/PR listing order.
-    hooks.is_ancestor = lambda older, newer: int(older[0]) > int(newer[0])
+    default_ancestry = hooks.is_ancestor
+    hooks.is_ancestor = lambda older, newer: (
+        int(older[0]) > int(newer[0])
+        if older[0].isdigit() and newer[0].isdigit()
+        else default_ancestry(older, newer)
+    )
     landed = []
     def land(record, deadline):
         assert sorted(finished) == ids
@@ -749,7 +754,8 @@ def test_parallel_ff_refuses_unrelated_candidates_before_landing_any(tmp_path: P
     report = rw.run_window(store, project, config, options, hooks, base_ref="refs/heads/main",
         merge_pr=lambda record, deadline: attempted.append(record.task_id), **kwargs)
     assert not report.ok and not attempted and "ancestry chain" in report.stop_reason
-    assert all(record.pr_url for record in report.tasks)
+    assert not any(record.pr_url for record in report.tasks)
+    assert all(record.resumable for record in report.tasks)
 
 
 def test_parallel_ff_resumes_entire_owned_stack_before_new_work(tmp_path: Path) -> None:
