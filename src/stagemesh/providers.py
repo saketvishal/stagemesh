@@ -282,7 +282,7 @@ class RuntimeCommandAdapter:
                     stdin=subprocess.PIPE,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
-                    env=provider_environment(Path(project)),
+                    env=_review_provider_environment(Path(project), review_path),
                     **popen_session_kwargs(),
                 )
             except FileNotFoundError:
@@ -306,6 +306,17 @@ class RuntimeCommandAdapter:
             return _provider_text_response(stdout)
         finally:
             _cleanup_review_workspace(Path(temp_dir))
+
+
+def _review_provider_environment(project: Path, review_path: Path) -> dict[str, str]:
+    environment = provider_environment(project)
+    # The sandbox account differs from the host account that created this exact
+    # disposable checkout. Trust only this checkout, only in the review process.
+    setting = "safe.directory=" + review_path.resolve().as_posix()
+    quoted = "'" + setting.replace("'", "'\\''").replace("!", "'\\!'") + "'"
+    inherited = environment.get("GIT_CONFIG_PARAMETERS", "")
+    environment["GIT_CONFIG_PARAMETERS"] = (inherited + " " + quoted).strip()
+    return environment
 
 
 def _missing_provider_tool_host(stderr: str) -> bool:

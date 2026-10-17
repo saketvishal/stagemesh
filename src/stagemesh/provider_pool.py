@@ -282,6 +282,21 @@ class ProviderPool:
         now = time.time()
         cleared = cleared_at(store, provider)
         wide = provider_wide_outcomes()
+        recovered_at = 0.0
+        if stage == REVIEW and task_id is not None:
+            successes = store.conn.execute(
+                "SELECT payload, created_at FROM audit_events WHERE event_type=? AND created_at>=? ORDER BY created_at DESC",
+                (PROVIDER_USED_EVENT, now - max(self.cooldown_seconds, DEFAULT_QUOTA_COOLDOWN_SECONDS)),
+            )
+            for success in successes:
+                try:
+                    payload = json.loads(success["payload"])
+                except (TypeError, ValueError):
+                    continue
+                if (payload.get("stage") == stage and payload.get("provider") == provider
+                        and payload.get("task_id") == task_id and payload.get("outcome") == "ANSWERED"):
+                    recovered_at = float(success["created_at"])
+                    break
         rows = store.conn.execute(
             "SELECT payload, created_at FROM audit_events WHERE event_type=? AND created_at>=? ORDER BY created_at DESC",
             (PROVIDER_FAILURE_EVENT, now - max(self.cooldown_seconds, DEFAULT_QUOTA_COOLDOWN_SECONDS)),
@@ -294,6 +309,8 @@ class ProviderPool:
             if payload.get("stage") != stage or payload.get("provider") != provider or row["created_at"] <= cleared:
                 continue
             reason = str(payload.get("reason") or "provider_failure")
+            if reason not in wide and reason != PROVIDER_TIMEOUT and row["created_at"] <= recovered_at:
+                continue
             age = int(now - row["created_at"])
             cooldown = _failure_cooldown_seconds(reason, self.cooldown_seconds)
             if cooldown <= 0:

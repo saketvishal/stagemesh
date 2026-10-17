@@ -145,6 +145,20 @@ def rebind_contract(store: Store, project: Path, task_id: str, *, validate: bool
     binding = store.contract_binding(task_id, candidate_sha) if candidate_sha else None
     store.rebind_task_contract(task_id, CONTRACT_VERSION, digest, canonical, candidate_sha if binding is not None else None)
     changes = _resume_at_validate(store, task_id, task)
+    # Even an unchanged rebind must repair a stage that has no current validation.
+    if (
+        candidate_sha is not None
+        and store.get_task(task_id)["stage"] in (Stage.REVIEW, Stage.INTEGRATE)
+        and not store.has_bound_evidence(task_id, candidate_sha, EvidenceKind.VALIDATION, digest, EvidenceStatus.PASSED)
+    ):
+        store.advance_task(task_id, Stage.VALIDATE)
+        record_audit(store, "task.advance", {
+            "task_id": task_id,
+            "stage": Stage.VALIDATE,
+            "candidate_sha": candidate_sha,
+            "reason": "operator rebind: current candidate and contract require passed validation",
+        })
+        changes["stage_reset"] = True
     payload: dict[str, Any] = {
         "task_id": task_id,
         "old_digest": old_digest,
