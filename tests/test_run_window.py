@@ -678,7 +678,7 @@ def test_ff_window_stops_before_dependents_when_merge_is_refused(tmp_path: Path)
     assert "CI failed" in report.stop_reason and report.tasks[0].pr_state != "MERGED"
 
 
-@pytest.mark.parametrize("overrides", [{"concurrency": 2}, {"required_checks": ()}, {"open_prs": False}, {"integration_mode": "local"}])
+@pytest.mark.parametrize("overrides", [{"concurrency": 0}, {"required_checks": ()}, {"open_prs": False}, {"integration_mode": "local"}])
 def test_ff_window_refuses_incompatible_options(tmp_path: Path, overrides) -> None:
     opts = {"auto_merge_ff": True, "concurrency": 1, "required_checks": ("web",)}
     opts.update(overrides)
@@ -695,6 +695,201 @@ def test_ff_window_refuses_prior_unmerged_prs(tmp_path: Path) -> None:
     report = rw.run_window(store, project, config, options, hooks, base_ref="refs/heads/main",
         merge_pr=lambda r,d: {"merged": True}, **kwargs)
     assert report.refused and rig.runs == [] and "prior_prs" in report.stop_reason
+
+
+@pytest.mark.parametrize("workers", [2, 5])
+def test_parallel_ff_finishes_workers_then_lands_in_ancestry_not_task_order(tmp_path: Path, workers: int) -> None:
+    import threading
+
+    ids = [str(number) for number in range(1, workers + 1)]
+    barrier = threading.Barrier(workers)
+    finished = []
+    def work(rig, task_id):
+        barrier.wait(timeout=10)
+        result = rig.finish_done(task_id)
+        with rig.lock:
+            finished.append(task_id)
+        return result
+    store, project, rig, hooks, options, config, kwargs = window(
+        tmp_path, ids, {task_id: work for task_id in ids},
+        auto_merge_ff=True, required_checks=("web",), concurrency=workers)
+    # Integration order is the reverse of task/PR listing order.
+    default_ancestry = hooks.is_ancestor
+    hooks.is_ancestor = lambda older, newer: (
+        int(older[0]) > int(newer[0])
+        if older[0].isdigit() and newer[0].isdigit()
+        else default_ancestry(older, newer)
+    )
+    landed = []
+    def land(record, deadline):
+        assert sorted(finished) == ids
+        assert not list(store.running_executions())
+        landed.append(record.task_id)
+        return {"merged": True, "candidate_sha": record.integrated_candidate}
+    report = rw.run_window(store, project, config, options, hooks, base_ref="refs/heads/main", merge_pr=land, **kwargs)
+    assert report.ok and sorted(rig.runs) == ids
+    assert landed == list(reversed(ids))
+    assert all(record.landing == "fast_forward_merged" for record in report.tasks)
+
+
+def test_parallel_ff_preserves_all_prs_when_first_landing_fails(tmp_path: Path) -> None:
+    store, project, rig, hooks, options, config, kwargs = window(
+        tmp_path, ["1", "2"], auto_merge_ff=True, concurrency=2, required_checks=("web",))
+    hooks.is_ancestor = lambda older, newer: older.startswith("1") and newer.startswith("2")
+    attempted = []
+    def land(record, deadline):
+        attempted.append(record.task_id)
+        return {"merged": False, "reason": "hosted checks failed"}
+    report = rw.run_window(store, project, config, options, hooks, base_ref="refs/heads/main", merge_pr=land, **kwargs)
+    assert not report.ok and attempted == ["1"] and sorted(rig.runs) == ["1", "2"]
+    assert all(record.pr_url and record.ready_for_merge for record in report.tasks)
+    assert not report.merged_prs
+
+
+def test_parallel_ff_refuses_unrelated_candidates_before_landing_any(tmp_path: Path) -> None:
+    store, project, _rig, hooks, options, config, kwargs = window(
+        tmp_path, ["1", "2"], auto_merge_ff=True, concurrency=2, required_checks=("web",))
+    hooks.is_ancestor = lambda older, newer: False
+    attempted = []
+    report = rw.run_window(store, project, config, options, hooks, base_ref="refs/heads/main",
+        merge_pr=lambda record, deadline: attempted.append(record.task_id), **kwargs)
+    assert not report.ok and not attempted and "ancestry chain" in report.stop_reason
+    assert not any(record.pr_url for record in report.tasks)
+    assert all(record.resumable for record in report.tasks)
+
+
+def test_parallel_ff_resumes_entire_owned_stack_before_new_work(tmp_path: Path) -> None:
+    store, project, rig, hooks, options, config, kwargs = window(
+        tmp_path, ["1", "2", "3"], auto_merge_ff=True, concurrency=2, required_checks=("web",))
+    hooks.run_task("1", 8)
+    hooks.run_task("2", 8)
+    rig.runs.clear()
+    hooks.is_ancestor = lambda older, newer: older.startswith("1") and newer.startswith("2")
+    kwargs["list_prs"] = lambda project: [
+        {"headRefName": "wave/task-2", "url": "https://github.com/x/y/pull/2"},
+        {"headRefName": "wave/task-1", "url": "https://github.com/x/y/pull/1"},
+    ]
+    landed = []
+    original = hooks.run_task
+    def work(task_id, steps):
+        assert landed == ["1", "2"]
+        return original(task_id, steps)
+    hooks.run_task = work
+    def land(record, deadline):
+        landed.append(record.task_id)
+        return {"merged": True, "candidate_sha": record.integrated_candidate}
+    report = rw.run_window(store, project, config, options, hooks, base_ref="refs/heads/main", merge_pr=land, **kwargs)
+    assert report.ok and landed == ["1", "2", "3"] and rig.runs == ["3"]
+    assert all(record["resumed"] for record in report.merged_prs[:2])
+
+
+def test_parallel_ff_refuses_pending_stack_with_unowned_member(tmp_path: Path) -> None:
+    store, project, rig, hooks, options, config, kwargs = window(
+        tmp_path, ["1"], auto_merge_ff=True, concurrency=2, required_checks=("web",))
+    hooks.run_task("1", 8)
+    rig.runs.clear()
+    kwargs["list_prs"] = lambda project: [
+        {"headRefName": "wave/task-1", "url": "https://github.com/x/y/pull/1"},
+        {"headRefName": "wave/task-foreign", "url": "https://github.com/x/y/pull/2"},
+    ]
+    landed = []
+    report = rw.run_window(store, project, config, options, hooks, base_ref="refs/heads/main",
+        merge_pr=lambda record, deadline: landed.append(record.task_id), **kwargs)
+    assert report.refused and not rig.runs and not landed
+
+
+def test_parallel_ff_pending_stack_obeys_task_budget(tmp_path: Path) -> None:
+    store, project, rig, hooks, options, config, kwargs = window(
+        tmp_path, ["1", "2", "3"], auto_merge_ff=True, concurrency=3,
+        required_checks=("web",), max_tasks=1)
+    for task_id in ("1", "2", "3"):
+        hooks.run_task(task_id, 8)
+    rig.runs.clear()
+    hooks.is_ancestor = lambda older, newer: int(older[0]) < int(newer[0])
+    kwargs["list_prs"] = lambda project: [
+        {"headRefName": f"wave/task-{task_id}", "url": f"https://github.com/x/y/pull/{task_id}"}
+        for task_id in ("3", "1", "2")
+    ]
+    landed = []
+    def land(record, deadline):
+        landed.append(record.task_id)
+        return {"merged": True, "candidate_sha": record.integrated_candidate}
+    report = rw.run_window(store, project, config, options, hooks, base_ref="refs/heads/main", merge_pr=land, **kwargs)
+    assert report.ok and report.task_limit_reached and landed == ["1"] and not rig.runs
+
+
+def test_parallel_ff_pause_between_landings_retains_remaining_prs(tmp_path: Path) -> None:
+    from stagemesh.parallel import request_queue_control
+
+    store, project, _rig, hooks, options, config, kwargs = window(
+        tmp_path, ["1", "2"], auto_merge_ff=True, concurrency=2, required_checks=("web",))
+    hooks.is_ancestor = lambda older, newer: older.startswith("1") and newer.startswith("2")
+    landed = []
+    def land(record, deadline):
+        landed.append(record.task_id)
+        request_queue_control(store, "paused", reason="pause between stack members")
+        return {"merged": True, "candidate_sha": record.integrated_candidate}
+    report = rw.run_window(store, project, config, options, hooks, base_ref="refs/heads/main", merge_pr=land, **kwargs)
+    assert not report.ok and landed == ["1"] and report.stop_reason == "queue admission paused"
+    remaining = next(record for record in report.tasks if record.task_id == "2")
+    assert remaining.pr_url and remaining.ready_for_merge
+
+
+def test_parallel_ff_restart_refuses_descendant_with_deferred_ancestor(tmp_path: Path) -> None:
+    store, project, rig, hooks, options, config, kwargs = window(
+        tmp_path, ["1", "2"], auto_merge_ff=True, concurrency=2, required_checks=("web",))
+    hooks.run_task("1", 8)
+    hooks.run_task("2", 8)
+    store.advance_task("1", Stage.INTEGRATE)  # ancestor publication was interrupted
+    rig.runs.clear()
+    hooks.main_sha = lambda: "a" * 40
+    hooks.is_ancestor = lambda older, newer: older == newer or (older.startswith("1") and newer.startswith("2"))
+    kwargs["list_prs"] = lambda project: [
+        {"headRefName": "wave/task-2", "url": "https://github.com/x/y/pull/2"},
+    ]
+    landed = []
+    report = rw.run_window(store, project, config, options, hooks, base_ref="refs/heads/main",
+        merge_pr=lambda record, deadline: landed.append(record.task_id), **kwargs)
+    assert report.refused and not landed and not rig.runs
+    assert "unlanded task 1" in report.stop_reason
+
+
+def test_parallel_ff_publication_failure_never_publishes_descendants(tmp_path: Path) -> None:
+    store, project, rig, hooks, options, config, kwargs = window(
+        tmp_path, ["1", "2"], auto_merge_ff=True, concurrency=2, required_checks=("web",))
+    hooks.is_ancestor = lambda older, newer: older.startswith("2") and newer.startswith("1")
+    published, landed = [], []
+    def publish(record):
+        published.append(record.task_id)
+        raise OSError("ancestor publication unavailable")
+    hooks.open_pr = publish
+    report = rw.run_window(store, project, config, options, hooks, base_ref="refs/heads/main",
+        merge_pr=lambda record, deadline: landed.append(record.task_id), **kwargs)
+    assert not report.ok and published == ["2"] and not landed
+    assert all(record.resumable and not record.pr_url for record in report.tasks)
+
+
+def test_parallel_ff_validates_entire_pending_set_before_first_merge(tmp_path: Path) -> None:
+    store, project, rig, hooks, options, config, kwargs = window(
+        tmp_path, ["1", "2"], auto_merge_ff=True, concurrency=2, required_checks=("web",))
+    for task_id in ("1", "2"):
+        hooks.run_task(task_id, 8)
+    rig.runs.clear()
+    hooks.is_ancestor = lambda older, newer: older.startswith("1") and newer.startswith("2")
+    kwargs["list_prs"] = lambda project: [
+        {"headRefName": f"wave/task-{task_id}", "url": f"https://github.com/x/y/pull/{task_id}"}
+        for task_id in ("1", "2")
+    ]
+    validated, landed = [], []
+    def land(record, deadline):
+        landed.append(record.task_id)
+        return {"merged": True}
+    def validate(records, deadline):
+        validated.append([record.task_id for record in records])
+        return "later PR head changed"
+    land.validate_records = validate
+    report = rw.run_window(store, project, config, options, hooks, base_ref="refs/heads/main", merge_pr=land, **kwargs)
+    assert report.refused and validated == [["1", "2"]] and not landed and not rig.runs
 
 
 @pytest.mark.parametrize("republished", [False, True])

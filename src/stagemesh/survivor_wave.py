@@ -349,6 +349,27 @@ def _defer_pr_delivery(store: Store, record: TaskRecord, reason: str) -> None:
 # --- the wave ---------------------------------------------------------------------------------------------------------------------
 
 
+def ordered_candidate_records(records: list[TaskRecord], is_ancestor: Callable[[str, str], bool]) -> list[TaskRecord]:
+    """Verify and order one candidate chain, never task IDs or PR creation order."""
+    ordered: list[TaskRecord] = []
+    for record in records:
+        sha = record.integrated_candidate
+        if not sha:
+            raise RuntimeError("completed task has no exact integrated candidate")
+        position = len(ordered)
+        for index, previous in enumerate(ordered):
+            older = previous.integrated_candidate
+            if sha == older:
+                raise RuntimeError("multiple tasks claim the same landing candidate")
+            if is_ancestor(sha, older):
+                position = index
+                break
+            if not is_ancestor(older, sha):
+                raise RuntimeError("pending candidates are not one ancestry chain; preserve them for reconciliation")
+        ordered.insert(position, record)
+    return ordered
+
+
 def run_wave(
     store: Store,
     task_ids: list[str],
@@ -364,6 +385,7 @@ def run_wave(
     staging_ref: str | None = None,
     deadline: float | None = None,
     clock: Callable[[], float] = time.time,
+    ordered_publication: bool = False,
 ) -> WaveReport:
     """Run `task_ids` with at most `concurrency` running at once. The store is only touched from the calling thread."""
     if integration_mode not in INTEGRATION_MODES:
@@ -466,12 +488,26 @@ def run_wave(
         _snapshot(store, records[task_id], report.started_at)
 
     publish = open_prs and hooks.open_pr is not None and not local  # local mode integrates into the branch itself; a PR would be a second path
+    set_publication_deadline = getattr(hooks.open_pr, "set_deadline", None)
+    if callable(set_publication_deadline):
+        set_publication_deadline(deadline)
     for record in report.tasks:
         record.resumable = record.outcome in {"open", "stopped"}
+    publication_records = report.tasks
+    if publish and ordered_publication:
+        try:
+            publication_records = ordered_candidate_records([record for record in report.tasks if record.outcome == "done"], hooks.is_ancestor)
+        except Exception as exc:
+            halt(f"cannot verify publication order: {exc}")
+    for record in publication_records:
         if record.outcome != "done":
             continue
         if local:
             record.landing = "locally_integrated"
+        elif publish and deadline is not None and clock() >= deadline:
+            report.time_limit_reached = True
+            record.landing = "staged_not_published"
+            _defer_pr_delivery(store, record, "window deadline reached before PR publication")
         elif not publish or stop or control.blocks_admission():
             record.landing = "staged_not_published"
             if open_prs:
@@ -490,7 +526,7 @@ def run_wave(
                 continue
             record.landing, record.ready_for_merge = "pr_opened", True
             try:
-                record.pr_state = hooks.pr_state(record.pr_url)
+                record.pr_state = hooks.pr_state(record.pr_url) if deadline is None or clock() < deadline else None
             except Exception:  # noqa: BLE001 - the PR exists; only its state is unknown
                 record.pr_state = None
             record.pr_state = record.pr_state or "OPEN"
@@ -634,28 +670,40 @@ def is_task_pr_branch(head_ref: str, task_id: str, candidate_sha: str) -> bool:
     return head_ref in {base, f"{base}-{candidate_sha[:7]}"}
 
 
-def git_gh_pr_opener(project: Path, base: str = "main") -> Callable[[TaskRecord], str]:
+def git_gh_pr_opener(project: Path, base: str = "main", *, clock: Callable[[], float] = time.time) -> Callable[[TaskRecord], str]:
     """Push the task's integrated head to a branch and open a PR for it. Never force-pushes and never merges.
 
     The branch points at the candidate that was integrated, so it also carries the commits integrated before it (stacked); merge
     the PRs in order.
     """
 
-    def run(*argv: str) -> str:
-        proc = subprocess.run(argv, cwd=project, capture_output=True, text=True, check=False)
-        if proc.returncode != 0:
+    deadline: float | None = None
+
+    def set_deadline(value: float | None) -> None:
+        nonlocal deadline
+        deadline = value
+
+    def execute(*argv: str, check: bool = True) -> subprocess.CompletedProcess:
+        remaining = 30.0 if deadline is None else min(30.0, deadline - clock())
+        if remaining <= 0:
+            raise RuntimeError("window deadline reached before PR publication command")
+        proc = subprocess.run(argv, cwd=project, capture_output=True, text=True, check=False, timeout=remaining)
+        if check and proc.returncode != 0:
             raise RuntimeError(f"{' '.join(argv[:3])} failed: {(proc.stderr or proc.stdout).strip()[-300:]}")
-        return proc.stdout.strip()
+        return proc
+
+    def run(*argv: str) -> str:
+        return execute(*argv).stdout.strip()
 
     def open_pr(record: TaskRecord) -> str:
         sha = record.integrated_candidate
         if not sha:
             raise RuntimeError("no integrated candidate to open a PR for")
         branch = f"wave/task-{record.task_id}"
-        existing = subprocess.run(["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"], cwd=project, capture_output=True, text=True, check=False)
+        existing = execute("git", "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}", check=False)
         if existing.returncode == 0 and existing.stdout.strip() != sha:
             branch = f"{branch}-{sha[:7]}"
-            existing = subprocess.run(["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"], cwd=project, capture_output=True, text=True, check=False)
+            existing = execute("git", "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}", check=False)
             if existing.returncode == 0 and existing.stdout.strip() != sha:
                 raise RuntimeError("existing fallback branch differs from the verified candidate; publication was not repeated")
         prior = json.loads(run("gh", "pr", "list", "--state", "all", "--head", branch,
@@ -690,6 +738,7 @@ def git_gh_pr_opener(project: Path, base: str = "main") -> Callable[[TaskRecord]
         )
         return run("gh", "pr", "create", "--base", base, "--head", branch, "--title", f"{record.title} (task {record.task_id})", "--body", body)
 
+    open_pr.set_deadline = set_deadline
     return open_pr
 
 
@@ -787,7 +836,7 @@ def gh_pr_state(project: Path) -> Callable[[str], str | None]:
     """The PR's state as GitHub reports it (OPEN, MERGED, CLOSED); None when it cannot be read."""
 
     def state(url: str) -> str | None:
-        proc = subprocess.run(["gh", "pr", "view", url, "--json", "state", "--jq", ".state"], cwd=project, capture_output=True, text=True, check=False)
+        proc = subprocess.run(["gh", "pr", "view", url, "--json", "state", "--jq", ".state"], cwd=project, capture_output=True, text=True, check=False, timeout=10)
         return proc.stdout.strip() or None if proc.returncode == 0 else None
 
     return state

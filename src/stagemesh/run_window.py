@@ -13,8 +13,8 @@
 * one operator report: what ran, what completed, which PRs (in merge order, including older wave PRs), what blocked and why, what
   stopped the window, claims and executions left, provider and ledger health, repo state, and the next command.
 
-By default it never merges. Explicit serial fast-forward mode invokes the injected
-landing hook between tasks. Provider execution still uses injected wave hooks.
+By default it never merges. Automatic fast-forward mode develops a bounded batch
+in parallel, then lands its exact candidates serially after all workers exit.
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ from typing import Any
 from .audit import record_audit
 from .block_kinds import classify_block, reenter_blocked_task, reentry_refusal, runtime_fingerprint
 from .config import StageMeshConfig
-from .domain import EvidenceKind, Stage, TaskStatus
+from .domain import EvidenceKind, EvidenceStatus, Stage, TaskStatus
 from .operator_actions import recover_stale
 from .persistence import Store
 from .queue_control import QueueStopControl
@@ -50,6 +50,7 @@ from .survivor_wave import (
     WaveReport,
     git_repo_state,
     is_task_pr_branch,
+    ordered_candidate_records,
     prepare_staging_ref,
     run_wave,
     skip_reason,
@@ -447,11 +448,11 @@ def preflight(
     """Everything that must be true before unattended work starts. Returns (checks, executions auto-recovered)."""
     checks: list[Check] = []
     if options.auto_merge_ff:
-        valid = (options.integration_mode == INTEGRATION_PR and options.open_prs and options.concurrency == 1
+        valid = (options.integration_mode == INTEGRATION_PR and options.open_prs and options.concurrency >= 1
                  and bool(options.required_checks) and config.require_independent_review
                  and options.merge_policy in {"hosted", "stagemesh"}
                  and (options.merge_policy != "stagemesh" or (type(options.check_app_id) is int and options.check_app_id > 0)))
-        checks.append(Check("auto_merge_ff", valid, f"{options.merge_policy} serial PR fast-forward mode with named hosted checks" if valid else "automatic merging requires PR mode, concurrency 1, PR publishing, independent review, named checks and a trusted check app for stagemesh mode"))
+        checks.append(Check("auto_merge_ff", valid, f"{options.merge_policy} parallel development with serialized exact-candidate landing and named hosted checks" if valid else "automatic merging requires PR mode, positive concurrency, PR publishing, independent review, named checks and a trusted check app for stagemesh mode"))
     recovered: list[dict[str, Any]] = []
 
     fresh = runtime or check_runtime(project)
@@ -562,6 +563,30 @@ def next_command(report: WindowReport) -> str:
     return "nothing to do: no eligible work left"
 
 
+def _landing_order(store: Store, records: list[TaskRecord], hooks: WaveHooks) -> list[TaskRecord]:
+    """Require a complete owned prefix, including after an interrupted publication."""
+    ordered = ordered_candidate_records(records, hooks.is_ancestor)
+    covered = {record.task_id: record.integrated_candidate for record in ordered}
+    if not ordered:
+        return ordered
+    base = hooks.main_sha() or hooks.target_sha()
+    rows = store.conn.execute(
+        "SELECT DISTINCT task_id, candidate_sha FROM evidence WHERE kind=? AND status=?",
+        (EvidenceKind.INTEGRATION, EvidenceStatus.PASSED),
+    )
+    for row in rows:
+        task_id, sha = str(row["task_id"]), str(row["candidate_sha"])
+        current = covered.get(task_id)
+        if current and (sha == current or hooks.is_ancestor(sha, current)):
+            continue
+        if not any(hooks.is_ancestor(sha, record.integrated_candidate) for record in ordered):
+            continue
+        if base and hooks.is_ancestor(sha, base):
+            continue
+        raise RuntimeError(f"candidate contains unlanded task {task_id} ({sha[:12]}) without its own pending PR; recover ancestor publication first")
+    return ordered
+
+
 def run_window(
     store: Store,
     project: Path,
@@ -591,7 +616,7 @@ def run_window(
     )
     if options.auto_merge_ff and merge_pr is None:
         report.preflight.append(Check("merge_adapter", False, merge_setup_error or "no fast-forward merge adapter configured"))
-    pending_record = None
+    pending_records: list[TaskRecord] = []
     if options.auto_merge_ff and list_prs is not None:
         pending = []
         try:
@@ -608,9 +633,8 @@ def run_window(
                         pending.append({"url": record.pr_url, "headRefName": f"wave/task-{record.task_id}"})
         except Exception as exc:  # noqa: BLE001 -- preflight failure must still finalize its report
             report.preflight.append(Check("prior_pr_lookup", False, f"{type(exc).__name__}: {exc}"))
-        owned = len(pending) <= 1
-        if len(pending) == 1:
-            pr = pending[0]
+        owned = True
+        for pr in pending:
             head_ref = str(pr.get("headRefName", ""))
             raw_id = head_ref.removeprefix("wave/task-")
             possible_ids = {raw_id, raw_id.rsplit("-", 1)[0]} if head_ref.startswith("wave/task-") else set()
@@ -620,20 +644,32 @@ def run_window(
                 candidate = store.latest_candidate(possible_id) if task else None
                 if candidate and is_task_pr_branch(head_ref, possible_id, str(candidate["sha"])):
                     owners.append((possible_id, task, candidate))
-            owned = len(owners) == 1
-            if owned:
-                task_id, task, candidate = owners[0]
-                owned = bool(task["status"] == TaskStatus.DONE and task["stage"] == Stage.DONE
-                             and (options.tasks is None or task_id in options.tasks))
-            if owned:
-                sha = str(candidate["sha"])
-                owned = all(store.has_evidence(task_id, sha, kind) for kind in
-                            (EvidenceKind.VALIDATION, EvidenceKind.REVIEW, EvidenceKind.INTEGRATION))
-                if owned:
-                    pending_record = TaskRecord(task_id, title=str(task["title"]), outcome="done",
-                        pr_url=pr.get("url"), ready_for_merge=True, integrated_candidate=sha)
+            if len(owners) != 1:
+                owned = False
+                break
+            task_id, task, candidate = owners[0]
+            sha = str(candidate["sha"])
+            owned = bool(task["status"] == TaskStatus.DONE and task["stage"] == Stage.DONE
+                         and (options.tasks is None or task_id in options.tasks)
+                         and pr.get("url") and all(store.has_evidence(task_id, sha, kind) for kind in
+                             (EvidenceKind.VALIDATION, EvidenceKind.REVIEW, EvidenceKind.INTEGRATION)))
+            if not owned:
+                break
+            pending_records.append(TaskRecord(task_id, title=str(task["title"]), outcome="done",
+                pr_url=pr["url"], ready_for_merge=True, integrated_candidate=sha))
+        if owned:
+            try:
+                pending_records = _landing_order(store, pending_records, hooks)
+                validate = getattr(merge_pr, "validate_records", None)
+                if callable(validate) and pending_records:
+                    problem = validate(pending_records, deadline)
+                    if problem:
+                        raise RuntimeError(problem)
+            except Exception as exc:
+                owned = False
+                report.preflight.append(Check("prior_pr_order", False, f"cannot verify pending candidate order: {exc}"))
         report.preflight.append(Check("prior_prs", owned,
-            "no prior wave PR, or one owned evidenced PR to resume" if owned else
+            "no prior wave PR, or an owned evidenced candidate chain to resume" if owned else
             "prior PR is ambiguous, unowned, blocked or outside the selected tasks; resolve it before proceeding"))
     if prepare_staging is not None and not local and all(check.ok or not check.fatal for check in report.preflight):
         try:
@@ -659,6 +695,9 @@ def run_window(
     if options.auto_merge_ff:
         report.initial_repo_state = hooks.repo_state()
     def land(record):
+        if clock() >= deadline:
+            report.time_limit_reached = True
+            return False
         if control.blocks_admission():
             report.stop_reason = "queue admission " + control.state_label()
             return False
@@ -666,6 +705,11 @@ def run_window(
             report.stop_reason = "auto-merge stopped: completed task has no published PR"
             return False
         try:
+            validate = getattr(merge_pr, "validate_records", None)
+            if callable(validate):
+                problem = validate([record], deadline)
+                if problem:
+                    raise RuntimeError(problem)
             merged = merge_pr(record, deadline)
         except Exception as exc:  # noqa: BLE001 -- fail closed on any injected landing failure
             merged = {"merged": False, "reason": f"{type(exc).__name__}: {exc}"}
@@ -683,7 +727,12 @@ def run_window(
         return True
 
     try:
-        if pending_record is not None and land(pending_record):
+        for pending_record in pending_records:
+            if len(attempted) >= options.max_tasks:
+                report.task_limit_reached = True
+                break
+            if not land(pending_record):
+                break
             report.merged_prs[-1]["resumed"] = True
             attempted.add(pending_record.task_id)
         while report.stop_reason is None:
@@ -693,7 +742,7 @@ def run_window(
             if clock() >= deadline:
                 report.time_limit_reached = True
                 break
-            room = 1 if options.auto_merge_ff else options.concurrency * 2
+            room = options.concurrency if options.auto_merge_ff else options.concurrency * 2
             continuing = [task_id for task_id in resume if skip_reason(store, task_id) is None][:room]
             if len(attempted) >= options.max_tasks and not continuing:
                 report.task_limit_reached = True
@@ -733,6 +782,7 @@ def run_window(
                 staging_ref=None if local else staging_ref,
                 deadline=deadline,
                 clock=clock,
+                ordered_publication=options.auto_merge_ff,
             )
             attempted.update(fresh)
             report.selected.extend(task_id for task_id in batch if task_id not in report.selected)
@@ -751,8 +801,18 @@ def run_window(
                 report.stop_reason = wave.stop_reason or "the wave reported a violation"
                 break
             if options.auto_merge_ff:
-                for record in wave.tasks:
-                    if record.outcome == "done" and not land(record):
+                try:
+                    ready = _landing_order(store, [record for record in wave.tasks if record.outcome == "done"], hooks)
+                    validate = getattr(merge_pr, "validate_records", None)
+                    if callable(validate) and ready:
+                        problem = validate(ready, deadline)
+                        if problem:
+                            raise RuntimeError(problem)
+                except Exception as exc:
+                    report.stop_reason = f"auto-merge stopped: cannot verify candidate order: {exc}"
+                    break
+                for record in ready:
+                    if not land(record):
                         break
                 if report.stop_reason:
                     break

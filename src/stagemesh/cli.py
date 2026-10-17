@@ -3277,7 +3277,7 @@ def build_parser() -> argparse.ArgumentParser:
     merge_choice = window.add_mutually_exclusive_group()
     merge_choice.add_argument("--pr-only", action="store_true", help="Open PRs for manual merging; overrides the project automatic-merge default")
     window.add_argument("--merge-policy", choices=("hosted", "stagemesh"), help="Explicit automatic-merge policy; stagemesh requires a configured trusted check app")
-    merge_choice.add_argument("--auto-merge-ff", action="store_true", help="Opt in: serial PR workflow, wait for named green hosted checks, fast-forward origin and local integration branch, then continue")
+    merge_choice.add_argument("--auto-merge-ff", action="store_true", help="Opt in: parallel development, then serialized PR landing after named green hosted checks; fast-forward origin and local integration branch")
     window.add_argument("--required-checks", default="", help="Comma-separated hosted check names required by --auto-merge-ff; missing checks never count as green")
     window.add_argument("--no-pr", action="store_true", help="Do not open PRs (PR mode: finished work stays on the staging branch)")
     window.add_argument("--no-advance-baselines", action="store_true", help="Do not advance stale baselines")
