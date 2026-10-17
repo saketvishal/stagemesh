@@ -38,12 +38,12 @@ def landing_evidence_problem(store, task_id, sha):
     try:
         bound = bound_contract_from_record(dict(record))
         expected = bound.evidence_payload()
-        for kind in ("VALIDATION", "REVIEW"):
+        for kind in ("VALIDATION", "REVIEW", "INTEGRATION"):
             row = store.conn.execute(
                 "SELECT status,payload FROM evidence WHERE task_id=? AND candidate_sha=? AND kind=? "
                 "ORDER BY created_at DESC,rowid DESC LIMIT 1", (task_id, sha, kind)).fetchone()
             if row is None or row["status"] != "PASSED":
-                return "latest_validation_or_review_not_passed"
+                return "latest_integration_not_passed" if kind == "INTEGRATION" else "latest_validation_or_review_not_passed"
             payload = json.loads(row["payload"])
             if not isinstance(payload, dict) or any(payload.get(key) != value for key, value in expected.items()):
                 return "latest_evidence_not_bound_to_candidate_contract"
@@ -104,11 +104,17 @@ class FastForwardPullRequests(GitHubPullRequests):
             return None
         if status != 200 or not isinstance(payload, dict):
             raise RuntimeError("pull request identity unavailable")
+        if payload.get("number") != int(number) or payload.get("state") not in {"open", "closed"}:
+            raise RuntimeError("pull request number or state unavailable")
         expected = f"{self.owner}/{self.repo}".casefold()
         for side in ("head", "base"):
             full_name = ((payload.get(side) or {}).get("repo") or {}).get("full_name", "")
             if not isinstance(full_name, str) or full_name.casefold() != expected:
                 raise RuntimeError("fast-forward landing requires a same-repository PR")
+            if not isinstance((payload.get(side) or {}).get("ref"), str) or not payload[side]["ref"].strip():
+                raise RuntimeError("pull request head or base ref unavailable")
+        if not re.fullmatch(r"[0-9a-f]{40}", str((payload.get("head") or {}).get("sha") or "")):
+            raise RuntimeError("pull request full head SHA unavailable")
         return self._to_pull_request(payload)
 
     def host_policy(self, head_ref=None):
@@ -361,6 +367,34 @@ def make_merger(store, project: Path, base_ref: str, required_checks: tuple[str,
                             hosted_ci=ci, pull_requests=pulls,
                             integration_policy=IntegrationPolicy(allow_baseline_ci_failures=False, verify_exact_landing=True))
 
+    def validate_records(records, deadline):
+        """Observe the entire stack before any member can move the integration ref."""
+        for record in records:
+            if time.time() >= deadline:
+                return "deadline reached while verifying pending PRs"
+            url = urlparse(record.pr_url or "")
+            prefix = f"/{repository.owner}/{repository.repo}/pull/"
+            if url.scheme != "https" or url.hostname != "github.com" or not url.path.startswith(prefix):
+                return "unexpected PR URL"
+            number = url.path[len(prefix):]
+            if not number.isdigit():
+                return "invalid PR number"
+            task = store.get_task(record.task_id)
+            if task is None or task["status"] != "DONE" or task["stage"] != "DONE":
+                return "pending PR task is not complete"
+            pr = pulls.get(int(number))
+            if (pr is None or pr.number != int(number) or pr.base_ref != branch or pr.head_sha != record.integrated_candidate
+                    or not re.fullmatch(r"[0-9a-f]{40}", pr.head_sha)
+                    or not is_task_pr_branch(pr.head_ref, record.task_id, record.integrated_candidate)
+                    or pr.state is PRState.CLOSED):
+                return "pending PR observed head, base or ownership changed"
+            if pr.state is PRState.MERGED and pr.merge_commit_sha != record.integrated_candidate:
+                return "pending PR was not landed as the exact candidate"
+            problem = landing_evidence_problem(store, record.task_id, record.integrated_candidate)
+            if problem:
+                return problem
+        return None
+
     def attempt_record(record, deadline):
         url = urlparse(record.pr_url or "")
         prefix = f"/{repository.owner}/{repository.repo}/pull/"
@@ -380,6 +414,10 @@ def make_merger(store, project: Path, base_ref: str, required_checks: tuple[str,
                 return {"merged": False, "reason": "PR head no longer matches the staged candidate"}
             if pr.state is PRState.CLOSED:
                 return {"merged": False, "reason": "PR closed without merging"}
+            if pr.state is PRState.OPEN and pr.mergeable is None:
+                # GitHub recomputes mergeability when the preceding stack member lands.
+                time.sleep(min(2, max(0, deadline - time.time())))
+                continue
             policy_error = pulls.host_policy(pr.head_ref)
             if policy_error:
                 return {"merged": False, "reason": policy_error}
@@ -515,4 +553,5 @@ def make_merger(store, project: Path, base_ref: str, required_checks: tuple[str,
 
     merge_record.preflight = merge_preflight
     merge_record.pending_records = pending_records
+    merge_record.validate_records = validate_records
     return merge_record

@@ -112,10 +112,10 @@ Rerunning `stagemesh run-window` safely resolves the interruption: preflight aut
 ## Opt-in fast-forward merge and continue
 
 The default remains PR-only. For a repository that authorizes fast-forward main
-updates, explicitly opt in to serial, hosted-CI-gated landing:
+updates, opt in to parallel development with serialized, hosted-CI-gated landing:
 
 ```console
-stagemesh run-window --duration 2h --concurrency 1 --auto-merge-ff --required-checks backend,web,contracts
+stagemesh run-window --duration 2h --concurrency 5 --auto-merge-ff --required-checks backend,web,contracts
 ```
 
 Use `--tasks` to restrict the queue and `--max-tasks` to bound work. Each task is
@@ -134,17 +134,28 @@ both by an ancestry check and mandatory server-side no-rewrite rules. A competin
 push, even to an intermediate ancestor, refuses the update. It never squashes,
 rebases, creates a merge commit, deletes
 branches or resets work. The supervisor verifies the remote landing; local main
-then fast-forwards before another task is selected. Reports separately record
+then fast-forwards before another batch is selected. Reports separately record
 these authorized main movements and the merged PRs.
 
-This mode requires PR publishing, concurrency 1 and explicit required check names.
-One pending same-repository wave PR may be resumed before new tasks when its
-canonical task is DONE and has durable candidate, validation, review and staging
-evidence. It must be among `--tasks` when restricted. The same supervisor policy
-rechecks it; no candidate reconstruction or refresh is performed to resume it.
-Multiple legacy PRs, unknown tasks or changed heads fail closed for reconciliation. A failed/missing check, changed head/base, dirty checkout,
+This mode requires PR publishing, positive concurrency and explicit required check
+names. Up to `--concurrency` tasks develop together. The window waits for the batch
+to exit cleanly before moving main; merges are always one at a time, in verified
+Git ancestry order rather than task ID, completion time or PR number. Unrelated or
+duplicate candidate heads fail closed before any batch member is merged.
+PR publication also follows this ancestor-first order. A failed or expired
+publication defers its descendants rather than exposing an incomplete stack.
+
+Multiple pending same-repository wave PRs can resume before new work when every
+canonical task is DONE with durable candidate, validation, review and staging
+evidence, and their exact candidates form one ancestry chain. Each must be among
+`--tasks` when restricted. The same supervisor policy rechecks each candidate;
+no candidate reconstruction or refresh is performed to resume it. Unknown tasks,
+ambiguous ownership or changed heads fail closed for reconciliation. A failed/missing check, changed head/base, dirty checkout,
 queue pause, expired window or unverified landing retains the PR and stops the
 window before dependent work. True design/security decisions remain human gates.
+Resumed landings count against `--max-tasks`; publication commands are bounded by
+the remaining deadline. A legacy partial stack containing a known undelivered
+ancestor is refused rather than silently merging that task through a descendant.
 Review evidence must cover all repository-required checks, including relevant
 visual comparisons; this option never authorizes new screenshot baselines.
 

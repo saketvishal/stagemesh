@@ -99,6 +99,48 @@ class Rig:
         )
 
 
+def test_finished_batch_defers_publication_after_deadline(tmp_path: Path) -> None:
+    store, project = make_store(tmp_path, ["1"])
+    now = [0.0]
+    def work(rig, task_id):
+        result = rig.finish_done(task_id)
+        now[0] = 11.0
+        return result
+    rig = Rig(project, {"1": work})
+    report = run_wave(store, ["1"], rig.hooks(), deadline=10.0, clock=lambda: now[0])
+    assert report.time_limit_reached and not rig.prs
+    assert report.tasks[0].resumable and report.tasks[0].stop_reason == "PR_DELIVERY_PENDING"
+    assert report.tasks[0].landing == "staged_not_published"
+    assert store.get_task("1")["stage"] == "INTEGRATE"
+    assert report.tasks[0].validation == report.tasks[0].review == "PASSED"
+
+
+def test_publication_commands_are_bounded_and_stop_at_deadline(tmp_path: Path, monkeypatch) -> None:
+    import subprocess
+    from stagemesh import survivor_wave
+
+    now = [100.0]
+    sha = "a" * 40
+    calls = []
+    def execute(argv, **kwargs):
+        calls.append((argv, kwargs["timeout"]))
+        output = sha
+        if argv[0] == "gh":
+            output = json.dumps([{"url": "https://example.invalid/pr/1", "state": "OPEN", "headRefOid": sha, "baseRefName": "main"}])
+        return subprocess.CompletedProcess(argv, 0, output, "")
+    monkeypatch.setattr(survivor_wave.subprocess, "run", execute)
+    opener = survivor_wave.git_gh_pr_opener(tmp_path, clock=lambda: now[0])
+    opener.set_deadline(105.0)
+    record = survivor_wave.TaskRecord("1", integrated_candidate=sha)
+    assert opener(record) == "https://example.invalid/pr/1"
+    assert calls and all(0 < timeout <= 5 for _, timeout in calls)
+    before = len(calls)
+    now[0] = 106.0
+    with pytest.raises(RuntimeError, match="deadline"):
+        opener(record)
+    assert len(calls) == before
+
+
 def test_the_wave_selects_only_eligible_tasks_and_says_why_it_skips_the_rest(tmp_path: Path) -> None:
     store, project = make_store(tmp_path, ["T-1", "T-2", "T-3"])
     store.advance_task("T-2", Stage.DONE)

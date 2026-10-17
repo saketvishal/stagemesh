@@ -14,6 +14,8 @@ from autonomy_support import (
 )
 
 import stagemesh.fast_forward as ff
+from stagemesh.contracts import bound_contract_from_record
+from stagemesh.domain import EvidenceKind, EvidenceStatus, Stage
 from stagemesh.autonomy.ci_diagnosis import Conclusion, FakeHostedCI, GateOutcome, HostedCIRun
 from stagemesh.autonomy.dependencies import PullRequest
 from stagemesh.fast_forward import FastForwardPullRequests, checks_ready
@@ -36,6 +38,9 @@ def rig(tmp_path, monkeypatch, independent=True, intermediate=False):
     store = new_store(tmp_path)
     seed_candidate(store, TASK, baseline=base, candidate=candidate)
     add_passing_evidence(store, TASK, candidate, baseline=base, independent=independent)
+    bound = bound_contract_from_record(dict(store.contract_binding(TASK, candidate)))
+    store.add_evidence(TASK, candidate, EvidenceKind.INTEGRATION, EvidenceStatus.PASSED, bound.evidence_payload())
+    store.advance_task(TASK, Stage.DONE)
     ci = FakeHostedCI([HostedCIRun(candidate, {"web": GateOutcome("web", Conclusion.SUCCESS)}),
                        HostedCIRun(base, {"web": GateOutcome("web", Conclusion.SUCCESS)})])
     adapter = FastForwardPullRequests("owner", "repo", None, ci)
@@ -71,6 +76,119 @@ def test_supervisor_refuses_non_independent_review_before_push(tmp_path, monkeyp
     record = TaskRecord(TASK, pr_url="https://github.com/owner/repo/pull/7", integrated_candidate=sha)
     result = ff.make_merger(store, repo, "refs/heads/main", ("web",))(record, time.time()+20)
     assert not result["merged"] and git(remote, "rev-parse", "main") == base
+
+
+def test_landing_waits_for_mergeability_recalculation(tmp_path, monkeypatch):
+    from dataclasses import replace
+
+    repo, remote, _base, sha, store, _ci, adapter, pr = rig(tmp_path, monkeypatch)
+    calls = []
+    def get(number):
+        calls.append(number)
+        return replace(pr, mergeable=None) if len(calls) == 1 else pr
+    monkeypatch.setattr(adapter, "get", get)
+    monkeypatch.setattr(ff.time, "sleep", lambda seconds: None)
+    record = TaskRecord(TASK, pr_url="https://github.com/owner/repo/pull/7", integrated_candidate=sha)
+    result = ff.make_merger(store, repo, "refs/heads/main", ("web",))(record, time.time() + 20)
+    assert result["merged"] and len(calls) > 1
+    assert git(remote, "rev-parse", "main") == sha == git(repo, "rev-parse", "main")
+
+
+def stacked_rig(tmp_path, monkeypatch):
+    from dataclasses import replace
+    from stagemesh.autonomy.dependencies import PRState
+
+    repo, remote, base, first, store, ci, adapter, first_pr = rig(tmp_path, monkeypatch)
+    git(repo, "checkout", "work")
+    second = commit(repo, {"src/widget.py": "NEW = 3"}, "second stacked candidate")
+    git(repo, "push", "origin", f"{second}:refs/heads/wave/task-SECOND")
+    git(repo, "checkout", "main")
+    seed_candidate(store, "SECOND", baseline=first, candidate=second, stage=Stage.DONE)
+    add_passing_evidence(store, "SECOND", second, baseline=first)
+    bound = bound_contract_from_record(dict(store.contract_binding("SECOND", second)))
+    store.add_evidence("SECOND", second, EvidenceKind.INTEGRATION, EvidenceStatus.PASSED, bound.evidence_payload())
+    ci.runs[second] = HostedCIRun(second, {"web": GateOutcome("web", Conclusion.SUCCESS)})
+    prs = {7: first_pr, 8: PullRequest(8, second, "wave/task-SECOND", "main", mergeable=True)}
+    landed = set()
+    def get(number):
+        pr = prs[number]
+        tip = git(remote, "rev-parse", "main")
+        if tip == pr.head_sha:
+            landed.add(number)
+        if number in landed:
+            return replace(pr, state=PRState.MERGED, merge_commit_sha=pr.head_sha)
+        return pr
+    monkeypatch.setattr(adapter, "get", get)
+    records = [
+        TaskRecord(TASK, pr_url="https://github.com/owner/repo/pull/7", integrated_candidate=first),
+        TaskRecord("SECOND", pr_url="https://github.com/owner/repo/pull/8", integrated_candidate=second),
+    ]
+    return repo, remote, base, first, second, store, ci, adapter, prs, records
+
+
+@pytest.mark.parametrize("red_second", [False, True])
+def test_native_merger_lands_stacked_candidates_in_sequence(tmp_path, monkeypatch, red_second):
+    repo, remote, _base, first, second, store, ci, _adapter, _prs, records = stacked_rig(tmp_path, monkeypatch)
+    if red_second:
+        ci.runs[second] = HostedCIRun(second, {"web": GateOutcome("web", Conclusion.FAILURE)})
+    merger = ff.make_merger(store, repo, "refs/heads/main", ("web",))
+    assert merger.validate_records(records, time.time() + 30) is None
+    assert merger(records[0], time.time() + 30)["merged"]
+    assert git(remote, "rev-parse", "main") == first == git(repo, "rev-parse", "main")
+    result = merger(records[1], time.time() + 30)
+    assert result["merged"] is (not red_second)
+    expected = first if red_second else second
+    assert git(remote, "rev-parse", "main") == expected == git(repo, "rev-parse", "main")
+    if red_second:
+        evidence_before = store.conn.execute(
+            "SELECT COUNT(*) FROM evidence WHERE kind IN ('VALIDATION','REVIEW')"
+        ).fetchone()[0]
+        ci.runs[second] = HostedCIRun(second, {"web": GateOutcome("web", Conclusion.SUCCESS)})
+        assert merger(records[1], time.time() + 30)["merged"]
+        assert git(remote, "rev-parse", "main") == second == git(repo, "rev-parse", "main")
+        assert store.conn.execute("SELECT COUNT(*) FROM evidence WHERE kind IN ('VALIDATION','REVIEW')").fetchone()[0] == evidence_before
+    else:
+        replay = merger(records[0], time.time() + 30)
+        assert not replay["merged"]  # an older exact landing is not a fresh successful delivery
+        assert git(remote, "rev-parse", "main") == second == git(repo, "rev-parse", "main")
+
+
+@pytest.mark.parametrize("failure", ["head", "base", "closed", "review", "integration"])
+def test_entire_stack_validation_rejects_invalid_later_member(tmp_path, monkeypatch, failure):
+    from dataclasses import replace
+    from stagemesh.autonomy.dependencies import PRState
+
+    repo, remote, base, _first, second, store, _ci, _adapter, prs, records = stacked_rig(tmp_path, monkeypatch)
+    if failure == "head":
+        prs[8] = replace(prs[8], head_sha="")
+    elif failure == "base":
+        prs[8] = replace(prs[8], base_ref="")
+    elif failure == "closed":
+        prs[8] = replace(prs[8], state=PRState.CLOSED)
+    else:
+        kind = EvidenceKind.REVIEW if failure == "review" else EvidenceKind.INTEGRATION
+        store.add_evidence("SECOND", second, kind, EvidenceStatus.FAILED)
+    merger = ff.make_merger(store, repo, "refs/heads/main", ("web",))
+    assert merger.validate_records(records, time.time() + 30)
+    assert git(remote, "rev-parse", "main") == base == git(repo, "rev-parse", "main")
+
+
+@pytest.mark.parametrize("missing", ["number", "state", "head.sha", "head.ref", "base.ref"])
+def test_native_pr_identity_does_not_fill_missing_observed_fields(monkeypatch, missing):
+    payload = {
+        "number": 7, "state": "open", "mergeable": True,
+        "head": {"sha": "a" * 40, "ref": "wave/task-1", "repo": {"full_name": "owner/repo"}},
+        "base": {"ref": "main", "repo": {"full_name": "owner/repo"}},
+    }
+    if "." in missing:
+        side, field = missing.split(".")
+        payload[side].pop(field)
+    else:
+        payload.pop(missing)
+    adapter = FastForwardPullRequests("owner", "repo", None, FakeHostedCI())
+    monkeypatch.setattr(adapter, "_request", lambda *args, **kwargs: (200, payload))
+    with pytest.raises(RuntimeError):
+        adapter.get(7)
 
 
 @pytest.mark.parametrize("failure", ["dirty", "head_moved", "base_moved", "paused", "missing_check", "ci_red", "deadline"])
