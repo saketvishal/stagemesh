@@ -207,6 +207,7 @@ class WaveHooks:
     # executions and active claims a task still has after its runner exited (a provider process that was not cleaned up).
     main_sha: Callable[[], str | None] = lambda: None
     leftover: Callable[[str], tuple[int, int]] = lambda task_id: (0, 0)
+    retarget: Callable[[str], WaveHooks] | None = None
 
 
 def _safe_state(hooks: WaveHooks) -> RepoState | None:

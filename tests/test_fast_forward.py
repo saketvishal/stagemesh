@@ -94,6 +94,65 @@ def test_landing_waits_for_mergeability_recalculation(tmp_path, monkeypatch):
     assert git(remote, "rev-parse", "main") == sha == git(repo, "rev-parse", "main")
 
 
+def test_conflicted_published_candidate_requests_refresh_before_missing_ci(tmp_path, monkeypatch):
+    from dataclasses import replace
+
+    repo, remote, base, sha, store, ci, adapter, pr = rig(tmp_path, monkeypatch)
+    git(repo, "checkout", "-b", "upstream", "main")
+    advanced = commit(repo, {"src/widget.py": "UPSTREAM = 3"}, "upstream change")
+    git(repo, "push", "origin", "upstream:refs/heads/main")
+    git(repo, "checkout", "main")
+    monkeypatch.setattr(adapter, "get", lambda number: replace(pr, mergeable=False))
+    monkeypatch.setattr(ci, "run_for", lambda sha: pytest.fail("obsolete candidate waited for CI"))
+    record = TaskRecord(TASK, pr_url="https://github.com/owner/repo/pull/7", integrated_candidate=sha)
+    merger = ff.make_merger(store, repo, "refs/heads/main", ("web",))
+    lines = []
+    merger.progress = lines.append
+    result = merger(record, time.time() + 20)
+    assert result["refresh_required"] and result["remote_landed"] is False
+    assert result["base_sha"] == advanced
+    assert any("refresh required" in line and "conflicts" in line for line in lines)
+    assert git(repo, "rev-parse", "main") == base
+    assert git(remote, "rev-parse", "main") == advanced
+    assert git(remote, "rev-parse", f"wave/task-{TASK}") == sha
+
+
+def test_conflict_with_ancestral_base_is_reported_not_blindly_refreshed(tmp_path, monkeypatch):
+    from dataclasses import replace
+
+    repo, remote, base, sha, store, ci, adapter, pr = rig(tmp_path, monkeypatch)
+    monkeypatch.setattr(adapter, "get", lambda number: replace(pr, mergeable=False))
+    monkeypatch.setattr(ci, "run_for", lambda sha: pytest.fail("known conflict waited for CI"))
+    result = ff.make_merger(store, repo, "refs/heads/main", ("web",))(
+        TaskRecord(TASK, pr_url="https://github.com/owner/repo/pull/7", integrated_candidate=sha), time.time() + 20,
+    )
+    assert not result.get("refresh_required") and "ancestral" in result["reason"]
+    assert git(remote, "rev-parse", "main") == base
+
+
+@pytest.mark.parametrize("unknown", [False, True])
+def test_missing_checks_and_unknown_mergeability_have_bounded_visible_waits(tmp_path, monkeypatch, unknown):
+    from dataclasses import replace
+
+    repo, remote, base, sha, store, ci, adapter, pr = rig(tmp_path, monkeypatch)
+    if unknown:
+        monkeypatch.setattr(adapter, "get", lambda number: replace(pr, mergeable=None))
+    ci.runs.clear()
+    now = [time.time()]
+    monkeypatch.setattr(ff.time, "time", lambda: now[0])
+    monkeypatch.setattr(ff.time, "sleep", lambda seconds: now.__setitem__(0, now[0] + seconds))
+    merger = ff.make_merger(store, repo, "refs/heads/main", ("web",))
+    lines = []
+    merger.progress = lines.append
+    result = merger(TaskRecord(TASK, pr_url="https://github.com/owner/repo/pull/7", integrated_candidate=sha), now[0] + 120)
+    assert not result["merged"]
+    assert "60s" in result["reason"]
+    assert ("mergeability" if unknown else "checks missing") in result["reason"]
+    assert any("landing waiting" in line for line in lines)
+    assert any("landing blocked" in line for line in lines)
+    assert git(remote, "rev-parse", "main") == base
+
+
 def stacked_rig(tmp_path, monkeypatch):
     from dataclasses import replace
     from stagemesh.autonomy.dependencies import PRState

@@ -216,4 +216,14 @@ def with_progress(hooks: Any, db_path: Path, reporter: ProgressReporter, *, hear
         reporter.line(f"task {record.task_id}: PR opened {url}")
         return url
 
-    return replace(hooks, run_task=run, open_pr=None if open_pr is None else pr)
+    setter = getattr(open_pr, "set_deadline", None)
+    if callable(setter):
+        pr.set_deadline = setter
+    retarget = getattr(hooks, "retarget", None)
+    return replace(
+        hooks, run_task=run, open_pr=None if open_pr is None else pr,
+        retarget=(lambda ref: with_progress(
+            retarget(ref), db_path, reporter,
+            heartbeat_seconds=heartbeat_seconds, poll_seconds=poll_seconds,
+        )) if callable(retarget) else None,
+    )

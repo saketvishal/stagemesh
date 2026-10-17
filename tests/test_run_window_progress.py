@@ -161,3 +161,19 @@ def test_cli_json_stdout_stays_valid_and_progress_is_on_stderr(tmp_path: Path, c
     cli_module.main(["--project", str(project), "run-window", "--integration", "local", "--tasks", "T-2", "--json", "--no-progress", "--report", str(tmp_path / "r2.json")])
     quiet = capsys.readouterr()
     assert json.loads(quiet.out) and quiet.err == "" and rig.runs == ["T-1", "T-2"]
+
+
+def test_progress_and_retarget_preserve_publisher_deadline(tmp_path):
+    store, project = make_store(tmp_path, ["T-1"])
+    rig = Rig(project)
+    hooks = rig.hooks()
+    deadlines = []
+    opener = hooks.open_pr
+    hooks.open_pr = lambda record: opener(record)
+    hooks.open_pr.set_deadline = deadlines.append
+    hooks.retarget = lambda ref: hooks
+    wrapped = with_progress(hooks, project / ".stagemesh/stagemesh.sqlite3", ProgressReporter(WatchedStream()))
+    wrapped.open_pr.set_deadline(123)
+    wrapped.retarget("refs/heads/wave/recovery-fixture").open_pr.set_deadline(456)
+    assert deadlines == [123, 456]
+    store.close()

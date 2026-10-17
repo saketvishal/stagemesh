@@ -1015,3 +1015,48 @@ def test_failed_pr_publication_preserves_a_resumable_integration_stage(tmp_path:
     assert (store.get_task("241")["stage"], store.get_task("241")["status"]) == ("INTEGRATE", "OPEN")
     assert report.tasks[0].validation == report.tasks[0].review == report.tasks[0].integration == "PASSED"
     assert not store.has_active_claim("241") and not list(store.running_executions())
+
+
+def test_landing_refresh_recovers_entire_remaining_suffix_without_relanding_old_heads(tmp_path):
+    store, project, _rig, hooks, options, config, kwargs = window(
+        tmp_path, ["1", "2"], auto_merge_ff=True, concurrency=2, required_checks=("web",))
+    hooks.is_ancestor = lambda old, new: old.startswith("1") and new.startswith("2")
+    attempts, recovered = [], []
+    def land(record, deadline):
+        attempts.append(record.task_id)
+        return {"merged": False, "remote_landed": False, "refresh_required": True, "reason": "conflict"}
+    def recover(records, failure, deadline, passed_hooks, passed_options):
+        recovered.extend(record.task_id for record in records)
+        return {"ok": True, "waves": [], "merged_prs": [{"merged": True, "pr": n} for n in (3, 4)], "landing_results": []}
+    land.recover = recover
+    report = rw.run_window(store, project, config, options, hooks, base_ref="refs/heads/main", merge_pr=land, **kwargs)
+    assert report.ok and attempts == ["1"] and recovered == ["1", "2"]
+    assert len(report.merged_prs) == 2
+
+
+@pytest.mark.parametrize("remote_landed", [None, True])
+def test_partial_or_unknown_landing_never_enters_refresh_callback(tmp_path, remote_landed):
+    store, project, _rig, hooks, options, config, kwargs = window(
+        tmp_path, ["1"], auto_merge_ff=True, concurrency=1, required_checks=("web",))
+    def land(record, deadline):
+        return {"merged": False, "remote_landed": remote_landed, "refresh_required": True, "reason": "reconcile"}
+    land.recover = lambda *args: pytest.fail("uncertain landing was refreshed")
+    report = rw.run_window(store, project, config, options, hooks, base_ref="refs/heads/main", merge_pr=land, **kwargs)
+    assert not report.ok and "reconcile" in report.stop_reason
+
+
+def test_active_recovery_resumes_before_new_work_without_resetting_old_staging(tmp_path):
+    store, project, rig, hooks, options, config, kwargs = window(
+        tmp_path, ["1"], auto_merge_ff=True, concurrency=1, required_checks=("web",))
+    def land(record, deadline):
+        pytest.fail("original pending PR was relanded during recovery resume")
+    land.active_recovery = lambda: {"records": [{"task_id": "1"}]}
+    land.recovery_preflight = lambda pending: None
+    def resume(deadline, passed_hooks, passed_options):
+        store.advance_task("1", Stage.DONE)
+        return {"ok": True, "waves": [], "merged_prs": [{"merged": True}], "landing_results": []}
+    land.resume_recovery = resume
+    kwargs["list_prs"] = lambda project: [{"url": "https://example.invalid/pull/1", "headRefName": "wave/task-1"}]
+    report = rw.run_window(store, project, config, options, hooks, base_ref="refs/heads/main", merge_pr=land,
+                           prepare_staging=lambda: pytest.fail("generic staging reset during recovery"), **kwargs)
+    assert report.ok and not rig.runs and len(report.merged_prs) == 1
