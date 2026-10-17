@@ -207,6 +207,13 @@ class RuntimeCommandAdapter:
             if timed_out:
                 store.finish_execution(execution_id, ExecutionStatus.FAILED, result=PROVIDER_TIMEOUT)
                 return ExecutionResult(ExecutionStatus.FAILED, failure_reason=PROVIDER_TIMEOUT)
+            if _missing_provider_tool_host(stderr):
+                store.finish_execution(execution_id, ExecutionStatus.FAILED, result="provider_unavailable")
+                output, _ = capacity_evidence("", stderr)
+                return ExecutionResult(
+                    ExecutionStatus.FAILED, capacity_failure=True,
+                    failure_reason="provider_unavailable", provider_output=output,
+                )
             if proc.returncode != 0:
                 is_cap, reason = classify_failure(proc.returncode, stdout, stderr)
                 store.finish_execution(execution_id, ExecutionStatus.FAILED, result=reason)
@@ -287,6 +294,9 @@ class RuntimeCommandAdapter:
             tracked_dirty = _tracked_content_changed(review_path)
             if after_head != before_head or tracked_dirty:
                 return _review_failure("review execution mutated candidate workspace")
+            if _missing_provider_tool_host(stderr):
+                output, _ = capacity_evidence("", stderr)
+                return _review_infrastructure_failure("provider_unavailable", output)
             if proc.returncode != 0:
                 is_cap, reason = classify_failure(proc.returncode, stdout, stderr)
                 if is_cap:
@@ -296,6 +306,13 @@ class RuntimeCommandAdapter:
             return _provider_text_response(stdout)
         finally:
             _cleanup_review_workspace(Path(temp_dir))
+
+
+def _missing_provider_tool_host(stderr: str) -> bool:
+    text = stderr.casefold()
+    return "failed to spawn code-mode host" in text and (
+        "host executable was not found" in text or "cannot find the file specified" in text
+    )
 
 
 @dataclass(frozen=True)
@@ -398,12 +415,16 @@ def _prepare_review_checkout(project: Path, review_path: Path, candidate_sha: st
         detail = _bounded_process_output(init)
         return _review_infrastructure_failure("review workspace setup failed" + (f": {detail}" if detail else ""))
 
-    objects = _source_object_store(project)
-    if objects is None:
-        return _review_infrastructure_failure("review workspace setup failed: source object store unavailable")
-    alternates = review_path / ".git" / "objects" / "info" / "alternates"
-    alternates.parent.mkdir(parents=True, exist_ok=True)
-    alternates.write_bytes((objects.as_posix() + "\n").encode("utf-8"))
+    # A sandboxed reviewer cannot read an alternate object directory outside
+    # its workspace. Import candidate history locally so diff/log remain usable.
+    imported = subprocess.run(
+        ["git", "-c", "protocol.file.allow=always", "fetch", "--quiet", "--no-tags",
+         "--no-recurse-submodules", "--no-auto-maintenance", project.resolve().as_uri(), candidate_sha],
+        cwd=review_path, text=True, capture_output=True, check=False,
+    )
+    if imported.returncode != 0:
+        detail = _bounded_process_output(imported)
+        return _review_infrastructure_failure("review object import failed" + (f": {detail}" if detail else ""))
 
     # Reviewers must inspect the committed candidate bytes, not a platform-normalized
     # checkout shaped by the machine's global Git config.

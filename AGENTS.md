@@ -19,6 +19,8 @@
 
 ## Keep Work Bounded
 
+- Before switching the shared checkout, advancing local main, merging maintenance repairs, or updating installed runtimes, check for active StageMesh windows, executions and claims. Do not move an active runner's checkout or replace its runtime. Wait for it to finish; preserve its candidates and evidence.
+
 - Keep edits scoped to the requested behavior. Avoid unrelated refactors, speculative abstractions, and repository-wide formatting or cleanup.
 - Before expensive investigation or testing, state briefly what it will establish. Stop repeating checks once the required evidence is available.
 - Whole-tree file hashing is for moves, recovery, or integrity verification when needed, not routine development.
