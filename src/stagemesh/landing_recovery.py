@@ -13,6 +13,7 @@ from urllib.parse import urlparse
 from .autonomy.dependencies import PRState
 from .concurrency import IntegrationLock
 from .contract_binding import contract_for_candidate
+from .contracts import bound_contract_from_record
 from .coordinator import Coordinator
 from .domain import EvidenceKind, EvidenceStatus, Stage
 from .git import GitWorkspace
@@ -122,6 +123,90 @@ class LandingRecovery:
             raise RuntimeError("recovery PR identity changed; no published head was rewritten")
         return pr
 
+    def _external_completion(self, state):
+        """Observe an independently completed suffix, never authorize its landing."""
+        from .fast_forward import landing_evidence_problem
+
+        observed = [(item, self.pulls.get(self._number(item["pr_url"]))) for item in state["records"]]
+        if not all(pr is not None and pr.state is PRState.MERGED for _, pr in observed):
+            for item, pr in observed:
+                if pr is None or (pr.state is PRState.MERGED and item["phase"] != "landed"):
+                    raise RuntimeError("partial or unknown external recovery completion; work retained")
+                self._observe(item)
+            return None
+        base = self._tip(self.base_ref)
+        if base != self.pulls.remote_tip(self.base_ref) or not self._ancestor(state["target"], base):
+            raise RuntimeError("externally merged recovery requires a synchronized, descendant integration base")
+        current = next((item for item in state["records"] if item["phase"] != "landed"), None)
+        self._verify_generation(state, current)
+        staging = self._tip(STAGING_REF)
+        if staging not in {state["original_staging"], base}:
+            raise RuntimeError("canonical staging changed outside recovery; external completion refused")
+        records = []
+        for item, pr in observed:
+            task_id = item["task_id"]
+            task, latest = self.store.get_task(task_id), self.store.latest_candidate(task_id)
+            if not all(re.fullmatch(r"[0-9a-f]{40}", str(sha or "")) for sha in (pr.head_sha, pr.merge_commit_sha)):
+                raise RuntimeError("externally merged recovery commit identity is unavailable")
+            head_tree = self.git.run("rev-parse", "--verify", f"{pr.head_sha}^{{tree}}", check=False)
+            merge_tree = self.git.run("rev-parse", "--verify", f"{pr.merge_commit_sha}^{{tree}}", check=False)
+            if head_tree.returncode or merge_tree.returncode:
+                raise RuntimeError("externally merged recovery commit trees are unavailable")
+            proof = "ancestry" if self._ancestor(pr.head_sha, pr.merge_commit_sha) else None
+            if proof is None and head_tree.stdout == merge_tree.stdout:
+                proof = "identical_tree"
+            if (pr.base_ref != self.base_ref.removeprefix("refs/heads/")
+                    or not is_task_pr_branch(pr.head_ref, task_id, item["sha"])
+                    or proof is None
+                    or not self._ancestor(pr.merge_commit_sha, base)
+                    or task is None or task["stage"] != Stage.DONE or task["status"] != "DONE"
+                    or latest is None or not self._ancestor(latest["sha"], pr.head_sha)):
+                raise RuntimeError("externally merged recovery identity, task ownership or reachability is unverified")
+            binding = self.store.contract_binding(task_id, latest["sha"])
+            if binding is None:
+                raise RuntimeError("externally merged recovery has no recorded candidate contract")
+            bound = bound_contract_from_record(dict(binding))
+            if bound.digest != item["contract_hash"] or bound.version != item["contract_version"]:
+                raise RuntimeError("requirements changed before external recovery completion")
+            bases = {pair[2] for pair in state["pairs"] if pair[0] == task_id}
+            if latest["sha"] == item["sha"]:
+                bases.add(item["binding"]["baseline_sha"])
+            if bound.baseline_sha not in bases:
+                raise RuntimeError("externally merged candidate is outside the journaled recovery lineage")
+            records.append({"task_id": task_id, "pr_url": item["pr_url"], "head_sha": pr.head_sha,
+                            "merge_sha": pr.merge_commit_sha, "candidate_sha": latest["sha"],
+                            "content_proof": proof, "head_tree": head_tree.stdout.strip(),
+                            "merge_tree": merge_tree.stdout.strip(), "binding_id": binding["id"],
+                            "baseline_sha": bound.baseline_sha, "contract_hash": bound.digest,
+                            "contract_version": bound.version,
+                            "evidence_problem": landing_evidence_problem(self.store, task_id, latest["sha"])})
+        return {"base_sha": base, "staging_sha": staging, "records": records,
+                "landing_authority": "external", "stagemesh_verified_landing": False}
+
+    def _complete_external(self, state, observed, deadline):
+        self._idle(deadline)
+        self.pulls.deadline = deadline
+        problem = self.pulls.host_policy()
+        if problem:
+            raise RuntimeError(problem)
+        with IntegrationLock(self.project / ".stagemesh/integration.lock").hold("landing-recovery-external"):
+            if self._external_completion(state) != observed:
+                raise RuntimeError("external landing observation changed; recovery retained")
+            if (self.git.run("symbolic-ref", "HEAD").stdout.strip() != self.base_ref
+                    or self.git.run("status", "--porcelain", "--untracked-files=no").stdout.strip()):
+                raise RuntimeError("checkout changed; external completion refused")
+            self._preserve(state)
+            root = f"refs/stagemesh/preserved/landing-{state['id']}"
+            self._preserve_ref(f"{root}/external-generation", self._tip(state["ref"]))
+            for index, item in enumerate(observed["records"]):
+                self._preserve_ref(f"{root}/external-{index}", item["candidate_sha"])
+                self._preserve_ref(f"{root}/external-head-{index}", item["head_sha"])
+            if observed["staging_sha"] != observed["base_sha"]:
+                self.git.run("update-ref", STAGING_REF, observed["base_sha"], observed["staging_sha"])
+            state["status"], state["external_completion"] = "complete", observed
+            self._save(state)
+        self._emit("recovery", "previous PRs were merged externally; archived recovery without certifying their evidence")
+
     def preflight(self, pending_prs):
         try:
             state = self.active()
@@ -129,6 +214,10 @@ class LandingRecovery:
                 return "no active landing recovery journal"
             if state["policy"] != self._policy():
                 return "landing recovery required checks, trusted app or policy changed"
+            if self._external_completion(state) is not None:
+                if pending_prs:
+                    return "unowned open PR beside externally completed recovery"
+                return None
             if not self._tip(state["ref"]) and any(item["phase"] not in {"queued", "landed"} for item in state["records"]):
                 return "landing recovery staging generation is missing after work started"
             if self._tip(state["ref"]):
@@ -372,6 +461,12 @@ class LandingRecovery:
                 raise RuntimeError("no active landing recovery")
             if state["policy"] != self._policy():
                 raise RuntimeError("landing recovery policy changed")
+            external = self._external_completion(state)
+            if external is not None:
+                self._complete_external(state, external, deadline)
+                result["ok"] = True
+                result["landing_results"].append({"external_completion": external, "merged": False})
+                return result
             self._preserve(state)
             self._ensure_generation(state, deadline)
             for item in state["records"]:
