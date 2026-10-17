@@ -800,6 +800,7 @@ def run_window(
                 deadline=deadline,
                 clock=clock,
                 ordered_publication=options.auto_merge_ff,
+                project=project,
             )
             attempted.update(fresh)
             report.selected.extend(task_id for task_id in batch if task_id not in report.selected)

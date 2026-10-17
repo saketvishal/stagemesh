@@ -184,3 +184,55 @@ def test_invalid_environment_config_fails_validation_without_running_gate(tmp_pa
     assert result.gates == ()
     worktrees = workspace.run("worktree", "list", "--porcelain").stdout
     assert worktrees.count("worktree ") == 1
+
+
+def test_node_dependencies_provisioned_into_candidate(tmp_path):
+    project, checkout = tmp_path / "operator", tmp_path / "checkout"
+    (project / ".stagemesh").mkdir(parents=True)
+    web_source = project / "apps/web"
+    web_target = checkout / "apps/web"
+    web_source.mkdir(parents=True)
+    web_target.mkdir(parents=True)
+
+    (web_source / "package.json").write_text('{"name": "test-web", "version": "1.0.0"}', encoding="utf-8")
+    (web_target / "package.json").write_text('{"name": "test-web", "version": "1.0.0"}', encoding="utf-8")
+
+    node_modules = web_source / "node_modules"
+    bin_dir = node_modules / ".bin"
+    bin_dir.mkdir(parents=True)
+    (bin_dir / "tsc.cmd").write_text("@echo off\necho 5.5.4\n", encoding="utf-8")
+
+    config = {
+        "schema_version": 1,
+        "node": {"apps/web/node_modules": "apps/web/node_modules"},
+    }
+    (project / ".stagemesh/validation-environments.json").write_text(json.dumps(config), encoding="utf-8")
+
+    prepare_candidate_environments(project, checkout)
+
+    assert (checkout / "apps/web/node_modules/.bin/tsc.cmd").exists()
+    assert (checkout / "apps/web/node_modules").is_dir()
+
+
+def test_node_dependencies_differ_rejected(tmp_path):
+    project, checkout = tmp_path / "operator", tmp_path / "checkout"
+    (project / ".stagemesh").mkdir(parents=True)
+    web_source = project / "apps/web"
+    web_target = checkout / "apps/web"
+    web_source.mkdir(parents=True)
+    web_target.mkdir(parents=True)
+
+    (web_source / "package.json").write_text('{"name": "test-web", "version": "1.0.0"}', encoding="utf-8")
+    (web_target / "package.json").write_text('{"name": "test-web", "version": "2.0.0"}', encoding="utf-8")
+
+    node_modules = web_source / "node_modules"
+    node_modules.mkdir(parents=True)
+
+    config = {
+        "schema_version": 1,
+        "node": {"apps/web/node_modules": "apps/web/node_modules"},
+    }
+    (project / ".stagemesh/validation-environments.json").write_text(json.dumps(config), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="candidate dependencies differ"):
+        prepare_candidate_environments(project, checkout)

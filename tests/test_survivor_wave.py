@@ -978,3 +978,41 @@ def test_deferred_publication_never_clears_unknown_running_ownership(tmp_path: P
     assert rig.prs == [] and not report.tasks[0].ready_for_merge
     assert len(list(store.running_executions())) == 1
     assert store.get_task("T-1")["stage"] == Stage.DONE
+
+
+def test_survivor_wave_serializes_exclusive_resource_conflicts(tmp_path: Path) -> None:
+    from stagemesh.contracts import canonical_contract_json, ChangeContract
+
+    task_ids = ["task-242", "task-270", "task-300"]
+    store, project = make_store(tmp_path, task_ids)
+
+    # Bind contracts: 242 and 270 share exclusive resource; 300 does not
+    c242 = ChangeContract(objective="task 242", exclusive_resources=("caventra-promoted-web-validation",))
+    c270 = ChangeContract(objective="task 270", exclusive_resources=("caventra-promoted-web-validation",))
+    c300 = ChangeContract(objective="task 300", exclusive_resources=())
+
+    for tid, contract in [("task-242", c242), ("task-270", c270), ("task-300", c300)]:
+        canonical = canonical_contract_json(contract)
+        store.bind_task_contract(tid, OLD, 1, "digest-" + tid, canonical)
+
+    active_tasks: set[str] = set()
+    overlaps: list[tuple[str, str]] = []
+    lock = threading.Lock()
+
+    def work(rig, task_id):
+        with lock:
+            if "task-242" in active_tasks and task_id == "task-270":
+                overlaps.append(("task-242", "task-270"))
+            if "task-270" in active_tasks and task_id == "task-242":
+                overlaps.append(("task-270", "task-242"))
+            active_tasks.add(task_id)
+        time.sleep(0.05)
+        with lock:
+            active_tasks.remove(task_id)
+        return rig.finish_done(task_id)
+
+    rig = Rig(project, {"task-242": work, "task-270": work, "task-300": work})
+    report = run_wave(store, task_ids, rig.hooks(), concurrency=2, project=project)
+
+    assert overlaps == [], "Tasks sharing exclusive resource ran concurrently!"
+    assert all(task.outcome == "done" for task in report.tasks)

@@ -80,6 +80,12 @@ def prepare_task_workspace(project: Path, task_id: str) -> Path:
         workspace.run("worktree", "add", "--detach", str(target), "HEAD")
         if not target.exists() or not (target / ".git").exists():
             raise GitError(f"git worktree was not created at {target}")
+        from .candidate_environments import prepare_candidate_environments
+
+        try:
+            prepare_candidate_environments(root, target)
+        except Exception:
+            pass
         # Deliberately no `git config user.*` here: a worktree shares the repository config, so writing one would replace the owner's
         # identity in their real checkout. Commits resolve their identity per command (git_identity).
     return target
