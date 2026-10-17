@@ -226,7 +226,7 @@ def rebind_contract(store: Store, project: Path, task_id: str, *, validate: bool
         "new_digest": digest,
         "old_version": old_version,
         "new_version": CONTRACT_VERSION,
-        "old_canonical_json": original_canonical,
+        "old_canonical_json": str(old["canonical_json"]) if old is not None else original_canonical,
         "new_canonical_json": canonical,
         "invariant_classification": classification,
         "candidate_sha": candidate_sha,
