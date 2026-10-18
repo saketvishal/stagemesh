@@ -94,6 +94,85 @@ def test_selection_picks_only_runnable_tasks_and_never_blocked_parked_or_claimed
     assert "not picked automatically" in named["T-blocked"] and named["T-nope"] == "no such task"
 
 
+def _overlapping_prefix(project: Path, *, files: bool = False) -> None:
+    for task_id in ("2", "3", "5"):
+        path = project / ".stagemesh/contracts" / f"{task_id}.json"
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if files:
+            payload["protected_files"] = ["web/shared.py"]
+        else:
+            payload["exclusive_resources"] = ["shared-browser-validation"]
+        path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+@pytest.mark.parametrize("files", [False, True])
+def test_selection_looks_past_conflicts_to_fill_five_slots(tmp_path: Path, files: bool) -> None:
+    store, project = make_store(tmp_path, [str(n) for n in range(1, 8)])
+    _overlapping_prefix(project, files=files)
+    picked, deferred = rw.select_tasks(store, attempted=set(), limit=5, project=project, compatible_with=[])
+    assert picked == ["1", "2", "4", "6", "7"]
+    assert all("conflicts with task 2" in deferred[t] for t in ("3", "5"))
+    # Inventory/plan callers retain their original all-eligible selection.
+    assert rw.select_tasks(store, attempted=set(), limit=5, project=project)[0] == ["1", "2", "3", "4", "5"]
+    assert all(store.get_task(t)["status"] == "OPEN" for t in ("3", "5"))
+
+
+def test_selection_reserves_continuation_resources_without_wasting_slots(tmp_path: Path) -> None:
+    store, project = make_store(tmp_path, [str(n) for n in range(1, 8)])
+    _overlapping_prefix(project)
+    picked, deferred = rw.select_tasks(
+        store, attempted={"1", "2"}, only=["3", "4", "5", "6"], limit=2,
+        project=project, compatible_with=["2"],
+    )
+    assert picked == ["4", "6"]
+    assert all("conflicts with task 2" in deferred[t] for t in ("3", "5"))
+
+
+@pytest.mark.parametrize("automatic", [False, True])
+def test_window_starts_five_compatible_workers_and_later_runs_deferred_tasks(tmp_path: Path, automatic: bool) -> None:
+    import threading
+
+    ids = [str(n) for n in range(1, 8)]
+    first = {"1", "2", "4", "6", "7"}
+    barrier = threading.Barrier(5)
+    active = set()
+    overlaps = []
+    lock = threading.Lock()
+
+    def work(rig, task_id):
+        with lock:
+            if task_id in {"2", "3", "5"} and active & {"2", "3", "5"}:
+                overlaps.append(task_id)
+            active.add(task_id)
+        if task_id in first:
+            barrier.wait(timeout=10)
+        result = rig.finish_done(task_id)
+        with lock:
+            active.remove(task_id)
+        return result
+
+    store, project, rig, hooks, options, config, kwargs = window(
+        tmp_path, ids, {t: work for t in ids}, concurrency=5, max_tasks=7,
+        auto_merge_ff=automatic, required_checks=("web",),
+    )
+    _overlapping_prefix(project)
+    landed = []
+
+    def land(record, deadline):
+        assert not active  # Landing remains serialized after all batch workers exit.
+        landed.append(record.task_id)
+        return {"merged": True, "candidate_sha": record.integrated_candidate}
+
+    report = rw.run_window(store, project, config, options, hooks, base_ref="refs/heads/main",
+                           merge_pr=land if automatic else None, **kwargs)
+    assert report.ok, report.stop_reason
+    assert set(rig.runs[:5]) == first
+    assert set(rig.runs) == set(ids)
+    assert not overlaps and not active
+    assert all(t not in report.not_selected for t in ("3", "5"))
+    assert not automatic or set(landed) == set(ids)
+
+
 # --- the happy path --------------------------------------------------------------------------------------------------------------
 
 
