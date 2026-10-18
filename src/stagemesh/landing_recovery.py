@@ -18,7 +18,7 @@ from .coordinator import Coordinator
 from .domain import EvidenceKind, EvidenceStatus, Stage
 from .git import GitWorkspace
 from .serialized_integration import SerializedIntegrator
-from .survivor_wave import STAGING_REF, TaskRecord, is_task_pr_branch, run_wave
+from .survivor_wave import STAGING_REF, TaskRecord, WaveReport, _defer_pr_delivery, is_task_pr_branch, run_wave
 
 EVENT = "window.landing_recovery"
 MAX_REFRESHES = 3
@@ -297,7 +297,112 @@ class LandingRecovery:
         except Exception as exc:
             return {"ok": False, "reason": f"{type(exc).__name__}: {exc}", "waves": [], "merged_prs": [], "landing_results": []}
 
+    def _publish_deferred_tail(self, records, stage, deadline, hooks, options, waves):
+        """Account for fully evidenced publication-only work before refreshing a suffix."""
+        from .fast_forward import landing_evidence_problem
+        from .run_window import _landing_order
+
+        known = {record.task_id for record in records}
+        seen, deferred = set(), []
+        for row in self.store.conn.execute(
+            "SELECT payload FROM audit_events WHERE event_type=? ORDER BY created_at DESC,rowid DESC",
+            ("task.pr_delivery_pending",),
+        ):
+            payload = json.loads(row["payload"])
+            task_id = payload.get("task_id")
+            if task_id in seen or task_id in known:
+                continue
+            seen.add(task_id)
+            sha = payload.get("candidate_sha")
+            task = self.store.get_task(task_id)
+            latest = self.store.latest_candidate(task_id)
+            if (not task or not latest or latest["sha"] != sha
+                    or (task["stage"], task["status"]) not in {(Stage.INTEGRATE, "OPEN"), (Stage.DONE, "DONE")}
+                    or not self._ancestor(sha, stage)
+                    or any(self._ancestor(sha, record.integrated_candidate) for record in records)):
+                continue
+            if options.tasks is not None and task_id not in options.tasks:
+                raise RuntimeError("deferred staging work is outside selected tasks; preserved without publication")
+            if landing_evidence_problem(self.store, task_id, sha):
+                raise RuntimeError("deferred staging work lacks exact successful evidence; recovery refused")
+            deferred.append(TaskRecord(task_id, title=str(task["title"]), integrated_candidate=sha))
+        ordered = _landing_order(self.store, [*records, *deferred], hooks)
+        if not deferred or not ordered or ordered[-1].integrated_candidate != stage:
+            raise RuntimeError("staging includes unaccounted work; recovery refused")
+        if len(ordered) > options.max_tasks:
+            raise RuntimeError("deferred publication suffix exceeds window task budget; work retained")
+        pending_ids = {record.task_id for record in deferred}
+        bindings = {record.task_id: dict(self.store.contract_binding(record.task_id, record.integrated_candidate)) for record in deferred}
+        setter = getattr(hooks.open_pr, "set_deadline", None)
+        if callable(setter):
+            setter(deadline)
+
+        def verify_identity(store, record, states):
+            task = store.get_task(record.task_id)
+            binding = store.contract_binding(record.task_id, record.integrated_candidate)
+            if (self._tip(STAGING_REF) != stage or not task or (task["stage"], task["status"]) not in states
+                    or binding is None or dict(binding) != bindings[record.task_id]
+                    or landing_evidence_problem(store, record.task_id, record.integrated_candidate)):
+                raise RuntimeError("deferred publication identity, state or evidence changed; work retained")
+
+        def verify(record, states):
+            self._idle(deadline)
+            verify_identity(self.store, record, states)
+            for original in records:
+                self._snapshot(original)
+
+        for record in ordered:
+            if record.task_id not in pending_ids:
+                continue
+            verify(record, {(Stage.INTEGRATE, "OPEN"), (Stage.DONE, "DONE")})
+            self._emit(record.task_id, "resuming verified deferred PR publication before refreshing the complete suffix")
+            def publish(candidate):
+                if candidate.task_id != record.task_id or candidate.integrated_candidate != record.integrated_candidate:
+                    raise RuntimeError("deferred publication candidate changed; work retained")
+                verify(record, {(Stage.DONE, "DONE")})
+                return hooks.open_pr(candidate)
+
+            if callable(setter):
+                publish.set_deadline = setter
+            if self.store.get_task(record.task_id)["status"] == "DONE":
+                record.outcome, record.final_stage, record.final_status = "done", "DONE", "DONE"
+                record.validation = record.review = record.integration = "PASSED"
+                wave = WaveReport(tasks=[record], staging_ref=STAGING_REF)
+                waves.append(wave)
+                try:
+                    record.pr_url = publish(record)
+                except Exception:
+                    _defer_pr_delivery(self.store, record, "interrupted deferred PR publication")
+                    raise
+                record.ready_for_merge, record.pr_state, record.landing = True, "OPEN", "pr_opened"
+            else:
+                def run(task_id, steps):
+                    if task_id != record.task_id or steps != 1:
+                        raise RuntimeError("deferred publication dispatch changed")
+                    from .persistence import Store
+
+                    worker = Store(self.store.db_path)
+                    try:
+                        verify_identity(worker, record, {(Stage.INTEGRATE, "OPEN")})
+                    finally:
+                        worker.close()
+                    return hooks.run_task(task_id, steps)
+
+                guarded = replace(hooks, run_task=run, open_pr=publish)
+                wave = run_wave(self.store, [record.task_id], guarded, concurrency=1, max_steps=1,
+                    advance_baselines=False, unblock_blocked=False, open_prs=True, integration_mode="pr",
+                    staging_ref=STAGING_REF, deadline=deadline, ordered_publication=True, project=self.project)
+                waves.append(wave)
+            published = wave.tasks[0] if len(wave.tasks) == 1 else None
+            if (not wave.ok or published is None or published.outcome != "done" or not published.pr_url
+                    or published.integrated_candidate != record.integrated_candidate):
+                detail = published.reason or published.stop_reason if published is not None else str(wave.not_selected)
+                raise RuntimeError(wave.stop_reason or f"deferred publication did not retain its exact candidate: {detail}")
+            ordered[ordered.index(record)] = published
+        return ordered
+
     def _recover(self, records, failure, deadline, hooks, options):
+        waves = []
         try:
             self._idle(deadline)
             if not failure.get("refresh_required") or failure.get("remote_landed") is not False:
@@ -310,12 +415,14 @@ class LandingRecovery:
             ordered = _landing_order(self.store, records, hooks)
             if not ordered or ordered[0].integrated_candidate != failure.get("candidate_sha"):
                 raise RuntimeError("landing recovery suffix does not start at the observed failed candidate")
-            stage = self._tip(STAGING_REF)
-            if stage != ordered[-1].integrated_candidate:
-                raise RuntimeError("staging includes unaccounted work; recovery refused")
             target = failure.get("base_sha")
             if not re.fullmatch(r"[0-9a-f]{40}", str(target or "")):
                 raise RuntimeError("landing recovery requires an exact observed base SHA")
+            for record in ordered:
+                self._snapshot(record)
+            stage = self._tip(STAGING_REF)
+            if stage != ordered[-1].integrated_candidate:
+                ordered = self._publish_deferred_tail(ordered, stage, deadline, hooks, options, waves)
             items = [self._snapshot(record) for record in ordered]
             if any(self._ancestor(item["sha"], target) for item in items):
                 raise RuntimeError("candidate already reachable from remote base; reconcile instead of refreshing")
@@ -330,9 +437,11 @@ class LandingRecovery:
             self._preserve(state)
             self._sync_base(target, deadline)
             self.git.run("update-ref", state["ref"], target, "0" * 40)
-            return self._resume(deadline, hooks, options)
+            result = self._resume(deadline, hooks, options)
+            result["waves"] = [*waves, *result["waves"]]
+            return result
         except Exception as exc:
-            return {"ok": False, "reason": f"{type(exc).__name__}: {exc}", "waves": [], "merged_prs": [], "landing_results": []}
+            return {"ok": False, "reason": f"{type(exc).__name__}: {exc}", "waves": waves, "merged_prs": [], "landing_results": []}
 
     def _preserve(self, state):
         originals = [("staging", state["original_staging"])] + [
