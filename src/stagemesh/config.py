@@ -102,7 +102,7 @@ class BudgetConfig:
     """Effort limits checked at stage boundaries (see efficiency.py). 0 or null disables a limit."""
 
     max_provider_calls_per_task: int | None = 30
-    max_equivalent_failures: int | None = 3
+    max_equivalent_failures: int | None = 5
     max_provider_calls_per_window: int | None = None
     max_reported_usage_per_task: int | None = None
 

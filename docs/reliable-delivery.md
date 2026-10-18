@@ -146,7 +146,7 @@ duplicated; adverse findings and dispositions are append-only.
 class, duration, provider-reported usage) and `stage.transition` events feed `stagemesh efficiency` together with the existing
 executions and `validation_reuse` evidence. Usage the provider did not report is `null`/unknown and is never summed as zero; keys are
 `input`/`output`/`cached_input` because the audit redactor masks any key containing the word for a credential. No prompts, provider
-output or client content is stored. Budgets (`budgets` in `.stagemesh/config.json`, defaults: 3 consecutive equivalent failures, 30
+output or client content is stored. Budgets (`budgets` in `.stagemesh/config.json`, defaults: 5 consecutive equivalent failures, above the bounded hands-off provider-exhaustion recovery, 30
 provider calls per task; optional per-window calls and reported-usage caps) come from the ledger, so they survive new windows and
 restarts, and are checked only **between** stages and waves; reaching one is a single typed `BLOCKED_RECOVERABLE_OPERATIONAL` blocker
 (`budget_exhausted`) and a fresh start by the operator (`retry-task`) resets the task's counters. Budgets never skip validation or review.

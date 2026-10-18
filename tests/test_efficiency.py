@@ -362,7 +362,7 @@ def test_budget_configuration_is_validated_and_defaults_are_bounded(tmp_path: Pa
     store, project = make_store(tmp_path, ["1"])
     config_path = project / ".stagemesh" / "config.json"
     base = json.loads(config_path.read_text(encoding="utf-8")) if config_path.exists() else {}
-    assert load_config(project).budgets.max_equivalent_failures == 3 and load_config(project).budgets.max_provider_calls_per_task == 30
+    assert load_config(project).budgets.max_equivalent_failures == 5 and load_config(project).budgets.max_provider_calls_per_task == 30
     for bad in ({"max_equivalent_failures": 1}, {"max_provider_calls_per_task": -1}, {"max_provider_calls_per_task": "many"}, {"nope": 1}):
         config_path.write_text(json.dumps({**base, "budgets": bad}), encoding="utf-8")
         with pytest.raises(ConfigValidationError):
@@ -375,9 +375,9 @@ def test_budget_configuration_is_validated_and_defaults_are_bounded(tmp_path: Pa
 
 
 def test_the_default_configuration_is_bounded_by_the_earlier_guard(tmp_path: Path) -> None:
-    rig = LoopRig(tmp_path, BudgetPolicy(), diagnosis=True)  # default budget (3) plus the existing repeat diagnosis (2)
+    rig = LoopRig(tmp_path, BudgetPolicy(), diagnosis=True)  # default budget (5) plus the existing repeat diagnosis (2)
     for _ in range(6):
         rig.window()
         if rig.store.get_task(TASK)["status"] == TaskStatus.BLOCKED:
             break
-    assert rig.store.get_task(TASK)["status"] == TaskStatus.BLOCKED and rig.spent <= 3
+    assert rig.store.get_task(TASK)["status"] == TaskStatus.BLOCKED and rig.spent <= 5
