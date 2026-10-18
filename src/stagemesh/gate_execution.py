@@ -48,6 +48,7 @@ _SERVICE_MARKERS = re.compile(
     r"is the server running on host",
     re.IGNORECASE,
 )
+_SETUP_EVIDENCE = re.compile(r"\b(?:fixtures?|conftest|session[- ]?(?:scope|setup|start)|setup|setting up|migrat\w+)\b", re.IGNORECASE)
 _COLLECTING = re.compile(r"\bcollecting\b", re.IGNORECASE)
 _COLLECTED = re.compile(r"\bcollected\s+(\d+)\s+items?\b", re.IGNORECASE)
 _TEST_PROGRESS = re.compile(
@@ -143,6 +144,10 @@ def classify_timeout(stdout: str | None, stderr: str | None) -> dict[str, Any]:
             "progress": progress,
         }
     marker = _SERVICE_MARKERS.search(text)
+    started_tests = bool(_TEST_PROGRESS.search(text))
+    if marker and started_tests:
+        # Tests ran: a logged "connection refused" only counts if it is among the last lines, i.e. what the run was stuck on.
+        marker = _SERVICE_MARKERS.search("\n".join(text.strip().splitlines()[-3:]))
     if marker:
         return {
             "timeout_class": TIMEOUT_SERVICE_UNAVAILABLE,
@@ -151,7 +156,6 @@ def classify_timeout(stdout: str | None, stderr: str | None) -> dict[str, Any]:
             "progress": progress,
         }
     collected = _COLLECTED.search(text)
-    started_tests = bool(_TEST_PROGRESS.search(text))
     if started_tests:
         return {
             "timeout_class": TIMEOUT_TEST_EXECUTION,
@@ -166,13 +170,13 @@ def classify_timeout(stdout: str | None, stderr: str | None) -> dict[str, Any]:
             "explanation": "the run was still collecting tests (importing test modules); a slow import or unavailable resource is probable",
             "progress": progress,
         }
-    if collected:
+    if collected and _SETUP_EVIDENCE.search(text.split(collected.group(0), 1)[-1]):
         return {
             "timeout_class": TIMEOUT_SETUP,
             "attribution": "environment_or_fixture_setup",
             "explanation": (
-                f"collection finished ({collected.group(1)} items) but no test reported a result; session or fixture setup did not "
-                "complete, which points at an external resource or fixture rather than assertions"
+                f"collection finished ({collected.group(1)} items) and the output after it names fixture or session setup, but no test "
+                "reported a result; setup did not complete, which points at an external resource or fixture rather than assertions"
             ),
             "progress": progress,
         }

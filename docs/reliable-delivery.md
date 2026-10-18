@@ -21,10 +21,10 @@ providers, temporary repositories and controlled clocks (`tests/test_gate_execut
   | class | evidence | effect |
   | --- | --- | --- |
   | `service_unavailable` | output names an unreachable service (connection refused, role/database missing, ...) | stops at once as an operational blocker; no provider retry |
-  | `setup_timeout` | collection finished but no test reported a result | stops at once; diagnosis required |
+  | `setup_timeout` | collection finished, no test reported a result, and the output after it names fixture/session setup | stops at once; diagnosis required |
   | `collection_timeout` | still collecting/importing | stops at once; diagnosis required |
-  | `test_execution_timeout` | tests were running | ordinary bounded remediation (a candidate defect is plausible) |
-  | `no_output_timeout` | nothing printed | cause *not established*; one bounded remediation attempt, an equivalent repeat stops |
+  | `test_execution_timeout` | tests were running (a logged service error only counts if it is among the last lines) | ordinary bounded remediation (a candidate defect is plausible) |
+  | `timeout_unclassified` / `no_output_timeout` | nothing printed, or output that does not identify the phase (including "collected N items" with no further evidence) | cause *not established*; one bounded remediation attempt, an equivalent repeat stops |
 
   Equivalent timeouts compare equal across candidates. StageMesh never skips fixtures, bypasses a database requirement, or edits
   client gates; the recommendation tells the operator to run the gate directly and fix the environment or the gate's declared setup.
@@ -51,8 +51,10 @@ Before a provider runs, `allowed_files` is reconciled with discoverable mandator
 1. `.stagemesh/policy/required-changes.json` (project owned, authoritative):
    `{"version":1,"requirements":[{"id","kind","description","paths":["docs/design/**"],"applies_to":["src/**"],"waived":false}]}`
 2. The contract's own objective, acceptance criteria, invariants and cited `spec_refs` ("... must update `docs/x.md`").
-3. Unconditional "must/required ... update/add/record ... `path`" sentences in `AGENTS.md` and `CONTRIBUTING.md`. Conditional or
-   negated sentences are advisory only.
+3. Unconditional "must/required ... update/add/record ... `path`" sentences in `AGENTS.md` and `CONTRIBUTING.md`, where the token is a
+   plausible repository path (known extension, or a directory that exists) and the sentence has a documentation/record cue or the file
+   exists. Conditional, negated and speculative (possible runtime output) sentences are advisory only. Documents are read only from
+   inside the project.
 
 A conflict refuses admission (`contract_policy_conflict`) with one message listing the requirements and three legitimate ways out: an
 audited `rebind-contract` by the contract owner, a narrowly scoped prerequisite task through the existing planning flow, or an
@@ -89,7 +91,7 @@ replayed and remediation budgets stay scoped to task and stage.
 a ledger `DONE` accordingly. A GitHub issue is commented and closed only after the merge (or in local mode), never at ledger DONE.
 PR identity and the exact head are recorded (`delivery.pr_published`); the landing guard records the merge outcome.
 
-A publication permission denial (push or PR creation refused) is recorded once (`delivery.externally_blocked`), preserves the work,
+A publication permission denial (an explicit permission/authentication/403 refusal, not a network error) is recorded once (`delivery.externally_blocked`), preserves the work,
 stops the rest of that window's publication attempts and is not retried until access is granted and
 `stagemesh delivery-unblock --task T --actor A --reason R` is run. No alternative branch, credential or force is tried.
 

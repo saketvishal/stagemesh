@@ -20,6 +20,7 @@ from MERGED, never from ledger DONE.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -36,9 +37,11 @@ LANDING_STATUS = "window.landing_status"
 
 STAGING_MARKER = "wave/"
 
-_PERMISSION_MARKERS = (
-    "permission denied", "403", "401", "authentication failed", "not authorized", "unauthorized", "protected branch",
-    "resource not accessible", "must have admin", "insufficient", "forbidden", "could not read from remote", "access denied",
+_PERMISSION_PATTERN = re.compile(
+    r"permission denied|permission to \S+ denied|authentication failed|not authorized|unauthorized|protected branch|"
+    r"resource not accessible|must have admin|access denied|please make sure you have the correct access rights|"
+    r"\b(?:http|status|error|code)[: ]+(?:401|403)\b|\b(?:401|403)\s+(?:forbidden|unauthorized)\b|\bforbidden\b",
+    re.IGNORECASE,
 )
 
 
@@ -67,7 +70,8 @@ def _loads(raw: object) -> dict[str, Any]:
 
 def _latest(store: Store, event_type: str, task_id: str, candidate: str | None = None) -> dict[str, Any] | None:
     rows = store.conn.execute(
-        "SELECT payload FROM audit_events WHERE event_type=? ORDER BY created_at DESC, rowid DESC LIMIT 300", (event_type,)
+        "SELECT payload FROM audit_events WHERE event_type=? AND payload LIKE ? ORDER BY created_at DESC, rowid DESC",
+        (event_type, f'%"task_id": "{task_id}"%'),
     ).fetchall()
     for row in rows:
         payload = _loads(row["payload"])
@@ -77,8 +81,7 @@ def _latest(store: Store, event_type: str, task_id: str, candidate: str | None =
 
 
 def is_permission_denial(message: str) -> bool:
-    lowered = message.casefold()
-    return any(marker in lowered for marker in _PERMISSION_MARKERS)
+    return bool(_PERMISSION_PATTERN.search(message))
 
 
 def record_publication(store: Store, task_id: str, pr_url: str, head_sha: str, base: str) -> None:

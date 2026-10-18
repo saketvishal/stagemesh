@@ -184,21 +184,30 @@ def _sentences(text: str) -> list[tuple[int, str]]:
     return found
 
 
-def _path_like(token: str) -> bool:
-    token = token.strip()
-    if "/" not in token and "\\" not in token:
-        return bool(re.search(r"\.(?:md|rst|txt|json|ya?ml|toml)$", token))
-    return not token.startswith(("http:", "https:", "-")) and not re.search(r"\s", token)
+_KNOWN_SUFFIX = re.compile(r"\.(?:md|rst|txt|json|ya?ml|toml|py|js|ts|tsx|jsx|cfg|ini)$", re.IGNORECASE)
 
 
-def _from_text(text: str, source: str, origin: str) -> tuple[list[Requirement], list[Requirement]]:
+def _path_like(token: str, project: Path | None = None) -> bool:
+    """A token that can name a file in this repository: not a URL, route or `a/b` phrase."""
+    token = token.strip().replace("\\", "/")
+    if not token or token.startswith(("http:", "https:", "-", "/", "~")) or ".." in token.split("/") or re.search(r"\s", token):
+        return False
+    if token.endswith("/"):
+        return project is None or (project / token.rstrip("/")).is_dir() or token.split("/")[0] in {"docs", "doc", "design"}
+    if _KNOWN_SUFFIX.search(token):
+        return True
+    first = token.split("/")[0]
+    return "/" in token and project is not None and (project / first).is_dir()
+
+
+def _from_text(text: str, source: str, origin: str, project: Path | None = None) -> tuple[list[Requirement], list[Requirement]]:
     blocking: list[Requirement] = []
     advisory: list[Requirement] = []
     for number, sentence in _sentences(text):
         if not (_MODAL.search(sentence) and _VERB.search(sentence)) or _NEGATION.search(sentence):
             continue
         paths = tuple(
-            dict.fromkeys(_normalise(a or b) for a, b in _PATH_TOKEN.findall(sentence) if _path_like(a or b))
+            dict.fromkeys(_normalise(a or b) for a, b in _PATH_TOKEN.findall(sentence) if _path_like(a or b, project))
         )
         if not paths:
             continue
@@ -206,12 +215,16 @@ def _from_text(text: str, source: str, origin: str) -> tuple[list[Requirement], 
             f"{Path(source).name}:{number}", _kind_of(sentence), sentence.strip()[:200], paths, f"{source}:{number}", origin,
         )
         conditional = bool(_CONDITION.search(sentence))
-        (advisory if conditional else blocking).append(requirement)
+        # Without a documentation/record cue and without an existing file, "must create X" may describe runtime output.
+        speculative = not _DOC_KIND.search(sentence) and not any((project / p).exists() for p in paths if project is not None)
+        (advisory if conditional or speculative else blocking).append(requirement)
     return blocking, advisory
 
 
-def _read(path: Path) -> str:
+def _read(path: Path, root: Path | None = None) -> str:
     try:
+        if root is not None and not path.resolve().is_relative_to(root.resolve()):
+            return ""  # spec refs and policy documents are only read from inside the project
         if path.is_file() and path.stat().st_size <= MAX_DOCUMENT_BYTES:
             return path.read_text(encoding="utf-8", errors="replace")
     except OSError:
@@ -227,15 +240,15 @@ def discover_requirements(project: Path, contract: ChangeContract) -> tuple[list
     own = [("objective", contract.objective), *((f"acceptance_criteria[{i}]", t) for i, t in enumerate(contract.acceptance_criteria)),
            *((f"invariants[{i}]", t) for i, t in enumerate(contract.invariants))]
     for label, text in own:
-        found, soft = _from_text(text, f"contract {label}", "contract")
+        found, soft = _from_text(text, f"contract {label}", "contract", project)
         blocking.extend(found)
         advisory.extend(soft)
     for ref in contract.spec_refs:
-        found, soft = _from_text(_read(project / ref), ref, "contract")
+        found, soft = _from_text(_read(project / ref, project), ref, "contract", project)
         blocking.extend(found)
         advisory.extend(soft)
     for name in POLICY_DOCUMENTS:
-        found, soft = _from_text(_read(project / name), name, "policy-prose")
+        found, soft = _from_text(_read(project / name, project), name, "policy-prose", project)
         blocking.extend(found)
         advisory.extend(soft)
     # The project owner can dismiss a prose-derived requirement that is not really one (a false positive) by its id or source.

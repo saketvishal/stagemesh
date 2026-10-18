@@ -100,7 +100,10 @@ def test_gate_output_is_unbuffered_so_a_hang_is_not_an_empty_log(tmp_path: Path)
     [
         ("", "", TIMEOUT_NO_OUTPUT, "undetermined"),
         ("collecting ...", "", TIMEOUT_COLLECTION, "environment_or_import_time"),
-        ("collected 12 items\n", "", TIMEOUT_SETUP, "environment_or_fixture_setup"),
+        ("collected 12 items\nsession fixture db_engine: setting up\n", "", TIMEOUT_SETUP, "environment_or_fixture_setup"),
+        ("collected 12 items\n\ntests/test_a.py ", "", "timeout_unclassified", "undetermined"),  # first test may simply hang: no claim
+        ("tests/test_x.py::test_a PASSED\nlog: connection refused (expected in test)\ntests/test_y.py::test_b PASSED\n"
+         "tests/test_z.py::test_c PASSED\ntests/test_w.py::test_d ", "", TIMEOUT_TEST_EXECUTION, "candidate_possible"),
         ("collected 12 items\ntests/test_a.py::test_x PASSED [ 8%]\n", "", TIMEOUT_TEST_EXECUTION, "candidate_possible"),
         ("collected 3 items", "psycopg2.OperationalError: connection refused", TIMEOUT_SERVICE_UNAVAILABLE, "infrastructure"),
     ],

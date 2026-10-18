@@ -24,7 +24,7 @@ def _run(tmp_path: Path, printed: str, ticks: int = 8) -> tuple[Attempts, object
 
 
 def test_session_setup_timeout_is_diagnosed_once_and_never_retried_blindly(tmp_path: Path) -> None:
-    executor, store = _run(tmp_path, "collected 41 items")
+    executor, store = _run(tmp_path, "collected 41 items\nsession fixture db_engine: setting up")
 
     assert executor.calls == 1  # no second implementation attempt was spent
     assert store.get_task(TASK)["status"] == TaskStatus.BLOCKED
@@ -35,7 +35,7 @@ def test_session_setup_timeout_is_diagnosed_once_and_never_retried_blindly(tmp_p
     assert block["kind"] == "BLOCKED_RECOVERABLE_OPERATIONAL"
     assert "gate_timeout_diagnosis_required" in block["reason"]
     diagnosis = diagnose(store, TASK)
-    assert "fixture setup" in diagnosis.summary or "session or fixture setup" in diagnosis.summary
+    assert "fixture or session setup" in diagnosis.summary
     assert "StageMesh never skips fixtures" in diagnosis.recommendation
     assert diagnosis.failing_evidence[-1]["timeout_notes"]
 

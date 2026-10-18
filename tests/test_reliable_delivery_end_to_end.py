@@ -60,7 +60,7 @@ class Flow(Rig):
         gate = (
             "import pathlib, sys, time\n"
             f"if pathlib.Path({str(self.fixed)!r}).exists(): sys.exit(0)\n"
-            "print('collected 41 items', flush=True)\n"  # collection finished, then session setup never completes
+            "print('collected 41 items\\nsession fixture db_engine: setting up', flush=True)\n"  # collection finished, then session setup never completes
             "time.sleep(30)\n"
         )
         contracts = project / ".stagemesh" / "contracts"

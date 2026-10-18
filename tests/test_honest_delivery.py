@@ -180,6 +180,11 @@ def test_permission_denial_wording_is_recognised_but_ordinary_failures_are_not()
     assert is_permission_denial("remote: Permission to x denied (403)") and is_permission_denial("protected branch hook declined")
     assert not is_permission_denial("window deadline reached before PR publication command")
     assert not is_permission_denial("gh pr create failed: network timeout")
+    # transient failures and incidental digits are not permission problems
+    assert not is_permission_denial("gh pr create failed: HTTP 502 https://github.com/o/r/pull/4013")
+    assert not is_permission_denial("fatal: Could not read from remote repository. Connection reset by peer")
+    assert not is_permission_denial("write failed: insufficient disk space")
+    assert is_permission_denial("remote: HTTP 403 Forbidden") and is_permission_denial("fatal: Authentication failed for 'https://x'")
 
 
 def test_an_upstream_issue_is_only_closed_after_the_exact_head_merged(tmp_path: Path) -> None:

@@ -104,6 +104,28 @@ def test_an_owner_recorded_waiver_is_honoured(tmp_path: Path) -> None:
     assert check_contract_feasibility(project, parse_contract(TWO_TESTS)).feasible
 
 
+def test_ordinary_slashes_routes_and_runtime_outputs_are_not_mandatory_repository_changes(tmp_path: Path) -> None:
+    project, _ = _setup(tmp_path, TWO_TESTS)
+    (project / "AGENTS.md").write_text(
+        "Reviewers must record `pass/fail` for each check.\n"
+        "Contributors must document `and/or` usage.\n"
+        "The CLI must create `report.json` in the working directory.\n"
+        "The service must write `/api/v1/orders` responses.\n",
+        encoding="utf-8",
+    )
+    report = check_contract_feasibility(project, parse_contract(TWO_TESTS))
+    assert report.feasible and not [c for c in report.conflicts]
+
+
+def test_policy_documents_are_only_read_from_inside_the_project(tmp_path: Path) -> None:
+    from stagemesh.contract_feasibility import _read
+
+    project, _ = _setup(tmp_path, TWO_TESTS)
+    outside = tmp_path / "outside.md"
+    outside.write_text("Every change must add a record to `docs/design/x.md`.\n", encoding="utf-8")
+    assert _read(outside, project) == "" and "record" in _read(outside)
+
+
 def test_this_repositorys_own_policy_documents_produce_no_false_conflicts() -> None:
     root = Path(__file__).resolve().parent.parent
     for allowed in (["tests/test_a.py"], ["src/stagemesh/x.py"], ["docs/x.md"]):

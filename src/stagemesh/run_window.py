@@ -864,8 +864,8 @@ def run_window(
         if on_merged is not None:
             try:
                 on_merged(record.task_id)  # e.g. close the upstream issue now that the exact head is merged; advisory only
-            except Exception:  # noqa: BLE001 - outbound sync never alters landing results
-                pass
+            except Exception as exc:  # noqa: BLE001 - outbound sync never alters landing results, but a failure is visible
+                record_audit(store, "source.outbound_after_merge_failed", {"task_id": record.task_id, "error": f"{type(exc).__name__}: {exc}"[:300]})
         report.final_repo_state = hooks.repo_state()
         return True
 
