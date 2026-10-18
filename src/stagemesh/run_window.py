@@ -839,7 +839,11 @@ def run_window(
                     report.stop_reason = "landing recovery suffix exceeds this window's task budget; published work retained"
                     return False
                 try:
-                    return accept_recovery(recover(suffix, merged, deadline, hooks, options))
+                    # Recovery may discover deferred publications beyond this
+                    # published suffix; reserve room for earlier attempted work.
+                    recovery_options = replace(options, max_tasks=options.max_tasks - len(
+                        attempted - {task.task_id for task in suffix}))
+                    return accept_recovery(recover(suffix, merged, deadline, hooks, recovery_options))
                 except Exception as exc:
                     report.stop_reason = f"auto-merge recovery stopped: {type(exc).__name__}: {exc}"
                     return False
