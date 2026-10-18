@@ -194,7 +194,20 @@ def contract_state(store: Store, project: Path, task_id: str, auto_plan: bool) -
         problem = contract_admission_problem(contract)
         if problem:
             return f"unplannable:{problem}"
-        return "valid" if size <= MAX_CANONICAL_CONTRACT_CHARS else "unplannable:contract exceeds the size limit"
+        if size > MAX_CANONICAL_CONTRACT_CHARS:
+            return "unplannable:contract exceeds the size limit"
+        if store.latest_candidate(task_id) is None:  # before any implementation: a contract that cannot be satisfied is not admitted
+            from .contract_feasibility import check_contract_feasibility
+
+            report = check_contract_feasibility(project, contract)
+            if not report.feasible:
+                first = report.conflicts[0]
+                more = f" (+{len(report.conflicts) - 1} more)" if len(report.conflicts) > 1 else ""
+                return (
+                    f"unplannable:contract_policy_conflict: {first.requirement.description[:120]} (required by "
+                    f"{first.requirement.source}) must change {', '.join(first.requirement.paths)}; {first.reason}{more}"
+                )
+        return "valid"
     if not auto_plan:
         return "unplannable:no contract and auto-planning is disabled"
     why = plannable(store, project, task_id)

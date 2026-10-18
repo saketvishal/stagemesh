@@ -8,6 +8,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
@@ -142,6 +143,40 @@ class GateResult:
     stdout: str = ""
     stderr: str = ""
     failure_kind: str | None = None
+    executed_command: tuple[str, ...] = ()  # the argv actually launched; differs from `command` only in its resolved first element
+    resolution: dict[str, Any] | None = None  # declared vs executed executable and how one became the other
+    cwd: str | None = None
+    duration_seconds: float | None = None
+    diagnosis: dict[str, Any] | None = None  # timeout class, attribution, explanation and the last progress lines
+    output_truncated: bool = False
+    input_fingerprint: str | None = None  # complete-input fingerprint (see validation_reuse); None when it could not be computed
+    reused_from: str | None = None  # "evidence:<id>:<gate>" for a prior PASSED result, "attempt:<gate>" for a duplicate in this attempt
+
+    def provenance(self) -> dict[str, Any]:
+        """The bounded, redacted execution record stored with validation evidence."""
+        from .gate_execution import bounded_output
+
+        stdout, cut_out = bounded_output(self.stdout, 600)
+        stderr, cut_err = bounded_output(self.stderr, 600)
+        return {
+            "declared_command": list(self.command),
+            "executed_command": list(self.executed_command),
+            "executable_resolution": self.resolution,
+            "cwd": self.cwd,
+            "duration_seconds": self.duration_seconds,
+            "diagnosis": self.diagnosis,
+            "stdout_tail": stdout,
+            "stderr_tail": stderr,
+            "output_truncated": cut_out or cut_err or self.output_truncated,
+            "input_fingerprint": self.input_fingerprint,
+            "reused_from": self.reused_from,
+        }
+
+
+def _redacted_tail(text: str) -> str:
+    from .gate_execution import bounded_output
+
+    return bounded_output(text)[0]
 
 
 def _gate_output_text(value: str | bytes | None) -> str:
@@ -305,6 +340,7 @@ def evaluate_contract(
     *,
     baseline_sha: str | None = None,
     run_gates: bool = True,
+    gate_reuse: Any = None,
 ) -> ContractEvaluation:
     try:
         changed = tuple(changed_files(project, candidate_sha, baseline_sha))
@@ -413,11 +449,7 @@ def evaluate_contract(
 
     if run_gates:
         try:
-            with candidate_workspace(project, candidate_sha) as gate_project:
-                for gate in contract.gates:
-                    gates.append(run_gate(gate_project, gate))
-                for gate in invariant_gates(contract):
-                    gates.append(run_gate(gate_project, gate))
+            gates.extend(_run_planned_gates(project, candidate_sha, contract, gate_reuse))
         except (GitError, OSError) as exc:
             findings.append(
                 {
@@ -437,8 +469,9 @@ def evaluate_contract(
                     "command": list(gate.command),
                     "returncode": gate.returncode,
                     "failure_kind": gate.failure_kind,
-                    "stdout": gate.stdout[-2000:],
-                    "stderr": gate.stderr[-2000:],
+                    "stdout": _redacted_tail(gate.stdout),
+                    "stderr": _redacted_tail(gate.stderr),
+                    "execution": gate.provenance(),
                 }
             )
 
@@ -448,6 +481,71 @@ def evaluate_contract(
         findings=tuple(findings),
         gates=tuple(gates),
     )
+
+
+def _run_planned_gates(project: Path, candidate_sha: str, contract: ChangeContract, gate_reuse: Any) -> list[GateResult]:
+    """Run each distinct gate once, reuse a prior PASSED result only for identical complete inputs, keep the declared order."""
+    from dataclasses import replace
+
+    from .validation_reuse import gate_identity
+
+    planned = [*contract.gates, *invariant_gates(contract)]
+    slots: list[GateResult | tuple[str, GateCommand] | None] = []
+    to_run: dict[tuple[Any, ...], GateCommand] = {}
+    fingerprints: dict[tuple[Any, ...], str | None] = {}
+    for gate in planned:
+        identity = gate_identity(gate)
+        if identity in to_run or identity in fingerprints:
+            slots.append(("duplicate", gate))
+            continue
+        fingerprints[identity] = gate_reuse.fingerprint(gate) if gate_reuse is not None else None
+        hit = gate_reuse.lookup(gate) if gate_reuse is not None else None
+        if hit is not None:
+            fingerprint, prior = hit
+            source = f"evidence:{prior['evidence_id']}:{prior['gate']}"
+            reused = GateResult(
+                gate.name, "PASSED", tuple(gate.command), 0, "", "", None, input_fingerprint=fingerprint, reused_from=source,
+                cwd=gate.cwd,
+            )
+            gate_reuse.reused.append({"gate": gate.name, "from": source, "candidate_sha": prior["candidate_sha"], "fingerprint": fingerprint})
+            slots.append(reused)
+            continue
+        to_run[identity] = gate
+        slots.append(("run", gate))
+    if to_run and gate_reuse is not None and gate_reuse.reused:
+        # Gates in one checkout can depend on each other's side effects (a build before its tests). Reuse is therefore
+        # all-or-nothing: if any distinct gate must run, every distinct gate runs in the fresh checkout.
+        gate_reuse.reused.clear()
+        to_run, slots = {}, []
+        for gate in planned:
+            identity = gate_identity(gate)
+            if identity in to_run:
+                slots.append(("duplicate", gate))
+            else:
+                to_run[identity] = gate
+                slots.append(("run", gate))
+    executed: dict[tuple[Any, ...], GateResult] = {}
+    if to_run:
+        with candidate_workspace(project, candidate_sha) as gate_project:
+            for identity, gate in to_run.items():
+                result = run_gate(gate_project, gate)
+                executed[identity] = replace(result, input_fingerprint=fingerprints.get(identity))
+    results: list[GateResult] = []
+    shared: dict[tuple[Any, ...], GateResult] = {}
+    for slot in slots:
+        if isinstance(slot, GateResult):
+            results.append(slot)
+            shared[gate_identity(planned[len(results) - 1])] = slot
+            continue
+        kind, gate = slot  # type: ignore[misc]
+        identity = gate_identity(gate)
+        if kind == "run":
+            results.append(executed[identity])
+            shared[identity] = executed[identity]
+        else:
+            first = shared.get(identity) or executed[identity]
+            results.append(replace(first, name=gate.name, reused_from=f"attempt:{first.name}"))
+    return results
 
 
 NOISE_SEGMENTS = frozenset(
@@ -554,9 +652,29 @@ def candidate_workspace(project: Path, candidate_sha: str) -> Iterator[Path]:
 
 
 def run_gate(project: Path, gate: GateCommand) -> GateResult:
+    from .gate_execution import bounded_output, classify_timeout, resolve_gate_executable
+
     run_dir = project / gate.cwd if gate.cwd else project
-    command = _gate_runtime_command(list(gate.command))
+    declared = tuple(gate.command)
     environment = _gate_environment(run_dir, gate)
+    resolution = resolve_gate_executable(list(gate.command), run_dir, search_path=(environment or os.environ).get("PATH"))
+    command = list(gate.command)
+    if resolution is not None and resolution.executed:
+        command[0] = resolution.executed
+    provenance = {
+        "executed_command": tuple(command),
+        "resolution": None if resolution is None else resolution.to_dict(),
+        "cwd": str(run_dir),
+    }
+    if resolution is not None and not resolution.launchable:
+        # An explicit executable that is missing is a launch failure. Substituting a same-named PATH program would run something
+        # the gate never declared, so the gate fails with the exact path that was looked for.
+        return GateResult(
+            gate.name, "FAILED", declared, None, "", resolution.detail, "environment",
+            **{**provenance, "executed_command": ()},
+            diagnosis={"timeout_class": None, "attribution": "environment", "explanation": resolution.detail, "progress": []},
+        )
+    started = time.monotonic()
     try:
         with ExitStack() as resources:
             # Provider sandboxes can create pytest temp roots unreadable by the
@@ -579,43 +697,57 @@ def run_gate(project: Path, gate: GateCommand) -> GateResult:
                 timeout=gate.timeout_seconds,
             )
     except OSError as exc:
-        return GateResult(gate.name, "FAILED", tuple(gate.command), None, "", str(exc), "environment")
+        return GateResult(
+            gate.name, "FAILED", declared, None, "", str(exc), "environment",
+            duration_seconds=round(time.monotonic() - started, 3), **provenance,
+        )
     except subprocess.TimeoutExpired as exc:
+        out, err = _gate_output_text(exc.stdout), _gate_output_text(exc.stderr)
+        diagnosis = classify_timeout(out, err)
         return GateResult(
             gate.name,
             "FAILED",
-            tuple(gate.command),
+            declared,
             None,
-            _gate_output_text(exc.stdout),
-            f"timed out after {gate.timeout_seconds}s\n{_gate_output_text(exc.stderr)}",
+            bounded_output(out, 4000)[0],
+            f"timed out after {gate.timeout_seconds}s\n{bounded_output(err, 4000)[0]}",
             "timeout",
+            duration_seconds=round(time.monotonic() - started, 3),
+            diagnosis=diagnosis,
+            output_truncated=len(out) > 4000 or len(err) > 4000,
+            **provenance,
         )
     return GateResult(
         gate.name,
         "PASSED" if result.returncode == 0 else "FAILED",
-        tuple(gate.command),
+        declared,
         result.returncode,
         _gate_output_text(result.stdout),
         _gate_output_text(result.stderr),
+        duration_seconds=round(time.monotonic() - started, 3),
+        **provenance,
     )
 
 
-def _gate_runtime_command(command: list[str]) -> list[str]:
-    if not command:
-        return command
-    resolved = shutil.which(command[0])  # lets "npm" find npm.cmd on Windows without a shell
-    if resolved:
-        command[0] = resolved
+def _gate_runtime_command(command: list[str], run_dir: Path | None = None) -> list[str]:
+    """The command with its executable resolved for `run_dir` (see gate_execution); kept for callers that only need argv."""
+    from .gate_execution import resolve_gate_executable
+
+    resolution = resolve_gate_executable(command, run_dir or Path.cwd())
+    if resolution is not None and (resolution.executed or resolution.path):
+        command[0] = resolution.executed or str(resolution.path)  # an explicit path stays explicit even if nothing exists there
     return command
 
 
 def _gate_environment(run_dir: Path, gate: GateCommand) -> dict[str, str] | None:
     environment = {**os.environ, **dict(gate.env)}
+    # A child that buffers its stdout in a pipe prints nothing before a timeout, which makes every hang look identical.
+    environment.setdefault("PYTHONUNBUFFERED", "1")
     src = run_dir / "src"
     if src.is_dir():
         existing = environment.get("PYTHONPATH")
         environment["PYTHONPATH"] = str(src) if not existing else str(src) + os.pathsep + existing
-    return environment if gate.env or src.is_dir() else None
+    return environment
 
 
 def _matches(path: str, patterns: tuple[str, ...]) -> bool:

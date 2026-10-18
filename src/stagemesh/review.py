@@ -14,6 +14,7 @@ from .persistence import Store
 from .process_identity import owner_execution_fields
 from .queue_control import OperatorStopRequested
 from .remediation import finding_identity
+from .review_disposition import record_review_findings
 
 
 @dataclass(frozen=True)
@@ -570,12 +571,19 @@ class Reviewer:
                 for finding in findings:
                     identity = finding.identity or finding_identity(candidate_sha, finding.message)
                     store.upsert_finding(identity, task_id, candidate_sha, finding.severity, finding.message)
-                store.add_evidence(
+                failed_id = store.add_evidence(
                     task_id,
                     candidate_sha,
                     EvidenceKind.REVIEW,
                     EvidenceStatus.FAILED,
                     {**review_payload, "finding_count": len(findings)},
+                )
+                record_review_findings(
+                    store, task_id, candidate_sha, reviewer_provider,
+                    [(f.identity or finding_identity(candidate_sha, f.message), f.severity, f.message) for f in findings],
+                    contract_hash=str(review_payload.get("contract_hash") or "") or None,
+                    baseline_sha=str(review_payload.get("baseline_sha") or "") or None,
+                    review_evidence_id=failed_id,
                 )
                 finish_running(ExecutionStatus.FAILED, actor=reviewer_provider, result="findings")
                 return EvidenceStatus.FAILED

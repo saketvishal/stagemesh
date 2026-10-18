@@ -66,6 +66,13 @@ from .remediation_recovery import (
     stalled_since_last_round,
 )
 from .review import Reviewer, independent_review_verified
+from .review_disposition import (
+    UNRESOLVED_EVENT,
+    AdverseSummary,
+    reconcile_withdrawals,
+    recheck_review_authorized,
+    unresolved_adverse_review_findings,
+)
 from .scheduling import Scheduler
 from .task_completion import record_task_owner_state
 from .task_selection import contract_state
@@ -383,10 +390,21 @@ class Coordinator:
             if not self._workspace_intact(task_id, sha, "REVIEW:before_review", require=(EvidenceKind.VALIDATION,)):
                 return 1
             bound = contract_for_candidate(self.store, task_id, sha, self.project)
+            reconcile_withdrawals(self.store, task_id, sha, bound.digest)
             if not self._review_satisfied(task_id, sha, bound.digest):
+                pending = AdverseSummary(tuple(unresolved_adverse_review_findings(self.store, task_id, sha)))
+                if pending and not recheck_review_authorized(self.store, task_id, sha):
+                    # An earlier reviewer's adverse finding is still open on this exact candidate. Asking again until someone
+                    # passes would only bury it, so no new reviewer runs: the finding is remediated or dispositioned explicitly.
+                    record_audit(self.store, UNRESOLVED_EVENT, {
+                        "task_id": task_id, "candidate_sha": sha, "reason": pending.reason(),
+                        "finding_ids": [item["finding_id"] for item in pending.findings],
+                    })
+                    return self._remediate_or_block(task_id, sha, Stage.REVIEW)
                 self.reviewer.review(self.store, task_id, sha, self.project)
                 if not self._workspace_intact(task_id, sha, "REVIEW:after_review", require=(EvidenceKind.VALIDATION,)):
                     return 1
+                reconcile_withdrawals(self.store, task_id, sha, bound.digest)
             if self._review_satisfied(task_id, sha, bound.digest):
                 return self._advance_with_evidence(task_id, stage, sha, EvidenceKind.REVIEW, bound.digest)
             if self.store.has_bound_evidence(task_id, sha, EvidenceKind.REVIEW, bound.digest, EvidenceStatus.FAILED):
@@ -398,6 +416,15 @@ class Coordinator:
             if not self._workspace_intact(task_id, sha, "INTEGRATE:before_integration", require=(EvidenceKind.VALIDATION, EvidenceKind.REVIEW)):
                 return 1
             bound = contract_for_candidate(self.store, task_id, sha, self.project)
+            pending = AdverseSummary(tuple(unresolved_adverse_review_findings(self.store, task_id, sha)))
+            if pending:  # nothing integrates while an adverse review finding on this candidate is unresolved
+                record_audit(self.store, UNRESOLVED_EVENT, {
+                    "task_id": task_id, "candidate_sha": sha, "reason": pending.reason(),
+                    "finding_ids": [item["finding_id"] for item in pending.findings], "stage": "INTEGRATE",
+                })
+                record_block(self.store, task_id, BlockKind.HUMAN_DECISION, pending.reason(), stage=str(Stage.INTEGRATE),
+                             candidate_sha=sha, detail={"failure_code": "unresolved_adverse_review_finding"})
+                return 1
             if not self.store.has_bound_evidence(task_id, sha, EvidenceKind.INTEGRATION, bound.digest):
                 try:
                     self.integrator.integrate(self.store, task_id, sha, self.project)
@@ -560,6 +587,8 @@ class Coordinator:
         return self.store.get_task(task_id)["status"] == TaskStatus.BLOCKED
 
     def _review_satisfied(self, task_id: str, sha: str, contract_hash: str) -> bool:
+        if unresolved_adverse_review_findings(self.store, task_id, sha):
+            return False  # a PASS from another reviewer never erases an unresolved adverse finding on the same candidate
         for payload in self.store.bound_evidence_payloads(task_id, sha, EvidenceKind.REVIEW, contract_hash):
             if not self.require_independent_review or independent_review_verified(payload):
                 return True
@@ -766,7 +795,7 @@ class Coordinator:
         if diagnosis is not None and self._auto_rebaseline(task_id, diagnosis):
             return 1
         if diagnosis is not None and diagnosis.stops_remediation and (
-            diagnosis.environment_unavailable or self.diagnosis_policy.stop_on_repeat
+            diagnosis.environment_unavailable or diagnosis.diagnosis_required or self.diagnosis_policy.stop_on_repeat
         ):
             # The same failure again (or one a provider cannot fix, like a stale baseline): another identical attempt would only repeat
             # it. Record the diagnosis, then recover differently instead of stopping.
@@ -777,6 +806,7 @@ class Coordinator:
             )
             reason = (
                 "validation_environment_unavailable" if diagnosis.environment_unavailable
+                else "gate_timeout_diagnosis_required" if diagnosis.diagnosis_required
                 else "stale_baseline_diagnosed" if diagnosis.category == STALE_BASELINE
                 else "repeated_failure_diagnosed"
             )

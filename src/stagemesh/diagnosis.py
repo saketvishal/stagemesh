@@ -27,6 +27,7 @@ from typing import Any
 
 from .baseline import BaselineAnalysis, analyze_baseline, resolve_integration_ref
 from .domain import EvidenceKind
+from .gate_execution import NON_CODE_TIMEOUTS, TIMEOUT_SERVICE_UNAVAILABLE
 from .git import GitError, GitWorkspace
 from .persistence import Store
 from .remediation import latest_candidate_findings
@@ -99,6 +100,8 @@ class Failure:
     excerpt: str
     paths: tuple[str, ...] = ()
     environment_unavailable: bool = False
+    diagnosis_required: bool = False  # a timeout whose evidence points away from the code (or proves nothing): diagnose before any retry
+    timeout_notes: tuple[str, ...] = ()  # what the captured output supports about each timeout, never more
 
     def same_as(self, other: Failure) -> bool:
         if self.stage != other.stage or self.codes != other.codes or self.gates != other.gates:
@@ -116,6 +119,7 @@ class Failure:
             "excerpt": self.excerpt,
             "environment_unavailable": self.environment_unavailable,
             **({"paths": list(self.paths[:20])} if self.paths else {}),
+            **({"timeout_notes": list(self.timeout_notes)} if self.timeout_notes else {}),
         }
 
 
@@ -138,17 +142,24 @@ class Diagnosis:
     review_findings: list[dict[str, Any]] = field(default_factory=list)
     baseline: dict[str, Any] | None = None
     environment_unavailable: bool = False
+    diagnosis_required: bool = False
 
     @property
     def stops_remediation(self) -> bool:
-        """Proven launch outages or stale baselines stop at once; ambiguous gate failures retain bounded remediation."""
-        return self.environment_unavailable or self.category == STALE_BASELINE or (self.repeated and self.category in NON_CODE_CATEGORIES)
+        """Proven launch outages, stale baselines and setup-class timeouts stop at once; ambiguous gate failures retain bounded remediation."""
+        return (
+            self.environment_unavailable
+            or self.diagnosis_required
+            or self.category == STALE_BASELINE
+            or (self.repeated and self.category in NON_CODE_CATEGORIES)
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "task_id": self.task_id,
             "category": self.category,
             "environment_unavailable": self.environment_unavailable,
+            "diagnosis_required": self.diagnosis_required,
             "stage": self.stage,
             "repeated": self.repeated,
             "repeat_count": self.repeat_count,
@@ -173,6 +184,7 @@ class Diagnosis:
             "candidate_sha": self.candidate_sha,
             "category": self.category,
             "environment_unavailable": self.environment_unavailable,
+            "diagnosis_required": self.diagnosis_required,
             "stage": self.stage,
             "repeated": self.repeated,
             "repeat_count": self.repeat_count,
@@ -270,6 +282,15 @@ def _unavailable_launch(finding: dict[str, Any]) -> bool:
     )
 
 
+def _gate_timeout_diagnosis(finding: dict[str, Any]) -> dict[str, Any] | None:
+    """The recorded timeout explanation of a gate finding (see gate_execution.classify_timeout), or None for any other failure."""
+    if finding.get("failure_kind") != "timeout":
+        return None
+    execution = finding.get("execution")
+    diagnosis = execution.get("diagnosis") if isinstance(execution, dict) else None
+    return diagnosis if isinstance(diagnosis, dict) and diagnosis.get("timeout_class") else None
+
+
 def _key_lines(text: str, limit: int = 12) -> list[str]:
     lines = [normalize(line) for line in text.splitlines() if line.strip() and _KEY_LINE.search(line)]
     return list(dict.fromkeys(lines))[:limit]
@@ -327,8 +348,15 @@ def _failures(store: Store, task_id: str) -> list[Failure]:
         if not gates:
             gates = tuple(sorted({str(f.get("message", "")).removesuffix(" failed") for f in gate_findings}))
         output_lines: list[str] = []
+        timeout_classes: list[str] = []
+        timeout_notes: list[str] = []
         for finding in gate_findings:
             output_lines += _key_lines(_gate_output(finding))
+            timeout = _gate_timeout_diagnosis(finding)
+            if timeout is not None:
+                timeout_classes.append(str(timeout["timeout_class"]))
+                timeout_notes.append(f"{str(finding.get('message', 'gate failed')).removesuffix(' failed')}: {timeout.get('explanation', '')}"[:400])
+                output_lines.append(f"timeout:{timeout['timeout_class']}")  # equivalent timeouts compare equal across candidates
         if kind == EvidenceKind.REVIEW:
             tokens = frozenset(w for m in messages for w in re.findall(r"[a-z_]{4,}", normalize(m)))
         else:
@@ -341,7 +369,10 @@ def _failures(store: Store, task_id: str) -> list[Failure]:
             Failure(
                 stage, sha, float(row["created_at"]), _classify(kind, codes, gate_findings), tuple(sorted(codes)),
                 gates, tuple(messages), tokens, excerpt, paths,
-                environment_unavailable=any(_unavailable_launch(f) for f in gate_findings),
+                environment_unavailable=any(_unavailable_launch(f) for f in gate_findings)
+                or TIMEOUT_SERVICE_UNAVAILABLE in timeout_classes,
+                diagnosis_required=any(name in NON_CODE_TIMEOUTS and name != TIMEOUT_SERVICE_UNAVAILABLE for name in timeout_classes),
+                timeout_notes=tuple(timeout_notes),
             )
         )
     return failures
@@ -523,6 +554,8 @@ def diagnose(
             )
         elif latest.messages:
             summary += f". First finding: {latest.messages[0][:240]}"
+        if latest.timeout_notes:
+            summary += ". Timeout analysis: " + " | ".join(latest.timeout_notes[:2])
     focus = latest
     exhausted_markers = (
         "all_implementation_providers_no_progress",
@@ -540,6 +573,13 @@ def diagnose(
         paths=(f" ({', '.join(focus.paths[:5])})" if focus and focus.paths else ""),
         ref_hint=integration_ref or (baseline or {}).get("integration_ref") or "integration ref",
     )
+    if category == VALIDATION_GATE and focus is not None and focus.diagnosis_required:
+        recommendation = (
+            f"Gate {', '.join(focus.gates) or 'the failing gate'} timed out and its captured output does not show the candidate's tests "
+            "running, so no implementation retry was queued. Run the gate command directly with verbose output in the candidate "
+            "environment to establish where it stalls (service, fixture, import or collection); fix that environment or the gate's "
+            "declared setup (StageMesh never skips fixtures or edits client gates on its own), then run `stagemesh continue`."
+        )
     if exhausted:
         attempted = ", ".join(str(reason) for reason in no_progress["reasons"][-5:])
         recommendation = (
@@ -568,6 +608,7 @@ def diagnose(
         review_findings=latest_candidate_findings(store, task_id),
         baseline=baseline,
         environment_unavailable=bool(latest and latest.environment_unavailable and category == VALIDATION_GATE),
+        diagnosis_required=bool(latest and latest.diagnosis_required and category == VALIDATION_GATE),
     )
 
 

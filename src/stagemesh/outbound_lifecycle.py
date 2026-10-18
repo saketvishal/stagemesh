@@ -45,6 +45,8 @@ def sync_outbound_outcomes(
                 continue
             if not RetryRegistry(store).decision(key).allowed:
                 continue
+            if outcome == "DONE" and not _delivery_allows_closure(store, task_id):
+                continue  # ledger DONE is not delivery: an issue closes after a merge (or local-mode integration), never on staging
             if outcome == "DONE":
                 sync.publish_done(issue, subject)
             else:
@@ -66,6 +68,12 @@ def sync_outbound_outcomes(
             except Exception:  # noqa: BLE001
                 pass
     return results
+
+
+def _delivery_allows_closure(store: Store, task_id: str) -> bool:
+    from .delivery_state import task_delivery
+
+    return task_delivery(store, task_id).state in {"MERGED", "INTEGRATED_LOCALLY"}
 
 
 def outcomes(tasks: list[Any]) -> dict[str, str]:

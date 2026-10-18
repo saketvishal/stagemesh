@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from urllib.parse import urlsplit, urlunsplit
 
 SECRET_MARKERS = ("token", "secret", "password", "authorization", "apikey", "api_key", "api-key")
@@ -73,3 +74,17 @@ def redact_command_secrets(command: str) -> str:
             continue
         redacted.append(part)
     return shlex.join(redacted)
+
+
+# Anchored so a long run of word characters is scanned once (no quadratic backtracking on captured output).
+_URL_CREDENTIALS = re.compile(r"(?<![\w+.\-])(?P<scheme>[A-Za-z][A-Za-z0-9+.\-]*://)[^/\s:@]+:[^/\s@]+@")
+_SECRET_ASSIGNMENT = re.compile(
+    r"(?P<key>(?:token|secret|password|passwd|authorization|api[_\-]?key)\w*)(?P<sep>\s*[=:]\s*)(?:Bearer\s+)?[^\s\"',;]+",
+    re.IGNORECASE,
+)
+
+
+def redact_output(text: str) -> str:
+    """Scrub credentials from captured process output before it is stored or shown (URL userinfo and key=value secrets)."""
+    text = _URL_CREDENTIALS.sub(lambda match: f"{match.group('scheme')}***REDACTED***@", text)
+    return _SECRET_ASSIGNMENT.sub(lambda match: f"{match.group('key')}{match.group('sep')}***REDACTED***", text)

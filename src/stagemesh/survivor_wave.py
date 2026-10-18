@@ -39,6 +39,7 @@ from .contracts import (
     parse_contract,
     task_contract_path,
 )
+from .delivery_state import externally_blocked, is_permission_denial, record_external_block, record_publication
 from .domain import EvidenceKind, Stage, TaskStatus
 from .objective_roots import objective_root_reason
 from .persistence import Store
@@ -240,6 +241,9 @@ def skip_reason(store: Store, task_id: str) -> str | None:
     objective = objective_root_reason(store, task)
     if objective:
         return f"objective root ({objective}); plan it instead"
+    blocked = externally_blocked(store, task_id)
+    if blocked is not None:  # recorded once; a window never re-asks for a permission that is still missing
+        return f"delivery externally blocked (needs {blocked.get('needed')}): {blocked.get('reason')}"
     if store.has_active_claim(task_id) or any(row["task_id"] == task_id for row in store.running_executions()):
         return "has an active claim or running execution"
     return None
@@ -592,9 +596,23 @@ def run_wave(
                 record.pr_error = f"{type(exc).__name__}: {exc}"
                 record.landing = "pr_failed"
                 reason = f"PR publication failed for task {record.task_id}: {record.pr_error}"
+                if is_permission_denial(record.pr_error):
+                    # One blocker, recorded once; no alternative route (other branch, force, another credential) is tried.
+                    first = record_external_block(
+                        store, record.task_id, record.integrated_candidate, record.pr_error,
+                        "permission to push branches and open pull requests on this repository",
+                    )
+                    record.landing = "externally_blocked"
+                    reason = (
+                        f"delivery of task {record.task_id} needs permission to push branches and open pull requests: {record.pr_error}. "
+                        "The verified work is preserved; grant access, then `stagemesh delivery-unblock --task "
+                        f"{record.task_id}`." + ("" if first else " (already reported)")
+                    )
                 _defer_pr_delivery(store, record, reason)
                 halt(reason)
                 continue
+            if record.integrated_candidate:
+                record_publication(store, record.task_id, record.pr_url, record.integrated_candidate, str(getattr(hooks.open_pr, "base", "") or ""))
             record.landing, record.ready_for_merge = "pr_opened", True
             try:
                 record.pr_state = hooks.pr_state(record.pr_url) if deadline is None or clock() < deadline else None
@@ -825,6 +843,7 @@ def git_gh_pr_opener(project: Path, base: str = "main", *, clock: Callable[[], f
         return run("gh", "pr", "create", "--base", base, "--head", branch, "--title", f"{record.title} (task {record.task_id})", "--body", body)
 
     open_pr.set_deadline = set_deadline
+    open_pr.base = base
     return open_pr
 
 
