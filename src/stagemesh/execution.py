@@ -72,7 +72,9 @@ def capacity_evidence(stdout: str, stderr: str) -> tuple[str, str | None]:
     """Redacted provider text and an observable reset hint. No tokens."""
     text = _SECRET.sub(lambda m: (m.group(1) or "") + "[redacted]", f"{stdout}\n{stderr}").strip()
     retry = _RETRY.search(text)
-    return text[:500], (retry.group(0).strip()[:120] if retry else None)
+    # CLI startup banners and echoed prompts can hide the terminal error.
+    excerpt = text if len(text) <= 500 else text[:180] + "\n...\n" + text[-315:]
+    return excerpt, (retry.group(0).strip()[:120] if retry else None)
 
 
 def classify_failure(

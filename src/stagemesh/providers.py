@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import filecmp
 import json
 import os
 import shlex
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import time
 from dataclasses import dataclass
@@ -112,17 +114,39 @@ def resolve_executable(executable: str, provider_name: str | None = None) -> str
         return None
     found = shutil.which(executable)
     if found:
-        return found
+        return _complete_codex_executable(found)
     p = Path(executable)
     if p.name and p.name != executable:
         found = shutil.which(p.name)
         if found:
-            return found
+            return _complete_codex_executable(found)
     if p.stem and p.stem != executable and p.stem != p.name:
         found = shutil.which(p.stem)
         if found:
-            return found
+            return _complete_codex_executable(found)
     return None
+
+
+def _complete_codex_executable(executable: str) -> str:
+    """Keep a detached npm Codex binary with its identical packaged tool host."""
+    path = Path(executable)
+    if sys.platform != "win32" or path.name.casefold() != "codex.exe":
+        return executable
+    if path.with_name("codex-code-mode-host.exe").is_file():
+        return executable
+    package = path.parent / "node_modules" / "@openai" / "codex"
+    patterns = (
+        "node_modules/@openai/codex-win32-*/vendor/*/bin/codex.exe",
+        "vendor/*/bin/codex.exe",
+    )
+    for pattern in patterns:
+        for candidate in sorted(package.glob(pattern)):
+            try:
+                if candidate.with_name("codex-code-mode-host.exe").is_file() and filecmp.cmp(path, candidate, shallow=False):
+                    return str(candidate)
+            except OSError:
+                continue
+    return executable
 
 
 @dataclass(frozen=True)
@@ -157,10 +181,13 @@ class RuntimeCommandAdapter:
         if not cmd:
             return cmd
         exe = cmd[0]
-        if not shutil.which(exe):
-            relocated = resolve_executable(exe, self.name)
-            if relocated:
-                return (relocated, *cmd[1:])
+        found = shutil.which(exe)
+        if found:
+            complete = _complete_codex_executable(found)
+            return (complete, *cmd[1:]) if complete != found else cmd
+        relocated = resolve_executable(exe, self.name)
+        if relocated:
+            return (relocated, *cmd[1:])
         return cmd
 
     def all_commands(self) -> tuple[tuple[str, ...], ...]:
@@ -606,7 +633,8 @@ def stage_command_summary(adapter: RuntimeCommandAdapter) -> dict[str, dict[str,
         if capability not in adapter.capabilities:
             continue
         command = adapter.command_for(capability)
-        override = command != adapter.command
+        configured_override = adapter.implement_command if capability == "code" else adapter.review_command
+        override = configured_override is not None and configured_override != adapter.command
         summary[stage] = {
             "command": redact_command_secrets(shlex.join(command)),
             "executable": command[0],
