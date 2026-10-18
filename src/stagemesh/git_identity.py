@@ -250,6 +250,9 @@ def provider_environment(path: Path | None = None, base: dict[str, str] | None =
     """Environment for a provider subprocess: pinned to the project identity so a commit the provider makes itself is never credited
     to the provider's own git configuration."""
     env = dict(os.environ if base is None else base)
+    # Marks the process tree of an implementation or review provider. Commands that record operator decisions (finding
+    # dispositions, delivery unblocking, follow-up cancellation) refuse to run inside it.
+    env["STAGEMESH_PROVIDER_PROCESS"] = "1"
     try:
         identity = configured_identity(path, _without_unapproved_commit_identity(env)) or SYNTHETIC_IDENTITY
     except GitIdentityError:

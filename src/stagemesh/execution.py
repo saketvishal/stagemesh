@@ -344,9 +344,8 @@ class SubprocessExecutor(Executor):
             bound = bind_task_contract(store, project, task_id, baseline_sha)
         except ContractRejected as exc:
             return ExecutionResult(ExecutionStatus.FAILED, failure_reason=f"{exc.reason}: {exc}")
-        task_prompt = build_prompt(
-            task_id, task, run_path, contract=bound.contract, remediation=remediation_context(store, task_id, project)
-        )
+        remediation = remediation_context(store, task_id, project)
+        task_prompt = build_prompt(task_id, task, run_path, contract=bound.contract, remediation=remediation)
 
         lease.check("before_agent")
         try:
@@ -382,15 +381,21 @@ class SubprocessExecutor(Executor):
             executable=ident.executable,
         )
         lease.bind_execution(execution_id)
+        from .efficiency import CallRecorder
+
+        call = CallRecorder(store, task_id, "remediation" if remediation else "implementation", self.name)
         stdout, stderr, timed_out = communicate_bounded(proc, task_prompt, provider_timeout_seconds(self.timeout_seconds))
+        call.observe(stdout, stderr)
         code = proc.returncode
         lease.after_agent()
 
         if timed_out:
+            call.finish("timeout", PROVIDER_TIMEOUT)
             store.finish_execution(execution_id, ExecutionStatus.FAILED, result=PROVIDER_TIMEOUT)
             return ExecutionResult(ExecutionStatus.FAILED, failure_reason=PROVIDER_TIMEOUT)
         if code != 0:
             is_cap, reason = classify_failure(code, stdout, stderr)
+            call.finish("failed", reason)
             store.finish_execution(execution_id, ExecutionStatus.FAILED, result=reason)
             return ExecutionResult(
                 ExecutionStatus.FAILED,
@@ -407,9 +412,11 @@ class SubprocessExecutor(Executor):
             attribution=attribution_for_worker("local-worker", self.name),
         )
         if sha is None:
+            call.finish("failed", NO_IMPLEMENTATION_CHANGE)
             store.finish_execution(execution_id, ExecutionStatus.FAILED, result=NO_IMPLEMENTATION_CHANGE)
             return ExecutionResult(ExecutionStatus.FAILED, failure_reason=NO_IMPLEMENTATION_CHANGE)
         store.add_candidate(task_id, sha, self.name, durable_handoff=True)
         lease.seal(sha)
+        call.finish("succeeded", candidate=sha)
         store.finish_execution(execution_id, ExecutionStatus.SUCCEEDED, sha)
         return ExecutionResult(ExecutionStatus.SUCCEEDED, sha, durable_handoff=True)

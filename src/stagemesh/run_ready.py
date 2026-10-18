@@ -23,6 +23,7 @@ from .contracts import (
 from .coordinator import Coordinator, TargetSelection, TargetSelectionError
 from .diagnosis import format_findings
 from .domain import EvidenceKind, ExecutionKind, Stage, TaskStatus
+from .efficiency import BUDGET_EXHAUSTED, BudgetPolicy, block_reason, check_task_budget
 from .git import GitWorkspace
 from .objective_roots import objective_root_reason
 from .observability import health
@@ -509,6 +510,30 @@ def _settle_step_cap(
     _attach_diagnosis(summary, store, project, task_id, coordinator)
 
 
+def _settle_budget(summary: RunSummary, store: Store, project: Path, task_id: str, coordinator: Coordinator, verdict: Any) -> None:
+    """A configured effort limit was reached at a stage boundary: one typed blocker, recorded once, nothing interrupted."""
+    from .audit import record_audit
+    from .block_kinds import BlockKind, record_block, runtime_fingerprint
+
+    reason = block_reason(task_id, verdict)
+    task = store.get_task(task_id)
+    if task is not None and task["status"] == TaskStatus.OPEN:
+        latest = store.latest_candidate(task_id)
+        try:
+            fingerprint = runtime_fingerprint(project)
+        except Exception:  # noqa: BLE001 - the fingerprint only decides when a bounded automatic re-entry is allowed
+            fingerprint = None
+        record_block(
+            store, task_id, BlockKind.RECOVERABLE_OPERATIONAL, reason, stage=str(task["stage"]),
+            candidate_sha=None if latest is None else str(latest["sha"]), runtime=fingerprint,
+            detail={"failure_code": "budget_exhausted", "budget": verdict.exceeded, "observed": verdict.observed, "limit": verdict.limit},
+        )
+        record_audit(store, BUDGET_EXHAUSTED, {"task_id": task_id, "budget": verdict.exceeded, "observed": verdict.observed, "limit": verdict.limit})
+    summary.stop_reason, summary.message = "BLOCKED", reason
+    summary.detail["budget"] = {"exceeded": verdict.exceeded, "observed": verdict.observed, "limit": verdict.limit}
+    _attach_diagnosis(summary, store, project, task_id, coordinator)
+
+
 def _attach_diagnosis(
     summary: RunSummary, store: Store, project: Path, task_id: str, coordinator: Coordinator | None
 ) -> None:
@@ -896,6 +921,11 @@ def drive_task(
             break
         if should_stop is not None and should_stop():
             summary.stop_reason, summary.message = "INTERRUPTED", "the run was interrupted; claims were released and the worktree kept"
+            break
+        # A stage boundary: the previous tick has fully ended and the next has not begun, so stopping here never interrupts work.
+        verdict = check_task_budget(store, selected, getattr(coordinator, "budget_policy", None) or BudgetPolicy())
+        if verdict is not None:
+            _settle_budget(summary, store, project, selected, coordinator, verdict)
             break
         summary.recovered.extend(_recover_dead(store, selected))
         previous = _snapshot(store, selected)
