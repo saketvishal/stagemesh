@@ -20,6 +20,7 @@ from .capacity import CapacityKind, CapacityRegistry
 from .config import StageMeshConfig
 from .contract_binding import ContractRejected, bind_task_contract
 from .domain import ExecutionKind, ExecutionStatus
+from .efficiency import CallRecorder, extract_usage, note_call_usage
 from .execution import (
     PROVIDER_TIMEOUT,
     ExecutionResult,
@@ -222,10 +223,10 @@ class RuntimeCommandAdapter:
         except ContractRejected as exc:
             return ExecutionResult(ExecutionStatus.FAILED, failure_reason=f"{exc.reason}: {exc}")
         task = store.get_task(task_id)
+        remediation = remediation_context(store, task_id, project)
+        purpose = "remediation" if remediation else "implementation"
         try:
-            task_prompt = _build_task_prompt(
-                task_id, task, run_path, contract=bound.contract, remediation=remediation_context(store, task_id, project)
-            )
+            task_prompt = _build_task_prompt(task_id, task, run_path, contract=bound.contract, remediation=remediation)
         except SkillPackError as exc:
             return ExecutionResult(ExecutionStatus.FAILED, failure_reason=f"skill_pack_unavailable: {exc}")
         command, provider_input = _command_and_input(self.command_for("code"), task_prompt)
@@ -258,13 +259,18 @@ class RuntimeCommandAdapter:
             executable=identity.executable,
         )
         lease.bind_execution(execution_id)
+        call = CallRecorder(store, task_id, purpose, self.name)
+
         try:
             stdout, stderr, timed_out = communicate_bounded(proc, provider_input, provider_timeout_seconds(self.timeout_seconds))
+            call.observe(stdout, stderr)
             lease.after_agent()
             if timed_out:
+                call.finish("timeout", PROVIDER_TIMEOUT)
                 store.finish_execution(execution_id, ExecutionStatus.FAILED, result=PROVIDER_TIMEOUT)
                 return ExecutionResult(ExecutionStatus.FAILED, failure_reason=PROVIDER_TIMEOUT)
             if _missing_provider_tool_host(stderr):
+                call.finish("failed", "provider_unavailable")
                 store.finish_execution(execution_id, ExecutionStatus.FAILED, result="provider_unavailable")
                 output, _ = capacity_evidence("", stderr)
                 return ExecutionResult(
@@ -273,6 +279,7 @@ class RuntimeCommandAdapter:
                 )
             if proc.returncode != 0:
                 is_cap, reason = classify_failure(proc.returncode, stdout, stderr)
+                call.finish("failed", reason)
                 store.finish_execution(execution_id, ExecutionStatus.FAILED, result=reason)
                 output, retry_after = capacity_evidence(stdout, stderr)  # the operator sees why, capacity failure or not
                 return ExecutionResult(
@@ -293,6 +300,7 @@ class RuntimeCommandAdapter:
             if sha is None:
                 output, _ = capacity_evidence(stdout, stderr)
                 failure_reason = _provider_permission_denial(stdout, stderr) or NO_IMPLEMENTATION_CHANGE
+                call.finish("failed", failure_reason)
                 store.finish_execution(execution_id, ExecutionStatus.FAILED, result=failure_reason)
                 return ExecutionResult(
                     ExecutionStatus.FAILED,
@@ -301,9 +309,11 @@ class RuntimeCommandAdapter:
                 )
             store.add_candidate(task_id, sha, self.name, durable_handoff=True)
             lease.seal(sha)
+            call.finish("succeeded", candidate=sha)
             store.finish_execution(execution_id, ExecutionStatus.SUCCEEDED, sha)
             return ExecutionResult(ExecutionStatus.SUCCEEDED, sha, durable_handoff=True)
         except Exception as exc:
+            call.finish("failed", _execution_result(exc))
             store.finish_execution(execution_id, ExecutionStatus.FAILED, result=_execution_result(exc))
             if _is_external_workspace_mutation(exc):
                 return ExecutionResult(ExecutionStatus.FAILED, failure_reason=EXTERNAL_WORKSPACE_MUTATION)
@@ -345,6 +355,7 @@ class RuntimeCommandAdapter:
             except FileNotFoundError:
                 return _review_infrastructure_failure("provider_unavailable")
             stdout, stderr, timed_out = communicate_bounded(proc, provider_input, provider_timeout_seconds(self.timeout_seconds))
+            note_call_usage(extract_usage(stdout, stderr))  # the caller records the call (it owns the store and the purpose)
             if timed_out:
                 return _review_infrastructure_failure(PROVIDER_TIMEOUT)
             after_head = _git_output(review_path, "rev-parse", "HEAD")

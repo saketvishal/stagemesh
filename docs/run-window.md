@@ -33,6 +33,9 @@ up worktrees, closes no issues (only a PR merge does), and writes a report to `.
 | `--strict-live` | Off | Require fresh passing live acceptance results in preflight and in every child runner, for both implementation and review. Default windows still exclude providers with recorded live-check failures. |
 | `--allow-stale-runtime` | Off | Development bypass: allow starting even if the installed CLI runtime lacks commands present in source. |
 | `--plan` | Off | Read-only mode: run preflight checks and show which tasks would be picked or left alone without starting any work or recovering executions. |
+| `--follow-up` | Off | Explicitly authorize ONE scheduled follow-up per delivery the window leaves pending (publication deferred, or a published PR waiting for hosted checks). It may publish unless `--no-pr`, and merge only when automatic merging was requested in this same command; it ends itself when delivered, blocked or expired, and removes its schedule. See `docs/reliable-delivery.md`. |
+| `--follow-up-interval` | `10m` | How often a scheduled follow-up wakes. |
+| `--follow-up-ttl` | `24h` | How long a follow-up may keep trying before it ends with one actionable blocker. |
 | `--report` | Auto-generated | Path to write the JSON report (defaults to `.stagemesh/reports/run-window/<timestamp>.json`, created automatically). |
 
 ## Live Progress

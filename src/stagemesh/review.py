@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -10,6 +11,7 @@ from .audit import record_audit
 from .contract_binding import contract_for_candidate
 from .contracts import ContractError, _split_command, contract_prompt, declarative_invariants, evaluate_contract
 from .domain import EvidenceKind, EvidenceStatus, ExecutionKind, ExecutionStatus
+from .efficiency import record_provider_call, take_call_usage
 from .persistence import Store
 from .process_identity import owner_execution_fields
 from .queue_control import OperatorStopRequested
@@ -490,10 +492,14 @@ class Reviewer:
                     candidate_review = getattr(adapter, "review_candidate", None)
                     verdict = ReviewVerdict(VERDICT_REVIEW_INCOMPLETE, reason="review_not_attempted")
                     for attempt in range(1 + self.max_incomplete_retries):
+                        take_call_usage()  # clear anything a previous call left on this thread
+                        call_started = time.monotonic()
                         if callable(candidate_review):
                             response = candidate_review(prompt, project, candidate_sha)
                         else:
                             response = adapter.review(prompt)
+                        call_seconds = time.monotonic() - call_started
+                        call_usage = take_call_usage()  # unknown unless the adapter noted what the provider reported
                         final_provider = getattr(adapter, "name", reviewer_provider)
                         if final_provider != reviewer_provider:  # a fallback reviewer produced the answer
                             reviewer_provider = final_provider
@@ -505,6 +511,12 @@ class Reviewer:
                         review_payload["review_response"] = str(response)[:MAX_RECORDED_REVIEW_RESPONSE_CHARS]
                         review_payload["review_attempts"] = attempt + 1
                         verdict = classify_review_response(response)
+                        record_provider_call(
+                            store, task_id=task_id, purpose="review", provider=str(final_provider), candidate_sha=candidate_sha,
+                            outcome="failed" if verdict.kind == VERDICT_REVIEW_INCOMPLETE else "succeeded",
+                            reason=verdict.reason if verdict.kind == VERDICT_REVIEW_INCOMPLETE else None,
+                            duration_seconds=call_seconds, usage=call_usage,
+                        )
                         if verdict.kind != VERDICT_REVIEW_INCOMPLETE or verdict.provider_failure:
                             break  # a provider outage was already walked through every eligible reviewer
                     review_payload["review_verdict"] = verdict.kind

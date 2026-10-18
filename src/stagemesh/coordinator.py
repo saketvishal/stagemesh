@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -10,6 +12,7 @@ from .baseline import resolve_integration_ref
 from .block_kinds import BlockKind, block_kind_for, record_block, runtime_fingerprint
 from .contract_binding import contract_for_candidate
 from .contracts import _matches, task_contract_path
+from .efficiency import BudgetPolicy, record_provider_call, take_call_usage
 from .diagnosis import (
     CONTRACT_SCOPE,
     DIAGNOSIS_EVENT,
@@ -117,12 +120,14 @@ class Coordinator:
         outbound_sources: frozenset[str] = frozenset(),
         max_integration_recoveries: int = DEFAULT_MAX_RECOVERIES,
         recovery_advisor: DecisionAdvisor | None = None,
+        budget_policy: BudgetPolicy | None = None,
     ):
         self.max_integration_recoveries = max_integration_recoveries
         self.recovery_advisor = recovery_advisor  # only consulted for contexts the deterministic rules leave ambiguous
         self.guard = guard  # optional autonomy supervisor: allow(), integration_verified(), recover_unknown(), execution_finished(), candidate_committed()
         self.worker_id = worker_id
         self.diagnosis_policy = diagnosis_policy or DiagnosisPolicy()
+        self.budget_policy = budget_policy or BudgetPolicy()
         self.store = store
         self.project = Path(project)
         self.executor = executor or FakeExecutor()
@@ -556,10 +561,22 @@ class Coordinator:
                 return None
             wanted = policy.dispatch == "every_failure" or (policy.dispatch == "on_repeat" and diagnosis.repeated)
             if policy.analyst is not None and wanted:
+                take_call_usage()
+                started = time.monotonic()
                 try:
                     diagnosis.provider_analysis = policy.analyst(diagnosis, sha)
+                    record_provider_call(
+                        self.store, task_id=task_id, purpose="diagnosis", candidate_sha=sha, duration_seconds=time.monotonic() - started,
+                        provider=str((diagnosis.provider_analysis or {}).get("provider") or "analyst"),
+                        outcome="succeeded" if diagnosis.provider_analysis else "failed", reason=None if diagnosis.provider_analysis else "no usable analysis",
+                        usage=take_call_usage(),
+                    )
                 except Exception as exc:  # noqa: BLE001 - the diagnostic pass is optional; it must never block the lifecycle
                     diagnosis.provider_analysis = None
+                    record_provider_call(
+                        self.store, task_id=task_id, purpose="diagnosis", provider="analyst", outcome="failed", reason=type(exc).__name__,
+                        candidate_sha=sha, duration_seconds=time.monotonic() - started,
+                    )
                     record_audit(self.store, "task.diagnosis_provider_failed", {"task_id": task_id, "reason": f"{type(exc).__name__}: {exc}"[:300]})
             record_audit(self.store, DIAGNOSIS_EVENT, diagnosis.audit_payload())
             return diagnosis

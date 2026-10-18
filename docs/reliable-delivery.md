@@ -4,7 +4,7 @@ How a bounded task gets from admission to a merged change without repeated check
 and what each state of that path honestly means. Every rule below is deterministic and covered by regression tests that use fake
 providers, temporary repositories and controlled clocks (`tests/test_gate_execution.py`, `test_gate_timeout_diagnosis.py`,
 `test_validation_selection_reuse.py`, `test_contract_feasibility.py`, `test_review_disposition.py`, `test_step_progress.py`,
-`test_honest_delivery.py`, and the failure-to-delivery path in `test_reliable_delivery_end_to_end.py`).
+`test_honest_delivery.py`, `test_delivery_identity.py`, `test_delivery_followup.py`, `test_efficiency.py`, and the failure-to-delivery path in `test_reliable_delivery_end_to_end.py`).
 
 ## Gate execution and timeout diagnosis
 
@@ -95,11 +95,61 @@ A publication permission denial (an explicit permission/authentication/403 refus
 stops the rest of that window's publication attempts and is not retried until access is granted and
 `stagemesh delivery-unblock --task T --actor A --reason R` is run. No alternative branch, credential or force is tried.
 
-## Quiet follow-through
+## Follow-through that runs by itself
 
-`follow_through` persists once-only notifications, follow-up registration/completion and blocker consolidation in the ledger.
-A scheduled follow-up must check `follow_up_active` and stop scheduling itself after `complete_follow_up`; the completion notice
-is sent only when `notify_once` returns true. The window report lists one cause once with all affected tasks.
+A window that ends with authorized delivery still pending hands it to **one** follow-up, armed only when the invocation asked for it
+(`run-window --follow-up`, with `--follow-up-interval` default 10m and `--follow-up-ttl` default 24h). The runtime path is:
+
+1. `run_window` ends -> `register_pending_follow_ups` (tasks left `DELIVERY_PENDING`, `PUBLISHED` or `AWAITING_CHECKS`).
+2. Each one is registered once under a key derived from **repository + task + candidate**, together with its exact identity
+   (repository, task, candidate, PR URL, base), its explicit authorization (`publish` if the window may open PRs, `merge` only if
+   automatic merging was requested, with the merge policy and required checks), the authorizing invocation and the narrowed
+   `run-window` command that resumes it. Passing checks or a finished task never add a `merge` scope.
+3. One schedule is created through the single supported mechanism (`followup_scheduler`: Windows Task Scheduler via `schtasks`,
+   launching a small script in `.stagemesh/followups/`). Where no mechanism exists the report says so and prints the one command to run.
+4. Each wakeup runs `stagemesh follow-up --key K`. It takes a per-follow-up OS file lock (a simultaneous wakeup does nothing),
+   re-validates the identity, then runs the same narrowed `run-window` (no implementation replay, exact-head review and the
+   landing guard unchanged) and decides from the **ledger**, not the exit code:
+
+   | situation | result |
+   | --- | --- |
+   | PR merged at the exact reviewed head | complete; one completion notice |
+   | hosted checks pending | keep waiting; one notice per distinct state, not per wakeup |
+   | publication/merge permission denied (explicit 401/403/permission text) | recorded once as `EXTERNALLY_BLOCKED`, follow-up ends, no other branch/credential/force/route is tried; `delivery-unblock` plus a new `--follow-up` window starts a fresh generation |
+   | transient failure | backoff (retry registry), at most 5, then one blocker |
+   | ttl reached / check budget used | one blocker with the exact re-arm command |
+   | candidate changed, PR head is not the reviewed candidate, PR closed, other repository | stale: one blocker, nothing is acted on |
+   | published but `merge` was not authorized | ends: a person merges |
+
+5. Completion, cancellation (`follow-up --cancel`) and expiry **remove the OS schedule through the adapter and verify it is gone**
+   (`schtasks /Delete`, then `/Query`). If removal fails the failure is recorded once and the next wakeup only retries the cleanup.
+   Finalization is idempotent, so a crash between "completed" and "removed" or "announced" is repaired by the next wakeup (a
+   notice is announced at most once).
+
+`follow_through` holds the persisted facts (`INSERT ... WHERE NOT EXISTS`, so racing processes produce one row and one winner).
+`stagemesh follow-up --list` shows active follow-ups. Cancelling or re-arming is an operator decision and refuses to run inside a provider process.
+
+## Finding dispositions are attributable
+
+A disposition records the actor, the exact candidate, the finding's severity and originating reviewer, what each evidence reference
+resolved to in the ledger, and the implementers it was checked against. It is refused when the actor is (or is named like) an
+implementer of the task or an automation label, or when requested from inside a provider process (`STAGEMESH_PROVIDER_PROCESS`, set
+for every provider subprocess). `refuted_with_evidence` additionally needs `--evidence review-evidence:<id>` resolving to a **passing,
+independent review of the same candidate recorded after the finding** by a reviewer that neither implemented nor raised it (machine
+validation alone cannot rebut a reviewer). `waived_by_owner` is an explicit risk decision and is stored as `owner_attestation`, never
+as independent evidence. The decision is written before the finding is closed, so an interrupted disposition is completed, not
+duplicated; adverse findings and dispositions are append-only.
+
+## Effort accounting and budgets
+
+`provider.call` (task, candidate, provider, purpose `implementation`/`remediation`/`review`/`diagnosis`, outcome, normalized failure
+class, duration, provider-reported usage) and `stage.transition` events feed `stagemesh efficiency` together with the existing
+executions and `validation_reuse` evidence. Usage the provider did not report is `null`/unknown and is never summed as zero; keys are
+`input`/`output`/`cached_input` because the audit redactor masks any key containing the word for a credential. No prompts, provider
+output or client content is stored. Budgets (`budgets` in `.stagemesh/config.json`, defaults: 5 consecutive equivalent failures, above the bounded hands-off provider-exhaustion recovery, 30
+provider calls per task; optional per-window calls and reported-usage caps) come from the ledger, so they survive new windows and
+restarts, and are checked only **between** stages and waves; reaching one is a single typed `BLOCKED_RECOVERABLE_OPERATIONAL` blocker
+(`budget_exhausted`) and a fresh start by the operator (`retry-task`) resets the task's counters. Budgets never skip validation or review.
 
 ## Runtime artifacts
 

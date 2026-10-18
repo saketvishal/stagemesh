@@ -586,10 +586,16 @@ class Store:
         task_id = _validate_text(task_id, "task id")
         stage = _validate_enum(stage, Stage, "task stage")
         status = TaskStatus.DONE if stage is Stage.DONE else TaskStatus.OPEN
+        before = self.conn.execute("SELECT stage FROM tasks WHERE id=?", (task_id,)).fetchone()
         self.conn.execute(
             "UPDATE tasks SET stage=?, status=?, updated_at=? WHERE id=?", (stage, status, time.time(), task_id)
         )
         self.conn.execute("UPDATE claims SET active=0 WHERE task_id=?", (task_id,))
+        if before is not None and str(before["stage"]) != str(stage):  # one small event per real transition (efficiency accounting)
+            self.conn.execute(
+                "INSERT INTO audit_events VALUES (?, ?, ?, ?)",
+                (str(uuid.uuid4()), "stage.transition", json.dumps({"task_id": task_id, "from": str(before["stage"]), "to": str(stage)}, sort_keys=True), time.time()),
+            )
         self.conn.commit()
 
     def release_claim(self, claim_id: str) -> None:

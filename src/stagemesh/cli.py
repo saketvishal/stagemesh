@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import platform
 import re
 import shlex
@@ -36,6 +37,7 @@ from .coordinator import Coordinator, TargetSelection, TargetSelectionError
 from .dashboard import dashboard_summary, render_dashboard
 from .demo import DemoValidationError, create_demo_project
 from .diagnosis import DiagnosisPolicy, diagnose, format_findings, make_adapter_analyst
+from .efficiency import BudgetPolicy
 from .distributed import WorkQueue, WorkQueueError
 from .e2e_acceptance import EndToEndAcceptanceValidationError, end_to_end_acceptance
 from .external_evidence import (
@@ -615,6 +617,7 @@ def _build_coordinator(
         target=target,
         require_independent_review=require_independent_review,
         diagnosis_policy=_diagnosis_policy(config, project, {} if getattr(args, "dry_run", False) else adapter_by_name),
+        budget_policy=BudgetPolicy.from_config(config.budgets),
         guard=guard,
         outbound_sync=outbound_sync,
         outbound_sources=outbound_sources,
@@ -779,12 +782,15 @@ def command_finding_disposition(args: argparse.Namespace) -> int:
         try:
             report = record_disposition(
                 store, args.task, args.finding, disposition=args.disposition, actor=args.actor,
-                evidence_ref=args.evidence, rationale=args.rationale,
+                evidence_ref=tuple(args.evidence), rationale=args.rationale,
             )
         except DispositionError as exc:
             raise RecoveryRefusal("disposition_refused", str(exc)) from exc
         if not args.json:
-            print(f"task {args.task}: finding {args.finding[:16]} {args.disposition} by {args.actor} (evidence: {args.evidence})")
+            print(
+                f"task {args.task}: finding {args.finding[:16]} {args.disposition} by {args.actor} "
+                f"({report['support'].replace('_', ' ')}; evidence: {', '.join(args.evidence)})"
+            )
         return report
 
     return _repair_command(args, run)
@@ -794,6 +800,8 @@ def command_delivery_unblock(args: argparse.Namespace) -> int:
     from .delivery_state import clear_external_block, externally_blocked
 
     def run(store, project):  # type: ignore[no-untyped-def]
+        if os.environ.get("STAGEMESH_PROVIDER_PROCESS"):
+            raise RecoveryRefusal("operator_decision", "clearing a delivery blocker is an operator decision; it cannot run inside a provider process")
         blocked = externally_blocked(store, args.task)
         if blocked is None:
             raise RecoveryRefusal("not_blocked", f"task {args.task} has no external delivery blocker on record")
@@ -864,6 +872,7 @@ def command_run_window(args: argparse.Namespace) -> int:
     from datetime import datetime
 
     from .baseline import resolve_integration_ref
+    from .followup_scheduler import default_scheduler
     from .run_window import (
         Check,
         WindowOptions,
@@ -925,6 +934,9 @@ def command_run_window(args: argparse.Namespace) -> int:
         allow_stale_runtime=args.allow_stale_runtime,
         tasks=parse_task_ids(args.tasks) if args.tasks else None,
         report_path=report_path,
+        follow_up=args.follow_up,
+        follow_up_interval_seconds=int(parse_duration(args.follow_up_interval)),
+        follow_up_ttl_seconds=int(parse_duration(args.follow_up_ttl)),
     )
     store = Store(Path(":memory:") if args.plan else db_path(project))
     if args.plan and db_path(project).exists():
@@ -1008,6 +1020,7 @@ def command_run_window(args: argparse.Namespace) -> int:
             prepare_staging=None if local else (lambda: prepare_staging_ref(project, base_ref, STAGING_REF)),
             checkout_ref=lambda: _current_branch_ref(project),
             on_merged=on_merged,
+            follow_up_scheduler=default_scheduler(project) if options.follow_up else None,
         )
     finally:
         store.close()
@@ -1018,6 +1031,85 @@ def command_run_window(args: argparse.Namespace) -> int:
     if report.report_error:
         print(f"report not written: {report.report_error}", file=sys.stderr)
     return report.exit_code
+
+
+def command_efficiency(args: argparse.Namespace) -> int:
+    from .efficiency import efficiency_report, format_efficiency
+
+    project = Path(args.project).resolve()
+    store = Store(db_path(project))
+    store.migrate()
+    try:
+        report = efficiency_report(store, args.task)
+    finally:
+        store.close()
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        print("\n".join(format_efficiency(report)))
+    return 0
+
+
+def command_follow_up(args: argparse.Namespace) -> int:
+    import subprocess
+
+    from .delivery_followup import GhHosting, cancel_follow_up, rearm_follow_up, repository_of, run_follow_up, validated_resume_argv
+    from .follow_through import active_follow_ups, follow_up_record
+    from .followup_scheduler import default_scheduler
+
+    project = Path(args.project).resolve()
+    store = Store(db_path(project))
+    store.migrate()
+    try:
+        if args.list:
+            records = active_follow_ups(store)
+            if args.json:
+                print(json.dumps(records, indent=2, sort_keys=True, default=str))
+            else:
+                for record in records:
+                    print(f"{record['key']}: task {record['task_id']} candidate {str(record['candidate_sha'])[:12]} scope {','.join(record.get('scope') or [])} pr {record.get('pr_url') or '-'}")
+                if not records:
+                    print("no active follow-ups")
+            return 0
+        if not args.key:
+            print("--key is required (or use --list)", file=sys.stderr)
+            return 2
+        if (args.cancel or args.rearm) and os.environ.get("STAGEMESH_PROVIDER_PROCESS"):
+            print("cancelling or re-arming a follow-up is an operator decision; it cannot run inside a provider process", file=sys.stderr)
+            return 2
+        scheduler = default_scheduler(project)
+
+        def notify(key: str, message: str) -> None:
+            print(f"[stagemesh follow-up {key}] {message}", flush=True)
+
+        if args.rearm:
+            task_id = rearm_follow_up(store, args.key)
+            if task_id is None:
+                print(f"no such follow-up, or it is still active (cancel it first): {args.key}", file=sys.stderr)
+                return 2
+            print(f"task {task_id}: the next `run-window --follow-up` arms a fresh follow-up")
+            return 0
+        if args.cancel:
+            outcome = cancel_follow_up(store, args.key, scheduler, notify, args.reason)
+        else:
+            def runner(record: dict) -> int:
+                limit = 1800 + 300
+                done = subprocess.run(validated_resume_argv(record, project), cwd=project, capture_output=True, text=True, timeout=limit, check=False)
+                if done.returncode:
+                    print((done.stderr or done.stdout)[-300:], file=sys.stderr)
+                return done.returncode
+
+            outcome = run_follow_up(
+                store, project, args.key, scheduler=scheduler, hosting=GhHosting(project), window_runner=runner, notify=notify,
+                repository=repository_of(project),
+            )
+        if args.json:
+            print(json.dumps(outcome.to_dict(), indent=2, sort_keys=True))
+        elif not outcome.notified:
+            print(f"[stagemesh follow-up {args.key}] {outcome.state}: {outcome.message}")  # the log line of a quiet wakeup
+        return 2 if outcome.state == "unknown_follow_up" else 0
+    finally:
+        store.close()
 
 
 def command_survivor_wave(args: argparse.Namespace) -> int:
@@ -3329,7 +3421,11 @@ def build_parser() -> argparse.ArgumentParser:
     disposition.add_argument("--finding", required=True, help="Finding id as shown in the block reason or `stagemesh diagnose`")
     disposition.add_argument("--disposition", required=True, choices=("refuted_with_evidence", "waived_by_owner"))
     disposition.add_argument("--actor", required=True, help="Who decided (a person or the owning role)")
-    disposition.add_argument("--evidence", required=True, help="Reference supporting the decision (commit, test run, policy exception, PR comment URL)")
+    disposition.add_argument(
+        "--evidence", required=True, action="append",
+        help="Reference supporting the decision; repeatable. `review-evidence:<id>` / `validation-evidence:<id>` resolve in the ledger "
+        "(refuting a finding needs an independent passing review); anything else (commit, PR comment URL) is recorded as stated",
+    )
     disposition.add_argument("--rationale", required=True)
     disposition.add_argument("--json", action="store_true")
     disposition.set_defaults(func=command_finding_disposition)
@@ -3399,8 +3495,34 @@ def build_parser() -> argparse.ArgumentParser:
     window.add_argument("--report", metavar="PATH", help="Write the JSON report here (default: .stagemesh/reports/run-window/<timestamp>.json, created automatically)")
     window.add_argument("--no-progress", action="store_true", help="Do not stream live progress lines to stderr")
     window.add_argument("--heartbeat", type=float, default=60.0, metavar="SECONDS", help="Seconds of silence before a running step prints a heartbeat line (default 60, 0 = off)")
+    window.add_argument(
+        "--follow-up", action="store_true",
+        help="Authorize ONE scheduled follow-up per delivery this window leaves pending (deferred publication, or a PR waiting for "
+        "hosted checks). Its authority is this invocation's own: it may publish unless --no-pr, and merge only when automatic merging "
+        "was requested here. It ends itself when delivered, blocked or expired and removes its schedule.",
+    )
+    window.add_argument("--follow-up-interval", default="10m", metavar="DURATION", help="How often a scheduled follow-up wakes (default 10m)")
+    window.add_argument("--follow-up-ttl", default="24h", metavar="DURATION", help="How long a follow-up may keep trying before it ends with one blocker (default 24h)")
     window.add_argument("--json", action="store_true")
     window.set_defaults(func=command_run_window)
+    follow = sub.add_parser(
+        "follow-up",
+        help="Wake, list, cancel or re-arm a delivery follow-up (normally run by the schedule `run-window --follow-up` created)",
+    )
+    follow.add_argument("--key", help="Follow-up key as shown in the window report")
+    follow.add_argument("--list", action="store_true", help="List active follow-ups")
+    follow.add_argument("--cancel", action="store_true", help="Operator decision: end this follow-up and remove its schedule")
+    follow.add_argument("--rearm", action="store_true", help="Operator decision: allow the next `run-window --follow-up` to arm a fresh follow-up for this task")
+    follow.add_argument("--reason", default="cancelled by the operator")
+    follow.add_argument("--json", action="store_true")
+    follow.set_defaults(func=command_follow_up)
+    efficiency = sub.add_parser(
+        "efficiency",
+        help="Provider attempts, equivalent-failure retries, checks run/reused, validation time and provider-reported usage (unknown is never zero)",
+    )
+    efficiency.add_argument("--task", action="append", help="Limit to this task (repeatable)")
+    efficiency.add_argument("--json", action="store_true")
+    efficiency.set_defaults(func=command_efficiency)
     queue = sub.add_parser("queue", help="Inspect and reconcile the StageMesh task queue without starting work")
     queue_sub = queue.add_subparsers(dest="queue_command", required=True)
     reconcile = queue_sub.add_parser(

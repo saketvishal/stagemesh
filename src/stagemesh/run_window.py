@@ -43,6 +43,9 @@ from .readiness import PrLister, build_readiness, gh_open_wave_prs
 from .recovery_decision import STEP_BUDGET_EXHAUSTED, RecoveryAction, RecoveryContext, decide
 from .runtime_freshness import RuntimeFreshness, check_runtime
 from .scheduling import Scheduler
+from .delivery_followup import register_pending_follow_ups, repository_of
+from .delivery_state import externally_blocked, record_external_block, record_landing_result
+from .efficiency import BudgetPolicy, check_window_budget
 from .follow_through import consolidate_blockers
 from .step_progress import made_progress, progress_state
 from .survivor_wave import (
@@ -107,6 +110,12 @@ class WindowOptions:
     allow_stale_runtime: bool = False
     tasks: list[str] | None = None  # None: pick every eligible task; a list restricts the window to exactly those
     report_path: Path | None = None
+    # Explicit authorization to arm ONE scheduled follow-up per delivery this window leaves pending (publication deferred, or a
+    # published PR waiting for hosted checks). Its scope is exactly this window's own: publish if PRs are enabled, merge only if
+    # automatic merging was requested. Off unless asked for.
+    follow_up: bool = False
+    follow_up_interval_seconds: int = 600
+    follow_up_ttl_seconds: int = 86400
 
 
 def resolve_merge_defaults(config: StageMeshConfig, args: Any) -> dict[str, Any]:
@@ -150,6 +159,7 @@ class WindowReport:
     interrupted: bool = False
     readiness: dict[str, Any] | None = None
     open_wave_prs: list[dict[str, Any]] = field(default_factory=list)
+    follow_ups: list[dict[str, Any]] = field(default_factory=list)  # deliveries left pending and how each is followed
     next_command: str = ""
 
     @property
@@ -224,7 +234,9 @@ class WindowReport:
                 "required_checks": list(self.options.required_checks),
                 "merge_policy": self.options.merge_policy,
                 "check_app_id": self.options.check_app_id,
+                "follow_up": self.options.follow_up,
             },
+            "follow_ups": self.follow_ups,
             "preflight": [check.to_dict() for check in self.preflight],
             "recovered": self.recovered,
             "selected": self.selected,
@@ -605,6 +617,10 @@ def next_command(report: WindowReport) -> str:
 
 
 def _resume_command(options: WindowOptions) -> str:
+    return shlex.join(_resume_argv(options))
+
+
+def _resume_argv(options: WindowOptions) -> list[str]:
     argv = [
         "stagemesh",
         "run-window",
@@ -633,7 +649,7 @@ def _resume_command(options: WindowOptions) -> str:
             argv.extend(("--required-checks", ",".join(options.required_checks)))
     else:
         argv.append("--pr-only")
-    return shlex.join(argv)
+    return argv
 
 
 def _landing_order(store: Store, records: list[TaskRecord], hooks: WaveHooks) -> list[TaskRecord]:
@@ -678,11 +694,14 @@ def run_window(
     merge_pr: Callable[[Any, float], dict[str, Any]] | None = None,
     merge_setup_error: str | None = None,
     on_merged: Callable[[str], None] | None = None,
+    follow_up_scheduler: Any = None,
+    repository: str | None = None,
 ) -> WindowReport:
     local = options.integration_mode == INTEGRATION_LOCAL
     report = WindowReport(window_id=uuid.uuid4().hex[:8], options=options, started_at=clock())
     deadline = report.started_at + options.duration_seconds
     control = QueueStopControl(store)
+    window_wall_start = time.time()  # ledger timestamps are wall-clock even when the window runs on an injected clock
 
     report.preflight, report.recovered = preflight(
         store, project, config, options, base_ref=base_ref, runtime=runtime, provider_check=provider_check, repo_state=hooks.repo_state,
@@ -827,6 +846,11 @@ def run_window(
         if not record.ready_for_merge or not record.pr_url:
             report.stop_reason = "auto-merge stopped: completed task has no published PR"
             return False
+        blocked = externally_blocked(store, record.task_id)
+        if blocked is not None:  # a recorded permission denial is never asked again until an operator clears it
+            report.stop_reason = (f"auto-merge stopped: task {record.task_id} needs {blocked.get('needed')} ({str(blocked.get('reason'))[:120]}); "
+                                  f"after access is granted run `stagemesh delivery-unblock --task {record.task_id}`")
+            return False
         try:
             validate = getattr(merge_pr, "validate_records", None)
             if callable(validate):
@@ -857,7 +881,14 @@ def run_window(
                     return False
             if merged.get("remote_landed") is True:
                 record.landing = "remote_landed_sync_blocked"
-            report.stop_reason = "auto-merge stopped: " + str(merged.get("reason", "landing unverified"))
+            why = str(merged.get("reason", "landing unverified"))
+            outcome = record_landing_result(store, record.task_id, record.integrated_candidate, why)
+            if outcome["permission_denied"]:  # one blocker, no second route to the same action
+                record_external_block(store, record.task_id, record.integrated_candidate, why, "permission to merge this pull request")
+                record.landing = "externally_blocked"
+                why = (f"permission to merge was denied ({why[:160]}); the PR and its verified head are preserved. Grant access, then "
+                       f"`stagemesh delivery-unblock --task {record.task_id}`")
+            report.stop_reason = "auto-merge stopped: " + why
             return False
         report.merged_prs.append(merged)
         record.pr_state, record.ready_for_merge, record.landing = "MERGED", False, "fast_forward_merged"
@@ -868,6 +899,26 @@ def run_window(
                 record_audit(store, "source.outbound_after_merge_failed", {"task_id": record.task_id, "error": f"{type(exc).__name__}: {exc}"[:300]})
         report.final_repo_state = hooks.repo_state()
         return True
+
+    def arm_follow_ups() -> None:
+        """Hand deliveries this window could not finish to the single follow-up mechanism. Never alters the window's own outcome."""
+        if not options.follow_up or local:
+            return
+        try:
+            task_ids = [*report.selected, *(record.task_id for record in pending_records), *(task.task_id for task in report.tasks)]
+            report.follow_ups = register_pending_follow_ups(
+                store, project, task_ids,
+                repository=repository if repository is not None else repository_of(project),
+                open_prs=options.open_prs, merge_authorized=options.auto_merge_ff,
+                merge_policy=options.merge_policy, required_checks=options.required_checks,
+                authorized_by="run-window --follow-up" + (f" --merge-policy {options.merge_policy}" if options.auto_merge_ff else ""),
+                window_id=report.window_id, base_argv=_resume_argv(options), base=base_ref.removeprefix("refs/heads/"),
+                scheduler=follow_up_scheduler, interval_seconds=options.follow_up_interval_seconds,
+                ttl_seconds=options.follow_up_ttl_seconds, window_seconds=min(options.duration_seconds, 1800.0), clock=clock,
+                landing_since=window_wall_start,
+            )
+        except Exception as exc:  # noqa: BLE001 - a follow-up problem is reported, never allowed to hide the window's result
+            report.follow_ups = [{"state": "error", "reason": f"{type(exc).__name__}: {exc}"}]
 
     try:
         if active_landing_recovery:
@@ -890,6 +941,10 @@ def run_window(
                 break
             if clock() >= deadline:
                 report.time_limit_reached = True
+                break
+            window_budget = check_window_budget(store, window_wall_start, BudgetPolicy.from_config(config.budgets))
+            if window_budget is not None:  # a wave boundary: nothing is running, nothing is interrupted
+                report.stop_reason = f"provider-call budget reached for this window ({window_budget.detail}; limit {window_budget.limit}); work is preserved"
                 break
             room = options.concurrency if options.auto_merge_ff else options.concurrency * 2
             # Fill the bounded wave with compatible work, not merely the first
@@ -1006,8 +1061,10 @@ def run_window(
     except BaseException as exc:
         report.interrupted = True
         report.stop_reason = f"interrupted: {type(exc).__name__}"
+        arm_follow_ups()
         _finish(store, project, config, report, list_prs, clock, journal=True)
         raise
+    arm_follow_ups()
     return _finish(store, project, config, report, list_prs, clock, journal=True)
 
 
@@ -1101,6 +1158,12 @@ def format_window_report(report: WindowReport) -> str:
                 for entry in consolidate_blockers(((task_id, str(reason)) for task_id, reason in ordered), exact=True)
             )
         )
+    for entry in report.follow_ups:
+        if entry.get("state") in ("registered", "existing"):
+            where = "scheduled" if entry.get("scheduled") else "NOT scheduled (" + str(entry.get("reason", "")) + ")"
+            lines.append(f"  follow-up for {entry['task_id']}: {where}; authorized: {', '.join(entry.get('scope', []))}; ends when delivered, blocked or expired")
+        else:
+            lines.append(f"  follow-up for {entry.get('task_id', '?')}: {entry.get('state')}: {entry.get('reason', '')}")
     if report.merged_prs:
         lines.append("fast-forward merged: " + ", ".join("#" + str(item["pr"]) for item in report.merged_prs))
     if report.open_wave_prs:

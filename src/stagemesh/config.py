@@ -98,6 +98,16 @@ class GitHubConfig:
 
 
 @dataclass(frozen=True)
+class BudgetConfig:
+    """Effort limits checked at stage boundaries (see efficiency.py). 0 or null disables a limit."""
+
+    max_provider_calls_per_task: int | None = 30
+    max_equivalent_failures: int | None = 5
+    max_provider_calls_per_window: int | None = None
+    max_reported_usage_per_task: int | None = None
+
+
+@dataclass(frozen=True)
 class MergeConfig:
     mode: str = "pr_only"
     required_checks: tuple[str, ...] = ()
@@ -149,6 +159,7 @@ class StageMeshConfig:
     parallel: ParallelConfig = field(default_factory=ParallelConfig)
     runtime: RuntimeConfig | None = None
     diagnosis: DiagnosisConfig = field(default_factory=DiagnosisConfig)
+    budgets: BudgetConfig = field(default_factory=BudgetConfig)
     merging: MergeConfig = field(default_factory=MergeConfig)
 
 
@@ -267,6 +278,7 @@ def load_config(project: Path, config_path: Path | None = None) -> StageMeshConf
         runtime=runtime,
         diagnosis=_diagnosis(_optional_mapping(data, "diagnosis"), known),
         merging=_merging(_optional_mapping(data, "merging"), require_review),
+        budgets=_budgets(_optional_mapping(data, "budgets")),
     )
 
 
@@ -384,6 +396,22 @@ def _is_legacy_builtin_priority_routing(
         and set(provider_specs) == set(legacy_priorities)
         and all(provider_specs[name].priority == priority for name, priority in legacy_priorities.items())
     )
+def _budgets(data: dict[str, object]) -> BudgetConfig:
+    defaults = BudgetConfig()
+    unknown = set(data) - set(defaults.__dataclass_fields__)
+    if unknown:
+        raise ConfigValidationError(f"budgets has unsupported keys: {', '.join(sorted(unknown))}")
+    values: dict[str, int | None] = {}
+    for name in defaults.__dataclass_fields__:
+        value = data.get(name, getattr(defaults, name))
+        if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0):
+            raise ConfigValidationError(f"budgets.{name} must be a non-negative integer or null")
+        if name == "max_equivalent_failures" and isinstance(value, int) and value == 1:
+            raise ConfigValidationError("budgets.max_equivalent_failures must be at least 2 (one failure is not a repeat) or 0 to disable")
+        values[name] = value or None
+    return BudgetConfig(**values)
+
+
 def _diagnosis(data: dict[str, object], known_providers: set[str]) -> DiagnosisConfig:
     unknown = set(data) - {"repeat_threshold", "stop_on_repeat", "provider", "dispatch"}
     if unknown:
