@@ -766,7 +766,7 @@ class Coordinator:
         if diagnosis is not None and self._auto_rebaseline(task_id, diagnosis):
             return 1
         if diagnosis is not None and diagnosis.stops_remediation and (
-            diagnosis.environment_unavailable or self.diagnosis_policy.stop_on_repeat
+            diagnosis.environment_unavailable or diagnosis.diagnosis_required or self.diagnosis_policy.stop_on_repeat
         ):
             # The same failure again (or one a provider cannot fix, like a stale baseline): another identical attempt would only repeat
             # it. Record the diagnosis, then recover differently instead of stopping.
@@ -777,6 +777,7 @@ class Coordinator:
             )
             reason = (
                 "validation_environment_unavailable" if diagnosis.environment_unavailable
+                else "gate_timeout_diagnosis_required" if diagnosis.diagnosis_required
                 else "stale_baseline_diagnosed" if diagnosis.category == STALE_BASELINE
                 else "repeated_failure_diagnosed"
             )

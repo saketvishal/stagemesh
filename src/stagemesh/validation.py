@@ -105,6 +105,7 @@ class Validator:
                         "command": list(gate.command),
                         "returncode": gate.returncode,
                         "failure_kind": gate.failure_kind,
+                        **gate.provenance(),
                     }
                     for gate in evaluation.gates
                 ],

@@ -8,6 +8,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
@@ -142,6 +143,36 @@ class GateResult:
     stdout: str = ""
     stderr: str = ""
     failure_kind: str | None = None
+    executed_command: tuple[str, ...] = ()  # the argv actually launched; differs from `command` only in its resolved first element
+    resolution: dict[str, Any] | None = None  # declared vs executed executable and how one became the other
+    cwd: str | None = None
+    duration_seconds: float | None = None
+    diagnosis: dict[str, Any] | None = None  # timeout class, attribution, explanation and the last progress lines
+    output_truncated: bool = False
+
+    def provenance(self) -> dict[str, Any]:
+        """The bounded, redacted execution record stored with validation evidence."""
+        from .gate_execution import bounded_output
+
+        stdout, cut_out = bounded_output(self.stdout, 600)
+        stderr, cut_err = bounded_output(self.stderr, 600)
+        return {
+            "declared_command": list(self.command),
+            "executed_command": list(self.executed_command),
+            "executable_resolution": self.resolution,
+            "cwd": self.cwd,
+            "duration_seconds": self.duration_seconds,
+            "diagnosis": self.diagnosis,
+            "stdout_tail": stdout,
+            "stderr_tail": stderr,
+            "output_truncated": cut_out or cut_err or self.output_truncated,
+        }
+
+
+def _redacted_tail(text: str) -> str:
+    from .gate_execution import bounded_output
+
+    return bounded_output(text)[0]
 
 
 def _gate_output_text(value: str | bytes | None) -> str:
@@ -437,8 +468,9 @@ def evaluate_contract(
                     "command": list(gate.command),
                     "returncode": gate.returncode,
                     "failure_kind": gate.failure_kind,
-                    "stdout": gate.stdout[-2000:],
-                    "stderr": gate.stderr[-2000:],
+                    "stdout": _redacted_tail(gate.stdout),
+                    "stderr": _redacted_tail(gate.stderr),
+                    "execution": gate.provenance(),
                 }
             )
 
@@ -554,9 +586,29 @@ def candidate_workspace(project: Path, candidate_sha: str) -> Iterator[Path]:
 
 
 def run_gate(project: Path, gate: GateCommand) -> GateResult:
+    from .gate_execution import bounded_output, classify_timeout, resolve_gate_executable
+
     run_dir = project / gate.cwd if gate.cwd else project
-    command = _gate_runtime_command(list(gate.command))
+    declared = tuple(gate.command)
     environment = _gate_environment(run_dir, gate)
+    resolution = resolve_gate_executable(list(gate.command), run_dir, search_path=(environment or os.environ).get("PATH"))
+    command = list(gate.command)
+    if resolution is not None and resolution.executed:
+        command[0] = resolution.executed
+    provenance = {
+        "executed_command": tuple(command),
+        "resolution": None if resolution is None else resolution.to_dict(),
+        "cwd": str(run_dir),
+    }
+    if resolution is not None and not resolution.launchable:
+        # An explicit executable that is missing is a launch failure. Substituting a same-named PATH program would run something
+        # the gate never declared, so the gate fails with the exact path that was looked for.
+        return GateResult(
+            gate.name, "FAILED", declared, None, "", resolution.detail, "environment",
+            **{**provenance, "executed_command": ()},
+            diagnosis={"timeout_class": None, "attribution": "environment", "explanation": resolution.detail, "progress": []},
+        )
+    started = time.monotonic()
     try:
         with ExitStack() as resources:
             # Provider sandboxes can create pytest temp roots unreadable by the
@@ -579,43 +631,57 @@ def run_gate(project: Path, gate: GateCommand) -> GateResult:
                 timeout=gate.timeout_seconds,
             )
     except OSError as exc:
-        return GateResult(gate.name, "FAILED", tuple(gate.command), None, "", str(exc), "environment")
+        return GateResult(
+            gate.name, "FAILED", declared, None, "", str(exc), "environment",
+            duration_seconds=round(time.monotonic() - started, 3), **provenance,
+        )
     except subprocess.TimeoutExpired as exc:
+        out, err = _gate_output_text(exc.stdout), _gate_output_text(exc.stderr)
+        diagnosis = classify_timeout(out, err)
         return GateResult(
             gate.name,
             "FAILED",
-            tuple(gate.command),
+            declared,
             None,
-            _gate_output_text(exc.stdout),
-            f"timed out after {gate.timeout_seconds}s\n{_gate_output_text(exc.stderr)}",
+            bounded_output(out, 4000)[0],
+            f"timed out after {gate.timeout_seconds}s\n{bounded_output(err, 4000)[0]}",
             "timeout",
+            duration_seconds=round(time.monotonic() - started, 3),
+            diagnosis=diagnosis,
+            output_truncated=len(out) > 4000 or len(err) > 4000,
+            **provenance,
         )
     return GateResult(
         gate.name,
         "PASSED" if result.returncode == 0 else "FAILED",
-        tuple(gate.command),
+        declared,
         result.returncode,
         _gate_output_text(result.stdout),
         _gate_output_text(result.stderr),
+        duration_seconds=round(time.monotonic() - started, 3),
+        **provenance,
     )
 
 
-def _gate_runtime_command(command: list[str]) -> list[str]:
-    if not command:
-        return command
-    resolved = shutil.which(command[0])  # lets "npm" find npm.cmd on Windows without a shell
-    if resolved:
-        command[0] = resolved
+def _gate_runtime_command(command: list[str], run_dir: Path | None = None) -> list[str]:
+    """The command with its executable resolved for `run_dir` (see gate_execution); kept for callers that only need argv."""
+    from .gate_execution import resolve_gate_executable
+
+    resolution = resolve_gate_executable(command, run_dir or Path.cwd())
+    if resolution is not None and resolution.executed:
+        command[0] = resolution.executed
     return command
 
 
 def _gate_environment(run_dir: Path, gate: GateCommand) -> dict[str, str] | None:
     environment = {**os.environ, **dict(gate.env)}
+    # A child that buffers its stdout in a pipe prints nothing before a timeout, which makes every hang look identical.
+    environment.setdefault("PYTHONUNBUFFERED", "1")
     src = run_dir / "src"
     if src.is_dir():
         existing = environment.get("PYTHONPATH")
         environment["PYTHONPATH"] = str(src) if not existing else str(src) + os.pathsep + existing
-    return environment if gate.env or src.is_dir() else None
+    return environment
 
 
 def _matches(path: str, patterns: tuple[str, ...]) -> bool:
