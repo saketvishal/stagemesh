@@ -30,7 +30,9 @@ from typing import Any
 
 from .audit import record_audit
 from .block_kinds import classify_block, reenter_blocked_task, reentry_refusal, runtime_fingerprint
+from .concurrency import contract_conflict
 from .config import StageMeshConfig
+from .contracts import ContractError
 from .domain import EvidenceKind, EvidenceStatus, Stage, TaskStatus
 from .operator_actions import recover_stale
 from .persistence import Store
@@ -50,6 +52,7 @@ from .survivor_wave import (
     WaveReport,
     git_repo_state,
     is_task_pr_branch,
+    load_wave_contract,
     ordered_candidate_records,
     prepare_staging_ref,
     run_wave,
@@ -251,19 +254,42 @@ def _task_sort_key(task_id: str) -> tuple[int, int, str]:
 
 
 def select_tasks(
-    store: Store, *, attempted: set[str], limit: int, only: list[str] | None = None, fingerprint: str | None = None, project: Path | None = None
+    store: Store, *, attempted: set[str], limit: int, only: list[str] | None = None, fingerprint: str | None = None,
+    project: Path | None = None, compatible_with: list[str] | None = None,
 ) -> tuple[list[str], dict[str, str]]:
     """Up to `limit` runnable tasks (oldest first) and why the others were left alone.
 
     Runnable means: OPEN, not DONE, eligible to the scheduler (so not blocked, parked, source-closed, waiting on a dependency or an
     objective root) and with no active claim or running execution. A BLOCKED task is picked only when it is blocked for a recoverable
     operational reason and the runtime or configuration changed since (`fingerprint`, see `block_kinds`); every other block stays blocked
-    and is reported with its kind and cause.
+    and is reported with its kind and cause. When `compatible_with` is supplied,
+    reserve those tasks' contracts and pick mutually compatible work; conflicts
+    remain queued and do not consume the selection limit.
     """
     scheduler = Scheduler(store)
     skipped: dict[str, str] = {}
     candidates = only if only is not None else [str(row["id"]) for row in store.tasks()]
     picked: list[str] = []
+    if compatible_with is not None and project is None:
+        raise ValueError("conflict-aware selection requires a project")
+    contracts = {task_id: load_wave_contract(store, project, task_id) for task_id in (compatible_with or [])}
+
+    def admit(task_id: str) -> bool:
+        if compatible_with is not None:
+            try:
+                contract = load_wave_contract(store, project, task_id)
+            except ContractError as exc:
+                skipped[task_id] = f"invalid_contract: {exc}"
+                return False
+            for other_id, other in contracts.items():
+                conflict = contract_conflict(contract, other)
+                if conflict is not None:
+                    skipped[task_id] = f"waiting for compatible slot: conflicts with task {other_id} ({conflict})"
+                    return False
+            contracts[task_id] = contract
+        picked.append(task_id)
+        return True
+
     for task_id in sorted(dict.fromkeys(candidates), key=_task_sort_key):
         if task_id in attempted:
             continue
@@ -288,8 +314,7 @@ def select_tasks(
                         if state.startswith("unplannable:"):
                             skipped[task_id] = state.removeprefix("unplannable:")
                             continue
-                    picked.append(task_id)
-                    if len(picked) >= limit:
+                    if admit(task_id) and len(picked) >= limit:
                         break
                 else:
                     skipped[task_id] = reason
@@ -314,8 +339,7 @@ def select_tasks(
             if state.startswith("unplannable:"):
                 skipped[task_id] = state.removeprefix("unplannable:")
                 continue
-        picked.append(task_id)
-        if len(picked) >= limit:
+        if admit(task_id) and len(picked) >= limit:
             break
     return picked, skipped
 
@@ -809,7 +833,13 @@ def run_window(
                 report.time_limit_reached = True
                 break
             room = options.concurrency if options.auto_merge_ff else options.concurrency * 2
-            continuing = [task_id for task_id in resume if skip_reason(store, task_id) is None][:room]
+            # Fill the bounded wave with compatible work, not merely the first
+            # N queue entries that the wave would then have to serialize.
+            continuing, deferred = select_tasks(
+                store, attempted=set(), limit=room, only=list(resume), fingerprint=fingerprint,
+                project=project, compatible_with=[],
+            )
+            report.not_selected.update(deferred)
             if len(attempted) >= options.max_tasks and not continuing:
                 report.task_limit_reached = True
                 break
@@ -831,6 +861,7 @@ def run_window(
                     only=options.tasks,
                     fingerprint=fingerprint,
                     project=project,
+                    compatible_with=continuing,
                 )
                 if len(attempted) < options.max_tasks and room - len(continuing) > 0
                 else ([], {})
@@ -839,6 +870,8 @@ def run_window(
             batch = [*continuing, *fresh]
             if not batch:
                 break
+            for task_id in batch:
+                report.not_selected.pop(task_id, None)
             for task_id in fresh:  # a recoverable block is reconsidered here, before the wave runs the task
                 entry = reenter_blocked_task(store, task_id, fingerprint)
                 if entry is not None:
