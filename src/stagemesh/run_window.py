@@ -43,6 +43,8 @@ from .readiness import PrLister, build_readiness, gh_open_wave_prs
 from .recovery_decision import STEP_BUDGET_EXHAUSTED, RecoveryAction, RecoveryContext, decide
 from .runtime_freshness import RuntimeFreshness, check_runtime
 from .scheduling import Scheduler
+from .follow_through import consolidate_blockers
+from .step_progress import made_progress, progress_state
 from .survivor_wave import (
     INTEGRATION_LOCAL,
     INTEGRATION_PR,
@@ -365,6 +367,11 @@ def progress_key(store: Store, task_id: str) -> tuple[Any, ...]:
     )
 
 
+def _meaningful_progress(store: Store, task_id: str, before: Any) -> bool:
+    """Stage advance or a resolved failure on a new candidate; activity such as more evidence rows or remediation attempts is not progress."""
+    return before is not None and made_progress(before, progress_state(store, task_id))[0]
+
+
 def continuation(store: Store, task_id: str, used: int, limit: int, progressed: bool) -> dict[str, Any]:
     """Should a task that ran out of steps get another run from its recorded state? Decided by the recovery rules, and audited.
 
@@ -670,6 +677,7 @@ def run_window(
     clock: Callable[[], float] = time.time,
     merge_pr: Callable[[Any, float], dict[str, Any]] | None = None,
     merge_setup_error: str | None = None,
+    on_merged: Callable[[str], None] | None = None,
 ) -> WindowReport:
     local = options.integration_mode == INTEGRATION_LOCAL
     report = WindowReport(window_id=uuid.uuid4().hex[:8], options=options, started_at=clock())
@@ -853,6 +861,11 @@ def run_window(
             return False
         report.merged_prs.append(merged)
         record.pr_state, record.ready_for_merge, record.landing = "MERGED", False, "fast_forward_merged"
+        if on_merged is not None:
+            try:
+                on_merged(record.task_id)  # e.g. close the upstream issue now that the exact head is merged; advisory only
+            except Exception:  # noqa: BLE001 - outbound sync never alters landing results
+                pass
         report.final_repo_state = hooks.repo_state()
         return True
 
@@ -935,7 +948,7 @@ def run_window(
                 if entry is not None:
                     report.reentered.append(entry)
                     report.not_selected.pop(task_id, None)
-            before = {task_id: progress_key(store, task_id) for task_id in batch}
+            before = {task_id: progress_state(store, task_id) for task_id in batch}
             wave = run_wave(
                 store,
                 batch,
@@ -959,7 +972,7 @@ def run_window(
                 resume.pop(record.task_id, None)
                 if record.outcome == "open" and record.stop_reason == "MAX_STEPS":
                     count = sum(1 for entry in report.continued if entry["task_id"] == record.task_id)
-                    note = continuation(store, record.task_id, count, options.max_continuations, progress_key(store, record.task_id) != before.get(record.task_id))
+                    note = continuation(store, record.task_id, count, options.max_continuations, _meaningful_progress(store, record.task_id, before.get(record.task_id)))
                     if note["continue"]:
                         resume[record.task_id] = count + 1
                         report.continued.append(note)
@@ -1080,7 +1093,14 @@ def format_window_report(report: WindowReport) -> str:
     for entry in report.continued:
         lines.append(f"  resumed {entry['task_id']} after the step cap (run {entry['attempt'] + 1}): stage {entry['stage']}, candidate {str(entry['candidate_sha'])[:7]}")
     if report.not_selected:
-        lines.append("left alone: " + "; ".join(f"{k} ({v})" for k, v in sorted(report.not_selected.items(), key=lambda kv: _task_sort_key(kv[0]))))
+        ordered = sorted(report.not_selected.items(), key=lambda kv: _task_sort_key(kv[0]))
+        lines.append(
+            "left alone: "  # one cause on several tasks is one entry, not a repeated request
+            + "; ".join(
+                f"{', '.join(entry['tasks'])} ({entry['reason']})"
+                for entry in consolidate_blockers(((task_id, str(reason)) for task_id, reason in ordered), exact=True)
+            )
+        )
     if report.merged_prs:
         lines.append("fast-forward merged: " + ", ".join("#" + str(item["pr"]) for item in report.merged_prs))
     if report.open_wave_prs:

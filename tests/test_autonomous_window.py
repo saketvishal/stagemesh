@@ -138,7 +138,8 @@ def progress(rig, task_id: str) -> None:  # type: ignore[no-untyped-def]
     """What a capped run leaves behind: a validated candidate that has not been reviewed yet."""
     store = rig.worker_store()
     try:
-        sha = (task_id + "e" * 40)[:40]
+        runs = rig.runs.count(task_id)  # each later capped run leaves a further candidate: meaningful progress, not repeated activity
+        sha = (task_id + (str(runs) if runs > 1 else "") + "e" * 40)[:40]
         store.add_candidate(task_id, sha, "codex", True)
         store.add_evidence(task_id, sha, EvidenceKind.VALIDATION, EvidenceStatus.PASSED)
     finally:

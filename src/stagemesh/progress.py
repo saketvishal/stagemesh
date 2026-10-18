@@ -203,7 +203,13 @@ def with_progress(hooks: Any, db_path: Path, reporter: ProgressReporter, *, hear
         reporter.line(f"task {task_id}: started (up to {max_steps} steps)")
         with TaskMonitor(db_path, task_id, reporter, heartbeat_seconds=heartbeat_seconds, poll_seconds=poll_seconds):
             result = run_task(task_id, max_steps)
-        reporter.line(f"task {task_id}: finished: {result.stop_reason}")
+        qualifier = ""
+        if result.stop_reason == "DONE":  # ledger completion is not delivery
+            qualifier = (
+                " (ledger complete; delivery pending: PR not yet published or merged)" if open_pr is not None
+                else " (ledger complete; integrated, but this run publishes and merges nothing)"
+            )
+        reporter.line(f"task {task_id}: finished: {result.stop_reason}{qualifier}")
         return result
 
     def pr(record: Any) -> str:
@@ -213,7 +219,7 @@ def with_progress(hooks: Any, db_path: Path, reporter: ProgressReporter, *, hear
         except Exception as exc:
             reporter.line(f"task {record.task_id}: PR open failed: {exc}")
             raise
-        reporter.line(f"task {record.task_id}: PR opened {url}")
+        reporter.line(f"task {record.task_id}: PR opened {url} (awaiting checks; not merged)")
         return url
 
     setter = getattr(open_pr, "set_deadline", None)

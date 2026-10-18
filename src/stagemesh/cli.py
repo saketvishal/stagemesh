@@ -790,6 +790,21 @@ def command_finding_disposition(args: argparse.Namespace) -> int:
     return _repair_command(args, run)
 
 
+def command_delivery_unblock(args: argparse.Namespace) -> int:
+    from .delivery_state import clear_external_block, externally_blocked
+
+    def run(store, project):  # type: ignore[no-untyped-def]
+        blocked = externally_blocked(store, args.task)
+        if blocked is None:
+            raise RecoveryRefusal("not_blocked", f"task {args.task} has no external delivery blocker on record")
+        clear_external_block(store, args.task, args.actor, args.reason)
+        if not args.json:
+            print(f"task {args.task}: external delivery blocker cleared by {args.actor}; the next window retries publication once")
+        return {"task_id": args.task, "cleared": blocked}
+
+    return _repair_command(args, run)
+
+
 def command_advance_baseline(args: argparse.Namespace) -> int:
     def run(store, project):  # type: ignore[no-untyped-def]
         report = advance_baseline(store, project, args.task, args.to, reason=args.reason, yes=args.yes)
@@ -971,6 +986,15 @@ def command_run_window(args: argparse.Namespace) -> int:
             hooks = with_progress(hooks, db_path(project), reporter, heartbeat_seconds=args.heartbeat)
             if merger is not None:
                 merger.progress = reporter.line
+        outbound_sync, outbound_names = _github_outbound(config, store, dry_run=False)
+
+        def on_merged(task_id: str) -> None:
+            task = store.get_task(task_id)
+            if outbound_sync is not None and task is not None:
+                from .outbound_lifecycle import sync_outbound_outcomes
+
+                sync_outbound_outcomes(store, outbound_sync, outbound_names, [task], {task_id: "DONE"})
+
         report = run_window(
             store,
             project,
@@ -983,6 +1007,7 @@ def command_run_window(args: argparse.Namespace) -> int:
             merge_setup_error=merger_error,
             prepare_staging=None if local else (lambda: prepare_staging_ref(project, base_ref, STAGING_REF)),
             checkout_ref=lambda: _current_branch_ref(project),
+            on_merged=on_merged,
         )
     finally:
         store.close()
@@ -3308,6 +3333,15 @@ def build_parser() -> argparse.ArgumentParser:
     disposition.add_argument("--rationale", required=True)
     disposition.add_argument("--json", action="store_true")
     disposition.set_defaults(func=command_finding_disposition)
+    delivery_unblock = sub.add_parser(
+        "delivery-unblock",
+        help="Clear a recorded external delivery blocker (missing push/PR permission) after access was granted; the next window retries once",
+    )
+    delivery_unblock.add_argument("--task", required=True)
+    delivery_unblock.add_argument("--actor", required=True)
+    delivery_unblock.add_argument("--reason", required=True, help="What changed (for example: write access granted to the token)")
+    delivery_unblock.add_argument("--json", action="store_true")
+    delivery_unblock.set_defaults(func=command_delivery_unblock)
     advance = sub.add_parser(
         "advance-baseline",
         help="Move a task's baseline forward to the integration ref, reset its idle worktree and restart IMPLEMENT (audited; old state preserved)",

@@ -12,6 +12,7 @@ from .blocked_recovery import auto_retry_blocked_provider_failures, exhaustion_m
 from .config import TaskSelectionConfig
 from .contract_check import contract_section_sizes
 from .contract_feasibility import check_contract_feasibility
+from .delivery_state import task_delivery
 from .contracts import (
     ContractError,
     canonical_contract_json,
@@ -35,6 +36,7 @@ from .recovery import (
     auto_revalidate_blocked_validation_gates,
 )
 from .scheduling import Scheduler
+from .step_progress import STEP_CAP_STALL_LIMIT, ProgressState, progress_state, record_step_cap, unproductive_step_caps
 from .task_selection import Candidate, Selection, SelectionRefusal, contract_state, select_next_task
 from .timing import execution_timings, format_duration, step_duration
 from .workspace_guard import EXTERNAL_WORKSPACE_MUTATION
@@ -474,6 +476,39 @@ def format_start(summary: RunSummary) -> str:
     return "\n".join(lines)
 
 
+def _settle_step_cap(
+    summary: RunSummary, store: Store, project: Path, task_id: str, coordinator: Coordinator, started: ProgressState, steps: int,
+) -> None:
+    """A step cap with meaningful progress stays resumable. Repeated caps without it end as one typed blocker, not a new admission."""
+    from .block_kinds import BlockKind, record_block, runtime_fingerprint
+
+    note = record_step_cap(store, task_id, started, progress_state(store, task_id), steps)
+    summary.detail["step_cap"] = note
+    unproductive = unproductive_step_caps(store, task_id)
+    if note["progressed"] or unproductive < STEP_CAP_STALL_LIMIT:
+        return
+    task = store.get_task(task_id)
+    if task is None or task["status"] != TaskStatus.OPEN:
+        return
+    reason = (
+        f"step_cap_no_progress: {unproductive} consecutive step-capped runs made no meaningful progress (latest: {note['reason']}). "
+        "Another admission would repeat the same loop. Run `stagemesh diagnose --task " + task_id + "` and fix the cause, "
+        "then `stagemesh retry-task`."
+    )
+    latest = store.latest_candidate(task_id)
+    try:
+        fingerprint = runtime_fingerprint(project)
+    except Exception:  # noqa: BLE001 - the fingerprint only decides when a bounded automatic re-entry is allowed
+        fingerprint = None
+    record_block(
+        store, task_id, BlockKind.RECOVERABLE_OPERATIONAL, reason, stage=str(task["stage"]),
+        candidate_sha=None if latest is None else str(latest["sha"]), runtime=fingerprint,
+        detail={"failure_code": "step_cap_no_progress", "unproductive_step_caps": unproductive},
+    )
+    summary.stop_reason, summary.message = "BLOCKED", reason
+    _attach_diagnosis(summary, store, project, task_id, coordinator)
+
+
 def _attach_diagnosis(
     summary: RunSummary, store: Store, project: Path, task_id: str, coordinator: Coordinator | None
 ) -> None:
@@ -508,6 +543,9 @@ def _attach_diagnosis(
 
 def format_stop(summary: RunSummary) -> str:
     reason = _human_stop_reason(summary.stop_reason)
+    delivery = summary.detail.get("delivery")
+    if summary.stop_reason == "DONE" and isinstance(delivery, dict):
+        reason += f" (ledger complete; {str(delivery['state']).replace('_', ' ').lower()}: {delivery['detail']})"
     lines = [f"stopped: {reason}"]
     if summary.message:
         lines.append(f"  reason: {summary.message}")
@@ -851,6 +889,7 @@ def drive_task(
     if on_start is not None:
         on_start(format_start(summary))
     control = QueueStopControl(store, selected)
+    started_state = progress_state(store, selected)
     for number in range(1, max_steps + 1):
         if control.poll() is not None:
             summary.stop_reason, summary.message = "OPERATOR_STOP", "operator stop requested; current stage retained"
@@ -884,6 +923,7 @@ def drive_task(
         new = step["new"]
         if new["stage"] == Stage.DONE or new["status"] == TaskStatus.DONE:
             summary.stop_reason = "DONE"
+            summary.detail["delivery"] = task_delivery(store, selected).to_dict()  # ledger DONE is not delivery
             break
         if new["status"] == TaskStatus.BLOCKED:
             summary.stop_reason, summary.message = "BLOCKED", _blocked_message(store, selected)
@@ -911,6 +951,7 @@ def drive_task(
             break
     else:
         summary.stop_reason, summary.message = "MAX_STEPS", f"stopped after {max_steps} steps"
+        _settle_step_cap(summary, store, project, selected, coordinator, started_state, max_steps)
     if should_stop is not None and should_stop() and summary.stop_reason not in {"DONE", "BLOCKED", "STOP_CLEANUP_INCOMPLETE", "STOP_MONITOR_FAILED"}:
         # A provider killed by the interrupt reports a failure; that is the interrupt, not a verdict on the task.
         # A task that already finished or was blocked keeps its own outcome and reason.
