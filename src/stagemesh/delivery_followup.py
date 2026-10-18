@@ -151,6 +151,10 @@ def _identity_key(identity: FollowUpIdentity, store: Store) -> str:
     # The generation separates a follow-up that ended (blocked, expired) from the one an operator explicitly re-opened.
     n = generation(store, identity.task_id)
     base = FollowUpIdentity(identity.repository, identity.task_id, identity.candidate_sha).key()
+    for g in range(n, -1, -1):  # an active follow-up for this delivery is reused, whatever generation armed it
+        candidate = base if g == 0 else f"{base}-g{g}"
+        if follow_up_active(store, candidate):
+            return candidate
     return base if n == 0 else f"{base}-g{n}"
 
 
@@ -213,6 +217,7 @@ def register_pending_follow_ups(
     ttl_seconds: int = DEFAULT_TTL_SECONDS,
     window_seconds: float = 1800,
     clock: Callable[[], float] = time.time,
+    landing_since: float = 0.0,
 ) -> list[dict[str, Any]]:
     """Arm at most one follow-up per pending delivery. Returns a compact record per task for the window report."""
     entries: list[dict[str, Any]] = []
@@ -222,7 +227,7 @@ def register_pending_follow_ups(
             continue
         scope = ((SCOPE_PUBLISH,) if open_prs else ()) + ((SCOPE_MERGE,) if merge_authorized else ())
         needs = SCOPE_PUBLISH if delivery.state == "DELIVERY_PENDING" else SCOPE_MERGE
-        landed = latest_landing_result(store, task_id, delivery.head_sha) if needs == SCOPE_MERGE else None
+        landed = latest_landing_result(store, task_id, delivery.head_sha, landing_since) if needs == SCOPE_MERGE else None
         if landed is not None and not landed["retryable"]:
             entries.append({"task_id": task_id, "state": "not_followed", "reason": f"landing stopped for a reason waiting cannot fix: {landed['reason']}"})
             continue
@@ -281,7 +286,10 @@ def _finish(
 def _deschedule(store: Store, key: str, scheduler: FollowUpScheduler | None) -> bool:
     handle = schedule_handle(store, key)
     if handle is None:
-        return True
+        derive = getattr(scheduler, "handle_for", None)  # a crash between creating the schedule and recording it must not leak it
+        if scheduler is None or not callable(derive) or not scheduler.exists(derive(key)):
+            return True
+        handle = derive(key)
     if scheduler is None:
         return False
     try:
@@ -479,7 +487,7 @@ def _classify(
 def rearm_follow_up(store: Store, key: str) -> str | None:
     """Explicitly re-open delivery for a finished follow-up's task (the next window with --follow-up arms a fresh generation)."""
     record = follow_up_record(store, key)
-    if record is None:
+    if record is None or follow_up_active(store, key):  # re-arming is for a follow-up that ended
         return None
     record_audit(store, REARMED, {"task_id": record["task_id"], "key": key})
     return str(record["task_id"])

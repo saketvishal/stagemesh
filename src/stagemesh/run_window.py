@@ -915,6 +915,7 @@ def run_window(
                 window_id=report.window_id, base_argv=_resume_argv(options), base=base_ref.removeprefix("refs/heads/"),
                 scheduler=follow_up_scheduler, interval_seconds=options.follow_up_interval_seconds,
                 ttl_seconds=options.follow_up_ttl_seconds, window_seconds=min(options.duration_seconds, 1800.0), clock=clock,
+                landing_since=window_wall_start,
             )
         except Exception as exc:  # noqa: BLE001 - a follow-up problem is reported, never allowed to hide the window's result
             report.follow_ups = [{"state": "error", "reason": f"{type(exc).__name__}: {exc}"}]

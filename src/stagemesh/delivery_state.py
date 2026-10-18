@@ -96,6 +96,8 @@ def _latest(
 
 
 def is_permission_denial(message: str) -> bool:
+    if "rate limit" in message.casefold():  # a 403 that is only throttling is transient, not a missing permission
+        return False
     return bool(_PERMISSION_PATTERN.search(message))
 
 

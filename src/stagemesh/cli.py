@@ -1085,7 +1085,7 @@ def command_follow_up(args: argparse.Namespace) -> int:
         if args.rearm:
             task_id = rearm_follow_up(store, args.key)
             if task_id is None:
-                print(f"no such follow-up: {args.key}", file=sys.stderr)
+                print(f"no such follow-up, or it is still active (cancel it first): {args.key}", file=sys.stderr)
                 return 2
             print(f"task {task_id}: the next `run-window --follow-up` arms a fresh follow-up")
             return 0

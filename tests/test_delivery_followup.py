@@ -9,6 +9,7 @@ OS scheduler (an in-memory registry) and the clock.
 from __future__ import annotations
 
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -785,3 +786,72 @@ def test_the_gh_adapter_turns_every_failure_into_a_classified_error(tmp_path: Pa
     with pytest.raises(HostingError) as denied:
         GhHosting(tmp_path).pr_snapshot("https://github.com/acme/app/pull/1")
     assert denied.value.permission is True
+
+
+# -------------------------------------------------------------------------------------------------------------------------------
+# independent-review fixes
+
+
+def test_rate_limiting_is_transient_not_a_permission_denial() -> None:
+    from stagemesh.delivery_state import is_permission_denial
+
+    assert not is_permission_denial("HTTP 403: API rate limit exceeded for user")
+    assert not is_permission_denial("error 403 secondary rate limit")
+    assert is_permission_denial("HTTP 403: Resource not accessible by integration")
+
+
+def test_a_stale_landing_result_does_not_veto_arming_a_later_window(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    h.merge_script = [{"merged": False, "reason": "hosted CI failed; candidate not merged"}]
+    assert h.window(merge=True).follow_ups[0]["state"] == "not_followed"
+    time.sleep(0.05)
+    h.merge_script = [{"merged": False, "reason": "hosted CI deadline reached; PR retained for retry"}]  # CI re-run on the same head
+    again = h.window(tasks=["1"], merge=True)
+    assert again.follow_ups and again.follow_ups[0]["state"] == "registered"
+
+
+def test_rearm_and_unblock_never_create_a_second_worker_for_an_active_delivery(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    key = _deadline_before_publication(h).follow_ups[0]["key"]
+    assert rearm_follow_up(h.store, key) is None  # still active: refused
+    clear_external_block(h.store, "1", "owner", "x")  # an unblock bumps the generation, but the active follow-up is reused
+    again = h.window(tasks=["1"], expire=100.0)
+    assert [e["key"] for e in again.follow_ups] == [key] and len(active_follow_ups(h.store)) == 1
+
+
+def test_a_schedule_created_before_a_crash_is_still_removed_on_completion(tmp_path: Path) -> None:
+    recorder = Recorder()
+    h = Harness(tmp_path)
+    h.scheduler = WindowsTaskScheduler(h.project, runner=recorder)
+    key = _deadline_before_publication(h).follow_ups[0]["key"]
+    h.store.conn.execute("DELETE FROM audit_events WHERE event_type='followup.scheduled'")  # the handle was never recorded
+    h.store.conn.commit()
+    assert schedule_handle(h.store, key) is None and recorder.tasks
+
+    h.wake(key)
+
+    assert recorder.tasks == set()
+
+
+def test_budget_never_blocks_ticks_that_call_no_provider(tmp_path: Path) -> None:
+    from stagemesh.efficiency import BudgetPolicy, record_provider_call
+
+    rig = _LoopRigForStage(tmp_path)
+    for i in range(5):
+        record_provider_call(rig.store, task_id="TASK-1", purpose="review", provider="claude", outcome="failed", reason="same", duration_seconds=1.0)
+    rig.coordinator.budget_policy = BudgetPolicy(max_equivalent_failures=2)
+    rig.store.advance_task("TASK-1", Stage.INTEGRATE)
+    from stagemesh.run_ready import RunSummary, drive_task
+
+    summary = RunSummary(True, "UNSET", task_id="TASK-1")
+    drive_task(rig.store, rig.project, rig.coordinator, "TASK-1", summary, max_steps=1, global_health=False)
+    assert summary.steps  # the integrate tick ran despite the spent provider budget
+
+
+class _LoopRigForStage:
+    def __init__(self, tmp_path: Path):
+        from test_completion_integrity import FakeReviewAdapter
+        from test_completion_integrity import Rig as CompletionRig
+
+        rig = CompletionRig(tmp_path, FakeReviewAdapter("claude"), integration_ref="refs/heads/integration")
+        self.store, self.project, self.coordinator = rig.store, rig.project, rig.coordinator

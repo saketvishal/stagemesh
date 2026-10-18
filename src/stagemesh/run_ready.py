@@ -923,7 +923,11 @@ def drive_task(
             summary.stop_reason, summary.message = "INTERRUPTED", "the run was interrupted; claims were released and the worktree kept"
             break
         # A stage boundary: the previous tick has fully ended and the next has not begun, so stopping here never interrupts work.
-        verdict = check_task_budget(store, selected, getattr(coordinator, "budget_policy", None) or BudgetPolicy())
+        current = store.get_task(selected)
+        # Validation, integration and publication ticks call no provider, so a spent provider budget never blocks delivery of
+        # verified work; it only stops the stages that would spend more.
+        spends_provider = current is not None and str(current["stage"]) in (str(Stage.IMPLEMENT), str(Stage.REVIEW))
+        verdict = check_task_budget(store, selected, getattr(coordinator, "budget_policy", None) or BudgetPolicy()) if spends_provider else None
         if verdict is not None:
             _settle_budget(summary, store, project, selected, coordinator, verdict)
             break
