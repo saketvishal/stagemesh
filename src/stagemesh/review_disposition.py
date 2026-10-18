@@ -25,6 +25,8 @@ FINDING_RECORDED = "review.finding_recorded"
 FINDING_DISPOSITION = "review.finding_disposition"
 UNRESOLVED_EVENT = "review.adverse_finding_unresolved"
 
+RECHECK_EVENT = "task.recheck_existing_candidate"
+WITHDRAWN = "withdrawn_by_reviewer"
 DISPOSITIONS = ("refuted_with_evidence", "waived_by_owner")
 
 
@@ -72,9 +74,13 @@ def record_review_findings(
 
 def _events(store: Store, event_type: str, task_id: str) -> list[dict[str, Any]]:
     rows = store.conn.execute(
-        "SELECT payload FROM audit_events WHERE event_type=? ORDER BY created_at, rowid", (event_type,)
+        "SELECT payload, created_at FROM audit_events WHERE event_type=? ORDER BY created_at, rowid", (event_type,)
     ).fetchall()
-    return [payload for row in rows if (payload := _loads(row["payload"])).get("task_id") == task_id]
+    return [
+        {**payload, "_at": float(row["created_at"])}
+        for row in rows
+        if (payload := _loads(row["payload"])).get("task_id") == task_id
+    ]
 
 
 def unresolved_adverse_review_findings(store: Store, task_id: str, candidate_sha: str) -> list[dict[str, Any]]:
@@ -90,6 +96,55 @@ def unresolved_adverse_review_findings(store: Store, task_id: str, candidate_sha
     return unresolved
 
 
+def recheck_review_authorized(store: Store, task_id: str, candidate_sha: str) -> bool:
+    """True when a no-op remediation asked for exactly one re-check of this candidate and no review has run since."""
+    rechecks = [e for e in _events(store, RECHECK_EVENT, task_id) if e.get("candidate_sha") == candidate_sha]
+    if not rechecks:
+        return False
+    since = rechecks[-1]["_at"]
+    newer = store.conn.execute(
+        "SELECT 1 FROM evidence WHERE task_id=? AND candidate_sha=? AND kind='REVIEW' AND created_at>=? LIMIT 1",
+        (task_id, candidate_sha, since),
+    ).fetchone()
+    return newer is None
+
+
+def reconcile_withdrawals(store: Store, task_id: str, candidate_sha: str, contract_hash: str) -> list[str]:
+    """A reviewer may withdraw its own finding by passing the same candidate later; no other reviewer's PASS counts.
+
+    The withdrawal is recorded as an explicit disposition that cites the PASSED review evidence, so the history shows who changed
+    their verdict and on what evidence. Returns the finding ids resolved this way.
+    """
+    pending = unresolved_adverse_review_findings(store, task_id, candidate_sha)
+    if not pending:
+        return []
+    passes = store.conn.execute(
+        "SELECT id, payload, created_at FROM evidence WHERE task_id=? AND candidate_sha=? AND kind='REVIEW' AND status='PASSED' ORDER BY created_at, rowid",
+        (task_id, candidate_sha),
+    ).fetchall()
+    resolved: list[str] = []
+    for finding in pending:
+        raised_at = next((e["_at"] for e in _events(store, FINDING_RECORDED, task_id) if e.get("finding_id") == finding["finding_id"]), 0.0)
+        reviewer = str(finding.get("reviewer") or "").casefold()
+        for row in passes:
+            payload = _loads(row["payload"])
+            if (
+                float(row["created_at"]) >= raised_at
+                and payload.get("contract_hash") == contract_hash
+                and payload.get("independent_reviewer") is not False
+                and str(payload.get("review_provider") or "").casefold() == reviewer
+                and reviewer
+            ):
+                record_disposition(
+                    store, task_id, finding["finding_id"], disposition=WITHDRAWN, actor=str(finding.get("reviewer")),
+                    evidence_ref=f"review-evidence:{row['id']}",
+                    rationale="the reviewer that raised this finding passed the same candidate on re-check",
+                )
+                resolved.append(finding["finding_id"])
+                break
+    return resolved
+
+
 def finding_history(store: Store, task_id: str, finding_id: str) -> list[dict[str, Any]]:
     """Every recorded step for one finding, oldest first: raised, then any dispositions."""
     history = [{"event": FINDING_RECORDED, **item} for item in _events(store, FINDING_RECORDED, task_id) if item.get("finding_id") == finding_id]
@@ -101,7 +156,7 @@ def record_disposition(
     store: Store, task_id: str, finding_id: str, *, disposition: str, actor: str, evidence_ref: str, rationale: str
 ) -> dict[str, Any]:
     """Resolve one adverse finding by explicit, evidenced decision. Nothing else closes a review finding."""
-    if disposition not in DISPOSITIONS:
+    if disposition not in (*DISPOSITIONS, WITHDRAWN):
         raise DispositionError(f"disposition must be one of: {', '.join(DISPOSITIONS)}")
     for name, value in (("actor", actor), ("evidence reference", evidence_ref), ("rationale", rationale)):
         if not value or not value.strip():

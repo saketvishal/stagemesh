@@ -66,7 +66,13 @@ from .remediation_recovery import (
     stalled_since_last_round,
 )
 from .review import Reviewer, independent_review_verified
-from .review_disposition import UNRESOLVED_EVENT, AdverseSummary, unresolved_adverse_review_findings
+from .review_disposition import (
+    UNRESOLVED_EVENT,
+    AdverseSummary,
+    reconcile_withdrawals,
+    recheck_review_authorized,
+    unresolved_adverse_review_findings,
+)
 from .scheduling import Scheduler
 from .task_completion import record_task_owner_state
 from .task_selection import contract_state
@@ -384,9 +390,10 @@ class Coordinator:
             if not self._workspace_intact(task_id, sha, "REVIEW:before_review", require=(EvidenceKind.VALIDATION,)):
                 return 1
             bound = contract_for_candidate(self.store, task_id, sha, self.project)
+            reconcile_withdrawals(self.store, task_id, sha, bound.digest)
             if not self._review_satisfied(task_id, sha, bound.digest):
                 pending = AdverseSummary(tuple(unresolved_adverse_review_findings(self.store, task_id, sha)))
-                if pending:
+                if pending and not recheck_review_authorized(self.store, task_id, sha):
                     # An earlier reviewer's adverse finding is still open on this exact candidate. Asking again until someone
                     # passes would only bury it, so no new reviewer runs: the finding is remediated or dispositioned explicitly.
                     record_audit(self.store, UNRESOLVED_EVENT, {
@@ -397,6 +404,7 @@ class Coordinator:
                 self.reviewer.review(self.store, task_id, sha, self.project)
                 if not self._workspace_intact(task_id, sha, "REVIEW:after_review", require=(EvidenceKind.VALIDATION,)):
                     return 1
+                reconcile_withdrawals(self.store, task_id, sha, bound.digest)
             if self._review_satisfied(task_id, sha, bound.digest):
                 return self._advance_with_evidence(task_id, stage, sha, EvidenceKind.REVIEW, bound.digest)
             if self.store.has_bound_evidence(task_id, sha, EvidenceKind.REVIEW, bound.digest, EvidenceStatus.FAILED):

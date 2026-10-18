@@ -118,6 +118,8 @@ class Validator:
                     "planned": list(plan.planned_checks),
                     "executed": list(executed),
                     "missing": list(missing),
+                },
+                "check_roles": {
                     "required": [name for name in executed if name not in exploratory],
                     "exploratory": [name for name in executed if name in exploratory],
                 },

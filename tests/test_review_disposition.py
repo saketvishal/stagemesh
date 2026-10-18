@@ -121,3 +121,41 @@ def test_a_remediated_candidate_needs_its_own_final_review(tmp_path: Path) -> No
     reviewed = {row["candidate_sha"] for row in rig.store.conn.execute("SELECT candidate_sha FROM evidence WHERE kind='REVIEW' AND status='PASSED'")}
     if latest != first:
         assert reviewed <= {latest}  # the earlier candidate's review was never carried over to the remediation
+
+
+def _authorize_recheck(rig: Rig, sha: str) -> None:
+    """What a no-op remediation does: ask for one re-check of the candidate it declined to change."""
+    from stagemesh.audit import record_audit
+
+    record_audit(rig.store, "task.recheck_existing_candidate", {"task_id": TASK, "candidate_sha": sha, "from_stage": "IMPLEMENT", "to_stage": "REVIEW", "reason": "no_implementation_change"})
+    rig.store.advance_task(TASK, Stage.REVIEW)
+
+
+def test_the_reviewer_that_raised_a_finding_may_withdraw_it_on_the_one_authorized_recheck(tmp_path: Path) -> None:
+    rig, sha = _rig_with_adverse_review(tmp_path)
+    _authorize_recheck(rig, sha)
+    same = FakeReviewAdapter("claude")  # the reviewer that raised the finding now passes the unchanged candidate
+    rig.coordinator.reviewer = Reviewer(adapter=same, require_independent=True)
+
+    rig.tick(1)
+
+    assert same.calls == 1 and rig.stage == Stage.INTEGRATE
+    finding_id = _events(rig, FINDING_RECORDED)[0]["finding_id"]
+    withdrawn = finding_history(rig.store, TASK, finding_id)[-1]
+    assert withdrawn["event"] == FINDING_DISPOSITION and withdrawn["disposition"] == "withdrawn_by_reviewer"
+    assert withdrawn["actor"] == "claude" and withdrawn["evidence_ref"].startswith("review-evidence:")  # explicit, attributable, evidenced
+
+
+def test_a_different_reviewers_pass_on_the_recheck_does_not_resolve_the_finding(tmp_path: Path) -> None:
+    rig, sha = _rig_with_adverse_review(tmp_path)
+    _authorize_recheck(rig, sha)
+    other = FakeReviewAdapter("grok")
+    rig.coordinator.reviewer = Reviewer(adapter=other, require_independent=True)
+
+    rig.tick(1)
+
+    assert other.calls == 1 and rig.stage != Stage.INTEGRATE
+    assert unresolved_adverse_review_findings(rig.store, TASK, sha)  # still open: another reviewer cannot erase it
+    rig.store.advance_task(TASK, Stage.REVIEW)
+    rig.tick(1)
+    assert other.calls == 1  # the single authorized re-check is spent; reviewers are not retried until one passes

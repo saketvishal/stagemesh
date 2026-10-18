@@ -37,7 +37,7 @@ providers, temporary repositories and controlled clocks (`tests/test_gate_execut
   baseline itself is never replaced.
 * A frozen gate that names its own comparison base (`--base origin/main`, a SHA, `A...B`) is reported in
   `selection.declared_gate_bases` and preserved.
-* Required gates and discovered (exploratory) gates are listed separately in `validation_checks`.
+* Required gates and discovered (exploratory) gates are listed separately in `check_roles`.
 * Within one attempt, gates with the same command, directory, environment and limit run once. Across attempts a PASSED gate is reused
   only when the candidate tree, contract digest, command, working directory, environment, time limit, resolved executable, platform
   and the reuse policy version are all identical; `validation_reuse` lists what ran and what was reused from which evidence.
