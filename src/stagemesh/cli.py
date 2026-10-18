@@ -1094,14 +1094,23 @@ def command_continue(args: argparse.Namespace) -> int:
                 print(f"--parallel selects tasks automatically and cannot be combined with {', '.join(conflicts)}", file=sys.stderr)
                 return 2
             return command_run_parallel(args)
-    if not getattr(args, "once", False):
-        return command_run_ready(args)  # default: supervise one task to completion; --once keeps the single tick
     project = Path(args.project).resolve()
     targeted_task_id = getattr(args, "task", None) or getattr(args, "task_id", None)
     targeted_mode = targeted_task_id is not None
     if targeted_task_id is not None and not str(targeted_task_id).strip():
         print("target task id must not be empty", file=sys.stderr)
         return 2
+    if targeted_task_id is not None and not getattr(args, "integration_ref", None):
+        resume_command = _pr_window_resume_command(project, str(targeted_task_id))
+        if resume_command:
+            print(
+                "targeted continue refused: this task belongs to a PR-mode run-window; "
+                "plain continue would bypass PR publication. Resume it with:\n" + resume_command,
+                file=sys.stderr,
+            )
+            return 2
+    if not getattr(args, "once", False):
+        return command_run_ready(args)  # default: supervise one task to completion; --once keeps the single tick
     target = TargetSelection(str(targeted_task_id)) if targeted_task_id is not None else None
     config = load_config(project)
     store = Store(db_path(project))
@@ -1457,6 +1466,21 @@ def command_run_ready(args: argparse.Namespace) -> int:
     store.close()
     info["provider_events"] = provider_log.lines
     return _report_run_ready(summary, info, as_json=args.json)
+
+
+def _pr_window_resume_command(project: Path, task_id: str) -> str | None:
+    from .window_journal import latest_task_context
+
+    store = Store(db_path(project))
+    store.migrate()
+    try:
+        context = latest_task_context(store, task_id)
+    finally:
+        store.close()
+    if context is None or context.get("integration_mode") != "pr":
+        return None
+    command = context.get("resume_command")
+    return command if isinstance(command, str) and command else None
 
 
 def _continue_after_task_block(summary: RunSummary, requested: str | None) -> bool:

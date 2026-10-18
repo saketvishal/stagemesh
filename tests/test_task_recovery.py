@@ -692,6 +692,39 @@ def test_remediation_prompt_includes_exact_review_findings_and_candidate_sha(tmp
     assert "[warning] Missing test for the timeout path" in prompt and "[error] The retry loop" in prompt
 
 
+def test_remediation_prompt_includes_exact_failed_gate_output(tmp_path: Path) -> None:
+    project, store = _setup(tmp_path, DOCS_CONTRACT)
+    sha = "f" * 40
+    message = "mobile-inventory failed"
+    store.add_candidate(TASK, sha, "impl", durable_handoff=True)
+    store.add_evidence(
+        TASK,
+        sha,
+        EvidenceKind.VALIDATION,
+        EvidenceStatus.FAILED,
+        {
+            "findings": [
+                {
+                    "code": "gate_failed",
+                    "message": message,
+                    "command": ["python", "check_inventory.py"],
+                    "returncode": 1,
+                    "stdout": "schema check started",
+                    "stderr": "KeyError: baseline_sha",
+                }
+            ]
+        },
+    )
+    store.upsert_finding(finding_identity(sha, message), TASK, sha, "error", message)
+    store.add_task_remediation(TASK, "VALIDATE", sha)
+
+    prompt = _remediation_prompt(remediation_context(store, TASK, project))
+
+    assert "Exact failed validation evidence" in prompt
+    assert "KeyError: baseline_sha" in prompt and "schema check started" in prompt
+    assert '"command": [' in prompt and '"returncode": 1' in prompt
+
+
 def test_review_findings_are_shown_in_diagnose_doctor_and_run_summary(tmp_path: Path) -> None:
     project, store = _setup(tmp_path, DOCS_CONTRACT)
     sha = "b" * 40
