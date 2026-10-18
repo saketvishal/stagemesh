@@ -779,6 +779,21 @@ def git_gh_pr_opener(project: Path, base: str = "main", *, clock: Callable[[], f
                 raise RuntimeError("existing fallback branch differs from the verified candidate; publication was not repeated")
         prior = json.loads(run("gh", "pr", "list", "--state", "all", "--head", branch,
                                "--json", "url,state,headRefOid,baseRefName"))
+        # A merged PR can outlive its deleted local branch. Preserve it and publish
+        # a later verified candidate separately, just as for a retained old ref.
+        if (branch == f"wave/task-{record.task_id}" and isinstance(prior, list) and len(prior) == 1
+                and isinstance(prior[0], dict) and prior[0].get("state") == "MERGED"
+                and prior[0].get("baseRefName") == base and isinstance(prior[0].get("url"), str)
+                and prior[0]["url"] and isinstance(prior[0].get("headRefOid"), str)
+                and len(prior[0]["headRefOid"]) == 40
+                and all(c in "0123456789abcdef" for c in prior[0]["headRefOid"])
+                and prior[0]["headRefOid"] != sha):
+            branch = f"{branch}-{sha[:7]}"
+            existing = execute("git", "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}", check=False)
+            if existing.returncode == 0 and existing.stdout.strip() != sha:
+                raise RuntimeError("existing fallback branch differs from the verified candidate; publication was not repeated")
+            prior = json.loads(run("gh", "pr", "list", "--state", "all", "--head", branch,
+                                   "--json", "url,state,headRefOid,baseRefName"))
         if not isinstance(prior, list) or any(not isinstance(pr, dict) for pr in prior):
             raise RuntimeError("PR lookup returned invalid metadata; publication was not repeated")
         if prior:
