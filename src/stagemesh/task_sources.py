@@ -363,6 +363,8 @@ def sync_source(store: Store, tasks: list[DiscoveredTask]) -> list[str]:
         source_objective = is_github and source_issue_is_objective(task.labels)
         historical_objective = is_github and not direct_execution and _objective_exists(store, task.source_id)
         cached: dict[str, object] = {"eligible": task.eligible, "state": state}
+        if task.eligibility_reason:
+            cached["eligibility_reason"] = task.eligibility_reason
         if source_objective or historical_objective:
             cached["objective_root"] = True
         previous_source_state = store.source_state(task.source, task.source_id) if is_github else {}
