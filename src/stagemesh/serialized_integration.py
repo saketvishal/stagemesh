@@ -86,6 +86,17 @@ class SerializedIntegrator(Integrator):
         result = GitWorkspace(project).run("rev-parse", "--verify", "--quiet", f"{self.integration_ref}^{{commit}}", check=False)
         return result.stdout.strip() if result.returncode == 0 and result.stdout.strip() else None
 
+    def refresh_before_verification(self, store: Store, task_id: str, candidate_sha: str, project: Path) -> bool:
+        """Avoid verifying an already stale SHA; retain the normal refresh budget."""
+        with self.lock.hold(task_id):
+            self._typed_failure = None
+            try:
+                if self.integration_ref is None or self._diverged(project, candidate_sha) is None:
+                    return False
+                return self._rebase(store, task_id, candidate_sha, project)
+            finally:
+                self._typed_failure = None
+
     def _diverged(self, project: Path, candidate_sha: str) -> str | None:
         """The ref tip when it is neither an ancestor nor a descendant of the candidate (so a fast-forward is impossible)."""
         tip = self._resolve(project)

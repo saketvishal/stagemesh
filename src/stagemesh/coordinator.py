@@ -347,6 +347,27 @@ class Coordinator:
         sha = str(candidate["sha"])
         if self.guard is not None and not self.guard.allow(stage, task_id, sha):
             return 0  # fail closed: the supervisor recorded why (external mutation, evidence not bound to this candidate, ...)
+        prepare = getattr(self.integrator, "refresh_before_verification", None)
+        if stage in {Stage.VALIDATE, Stage.REVIEW} and callable(prepare):
+            bound = contract_for_candidate(self.store, task_id, sha, self.project)
+            failed = any(self.store.has_bound_evidence(task_id, sha, kind, bound.digest, EvidenceStatus.FAILED)
+                         for kind in (EvidenceKind.VALIDATION, EvidenceKind.REVIEW))
+            # A replacement SHA must not bypass a persisted failure or its remediation budget.
+            if not failed and not self.store.open_findings_for_candidate(task_id, sha):
+                required = (EvidenceKind.VALIDATION,) if stage is Stage.REVIEW else ()
+                if not self._workspace_intact(task_id, sha, f"{stage}:before_freshness_check", require=required):
+                    return 1
+                try:
+                    refreshed = prepare(self.store, task_id, sha, self.project)
+                except WorkspaceMutation:
+                    self._block_on_mutation(task_id, str(stage))
+                    return 1
+                if refreshed:
+                    record_audit(self.store, "candidate.refreshed_before_verification", {
+                        "task_id": task_id, "from_candidate": sha, "stage": str(stage),
+                    })
+                    record_task_owner_state(self.store, task_id, "candidate_refreshed_before_verification", self.project)
+                    return 1  # the replacement must earn its own validation and review on later ticks
         if stage is Stage.VALIDATE:
             if not self._workspace_intact(task_id, sha, "VALIDATE:before_validation"):
                 return 1
