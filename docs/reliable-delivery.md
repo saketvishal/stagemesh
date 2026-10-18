@@ -4,7 +4,7 @@ How a bounded task gets from admission to a merged change without repeated check
 and what each state of that path honestly means. Every rule below is deterministic and covered by regression tests that use fake
 providers, temporary repositories and controlled clocks (`tests/test_gate_execution.py`, `test_gate_timeout_diagnosis.py`,
 `test_validation_selection_reuse.py`, `test_contract_feasibility.py`, `test_review_disposition.py`, `test_step_progress.py`,
-`test_honest_delivery.py`).
+`test_honest_delivery.py`, and the failure-to-delivery path in `test_reliable_delivery_end_to_end.py`).
 
 ## Gate execution and timeout diagnosis
 
@@ -65,7 +65,10 @@ review evidence (`review.finding_recorded`), and every resolution (`review.findi
 only when an independent PASS exists *and* no blocking review finding on that candidate is open. A later reviewer is not asked
 while one is open (reviewers are not retried until one passes); nothing integrates past it. Only
 `stagemesh finding-disposition --task T --finding ID --disposition refuted_with_evidence|waived_by_owner --actor A --evidence REF
---rationale TEXT` resolves it, and a remediated candidate always needs its own validation and review.
+--rationale TEXT` resolves it, and a remediated candidate always needs its own validation and review. The one exception is the
+existing no-op re-check (the implementer declined to change anything): the reviewer that raised a finding may withdraw it by passing
+the unchanged candidate on that single re-check, which is recorded as a `withdrawn_by_reviewer` disposition citing the PASS
+evidence. A different reviewer's PASS never counts.
 
 ## Retries and step caps
 
