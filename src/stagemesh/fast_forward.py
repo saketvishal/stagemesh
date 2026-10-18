@@ -261,6 +261,25 @@ class FastForwardPullRequests(GitHubPullRequests):
         output = self.bounded_git("ls-remote", self.remote_url, ref, after_landing=after_landing).stdout.split()
         return output[0] if output else None
 
+    def historical_ancestor(self, candidate: str, tip: str) -> bool:
+        """Observe completed history without fetching into the client checkout."""
+        if not all(re.fullmatch(r"[0-9a-f]{40}", sha) for sha in (candidate, tip)):
+            return False
+        local = GitWorkspace(self.project).run("merge-base", "--is-ancestor", candidate, tip, check=False)
+        if local.returncode == 0:
+            return True
+        if local.returncode == 1:
+            return False
+        # A newly observed remote tip may not exist locally yet. This proof only
+        # retires completed history; it never authorizes a new landing.
+        status, data = self._request("GET", f"/compare/{candidate}...{tip}?per_page=1")
+        if status != 200 or not isinstance(data, dict):
+            return False
+        base, merge_base = data.get("base_commit"), data.get("merge_base_commit")
+        return bool(data.get("status") in {"ahead", "identical"}
+            and isinstance(base, dict) and base.get("sha") == candidate
+            and isinstance(merge_base, dict) and merge_base.get("sha") == candidate)
+
     def sync_local(self, candidate):
         with IntegrationLock(self.project / ".stagemesh/integration.lock", timeout_seconds=10).hold("ff-sync"):
             git = lambda *args: self.bounded_git(*args, after_landing=True)
@@ -561,8 +580,7 @@ def make_merger(store, project: Path, base_ref: str, required_checks: tuple[str,
                     or pr.merge_commit_sha != sha or not is_task_pr_branch(pr.head_ref, completed.get("task_id", ""), sha)):
                 return False
             tip = pulls.remote_tip(base_ref)
-            return bool(tip and re.fullmatch(r"[0-9a-f]{40}", tip) and
-                GitWorkspace(project).run("merge-base", "--is-ancestor", sha, tip, check=False).returncode == 0)
+            return bool(tip and pulls.historical_ancestor(sha, tip))
 
         pending = {}
         pending_policies = {}
