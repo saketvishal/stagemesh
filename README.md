@@ -133,6 +133,10 @@ is how a stale task is retried; `--choose` asks on the terminal. Ranking (best f
 (`stagemesh:prep`, `prep`, `governance`, `readiness`), valid contract over one needing auto-planning, then issue number. Tasks with an
 excluded label (`stagemesh:blocked`, `stagemesh:deferred`), unmet dependencies, a stale failure (failed integration or pending
 remediation) or no contract that can be auto-planned are skipped. The reason is logged and returned as `selection` in `--json`.
+GitHub synchronization still registers open non-objective issues that are not eligible, so the complete backlog and its dependency
+frontier remain visible without making deferred work runnable. Dependency links are reconciled only after discovery completes.
+Issues with contradictory ready/blocked labels, a self-dependency or an unknown dependency are registered as blocked with a
+`source validation failed` reason; one malformed issue does not hide or stop valid work.
 Tune it with:
 
 ```json
