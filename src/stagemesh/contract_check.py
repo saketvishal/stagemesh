@@ -15,6 +15,7 @@ from .contracts import (
     parse_contract,
     task_contract_path,
 )
+from .contract_feasibility import check_contract_feasibility
 from .persistence import MAX_CANONICAL_CONTRACT_CHARS
 
 TOP_SECTIONS = 5
@@ -104,6 +105,17 @@ def check_contract(
         }
     report = check_contract_text(text, limit=limit, require_spec=require_spec)
     report["path"] = str(path)
+    if report["ok"]:
+        try:
+            parsed = parse_contract(json.loads(text))
+        except (ValueError, ContractError):
+            parsed = None
+        feasibility = None if parsed is None else check_contract_feasibility(project, parsed)
+        if feasibility is not None:
+            report["feasibility"] = feasibility.to_dict()
+            if not feasibility.feasible:
+                report["errors"].append(feasibility.message(task_id or path.stem, parsed))
+                report["ok"] = False
     if require_spec and report["ok"]:
         try:
             contract = parse_contract(json.loads(text))

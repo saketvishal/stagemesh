@@ -5,8 +5,10 @@ import json
 from dataclasses import replace
 from pathlib import Path
 
+from .contract_feasibility import check_contract_feasibility
 from .contracts import (
     CONTRACT_VERSION,
+    ChangeContract,
     BoundChangeContract,
     ContractError,
     bind_contract,
@@ -39,6 +41,8 @@ def bind_task_contract(store: Store, project: Path, task_id: str, baseline_sha: 
         problem = contract_admission_problem(bound.contract)
         if problem:
             raise ContractRejected("invalid_contract" if problem.startswith("invalid invariant:") else "placeholder_validation_gates", problem)
+        if store.latest_candidate(task_id) is None:
+            _require_feasible(project, task_id, bound.contract)
         return bound
     path = task_contract_path(project, task_id)
     if path is None:
@@ -52,10 +56,18 @@ def bind_task_contract(store: Store, project: Path, task_id: str, baseline_sha: 
     problem = contract_admission_problem(contract)
     if problem:
         raise ContractRejected("invalid_contract" if problem.startswith("invalid invariant:") else "placeholder_validation_gates", problem)
+    _require_feasible(project, task_id, contract)
     canonical_json = canonical_contract_json(contract)
     digest = hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
     store.bind_task_contract(task_id, baseline_sha, CONTRACT_VERSION, digest, canonical_json)
     return bound_contract_from_record(dict(store.task_contract(task_id)))
+
+
+def _require_feasible(project: Path, task_id: str, contract: ChangeContract) -> None:
+    """Defense in depth: admission already checks this, but a provider never starts on a contract that cannot be satisfied."""
+    report = check_contract_feasibility(project, contract)
+    if not report.feasible:
+        raise ContractRejected("contract_policy_conflict", report.message(task_id, contract))
 
 
 def contract_for_candidate(store: Store, task_id: str, candidate_sha: str, project: Path) -> BoundChangeContract:

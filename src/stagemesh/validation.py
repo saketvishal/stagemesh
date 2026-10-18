@@ -19,11 +19,22 @@ from .git import GitError
 from .persistence import Store
 from .process_identity import owner_execution_fields
 from .remediation import finding_identity
+from .validation_reuse import GATE_REUSE_POLICY_VERSION, GateReuse, candidate_tree, load_prior_passes, select_files
 from .validation_plan import (
     contract_with_browser_e2e_gates,
     derive_validation_plan,
     with_required_checks,
 )
+
+
+def _integration_ref(project: Path) -> str | None:
+    try:
+        from .baseline import resolve_integration_ref
+        from .config import load_config
+
+        return resolve_integration_ref(project, load_config(project).integration_ref)
+    except Exception:  # noqa: BLE001 - selection hygiene must never fail validation; without a ref nothing is excluded
+        return None
 
 
 class Validator:
@@ -44,10 +55,19 @@ class Validator:
                 inspected_files = tuple(changed_files(project, candidate_sha, bound.baseline_sha))
             except (GitError, OSError):
                 inspected_files = ()
-            contract = contract_with_browser_e2e_gates(project, contract, inspected_files)
-            focused_gates = discover_focused_gates(project, inspected_files, contract, candidate_sha=candidate_sha)
+            # The bound baseline measures the change and the scope check sees all of it. Automatic selection (browser end-to-end,
+            # nearby tests, risk class) uses only the candidate's own files when the baseline is demonstrably behind the integration ref.
+            selection = select_files(
+                project, candidate_sha, bound.baseline_sha, inspected_files, _integration_ref(project), contract.gates,
+            )
+            selected_files = selection.selection_files
+            declared_names = {gate.name for gate in contract.gates}
+            contract = contract_with_browser_e2e_gates(project, contract, selected_files)
+            focused_gates = discover_focused_gates(project, selected_files, contract, candidate_sha=candidate_sha)
             contract = with_focused_gates(contract, focused_gates)
-            plan = with_required_checks(contract, derive_validation_plan(contract, inspected_files))
+            exploratory = tuple(gate.name for gate in contract.gates if gate.name not in declared_names)
+            plan = with_required_checks(contract, derive_validation_plan(contract, selected_files))
+            gate_reuse = GateReuse(candidate_tree(project, candidate_sha), bound.digest, load_prior_passes(store, task_id))
             evaluation = evaluate_contract(
                 project,
                 candidate_sha,
@@ -55,6 +75,7 @@ class Validator:
                         validation_escalation_reasons=plan.escalation_reasons),
                 baseline_sha=bound.baseline_sha,
                 run_gates=True,
+                gate_reuse=gate_reuse,
             )
             findings = list(evaluation.findings)
             executed = tuple(gate.name for gate in evaluation.gates)
@@ -97,6 +118,20 @@ class Validator:
                     "planned": list(plan.planned_checks),
                     "executed": list(executed),
                     "missing": list(missing),
+                    "required": [name for name in executed if name not in exploratory],
+                    "exploratory": [name for name in executed if name in exploratory],
+                },
+                "selection": selection.to_dict(),
+                "validation_reuse": {
+                    "policy_version": GATE_REUSE_POLICY_VERSION,
+                    "ran": [gate.name for gate in evaluation.gates if gate.reused_from is None],
+                    "reused": [
+                        {"gate": gate.name, "from": gate.reused_from}
+                        for gate in evaluation.gates
+                        if gate.reused_from is not None
+                    ],
+                    "note": "a prior PASSED result is reused only for an identical tree, contract, command, environment and policy; "
+                    "hosted checks and independent review never reuse local results",
                 },
                 "gates": [
                     {

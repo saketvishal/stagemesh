@@ -772,6 +772,24 @@ def command_rebaseline_task(args: argparse.Namespace) -> int:
     return _repair_command(args, run)
 
 
+def command_finding_disposition(args: argparse.Namespace) -> int:
+    from .review_disposition import DispositionError, record_disposition
+
+    def run(store, project):  # type: ignore[no-untyped-def]
+        try:
+            report = record_disposition(
+                store, args.task, args.finding, disposition=args.disposition, actor=args.actor,
+                evidence_ref=args.evidence, rationale=args.rationale,
+            )
+        except DispositionError as exc:
+            raise RecoveryRefusal("disposition_refused", str(exc)) from exc
+        if not args.json:
+            print(f"task {args.task}: finding {args.finding[:16]} {args.disposition} by {args.actor} (evidence: {args.evidence})")
+        return report
+
+    return _repair_command(args, run)
+
+
 def command_advance_baseline(args: argparse.Namespace) -> int:
     def run(store, project):  # type: ignore[no-untyped-def]
         report = advance_baseline(store, project, args.task, args.to, reason=args.reason, yes=args.yes)
@@ -3278,6 +3296,18 @@ def build_parser() -> argparse.ArgumentParser:
     rebase.add_argument("--reason", help="Why the baseline moved (recorded in the audit event)")
     rebase.add_argument("--json", action="store_true")
     rebase.set_defaults(func=command_rebaseline_task)
+    disposition = sub.add_parser(
+        "finding-disposition",
+        help="Record an explicit, evidenced decision about an unresolved adverse review finding (nothing else lets a candidate proceed past it)",
+    )
+    disposition.add_argument("--task", required=True)
+    disposition.add_argument("--finding", required=True, help="Finding id as shown in the block reason or `stagemesh diagnose`")
+    disposition.add_argument("--disposition", required=True, choices=("refuted_with_evidence", "waived_by_owner"))
+    disposition.add_argument("--actor", required=True, help="Who decided (a person or the owning role)")
+    disposition.add_argument("--evidence", required=True, help="Reference supporting the decision (commit, test run, policy exception, PR comment URL)")
+    disposition.add_argument("--rationale", required=True)
+    disposition.add_argument("--json", action="store_true")
+    disposition.set_defaults(func=command_finding_disposition)
     advance = sub.add_parser(
         "advance-baseline",
         help="Move a task's baseline forward to the integration ref, reset its idle worktree and restart IMPLEMENT (audited; old state preserved)",

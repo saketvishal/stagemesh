@@ -11,6 +11,7 @@ from .auto_plan import AutoPlanError, create_contract, refresh_stale_generated_c
 from .blocked_recovery import auto_retry_blocked_provider_failures, exhaustion_message
 from .config import TaskSelectionConfig
 from .contract_check import contract_section_sizes
+from .contract_feasibility import check_contract_feasibility
 from .contracts import (
     ContractError,
     canonical_contract_json,
@@ -255,6 +256,12 @@ def _ensure_contract(
         if problem:
             raise ContractError(problem)
         size = len(canonical_contract_json(contract))
+        feasibility = check_contract_feasibility(project, contract)
+        if not feasibility.feasible:
+            raise RunReadyRefusal(
+                "contract_policy_conflict", feasibility.message(task_id, contract), task_id=task_id,
+                conflicts=[conflict.to_dict() for conflict in feasibility.conflicts],
+            )
     except (OSError, ValueError, ContractError) as exc:
         raise RunReadyRefusal("invalid_contract", f"contract for {task_id} is invalid: {exc}", task_id=task_id) from exc
     if size > MAX_CANONICAL_CONTRACT_CHARS:

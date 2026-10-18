@@ -149,6 +149,8 @@ class GateResult:
     duration_seconds: float | None = None
     diagnosis: dict[str, Any] | None = None  # timeout class, attribution, explanation and the last progress lines
     output_truncated: bool = False
+    input_fingerprint: str | None = None  # complete-input fingerprint (see validation_reuse); None when it could not be computed
+    reused_from: str | None = None  # "evidence:<id>:<gate>" for a prior PASSED result, "attempt:<gate>" for a duplicate in this attempt
 
     def provenance(self) -> dict[str, Any]:
         """The bounded, redacted execution record stored with validation evidence."""
@@ -166,6 +168,8 @@ class GateResult:
             "stdout_tail": stdout,
             "stderr_tail": stderr,
             "output_truncated": cut_out or cut_err or self.output_truncated,
+            "input_fingerprint": self.input_fingerprint,
+            "reused_from": self.reused_from,
         }
 
 
@@ -336,6 +340,7 @@ def evaluate_contract(
     *,
     baseline_sha: str | None = None,
     run_gates: bool = True,
+    gate_reuse: Any = None,
 ) -> ContractEvaluation:
     try:
         changed = tuple(changed_files(project, candidate_sha, baseline_sha))
@@ -444,11 +449,7 @@ def evaluate_contract(
 
     if run_gates:
         try:
-            with candidate_workspace(project, candidate_sha) as gate_project:
-                for gate in contract.gates:
-                    gates.append(run_gate(gate_project, gate))
-                for gate in invariant_gates(contract):
-                    gates.append(run_gate(gate_project, gate))
+            gates.extend(_run_planned_gates(project, candidate_sha, contract, gate_reuse))
         except (GitError, OSError) as exc:
             findings.append(
                 {
@@ -480,6 +481,59 @@ def evaluate_contract(
         findings=tuple(findings),
         gates=tuple(gates),
     )
+
+
+def _run_planned_gates(project: Path, candidate_sha: str, contract: ChangeContract, gate_reuse: Any) -> list[GateResult]:
+    """Run each distinct gate once, reuse a prior PASSED result only for identical complete inputs, keep the declared order."""
+    from dataclasses import replace
+
+    from .validation_reuse import gate_identity
+
+    planned = [*contract.gates, *invariant_gates(contract)]
+    slots: list[GateResult | tuple[str, GateCommand] | None] = []
+    to_run: dict[tuple[Any, ...], GateCommand] = {}
+    fingerprints: dict[tuple[Any, ...], str | None] = {}
+    for gate in planned:
+        identity = gate_identity(gate)
+        if identity in to_run or identity in fingerprints:
+            slots.append(("duplicate", gate))
+            continue
+        fingerprints[identity] = gate_reuse.fingerprint(gate) if gate_reuse is not None else None
+        hit = gate_reuse.lookup(gate) if gate_reuse is not None else None
+        if hit is not None:
+            fingerprint, prior = hit
+            source = f"evidence:{prior['evidence_id']}:{prior['gate']}"
+            reused = GateResult(
+                gate.name, "PASSED", tuple(gate.command), 0, "", "", None, input_fingerprint=fingerprint, reused_from=source,
+                cwd=gate.cwd,
+            )
+            gate_reuse.reused.append({"gate": gate.name, "from": source, "candidate_sha": prior["candidate_sha"], "fingerprint": fingerprint})
+            slots.append(reused)
+            continue
+        to_run[identity] = gate
+        slots.append(("run", gate))
+    executed: dict[tuple[Any, ...], GateResult] = {}
+    if to_run:
+        with candidate_workspace(project, candidate_sha) as gate_project:
+            for identity, gate in to_run.items():
+                result = run_gate(gate_project, gate)
+                executed[identity] = replace(result, input_fingerprint=fingerprints.get(identity))
+    results: list[GateResult] = []
+    shared: dict[tuple[Any, ...], GateResult] = {}
+    for slot in slots:
+        if isinstance(slot, GateResult):
+            results.append(slot)
+            shared[gate_identity(planned[len(results) - 1])] = slot
+            continue
+        kind, gate = slot  # type: ignore[misc]
+        identity = gate_identity(gate)
+        if kind == "run":
+            results.append(executed[identity])
+            shared[identity] = executed[identity]
+        else:
+            first = shared.get(identity) or executed[identity]
+            results.append(replace(first, name=gate.name, reused_from=f"attempt:{first.name}"))
+    return results
 
 
 NOISE_SEGMENTS = frozenset(
