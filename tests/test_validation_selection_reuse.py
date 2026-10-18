@@ -164,3 +164,31 @@ def test_failed_results_are_never_reused(tmp_path: Path) -> None:
         "gates": [{"name": "unit", "status": "FAILED", "input_fingerprint": "f1"}, {"name": "lint", "status": "PASSED", "input_fingerprint": "f2"}],
     })
     assert set(load_prior_passes(store, TASK)) == {"f2"}
+
+
+def test_reuse_is_all_or_nothing_so_gates_that_depend_on_each_others_side_effects_still_run_in_order(tmp_path: Path) -> None:
+    flag = tmp_path / "fixed.flag"
+    log = tmp_path / "order.txt"
+    build = f"import pathlib; p = pathlib.Path({str(log)!r}); p.write_text((p.read_text() if p.exists() else '') + 'build;')"
+    test = (
+        f"import pathlib, sys; p = pathlib.Path({str(log)!r}); p.write_text((p.read_text() if p.exists() else '') + 'test;'); "
+        f"sys.exit(0 if pathlib.Path({str(flag)!r}).exists() else 1)"
+    )
+    contract = {"objective": "docs only", "allowed_files": ["docs/**"], "required_tests": [
+        {"name": "build", "command": [PY, "-c", build]}, {"name": "test", "command": [PY, "-c", test]},
+    ]}
+    project, store = _setup(tmp_path, contract)
+    sha = _single_candidate(project, store)
+    assert Validator().validate(store, TASK, sha, project) is EvidenceStatus.FAILED  # build passed, test failed
+    assert log.read_text() == "build;test;"
+
+    flag.write_text("ok", encoding="utf-8")  # the environment problem is fixed; the tree is unchanged
+    git = GitWorkspace(project)
+    git.run("commit", "-q", "--amend", "-m", "same tree, new commit")
+    second = git.head()
+    store.add_candidate(TASK, second, "p", durable_handoff=True)
+    assert Validator().validate(store, TASK, second, project) is EvidenceStatus.PASSED
+
+    assert log.read_text() == "build;test;build;test;"  # `build` was not skipped just because it passed before
+    payload = [json.loads(r[0]) for r in store.conn.execute("SELECT payload FROM evidence WHERE kind='VALIDATION' ORDER BY created_at, rowid")][-1]
+    assert payload["validation_reuse"]["reused"] == [] and payload["validation_reuse"]["ran"] == ["build", "test"]

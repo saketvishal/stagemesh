@@ -41,7 +41,8 @@ providers, temporary repositories and controlled clocks (`tests/test_gate_execut
 * Within one attempt, gates with the same command, directory, environment and limit run once. Across attempts a PASSED gate is reused
   only when the candidate tree, contract digest, command, working directory, environment, time limit, resolved executable, platform
   and the reuse policy version are all identical; `validation_reuse` lists what ran and what was reused from which evidence.
-  Failed results are never reused, and hosted checks, independent review and integration never use local reuse.
+  Failed results are never reused, reuse is all-or-nothing (if any distinct gate must run, all run, because gates in one checkout may
+  depend on each other's side effects), and hosted checks, independent review and integration never use local reuse.
 
 ## Contracts that cannot be satisfied
 
@@ -55,7 +56,8 @@ Before a provider runs, `allowed_files` is reconciled with discoverable mandator
 
 A conflict refuses admission (`contract_policy_conflict`) with one message listing the requirements and three legitimate ways out: an
 audited `rebind-contract` by the contract owner, a narrowly scoped prerequisite task through the existing planning flow, or an
-owner-recorded exception (`"waived": true`). Nothing is widened, relocated or created automatically. `contract-check` reports the
+owner-recorded exception (`"waived": true`). A prose-derived requirement that is a false positive is dismissed by listing its id or
+source (for example `"ignore": ["AGENTS.md:12"]`) in the same file. Nothing is widened, relocated or created automatically. `contract-check` reports the
 same conflicts.
 
 ## Independent review

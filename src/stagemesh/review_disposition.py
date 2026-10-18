@@ -131,7 +131,6 @@ def reconcile_withdrawals(store: Store, task_id: str, candidate_sha: str, contra
             if (
                 float(row["created_at"]) >= raised_at
                 and payload.get("contract_hash") == contract_hash
-                and payload.get("independent_reviewer") is not False
                 and str(payload.get("review_provider") or "").casefold() == reviewer
                 and reviewer
             ):

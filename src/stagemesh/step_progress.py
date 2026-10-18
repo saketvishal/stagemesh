@@ -83,7 +83,10 @@ def progress_state(store: Store, task_id: str) -> ProgressState:
     task = store.get_task(task_id)
     latest = store.latest_candidate(task_id)
     candidate = None if latest is None else str(latest["sha"])
-    stage = Stage(task["stage"]) if task is not None else Stage.PLAN
+    try:
+        stage = Stage(task["stage"]) if task is not None else Stage.PLAN
+    except ValueError:  # an unknown stage label is "no rank", never a crash in the run summary
+        stage = Stage.PLAN
     return ProgressState(
         stage.value, "MISSING" if task is None else str(task["status"]), _RANK.get(stage, 0), candidate, _failure_signature(store, task_id, candidate),
     )

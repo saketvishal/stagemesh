@@ -138,3 +138,13 @@ def test_admission_refuses_before_any_provider_and_names_the_conflict(tmp_path: 
 
     checked = check_contract(project, TASK)
     assert checked["ok"] is False and checked["feasibility"]["conflicts"]
+
+
+def test_a_project_owner_can_dismiss_a_prose_requirement_that_is_not_really_one(tmp_path: Path) -> None:
+    project, _ = _setup(tmp_path, TWO_TESTS)
+    (project / "AGENTS.md").write_text("Every change must add an Engineering Impact record under `docs/design/`.\n", encoding="utf-8")
+    assert not check_contract_feasibility(project, parse_contract(TWO_TESTS)).feasible
+    folder = project / ".stagemesh" / "policy"
+    folder.mkdir(parents=True)
+    (folder / "required-changes.json").write_text(json.dumps({"version": 1, "requirements": [], "ignore": ["AGENTS.md:1"]}), encoding="utf-8")
+    assert check_contract_feasibility(project, parse_contract(TWO_TESTS)).feasible

@@ -512,6 +512,18 @@ def _run_planned_gates(project: Path, candidate_sha: str, contract: ChangeContra
             continue
         to_run[identity] = gate
         slots.append(("run", gate))
+    if to_run and gate_reuse is not None and gate_reuse.reused:
+        # Gates in one checkout can depend on each other's side effects (a build before its tests). Reuse is therefore
+        # all-or-nothing: if any distinct gate must run, every distinct gate runs in the fresh checkout.
+        gate_reuse.reused.clear()
+        to_run, slots = {}, []
+        for gate in planned:
+            identity = gate_identity(gate)
+            if identity in to_run:
+                slots.append(("duplicate", gate))
+            else:
+                to_run[identity] = gate
+                slots.append(("run", gate))
     executed: dict[tuple[Any, ...], GateResult] = {}
     if to_run:
         with candidate_workspace(project, candidate_sha) as gate_project:

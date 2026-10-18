@@ -134,15 +134,19 @@ def _fully_inside(requirement_path: str, patterns: tuple[str, ...]) -> bool:
     return any(fnmatch.fnmatchcase(candidate, _normalise(pattern)) for pattern in patterns)
 
 
-def _structured(project: Path) -> list[Requirement]:
+def _policy_payload(project: Path) -> dict[str, Any]:
     path = project / POLICY_FILE
     if not path.is_file():
-        return []
+        return {}
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return []
-    items = payload.get("requirements") if isinstance(payload, dict) else None
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _structured(payload: dict[str, Any]) -> list[Requirement]:
+    items = payload.get("requirements")
     found: list[Requirement] = []
     for item in items if isinstance(items, list) else []:
         if not isinstance(item, dict) or not isinstance(item.get("paths"), list) or not item["paths"]:
@@ -217,7 +221,8 @@ def _read(path: Path) -> str:
 
 def discover_requirements(project: Path, contract: ChangeContract) -> tuple[list[Requirement], list[Requirement]]:
     """(blocking requirements, advisory requirements) discoverable without running anything."""
-    blocking = _structured(project)
+    payload = _policy_payload(project)
+    blocking = _structured(payload)
     advisory: list[Requirement] = []
     own = [("objective", contract.objective), *((f"acceptance_criteria[{i}]", t) for i, t in enumerate(contract.acceptance_criteria)),
            *((f"invariants[{i}]", t) for i, t in enumerate(contract.invariants))]
@@ -233,7 +238,10 @@ def discover_requirements(project: Path, contract: ChangeContract) -> tuple[list
         found, soft = _from_text(_read(project / name), name, "policy-prose")
         blocking.extend(found)
         advisory.extend(soft)
-    return blocking, advisory
+    # The project owner can dismiss a prose-derived requirement that is not really one (a false positive) by its id or source.
+    ignored = {str(x) for x in payload.get("ignore", [])} if isinstance(payload.get("ignore"), list) else set()
+    keep = lambda item: item.id not in ignored and item.source not in ignored  # noqa: E731
+    return [item for item in blocking if keep(item)], [item for item in advisory if keep(item)]
 
 
 def _applies(requirement: Requirement, contract: ChangeContract) -> bool:
