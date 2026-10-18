@@ -14,6 +14,7 @@ from .audit import record_audit
 from .persistence import Store
 
 STARTED, FINISHED, REFUSED = "window.started", "window.finished", "window.refused"
+TASK_CONTEXT = "window.task_context"
 _EVENTS = (STARTED, FINISHED, REFUSED)
 
 
@@ -27,6 +28,25 @@ def record_finished(store: Store, window_id: str, details: dict[str, Any]) -> No
 
 def record_refused(store: Store, window_id: str, details: dict[str, Any]) -> None:
     record_audit(store, REFUSED, {"window_id": window_id, **details})
+
+
+def record_task_context(store: Store, window_id: str, task_id: str, details: dict[str, Any]) -> None:
+    record_audit(store, TASK_CONTEXT, {"window_id": window_id, "task_id": task_id, **details})
+
+
+def latest_task_context(store: Store, task_id: str) -> dict[str, Any] | None:
+    rows = store.conn.execute(
+        "SELECT payload FROM audit_events WHERE event_type=? ORDER BY created_at DESC, rowid DESC LIMIT 200",
+        (TASK_CONTEXT,),
+    ).fetchall()
+    for row in rows:
+        try:
+            payload = json.loads(row["payload"])
+        except (TypeError, ValueError):
+            continue
+        if isinstance(payload, dict) and str(payload.get("task_id")) == task_id:
+            return payload
+    return None
 
 
 def last_window(store: Store, *, now: float | None = None) -> dict[str, Any] | None:

@@ -94,6 +94,21 @@ def test_selection_picks_only_runnable_tasks_and_never_blocked_parked_or_claimed
     assert "not picked automatically" in named["T-blocked"] and named["T-nope"] == "no such task"
 
 
+def test_named_ineligible_github_issue_reports_source_reason(tmp_path: Path) -> None:
+    store, _project = make_store(tmp_path, [])
+    store.cache_source(
+        "github",
+        "298",
+        {"state": "OPEN", "eligible": False, "eligibility_reason": "blocked by label: stagemesh:deferred"},
+        "OPEN",
+    )
+
+    picked, skipped = rw.select_tasks(store, attempted=set(), limit=1, only=["298"])
+
+    assert picked == []
+    assert skipped == {"298": "GitHub issue is not runnable: blocked by label: stagemesh:deferred"}
+
+
 def _overlapping_prefix(project: Path, *, files: bool = False) -> None:
     for task_id in ("2", "3", "5"):
         path = project / ".stagemesh/contracts" / f"{task_id}.json"
@@ -541,8 +556,14 @@ def test_blocked_tasks_are_reported_with_the_reason_and_the_window_carries_on(tm
     assert "why: task exhausted its remediation budget" in rw.format_window_report(report)
 
 
-def test_a_window_where_every_task_made_no_progress_is_incomplete_but_runs_all_eligible_work(tmp_path: Path) -> None:
-    report, _s, _rig, _ = go(tmp_path, ["1", "2"], {"1": RunResult("NO_PROGRESS", "no change"), "2": RunResult("NO_PROGRESS", "no change")}, concurrency=1)
+def test_a_window_where_every_task_made_no_progress_is_incomplete_but_runs_all_eligible_work(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    report, store, _rig, _ = go(
+        tmp_path,
+        ["1", "2"],
+        {"1": RunResult("NO_PROGRESS", "no change"), "2": RunResult("NO_PROGRESS", "no change")},
+        concurrency=1,
+        tasks=["1", "2"],
+    )
 
     assert {t.task_id: t.outcome for t in report.tasks} == {"1": "open", "2": "open"}
     assert not report.ok and report.exit_code == rw.EXIT_STOPPED
@@ -551,6 +572,12 @@ def test_a_window_where_every_task_made_no_progress_is_incomplete_but_runs_all_e
     assert "STOPPED" in text and "OK (" not in text
     assert json.loads(report.options.report_path.read_text(encoding="utf-8"))["ok"] is False
     assert report.next_command.startswith("stagemesh doctor")
+    assert "--tasks 1,2" in report.next_command
+    assert "--integration pr" in report.next_command and "--pr-only" in report.next_command
+    project = Path(store.db_path).parent.parent
+    assert cli_module.main(["--project", str(project), "continue", "--task", "1"]) == 2
+    refusal = capsys.readouterr().err
+    assert "belongs to a PR-mode run-window" in refusal and "--tasks 1,2" in refusal
 
 
 def test_no_progress_beside_a_delivered_task_or_no_work_stays_ok(tmp_path: Path) -> None:
@@ -562,9 +589,17 @@ def test_no_progress_beside_a_delivered_task_or_no_work_stays_ok(tmp_path: Path)
 
 
 def test_step_cap_tasks_are_resumable_and_the_report_says_how_to_resume(tmp_path: Path) -> None:
-    report, _s, _rig, _ = go(tmp_path, ["1"], {"1": RunResult("MAX_STEPS", "stopped after 4 steps")})
+    report, _s, _rig, _ = go(
+        tmp_path,
+        ["1"],
+        {"1": RunResult("MAX_STEPS", "stopped after 4 steps")},
+        tasks=["1"],
+        advance_baselines=False,
+    )
 
     assert report.ok and report.tasks[0].resumable and report.next_command.startswith("stagemesh run-window")
+    assert "--tasks 1" in report.next_command and "--no-advance-baselines" in report.next_command
+    assert "--integration pr" in report.next_command and "--pr-only" in report.next_command
 
 
 def test_local_mode_does_not_prepare_staging_or_open_prs(tmp_path: Path) -> None:

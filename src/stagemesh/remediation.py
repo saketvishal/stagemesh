@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -84,6 +85,9 @@ def remediation_context(store: Store, task_id: str, project: Path | None = None)
         "findings": [{"id": row["id"], "severity": row["severity"], "message": row["message"]} for row in findings],
         "task_owner_state": task_owner_state(store, task_id, project),
     }
+    failure_details = _latest_failure_details(store, task_id, str(latest["candidate_sha"]))
+    if failure_details:
+        context["failure_details"] = failure_details
     diagnosis = _latest_diagnosis(store, task_id, str(latest["candidate_sha"]))
     if diagnosis is not None:
         context["diagnosis"] = diagnosis
@@ -95,9 +99,37 @@ def remediation_context(store: Store, task_id: str, project: Path | None = None)
     return context
 
 
-def _latest_diagnosis(store: Store, task_id: str, candidate_sha: str) -> dict[str, object] | None:
-    import json
+def _latest_failure_details(store: Store, task_id: str, candidate_sha: str) -> list[dict[str, object]]:
+    row = store.conn.execute(
+        "SELECT payload FROM evidence WHERE task_id=? AND candidate_sha=? AND status='FAILED' "
+        "ORDER BY created_at DESC, rowid DESC LIMIT 1",
+        (task_id, candidate_sha),
+    ).fetchone()
+    if row is None:
+        return []
+    try:
+        payload = json.loads(row["payload"])
+    except (TypeError, ValueError):
+        return []
+    details: list[dict[str, object]] = []
+    for finding in payload.get("findings", []):
+        if not isinstance(finding, dict):
+            continue
+        detail = {
+            key: finding[key]
+            for key in ("code", "message", "command", "returncode", "failure_kind")
+            if key in finding
+        }
+        for key in ("stdout", "stderr"):
+            value = finding.get(key)
+            if isinstance(value, str) and value:
+                detail[key] = value[-4000:]
+        if detail:
+            details.append(detail)
+    return details[:20]
 
+
+def _latest_diagnosis(store: Store, task_id: str, candidate_sha: str) -> dict[str, object] | None:
     rows = store.conn.execute("SELECT payload FROM audit_events WHERE event_type='task.diagnosis' ORDER BY created_at DESC, rowid DESC LIMIT 50")
     for row in rows:
         try:

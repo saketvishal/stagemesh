@@ -823,6 +823,15 @@ def _remediation_prompt(remediation: dict[str, object]) -> str:
     ]
     for finding in remediation["findings"][:50]:  # type: ignore[index]
         lines.append(f"- [{finding['severity']}] {finding['message']}")
+    failure_details = remediation.get("failure_details")
+    if isinstance(failure_details, list) and failure_details:
+        lines.extend(
+            [
+                "",
+                "Exact failed validation evidence (including bounded stdout/stderr; use it to repair the failure):",
+                json.dumps(failure_details, indent=2, sort_keys=True),
+            ]
+        )
     diagnosis = remediation.get("diagnosis")
     if isinstance(diagnosis, dict):
         lines.extend(["", f"Diagnosis ({diagnosis.get('category')}): {str(diagnosis.get('summary'))[:500]}"])

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 import time
 import uuid
 from collections.abc import Callable
@@ -59,7 +60,7 @@ from .survivor_wave import (
     skip_reason,
 )
 from .task_selection import contract_state
-from .window_journal import record_finished, record_refused, record_started
+from .window_journal import record_finished, record_refused, record_started, record_task_context
 
 EXIT_OK, EXIT_STOPPED, EXIT_REFUSED, EXIT_REPORT = 0, 1, 2, 3
 _DURATION = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*([smhd]?)\s*$", re.IGNORECASE)
@@ -295,7 +296,13 @@ def select_tasks(
             continue
         task = store.get_task(task_id)
         if task is None:
-            skipped[task_id] = "no such task"
+            source_state = store.source_state("github", task_id)
+            source_reason = source_state.get("eligibility_reason") if source_state else None
+            skipped[task_id] = (
+                f"GitHub issue is not runnable: {source_reason}"
+                if source_reason
+                else "no such task"
+            )
             continue
         if task["status"] == TaskStatus.DONE or task["stage"] == Stage.DONE:
             continue  # finished work is not news
@@ -573,7 +580,10 @@ def next_command(report: WindowReport) -> str:
         return "stagemesh doctor  # the report could not be written; fix the --report path and rerun"
     reason = (report.stop_reason or "").lower()
     if report.no_progress_reason:
-        return "stagemesh doctor  # every attempted task made no progress: inspect the provider pool before rerunning"
+        return (
+            "stagemesh doctor  # every attempted task made no progress; after provider health is ready, rerun exactly: "
+            + _resume_command(report.options)
+        )
     if "main moved" in reason or "orphan" in reason or "cleanup" in reason or "infrastructure" in reason:
         return "stagemesh doctor  # a shared fault stopped the window: inspect it before running again"
     prs = [t for t in report.tasks if getattr(t, "ready_for_merge", False)]
@@ -583,8 +593,40 @@ def next_command(report: WindowReport) -> str:
     if decisions:
         return "stagemesh doctor  # tasks " + ", ".join(t.task_id for t in decisions) + " need a design decision"
     if any(t.resumable for t in report.tasks):
-        return "stagemesh run-window  # unfinished tasks resume where they stopped"
+        return _resume_command(report.options) + "  # unfinished tasks resume where they stopped"
     return "nothing to do: no eligible work left"
+
+
+def _resume_command(options: WindowOptions) -> str:
+    argv = [
+        "stagemesh",
+        "run-window",
+        "--duration",
+        f"{options.duration_seconds:g}s",
+        "--concurrency",
+        str(options.concurrency),
+        "--max-steps-per-task",
+        str(options.max_steps_per_task),
+        "--max-tasks",
+        str(options.max_tasks),
+        "--integration",
+        options.integration_mode,
+    ]
+    if options.tasks:
+        argv.extend(("--tasks", ",".join(options.tasks)))
+    if not options.open_prs:
+        argv.append("--no-pr")
+    if not options.advance_baselines:
+        argv.append("--no-advance-baselines")
+    if options.strict_live:
+        argv.append("--strict-live")
+    if options.auto_merge_ff:
+        argv.extend(("--merge-policy", options.merge_policy))
+        if options.required_checks:
+            argv.extend(("--required-checks", ",".join(options.required_checks)))
+    else:
+        argv.append("--pr-only")
+    return shlex.join(argv)
 
 
 def _landing_order(store: Store, records: list[TaskRecord], hooks: WaveHooks) -> list[TaskRecord]:
@@ -870,6 +912,18 @@ def run_window(
             batch = [*continuing, *fresh]
             if not batch:
                 break
+            for task_id in batch:
+                record_task_context(
+                    store,
+                    report.window_id,
+                    task_id,
+                    {
+                        "integration_mode": options.integration_mode,
+                        "integration_ref": base_ref if local else staging_ref,
+                        "open_prs": options.open_prs,
+                        "resume_command": _resume_command(options),
+                    },
+                )
             for task_id in batch:
                 report.not_selected.pop(task_id, None)
             for task_id in fresh:  # a recoverable block is reconsidered here, before the wave runs the task
