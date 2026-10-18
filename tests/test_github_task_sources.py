@@ -193,6 +193,78 @@ def test_syncing_github_issue_without_required_label_retires_local_task(tmp_path
         store.close()
 
 
+def test_sync_materializes_deferred_dependency_before_linking_ready_child(tmp_path):
+    store = _store(tmp_path)
+    try:
+        ids = sync_source(
+            store,
+            [
+                DiscoveredTask(
+                    "github",
+                    "2",
+                    "ready child",
+                    labels=("stagemesh:ready",),
+                    dependencies=("1",),
+                ),
+                DiscoveredTask(
+                    "github",
+                    "1",
+                    "deferred dependency",
+                    eligible=False,
+                    labels=("stagemesh:deferred",),
+                ),
+            ],
+        )
+
+        assert ids == ["2"]
+        assert store.get_task("1")["status"] == TaskStatus.BLOCKED
+        assert Scheduler(store).decision("1").reason == "source no longer eligible"
+        assert store.incomplete_dependencies("2") == ["1"]
+        assert Scheduler(store).decision("2").reason == "waiting for 1"
+    finally:
+        store.close()
+
+
+def test_sync_blocks_malformed_github_tasks_without_hiding_valid_work(tmp_path):
+    store = _store(tmp_path)
+    try:
+        ids = sync_source(
+            store,
+            [
+                DiscoveredTask(
+                    "github",
+                    "10",
+                    "contradictory labels",
+                    labels=("stagemesh:ready", "stagemesh:deferred"),
+                ),
+                DiscoveredTask(
+                    "github",
+                    "11",
+                    "missing dependency",
+                    labels=("stagemesh:ready",),
+                    dependencies=("999",),
+                ),
+                DiscoveredTask(
+                    "github",
+                    "12",
+                    "valid task",
+                    labels=("stagemesh:ready",),
+                ),
+            ],
+        )
+
+        assert ids == ["12"]
+        assert store.get_task("10")["status"] == TaskStatus.BLOCKED
+        assert store.get_task("11")["status"] == TaskStatus.BLOCKED
+        assert Scheduler(store).decision("12").reason == "eligible"
+        contradictory = store.source_state("github", "10")
+        missing = store.source_state("github", "11")
+        assert contradictory["validation_errors"] == ["ready label conflicts with a blocked or deferred label"]
+        assert missing["validation_errors"] == ["unknown dependency issue(s): #999"]
+    finally:
+        store.close()
+
+
 def test_closed_github_sync_preserves_done_task(tmp_path):
     store = _store(tmp_path)
     try:

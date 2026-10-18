@@ -356,19 +356,30 @@ def _description(item: dict[str, object]) -> str:
 
 def sync_source(store: Store, tasks: list[DiscoveredTask]) -> list[str]:
     ids: list[str] = []
+    dependency_tasks: list[tuple[str, set[str]]] = []
+    github_validation_errors = _github_validation_errors(tasks)
     for task in tasks:
         state = _normalized_state(task.state)
         is_github = task.source == GitHubIssueSource.name
+        validation_errors = github_validation_errors.get(task.source_id, ()) if is_github else ()
+        source_eligible = task.eligible and not validation_errors
         direct_execution = bool(folded_labels(task.labels) & DIRECT_EXECUTION_LABELS)
         source_objective = is_github and source_issue_is_objective(task.labels)
         historical_objective = is_github and not direct_execution and _objective_exists(store, task.source_id)
-        cached: dict[str, object] = {"eligible": task.eligible, "state": state}
+        cached: dict[str, object] = {"eligible": source_eligible, "state": state}
         if task.eligibility_reason:
             cached["eligibility_reason"] = task.eligibility_reason
+        if validation_errors:
+            cached["validation_errors"] = list(validation_errors)
+            cached["eligibility_reason"] = f"source validation failed: {'; '.join(validation_errors)}"
         if source_objective or historical_objective:
             cached["objective_root"] = True
         previous_source_state = store.source_state(task.source, task.source_id) if is_github else {}
-        retirement_reason = _retirement_reason(task, state)
+        retirement_reason = (
+            f"source validation failed: {'; '.join(validation_errors)}"
+            if validation_errors
+            else _retirement_reason(task, state)
+        )
         if is_github:
             _record_ready_label_drift(store, task, previous_source_state)
         if source_objective or historical_objective:
@@ -378,6 +389,16 @@ def sync_source(store: Store, tasks: list[DiscoveredTask]) -> list[str]:
                 task.title,
                 objective_payload(task.source_id, task.labels, task.body, task.dependencies),
             )
+        materialize_blocked_github_task = (
+            is_github
+            and state == "OPEN"
+            and not source_objective
+            and not historical_objective
+            and retirement_reason is not None
+        )
+        if materialize_blocked_github_task:
+            task_id = store.upsert_task(task.title, task.source, task.source_id)
+            dependency_tasks.append((task_id, set(task.dependencies)))
         if retirement_reason is not None and is_github:
             cached["retirement_reason"] = retirement_reason
         if task.labels or is_github:
@@ -395,9 +416,9 @@ def sync_source(store: Store, tasks: list[DiscoveredTask]) -> list[str]:
                 task.source,
                 task.source_id,
                 retirement_reason,
-                {"source_state": state, "eligible": task.eligible, "objective_root": bool(source_objective or historical_objective)},
+                {"source_state": state, "eligible": source_eligible, "objective_root": bool(source_objective or historical_objective)},
             )
-        elif task.eligible and state == "OPEN":
+        elif source_eligible and state == "OPEN":
             task_id = store.upsert_task(task.title, task.source, task.source_id)
             previous_retirement_reason = previous_source_state.get("retirement_reason")
             if not previous_retirement_reason and hasattr(store, "operator_retirement_reason"):
@@ -414,19 +435,43 @@ def sync_source(store: Store, tasks: list[DiscoveredTask]) -> list[str]:
                     {"source_state": state, "eligible": task.eligible},
                 )
             ids.append(task_id)
-            declared_deps = set(task.dependencies)
-            if hasattr(store, "conn"):
-                rows = store.conn.execute("SELECT depends_on_task_id FROM task_dependencies WHERE task_id=?", (task_id,)).fetchall()
-                existing_deps = {str(r[0]) for r in rows}
-                removed_deps = existing_deps - declared_deps
-                if removed_deps:
-                    for removed_dep in removed_deps:
-                        store.conn.execute("DELETE FROM task_dependencies WHERE task_id=? AND depends_on_task_id=?", (task_id, removed_dep))
-                    store.conn.commit()
-            for dependency in declared_deps:
-                if store.get_task(dependency) is not None:
-                    store.add_dependency(task_id, dependency)
+            dependency_tasks.append((task_id, set(task.dependencies)))
+    for task_id, declared_deps in dependency_tasks:
+        if hasattr(store, "conn"):
+            rows = store.conn.execute("SELECT depends_on_task_id FROM task_dependencies WHERE task_id=?", (task_id,)).fetchall()
+            existing_deps = {str(r[0]) for r in rows}
+            removed_deps = existing_deps - declared_deps
+            if removed_deps:
+                for removed_dep in removed_deps:
+                    store.conn.execute("DELETE FROM task_dependencies WHERE task_id=? AND depends_on_task_id=?", (task_id, removed_dep))
+                store.conn.commit()
+        for dependency in declared_deps:
+            if store.get_task(dependency) is not None:
+                store.add_dependency(task_id, dependency)
     return ids
+
+
+def _github_validation_errors(tasks: list[DiscoveredTask]) -> dict[str, tuple[str, ...]]:
+    github_ids = {task.source_id for task in tasks if task.source == GitHubIssueSource.name}
+    errors: dict[str, tuple[str, ...]] = {}
+    blocked_labels = {"stagemesh:blocked", "stagemesh:deferred", "status:blocked", "status:remediating"}
+    for task in tasks:
+        if task.source != GitHubIssueSource.name:
+            continue
+        task_errors: list[str] = []
+        labels = folded_labels(task.labels)
+        if READY_LABEL in labels and labels & blocked_labels:
+            task_errors.append("ready label conflicts with a blocked or deferred label")
+        if READY_LABEL in labels and source_issue_is_objective(task.labels):
+            task_errors.append("ready label conflicts with objective label")
+        if task.source_id in task.dependencies:
+            task_errors.append("task depends on itself")
+        missing = sorted(set(task.dependencies) - github_ids, key=lambda value: int(value) if value.isdigit() else value)
+        if missing:
+            task_errors.append(f"unknown dependency issue(s): {', '.join('#' + value for value in missing)}")
+        if task_errors:
+            errors[task.source_id] = tuple(task_errors)
+    return errors
 
 
 READY_LABEL = "stagemesh:ready"
