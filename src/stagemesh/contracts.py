@@ -722,8 +722,8 @@ def _gate_runtime_command(command: list[str], run_dir: Path | None = None) -> li
     from .gate_execution import resolve_gate_executable
 
     resolution = resolve_gate_executable(command, run_dir or Path.cwd())
-    if resolution is not None and resolution.executed:
-        command[0] = resolution.executed
+    if resolution is not None and (resolution.executed or resolution.path):
+        command[0] = resolution.executed or str(resolution.path)  # an explicit path stays explicit even if nothing exists there
     return command
 
 

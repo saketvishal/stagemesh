@@ -65,13 +65,17 @@ class ExecutableResolution:
     executed: str | None
     method: str  # explicit-relative | explicit-absolute | path-lookup | bare-unresolved | missing-explicit
     detail: str = ""
+    path: str | None = None  # the normalised location an explicit executable names, even when nothing exists there
 
     @property
     def launchable(self) -> bool:
         return self.method != "missing-explicit"
 
     def to_dict(self) -> dict[str, Any]:
-        return {"declared": self.declared, "executed": self.executed, "method": self.method, **({"detail": self.detail} if self.detail else {})}
+        return {
+            "declared": self.declared, "executed": self.executed, "method": self.method,
+            **({"detail": self.detail} if self.detail else {}), **({"path": self.path} if self.path else {}),
+        }
 
 
 def is_explicit_executable(value: str) -> bool:
@@ -100,12 +104,13 @@ def resolve_gate_executable(command: list[str], run_dir: Path, *, search_path: s
     candidate = raw if absolute else Path(os.path.normpath(os.path.join(run_dir, declared)))  # normpath keeps symlinks/launchers as written
     for option in _pathext_candidates(candidate):
         if option.is_file():
-            return ExecutableResolution(declared, str(option), "explicit-absolute" if absolute else "explicit-relative")
+            return ExecutableResolution(declared, str(option), "explicit-absolute" if absolute else "explicit-relative", path=str(option))
     return ExecutableResolution(
         declared,
         None,
         "missing-explicit",
         f"explicit executable {declared!r} does not exist at {candidate}; no PATH program was substituted",
+        str(candidate),
     )
 
 
