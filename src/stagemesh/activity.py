@@ -3,7 +3,7 @@
 Display only: it runs SELECTs on rows the runner already writes, adds no schema, and never
 mutates state. Results are bounded (page size and scan cap) and ordered newest first with a
 stable tie-break, so pages never overlap. Free-form text (execution results, audit payloads,
-provider output) is never copied into entries; only short identifier-shaped values are exposed.
+provider output) is never copied into entries; result codes use a fixed outcome allowlist.
 """
 
 from __future__ import annotations
@@ -24,10 +24,17 @@ ActivityState = Literal["open", "closed"]
 STATES: tuple[str, ...] = ("open", "closed")
 DEFAULT_LIMIT = 50
 MAX_LIMIT = 200
-MAX_SCAN = 1000  # rows read per source; offset + limit must fit inside it
+MAX_SCAN = 1000  # retained rows per source and across the combined projection
 MAX_TITLE_CHARS = 200
 _KIND_ORDER = {"audit": 0, "execution": 1, "task": 2}
 _SAFE_CODE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$")
+# Fixed application outcomes only: identifier-shaped provider text may still be a secret.
+_SAFE_RESULTS = frozenset({
+    "capacity", "cleanup_incomplete", "executor_aborted", "external_workspace_mutation",
+    "fenced_identity_unknown", "findings", "no_implementation_change", "operator_stop",
+    "orphaned", "provider_permission_denied", "provider_timeout", "provider_unavailable",
+    "recovered_stale", "tool_execution_failure",
+})
 _SAFE_SHA = re.compile(r"^[0-9a-fA-F]{7,64}$")
 _SECRET_MARKERS = ("token", "secret", "password", "authorization", "apikey", "api_key", "api-key")
 
@@ -68,11 +75,11 @@ class ActivityEntry:
 @dataclass(frozen=True)
 class ActivityPage:
     entries: tuple[ActivityEntry, ...]
-    total: int  # matches found within the scan cap
+    total: int  # matches retained within the combined cap
     limit: int
     offset: int
     next_offset: int | None
-    truncated: bool  # some source hit the scan cap, so `total` may undercount
+    truncated: bool  # a source or combined cap excluded records; `total` may undercount
 
 
 def validate_query(query: ActivityQuery) -> ActivityQuery:
@@ -98,8 +105,8 @@ def validate_query(query: ActivityQuery) -> ActivityQuery:
         raise ActivityQueryError(f"activity limit must be an integer from 1 to {MAX_LIMIT}")
     if isinstance(query.offset, bool) or not isinstance(query.offset, int) or query.offset < 0:
         raise ActivityQueryError("activity offset must be a non-negative integer")
-    if query.offset + query.limit > MAX_SCAN:
-        raise ActivityQueryError(f"activity offset + limit must be {MAX_SCAN} or fewer")
+    if query.offset >= MAX_SCAN:
+        raise ActivityQueryError(f"activity offset must be less than {MAX_SCAN}")
     return query
 
 
@@ -119,6 +126,8 @@ def query_activity(store: Store, query: ActivityQuery | None = None) -> Activity
         entries.extend(found)
         truncated = truncated or cut
     entries.sort(key=lambda e: (-e.at.timestamp(), _KIND_ORDER[e.kind], e.id))
+    truncated = truncated or len(entries) > MAX_SCAN
+    entries = entries[:MAX_SCAN]
     page = tuple(entries[query.offset : query.offset + query.limit])
     end = query.offset + len(page)
     return ActivityPage(
@@ -222,7 +231,7 @@ def _execution_entries(store: Store, query: ActivityQuery) -> tuple[list[Activit
             provider=_safe_code(row["actor"]),
             execution_kind=row["kind"],
             candidate_sha=row["candidate_sha"] if row["candidate_sha"] and _SAFE_SHA.match(row["candidate_sha"]) else None,
-            result_code=_safe_code(row["result"]),
+            result_code=row["result"] if row["result"] in _SAFE_RESULTS else None,
         )
         for row in rows[:MAX_SCAN]
     ]
@@ -275,9 +284,12 @@ def _safe_code(value: object) -> str | None:
 
 
 def _safe_title(title: str) -> str:
-    text = " ".join(str(title).split())
-    text = " ".join(
-        "***REDACTED***" if any(marker in word.lower() for marker in _SECRET_MARKERS) else redact_url_credentials(word) or word
-        for word in text.split()
-    )
+    words = []
+    for word in str(title).split():
+        if any(marker in word.lower() for marker in _SECRET_MARKERS):
+            # The value may be separated, quoted, or multiword: hide the whole suffix.
+            words.append("***REDACTED***")
+            break
+        words.append(redact_url_credentials(word) or word)
+    text = " ".join(words)
     return text if len(text) <= MAX_TITLE_CHARS else text[: MAX_TITLE_CHARS - 1] + "…"

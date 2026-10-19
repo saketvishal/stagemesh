@@ -174,3 +174,62 @@ def test_query_does_not_mutate_store(store: Store) -> None:
 def test_invalid_queries_are_rejected(store: Store, query: ActivityQuery) -> None:
     with pytest.raises(ActivityQueryError):
         query_activity(store, query)
+
+
+@pytest.mark.parametrize("credential", [
+    "password: hunter2", "password = hunter2", 'password: "hunter2 extra"',
+    "authorization: Bearer hunter2", "api_key= hunter2", "token hunter2",
+])
+def test_title_redacts_associated_credential_values(store: Store, credential: str) -> None:
+    store.upsert_task("deploy " + credential, source_id="title-secret")
+    page = query_activity(store)
+    assert "hunter2" not in repr(page)
+    assert "extra" not in repr(page)
+    assert page.entries[0].title.startswith("deploy ")
+    assert "REDACTED" in page.entries[0].title
+
+
+@pytest.mark.parametrize("result, expected", [
+    ("hunter2", None), ("sk-abc123", None), ("ghp_abc123", None),
+    ("Bearer:abc123", None), ("provider_timeout-extra", None),
+    ("provider_timeout", "provider_timeout"), ("operator_stop", "operator_stop"),
+    ("findings", "findings"), (None, None),
+])
+def test_result_codes_use_known_outcomes(store: Store, result, expected) -> None:
+    t = _task(store, "ordinary title", 0)
+    e = _execution(store, t, 1, "custom-provider", ExecutionStatus.FAILED)
+    store.conn.execute("UPDATE executions SET result=? WHERE id=?", (result, e))
+    store.conn.commit()
+    page = query_activity(store)
+    entry = next(x for x in page.entries if x.id == e)
+    assert entry.result_code == expected
+    assert entry.provider == "custom-provider"
+    assert next(x for x in page.entries if x.id == t).title == "ordinary title"
+
+
+@pytest.mark.parametrize("limit", [200, 199])
+@pytest.mark.parametrize("task_count, overflow", [(998, False), (1000, True)])
+def test_combined_pagination_cap(store: Store, limit: int, task_count: int, overflow: bool) -> None:
+    t = _task(store, "seed", 0)
+    store.conn.executemany(
+        "INSERT INTO tasks (id, title, source_id, source, stage, status, created_at, updated_at) "
+        "SELECT ?, title, ?, source, stage, status, created_at, updated_at FROM tasks WHERE id=?",
+        [(f"task-{i:04d}", f"source-{i}", t) for i in range(task_count - 1)],
+    )
+    store.conn.commit()
+    e = _execution(store, t, 1, "codex", ExecutionStatus.SUCCEEDED)
+    a = store.add_audit_event("task.note", {"task_id": t})
+    before = store.conn.total_changes
+    seen = []
+    offset = 0
+    while offset is not None:
+        page = query_activity(store, ActivityQuery(limit=limit, offset=offset))
+        assert page.total == 1000
+        assert page.truncated is overflow
+        assert len(page.entries) <= limit
+        seen.extend(_ids(page))
+        offset = page.next_offset
+    assert len(seen) == len(set(seen)) == 1000
+    assert seen[:2] == [a, e]
+    assert store.conn.total_changes == before
+    assert len(page.entries) == (200 if limit == 200 else 5)
