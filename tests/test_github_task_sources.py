@@ -265,6 +265,33 @@ def test_sync_blocks_malformed_github_tasks_without_hiding_valid_work(tmp_path):
         store.close()
 
 
+def test_sync_accepts_a_dependency_already_known_in_the_durable_ledger(tmp_path):
+    store = _store(tmp_path)
+    try:
+        dependency = store.upsert_task("landed prerequisite", source="github", source_id="248")
+        store.advance_task(dependency, Stage.DONE)
+
+        ids = sync_source(
+            store,
+            [
+                DiscoveredTask(
+                    "github",
+                    "249",
+                    "dependent work",
+                    labels=("stagemesh:ready",),
+                    dependencies=("248",),
+                )
+            ],
+        )
+
+        assert ids == ["249"]
+        assert store.get_task("249")["status"] == TaskStatus.OPEN
+        assert Scheduler(store).decision("249").reason == "eligible"
+        assert store.source_state("github", "249").get("validation_errors") is None
+    finally:
+        store.close()
+
+
 def test_closed_github_sync_preserves_done_task(tmp_path):
     store = _store(tmp_path)
     try:

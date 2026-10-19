@@ -357,7 +357,15 @@ def _description(item: dict[str, object]) -> str:
 def sync_source(store: Store, tasks: list[DiscoveredTask]) -> list[str]:
     ids: list[str] = []
     dependency_tasks: list[tuple[str, set[str]]] = []
-    github_validation_errors = _github_validation_errors(tasks)
+    known_github_ids = {
+        str(row[0])
+        for row in store.conn.execute(
+            "SELECT source_id FROM tasks WHERE source=? AND source_id IS NOT NULL "
+            "UNION SELECT source_id FROM source_cache WHERE source=?",
+            (GitHubIssueSource.name, GitHubIssueSource.name),
+        )
+    }
+    github_validation_errors = _github_validation_errors(tasks, known_github_ids)
     for task in tasks:
         state = _normalized_state(task.state)
         is_github = task.source == GitHubIssueSource.name
@@ -451,8 +459,13 @@ def sync_source(store: Store, tasks: list[DiscoveredTask]) -> list[str]:
     return ids
 
 
-def _github_validation_errors(tasks: list[DiscoveredTask]) -> dict[str, tuple[str, ...]]:
-    github_ids = {task.source_id for task in tasks if task.source == GitHubIssueSource.name}
+def _github_validation_errors(
+    tasks: list[DiscoveredTask], known_github_ids: set[str] | None = None
+) -> dict[str, tuple[str, ...]]:
+    github_ids = {
+        *(task.source_id for task in tasks if task.source == GitHubIssueSource.name),
+        *(known_github_ids or set()),
+    }
     errors: dict[str, tuple[str, ...]] = {}
     blocked_labels = {"stagemesh:blocked", "stagemesh:deferred", "status:blocked", "status:remediating"}
     for task in tasks:

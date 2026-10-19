@@ -64,6 +64,10 @@ owner-recorded exception (`"waived": true`). A prose-derived requirement that is
 source (for example `"ignore": ["AGENTS.md:12"]`) in the same file. Nothing is widened, relocated or created automatically. `contract-check` reports the
 same conflicts.
 
+GitHub dependency validation uses both the current source scan and the durable StageMesh ledger. A ready issue may depend on a closed
+or otherwise filtered issue that StageMesh already knows; it is not rejected as an unknown dependency merely because that prerequisite
+is absent from the current open-issue response. The scheduler still requires the recorded prerequisite task to be complete.
+
 ## Independent review
 
 Findings keep their stable identity (`finding_identity`), who raised them, the exact candidate, contract digest, baseline and
