@@ -23,7 +23,7 @@ python -m pip install -e ".[dev]"
 Or install the known-good stable package tag:
 
 ```bash
-python -m pip install "stagemesh @ git+https://github.com/saketvishal/stagemesh.git@v0.3.0"
+python -m pip install "stagemesh @ git+https://github.com/saketvishal/stagemesh.git@v0.4.0"
 ```
 
 See [docs/versioning.md](docs/versioning.md) for the stable-tag workflow.
