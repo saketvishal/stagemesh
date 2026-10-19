@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Protocol
 
 from .audit import record_audit
+from .config import AdverseReviewPolicy
 from .contract_binding import contract_for_candidate
 from .contracts import ContractError, _split_command, contract_prompt, declarative_invariants, evaluate_contract
 from .domain import EvidenceKind, EvidenceStatus, ExecutionKind, ExecutionStatus
@@ -89,6 +90,99 @@ ADVERSE_REVIEW_DISCIPLINE = (
     "- Check whether the candidate weakened validation, skipped the narrowest useful test, or changed behavior outside the stated objective.\n"
     "- Report only actionable findings tied to the candidate and contract. Do not fail for style preferences or future work.\n\n"
 )
+
+ROLE_NORMAL = "normal"
+ROLE_ADVERSE = "adverse"
+ADVERSE_OUTCOME_PASS = "PASS"
+ADVERSE_OUTCOME_BLOCKED = "BLOCKED"
+ADVERSE_OUTCOME_UNAVAILABLE = "UNAVAILABLE"
+
+
+def adverse_review_instructions(policy: AdverseReviewPolicy) -> str:
+    """The existing adverse discipline plus the typed policy the verdict will be judged against."""
+    return (
+        ADVERSE_REVIEW_DISCIPLINE
+        + f"Blocking severities: {', '.join(policy.blocking_severities)}. Other findings are advisory. "
+        + "If you cannot complete the review, answer REVIEW_INCOMPLETE; it is never treated as a pass.
+
+"
+    )
+
+
+def _command_identity(command: str) -> tuple[str, ...]:
+    try:
+        parts = _split_command(command)
+    except (ContractError, ValueError):
+        parts = command.split()
+    return tuple(part.strip("\"'").casefold() for part in parts)
+
+
+def command_alias_errors(commands: dict[str, str]) -> list[str]:
+    """Providers (role name -> command) that run the same command are aliases of one actor and cannot review each other."""
+    seen: dict[tuple[str, ...], str] = {}
+    errors: list[str] = []
+    for name, command in commands.items():
+        identity = _command_identity(command) if isinstance(command, str) else ()
+        if not identity:
+            errors.append(f"{name} has no command")
+        elif identity in seen:
+            errors.append(f"{name} shares a command with {seen[identity]}")
+        else:
+            seen[identity] = name
+    return errors
+
+
+def validate_role_evidence(
+    evidence: dict[str, dict[str, object]],
+    *,
+    candidate_sha: str,
+    policy: AdverseReviewPolicy,
+    implementer: dict[str, str],
+) -> list[str]:
+    """Reject review evidence that is not distinct, independent, and bound to this candidate and policy digest.
+
+    `evidence` maps role (normal/adverse) to {provider, command, candidate_sha, policy_digest, verdict, findings};
+    `implementer` is {provider, command}. Returns the rejection reasons; empty means the evidence is acceptable.
+    """
+    errors: list[str] = []
+    if set(evidence) != {ROLE_NORMAL, ROLE_ADVERSE}:
+        return [f"evidence must have exactly the roles {ROLE_NORMAL} and {ROLE_ADVERSE}"]
+    digest = policy.digest()
+    for role, item in evidence.items():
+        if item.get("candidate_sha") != candidate_sha:
+            errors.append(f"{role} evidence is not bound to candidate {candidate_sha}")
+        if item.get("policy_digest") != digest:
+            errors.append(f"{role} evidence is not bound to policy digest {digest}")
+        if item.get("verdict") not in (VERDICT_PASS, VERDICT_FAIL_WITH_FINDINGS, LEGACY_FAIL, VERDICT_REVIEW_INCOMPLETE):
+            errors.append(f"{role} evidence has an unknown verdict")
+        if not isinstance(item.get("provider"), str) or not isinstance(item.get("command"), str):
+            errors.append(f"{role} evidence needs a provider and command")
+    if errors:
+        return errors
+    actors = {"implementer": implementer, **evidence}
+    for role, item in actors.items():
+        for other, other_item in actors.items():
+            if role < other and _same_provider(str(item.get("provider")), str(other_item.get("provider"))):
+                errors.append(f"{role} and {other} must be different providers")
+    errors.extend(command_alias_errors({role: str(item.get("command")) for role, item in actors.items()}))
+    return errors
+
+
+def adverse_outcome(adverse: dict[str, object], policy: AdverseReviewPolicy) -> str:
+    """PASS, BLOCKED (a blocking finding or a FAIL without a usable finding) or UNAVAILABLE (fail closed, never a pass)."""
+    verdict = adverse.get("verdict")
+    if verdict == VERDICT_PASS:
+        return ADVERSE_OUTCOME_PASS
+    if verdict in (VERDICT_FAIL_WITH_FINDINGS, LEGACY_FAIL):
+        findings = adverse.get("findings")
+        findings = findings if isinstance(findings, list) else []
+        blocking = [f for f in findings if isinstance(f, dict) and policy.is_blocking(f.get("severity", "error"))]
+        # A FAIL whose findings are all advisory does not block; a FAIL with no findings at all is not a usable verdict.
+        if blocking:
+            return ADVERSE_OUTCOME_BLOCKED
+        return ADVERSE_OUTCOME_PASS if findings else ADVERSE_OUTCOME_UNAVAILABLE
+    return ADVERSE_OUTCOME_UNAVAILABLE
+
 
 # Progress chatter is not a verdict. _PRELIMINARY finds it anywhere in a short answer; findings are judged only by how they START
 # (or by being a bare filler word) so a concrete defect that merely mentions "in progress" is never discarded.

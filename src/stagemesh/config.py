@@ -125,6 +125,42 @@ def _merging(data: dict[str, object], independent: bool) -> MergeConfig:
     return MergeConfig(str(mode), tuple(checks), app)
 
 
+ADVERSE_UNAVAILABLE_BEHAVIORS = ("hold",)  # fail closed: an unavailable adverse reviewer never yields a pass
+DEFAULT_BLOCKING_SEVERITIES = ("blocker", "critical", "error", "high")
+
+
+@dataclass(frozen=True)
+class AdverseReviewPolicy:
+    """Typed adverse-review policy. Defining it adds no gate; review evidence is validated against its digest."""
+
+    blocking_severities: tuple[str, ...] = DEFAULT_BLOCKING_SEVERITIES
+    unavailable_reviewer: str = "hold"
+
+    def digest(self) -> str:
+        canonical = json.dumps(
+            {"blocking_severities": sorted(self.blocking_severities), "unavailable_reviewer": self.unavailable_reviewer},
+            sort_keys=True, separators=(",", ":"),
+        )
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    def is_blocking(self, severity: object) -> bool:
+        return isinstance(severity, str) and severity.strip().casefold() in self.blocking_severities
+
+
+def _adverse_review_policy(data: dict[str, object]) -> AdverseReviewPolicy:
+    unknown = set(data) - {"blocking_severities", "unavailable_reviewer"}
+    if unknown:
+        raise ConfigValidationError(f"adverse_review has unsupported keys: {', '.join(sorted(unknown))}")
+    severities = data.get("blocking_severities", DEFAULT_BLOCKING_SEVERITIES)
+    if (not isinstance(severities, (list, tuple)) or not severities
+            or not all(isinstance(item, str) and item.strip() for item in severities)):
+        raise ConfigValidationError("adverse_review.blocking_severities must be a non-empty list of severity names")
+    behavior = data.get("unavailable_reviewer", "hold")
+    if behavior not in ADVERSE_UNAVAILABLE_BEHAVIORS:
+        raise ConfigValidationError(f"adverse_review.unavailable_reviewer must be one of {', '.join(ADVERSE_UNAVAILABLE_BEHAVIORS)}")
+    return AdverseReviewPolicy(tuple(sorted({item.strip().casefold() for item in severities})), behavior)
+
+
 @dataclass(frozen=True)
 class StageMeshConfig:
     project: Path
@@ -150,6 +186,7 @@ class StageMeshConfig:
     runtime: RuntimeConfig | None = None
     diagnosis: DiagnosisConfig = field(default_factory=DiagnosisConfig)
     merging: MergeConfig = field(default_factory=MergeConfig)
+    adverse_review: AdverseReviewPolicy = field(default_factory=AdverseReviewPolicy)
 
 
 @dataclass(frozen=True)
@@ -267,6 +304,7 @@ def load_config(project: Path, config_path: Path | None = None) -> StageMeshConf
         runtime=runtime,
         diagnosis=_diagnosis(_optional_mapping(data, "diagnosis"), known),
         merging=_merging(_optional_mapping(data, "merging"), require_review),
+        adverse_review=_adverse_review_policy(_optional_mapping(data, "adverse_review")),
     )
 
 
