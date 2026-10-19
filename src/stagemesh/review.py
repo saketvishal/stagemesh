@@ -103,9 +103,7 @@ def adverse_review_instructions(policy: AdverseReviewPolicy) -> str:
     return (
         ADVERSE_REVIEW_DISCIPLINE
         + f"Blocking severities: {', '.join(policy.blocking_severities)}. Other findings are advisory. "
-        + "If you cannot complete the review, answer REVIEW_INCOMPLETE; it is never treated as a pass.
-
-"
+        + "If you cannot complete the review, answer REVIEW_INCOMPLETE; it is never treated as a pass.\n\n"
     )
 
 
