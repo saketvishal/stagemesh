@@ -50,7 +50,9 @@ Before a provider runs, `allowed_files` is reconciled with discoverable mandator
 
 1. `.stagemesh/policy/required-changes.json` (project owned, authoritative):
    `{"version":1,"requirements":[{"id","kind","description","paths":["docs/design/**"],"applies_to":["src/**"],"waived":false}]}`
-2. The contract's own objective, acceptance criteria, invariants and cited `spec_refs` ("... must update `docs/x.md`").
+2. The contract's own objective, acceptance criteria and invariants ("... must update `docs/x.md`"). Cited `spec_refs` remain
+   governing validation context, but path-changing prose discovered inside them is advisory because citing an authority does not mean
+   the task must edit every repository path mentioned anywhere in that specification.
 3. Unconditional "must/required ... update/add/record ... `path`" sentences in `AGENTS.md` and `CONTRIBUTING.md`, where the token is a
    plausible repository path (known extension, or a directory that exists) and the sentence has a documentation/record cue or the file
    exists. Conditional, negated and speculative (possible runtime output) sentences are advisory only. Documents are read only from

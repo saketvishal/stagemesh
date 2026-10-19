@@ -75,6 +75,33 @@ def test_the_contracts_own_acceptance_text_can_contradict_its_allowed_files(tmp_
     assert [c.requirement.origin for c in report.conflicts] == ["contract"]
 
 
+def test_cited_specs_do_not_expand_a_task_contract_to_every_path_they_mention(tmp_path: Path) -> None:
+    project, _ = _setup(tmp_path)
+    spec = project / "openspec" / "specs" / "product-requirements" / "spec.md"
+    spec.parent.mkdir(parents=True)
+    spec.write_text(
+        "The V1 scope per `docs/product/MVP_SCOPE.md` MUST include authentication.\n"
+        "Every change SHALL include an Engineering Impact analysis owned by "
+        "`openspec/specs/engineering-change-control/spec.md`.\n",
+        encoding="utf-8",
+    )
+    contract = dict(
+        TWO_TESTS,
+        allowed_files=["openspec/changes/bounded-demo/**"],
+        spec_refs=["openspec/specs/product-requirements/spec.md"],
+    )
+
+    report = check_contract_feasibility(project, parse_contract(contract))
+
+    assert report.feasible
+    assert not report.conflicts
+    assert {item.origin for item in report.advisories} == {"spec-reference"}
+    assert {item.paths for item in report.advisories} == {
+        ("docs/product/MVP_SCOPE.md",),
+        ("openspec/specs/engineering-change-control/spec.md",),
+    }
+
+
 def test_a_contract_that_includes_the_required_path_is_feasible(tmp_path: Path) -> None:
     project, _ = _setup(tmp_path, TWO_TESTS)
     _policy(project)

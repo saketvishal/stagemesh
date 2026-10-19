@@ -8,8 +8,10 @@ Requirement sources, strongest first:
 
 * `structured`   `.stagemesh/policy/required-changes.json`, a project-owned list of {id, kind, description, paths, applies_to}.
                  Authoritative: a conflict blocks admission.
-* `contract`     the contract's own acceptance criteria, invariants and objective, and the specs it cites (`spec_refs`): a sentence
-                 that says a named path "must"/"shall"/"required" be updated. A contract that contradicts itself is a conflict.
+* `contract`     the contract's own acceptance criteria, invariants and objective: a sentence that says a named path
+                 "must"/"shall"/"required" be updated. A contract that contradicts itself is a conflict.
+* `spec-reference` requirements discovered in cited specs (`spec_refs`) are advisory. A cited authority governs the work but does
+                 not imply that every repository path mentioned anywhere in that specification must be edited by this task.
 * `policy-prose` unconditional "must/required ... update/add/record ... `path`" sentences in the root policy documents
                  (AGENTS.md, CONTRIBUTING.md). A sentence with a condition ("if", "when", "only", "unless", "for any change to")
                  is advisory because whether it applies cannot be decided here; advisories are reported, never blocking.
@@ -49,7 +51,7 @@ class Requirement:
     description: str
     paths: tuple[str, ...]
     source: str
-    origin: str  # structured | contract | policy-prose
+    origin: str  # structured | contract | spec-reference | policy-prose
     applies_to: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
@@ -244,8 +246,8 @@ def discover_requirements(project: Path, contract: ChangeContract) -> tuple[list
         blocking.extend(found)
         advisory.extend(soft)
     for ref in contract.spec_refs:
-        found, soft = _from_text(_read(project / ref, project), ref, "contract", project)
-        blocking.extend(found)
+        found, soft = _from_text(_read(project / ref, project), ref, "spec-reference", project)
+        advisory.extend(found)
         advisory.extend(soft)
     for name in POLICY_DOCUMENTS:
         found, soft = _from_text(_read(project / name, project), name, "policy-prose", project)
