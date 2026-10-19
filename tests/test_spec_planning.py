@@ -80,6 +80,30 @@ def test_invalid_or_reserved_affected_paths_are_rejected(path):
     assert _problems(payload)
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        "src/bad\x00.py",
+        "src/bad\x01.py",
+        "src/bad\x1f.py",
+        'src/bad".py',
+        "src/bad<.py",
+        "src/bad>.py",
+        "src/bad|.py",
+        ".GIT/config",
+        ".STAGEMESH/queue.json",
+        "./.GiT/config",
+        ".StAgEmEsH\\queue.json",
+    ],
+)
+def test_invalid_affected_paths_cannot_be_frozen(path):
+    payload = _payload()
+    payload["affected_paths"] = [path]
+    assert any("affected_paths" in problem for problem in _problems(payload))
+    with pytest.raises(PlanningSpecError):
+        freeze_planning_spec(payload)
+
+
 def test_invalid_spec_refs_are_rejected():
     payload = _payload()
     payload["spec_refs"] = ["../secret.md"]

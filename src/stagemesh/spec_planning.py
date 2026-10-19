@@ -161,8 +161,11 @@ def _check_paths(paths: tuple[str, ...], problems: list[str]) -> None:
     except ContractError as exc:
         problems.append(str(exc))
     for path in paths:
+        # Glob wildcards remain valid; reject characters invalid in filesystem paths.
+        if any(ord(char) < 32 or char in '"<>|' for char in path):
+            problems.append(f"affected_paths entry contains invalid path characters: {path!r}")
         parts = [part for part in path.replace("\\", "/").split("/") if part not in ("", ".")]
-        if parts and parts[0] in RESERVED_PATH_ROOTS:
+        if parts and parts[0].casefold() in RESERVED_PATH_ROOTS:
             problems.append(f"affected_paths entry targets reserved location: {path}")
 
 
