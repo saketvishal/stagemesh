@@ -544,7 +544,7 @@ WRITE_CAPABLE_DEFAULT_COMMANDS = {
         "--allow 'Bash(git show*)' --allow 'Bash(git rev-parse*)' "
         "--allow 'Bash(python *)' --allow 'Bash(pytest *)' --allow 'Bash(ruff *)'"
     ),
-    "agy": "agy --mode accept-edits",
+    "agy": "agy --mode accept-edits --dangerously-skip-permissions --model gemini-3.8-flash-medium",
 }
 
 LEGACY_DEFAULT_COMMANDS = {
@@ -795,6 +795,25 @@ def _remediation_prompt(remediation: dict[str, object]) -> str:
     ]
     for finding in remediation["findings"][:50]:  # type: ignore[index]
         lines.append(f"- [{finding['severity']}] {finding['message']}")
+        if finding.get("stderr"):
+            lines.append(f"  stderr: {str(finding['stderr']).strip()[:500]}")
+        if finding.get("stdout"):
+            stdout_lines = [l for l in str(finding["stdout"]).splitlines() if l.strip()]
+            if stdout_lines:
+                lines.append("  stdout excerpt:\n    " + "\n    ".join(stdout_lines[-15:]))
+    failed_gates = remediation.get("failed_gates")
+    if isinstance(failed_gates, list) and failed_gates:
+        lines.extend(["", "Failing validation gates (command and failure output):"])
+        for gate in failed_gates[:5]:
+            lines.append(f"- Gate {gate.get('name')} (exit code {gate.get('returncode')} after {gate.get('duration_seconds')}s):")
+            if gate.get("command"):
+                lines.append(f"  command: {' '.join(str(c) for c in gate['command'])}")
+            if gate.get("stderr"):
+                lines.append(f"  stderr: {str(gate['stderr']).strip()[:500]}")
+            if gate.get("stdout"):
+                out_lines = [l for l in str(gate["stdout"]).splitlines() if l.strip()]
+                if out_lines:
+                    lines.append("  stdout excerpt:\n    " + "\n    ".join(out_lines[-15:]))
     diagnosis = remediation.get("diagnosis")
     if isinstance(diagnosis, dict):
         lines.extend(["", f"Diagnosis ({diagnosis.get('category')}): {str(diagnosis.get('summary'))[:500]}"])

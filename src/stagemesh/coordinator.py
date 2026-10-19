@@ -371,6 +371,47 @@ class Coordinator:
             if self.store.has_bound_evidence(task_id, sha, EvidenceKind.REVIEW, bound.digest, EvidenceStatus.FAILED):
                 return self._remediate_or_block(task_id, sha, Stage.REVIEW)
             if not self._review_satisfied(task_id, sha, bound.digest):
+                capacity_row = self.store.conn.execute(
+                    "SELECT payload FROM evidence WHERE task_id=? AND candidate_sha=? AND kind=? AND status=? ORDER BY rowid DESC LIMIT 1",
+                    (task_id, sha, EvidenceKind.REVIEW, EvidenceStatus.CAPACITY),
+                ).fetchone()
+                if capacity_row is not None:
+                    try:
+                        cap_payload = json.loads(capacity_row["payload"])
+                    except (TypeError, ValueError):
+                        cap_payload = {}
+                    failure_reason = cap_payload.get("review_infrastructure_failure") or "review_infrastructure_failure"
+                    if failure_reason in {
+                        "authentication_failure",
+                        "quota_exceeded",
+                        "quota_rate_limit",
+                        "provider_unavailable",
+                        "independent_review_unavailable",
+                        "provider_timeout",
+                    }:
+                        providers_text = ""
+                        if cap_payload.get("review_providers_considered"):
+                            providers_text = "; ".join(
+                                f"{c.get('provider')}: {c.get('reason')}"
+                                for c in cap_payload["review_providers_considered"]
+                            )
+                        reason_msg = f"review infrastructure failure on candidate {sha[:10]}: {failure_reason}"
+                        if providers_text:
+                            reason_msg += f" ({providers_text})"
+                        record_block(
+                            self.store,
+                            task_id,
+                            BlockKind.EXTERNAL_DEPENDENCY,
+                            reason_msg,
+                            stage=str(stage),
+                            candidate_sha=sha,
+                            runtime=runtime_fingerprint(self.project),
+                            detail={
+                                "review_infrastructure_failure": failure_reason,
+                                "providers_considered": cap_payload.get("review_providers_considered"),
+                            },
+                        )
+                        return 1
                 return 0  # review infrastructure failure or unsatisfied independence: stay in REVIEW, no remediation
             return 0
         if stage is Stage.INTEGRATE:

@@ -94,7 +94,7 @@ from .queue_reconcile import ReconcileOptions, reconcile_queue
 from .queue_run import QueueRunner
 from .queue_visibility import format_queue_control, queue_control_report
 from .contract_check import check_contract, format_report
-from .recovery import RecoveryRefusal, advance_baseline, format_doctor, rebaseline_task, rebind_contract, task_doctor
+from .recovery import RecoveryRefusal, advance_baseline, format_doctor, rebaseline_task, rebind_contract, resume_task, task_doctor
 from .redaction import redact_command_secrets, redact_url_credentials
 from .registry import (
     GlobalRegistry,
@@ -1323,10 +1323,11 @@ def command_retry_task(args: argparse.Namespace) -> int:
         print(f"task does not exist: {args.task}", file=sys.stderr)
         store.close()
         return 2
-    if not store.unblock_task(args.task):
+    if task["status"] != TaskStatus.BLOCKED:
         print(f"task is not blocked: {args.task} (status {task['status']})", file=sys.stderr)
         store.close()
         return 2
+    resume_task(store, args.task)
     task = store.get_task(args.task)
     if args.json:
         print(json.dumps({"task_id": args.task, "status": task["status"], "stage": task["stage"]}, sort_keys=True))

@@ -78,12 +78,49 @@ def remediation_context(store: Store, task_id: str, project: Path | None = None)
     if latest is None:
         return None
     findings = store.open_findings_for_candidate(task_id, str(latest["candidate_sha"]))
+    raw_findings = [{"id": row["id"], "severity": row["severity"], "message": row["message"]} for row in findings]
+    evidence_row = store.conn.execute(
+        "SELECT payload FROM evidence WHERE task_id=? AND candidate_sha=? AND status='FAILED' "
+        "ORDER BY created_at DESC, rowid DESC LIMIT 1",
+        (task_id, str(latest["candidate_sha"])),
+    ).fetchone()
+    failed_gates: list[dict[str, object]] = []
+    if evidence_row is not None:
+        import json
+        try:
+            ev_payload = json.loads(evidence_row["payload"])
+        except (TypeError, ValueError):
+            ev_payload = {}
+        ev_findings = {f.get("message"): f for f in ev_payload.get("findings", []) if isinstance(f, dict)}
+        for item in raw_findings:
+            msg = item.get("message")
+            if msg in ev_findings:
+                ev_f = ev_findings[msg]
+                for k in ("stdout", "stderr", "failure_kind", "code", "path"):
+                    if ev_f.get(k):
+                        item[k] = ev_f[k]
+        gates = ev_payload.get("gates", [])
+        if isinstance(gates, list):
+            for g in gates:
+                if isinstance(g, dict) and g.get("status") not in (None, "PASSED"):
+                    failed_gates.append(
+                        {
+                            "name": g.get("name"),
+                            "returncode": g.get("returncode"),
+                            "command": g.get("command"),
+                            "duration_seconds": g.get("duration_seconds"),
+                            "stderr": (g.get("stderr_tail") or g.get("stderr") or "")[:1500],
+                            "stdout": (g.get("stdout_tail") or g.get("stdout") or "")[-2500:],
+                        }
+                    )
     context: dict[str, object] = {
         "stage": str(latest["stage"]),
         "candidate_sha": str(latest["candidate_sha"]),
-        "findings": [{"id": row["id"], "severity": row["severity"], "message": row["message"]} for row in findings],
+        "findings": raw_findings,
         "task_owner_state": task_owner_state(store, task_id, project),
     }
+    if failed_gates:
+        context["failed_gates"] = failed_gates
     diagnosis = _latest_diagnosis(store, task_id, str(latest["candidate_sha"]))
     if diagnosis is not None:
         context["diagnosis"] = diagnosis
