@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 from .audit import record_audit
 from .contract_binding import contract_for_candidate
@@ -24,6 +25,27 @@ from .validation_plan import (
     derive_validation_plan,
     with_required_checks,
 )
+from .validation_services import discover_validation_services
+from .e2e_evidence import E2EEvidenceManifest, validate_e2e_evidence_manifest
+
+
+def record_e2e_evidence_in_validation(
+    payload: dict[str, Any],
+    manifest: E2EEvidenceManifest,
+    bound: Any,
+    *,
+    artifact_root: Path | None = None,
+) -> dict[str, Any]:
+    """Bind and validate an E2E evidence manifest into the validation evidence payload."""
+    validate_e2e_evidence_manifest(
+        manifest,
+        bound,
+        expected_candidate_sha=payload.get("candidate_sha") or bound.candidate_sha,
+        artifact_root=artifact_root,
+    )
+    payload["e2e_evidence"] = manifest.to_dict()
+    return payload
+
 
 
 class Validator:
