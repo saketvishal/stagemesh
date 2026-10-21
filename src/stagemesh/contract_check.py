@@ -39,9 +39,12 @@ def check_contract_text(
     *,
     require_spec: bool = False,
     prerequisite_manifest: dict[str, Any] | None = None,
+    manifest_load_error: str | None = None,
 ) -> dict[str, Any]:
     """Fail-closed verdict for contract JSON text. `ok` is True only when it parses and fits the canonical limit."""
     report: dict[str, Any] = {"ok": False, "limit": limit, "size": None, "errors": [], "gates": [], "largest_sections": []}
+    if manifest_load_error:
+        report["errors"].append(manifest_load_error)
     try:
         payload = json.loads(text)
     except ValueError as exc:
@@ -66,8 +69,36 @@ def check_contract_text(
         elif isinstance(payload.get("prerequisite_manifest"), dict):
             prerequisite_manifest = payload["prerequisite_manifest"]
 
+    is_spec_governed = (
+        ("spec_manifest" in payload)
+        or ("prerequisite_manifest" in payload)
+        or any("openspec/" in ref or "adapter.json" in ref or ref.startswith("specs/") for ref in contract.spec_refs)
+        or any("openspec/" in f or f == "adapter.json" for f in contract.allowed_files)
+    )
+
+    if prerequisite_manifest is None and is_spec_governed and not manifest_load_error:
+        report["errors"].append(
+            "spec-governed contract requires a prerequisite structural impact manifest before implementation"
+        )
+
     if prerequisite_manifest is not None:
-        from .spec_integrity import validate_prerequisite_manifest
+        from .spec_integrity import resolve_pinned_adapter, validate_prerequisite_manifest
+
+        adapter_info = prerequisite_manifest.get("adapter", {})
+        if isinstance(adapter_info, dict):
+            name = adapter_info.get("name")
+            version = adapter_info.get("version")
+            if isinstance(name, str) and isinstance(version, str):
+                try:
+                    resolve_pinned_adapter(
+                        name,
+                        version,
+                        contract_path=adapter_info.get("contract_path")
+                        or prerequisite_manifest.get("contract_path")
+                        or "adapter.json",
+                    )
+                except Exception as exc:
+                    report["errors"].append(f"pinned adapter validation failed: {exc}")
 
         verdict = validate_prerequisite_manifest(prerequisite_manifest, allowed_files=contract.allowed_files)
         report["spec_governance"] = verdict.to_dict()
@@ -101,6 +132,7 @@ def check_contract(
     require_spec: bool = False,
     prerequisite_manifest: dict[str, Any] | Path | str | None = None,
 ) -> dict[str, Any]:
+    manifest_load_error = None
     if isinstance(prerequisite_manifest, (str, Path)):
         try:
             prerequisite_manifest = json.loads(Path(prerequisite_manifest).read_text(encoding="utf-8"))
@@ -125,8 +157,9 @@ def check_contract(
                 try:
                     prerequisite_manifest = json.loads(candidate_path.read_text(encoding="utf-8"))
                     break
-                except (OSError, ValueError):
-                    pass
+                except (OSError, ValueError) as exc:
+                    manifest_load_error = f"cannot read prerequisite manifest from {candidate_path}: {exc}"
+                    break
 
     if path is None:
         if task_id is None:
@@ -154,7 +187,13 @@ def check_contract(
             "largest_sections": [],
             "path": str(path),
         }
-    report = check_contract_text(text, limit=limit, require_spec=require_spec, prerequisite_manifest=prerequisite_manifest)
+    report = check_contract_text(
+        text,
+        limit=limit,
+        require_spec=require_spec,
+        prerequisite_manifest=prerequisite_manifest,
+        manifest_load_error=manifest_load_error,
+    )
     report["path"] = str(path)
     if require_spec and report["ok"]:
         try:

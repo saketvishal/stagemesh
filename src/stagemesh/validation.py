@@ -113,6 +113,7 @@ class Validator:
                         }
                     )
 
+            manifest_load_error = False
             if prerequisite_manifest is None:
                 spec_manifest_paths = [
                     project / ".stagemesh" / "contracts" / f"{task_id}.spec_manifest.json",
@@ -123,26 +124,68 @@ class Validator:
                         try:
                             prerequisite_manifest = json.loads(p.read_text(encoding="utf-8"))
                             break
-                        except (OSError, ValueError):
-                            pass
+                        except (OSError, ValueError) as exc:
+                            findings.append({
+                                "severity": "error",
+                                "code": "spec_manifest_load_failure",
+                                "message": f"cannot read prerequisite manifest from {p}: {exc}",
+                            })
+                            manifest_load_error = True
+                            break
+
+            is_spec_governed = bool(
+                contract.spec_refs
+                and any("openspec/" in r or "adapter.json" in r or r.startswith("specs/") for r in contract.spec_refs)
+            ) or any("openspec/" in f or f == "adapter.json" for f in inspected_files) or any(
+                "openspec/" in f or f == "adapter.json" for f in contract.allowed_files
+            )
+
+            if prerequisite_manifest is None and is_spec_governed and not manifest_load_error:
+                findings.append({
+                    "severity": "error",
+                    "code": "spec_manifest_missing",
+                    "message": "specification modification requires pinned adapter validation and prerequisite manifest",
+                })
 
             spec_verdict = None
             if prerequisite_manifest is not None:
-                from .spec_integrity import validate_prerequisite_manifest
+                from .spec_integrity import resolve_pinned_adapter, validate_prerequisite_manifest
 
-                spec_verdict = validate_prerequisite_manifest(prerequisite_manifest, allowed_files=contract.allowed_files)
+                adapter_info = prerequisite_manifest.get("adapter", {})
+                if isinstance(adapter_info, dict):
+                    name = adapter_info.get("name")
+                    version = adapter_info.get("version")
+                    if isinstance(name, str) and isinstance(version, str):
+                        try:
+                            adapter = resolve_pinned_adapter(
+                                name,
+                                version,
+                                contract_path=adapter_info.get("contract_path")
+                                or prerequisite_manifest.get("contract_path")
+                                or "adapter.json",
+                            )
+                            if (project / "openspec").is_dir():
+                                adapter.discover(project)
+                        except Exception as exc:
+                            findings.append({
+                                "severity": "error",
+                                "code": "spec_adapter_validation_failed",
+                                "message": f"pinned adapter validation failed: {exc}",
+                            })
+
+                spec_verdict = validate_prerequisite_manifest(
+                    prerequisite_manifest,
+                    allowed_files=contract.allowed_files,
+                    expected_candidate_revision=candidate_sha,
+                    expected_base_revision=bound.baseline_sha,
+                    expected_changed_files=inspected_files,
+                )
                 if not spec_verdict.ok:
                     for err in spec_verdict.errors:
                         findings.append({"severity": "error", "code": "spec_governance_failure", "message": err})
                 if spec_verdict.review_findings:
                     for rf in spec_verdict.review_findings:
                         findings.append({"severity": "warning", "code": "spec_semantic_overlap", "message": rf})
-            elif any("openspec/" in f or f == "adapter.json" for f in inspected_files) and contract.explicit:
-                findings.append({
-                    "severity": "error",
-                    "code": "spec_skipped_validation_or_sync",
-                    "message": "specification modification requires pinned adapter validation and prerequisite manifest",
-                })
 
             has_error_findings = any(f.get("severity") == "error" for f in findings)
             status = (

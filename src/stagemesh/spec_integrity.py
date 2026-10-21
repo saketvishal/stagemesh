@@ -78,6 +78,9 @@ def validate_prerequisite_manifest(
     manifest: Any,
     *,
     allowed_files: tuple[str, ...] | list[str] | None = None,
+    expected_candidate_revision: str | None = None,
+    expected_base_revision: str | None = None,
+    expected_changed_files: tuple[str, ...] | list[str] | None = None,
 ) -> SpecGovernanceVerdict:
     """Validate a prerequisite structural impact manifest fail-closed.
 
@@ -104,8 +107,82 @@ def validate_prerequisite_manifest(
     else:
         name = adapter_info.get("name")
         version = adapter_info.get("version")
-        if name not in PINNED_ADAPTERS or (version and version not in PINNED_ADAPTERS[name]):
-            errors.append(f"adapter '{name}' (version {version}) is not a configured pinned adapter")
+        if not isinstance(name, str) or name not in PINNED_ADAPTERS:
+            errors.append(f"adapter '{name}' is not a configured pinned adapter")
+        elif not isinstance(version, str) or not version.strip() or version not in PINNED_ADAPTERS[name]:
+            errors.append(
+                f"adapter '{name}' (version {version!r}) is missing a valid configured version pin; allowed: {PINNED_ADAPTERS[name]}"
+            )
+        else:
+            try:
+                resolve_pinned_adapter(
+                    name,
+                    version,
+                    contract_path=adapter_info.get("contract_path")
+                    or manifest.get("contract_path")
+                    or "adapter.json",
+                )
+            except SpecAdapterError as exc:
+                errors.append(f"pinned adapter resolution failed: {exc}")
+
+    # Required adapter validation and sync completion evidence
+    val_status = manifest.get("validation_status")
+    if val_status is None:
+        errors.append("manifest missing required adapter validation evidence (validation_status)")
+    elif val_status not in {"passed", "ok", "valid", "completed", "verified"}:
+        errors.append(f"required pinned adapter validation was not passed: validation_status is '{val_status}'")
+    if manifest.get("skipped_validation") is True:
+        errors.append("skipped required pinned adapter validation")
+
+    sync_status = manifest.get("sync_status")
+    if sync_status is None:
+        errors.append("manifest missing required spec sync evidence (sync_status)")
+    elif sync_status not in {"in_sync", "synced", "passed", "ok", "completed", "verified"}:
+        errors.append(f"required spec sync was not completed: sync_status is '{sync_status}'")
+    if manifest.get("skipped_sync") is True:
+        errors.append("skipped required spec sync")
+    if manifest.get("sync_required") is True and not manifest.get("synced"):
+        errors.append("required spec sync was not completed")
+
+    # Candidate, baseline, and changed files binding
+    cand_rev = manifest.get("candidate_revision")
+    base_rev = manifest.get("base_revision")
+    changed = manifest.get("changed_files")
+
+    if expected_candidate_revision is not None:
+        if not cand_rev:
+            errors.append(f"manifest missing candidate_revision (expected '{expected_candidate_revision}')")
+        elif not (
+            cand_rev == expected_candidate_revision
+            or expected_candidate_revision.startswith(str(cand_rev))
+            or str(cand_rev).startswith(expected_candidate_revision)
+        ):
+            errors.append(
+                f"manifest candidate_revision '{cand_rev}' does not match candidate '{expected_candidate_revision}'"
+            )
+
+    if expected_base_revision is not None:
+        if not base_rev:
+            errors.append(f"manifest missing base_revision (expected '{expected_base_revision}')")
+        elif not (
+            base_rev == expected_base_revision
+            or expected_base_revision.startswith(str(base_rev))
+            or str(base_rev).startswith(expected_base_revision)
+        ):
+            errors.append(
+                f"manifest base_revision '{base_rev}' does not match baseline '{expected_base_revision}'"
+            )
+
+    if expected_changed_files is not None:
+        if changed is None or not isinstance(changed, list):
+            errors.append("manifest missing changed_files list")
+        else:
+            manifest_set = {f.replace("\\", "/").lstrip("/") for f in changed if isinstance(f, str)}
+            expected_set = {f.replace("\\", "/").lstrip("/") for f in expected_changed_files if isinstance(f, str)}
+            if manifest_set != expected_set:
+                errors.append(
+                    f"manifest changed_files {sorted(manifest_set)} does not match actual diff {sorted(expected_set)}"
+                )
 
     # Owners and IDs check
     owners = manifest.get("owners")
@@ -115,6 +192,8 @@ def validate_prerequisite_manifest(
 
     known_owner_ids: set[str] = set()
     owner_statuses: dict[str, str] = {}
+    owner_requirements: dict[str, set[str]] = {}
+    active_ids: set[str] = set()
     archived_markers = ("/archive/", "changes/archive", "openspec/changes/archive")
 
     for idx, owner in enumerate(owners):
@@ -143,6 +222,7 @@ def validate_prerequisite_manifest(
                 )
             owner_statuses[oid] = status
 
+            is_active = (status == "active") and (canonical is not False)
             # Canonical vs status contradiction
             if canonical is not None:
                 if canonical is True and status != "active":
@@ -155,7 +235,12 @@ def validate_prerequisite_manifest(
             if any(marker in normalized_path for marker in archived_markers) and status == "active":
                 errors.append(f"owner '{oid}' at historical archive path '{path}' cannot have active status")
 
+            if is_active:
+                active_ids.add(oid)
+
         known_owner_ids.add(oid)
+        req_set: set[str] = set()
+        owner_requirements[oid] = req_set
 
         # Requirement ID checks within owner
         reqs = owner.get("requirements", [])
@@ -169,8 +254,40 @@ def validate_prerequisite_manifest(
                 rid = req.get("id")
                 if not isinstance(rid, str) or not rid.strip():
                     errors.append(f"requirement #{ridx} in owner '{oid}' has missing or empty id")
+                else:
+                    req_set.add(rid)
+                    if status == "active" and canonical is not False:
+                        active_ids.add(rid)
 
-    # Requirements changes check
+    # Validate active dependencies against declared active IDs
+    for owner in owners:
+        if not isinstance(owner, dict):
+            continue
+        oid = owner.get("id")
+        status = owner.get("status")
+        canonical = owner.get("canonical")
+        if status == "active" and canonical is not False:
+            deps = owner.get("dependencies", [])
+            if isinstance(deps, (list, tuple)):
+                for dep in sorted(set(deps)):
+                    if dep not in active_ids:
+                        errors.append(
+                            f"missing affected reference: active owner '{oid}' has unresolved dependency '{dep}'"
+                        )
+            reqs = owner.get("requirements", [])
+            if isinstance(reqs, list):
+                for req in reqs:
+                    if isinstance(req, dict):
+                        rid = req.get("id")
+                        rdeps = req.get("dependencies", [])
+                        if isinstance(rdeps, (list, tuple)):
+                            for dep in sorted(set(rdeps)):
+                                if dep not in active_ids:
+                                    errors.append(
+                                        f"missing affected reference: requirement '{rid}' in owner '{oid}' has unresolved dependency '{dep}'"
+                                    )
+
+    # Requirements changes check against declared records
     req_changes = manifest.get("requirements", [])
     if isinstance(req_changes, list):
         for cidx, change in enumerate(req_changes):
@@ -178,12 +295,17 @@ def validate_prerequisite_manifest(
                 continue
             rid = change.get("requirement_id") or change.get("id")
             oid = change.get("owner_id")
+            ctype = change.get("change")
             if not isinstance(rid, str) or not rid.strip():
                 errors.append(f"affected requirement #{cidx} has missing or empty requirement_id")
+                continue
             if not isinstance(oid, str) or not oid.strip():
                 errors.append(f"affected requirement '{rid}' has missing or empty owner_id")
             elif oid not in known_owner_ids:
                 errors.append(f"affected requirement '{rid}' references missing owner '{oid}'")
+            else:
+                if ctype != "removed" and rid not in owner_requirements.get(oid, set()):
+                    errors.append(f"affected requirement '{rid}' not found in declared requirements for owner '{oid}'")
 
     # Missing affected references check
     unresolved = manifest.get("unresolved_references", [])
@@ -193,21 +315,9 @@ def validate_prerequisite_manifest(
                 sid = u.get("source_id")
                 tgt = u.get("target")
                 if sid and tgt and u.get("reason") == "no-active-target":
-                    errors.append(f"missing affected reference: source '{sid}' cannot resolve target '{tgt}'")
-
-    # Skipped required validation/sync
-    sync_status = manifest.get("sync_status")
-    validation_status = manifest.get("validation_status")
-    if sync_status in {"skipped", "out_of_sync", "missing", "failed", "unvalidated", "unsynced"}:
-        errors.append(f"skipped required spec sync: sync_status is '{sync_status}'")
-    if validation_status in {"skipped", "failed", "missing", "unvalidated"}:
-        errors.append(f"skipped required pinned adapter validation: validation_status is '{validation_status}'")
-    if manifest.get("skipped_validation") is True:
-        errors.append("skipped required pinned adapter validation")
-    if manifest.get("skipped_sync") is True:
-        errors.append("skipped required spec sync")
-    if manifest.get("sync_required") is True and not manifest.get("synced"):
-        errors.append("required spec sync was not completed")
+                    msg = f"missing affected reference: source '{sid}' cannot resolve target '{tgt}'"
+                    if msg not in errors:
+                        errors.append(msg)
 
     # Ambiguous semantic overlap is a review finding, NOT a deterministic error
     unmapped = manifest.get("unmapped_files", [])
@@ -233,9 +343,18 @@ def spec_governance_gate(
     base_revision: str = "base",
     candidate_revision: str = "candidate",
     allowed_files: tuple[str, ...] | list[str] | None = None,
+    expected_candidate_revision: str | None = None,
+    expected_base_revision: str | None = None,
+    expected_changed_files: tuple[str, ...] | list[str] | None = None,
 ) -> SpecGovernanceVerdict:
     if prerequisite_manifest is not None:
-        return validate_prerequisite_manifest(prerequisite_manifest, allowed_files=allowed_files)
+        return validate_prerequisite_manifest(
+            prerequisite_manifest,
+            allowed_files=allowed_files,
+            expected_candidate_revision=expected_candidate_revision,
+            expected_base_revision=expected_base_revision,
+            expected_changed_files=expected_changed_files,
+        )
     if before is not None and after is not None:
         manifest = structural_impact_manifest(
             before,
@@ -244,7 +363,13 @@ def spec_governance_gate(
             base_revision=base_revision,
             candidate_revision=candidate_revision,
         )
-        return validate_prerequisite_manifest(manifest, allowed_files=allowed_files)
+        return validate_prerequisite_manifest(
+            manifest,
+            allowed_files=allowed_files,
+            expected_candidate_revision=expected_candidate_revision,
+            expected_base_revision=expected_base_revision,
+            expected_changed_files=expected_changed_files,
+        )
     return SpecGovernanceVerdict(ok=False, errors=("prerequisite manifest or before/after snapshots are required",))
 
 
@@ -441,6 +566,8 @@ def structural_impact_manifest(
         "requirements": changes,
         "unmapped_files": sorted(set(paths) - {o.path for o in all_owners} - contract_paths),
         "unresolved_references": sorted(unresolved, key=lambda r: (r["source_id"], r["target"])),
+        "sync_status": "in_sync",
+        "validation_status": "passed",
     }
 
 
