@@ -302,6 +302,41 @@ def test_lock_path_folds_case_and_separates_explicit_resources(tmp_path: Path, m
     assert slot_path() != folded
 
 
+def test_child_window_deadline_is_read_from_the_environment(tmp_path: Path, monkeypatch) -> None:
+    import threading
+
+    from stagemesh.queue_control import OperatorStopRequested
+    from stagemesh.validation_slot import validation_slot
+
+    started_file = tmp_path / "gate-started.txt"
+    held = threading.Event()
+    release = threading.Event()
+
+    def holder() -> None:
+        with validation_slot():
+            held.set()
+            release.wait(5)
+
+    thread = threading.Thread(target=holder)
+    thread.start()
+    assert held.wait(5)
+    monkeypatch.setenv("STAGEMESH_WINDOW_DEADLINE", "1")
+    try:
+        with pytest.raises(OperatorStopRequested, match="deadline"):
+            run_gate(
+                tmp_path,
+                GateCommand(
+                    "never",
+                    [sys.executable, "-c", "open(r'%s', 'w', encoding='utf-8').write('x')" % started_file],
+                    timeout_seconds=5,
+                ),
+            )
+    finally:
+        release.set()
+        thread.join(5)
+    assert not started_file.exists()
+
+
 def test_deadline_while_waiting_starts_no_gate(tmp_path: Path) -> None:
     import threading
 

@@ -56,6 +56,10 @@ def slot_path() -> Path:
     return canonical_lock_path(str(Path(tempfile.gettempdir()) / "stagemesh-validation-slot.lock"))
 
 
+def current_window_deadline() -> float | None:
+    return _window_deadline
+
+
 def set_window_deadline(deadline: float | None) -> None:
     """Publish a wall-clock deadline (the same clock run_wave uses) to every worker."""
     global _window_deadline
@@ -73,11 +77,24 @@ def reset_validation_wait(tokens) -> None:
     _cancel_wait.reset(cancel_token)
 
 
+def _published_window_deadline() -> float | None:
+    if _window_deadline is not None:
+        return _window_deadline
+    raw = os.environ.get("STAGEMESH_WINDOW_DEADLINE")
+    if raw is None or raw == "":
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        # A broken deadline must not become permission to wait without a bound.
+        return 0.0
+
+
 def _deadline_exceeded() -> bool:
     deadline = _wait_deadline.get()
     if deadline is not None and time.monotonic() >= deadline:
         return True
-    window = _window_deadline
+    window = _published_window_deadline()
     return window is not None and time.time() >= window
 
 

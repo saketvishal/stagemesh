@@ -19,6 +19,7 @@ the orchestration is tested with fakes.
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -814,7 +815,13 @@ def subprocess_task_runner(
             argv += ["--integration-ref", integration_ref]
         if live_acceptance is not None:
             argv += ["--live-acceptance", live_acceptance]
-        proc = subprocess.run(argv, capture_output=True, text=True, check=False)
+        from .validation_slot import current_window_deadline
+
+        env = os.environ.copy()
+        window_deadline = current_window_deadline()
+        if window_deadline is not None:
+            env["STAGEMESH_WINDOW_DEADLINE"] = repr(float(window_deadline))
+        proc = subprocess.run(argv, capture_output=True, text=True, check=False, env=env)
         try:
             data = json.loads(proc.stdout)
         except ValueError:
