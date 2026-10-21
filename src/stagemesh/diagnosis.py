@@ -316,6 +316,48 @@ def tool_failure_evidence(
     }
 
 
+# Setup is never run for these: permission needs an operator, assertions are code defects, timeouts are budget questions.
+_NO_SETUP_KINDS = frozenset({"permission", "assertion_failure", "timeout"})
+
+
+def tool_failure_signature(evidence: dict[str, Any]) -> str:
+    """Stable identity of a failure: kind, executable and cwd. Excerpts and timings are excluded so repeats match."""
+    command = evidence.get("command") if isinstance(evidence.get("command"), dict) else {}
+    return "|".join((str(evidence.get("kind") or ""), str(command.get("executable") or ""), str(evidence.get("cwd") or "")))
+
+
+def plan_tool_recovery(
+    evidence: dict[str, Any],
+    attempted: list[str] | tuple[str, ...] = (),
+    setup_actions: dict[str, list[str]] | None = None,
+) -> dict[str, Any]:
+    """Decide the single bounded response to tool failure evidence; this only plans and never runs anything.
+
+    ``attempted`` lists the recovery actions already taken for this exact signature. A transient failure earns one
+    retry; a kind with an explicitly configured setup action earns that argv once; everything else, and every repeat,
+    stops with the attempted recovery and the exact operator action. Only caller-configured argv ever runs, never one
+    derived from output, and permission failures never get one, so recovery cannot widen access or install anything.
+    """
+    kind = str(evidence.get("kind") or "")
+    configured = (setup_actions or {}).get(kind)
+    setup = [str(part) for part in configured] if configured and kind not in _NO_SETUP_KINDS else None
+    action, argv = "stop", None
+    if kind == "transient" and "retry" not in attempted:
+        action = "retry_once"
+    elif setup and "setup" not in attempted:
+        action, argv = "setup", setup
+    plan: dict[str, Any] = {
+        "action": action,
+        "signature": tool_failure_signature(evidence),
+        "attempted": list(attempted),
+    }
+    if argv is not None:
+        plan["setup_command"] = argv
+    if action == "stop":
+        plan["operator_action"] = str(evidence.get("next_action") or "Inspect the failure evidence (operator action).")
+    return plan
+
+
 def _loads(raw: object) -> dict[str, Any]:
     try:
         value = json.loads(str(raw))
