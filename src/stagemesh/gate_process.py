@@ -48,7 +48,10 @@ def terminate_owned_gate(proc: subprocess.Popen[str], saved: ProcessIdentity) ->
     """
     observed = process_identity(proc.pid)
     if classify_process(saved, observed) != "LIVE":
-        _reap_if_exited(proc)
+        # The handle still belongs to the process we started, but the identity
+        # check failed. Do not signal it, and do not block the slot waiting
+        # for a process we refused to classify as ours.
+        proc.poll()
         return GateTermination(
             False,
             "process identity no longer matches; not terminated; no exit code",

@@ -8,7 +8,7 @@ import re
 import shutil
 import subprocess
 import tempfile
-import threading
+import time
 from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
@@ -143,6 +143,8 @@ class GateResult:
     stdout: str = ""
     stderr: str = ""
     failure_kind: str | None = None
+    wait_seconds: float = 0.0
+    execution_seconds: float = 0.0
 
 
 def _gate_output_text(value: str | bytes | None) -> str:
@@ -554,11 +556,6 @@ def candidate_workspace(project: Path, candidate_sha: str) -> Iterator[Path]:
             shutil.rmtree(temp_root, ignore_errors=True)
 
 
-# One validation process at a time in this runtime. Wait time is outside the
-# gate's own timeout, so a queued gate is not failed for time spent waiting.
-_VALIDATION_SLOT = threading.RLock()
-
-
 def _run_gate_process(
     command: list[str], cwd: Path, env: dict[str, str] | None, timeout: int
 ) -> subprocess.CompletedProcess[str]:
@@ -571,23 +568,34 @@ def _run_gate_process(
 
     proc, identity = spawn_gate_process(command, cwd, env)
     try:
-        stdout, stderr = proc.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired as exc:
-        termination = terminate_owned_gate(proc, identity)
         try:
-            stdout, stderr = proc.communicate(timeout=5)
-        except subprocess.TimeoutExpired:
-            stdout, stderr = exc.stdout, exc.stderr
-        expired = subprocess.TimeoutExpired(command, timeout, output=stdout, stderr=stderr)
-        expired.stagemesh_note = termination.note  # type: ignore[attr-defined]
-        raise expired from exc
+            stdout, stderr = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired as exc:
+            termination = terminate_owned_gate(proc, identity)
+            try:
+                stdout, stderr = proc.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                stdout, stderr = exc.stdout, exc.stderr
+            expired = subprocess.TimeoutExpired(command, timeout, output=stdout, stderr=stderr)
+            expired.stagemesh_note = termination.note  # type: ignore[attr-defined]
+            raise expired from exc
+        except BaseException:
+            terminate_owned_gate(proc, identity)
+            raise
+    finally:
+        if proc.poll() is None:
+            terminate_owned_gate(proc, identity)
     return subprocess.CompletedProcess(command, proc.returncode if proc.returncode is not None else 1, stdout, stderr)
 
 
 def run_gate(project: Path, gate: GateCommand) -> GateResult:
+    from .validation_slot import validation_slot
+
     run_dir = project / gate.cwd if gate.cwd else project
     command = _gate_runtime_command(list(gate.command))
     environment = _gate_environment(run_dir, gate)
+    waited = 0.0
+    ran = 0.0
     try:
         with ExitStack() as resources:
             # Provider sandboxes can create pytest temp roots unreadable by the
@@ -598,14 +606,20 @@ def run_gate(project: Path, gate: GateCommand) -> GateResult:
                     tempfile.TemporaryDirectory(prefix="stagemesh-gate-", ignore_cleanup_errors=True)
                 )
                 environment = {**(environment or os.environ), **dict.fromkeys(temp_keys, temp_root)}
-            with _VALIDATION_SLOT:
-                result = _run_gate_process(command, run_dir, environment, gate.timeout_seconds)
+            with validation_slot() as waited:
+                started = time.monotonic()
+                try:
+                    result = _run_gate_process(command, run_dir, environment, gate.timeout_seconds)
+                finally:
+                    ran = time.monotonic() - started
     except OSError as exc:
-        return GateResult(gate.name, "FAILED", tuple(gate.command), None, "", str(exc), "environment")
+        return GateResult(gate.name, "FAILED", tuple(gate.command), None, "", str(exc), "environment", waited, ran)
     except subprocess.TimeoutExpired as exc:
         stderr = _gate_output_text(exc.stderr)
         detail = getattr(exc, "stagemesh_note", "owned process tree terminated; no exit code")
-        note = "timed out after {0}s; {1}\n".format(gate.timeout_seconds, detail)
+        note = "timed out after {0}s; {1}\nwaited {2:.3f}s; ran {3:.3f}s\n".format(
+            gate.timeout_seconds, detail, waited, ran
+        )
         return GateResult(
             gate.name,
             "FAILED",
@@ -614,6 +628,8 @@ def run_gate(project: Path, gate: GateCommand) -> GateResult:
             _gate_output_text(exc.stdout),
             note + stderr,
             "timeout",
+            waited,
+            ran,
         )
     return GateResult(
         gate.name,
@@ -622,6 +638,9 @@ def run_gate(project: Path, gate: GateCommand) -> GateResult:
         result.returncode,
         _gate_output_text(result.stdout),
         _gate_output_text(result.stderr),
+        None,
+        waited,
+        ran,
     )
 
 

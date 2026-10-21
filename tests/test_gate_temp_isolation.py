@@ -12,6 +12,12 @@ import os
 from stagemesh.contracts import GateCommand, run_gate
 
 
+@pytest.fixture(autouse=True)
+def _isolated_validation_slot(tmp_path, monkeypatch):
+    """This file must not take the machine-wide slot used by a live runtime."""
+    monkeypatch.setenv("STAGEMESH_VALIDATION_SLOT", str(tmp_path / "validation-slot.lock"))
+
+
 def test_gate_does_not_reuse_provider_temporary_root(tmp_path, monkeypatch):
     shared = tmp_path / "provider-temp"
     shared.mkdir()
@@ -144,8 +150,157 @@ def test_validation_slot_serializes_gates_and_releases_after_timeout(tmp_path: P
         GateCommand("after-timeout", [sys.executable, "-c", "import time; time.sleep(5)"], timeout_seconds=1),
     )
     assert follow.failure_kind == "timeout" and follow.returncode is None
+    assert follow.execution_seconds >= 1.0
+    assert follow.wait_seconds < 1.0
+    assert "waited" in follow.stderr and "ran" in follow.stderr
     released = run_gate(tmp_path, GateCommand("released", [sys.executable, "-c", "print('ok')"], timeout_seconds=5))
     assert released.status == "PASSED"
+
+
+def test_separate_process_cannot_bypass_the_slot(tmp_path: Path) -> None:
+    import subprocess
+
+    lock = tmp_path / "validation-slot.lock"
+    holder = tmp_path / "hold.py"
+    holder.write_text(
+        "import os, time\n"
+        "from pathlib import Path\n"
+        "os.environ['STAGEMESH_VALIDATION_SLOT'] = r'''%s'''\n"
+        "from stagemesh.validation_slot import validation_slot\n"
+        "with validation_slot():\n"
+        "    Path(r'''%s''').write_text('held', encoding='utf-8')\n"
+        "    time.sleep(1.2)\n" % (lock, tmp_path / "held.txt"),
+        encoding="utf-8",
+    )
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
+    env["STAGEMESH_VALIDATION_SLOT"] = str(lock)
+    proc = subprocess.Popen([sys.executable, str(holder)], env=env)
+    try:
+        deadline = time.time() + 5
+        while not (tmp_path / "held.txt").exists() and time.time() < deadline:
+            time.sleep(0.02)
+        assert (tmp_path / "held.txt").exists()
+        started = time.time()
+        result = run_gate(tmp_path, GateCommand("queued", [sys.executable, "-c", "print('ran')"], timeout_seconds=5))
+        assert result.status == "PASSED"
+        assert time.time() - started >= 0.8
+        assert result.wait_seconds >= 0.5
+        assert result.execution_seconds < 2.0
+    finally:
+        proc.wait(timeout=5)
+
+
+def test_cancel_while_waiting_does_not_start_the_gate(tmp_path: Path) -> None:
+    import threading
+
+    from stagemesh.queue_control import OperatorStopRequested
+    from stagemesh.validation_slot import bind_validation_wait, reset_validation_wait, validation_slot
+
+    started_file = tmp_path / "gate-started.txt"
+    held = threading.Event()
+    release = threading.Event()
+
+    def holder() -> None:
+        with validation_slot():
+            held.set()
+            release.wait(5)
+
+    thread = threading.Thread(target=holder)
+    thread.start()
+    assert held.wait(5)
+    cancel = threading.Event()
+    tokens = bind_validation_wait(cancel=cancel.is_set)
+    try:
+        cancel.set()
+        with pytest.raises(OperatorStopRequested):
+            run_gate(
+                tmp_path,
+                GateCommand(
+                    "never",
+                    [sys.executable, "-c", "open(r'%s', 'w', encoding='utf-8').write('x')" % started_file],
+                    timeout_seconds=5,
+                ),
+            )
+    finally:
+        reset_validation_wait(tokens)
+        release.set()
+        thread.join(5)
+    assert not started_file.exists()
+
+
+def test_interrupt_after_launch_kills_the_owned_tree_and_releases_the_slot(tmp_path: Path, monkeypatch) -> None:
+    import subprocess
+
+    pid_file = tmp_path / "child-pid.txt"
+    code = (
+        "import pathlib, subprocess, sys, time\n"
+        "path = pathlib.Path(sys.argv[1])\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'])\n"
+        "path.write_text(str(child.pid), encoding='utf-8')\n"
+        "time.sleep(30)\n"
+    )
+    original = subprocess.Popen.communicate
+
+    def interrupt(self, input=None, timeout=None):
+        deadline = time.time() + 5
+        while not pid_file.exists() and time.time() < deadline:
+            time.sleep(0.02)
+        raise KeyboardInterrupt("operator")
+
+    monkeypatch.setattr(subprocess.Popen, "communicate", interrupt)
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            run_gate(tmp_path, GateCommand("interrupt", [sys.executable, "-c", code, str(pid_file)], timeout_seconds=30))
+    finally:
+        monkeypatch.setattr(subprocess.Popen, "communicate", original)
+    assert pid_file.exists()
+    child = int(pid_file.read_text(encoding="utf-8"))
+    deadline = time.time() + 5
+    while time.time() < deadline and _alive(child):
+        time.sleep(0.05)
+    assert not _alive(child)
+    follow = run_gate(tmp_path, GateCommand("after-interrupt", [sys.executable, "-c", "print('ok')"], timeout_seconds=5))
+    assert follow.status == "PASSED"
+
+
+def test_crashed_holder_does_not_strand_the_slot(tmp_path: Path) -> None:
+    import subprocess
+
+    lock = tmp_path / "validation-slot.lock"
+    holder = tmp_path / "crash.py"
+    holder.write_text(
+        "import os\n"
+        "os.environ['STAGEMESH_VALIDATION_SLOT'] = r'''%s'''\n"
+        "from stagemesh.validation_slot import validation_slot\n"
+        "with validation_slot():\n"
+        "    open(r'''%s''', 'w', encoding='utf-8').write('in')\n"
+        "    os._exit(3)\n" % (lock, tmp_path / "in.txt"),
+        encoding="utf-8",
+    )
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
+    env["STAGEMESH_VALIDATION_SLOT"] = str(lock)
+    proc = subprocess.Popen([sys.executable, str(holder)], env=env)
+    proc.wait(timeout=10)
+    assert proc.returncode == 3
+    result = run_gate(tmp_path, GateCommand("after-crash", [sys.executable, "-c", "print('ok')"], timeout_seconds=5))
+    assert result.status == "PASSED"
+
+
+def test_slot_file_contents_are_not_used_to_signal_a_live_process(tmp_path: Path) -> None:
+    import subprocess
+
+    other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        lock = tmp_path / "validation-slot.lock"
+        lock.write_text(str(other.pid), encoding="utf-8")
+        result = run_gate(tmp_path, GateCommand("ignore-pid", [sys.executable, "-c", "print('ok')"], timeout_seconds=5))
+        assert result.status == "PASSED"
+        assert _alive(other.pid)
+    finally:
+        other.kill()
+        other.wait(timeout=5)
 
 
 def _alive(pid: int) -> bool:
