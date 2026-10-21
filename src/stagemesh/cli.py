@@ -37,6 +37,7 @@ from .dashboard import dashboard_summary, render_dashboard
 from .demo import DemoValidationError, create_demo_project
 from .diagnosis import DiagnosisPolicy, diagnose, format_findings, make_adapter_analyst
 from .distributed import WorkQueue, WorkQueueError
+from .domain import TaskStatus
 from .e2e_acceptance import EndToEndAcceptanceValidationError, end_to_end_acceptance
 from .external_evidence import (
     ExternalEvidenceValidationError,
