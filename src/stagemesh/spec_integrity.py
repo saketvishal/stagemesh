@@ -22,12 +22,230 @@ from __future__ import annotations
 import json
 import posixpath
 import re
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 from urllib.parse import unquote, urlsplit
 
 from .spec_refs import (
-    Requirement, SpecAdapterError, SpecOwner, SpecSnapshot, local_path, nonempty, project_file,
+    Requirement, SpecAdapter, SpecAdapterError, SpecOwner, SpecSnapshot, local_path, nonempty, project_file,
 )
+
+PINNED_ADAPTERS: dict[str, tuple[str, ...]] = {
+    "openspec": ("layout-v1",),
+    "custom-json": ("1",),
+}
+
+
+def resolve_pinned_adapter(adapter_name: str, adapter_version: str | None = None, **kwargs: Any) -> SpecAdapter:
+    nonempty(adapter_name, "adapter name")
+    allowed_versions = PINNED_ADAPTERS.get(adapter_name)
+    if allowed_versions is None:
+        raise SpecAdapterError(f"unsupported or unpinned spec adapter: {adapter_name!r}")
+    if adapter_version is not None and adapter_version not in allowed_versions:
+        raise SpecAdapterError(
+            f"unsupported version {adapter_version!r} for pinned adapter {adapter_name!r}; allowed: {allowed_versions}"
+        )
+    if adapter_name == "openspec":
+        return OpenSpecAdapter()
+    if adapter_name == "custom-json":
+        contract_path = kwargs.get("contract_path")
+        if not contract_path:
+            raise SpecAdapterError("custom-json adapter requires a contract_path")
+        return CustomSpecAdapter(contract_path)
+    raise SpecAdapterError(f"unsupported or unpinned spec adapter: {adapter_name!r}")
+
+
+@dataclass(frozen=True)
+class SpecGovernanceVerdict:
+    ok: bool
+    errors: tuple[str, ...] = ()
+    review_findings: tuple[str, ...] = ()
+    manifest: dict[str, Any] | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "ok": self.ok,
+            "errors": list(self.errors),
+            "review_findings": list(self.review_findings),
+        }
+        if self.manifest is not None:
+            result["manifest"] = self.manifest
+        return result
+
+
+def validate_prerequisite_manifest(
+    manifest: Any,
+    *,
+    allowed_files: tuple[str, ...] | list[str] | None = None,
+) -> SpecGovernanceVerdict:
+    """Validate a prerequisite structural impact manifest fail-closed.
+
+    Blocks missing owners/IDs, contradictory declared active statuses,
+    missing affected references, and skipped required validation/sync.
+    Ambiguous semantic overlap is recorded as a review finding, not a deterministic error.
+    """
+    errors: list[str] = []
+    review_findings: list[str] = []
+
+    if not isinstance(manifest, dict):
+        return SpecGovernanceVerdict(ok=False, errors=("prerequisite manifest must be a JSON object",))
+
+    if manifest.get("schema_version") != 1:
+        return SpecGovernanceVerdict(
+            ok=False,
+            errors=(f"unsupported manifest schema_version: {manifest.get('schema_version')}",),
+        )
+
+    # Pinned adapter check
+    adapter_info = manifest.get("adapter")
+    if not isinstance(adapter_info, dict) or "name" not in adapter_info:
+        errors.append("manifest must declare a configured pinned adapter")
+    else:
+        name = adapter_info.get("name")
+        version = adapter_info.get("version")
+        if name not in PINNED_ADAPTERS or (version and version not in PINNED_ADAPTERS[name]):
+            errors.append(f"adapter '{name}' (version {version}) is not a configured pinned adapter")
+
+    # Owners and IDs check
+    owners = manifest.get("owners")
+    if not isinstance(owners, list):
+        errors.append("manifest owners must be a list")
+        owners = []
+
+    known_owner_ids: set[str] = set()
+    owner_statuses: dict[str, str] = {}
+    archived_markers = ("/archive/", "changes/archive", "openspec/changes/archive")
+
+    for idx, owner in enumerate(owners):
+        if not isinstance(owner, dict):
+            errors.append(f"owner #{idx} must be an object")
+            continue
+        oid = owner.get("id")
+        path = owner.get("path")
+        status = owner.get("status")
+        canonical = owner.get("canonical")
+
+        if not isinstance(oid, str) or not oid.strip():
+            errors.append(f"owner #{idx} has missing or empty id")
+            continue
+        if not isinstance(path, str) or not path.strip():
+            errors.append(f"owner '{oid}' has missing or empty path")
+            continue
+
+        # Status validation and contradictory checks
+        if status not in {"active", "history"}:
+            errors.append(f"owner '{oid}' has unsupported or missing status: {status!r}")
+        else:
+            if oid in owner_statuses and owner_statuses[oid] != status:
+                errors.append(
+                    f"owner '{oid}' has contradictory declared active statuses ({owner_statuses[oid]} vs {status})"
+                )
+            owner_statuses[oid] = status
+
+            # Canonical vs status contradiction
+            if canonical is not None:
+                if canonical is True and status != "active":
+                    errors.append(f"owner '{oid}' has contradictory status: canonical=True but status is '{status}'")
+                elif canonical is False and status == "active":
+                    errors.append(f"owner '{oid}' has contradictory status: canonical=False but status is 'active'")
+
+            # Historical archive path declared active
+            normalized_path = path.replace("\\", "/")
+            if any(marker in normalized_path for marker in archived_markers) and status == "active":
+                errors.append(f"owner '{oid}' at historical archive path '{path}' cannot have active status")
+
+        known_owner_ids.add(oid)
+
+        # Requirement ID checks within owner
+        reqs = owner.get("requirements", [])
+        if not isinstance(reqs, list):
+            errors.append(f"requirements for owner '{oid}' must be a list")
+        else:
+            for ridx, req in enumerate(reqs):
+                if not isinstance(req, dict):
+                    errors.append(f"requirement #{ridx} in owner '{oid}' must be an object")
+                    continue
+                rid = req.get("id")
+                if not isinstance(rid, str) or not rid.strip():
+                    errors.append(f"requirement #{ridx} in owner '{oid}' has missing or empty id")
+
+    # Requirements changes check
+    req_changes = manifest.get("requirements", [])
+    if isinstance(req_changes, list):
+        for cidx, change in enumerate(req_changes):
+            if not isinstance(change, dict):
+                continue
+            rid = change.get("requirement_id") or change.get("id")
+            oid = change.get("owner_id")
+            if not isinstance(rid, str) or not rid.strip():
+                errors.append(f"affected requirement #{cidx} has missing or empty requirement_id")
+            if not isinstance(oid, str) or not oid.strip():
+                errors.append(f"affected requirement '{rid}' has missing or empty owner_id")
+            elif oid not in known_owner_ids:
+                errors.append(f"affected requirement '{rid}' references missing owner '{oid}'")
+
+    # Missing affected references check
+    unresolved = manifest.get("unresolved_references", [])
+    if isinstance(unresolved, list):
+        for u in unresolved:
+            if isinstance(u, dict):
+                sid = u.get("source_id")
+                tgt = u.get("target")
+                if sid and tgt and u.get("reason") == "no-active-target":
+                    errors.append(f"missing affected reference: source '{sid}' cannot resolve target '{tgt}'")
+
+    # Skipped required validation/sync
+    sync_status = manifest.get("sync_status")
+    validation_status = manifest.get("validation_status")
+    if sync_status in {"skipped", "out_of_sync", "missing", "failed", "unvalidated", "unsynced"}:
+        errors.append(f"skipped required spec sync: sync_status is '{sync_status}'")
+    if validation_status in {"skipped", "failed", "missing", "unvalidated"}:
+        errors.append(f"skipped required pinned adapter validation: validation_status is '{validation_status}'")
+    if manifest.get("skipped_validation") is True:
+        errors.append("skipped required pinned adapter validation")
+    if manifest.get("skipped_sync") is True:
+        errors.append("skipped required spec sync")
+    if manifest.get("sync_required") is True and not manifest.get("synced"):
+        errors.append("required spec sync was not completed")
+
+    # Ambiguous semantic overlap is a review finding, NOT a deterministic error
+    unmapped = manifest.get("unmapped_files", [])
+    if isinstance(unmapped, (list, tuple)) and unmapped:
+        review_findings.append(f"ambiguous semantic overlap: unmapped files modified ({', '.join(sorted(unmapped))})")
+    if manifest.get("semantic_overlap"):
+        review_findings.append(f"ambiguous semantic overlap: {manifest.get('semantic_overlap')}")
+
+    return SpecGovernanceVerdict(
+        ok=len(errors) == 0,
+        errors=tuple(errors),
+        review_findings=tuple(review_findings),
+        manifest=manifest,
+    )
+
+
+def spec_governance_gate(
+    before: SpecSnapshot | None = None,
+    after: SpecSnapshot | None = None,
+    changed_files: tuple[str, ...] | list[str] | None = None,
+    *,
+    prerequisite_manifest: dict[str, Any] | None = None,
+    base_revision: str = "base",
+    candidate_revision: str = "candidate",
+    allowed_files: tuple[str, ...] | list[str] | None = None,
+) -> SpecGovernanceVerdict:
+    if prerequisite_manifest is not None:
+        return validate_prerequisite_manifest(prerequisite_manifest, allowed_files=allowed_files)
+    if before is not None and after is not None:
+        manifest = structural_impact_manifest(
+            before,
+            after,
+            changed_files or (),
+            base_revision=base_revision,
+            candidate_revision=candidate_revision,
+        )
+        return validate_prerequisite_manifest(manifest, allowed_files=allowed_files)
+    return SpecGovernanceVerdict(ok=False, errors=("prerequisite manifest or before/after snapshots are required",))
 
 
 def _read(root: Path, path: str) -> str:

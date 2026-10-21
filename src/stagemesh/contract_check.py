@@ -33,7 +33,13 @@ def contract_section_sizes(contract: ChangeContract) -> list[dict[str, Any]]:
     return _section_sizes(_contract_payload(contract))
 
 
-def check_contract_text(text: str, limit: int = MAX_CANONICAL_CONTRACT_CHARS, *, require_spec: bool = False) -> dict[str, Any]:
+def check_contract_text(
+    text: str,
+    limit: int = MAX_CANONICAL_CONTRACT_CHARS,
+    *,
+    require_spec: bool = False,
+    prerequisite_manifest: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Fail-closed verdict for contract JSON text. `ok` is True only when it parses and fits the canonical limit."""
     report: dict[str, Any] = {"ok": False, "limit": limit, "size": None, "errors": [], "gates": [], "largest_sections": []}
     try:
@@ -53,6 +59,24 @@ def check_contract_text(text: str, limit: int = MAX_CANONICAL_CONTRACT_CHARS, *,
         report["errors"].append("change contract must be explicit")
     if require_spec and not contract.spec_refs:
         report["errors"].append("strict spec mode requires at least one spec_refs entry")
+
+    if prerequisite_manifest is None:
+        if isinstance(payload.get("spec_manifest"), dict):
+            prerequisite_manifest = payload["spec_manifest"]
+        elif isinstance(payload.get("prerequisite_manifest"), dict):
+            prerequisite_manifest = payload["prerequisite_manifest"]
+
+    if prerequisite_manifest is not None:
+        from .spec_integrity import validate_prerequisite_manifest
+
+        verdict = validate_prerequisite_manifest(prerequisite_manifest, allowed_files=contract.allowed_files)
+        report["spec_governance"] = verdict.to_dict()
+        if not verdict.ok:
+            report["errors"].extend(verdict.errors)
+        if verdict.review_findings:
+            report.setdefault("warnings", []).extend(verdict.review_findings)
+            report.setdefault("review_findings", []).extend(verdict.review_findings)
+
     size = len(canonical_contract_json(contract))
     report["size"] = size
     report["gates"] = [gate.name for gate in contract.gates]
@@ -75,7 +99,35 @@ def check_contract(
     limit: int = MAX_CANONICAL_CONTRACT_CHARS,
     *,
     require_spec: bool = False,
+    prerequisite_manifest: dict[str, Any] | Path | str | None = None,
 ) -> dict[str, Any]:
+    if isinstance(prerequisite_manifest, (str, Path)):
+        try:
+            prerequisite_manifest = json.loads(Path(prerequisite_manifest).read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            return {
+                "ok": False,
+                "limit": limit,
+                "size": None,
+                "errors": [f"cannot read prerequisite manifest: {exc}"],
+                "gates": [],
+                "largest_sections": [],
+                "path": str(path) if path else None,
+            }
+
+    if prerequisite_manifest is None and task_id is not None:
+        candidates = [
+            project / ".stagemesh" / "contracts" / f"{task_id}.spec_manifest.json",
+            project / ".stagemesh" / "spec-manifest.json",
+        ]
+        for candidate_path in candidates:
+            if candidate_path.is_file():
+                try:
+                    prerequisite_manifest = json.loads(candidate_path.read_text(encoding="utf-8"))
+                    break
+                except (OSError, ValueError):
+                    pass
+
     if path is None:
         if task_id is None:
             raise ValueError("a task id or a contract file is required")
@@ -102,7 +154,7 @@ def check_contract(
             "largest_sections": [],
             "path": str(path),
         }
-    report = check_contract_text(text, limit=limit, require_spec=require_spec)
+    report = check_contract_text(text, limit=limit, require_spec=require_spec, prerequisite_manifest=prerequisite_manifest)
     report["path"] = str(path)
     if require_spec and report["ok"]:
         try:

@@ -57,6 +57,7 @@ class Validator:
         self, store: Store, task_id: str, candidate_sha: str, project: Path,
         *, e2e_evidence: E2EEvidenceManifest | None = None,
         artifact_root: Path | None = None,
+        prerequisite_manifest: dict[str, Any] | None = None,
     ) -> EvidenceStatus:
         execution_id = store.start_execution(
             task_id=task_id,
@@ -111,9 +112,42 @@ class Validator:
                             "message": "acceptance criteria require at least one executed validation gate",
                         }
                     )
+
+            if prerequisite_manifest is None:
+                spec_manifest_paths = [
+                    project / ".stagemesh" / "contracts" / f"{task_id}.spec_manifest.json",
+                    project / ".stagemesh" / "spec-manifest.json",
+                ]
+                for p in spec_manifest_paths:
+                    if p.is_file():
+                        try:
+                            prerequisite_manifest = json.loads(p.read_text(encoding="utf-8"))
+                            break
+                        except (OSError, ValueError):
+                            pass
+
+            spec_verdict = None
+            if prerequisite_manifest is not None:
+                from .spec_integrity import validate_prerequisite_manifest
+
+                spec_verdict = validate_prerequisite_manifest(prerequisite_manifest, allowed_files=contract.allowed_files)
+                if not spec_verdict.ok:
+                    for err in spec_verdict.errors:
+                        findings.append({"severity": "error", "code": "spec_governance_failure", "message": err})
+                if spec_verdict.review_findings:
+                    for rf in spec_verdict.review_findings:
+                        findings.append({"severity": "warning", "code": "spec_semantic_overlap", "message": rf})
+            elif any("openspec/" in f or f == "adapter.json" for f in inspected_files) and contract.explicit:
+                findings.append({
+                    "severity": "error",
+                    "code": "spec_skipped_validation_or_sync",
+                    "message": "specification modification requires pinned adapter validation and prerequisite manifest",
+                })
+
+            has_error_findings = any(f.get("severity") == "error" for f in findings)
             status = (
                 EvidenceStatus.PASSED
-                if evaluation.passed and len(findings) == len(evaluation.findings)
+                if evaluation.passed and not has_error_findings
                 else EvidenceStatus.FAILED
             )
             payload = {
@@ -142,6 +176,9 @@ class Validator:
                     for gate in evaluation.gates
                 ],
             }
+            if spec_verdict is not None:
+                payload["spec_governance"] = spec_verdict.to_dict()
+
             if e2e_evidence is not None:
                 try:
                     validate_e2e_evidence_manifest(
@@ -180,6 +217,16 @@ class Validator:
                     message,
                 )
         elif status is EvidenceStatus.PASSED:
+            for item in payload.get("findings", []):
+                if item.get("severity") == "warning":
+                    message = str(item.get("message", "warning"))
+                    store.upsert_finding(
+                        finding_identity(candidate_sha, message, item.get("path")),
+                        task_id,
+                        candidate_sha,
+                        "warning",
+                        message,
+                    )
             # Only a fresh passed validation can supersede old parser errors.
             # Other validation/review findings remain open for actual remediation.
             for previous in store.conn.execute(
