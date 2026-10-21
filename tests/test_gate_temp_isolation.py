@@ -288,6 +288,89 @@ def test_crashed_holder_does_not_strand_the_slot(tmp_path: Path) -> None:
     assert result.status == "PASSED"
 
 
+def test_lock_path_folds_case_and_separates_explicit_resources(tmp_path: Path, monkeypatch) -> None:
+    from stagemesh.validation_slot import canonical_lock_path, slot_path
+
+    raw = tmp_path / "Case" / "Slot.lock"
+    monkeypatch.setenv("STAGEMESH_VALIDATION_SLOT", str(raw))
+    folded = slot_path()
+    assert folded == canonical_lock_path(str(raw))
+    if os.name == "nt":
+        monkeypatch.setenv("STAGEMESH_VALIDATION_SLOT", str(raw).swapcase())
+        assert slot_path() == folded
+    monkeypatch.setenv("STAGEMESH_VALIDATION_SLOT", str(tmp_path / "other.lock"))
+    assert slot_path() != folded
+
+
+def test_deadline_while_waiting_starts_no_gate(tmp_path: Path) -> None:
+    import threading
+
+    from stagemesh.queue_control import OperatorStopRequested
+    from stagemesh.validation_slot import bind_validation_wait, reset_validation_wait, validation_slot
+
+    started_file = tmp_path / "gate-started.txt"
+    held = threading.Event()
+    release = threading.Event()
+
+    def holder() -> None:
+        with validation_slot():
+            held.set()
+            release.wait(5)
+
+    thread = threading.Thread(target=holder)
+    thread.start()
+    assert held.wait(5)
+    tokens = bind_validation_wait(deadline=time.monotonic() + 0.15)
+    try:
+        with pytest.raises(OperatorStopRequested, match="deadline"):
+            run_gate(
+                tmp_path,
+                GateCommand(
+                    "never",
+                    [sys.executable, "-c", "open(r'%s', 'w', encoding='utf-8').write('x')" % started_file],
+                    timeout_seconds=5,
+                ),
+            )
+    finally:
+        reset_validation_wait(tokens)
+        release.set()
+        thread.join(5)
+    assert not started_file.exists()
+
+
+def test_cancel_after_acquire_and_before_launch_starts_no_gate(tmp_path: Path, monkeypatch) -> None:
+    import threading
+
+    from stagemesh.queue_control import OperatorStopRequested
+    from stagemesh.validation_slot import bind_validation_wait, reset_validation_wait
+
+    started_file = tmp_path / "gate-started.txt"
+    cancel = threading.Event()
+
+    def flip():
+        if cancel.is_set():
+            return True
+        cancel.set()
+        return False
+
+    tokens = bind_validation_wait(cancel=flip)
+    try:
+        # The first observation is the wait loop. flip arms the event and
+        # reports clear, so the slot is taken. The recheck then sees it.
+        with pytest.raises(OperatorStopRequested):
+            run_gate(
+                tmp_path,
+                GateCommand(
+                    "never",
+                    [sys.executable, "-c", "open(r'%s', 'w', encoding='utf-8').write('x')" % started_file],
+                    timeout_seconds=5,
+                ),
+            )
+    finally:
+        reset_validation_wait(tokens)
+    assert not started_file.exists()
+
+
 def test_slot_file_contents_are_not_used_to_signal_a_live_process(tmp_path: Path) -> None:
     import subprocess
 

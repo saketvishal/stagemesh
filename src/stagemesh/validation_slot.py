@@ -1,22 +1,25 @@
-"""One validation gate process at a time on this machine.
+"""One validation gate process at a time for this user's default temp resource.
 
-The slot is a file lock in the shared temp directory plus a process-local
-mutex. Threads in one runtime and processes in other windows take the same
-lock, so they cannot run gate processes side by side. Coding work does not
-acquire it.
+The scope is the OS user, not the whole machine. Every runtime copy that
+resolves the same canonical lock path shares it: threads in one process and
+processes in other windows. A different STAGEMESH_VALIDATION_SLOT path is a
+different resource and is not serialized with the default. Coding work does
+not acquire the slot.
 
 The operating system drops the file lock when the holding process exits,
-including a crash. Ownership is the lock itself. A PID written into the file
-is never consulted and is never a reason to signal another process.
+including a crash. Ownership is that lock. Bytes in the file, including a
+PID, are never read and are never a reason to signal another process.
 
-Waiting polls. A stop or a supplied deadline returns before a gate is
-started. Time spent waiting is not part of the gate's execution timeout.
+Waiting polls. A terminate-stop, a bound cancel callback, or an applicable
+deadline returns before a gate is started and is checked again after the
+lock is held. Time spent waiting is not part of the gate's execution timeout.
 """
 
 from __future__ import annotations
 
 import os
 import sys
+import tempfile
 import threading
 import time
 from contextlib import contextmanager
@@ -30,13 +33,33 @@ _mu = threading.Lock()
 _depth = threading.local()
 _wait_deadline: ContextVar[float | None] = ContextVar("stagemesh_validation_wait_deadline", default=None)
 _cancel_wait: ContextVar[object | None] = ContextVar("stagemesh_validation_cancel", default=None)
+_window_deadline: float | None = None
+
+
+def canonical_lock_path(raw: str) -> Path:
+    """One identity for spellings that name the same file.
+
+    Case, slashes, and relative segments are folded. A stored PID is not
+    part of the identity.
+    """
+    absolute = os.path.abspath(os.path.expanduser(raw))
+    return Path(os.path.normcase(absolute))
 
 
 def slot_path() -> Path:
     override = os.environ.get("STAGEMESH_VALIDATION_SLOT")
     if override:
-        return Path(override)
-    return Path(os.environ.get("TEMP") or os.environ.get("TMPDIR") or "/tmp") / "stagemesh-validation-slot.lock"
+        return canonical_lock_path(override)
+    # tempfile picks one directory from TMP/TEMP/TMPDIR and normalizes it.
+    # Using that directory, not whichever variable happens to be set, keeps
+    # two runtime copies on the same user temp from taking two locks.
+    return canonical_lock_path(str(Path(tempfile.gettempdir()) / "stagemesh-validation-slot.lock"))
+
+
+def set_window_deadline(deadline: float | None) -> None:
+    """Publish a wall-clock deadline (the same clock run_wave uses) to every worker."""
+    global _window_deadline
+    _window_deadline = deadline
 
 
 def bind_validation_wait(deadline: float | None = None, cancel=None):
@@ -50,13 +73,31 @@ def reset_validation_wait(tokens) -> None:
     _cancel_wait.reset(cancel_token)
 
 
+def _deadline_exceeded() -> bool:
+    deadline = _wait_deadline.get()
+    if deadline is not None and time.monotonic() >= deadline:
+        return True
+    window = _window_deadline
+    return window is not None and time.time() >= window
+
+
 def _stop_requested() -> bool:
     cancel = _cancel_wait.get()
     if cancel is not None and bool(cancel()):
         return True
     stop = current_provider_stop()
-    request = getattr(stop, "request", None) if stop is not None else None
-    return bool(request and request.get("terminate_running") is True)
+    if stop is not None:
+        stop.poll()
+        request = getattr(stop, "request", None)
+        if request and request.get("terminate_running") is True:
+            return True
+    return _deadline_exceeded()
+
+
+def raise_if_validation_blocked() -> None:
+    """Call again after the slot is held and before any gate process is created."""
+    if _stop_requested():
+        raise OperatorStopRequested("validation cancelled before the gate started")
 
 
 def _try_file_lock(handle) -> bool:
@@ -123,10 +164,12 @@ def validation_slot() -> Iterator[float]:
     try:
         while True:
             if _stop_requested():
-                raise OperatorStopRequested("validation cancelled while waiting for the slot")
-            deadline = _wait_deadline.get()
-            if deadline is not None and time.monotonic() >= deadline:
-                raise OperatorStopRequested("validation slot wait exceeded the task deadline")
+                reason = (
+                    "validation slot wait exceeded the task deadline"
+                    if _deadline_exceeded()
+                    else "validation cancelled while waiting for the slot"
+                )
+                raise OperatorStopRequested(reason)
             if _mu.acquire(blocking=False):
                 try:
                     if _try_file_lock(handle):
@@ -136,6 +179,16 @@ def validation_slot() -> Iterator[float]:
                     if not held:
                         _mu.release()
             time.sleep(0.05)
+        if _stop_requested():
+            _file_unlock(handle)
+            held = False
+            _mu.release()
+            reason = (
+                "validation slot wait exceeded the task deadline"
+                if _deadline_exceeded()
+                else "validation cancelled before the gate started"
+            )
+            raise OperatorStopRequested(reason)
         waited = time.monotonic() - started
         _depth.value = 1
         try:

@@ -607,6 +607,9 @@ def run_gate(project: Path, gate: GateCommand) -> GateResult:
                 )
                 environment = {**(environment or os.environ), **dict.fromkeys(temp_keys, temp_root)}
             with validation_slot() as waited:
+                from .validation_slot import raise_if_validation_blocked
+
+                raise_if_validation_blocked()
                 started = time.monotonic()
                 try:
                     result = _run_gate_process(command, run_dir, environment, gate.timeout_seconds)

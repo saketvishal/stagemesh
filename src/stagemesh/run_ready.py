@@ -893,8 +893,14 @@ def drive_task(
             on_start(format_running(number, selected, previous))
         tick_started = time.time()
         try:
-            with provider_stop_scope(control):
-                progressed = coordinator.tick()
+            from .validation_slot import bind_validation_wait, reset_validation_wait
+
+            tokens = bind_validation_wait(cancel=should_stop)
+            try:
+                with provider_stop_scope(control):
+                    progressed = coordinator.tick()
+            finally:
+                reset_validation_wait(tokens)
         except OperatorStopRequested as exc:
             summary.stop_reason = "OPERATOR_STOP" if exc.cleanup_complete else "STOP_CLEANUP_INCOMPLETE"
             if exc.cleanup_complete and exc.monitor_failed:
