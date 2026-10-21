@@ -40,6 +40,9 @@ def check_contract_text(
     require_spec: bool = False,
     prerequisite_manifest: dict[str, Any] | None = None,
     manifest_load_error: str | None = None,
+    expected_candidate_revision: str | None = None,
+    expected_base_revision: str | None = None,
+    expected_changed_files: tuple[str, ...] | list[str] | None = None,
 ) -> dict[str, Any]:
     """Fail-closed verdict for contract JSON text. `ok` is True only when it parses and fits the canonical limit."""
     report: dict[str, Any] = {"ok": False, "limit": limit, "size": None, "errors": [], "gates": [], "largest_sections": []}
@@ -100,7 +103,13 @@ def check_contract_text(
                 except Exception as exc:
                     report["errors"].append(f"pinned adapter validation failed: {exc}")
 
-        verdict = validate_prerequisite_manifest(prerequisite_manifest, allowed_files=contract.allowed_files)
+        verdict = validate_prerequisite_manifest(
+            prerequisite_manifest,
+            allowed_files=contract.allowed_files,
+            expected_candidate_revision=expected_candidate_revision,
+            expected_base_revision=expected_base_revision,
+            expected_changed_files=expected_changed_files,
+        )
         report["spec_governance"] = verdict.to_dict()
         if not verdict.ok:
             report["errors"].extend(verdict.errors)
@@ -131,6 +140,9 @@ def check_contract(
     *,
     require_spec: bool = False,
     prerequisite_manifest: dict[str, Any] | Path | str | None = None,
+    expected_candidate_revision: str | None = None,
+    expected_base_revision: str | None = None,
+    expected_changed_files: tuple[str, ...] | list[str] | None = None,
 ) -> dict[str, Any]:
     manifest_load_error = None
     if isinstance(prerequisite_manifest, (str, Path)):
@@ -193,6 +205,9 @@ def check_contract(
         require_spec=require_spec,
         prerequisite_manifest=prerequisite_manifest,
         manifest_load_error=manifest_load_error,
+        expected_candidate_revision=expected_candidate_revision,
+        expected_base_revision=expected_base_revision,
+        expected_changed_files=expected_changed_files,
     )
     report["path"] = str(path)
     if require_spec and report["ok"]:

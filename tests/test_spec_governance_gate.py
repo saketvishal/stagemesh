@@ -547,3 +547,46 @@ def test_validator_enforces_spec_governance_before_review(tmp_path: Path) -> Non
         )
     finally:
         store.close()
+
+
+def test_revision_identity_rejects_prefixes_and_accepts_the_exact_value() -> None:
+    exact = valid_manifest()
+    assert validate_prerequisite_manifest(
+        exact,
+        expected_candidate_revision="candidate-sha-456",
+        expected_base_revision="base-sha-123",
+        expected_changed_files=["openspec/specs/auth/spec.md"],
+    ).ok
+
+    short = valid_manifest(candidate_revision="candidate")
+    short_verdict = validate_prerequisite_manifest(short, expected_candidate_revision="candidate-sha-456")
+    assert not short_verdict.ok
+    assert any("candidate_revision" in err for err in short_verdict.errors)
+
+    other_direction = valid_manifest(candidate_revision="candidate-sha-456-extra")
+    assert not validate_prerequisite_manifest(other_direction, expected_candidate_revision="candidate-sha-456").ok
+
+    stale = valid_manifest(base_revision="base-sha-122")
+    assert not validate_prerequisite_manifest(stale, expected_base_revision="base-sha-123").ok
+
+    malformed = valid_manifest(candidate_revision=456)
+    assert not validate_prerequisite_manifest(malformed, expected_candidate_revision="456").ok
+
+    shared_prefix = valid_manifest(candidate_revision="abc1234")
+    assert not validate_prerequisite_manifest(shared_prefix, expected_candidate_revision="abc1234deadbeef").ok
+
+
+def test_preflight_forwards_expected_revisions() -> None:
+    text = json.dumps(
+        {
+            "objective": "governed",
+            "explicit": True,
+            "spec_refs": ["openspec/specs/auth/spec.md"],
+            "allowed_files": ["openspec/specs/auth/spec.md"],
+            "required_tests": [{"name": "unit", "command": ["pytest", "-q"]}],
+        }
+    )
+    manifest = valid_manifest(candidate_revision="abc")
+    report = check_contract_text(text, prerequisite_manifest=manifest, expected_candidate_revision="abcdef")
+    assert not report["ok"]
+    assert any("candidate_revision" in err for err in report["errors"])

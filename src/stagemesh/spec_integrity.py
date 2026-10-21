@@ -74,6 +74,15 @@ class SpecGovernanceVerdict:
         return result
 
 
+def _same_revision(recorded: Any, expected: str) -> bool:
+    """The manifest revision must be the same immutable identity.
+
+    Abbreviated prefixes are not accepted. The contract does not define a
+    short form, and a shared prefix is not a unique object.
+    """
+    return isinstance(recorded, str) and recorded == expected
+
+
 def validate_prerequisite_manifest(
     manifest: Any,
     *,
@@ -152,11 +161,7 @@ def validate_prerequisite_manifest(
     if expected_candidate_revision is not None:
         if not cand_rev:
             errors.append(f"manifest missing candidate_revision (expected '{expected_candidate_revision}')")
-        elif not (
-            cand_rev == expected_candidate_revision
-            or expected_candidate_revision.startswith(str(cand_rev))
-            or str(cand_rev).startswith(expected_candidate_revision)
-        ):
+        elif not _same_revision(cand_rev, expected_candidate_revision):
             errors.append(
                 f"manifest candidate_revision '{cand_rev}' does not match candidate '{expected_candidate_revision}'"
             )
@@ -164,11 +169,7 @@ def validate_prerequisite_manifest(
     if expected_base_revision is not None:
         if not base_rev:
             errors.append(f"manifest missing base_revision (expected '{expected_base_revision}')")
-        elif not (
-            base_rev == expected_base_revision
-            or expected_base_revision.startswith(str(base_rev))
-            or str(base_rev).startswith(expected_base_revision)
-        ):
+        elif not _same_revision(base_rev, expected_base_revision):
             errors.append(
                 f"manifest base_revision '{base_rev}' does not match baseline '{expected_base_revision}'"
             )
