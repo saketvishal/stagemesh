@@ -148,27 +148,44 @@ def discover_validation_services(
                             )
                         )
                         break
-        except Exception:
-            pass
+        except (OSError, ValueError, UnicodeError) as exc:
+            raise ValidationServiceError("invalid package.json service discovery") from exc
 
-    # If no browser / api explicitly found but pytest is configured, check if api fixtures exist
     # Explicit npm commands also depend on the selected package script definition.
     from dataclasses import replace
     for index, service in enumerate(services):
         _validate_service(service)
-        if len(service.command) == 3 and service.command[:2] == ("npm", "run"):
-            package = _inside(root, service.cwd or ".") / "package.json"
-            if package.is_file():
-                try:
-                    script = json.loads(package.read_bytes()).get("scripts", {}).get(service.command[2])
-                except (ValueError, AttributeError) as exc:
-                    raise ValidationServiceError("invalid service package metadata") from exc
-                services[index] = replace(service, script_definition=script)
+        script_name = _npm_script_name(service.command)
+        if script_name is None:
+            continue
+        package = _inside(root, service.cwd or ".") / "package.json"
+        if not package.is_file():
+            raise ValidationServiceError("npm script service has no package.json")
+        try:
+            scripts = json.loads(package.read_bytes()).get("scripts", {})
+            script = scripts.get(script_name) if isinstance(scripts, dict) else None
+        except (OSError, ValueError, UnicodeError) as exc:
+            raise ValidationServiceError("invalid service package metadata") from exc
+        if not isinstance(script, str) or not script:
+            raise ValidationServiceError(f"npm script {script_name} is not defined")
+        services[index] = replace(service, script_definition=script)
     environment = {key: os.environ.get(key) for s in services for key in s.env_keys}
     config_digest += hashlib.sha256(json.dumps(environment, sort_keys=True).encode()).hexdigest()
     services_tuple = tuple(sorted(services, key=lambda s: s.name))
     fp = compute_service_fingerprint(services_tuple, config_digest=config_digest)
     return ValidationServicesManifest(services=services_tuple, fingerprint=fp)
+
+
+def _npm_script_name(command: tuple[str, ...]) -> str | None:
+    """The script token in `npm run <script> [-- extra]`, not only a three-item command."""
+    if len(command) < 3 or command[0] != "npm" or command[1] != "run":
+        return None
+    for token in command[2:]:
+        if token == "--":
+            break
+        if token and not token.startswith("-"):
+            return token
+    return None
 
 
 def _inside(root: Path, relative: str) -> Path:

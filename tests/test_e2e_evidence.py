@@ -371,6 +371,31 @@ def test_script_definition_changes_service_identity(test_env, script):
     assert before.fingerprint != after.fingerprint
 
 
+def test_npm_run_with_extra_arguments_binds_the_script_body(test_env):
+    project, _, _, _, _ = test_env
+    (project / "package.json").write_text(json.dumps({"scripts": {"e2e": "playwright test"}}))
+    config = project / ".stagemesh" / "config.json"
+    config.parent.mkdir(exist_ok=True)
+    config.write_text(json.dumps({
+        "validation_services": [{
+            "name": "browser", "kind": "browser",
+            "command": ["npm", "run", "e2e", "--", "--project=chromium"],
+        }]
+    }))
+    bound = discover_validation_services(project)
+    assert bound.services[0].script_definition == "playwright test"
+    (project / "package.json").write_text(json.dumps({"scripts": {"e2e": "echo skipped"}}))
+    changed = discover_validation_services(project)
+    assert changed.fingerprint != bound.fingerprint
+
+
+def test_broken_package_json_does_not_drop_service_discovery(test_env):
+    project, _, _, _, _ = test_env
+    (project / "package.json").write_text("{", encoding="utf-8")
+    with pytest.raises(Exception, match="package.json"):
+        discover_validation_services(project)
+
+
 def test_record_rejects_service_change_without_mutating_payload(test_env, api_manifest):
     project, artifact_root, bound, _, _ = test_env
     (project / "package.json").write_text('{"scripts":{"test:api":"new-api-tests"}}')
