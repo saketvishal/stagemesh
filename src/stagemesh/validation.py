@@ -25,7 +25,9 @@ from .validation_plan import (
     derive_validation_plan,
     with_required_checks,
 )
-from .validation_services import discover_validation_services
+from .validation_services import (
+    ValidationServiceError, discover_validation_services, run_configured_evaluations,
+)
 from .e2e_evidence import (
     E2EEvidenceManifest, E2EEvidenceValidationError, validate_e2e_evidence_manifest,
 )
@@ -78,9 +80,8 @@ class Validator:
             focused_gates = discover_focused_gates(project, inspected_files, contract, candidate_sha=candidate_sha)
             contract = with_focused_gates(contract, focused_gates)
             plan = with_required_checks(contract, derive_validation_plan(contract, inspected_files))
-            service_fingerprint = (
-                discover_validation_services(project).fingerprint if e2e_evidence is not None else None
-            )
+            services = discover_validation_services(project)
+            service_fingerprint = services.fingerprint
             evaluation = evaluate_contract(
                 project,
                 candidate_sha,
@@ -142,6 +143,25 @@ class Validator:
                     for gate in evaluation.gates
                 ],
             }
+            if any(s.kind in {"browser", "api"} for s in services.services):
+                output_root = (artifact_root or project / ".stagemesh" / "artifacts" / "e2e") / execution_id
+                try:
+                    manifests, e2e_gates, e2e_findings = run_configured_evaluations(
+                        project, bound, services, output_root,
+                    )
+                    payload["e2e_evaluations"] = manifests
+                    payload["e2e_artifact_root"] = str(output_root)
+                    payload["gates"].extend(e2e_gates)
+                    findings.extend(e2e_findings)
+                    if e2e_findings:
+                        status = EvidenceStatus.FAILED
+                except (ValidationServiceError, GitError, OSError, E2EEvidenceValidationError) as exc:
+                    from .remediation import bounded_failure_text
+
+                    status = EvidenceStatus.FAILED
+                    findings.append({"severity": "error", "code": "gate_failed",
+                                     "message": "configured E2E evaluation unavailable",
+                                     "failure_kind": "environment", "stderr": bounded_failure_text(exc)})
             if e2e_evidence is not None:
                 try:
                     validate_e2e_evidence_manifest(
@@ -164,6 +184,13 @@ class Validator:
                 except E2EEvidenceValidationError as exc:
                     status = EvidenceStatus.FAILED
                     findings.append({"severity": "error", "code": "invalid_e2e_evidence", "message": str(exc)})
+        except ValidationServiceError as exc:
+            from .remediation import bounded_failure_text
+
+            status = EvidenceStatus.FAILED
+            payload = {"validator": "contract", **(bound.evidence_payload() if bound else {}),
+                       "findings": [{"code": "gate_failed", "message": "invalid E2E prerequisites",
+                                     "failure_kind": "environment", "stderr": bounded_failure_text(exc)}]}
         except ContractError as exc:
             status = EvidenceStatus.FAILED
             payload = {"validator": "contract", **(bound.evidence_payload() if bound else {}),
