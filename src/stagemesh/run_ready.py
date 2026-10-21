@@ -779,6 +779,8 @@ def run_ready(
     worktree_root_path: Path | None = None,
     no_auto_retry: frozenset[str] | set[str] = frozenset(),
     planning_gate: bool | None = None,
+    adverse_policy: AdverseReviewPolicy | None = None,
+    adverse_override: dict[str, str] | None = None,
 ) -> RunSummary:
     """Drive exactly one task through the existing coordinator until DONE, BLOCKED or a safe stop."""
     if max_steps < 1:
@@ -855,6 +857,8 @@ def run_ready(
         on_step=on_step,
         on_start=on_start,
         worktree_root_path=worktree_root_path,
+        adverse_policy=adverse_policy,
+        adverse_override=adverse_override,
     )
     return summary
 
@@ -890,7 +894,7 @@ def drive_task(
 ) -> None:
     """Tick one task until DONE, BLOCKED or a safe stop, filling `summary`.
 
-    Integration is never ticked unless the adverse review gate allows it; `adverse_override` ({actor, reason}) is audited.
+    When `adverse_policy` is given, integration is never ticked unless the adverse review gate allows it; `adverse_override` ({actor, reason}) is audited.
 
     `global_health=False` is for parallel runs: another task's failure or a blocked task elsewhere says nothing about this
     one, so only this task's own progress decides when it stops.
@@ -908,7 +912,11 @@ def drive_task(
             summary.stop_reason, summary.message = "INTERRUPTED", "the run was interrupted; claims were released and the worktree kept"
             break
         summary.recovered.extend(_recover_dead(store, selected))
-        refused = _adverse_integration_block(store, project, selected, adverse_policy or AdverseReviewPolicy(), adverse_override)
+        refused = (
+            _adverse_integration_block(store, project, selected, adverse_policy, adverse_override)
+            if adverse_policy is not None
+            else None
+        )
         if refused is not None:
             store.block_task(selected)
             record_audit(store, "adverse_review.blocked", {"task_id": selected, "reasons": list(refused)})
