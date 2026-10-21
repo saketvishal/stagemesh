@@ -59,7 +59,7 @@ def test_gate_temp_is_cleaned_after_failure_or_timeout(tmp_path, timeout):
     assert not Path(result.stdout.strip()).exists()
     if timeout:
         assert result.returncode is None
-        assert "process tree terminated" in result.stderr
+        assert "owned process tree terminated" in result.stderr
         assert "no exit code" in result.stderr
 
 
@@ -85,6 +85,67 @@ def test_gate_timeout_kills_grandchild_process(tmp_path: Path) -> None:
     while time.time() < deadline and _alive(pid):
         time.sleep(0.1)
     assert not _alive(pid)
+
+
+def test_timeout_does_not_kill_an_unrelated_process(tmp_path: Path) -> None:
+    import subprocess
+
+    from stagemesh.domain import ProcessIdentity
+    from stagemesh.gate_process import terminate_owned_gate
+
+    other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        saved = ProcessIdentity(pid=other.pid, create_time=1.0, boot_id="not-this-process", executable="python")
+        result = terminate_owned_gate(other, saved)
+        assert result.terminated is False
+        assert "not terminated" in result.note
+        assert _alive(other.pid)
+    finally:
+        other.kill()
+        other.wait(timeout=5)
+
+
+def test_validation_slot_serializes_gates_and_releases_after_timeout(tmp_path: Path) -> None:
+    import threading
+
+    first = run_gate(tmp_path, GateCommand("slow", [sys.executable, "-c", "import time; time.sleep(0.6)"], timeout_seconds=5))
+    # The assertion below uses two overlapping calls; the one above only warms nothing.
+    assert first.status == "PASSED"
+    started = time.time()
+    results: list[object] = []
+    errors: list[BaseException] = []
+
+    def run(name: str, sleep_for: float, timeout: int) -> None:
+        try:
+            results.append(
+                run_gate(
+                    tmp_path,
+                    GateCommand(name, [sys.executable, "-c", f"import time; time.sleep({sleep_for})"], timeout_seconds=timeout),
+                )
+            )
+        except BaseException as exc:  # noqa: BLE001 - the thread must report the failure
+            errors.append(exc)
+
+    threads = [
+        threading.Thread(target=run, args=("a", 0.4, 5)),
+        threading.Thread(target=run, args=("b", 0.4, 5)),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(10)
+    assert not errors
+    assert len(results) == 2
+    assert all(getattr(item, "status", None) == "PASSED" for item in results)
+    assert time.time() - started >= 0.75
+
+    follow = run_gate(
+        tmp_path,
+        GateCommand("after-timeout", [sys.executable, "-c", "import time; time.sleep(5)"], timeout_seconds=1),
+    )
+    assert follow.failure_kind == "timeout" and follow.returncode is None
+    released = run_gate(tmp_path, GateCommand("released", [sys.executable, "-c", "print('ok')"], timeout_seconds=5))
+    assert released.status == "PASSED"
 
 
 def _alive(pid: int) -> bool:

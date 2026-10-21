@@ -99,6 +99,7 @@ class Failure:
     excerpt: str
     paths: tuple[str, ...] = ()
     environment_unavailable: bool = False
+    inconclusive_validation: bool = False
 
     def same_as(self, other: Failure) -> bool:
         if self.stage != other.stage or self.codes != other.codes or self.gates != other.gates:
@@ -138,17 +139,28 @@ class Diagnosis:
     review_findings: list[dict[str, Any]] = field(default_factory=list)
     baseline: dict[str, Any] | None = None
     environment_unavailable: bool = False
+    inconclusive_validation: bool = False
 
     @property
     def stops_remediation(self) -> bool:
-        """Proven launch outages or stale baselines stop at once; ambiguous gate failures retain bounded remediation."""
-        return self.environment_unavailable or self.category == STALE_BASELINE or (self.repeated and self.category in NON_CODE_CATEGORIES)
+        """Proven launch outages, incomplete gate timeouts, or stale baselines stop at once.
+
+        An inconclusive timeout is not an environment defect. It still must not
+        start another implementation pass from an unfinished gate.
+        """
+        return (
+            self.environment_unavailable
+            or self.inconclusive_validation
+            or self.category == STALE_BASELINE
+            or (self.repeated and self.category in NON_CODE_CATEGORIES)
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "task_id": self.task_id,
             "category": self.category,
             "environment_unavailable": self.environment_unavailable,
+            "inconclusive_validation": self.inconclusive_validation,
             "stage": self.stage,
             "repeated": self.repeated,
             "repeat_count": self.repeat_count,
@@ -173,6 +185,7 @@ class Diagnosis:
             "candidate_sha": self.candidate_sha,
             "category": self.category,
             "environment_unavailable": self.environment_unavailable,
+            "inconclusive_validation": self.inconclusive_validation,
             "stage": self.stage,
             "repeated": self.repeated,
             "repeat_count": self.repeat_count,
@@ -328,17 +341,27 @@ def _gate_output(finding: dict[str, Any]) -> str:
     return f"{finding.get('stdout') or ''}\n{finding.get('stderr') or ''}"
 
 
-def _timeout_without_assertion(finding: dict[str, Any]) -> bool:
-    """A gate killed at its budget with no failure line is an operational timeout.
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
-    Pytest ``-q`` prints only progress until a test fails. When the budget
-    expires first, the evidence has dots and ``returncode is None`` and does
-    not identify a code defect. An assertion, traceback, or FAILED line still
-    counts as a candidate defect.
+
+def _visible(text: str) -> str:
+    return _ANSI.sub("", text)
+
+
+def _assertion_captured(finding: dict[str, Any]) -> bool:
+    """A FAILED line or assertion names a code defect. Silence does not."""
+    return bool(_key_lines(_visible(_gate_output(finding))))
+
+
+def _inconclusive_timeout(finding: dict[str, Any]) -> bool:
+    """The gate ended at its budget without a completed result.
+
+    Missing assertion text does not prove an environment fault. A captured
+    assertion means the timeout still carries a code defect.
     """
     if finding.get("failure_kind") != "timeout":
         return False
-    return not _key_lines(_gate_output(finding))
+    return not _assertion_captured(finding)
 
 
 def _unavailable_launch(finding: dict[str, Any]) -> bool:
@@ -352,7 +375,7 @@ def _unavailable_launch(finding: dict[str, Any]) -> bool:
         return True
     if finding.get("failure_kind") == "timeout":
         return False
-    stderr = str(finding.get("stderr") or "").strip()
+    stderr = _visible(str(finding.get("stderr") or "")).strip()
     last = stderr.splitlines()[-1] if stderr else ""
     return (
         bool(re.match(r"FileNotFoundError: \[(?:WinError 2|Errno 2)\]", last))
@@ -378,7 +401,9 @@ def _classify(stage: str, codes: set[str], gate_findings: list[dict[str, Any]]) 
     if "gate_failed" in codes:
         for finding in gate_findings:
             output = _gate_output(finding).casefold()
-            if _unavailable_launch(finding) or finding.get("failure_kind") in ("environment", "timeout") or finding.get("returncode") in (None, 126, 127) or any(hint in output for hint in _ENVIRONMENT_HINTS):
+            if _unavailable_launch(finding) or finding.get("failure_kind") == "environment" or finding.get("returncode") in (126, 127) or any(hint in output for hint in _ENVIRONMENT_HINTS):
+                return VALIDATION_GATE
+            if (finding.get("failure_kind") == "timeout" or finding.get("returncode") is None) and not _assertion_captured(finding):
                 return VALIDATION_GATE
         return IMPLEMENTATION_DEFECT
     if stage == EvidenceKind.REVIEW:
@@ -432,10 +457,8 @@ def _failures(store: Store, task_id: str) -> list[Failure]:
             Failure(
                 stage, sha, float(row["created_at"]), _classify(kind, codes, gate_findings), tuple(sorted(codes)),
                 gates, tuple(messages), tokens, excerpt, paths,
-                environment_unavailable=(
-                    any(_unavailable_launch(f) for f in gate_findings)
-                    or (bool(gate_findings) and all(_timeout_without_assertion(f) for f in gate_findings))
-                ),
+                environment_unavailable=any(_unavailable_launch(f) for f in gate_findings),
+                inconclusive_validation=bool(gate_findings) and all(_inconclusive_timeout(f) for f in gate_findings),
             )
         )
     return failures
@@ -643,6 +666,15 @@ def diagnose(
             "After provider availability/capacity or the task contract changes, run `stagemesh continue`; "
             "no manual provider choice, diagnostic detour, SQLite edit, or retry command is required for normal recovery."
         )
+    inconclusive = bool(latest and latest.inconclusive_validation and category == VALIDATION_GATE)
+    if inconclusive and latest is not None:
+        gates = ", ".join(latest.gates) or "the gate"
+        recommendation = (
+            f"Validation of candidate {latest.candidate_sha} is incomplete: {gates} timed out without a finished result. "
+            "The candidate is unchanged. Do not start another implementation or provider pass from this evidence. "
+            "Next diagnostic action: rerun that gate by itself and keep its bounded output. "
+            "A missing FAILED line does not establish an environment fault or an implementation defect."
+        )
     if category == REVIEW_FINDING and focus and focus.messages:
         recommendation += " Finding: " + focus.messages[0][:300]
     return Diagnosis(
@@ -662,6 +694,7 @@ def diagnose(
         review_findings=latest_candidate_findings(store, task_id),
         baseline=baseline,
         environment_unavailable=bool(latest and latest.environment_unavailable and category == VALIDATION_GATE),
+        inconclusive_validation=inconclusive,
     )
 
 

@@ -106,8 +106,11 @@ def test_progress_only_timeout_is_an_operational_gate_failure(tmp_path: Path) ->
     diagnosis = diagnose(rig.store, TASK, rig.project)
     assert diagnosis is not None
     assert diagnosis.category == "validation_gate"
-    assert diagnosis.environment_unavailable is True
+    assert diagnosis.environment_unavailable is False
+    assert diagnosis.inconclusive_validation is True
     assert diagnosis.stops_remediation is True
+    assert "another implementation" in diagnosis.recommendation
+    assert "environment fault" in diagnosis.recommendation
 
 
 def test_timeout_that_captured_an_assertion_stays_a_code_defect(tmp_path: Path) -> None:

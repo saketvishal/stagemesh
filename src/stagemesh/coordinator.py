@@ -46,6 +46,7 @@ from .queue_control import OperatorStopRequested
 from .recovery import RecoveryRefusal, advance_baseline, rebaseline_task
 from .recovery_decision import (
     ENVIRONMENT_BLOCKED,
+    INCONCLUSIVE_VALIDATION,
     JUDGMENT_REQUIRED,
     REMEDIATION_EXHAUSTED,
     DecisionAdvisor,
@@ -786,10 +787,12 @@ class Coordinator:
         if diagnosis is not None and self._auto_rebaseline(task_id, diagnosis):
             return 1
         if diagnosis is not None and diagnosis.stops_remediation and (
-            diagnosis.environment_unavailable or self.diagnosis_policy.stop_on_repeat
+            diagnosis.environment_unavailable
+            or diagnosis.inconclusive_validation
+            or self.diagnosis_policy.stop_on_repeat
         ):
-            # The same failure again (or one a provider cannot fix, like a stale baseline): another identical attempt would only repeat
-            # it. Record the diagnosis, then recover differently instead of stopping.
+            # The same failure again, a proven launch outage, or a gate that never finished.
+            # An unfinished gate is not a reason to implement again.
             record_audit(
                 self.store,
                 DIAGNOSIS_STOP_EVENT,
@@ -797,6 +800,7 @@ class Coordinator:
             )
             reason = (
                 "validation_environment_unavailable" if diagnosis.environment_unavailable
+                else "validation_inconclusive" if diagnosis.inconclusive_validation
                 else "stale_baseline_diagnosed" if diagnosis.category == STALE_BASELINE
                 else "repeated_failure_diagnosed"
             )
@@ -889,6 +893,8 @@ class Coordinator:
         health = self._implementation_health(task_id)
         if needs_judgment is not None:
             category = JUDGMENT_REQUIRED
+        elif diagnosis is not None and diagnosis.inconclusive_validation:
+            category = INCONCLUSIVE_VALIDATION
         elif diagnosis is not None and diagnosis.category in {STALE_BASELINE, VALIDATION_GATE}:
             category = ENVIRONMENT_BLOCKED  # no provider attempt can fix a baseline that cannot advance or a gate that cannot run
         else:
