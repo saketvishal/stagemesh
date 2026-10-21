@@ -553,6 +553,39 @@ def candidate_workspace(project: Path, candidate_sha: str) -> Iterator[Path]:
             shutil.rmtree(temp_root, ignore_errors=True)
 
 
+def _run_gate_process(
+    command: list[str], cwd: Path, env: dict[str, str] | None, timeout: int
+) -> subprocess.CompletedProcess[str]:
+    """Run a gate and, on timeout, kill the whole process tree before returning.
+
+    ``subprocess.run`` kills only the direct child. On Windows that leaves
+    grandchildren (pytest workers, git) holding the checkout, so the next gate
+    stalls and the captured output never names the in-flight test.
+    """
+    from .execution import kill_process_tree
+
+    proc = subprocess.Popen(
+        command,
+        cwd=cwd,
+        env=env,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        kill_process_tree(proc)
+        try:
+            stdout, stderr = proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            stdout, stderr = exc.stdout, exc.stderr
+        raise subprocess.TimeoutExpired(command, timeout, output=stdout, stderr=stderr) from exc
+    return subprocess.CompletedProcess(command, proc.returncode if proc.returncode is not None else 1, stdout, stderr)
+
+
 def run_gate(project: Path, gate: GateCommand) -> GateResult:
     run_dir = project / gate.cwd if gate.cwd else project
     command = _gate_runtime_command(list(gate.command))
@@ -567,27 +600,19 @@ def run_gate(project: Path, gate: GateCommand) -> GateResult:
                     tempfile.TemporaryDirectory(prefix="stagemesh-gate-", ignore_cleanup_errors=True)
                 )
                 environment = {**(environment or os.environ), **dict.fromkeys(temp_keys, temp_root)}
-            result = subprocess.run(
-                command,
-                cwd=run_dir,
-                env=environment,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                capture_output=True,
-                check=False,
-                timeout=gate.timeout_seconds,
-            )
+            result = _run_gate_process(command, run_dir, environment, gate.timeout_seconds)
     except OSError as exc:
         return GateResult(gate.name, "FAILED", tuple(gate.command), None, "", str(exc), "environment")
     except subprocess.TimeoutExpired as exc:
+        stderr = _gate_output_text(exc.stderr)
+        note = "timed out after {0}s; process tree terminated; no exit code\n".format(gate.timeout_seconds)
         return GateResult(
             gate.name,
             "FAILED",
             tuple(gate.command),
             None,
             _gate_output_text(exc.stdout),
-            f"timed out after {gate.timeout_seconds}s\n{_gate_output_text(exc.stderr)}",
+            note + stderr,
             "timeout",
         )
     return GateResult(

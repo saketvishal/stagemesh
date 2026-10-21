@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from pathlib import Path
 
 import pytest
+
+import os
 
 from stagemesh.contracts import GateCommand, run_gate
 
@@ -54,3 +57,48 @@ def test_gate_temp_is_cleaned_after_failure_or_timeout(tmp_path, timeout):
     assert result.failure_kind == ("timeout" if timeout else None)
     assert result.stdout.strip()
     assert not Path(result.stdout.strip()).exists()
+    if timeout:
+        assert result.returncode is None
+        assert "process tree terminated" in result.stderr
+        assert "no exit code" in result.stderr
+
+
+def test_gate_timeout_kills_grandchild_process(tmp_path: Path) -> None:
+    pid_file = tmp_path / "grandchild.pid"
+    code = (
+        "import pathlib, subprocess, sys, time\n"
+        "path = pathlib.Path(sys.argv[1])\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'])\n"
+        "path.write_text(str(child.pid), encoding='utf-8')\n"
+        "time.sleep(30)\n"
+    )
+    gate = GateCommand(
+        "tree",
+        [sys.executable, "-c", code, str(pid_file)],
+        timeout_seconds=2,
+    )
+    result = run_gate(tmp_path, gate)
+    assert result.failure_kind == "timeout"
+    assert result.returncode is None
+    deadline = time.time() + 5
+    pid = int(pid_file.read_text(encoding="utf-8"))
+    while time.time() < deadline and _alive(pid):
+        time.sleep(0.1)
+    assert not _alive(pid)
+
+
+def _alive(pid: int) -> bool:
+    if os.name == "nt":
+        import subprocess
+        listed = subprocess.run(
+            ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        return str(pid) in listed.stdout
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True

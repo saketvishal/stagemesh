@@ -328,6 +328,19 @@ def _gate_output(finding: dict[str, Any]) -> str:
     return f"{finding.get('stdout') or ''}\n{finding.get('stderr') or ''}"
 
 
+def _timeout_without_assertion(finding: dict[str, Any]) -> bool:
+    """A gate killed at its budget with no failure line is an operational timeout.
+
+    Pytest ``-q`` prints only progress until a test fails. When the budget
+    expires first, the evidence has dots and ``returncode is None`` and does
+    not identify a code defect. An assertion, traceback, or FAILED line still
+    counts as a candidate defect.
+    """
+    if finding.get("failure_kind") != "timeout":
+        return False
+    return not _key_lines(_gate_output(finding))
+
+
 def _unavailable_launch(finding: dict[str, Any]) -> bool:
     """Only established launch failures justify skipping the first code remediation.
 
@@ -419,7 +432,10 @@ def _failures(store: Store, task_id: str) -> list[Failure]:
             Failure(
                 stage, sha, float(row["created_at"]), _classify(kind, codes, gate_findings), tuple(sorted(codes)),
                 gates, tuple(messages), tokens, excerpt, paths,
-                environment_unavailable=any(_unavailable_launch(f) for f in gate_findings),
+                environment_unavailable=(
+                    any(_unavailable_launch(f) for f in gate_findings)
+                    or (bool(gate_findings) and all(_timeout_without_assertion(f) for f in gate_findings))
+                ),
             )
         )
     return failures
