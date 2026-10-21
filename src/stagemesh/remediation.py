@@ -175,7 +175,7 @@ def tool_recovery_plan(
 
     signature = tool_failure_signature(evidence)
     attempted: list[str] = []
-    rows = store.audit_events(1000)
+    rows = store.audit_events(200)
     for row in reversed(rows):
         if row["event_type"] != TOOL_FAILURE_EVENT:
             continue
