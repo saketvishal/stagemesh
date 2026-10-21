@@ -13,6 +13,7 @@ from .config import ConfigValidationError, TaskSelectionConfig, load_config
 from .contract_check import contract_section_sizes
 from .contracts import (
     ContractError,
+    bind_contract,
     canonical_contract_json,
     contract_admission_problem,
     parse_contract,
@@ -283,7 +284,13 @@ def _enforce_planning_gate(store: Store, project: Path, task_id: str, enabled: b
     if not enabled:
         return
     record = store.task_contract(task_id)
-    contract_hash = str(record["digest"]) if record is not None else ""
+    if record is not None:
+        contract_hash = str(record["digest"])
+    else:  # not yet bound by the coordinator: the on-disk contract is what will be bound
+        try:
+            contract_hash = bind_contract(project, task_id).digest
+        except (OSError, ValueError, ContractError) as exc:
+            raise RunReadyRefusal("invalid_contract", f"contract for {task_id} is invalid: {exc}", task_id=task_id) from exc
     baseline = store.task_baseline(task_id) or GitWorkspace(project).head()
     spec_payload, approval = load_planning_artifacts(project, task_id)
     decision = evaluate_planning_gate(
