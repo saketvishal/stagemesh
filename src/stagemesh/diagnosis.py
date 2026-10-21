@@ -370,18 +370,27 @@ def _gate_output(finding: dict[str, Any]) -> str:
     return f"{finding.get('stdout') or ''}\n{finding.get('stderr') or ''}"
 
 
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _visible(text: str) -> str:
+    """Drop terminal color so a launch exception can be matched as text."""
+    return _ANSI.sub("", text)
+
+
 def _unavailable_launch(finding: dict[str, Any]) -> bool:
     """Only established launch failures justify skipping the first code remediation.
 
     Timeouts, application imports and missing data files can be candidate bugs.
     For a nested command, require an uncaught OS launch exception in subprocess,
     not merely an environment-like phrase somewhere in test output.
+    Color codes around that exception are not a different failure.
     """
     if finding.get("failure_kind") == "environment":
         return True
     if finding.get("failure_kind") == "timeout":
         return False
-    stderr = str(finding.get("stderr") or "").strip()
+    stderr = _visible(str(finding.get("stderr") or "")).strip()
     last = stderr.splitlines()[-1] if stderr else ""
     return (
         bool(re.match(r"FileNotFoundError: \[(?:WinError 2|Errno 2)\]", last))
