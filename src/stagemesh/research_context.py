@@ -294,3 +294,87 @@ def _research_storage_path(path: Path, project: Path) -> Path:
     if target.is_relative_to(project.resolve()):
         raise ValueError("research evidence storage must be outside the source project")
     return target
+
+
+MAX_RESEARCH_PROMPT_FINDINGS = 20
+MAX_RESEARCH_PROMPT_CHARS = 8000
+
+
+class ResearchBlocked(Exception):
+    """Implementation must not start; `reason` is a stable machine-readable code."""
+
+    def __init__(self, reason: str, detail: str = "") -> None:
+        super().__init__(f"{reason}: {detail}" if detail else reason)
+        self.reason = reason
+
+
+def research_request(bound: BoundChangeContract) -> str:
+    """Prompt for the read-only researcher; it must echo the identity it researched against."""
+    return (
+        "StageMesh research stage (read-only). Do NOT edit, create, delete or stage any file and do not run git write commands.\n"
+        "Inspect the code the change contract needs and reply with ONLY one JSON object with keys: "
+        "baseline_sha, contract_digest, inspected_paths (list of existing in-scope file paths), "
+        "findings (list of {path, summary}; path must be in inspected_paths), "
+        "unresolved_scope_gaps (list of strings; required context that is missing or out of scope), "
+        "provenance (non-empty list of strings).\n"
+        f"Use baseline_sha={bound.baseline_sha} and contract_digest={bound.digest}.\n\n"
+        f"{canonical_contract_json(bound.contract)}\n"
+    )
+
+
+def parse_research_report(raw: str, project: Path, bound: BoundChangeContract) -> ResearchEvidence:
+    """Validate a researcher's reply against the bound identity; unresolved scope gaps block."""
+    if len(raw.encode("utf-8", "replace")) > MAX_RESEARCH_EVIDENCE_BYTES:
+        raise ResearchBlocked("research_invalid", "report exceeds size limit")
+    start, end = raw.find("{"), raw.rfind("}")
+    try:
+        payload = json.loads(raw[start:end + 1]) if 0 <= start < end else None
+        if not isinstance(payload, dict) or set(payload) != {
+            "baseline_sha", "contract_digest", "inspected_paths", "findings",
+            "unresolved_scope_gaps", "provenance",
+        }:
+            raise ValueError("invalid research report fields")
+        for field in ("inspected_paths", "findings", "unresolved_scope_gaps", "provenance"):
+            if not isinstance(payload[field], list):
+                raise ValueError(f"invalid research {field}")
+        evidence = ResearchEvidence(
+            payload["baseline_sha"], payload["contract_digest"], tuple(payload["inspected_paths"]),
+            tuple(ResearchFinding(**item) for item in payload["findings"]),
+            tuple(payload["unresolved_scope_gaps"]), tuple(payload["provenance"]),
+            build_research_brief(project, bound.contract),
+        )
+        _validate_research_evidence(evidence, project, bound)
+    except (ValueError, TypeError, RecursionError) as exc:
+        reason = "research_stale" if "stale" in str(exc) else "research_invalid"
+        raise ResearchBlocked(reason, str(exc)[:200]) from exc
+    if evidence.unresolved_scope_gaps:
+        raise ResearchBlocked("research_unresolved_scope", "; ".join(evidence.unresolved_scope_gaps)[:200])
+    return evidence
+
+
+def research_findings_prompt(evidence: ResearchEvidence) -> str:
+    """Bounded, advisory findings for the implementation prompt."""
+    lines = ["Research findings (advisory, from a read-only researcher; they do not expand the change contract):"]
+    lines.extend(f"- {f.path}: {f.summary}" for f in evidence.findings[:MAX_RESEARCH_PROMPT_FINDINGS])
+    text = "\n".join(lines)
+    if len(text) > MAX_RESEARCH_PROMPT_CHARS:
+        text = text[:MAX_RESEARCH_PROMPT_CHARS] + "\n[research findings truncated]"
+    return text + "\n\n"
+
+
+def source_snapshot(root: Path) -> str:
+    """Digest of HEAD, the status, and the content of every changed or untracked file."""
+    import subprocess
+
+    def git(*args: str) -> bytes:
+        return subprocess.run(["git", *args], cwd=root, capture_output=True, check=True).stdout
+
+    head = git("rev-parse", "HEAD")
+    status = git("status", "--porcelain=v1", "-z", "-uall")
+    digest = hashlib.sha256(head + b"\0" + status)
+    for entry in status.split(b"\0"):
+        if len(entry) > 3:
+            target = root / entry[3:].decode("utf-8", "surrogateescape")
+            if target.is_file():
+                digest.update(target.read_bytes())
+    return digest.hexdigest()
