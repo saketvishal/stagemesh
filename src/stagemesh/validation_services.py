@@ -25,6 +25,7 @@ class ConfiguredService:
     env_keys: tuple[str, ...] = ()
     port: int | None = None
     url: str | None = None
+    script_definition: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -35,6 +36,7 @@ class ConfiguredService:
             "env_keys": list(self.env_keys),
             "port": self.port,
             "url": self.url,
+            "script_definition": self.script_definition,
         }
 
 
@@ -119,6 +121,7 @@ def discover_validation_services(
                                 name="browser",
                                 kind="browser",
                                 command=("npm", "run", script_name),
+                                script_definition=scripts[script_name],
                             )
                         )
                         break
@@ -130,6 +133,7 @@ def discover_validation_services(
                                 name="api",
                                 kind="api",
                                 command=("npm", "run", script_name),
+                                script_definition=scripts[script_name],
                             )
                         )
                         break

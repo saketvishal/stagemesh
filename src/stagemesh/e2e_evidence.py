@@ -224,23 +224,8 @@ def build_e2e_evidence(
     if artifact_root is not None:
         for a in artifacts:
             validated_artifacts.append(validate_artifact_reference(a, artifact_root))
-    else:
-        for a in artifacts:
-            # Basic validation without checking disk existence
-            if not a.name or not a.path or not re.fullmatch(r"[0-9a-fA-F]{64}", a.sha256):
-                raise E2EEvidenceValidationError(f"invalid artifact reference: {a}")
-            norm_p = a.path.replace("\\", "/").strip()
-            if norm_p.startswith("/") or "../" in norm_p or ":/" in norm_p or ":\\" in norm_p:
-                raise E2EEvidenceValidationError(f"artifact path contains traversal: {a.path}")
-            validated_artifacts.append(
-                ArtifactReference(
-                    name=a.name.strip(),
-                    path=norm_p,
-                    sha256=a.sha256.lower(),
-                    size=a.size,
-                    content_type=a.content_type,
-                )
-            )
+    elif artifacts:
+        raise E2EEvidenceValidationError("artifact root is required for artifact references")
 
     manifest = E2EEvidenceManifest(
         candidate_sha=norm_candidate,
@@ -309,9 +294,12 @@ def validate_e2e_evidence_manifest(
     if not manifest.command:
         raise E2EEvidenceValidationError("manifest command cannot be empty")
 
-    if artifact_root is not None:
-        for a in manifest.artifacts:
-            validate_artifact_reference(a, artifact_root)
+    if len(manifest.artifacts) > MAX_ARTIFACTS:
+        raise E2EEvidenceValidationError(f"artifacts count exceeds limit of {MAX_ARTIFACTS}")
+    if manifest.artifacts and artifact_root is None:
+        raise E2EEvidenceValidationError("artifact root is required for artifact references")
+    for a in manifest.artifacts:
+        validate_artifact_reference(a, artifact_root)
 
 
 def write_e2e_evidence(

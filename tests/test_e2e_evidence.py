@@ -298,6 +298,7 @@ def test_record_e2e_evidence_in_validation_integrates_cleanly(test_env):
         validation_payload,
         manifest,
         bound,
+        project=project,
         artifact_root=artifact_root,
     )
 
@@ -305,3 +306,151 @@ def test_record_e2e_evidence_in_validation_integrates_cleanly(test_env):
     assert updated["e2e_evidence"]["candidate_sha"] == bound.candidate_sha
     assert updated["e2e_evidence"]["result"] == "PASS"
     assert updated["e2e_evidence"]["artifacts"][0]["name"] == "api_log"
+
+
+@pytest.fixture
+def api_manifest(test_env):
+    project, artifact_root, bound, _, api_log = test_env
+    return build_e2e_evidence(
+        bound, candidate_sha=bound.candidate_sha,
+        service_fingerprint=discover_validation_services(project).fingerprint,
+        kind="api", command=["pytest", "tests/api"], result="PASS",
+        artifacts=[build_artifact_reference("api_log", api_log, artifact_root)],
+        artifact_root=artifact_root,
+    )
+
+
+@pytest.mark.parametrize("entry", ["build", "read", "record"])
+def test_artifacts_require_root(test_env, api_manifest, entry):
+    project, artifact_root, bound, _, _ = test_env
+    with pytest.raises(E2EEvidenceValidationError, match="artifact root"):
+        if entry == "build":
+            build_e2e_evidence(
+                bound, candidate_sha=bound.candidate_sha,
+                service_fingerprint=api_manifest.service_fingerprint,
+                kind="api", command=api_manifest.command, result="PASS",
+                artifacts=api_manifest.artifacts,
+            )
+        elif entry == "read":
+            source = project / "evidence.json"
+            source.write_text(json.dumps(api_manifest.to_dict()), encoding="utf-8")
+            read_e2e_evidence(source, bound)
+        else:
+            record_e2e_evidence_in_validation({}, api_manifest, bound, project=project)
+
+
+@pytest.mark.parametrize("entry", ["read", "record"])
+@pytest.mark.parametrize("count", [64, 65])
+def test_artifact_limit_at_acceptance(test_env, api_manifest, entry, count):
+    project, artifact_root, bound, _, _ = test_env
+    manifest = replace(api_manifest, artifacts=api_manifest.artifacts * count)
+    def accept():
+        if entry == "record":
+            return record_e2e_evidence_in_validation(
+                {}, manifest, bound, project=project, artifact_root=artifact_root,
+            )
+        source = project / "evidence.json"
+        source.write_text(json.dumps(manifest.to_dict()), encoding="utf-8")
+        return read_e2e_evidence(source, bound, artifact_root=artifact_root)
+    if count == 65:
+        with pytest.raises(E2EEvidenceValidationError, match="count exceeds"):
+            accept()
+    else:
+        assert accept()
+
+
+@pytest.mark.parametrize("script", ["test:api", "test:e2e"])
+def test_script_definition_changes_service_identity(test_env, script):
+    project, _, _, _, _ = test_env
+    package = project / "package.json"
+    package.write_text(json.dumps({"scripts": {script: "runner --url http://localhost:8000"}}))
+    before = discover_validation_services(project)
+    package.write_text(json.dumps({"scripts": {script: "runner --url http://localhost:9000"}}))
+    after = discover_validation_services(project)
+    assert before.services[0].command == after.services[0].command
+    assert before.fingerprint != after.fingerprint
+
+
+def test_record_rejects_service_change_without_mutating_payload(test_env, api_manifest):
+    project, artifact_root, bound, _, _ = test_env
+    (project / "package.json").write_text('{"scripts":{"test:api":"new-api-tests"}}')
+    payload = {"candidate_sha": bound.candidate_sha}
+    with pytest.raises(E2EEvidenceValidationError, match="service fingerprint mismatch"):
+        record_e2e_evidence_in_validation(
+            payload, api_manifest, bound, project=project, artifact_root=artifact_root,
+        )
+    assert "e2e_evidence" not in payload
+
+
+@pytest.mark.parametrize("damage", ["missing", "traversal", "checksum", "size"])
+@pytest.mark.parametrize("entry", ["read", "record"])
+def test_acceptance_validates_artifacts(test_env, api_manifest, damage, entry):
+    project, artifact_root, bound, _, api_log = test_env
+    ref = api_manifest.artifacts[0]
+    if damage == "missing":
+        api_log.unlink()
+    elif damage == "traversal":
+        ref = replace(ref, path="nested/../api_response.json")
+    elif damage == "checksum":
+        ref = replace(ref, sha256="invalid")
+    else:
+        ref = replace(ref, size=-1)
+    manifest = replace(api_manifest, artifacts=(ref,))
+    with pytest.raises(E2EEvidenceValidationError):
+        if entry == "read":
+            source = project / "evidence.json"
+            source.write_text(json.dumps(manifest.to_dict()), encoding="utf-8")
+            read_e2e_evidence(source, bound, artifact_root=artifact_root)
+        else:
+            record_e2e_evidence_in_validation(
+                {}, manifest, bound, project=project, artifact_root=artifact_root,
+            )
+
+
+@pytest.mark.parametrize("damage", [None, "service", "during_run", "artifact", "command", "result"])
+def test_validator_records_bound_evidence(test_env, api_manifest, monkeypatch, damage):
+    from stagemesh.contracts import ContractEvaluation, GateResult
+    from stagemesh.domain import EvidenceStatus
+    from stagemesh.persistence import Store
+    from stagemesh.validation import Validator
+
+    project, artifact_root, bound, _, api_log = test_env
+    monkeypatch.setattr("stagemesh.validation.contract_for_candidate", lambda *args: bound)
+    monkeypatch.setattr("stagemesh.validation.changed_files", lambda *args: ())
+    def evaluate(*args, **kwargs):
+        if damage == "during_run":
+            (project / "package.json").write_text('{"scripts":{"test:api":"changed"}}')
+        return ContractEvaluation("PASSED", (), (), (
+            GateResult("api", "PASSED", api_manifest.command, 0),
+        ))
+    monkeypatch.setattr("stagemesh.validation.evaluate_contract", evaluate)
+    manifest = api_manifest
+    if damage == "service":
+        manifest = replace(manifest, service_fingerprint="old-service")
+    elif damage == "artifact":
+        api_log.unlink()
+    elif damage == "command":
+        manifest = replace(manifest, command=("other-command",))
+    elif damage == "result":
+        manifest = replace(manifest, result="FAIL")
+    store = Store(project / "state.sqlite3")
+    store.migrate()
+    try:
+        task_id = store.upsert_task("API evidence", source_id="E2E")
+        store.add_candidate(task_id, bound.candidate_sha, "test", True)
+        status = Validator().validate(
+            store, task_id, bound.candidate_sha, project,
+            e2e_evidence=manifest, artifact_root=artifact_root,
+        )
+        payload = json.loads(store.conn.execute(
+            "SELECT payload FROM evidence WHERE kind='VALIDATION'"
+        ).fetchone()[0])
+        if damage is None:
+            assert status is EvidenceStatus.PASSED
+            assert payload["e2e_evidence"] == manifest.to_dict()
+        else:
+            assert status is EvidenceStatus.FAILED
+            assert "e2e_evidence" not in payload
+            assert any(f["code"] == "invalid_e2e_evidence" for f in payload["findings"])
+    finally:
+        store.close()

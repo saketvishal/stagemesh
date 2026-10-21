@@ -26,7 +26,9 @@ from .validation_plan import (
     with_required_checks,
 )
 from .validation_services import discover_validation_services
-from .e2e_evidence import E2EEvidenceManifest, validate_e2e_evidence_manifest
+from .e2e_evidence import (
+    E2EEvidenceManifest, E2EEvidenceValidationError, validate_e2e_evidence_manifest,
+)
 
 
 def record_e2e_evidence_in_validation(
@@ -34,6 +36,7 @@ def record_e2e_evidence_in_validation(
     manifest: E2EEvidenceManifest,
     bound: Any,
     *,
+    project: Path,
     artifact_root: Path | None = None,
 ) -> dict[str, Any]:
     """Bind and validate an E2E evidence manifest into the validation evidence payload."""
@@ -41,6 +44,7 @@ def record_e2e_evidence_in_validation(
         manifest,
         bound,
         expected_candidate_sha=payload.get("candidate_sha") or bound.candidate_sha,
+        expected_service_fingerprint=discover_validation_services(project).fingerprint,
         artifact_root=artifact_root,
     )
     payload["e2e_evidence"] = manifest.to_dict()
@@ -49,7 +53,11 @@ def record_e2e_evidence_in_validation(
 
 
 class Validator:
-    def validate(self, store: Store, task_id: str, candidate_sha: str, project: Path) -> EvidenceStatus:
+    def validate(
+        self, store: Store, task_id: str, candidate_sha: str, project: Path,
+        *, e2e_evidence: E2EEvidenceManifest | None = None,
+        artifact_root: Path | None = None,
+    ) -> EvidenceStatus:
         execution_id = store.start_execution(
             task_id=task_id,
             claim_id=None,
@@ -70,6 +78,9 @@ class Validator:
             focused_gates = discover_focused_gates(project, inspected_files, contract, candidate_sha=candidate_sha)
             contract = with_focused_gates(contract, focused_gates)
             plan = with_required_checks(contract, derive_validation_plan(contract, inspected_files))
+            service_fingerprint = (
+                discover_validation_services(project).fingerprint if e2e_evidence is not None else None
+            )
             evaluation = evaluate_contract(
                 project,
                 candidate_sha,
@@ -131,6 +142,28 @@ class Validator:
                     for gate in evaluation.gates
                 ],
             }
+            if e2e_evidence is not None:
+                try:
+                    validate_e2e_evidence_manifest(
+                        e2e_evidence, bound, expected_candidate_sha=candidate_sha,
+                        expected_service_fingerprint=service_fingerprint, artifact_root=artifact_root,
+                    )
+                    matching = [gate for gate in evaluation.gates if gate.command == e2e_evidence.command]
+                    expected_status = "PASSED" if e2e_evidence.result == "PASS" else "FAILED"
+                    if not matching or any(
+                        gate.status != expected_status or gate.returncode is None
+                        or (gate.returncode == 0) != (e2e_evidence.result == "PASS")
+                        for gate in matching
+                    ):
+                        raise E2EEvidenceValidationError("E2E command/result does not match executed gates")
+                    record_e2e_evidence_in_validation(
+                        payload, e2e_evidence, bound, project=project, artifact_root=artifact_root,
+                    )
+                    if e2e_evidence.result == "FAIL":
+                        status = EvidenceStatus.FAILED
+                except E2EEvidenceValidationError as exc:
+                    status = EvidenceStatus.FAILED
+                    findings.append({"severity": "error", "code": "invalid_e2e_evidence", "message": str(exc)})
         except ContractError as exc:
             status = EvidenceStatus.FAILED
             payload = {"validator": "contract", **(bound.evidence_payload() if bound else {}),
