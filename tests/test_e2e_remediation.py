@@ -132,18 +132,24 @@ def test_missing_configured_artifact_cannot_pass(evaluation):
 def test_environment_values_invalidate_service_identity(evaluation, monkeypatch):
     project, _, _, _, configure, _ = evaluation
     configure(env_keys=["E2E_TARGET"])
-    monkeypatch.setenv("E2E_TARGET", "first")
+    monkeypatch.setenv("E2E_TARGET", "private-target-before-change")
     first = discover_validation_services(project)
-    monkeypatch.setenv("E2E_TARGET", "second")
+    monkeypatch.setenv("E2E_TARGET", "private-target-after-change")
     second = discover_validation_services(project)
     assert first.fingerprint != second.fingerprint
-    assert "second" not in json.dumps(second.to_dict())
+    assert "private-target-before-change" not in json.dumps(first.to_dict())
+    assert "private-target-after-change" not in json.dumps(second.to_dict())
 
 
 def test_service_change_during_evaluation_cannot_pass(evaluation):
-    project, _, _, _, configure, validate = evaluation
+    project, store, task, sha, configure, validate = evaluation
     config = project / ".stagemesh" / "config.json"
     configure("from pathlib import Path; Path(" + repr(str(config)) + ").write_text('{}')")
     status, payload = validate()
     assert status is EvidenceStatus.FAILED
-    assert any("changed" in f["message"] for f in payload["findings"])
+    finding = next(f for f in payload["findings"] if f.get("code") == "gate_failed")
+    assert finding["failure_kind"] == "environment"
+    assert "service configuration changed during evaluation" in finding["stderr"]
+    store.add_task_remediation(task, "VALIDATE", sha)
+    context = remediation_context(store, task, project)
+    assert context["findings"][0]["stderr"] == finding["stderr"]
