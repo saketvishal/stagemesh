@@ -254,16 +254,19 @@ def validate_e2e_evidence_manifest(
     if manifest.version != 1:
         raise E2EEvidenceValidationError(f"unsupported manifest version {manifest.version}")
 
-    norm_cand = validate_candidate_sha(manifest.candidate_sha)
-    if expected_candidate_sha:
-        exp_cand = validate_candidate_sha(expected_candidate_sha)
+    try:
+        norm_cand = validate_candidate_sha(manifest.candidate_sha)
+        exp_cand = validate_candidate_sha(expected_candidate_sha) if expected_candidate_sha else None
+        bound_cand = validate_candidate_sha(bound.candidate_sha) if bound.candidate_sha else None
+    except ReleaseValidationError as exc:
+        raise E2EEvidenceValidationError(str(exc)) from exc
+    if exp_cand:
         if norm_cand != exp_cand:
             raise E2EEvidenceValidationError(
                 f"candidate sha changed: expected {exp_cand}, manifest has {norm_cand}"
             )
 
-    if bound.candidate_sha:
-        bound_cand = validate_candidate_sha(bound.candidate_sha)
+    if bound_cand:
         if norm_cand != bound_cand:
             raise E2EEvidenceValidationError(
                 f"candidate sha does not match bound contract: expected {bound_cand}, got {norm_cand}"
@@ -334,7 +337,8 @@ def read_e2e_evidence(
     if not src.is_file():
         raise E2EEvidenceValidationError(f"manifest file does not exist: {source}")
 
-    raw = src.read_bytes()
+    with src.open("rb") as stream:
+        raw = stream.read(MAX_MANIFEST_BYTES + 1)
     if len(raw) > MAX_MANIFEST_BYTES:
         raise E2EEvidenceValidationError("manifest exceeds maximum byte size")
 

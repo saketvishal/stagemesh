@@ -407,7 +407,7 @@ def test_acceptance_validates_artifacts(test_env, api_manifest, damage, entry):
             )
 
 
-@pytest.mark.parametrize("damage", [None, "service", "during_run", "artifact", "command", "result"])
+@pytest.mark.parametrize("damage", [None, "service", "during_run", "artifact", "command", "result", "candidate"])
 def test_validator_records_bound_evidence(test_env, api_manifest, monkeypatch, damage):
     from stagemesh.contracts import ContractEvaluation, GateResult
     from stagemesh.domain import EvidenceStatus
@@ -433,6 +433,8 @@ def test_validator_records_bound_evidence(test_env, api_manifest, monkeypatch, d
         manifest = replace(manifest, command=("other-command",))
     elif damage == "result":
         manifest = replace(manifest, result="FAIL")
+    elif damage == "candidate":
+        manifest = replace(manifest, candidate_sha="not-a-commit")
     store = Store(project / "state.sqlite3")
     store.migrate()
     try:
@@ -452,5 +454,30 @@ def test_validator_records_bound_evidence(test_env, api_manifest, monkeypatch, d
             assert status is EvidenceStatus.FAILED
             assert "e2e_evidence" not in payload
             assert any(f["code"] == "invalid_e2e_evidence" for f in payload["findings"])
+        assert not list(store.running_executions())
     finally:
         store.close()
+
+
+def test_manifest_size_limit_bounds_the_read(test_env, monkeypatch):
+    from io import BytesIO
+    from stagemesh.e2e_evidence import MAX_MANIFEST_BYTES
+
+    project, artifact_root, bound, _, _ = test_env
+    source = project / "oversized-evidence.json"
+    source.write_bytes(b"x")
+    calls = []
+    class BoundedReader(BytesIO):
+        def read(self, size=-1):
+            calls.append(size)
+            assert size == MAX_MANIFEST_BYTES + 1
+            return super().read(size)
+    original_open = Path.open
+    def open_manifest(path, mode="r", *args, **kwargs):
+        if path == source.resolve() and mode == "rb":
+            return BoundedReader(b"x" * (MAX_MANIFEST_BYTES + 2))
+        return original_open(path, mode, *args, **kwargs)
+    monkeypatch.setattr(Path, "open", open_manifest)
+    with pytest.raises(E2EEvidenceValidationError, match="maximum byte size"):
+        read_e2e_evidence(source, bound, artifact_root=artifact_root)
+    assert calls == [MAX_MANIFEST_BYTES + 1]
