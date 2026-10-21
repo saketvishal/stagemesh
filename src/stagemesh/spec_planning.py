@@ -10,6 +10,7 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from .contracts import ContractError, _relative_paths
@@ -209,3 +210,78 @@ def _identity(value: Any, field: str, pattern: re.Pattern[str], problems: list[s
         problems.append(f"{field} must be a lowercase hex digest")
         return ""
     return value
+
+
+# --- Opt-in pre-implementation gate -------------------------------------------------------------------------------
+PLANNING_ARTIFACT_DIR = ".stagemesh/planning"
+NEXT_WRITE_SPEC = "write_planning_spec"
+NEXT_RESOLVE_DECISIONS = "resolve_planning_decisions"
+NEXT_REFRESH_SPEC = "refresh_planning_spec"
+NEXT_APPROVE_SPEC = "approve_planning_spec"
+
+
+@dataclass(frozen=True)
+class PlanningGateDecision:
+    allowed: bool
+    next_action: str | None = None
+    reason: str = ""
+    approved_scope: tuple[str, ...] = ()
+
+
+def planning_artifact_paths(project: Path, task_id: str) -> tuple[Path, Path]:
+    """The spec and approval files for a task; approval is a separate file only an approver writes."""
+    base = project / PLANNING_ARTIFACT_DIR
+    return base / f"{task_id}.spec.json", base / f"{task_id}.approval.json"
+
+
+def load_planning_artifacts(project: Path, task_id: str) -> tuple[Any, Any]:
+    """Return (spec payload, approval payload); a missing or unreadable file is None."""
+    loaded: list[Any] = []
+    for path in planning_artifact_paths(project, task_id):
+        try:
+            loaded.append(json.loads(path.read_text(encoding="utf-8")))
+        except (OSError, ValueError):
+            loaded.append(None)
+    return loaded[0], loaded[1]
+
+
+def evaluate_planning_gate(
+    *, enabled: bool, spec_payload: Any, approval: Any, contract_hash: str, baseline_sha: str
+) -> PlanningGateDecision:
+    """Decide whether implementation may start. Disabled (legacy) policy always allows; otherwise fail closed."""
+    if not enabled:
+        return PlanningGateDecision(True)
+    if spec_payload is None:
+        return PlanningGateDecision(False, NEXT_WRITE_SPEC, "no planning spec has been written for this task")
+    spec, problems = validate_planning_spec(spec_payload)
+    if spec is None:
+        unresolved = any(problem.startswith("unresolved decision") for problem in problems)
+        return PlanningGateDecision(
+            False, NEXT_RESOLVE_DECISIONS if unresolved else NEXT_WRITE_SPEC, "; ".join(problems)
+        )
+    if spec.contract_hash != contract_hash or spec.baseline_sha != baseline_sha:
+        return PlanningGateDecision(
+            False, NEXT_REFRESH_SPEC, "planning spec identity is stale: the contract or baseline changed since it was written"
+        )
+    digest = freeze_planning_spec(spec_payload).digest
+    if not (isinstance(approval, dict) and approval.get("approved") is True and approval.get("planning_spec_hash") == digest):
+        return PlanningGateDecision(False, NEXT_APPROVE_SPEC, f"planning spec {digest[:12]} has no matching approval")
+    return PlanningGateDecision(True, approved_scope=spec.affected_paths)
+
+
+def approved_scope(project: Path, task_id: str, contract_hash: str) -> tuple[str, ...]:
+    """Affected paths of an approved, contract-current spec; empty when there is no valid approved evidence."""
+    spec_payload, approval = load_planning_artifacts(project, task_id)
+    spec, _ = validate_planning_spec(spec_payload)
+    if spec is None:
+        return ()
+    decision = evaluate_planning_gate(
+        enabled=True, spec_payload=spec_payload, approval=approval, contract_hash=contract_hash, baseline_sha=spec.baseline_sha
+    )
+    return decision.approved_scope
+
+
+def planner_scope_violations(changed_paths: list[str] | tuple[str, ...], task_id: str) -> tuple[str, ...]:
+    """A planner may only write its own spec artifact; anything else (production sources, approval) is a violation."""
+    allowed = f"{PLANNING_ARTIFACT_DIR}/{task_id}.spec.json"
+    return tuple(path for path in changed_paths if path.replace("\\", "/").removeprefix("./") != allowed)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shlex
@@ -197,7 +198,8 @@ class RuntimeCommandAdapter:
         task = store.get_task(task_id)
         try:
             task_prompt = _build_task_prompt(
-                task_id, task, run_path, contract=bound.contract, remediation=remediation_context(store, task_id, project)
+                task_id, task, run_path, contract=bound.contract, remediation=remediation_context(store, task_id, project),
+                planning_project=project,
             )
         except SkillPackError as exc:
             return ExecutionResult(ExecutionStatus.FAILED, failure_reason=f"skill_pack_unavailable: {exc}")
@@ -686,6 +688,7 @@ def _build_task_prompt(
     project: Path | None = None,
     contract: object = None,
     remediation: dict[str, object] | None = None,
+    planning_project: Path | None = None,
 ) -> str:
     """Build the prompt string sent via stdin to a provider CLI.
 
@@ -716,6 +719,8 @@ def _build_task_prompt(
         except ContractError as exc:
             contract_text = f"\n\nChange contract is invalid and must be fixed before coding: {exc}\n"
     remediation_text = _remediation_prompt(remediation) if remediation else ""
+    if remediation and (planning_project or project) is not None and effective_contract is not None:
+        remediation_text += _approved_scope_prompt(planning_project or project, task_id, effective_contract)  # type: ignore[arg-type]
     return (
         f"StageMesh task: {title}\n\n"
         f"{contract_text}"
@@ -783,6 +788,18 @@ def _resolve_project_spec(project: Path, ref: str) -> Path | None:
     if target == root or root not in target.parents:
         return None
     return target
+
+
+def _approved_scope_prompt(project: Path, task_id: str, contract: object) -> str:
+    """Remediation keeps the approved planning scope when approved, contract-current spec evidence exists."""
+    from .contracts import canonical_contract_json
+    from .spec_planning import approved_scope
+
+    digest = hashlib.sha256(canonical_contract_json(contract).encode("utf-8")).hexdigest()  # type: ignore[arg-type]
+    scope = approved_scope(project, str(task_id), digest)
+    if not scope:
+        return ""
+    return "\nApproved planning scope (stay within these paths while remediating):\n" + "\n".join(f"- {path}" for path in scope) + "\n"
 
 
 def _remediation_prompt(remediation: dict[str, object]) -> str:

@@ -9,7 +9,7 @@ from typing import Any
 
 from .auto_plan import AutoPlanError, create_contract, refresh_stale_generated_contract
 from .blocked_recovery import auto_retry_blocked_provider_failures, exhaustion_message
-from .config import TaskSelectionConfig
+from .config import ConfigValidationError, TaskSelectionConfig, load_config
 from .contract_check import contract_section_sizes
 from .contracts import (
     ContractError,
@@ -34,6 +34,7 @@ from .recovery import (
     auto_revalidate_blocked_validation_gates,
 )
 from .scheduling import Scheduler
+from .spec_planning import evaluate_planning_gate, load_planning_artifacts
 from .task_selection import Candidate, Selection, SelectionRefusal, contract_state, select_next_task
 from .timing import execution_timings, format_duration, step_duration
 from .workspace_guard import EXTERNAL_WORKSPACE_MUTATION
@@ -269,6 +270,32 @@ def _ensure_contract(
             size=size,
             limit=MAX_CANONICAL_CONTRACT_CHARS,
             largest_sections=largest,
+        )
+
+
+def _enforce_planning_gate(store: Store, project: Path, task_id: str, enabled: bool | None) -> None:
+    """Opt-in: refuse to start implementation without an approved, identity-current planning spec."""
+    if enabled is None:
+        try:
+            enabled = load_config(project).require_approved_spec
+        except ConfigValidationError as exc:
+            raise RunReadyRefusal("invalid_config", f"config is invalid, planning gate state unknown: {exc}", task_id=task_id) from exc
+    if not enabled:
+        return
+    record = store.task_contract(task_id)
+    contract_hash = str(record["digest"]) if record is not None else ""
+    baseline = store.task_baseline(task_id) or GitWorkspace(project).head()
+    spec_payload, approval = load_planning_artifacts(project, task_id)
+    decision = evaluate_planning_gate(
+        enabled=True, spec_payload=spec_payload, approval=approval, contract_hash=contract_hash, baseline_sha=baseline
+    )
+    if not decision.allowed:
+        raise RunReadyRefusal(
+            "planning_gate",
+            f"task {task_id} is blocked before implementation: {decision.reason}",
+            task_id=task_id,
+            next_action=decision.next_action,
+            planning_gate_reason=decision.reason,
         )
 
 
@@ -741,6 +768,7 @@ def run_ready(
     chooser: Callable[[list[Candidate]], str | None] | None = None,
     worktree_root_path: Path | None = None,
     no_auto_retry: frozenset[str] | set[str] = frozenset(),
+    planning_gate: bool | None = None,
 ) -> RunSummary:
     """Drive exactly one task through the existing coordinator until DONE, BLOCKED or a safe stop."""
     if max_steps < 1:
@@ -774,6 +802,7 @@ def run_ready(
                 task_id=selected,
             )
         _ensure_contract(store, project, selected, auto_plan, plan_info, note)
+        _enforce_planning_gate(store, project, selected, planning_gate)
         if any(row["task_id"] == selected for row in store.running_executions()):
             raise RunReadyRefusal(
                 "active_execution", f"task {selected} has a live or unknown execution; not recovering it", task_id=selected

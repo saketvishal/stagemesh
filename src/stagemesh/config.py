@@ -161,6 +161,17 @@ def _adverse_review_policy(data: dict[str, object]) -> AdverseReviewPolicy:
     return AdverseReviewPolicy(tuple(sorted({item.strip().casefold() for item in severities})), behavior)
 
 
+def _require_approved_spec(data: dict[str, object]) -> bool:
+    """Opt-in planning gate; absent means the legacy policy (no pre-implementation approval required)."""
+    unknown = set(data) - {"require_approved_spec"}
+    if unknown:
+        raise ConfigValidationError(f"planning_gate has unsupported keys: {', '.join(sorted(unknown))}")
+    value = data.get("require_approved_spec", False)
+    if not isinstance(value, bool):
+        raise ConfigValidationError("planning_gate.require_approved_spec must be a boolean")
+    return value
+
+
 @dataclass(frozen=True)
 class StageMeshConfig:
     project: Path
@@ -187,6 +198,7 @@ class StageMeshConfig:
     diagnosis: DiagnosisConfig = field(default_factory=DiagnosisConfig)
     merging: MergeConfig = field(default_factory=MergeConfig)
     adverse_review: AdverseReviewPolicy = field(default_factory=AdverseReviewPolicy)
+    require_approved_spec: bool = False
 
 
 @dataclass(frozen=True)
@@ -305,6 +317,7 @@ def load_config(project: Path, config_path: Path | None = None) -> StageMeshConf
         diagnosis=_diagnosis(_optional_mapping(data, "diagnosis"), known),
         merging=_merging(_optional_mapping(data, "merging"), require_review),
         adverse_review=_adverse_review_policy(_optional_mapping(data, "adverse_review")),
+        require_approved_spec=_require_approved_spec(_optional_mapping(data, "planning_gate")),
     )
 
 
