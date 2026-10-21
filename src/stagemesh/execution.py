@@ -11,7 +11,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .attribution import attribution_for_worker
+from .audit import record_audit
 from .contract_binding import ContractRejected, bind_task_contract
+from .diagnosis import TOOL_FAILURE_EVENT, tool_failure_evidence
 from .domain import ExecutionKind, ExecutionStatus
 from .git import GitWorkspace
 from .git_identity import provider_environment
@@ -335,6 +337,13 @@ class SubprocessExecutor(Executor):
         except WorkspaceEnvironmentError as exc:
             return ExecutionResult(ExecutionStatus.FAILED, failure_reason=str(exc))
 
+    def _record_tool_evidence(self, store, task_id, execution_id, cwd, code, stdout, stderr, reason, timed_out) -> None:  # type: ignore[no-untyped-def]
+        evidence = tool_failure_evidence(
+            self.command, cwd, code, stdout, stderr, timed_out=timed_out, reason=None if timed_out else reason
+        )
+        if evidence is not None:
+            record_audit(store, TOOL_FAILURE_EVENT, {"task_id": task_id, "execution_id": execution_id, "evidence": evidence})
+
     def _run_owned(self, store, task_id, claim_id, project, task, lease, build_prompt) -> ExecutionResult:  # type: ignore[no-untyped-def]
         run_path = lease.path
         baseline_sha = record_task_baseline(store, task_id, run_path)
@@ -385,10 +394,12 @@ class SubprocessExecutor(Executor):
         lease.after_agent()
 
         if timed_out:
+            self._record_tool_evidence(store, task_id, execution_id, run_path, code, stdout, stderr, PROVIDER_TIMEOUT, True)
             store.finish_execution(execution_id, ExecutionStatus.FAILED, result=PROVIDER_TIMEOUT)
             return ExecutionResult(ExecutionStatus.FAILED, failure_reason=PROVIDER_TIMEOUT)
         if code != 0:
             is_cap, reason = classify_failure(code, stdout, stderr)
+            self._record_tool_evidence(store, task_id, execution_id, run_path, code, stdout, stderr, reason, False)
             store.finish_execution(execution_id, ExecutionStatus.FAILED, result=reason)
             return ExecutionResult(
                 ExecutionStatus.FAILED,

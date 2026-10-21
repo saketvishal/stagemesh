@@ -238,6 +238,84 @@ class DiagnosisPolicy:
             raise ValueError(f"diagnosis dispatch must be one of: {', '.join(DISPATCH_MODES)}")
 
 
+TOOL_FAILURE_EVENT = "task.tool_failure_evidence"
+# Provider quota/auth failures keep their own semantics and never become tool evidence.
+_PROVIDER_REASONS = frozenset({"quota_rate_limit", "authentication_failure", "provider_unavailable", "transient_provider_failure"})
+# Ordered: the first matching kind wins, so specific causes precede generic ones.
+_TOOL_KINDS: tuple[tuple[str, re.Pattern[str], str], ...] = tuple(
+    (kind, re.compile(pattern, re.IGNORECASE), action)
+    for kind, pattern, action in (
+        ("browser_startup", r"browser executable doesn't exist|playwright install|browsertype\.launch|failed to launch (?:the )?browser|chrome(?:driver)? (?:failed|not reachable)|no usable sandbox",
+         "Provision the browser runtime for the gate (operator action); do not retry the implementation."),
+        ("permission", r"permission denied|\bEACCES\b|\bEPERM\b|access is denied|operation not permitted",
+         "Fix file or process permissions for the workspace (operator action)."),
+        ("cwd_path", r"no such file or directory|cannot find the path|\bENOENT\b|not a directory|winerror 3\b|working directory",
+         "Verify the command's cwd and referenced paths exist in the workspace."),
+        ("service_unavailable", r"connection refused|\bECONNREFUSED\b|could not connect to server|service unavailable|host unreachable",
+         "Start or restore the service the command depends on, then re-run."),
+        ("missing_dependency", r"modulenotfounderror|no module named|cannot find module|npm err!\s+missing script|no tests found|importerror",
+         "Install or declare the missing dependency or script (operator action)."),
+        ("missing_tool", r"command not found|is not recognized as|executable file not found|winerror 2\b|\bnot found\b",
+         "Install the missing tool or correct its name or PATH (operator action)."),
+        ("assertion_failure", r"assertionerror|\bassert\b|\d+ failed\b|expected .+ (?:to|but)|test failed",
+         "Inspect the failing assertion; this is a code defect, not an environment fault."),
+        ("transient", r"\bETIMEDOUT\b|\bECONNRESET\b|\b50[234]\b|socket hang up|temporary failure|try again",
+         "Transient fault; re-run manually if it persists (no automatic retry in this slice)."),
+    )
+)
+_TOOL_TIMEOUT_ACTION = "Raise the command's time budget or investigate the hang (operator action)."
+_EVIDENCE_SECRET = re.compile(
+    r"(?i)(bearer\s+)\S+|(\bgh[pousr]_|sk-|xai-)[A-Za-z0-9_\-]+|"
+    r"((?:token|secret|password|passwd|api[_-]?key|authorization)\s*[=:]\s*)\S+"
+)
+
+
+def _redact_evidence(text: str) -> str:
+    return _EVIDENCE_SECRET.sub(lambda m: (m.group(1) or m.group(3) or "") + "[redacted]", text)
+
+
+def tool_failure_evidence(
+    command: list[str] | str,
+    cwd: str | Path | None,
+    returncode: int | None,
+    stdout: str = "",
+    stderr: str = "",
+    *,
+    timed_out: bool = False,
+    reason: str | None = None,
+    max_chars: int = 600,
+) -> dict[str, Any] | None:
+    """Typed, redacted, bounded evidence for a failed tool command, or None when it is not a tool failure.
+
+    Provider quota/auth/availability reasons are rejected so they stay separate. Nothing here retries or installs.
+    """
+    if reason in _PROVIDER_REASONS:
+        return None
+    text = f"{stdout}\n{stderr}"
+    kind, action = "", ""
+    if timed_out:
+        kind, action = "timeout", _TOOL_TIMEOUT_ACTION
+    else:
+        for name, pattern, next_action in _TOOL_KINDS:
+            if pattern.search(text):
+                kind, action = name, next_action
+                break
+    if not kind:
+        return None
+    argv = command.split() if isinstance(command, str) else [str(part) for part in command]
+    shown = _redact_evidence(" ".join(argv))[:200]
+    lines = [line for line in _redact_evidence(text).splitlines() if line.strip()]
+    key = [line for line in lines if _KEY_LINE.search(line)] or lines
+    return {
+        "kind": kind,
+        "command": {"executable": Path(argv[0]).name if argv else "", "argc": len(argv), "text": shown},
+        "cwd": str(cwd) if cwd is not None else None,
+        "status": "timed_out" if timed_out else ("launch_failed" if returncode is None else f"exit {returncode}"),
+        "excerpt": "\n".join(line.strip()[:200] for line in key[-6:])[-max_chars:],
+        "next_action": action,
+    }
+
+
 def _loads(raw: object) -> dict[str, Any]:
     try:
         value = json.loads(str(raw))
