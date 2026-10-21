@@ -9,7 +9,9 @@ from typing import Any
 
 from .auto_plan import AutoPlanError, create_contract, refresh_stale_generated_contract
 from .blocked_recovery import auto_retry_blocked_provider_failures, exhaustion_message
-from .config import ConfigValidationError, TaskSelectionConfig, load_config
+from .audit import record_audit
+from .config import AdverseReviewPolicy, ConfigValidationError, TaskSelectionConfig, load_config
+from .contract_binding import contract_for_candidate
 from .contract_check import contract_section_sizes
 from .contracts import (
     ContractError,
@@ -28,6 +30,7 @@ from .observability import health
 from .operator_actions import recover_stale, task_details
 from .persistence import MAX_CANONICAL_CONTRACT_CHARS, Store
 from .queue_control import OperatorStopRequested, QueueStopControl, provider_stop_scope
+from .review import adverse_gate
 from .recovery import (
     auto_rebaseline_blocked_stale_baselines,
     auto_rebind_blocked_missing_validation_gates,
@@ -856,6 +859,19 @@ def run_ready(
     return summary
 
 
+def _adverse_integration_block(
+    store: Store, project: Path, task_id: str, policy: AdverseReviewPolicy, override: dict[str, str] | None
+) -> tuple[str, ...] | None:
+    """Reasons the adverse gate refuses integration of the task's candidate, or None when it may proceed."""
+    task = store.get_task(task_id)
+    candidate = store.latest_candidate(task_id)
+    if task is None or candidate is None or Stage(task["stage"]) is not Stage.INTEGRATE:
+        return None
+    sha = str(candidate["sha"])
+    decision = adverse_gate(store, task_id, sha, contract_for_candidate(store, task_id, sha, project).digest, policy, override=override)
+    return None if decision.allowed else decision.reasons
+
+
 def drive_task(
     store: Store,
     project: Path,
@@ -869,8 +885,12 @@ def drive_task(
     global_health: bool = True,
     should_stop: Callable[[], bool] | None = None,
     worktree_root_path: Path | None = None,
+    adverse_policy: AdverseReviewPolicy | None = None,
+    adverse_override: dict[str, str] | None = None,
 ) -> None:
     """Tick one task until DONE, BLOCKED or a safe stop, filling `summary`.
+
+    Integration is never ticked unless the adverse review gate allows it; `adverse_override` ({actor, reason}) is audited.
 
     `global_health=False` is for parallel runs: another task's failure or a blocked task elsewhere says nothing about this
     one, so only this task's own progress decides when it stops.
@@ -888,6 +908,13 @@ def drive_task(
             summary.stop_reason, summary.message = "INTERRUPTED", "the run was interrupted; claims were released and the worktree kept"
             break
         summary.recovered.extend(_recover_dead(store, selected))
+        refused = _adverse_integration_block(store, project, selected, adverse_policy or AdverseReviewPolicy(), adverse_override)
+        if refused is not None:
+            store.block_task(selected)
+            record_audit(store, "adverse_review.blocked", {"task_id": selected, "reasons": list(refused)})
+            summary.stop_reason, summary.message = "BLOCKED", "adverse review gate refused integration: " + "; ".join(refused)
+            summary.detail["adverse_review"] = list(refused)
+            break
         previous = _snapshot(store, selected)
         if on_start is not None:
             on_start(format_running(number, selected, previous))
