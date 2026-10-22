@@ -1,12 +1,26 @@
 from __future__ import annotations
 
 import hashlib
+import os
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
 from .persistence import Store
 from .task_completion import task_owner_state
+
+
+def bounded_failure_text(value: object, limit: int = 2500, secrets: tuple[str, ...] = ()) -> str:
+    """Redact complete diagnostics before taking a bounded tail for persistence or prompts."""
+    from .redaction import SECRET_MARKERS, redact_text
+
+    known = [v for k, v in os.environ.items() if any(m in k.lower() for m in SECRET_MARKERS)]
+    text = redact_text(str(value or ""), sorted((*known, *secrets), key=len, reverse=True))
+    text = re.sub(r"(?i)(bearer\s+)\S+|((?:token|secret|password|passwd|api[_-]?key|authorization)[\"']?\s*[=:]\s*[\"']?)[^\s\"',;]+",
+                  lambda m: (m.group(1) or m.group(2) or "") + "[redacted]", text)
+    text = re.sub(r"(?i)(https?://)[^/\s@]+@", r"\1[redacted]@", text)
+    return text[-limit:]
 
 
 class RemediationValidationError(ValueError):
@@ -115,7 +129,7 @@ def remediation_context(store: Store, task_id: str, project: Path | None = None)
                 ev_f = ev_findings[msg]
                 for k in ("stdout", "stderr", "failure_kind", "code", "path"):
                     if ev_f.get(k):
-                        item[k] = ev_f[k]
+                        item[k] = bounded_failure_text(ev_f[k])
         gates = ev_payload.get("gates", [])
         if isinstance(gates, list):
             for g in gates:
@@ -124,10 +138,11 @@ def remediation_context(store: Store, task_id: str, project: Path | None = None)
                         {
                             "name": g.get("name"),
                             "returncode": g.get("returncode"),
-                            "command": g.get("command"),
+                            "command": [bounded_failure_text(p, 500) for p in g.get("command", [])],
                             "duration_seconds": g.get("duration_seconds"),
-                            "stderr": (g.get("stderr_tail") or g.get("stderr") or "")[:1500],
-                            "stdout": (g.get("stdout_tail") or g.get("stdout") or "")[-2500:],
+                            "failure_kind": g.get("failure_kind"),
+                            "stderr": bounded_failure_text(g.get("stderr_tail") or g.get("stderr"), 1500),
+                            "stdout": bounded_failure_text(g.get("stdout_tail") or g.get("stdout")),
                         }
                     )
     context: dict[str, object] = {
