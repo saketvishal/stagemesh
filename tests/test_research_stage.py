@@ -114,12 +114,16 @@ def test_rejected_research_blocks_implementation(rig, mode: str, reason: str) ->
     assert caught.value.reason == reason
 
 
-def test_stale_workspace_head_blocks_before_running_the_researcher(rig) -> None:
+def test_later_attempt_head_still_uses_the_frozen_research_identity(rig) -> None:
     project, bound, store, adapter = rig
+    first = adapter("ok")._run_research(store, "t1", project, bound)
     git(project, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "--allow-empty", "-qm", "later")
-    with pytest.raises(ResearchBlocked) as caught:
-        adapter("ok")._run_research(store, "t1", project, bound)
-    assert caught.value.reason == "research_stale"
+    second = adapter("ok")._run_research(store, "t1", project, bound)
+    assert "src/service.py: entry point" in first
+    assert "src/service.py: entry point" in second
+    assert len(events(store)) == 2
+    assert all(event["baseline_sha"] == bound.baseline_sha for event in events(store))
+    assert all(event["contract_digest"] == bound.digest for event in events(store))
 
 
 def test_research_is_opt_in_in_config(tmp_path: Path) -> None:

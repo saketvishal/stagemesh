@@ -312,8 +312,6 @@ class RuntimeCommandAdapter:
         """Run the read-only researcher; any failure raises ResearchBlocked so implementation never starts."""
         role = self.research
         try:
-            if _git_output(run_path, "rev-parse", "HEAD") != bound.baseline_sha:
-                raise ResearchBlocked("research_stale", "workspace HEAD differs from the bound baseline")
             before = source_snapshot(run_path)
             command, provider_input = _command_and_input(role.command, research_request(bound))
             try:
