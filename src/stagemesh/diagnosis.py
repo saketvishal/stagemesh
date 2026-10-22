@@ -350,7 +350,14 @@ def _visible(text: str) -> str:
 
 def _assertion_captured(finding: dict[str, Any]) -> bool:
     """A FAILED line or assertion names a code defect. Silence does not."""
-    return bool(_key_lines(_visible(_gate_output(finding))))
+    text = _visible(_gate_output(finding))
+    return bool(
+        re.search(
+            r"(?im)(?:^\s*FAILED(?:\s|$)|^\s*AssertionError(?::|\s*$)|"
+            r"^\s*[A-Za-z_][\w.]*Error(?::|\s*$)|^Traceback \(most recent call last\):)",
+            text,
+        )
+    )
 
 
 def _inconclusive_timeout(finding: dict[str, Any]) -> bool:

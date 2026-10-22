@@ -111,6 +111,25 @@ def test_timeout_does_not_kill_an_unrelated_process(tmp_path: Path) -> None:
         other.wait(timeout=5)
 
 
+def test_unknown_identity_still_terminates_the_owned_process_handle(tmp_path: Path, monkeypatch) -> None:
+    import subprocess
+
+    from stagemesh.gate_process import terminate_owned_gate
+    from stagemesh.process_identity import popen_identity
+
+    owned = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    saved = popen_identity(owned)
+    monkeypatch.setattr("stagemesh.gate_process.process_identity", lambda _pid: None)
+    try:
+        result = terminate_owned_gate(owned, saved)
+        assert result.terminated is True
+        assert owned.poll() is not None
+    finally:
+        if owned.poll() is None:
+            owned.kill()
+            owned.wait(timeout=5)
+
+
 def test_validation_slot_serializes_gates_and_releases_after_timeout(tmp_path: Path) -> None:
     import threading
 
@@ -404,6 +423,30 @@ def test_cancel_after_acquire_and_before_launch_starts_no_gate(tmp_path: Path, m
     finally:
         reset_validation_wait(tokens)
     assert not started_file.exists()
+
+
+def test_exception_during_post_acquire_recheck_releases_the_slot() -> None:
+    from stagemesh.validation_slot import bind_validation_wait, reset_validation_wait, validation_slot
+
+    observations = 0
+
+    def fail_on_recheck() -> bool:
+        nonlocal observations
+        observations += 1
+        if observations == 2:
+            raise RuntimeError("cancel callback failed")
+        return False
+
+    tokens = bind_validation_wait(cancel=fail_on_recheck)
+    try:
+        with pytest.raises(RuntimeError, match="cancel callback failed"):
+            with validation_slot():
+                pytest.fail("slot body must not run")
+    finally:
+        reset_validation_wait(tokens)
+
+    with validation_slot():
+        pass
 
 
 def test_slot_file_contents_are_not_used_to_signal_a_live_process(tmp_path: Path) -> None:

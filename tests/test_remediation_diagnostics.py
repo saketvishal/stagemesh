@@ -97,7 +97,7 @@ def test_progress_only_timeout_is_an_operational_gate_failure(tmp_path: Path) ->
                     "message": "stagemesh-lifecycle-smoke failed",
                     "failure_kind": "timeout",
                     "returncode": None,
-                    "stdout": "...... [ 45%]\n",
+                    "stdout": "tests/test_error_handling.py ...... [ 45%]\n",
                     "stderr": "timed out after 360s\n",
                 }
             ]
@@ -137,4 +137,6 @@ def test_timeout_that_captured_an_assertion_stays_a_code_defect(tmp_path: Path) 
     )
     diagnosis = diagnose(rig.store, TASK, rig.project)
     assert diagnosis is not None
+    assert diagnosis.category == "implementation_defect"
     assert diagnosis.environment_unavailable is False
+    assert diagnosis.inconclusive_validation is False

@@ -196,19 +196,16 @@ def validation_slot() -> Iterator[float]:
                     if not held:
                         _mu.release()
             time.sleep(0.05)
-        if _stop_requested():
-            _file_unlock(handle)
-            held = False
-            _mu.release()
-            reason = (
-                "validation slot wait exceeded the task deadline"
-                if _deadline_exceeded()
-                else "validation cancelled before the gate started"
-            )
-            raise OperatorStopRequested(reason)
-        waited = time.monotonic() - started
-        _depth.value = 1
         try:
+            if _stop_requested():
+                reason = (
+                    "validation slot wait exceeded the task deadline"
+                    if _deadline_exceeded()
+                    else "validation cancelled before the gate started"
+                )
+                raise OperatorStopRequested(reason)
+            waited = time.monotonic() - started
+            _depth.value = 1
             yield waited
         finally:
             _depth.value = 0

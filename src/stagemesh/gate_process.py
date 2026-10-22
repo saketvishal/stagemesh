@@ -7,7 +7,7 @@ import sys
 from dataclasses import dataclass
 
 from .domain import ProcessIdentity
-from .process_identity import classify_process, popen_identity, process_identity
+from .process_identity import popen_identity, process_identity
 
 
 @dataclass(frozen=True)
@@ -46,12 +46,12 @@ def terminate_owned_gate(proc: subprocess.Popen[str], saved: ProcessIdentity) ->
     A reused PID is left alone. The direct child is signalled through the
     process handle on Windows, which stays bound to the original process.
     """
+    if proc.poll() is not None:
+        return GateTermination(False, "owned process already exited", proc.returncode)
     observed = process_identity(proc.pid)
-    if classify_process(saved, observed) != "LIVE":
-        # The handle still belongs to the process we started, but the identity
-        # check failed. Do not signal it, and do not block the slot waiting
-        # for a process we refused to classify as ours.
-        proc.poll()
+    if _known_identity_mismatch(saved, observed):
+        # A known mismatch proves that the PID now identifies another process.
+        # Unknown identity does not override the Popen handle we still own.
         return GateTermination(
             False,
             "process identity no longer matches; not terminated; no exit code",
@@ -67,6 +67,10 @@ def terminate_owned_gate(proc: subprocess.Popen[str], saved: ProcessIdentity) ->
         _terminate_posix_group(proc, saved)
     _reap_if_exited(proc)
     return GateTermination(True, "owned process tree terminated; no exit code", proc.returncode)
+
+
+def _known_identity_mismatch(saved: ProcessIdentity, observed: ProcessIdentity | None) -> bool:
+    return saved.is_known and observed is not None and observed.is_known and not saved.matches(observed)
 
 
 def _reap_if_exited(proc: subprocess.Popen[str]) -> None:
@@ -176,7 +180,7 @@ def _terminate_posix_group(proc: subprocess.Popen[str], saved: ProcessIdentity) 
     except OSError:
         group = None
     current = process_identity(proc.pid)
-    if classify_process(saved, current) != "LIVE" or group != proc.pid:
+    if _known_identity_mismatch(saved, current) or group != proc.pid:
         return
     try:
         os.killpg(group, signal.SIGKILL)
