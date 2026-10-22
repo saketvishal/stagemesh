@@ -61,6 +61,12 @@ if mode == "mutate":
 out = pathlib.Path("out")
 out.mkdir(exist_ok=True)
 (out / f"{task}.txt").write_text((mode + "\n") if str(mode).startswith("bad") else "done\n", encoding="utf-8")
+# A remediation attempt must produce a distinct candidate even when the
+# acceptance-file contents are already stable. This lets the next review prove
+# that it inspected the repaired revision instead of silently clearing a
+# finding against the unchanged commit.
+if not str(mode).startswith("bad"):
+    (out / f"{task}.attempt").write_text(f"{previous + 1}\n", encoding="utf-8")
 '''
 
 # Operator detours that normal recovery must never ask for.
