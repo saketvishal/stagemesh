@@ -914,6 +914,14 @@ def drive_task(
     `global_health=False` is for parallel runs: another task's failure or a blocked task elsewhere says nothing about this
     one, so only this task's own progress decides when it stops.
     """
+    if adverse_policy is None:
+        try:
+            adverse_policy = _configured_adverse_policy(project, selected, None)
+        except RunReadyRefusal as refusal:
+            summary.stop_reason = f"REFUSED:{refusal.reason}"
+            summary.message = refusal.message
+            summary.detail.update(refusal.detail)
+            return
     summary.detail["workspace"] = workspace_info(project, selected, worktree_root_path)
     summary.detail["task"] = _task_heading(store, selected)
     if on_start is not None:
@@ -927,11 +935,7 @@ def drive_task(
             summary.stop_reason, summary.message = "INTERRUPTED", "the run was interrupted; claims were released and the worktree kept"
             break
         summary.recovered.extend(_recover_dead(store, selected))
-        refused = (
-            _adverse_integration_block(store, project, selected, adverse_policy, adverse_override)
-            if adverse_policy is not None
-            else None
-        )
+        refused = _adverse_integration_block(store, project, selected, adverse_policy, adverse_override)
         if refused is not None:
             store.block_task(selected)
             record_audit(store, "adverse_review.blocked", {"task_id": selected, "reasons": list(refused)})

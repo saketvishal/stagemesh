@@ -98,7 +98,7 @@ def test_drive_task_refuses_to_tick_integration_without_adverse_review(tmp_path,
     coordinator = SimpleNamespace(tick=lambda: ticked.append(1) or 1)
     summary = run_ready.RunSummary(True, "UNSET", task_id=TASK)
     monkeypatch.setattr(run_ready, "workspace_info", lambda *a: {})
-    run_ready.drive_task(store, tmp_path, coordinator, TASK, summary, max_steps=1, adverse_policy=POLICY)
+    run_ready.drive_task(store, tmp_path, coordinator, TASK, summary, max_steps=1)
     assert ticked == [] and summary.stop_reason == "BLOCKED" and "adverse review" in summary.message
     assert store.conn.execute("SELECT 1 FROM audit_events WHERE event_type='adverse_review.blocked'").fetchone()
 
@@ -108,3 +108,25 @@ def test_run_ready_resolves_the_configured_adverse_policy(tmp_path, monkeypatch)
     monkeypatch.setattr(run_ready, "load_config", lambda _project: SimpleNamespace(adverse_review=configured))
     assert run_ready._configured_adverse_policy(tmp_path, TASK, None) is configured
     assert run_ready._configured_adverse_policy(tmp_path, TASK, POLICY) is POLICY
+
+
+def test_drive_task_fails_closed_when_adverse_policy_config_is_invalid(tmp_path, monkeypatch):
+    store = _store(tmp_path)
+    ticked = []
+    summary = run_ready.RunSummary(True, "UNSET", task_id=TASK)
+    monkeypatch.setattr(
+        run_ready,
+        "load_config",
+        lambda _project: (_ for _ in ()).throw(run_ready.ConfigValidationError("bad adverse policy")),
+    )
+    run_ready.drive_task(
+        store,
+        tmp_path,
+        SimpleNamespace(tick=lambda: ticked.append(1) or 1),
+        TASK,
+        summary,
+        max_steps=1,
+    )
+    assert ticked == []
+    assert summary.stop_reason == "REFUSED:invalid_config"
+    assert "adverse review policy unknown" in summary.message
