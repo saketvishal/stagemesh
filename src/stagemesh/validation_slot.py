@@ -173,12 +173,12 @@ def validation_slot() -> Iterator[float]:
     path = slot_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     handle = path.open("a+b")
-    if handle.seek(0, os.SEEK_END) < 1:
-        handle.write(b"\0")
-        handle.flush()
-    handle.seek(0)
     held = False
     try:
+        if handle.seek(0, os.SEEK_END) < 1:
+            handle.write(b"\0")
+            handle.flush()
+        handle.seek(0)
         while True:
             if _stop_requested():
                 reason = (

@@ -130,6 +130,29 @@ def test_unknown_identity_still_terminates_the_owned_process_handle(tmp_path: Pa
             owned.wait(timeout=5)
 
 
+def test_posix_nonleader_kills_only_the_owned_process_handle(monkeypatch) -> None:
+    from stagemesh.domain import ProcessIdentity
+    from stagemesh.gate_process import _terminate_posix_group
+
+    class OwnedProcess:
+        pid = 1234
+        killed = False
+
+        def kill(self) -> None:
+            self.killed = True
+
+    owned = OwnedProcess()
+    monkeypatch.setattr(os, "getpgid", lambda _pid: 999, raising=False)
+    monkeypatch.setattr("stagemesh.gate_process.process_identity", lambda _pid: None)
+
+    _terminate_posix_group(
+        owned,  # type: ignore[arg-type]
+        ProcessIdentity(pid=owned.pid, create_time=None, boot_id="test"),
+    )
+
+    assert owned.killed is True
+
+
 def test_validation_slot_serializes_gates_and_releases_after_timeout(tmp_path: Path) -> None:
     import threading
 

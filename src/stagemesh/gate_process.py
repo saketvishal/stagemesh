@@ -180,12 +180,13 @@ def _terminate_posix_group(proc: subprocess.Popen[str], saved: ProcessIdentity) 
     except OSError:
         group = None
     current = process_identity(proc.pid)
-    if _known_identity_mismatch(saved, current) or group != proc.pid:
+    if _known_identity_mismatch(saved, current):
         return
-    try:
-        os.killpg(group, signal.SIGKILL)
-    except OSError:
-        pass
+    if group == proc.pid:
+        try:
+            os.killpg(group, signal.SIGKILL)
+        except OSError:
+            pass
     try:
         proc.kill()
     except OSError:
