@@ -11,6 +11,7 @@ import pytest
 from stagemesh.contracts import BoundChangeContract, ChangeContract, canonical_contract_json
 from stagemesh.validation_services import (
     ConfiguredService,
+    ValidationServiceError,
     ValidationServicesManifest,
     compute_service_fingerprint,
     discover_validation_services,
@@ -408,10 +409,11 @@ def test_npm_run_with_extra_arguments_binds_the_script_body(test_env):
     assert changed.fingerprint != bound.fingerprint
 
 
-def test_broken_package_json_does_not_drop_service_discovery(test_env):
+@pytest.mark.parametrize("contents", ["{", "[]", "null", "1"])
+def test_broken_package_json_does_not_drop_service_discovery(test_env, contents):
     project, _, _, _, _ = test_env
-    (project / "package.json").write_text("{", encoding="utf-8")
-    with pytest.raises(Exception, match="package.json"):
+    (project / "package.json").write_text(contents, encoding="utf-8")
+    with pytest.raises(ValidationServiceError, match="package.json"):
         discover_validation_services(project)
 
 
