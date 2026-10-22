@@ -64,6 +64,23 @@ def recorded_findings(store: Store, task_id: str, candidate_sha: str) -> list[di
     ]
 
 
+def findings_to_verify(store: Store, task_id: str, candidate_sha: str) -> list[dict[str, object]]:
+    """Concrete findings of the candidate being remediated that a review of `candidate_sha` must show resolved."""
+    latest = store.latest_task_remediation(task_id)
+    if latest is None or str(latest["candidate_sha"]) == candidate_sha:
+        return []
+    return [
+        {"id": r["id"], "severity": r["severity"], "message": r["message"]}
+        for r in store.open_findings_for_candidate(task_id, str(latest["candidate_sha"]))
+    ]
+
+
+def unresolved_findings(store: Store, task_id: str, candidate_sha: str) -> list[dict[str, object]]:
+    """Findings handed to remediation that the new candidate's own review raised again (same message, still OPEN)."""
+    current = {str(r["message"]) for r in store.open_findings_for_candidate(task_id, candidate_sha)}
+    return [f for f in findings_to_verify(store, task_id, candidate_sha) if f["message"] in current]
+
+
 def latest_candidate_findings(store: Store, task_id: str, open_only: bool = True) -> list[dict[str, object]]:
     candidate = store.latest_candidate(task_id)
     if candidate is None:

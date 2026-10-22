@@ -9,7 +9,9 @@ from typing import Any
 
 from .auto_plan import AutoPlanError, create_contract, refresh_stale_generated_contract
 from .blocked_recovery import auto_retry_blocked_provider_failures, exhaustion_message
-from .config import ConfigValidationError, TaskSelectionConfig, load_config
+from .audit import record_audit
+from .config import AdverseReviewPolicy, ConfigValidationError, TaskSelectionConfig, load_config
+from .contract_binding import contract_for_candidate
 from .contract_check import contract_section_sizes
 from .contracts import (
     ContractError,
@@ -28,6 +30,7 @@ from .observability import health
 from .operator_actions import recover_stale, task_details
 from .persistence import MAX_CANONICAL_CONTRACT_CHARS, Store
 from .queue_control import OperatorStopRequested, QueueStopControl, provider_stop_scope
+from .review import adverse_gate
 from .recovery import (
     auto_rebaseline_blocked_stale_baselines,
     auto_rebind_blocked_missing_validation_gates,
@@ -304,6 +307,20 @@ def _enforce_planning_gate(store: Store, project: Path, task_id: str, enabled: b
             next_action=decision.next_action,
             planning_gate_reason=decision.reason,
         )
+
+
+def _configured_adverse_policy(
+    project: Path, task_id: str, explicit: AdverseReviewPolicy | None,
+) -> AdverseReviewPolicy:
+    """Resolve the integration gate policy; production runs never silently omit it."""
+    if explicit is not None:
+        return explicit
+    try:
+        return load_config(project).adverse_review
+    except ConfigValidationError as exc:
+        raise RunReadyRefusal(
+            "invalid_config", f"config is invalid, adverse review policy unknown: {exc}", task_id=task_id,
+        ) from exc
 
 
 _FAILURE_EVENTS = (
@@ -776,6 +793,8 @@ def run_ready(
     worktree_root_path: Path | None = None,
     no_auto_retry: frozenset[str] | set[str] = frozenset(),
     planning_gate: bool | None = None,
+    adverse_policy: AdverseReviewPolicy | None = None,
+    adverse_override: dict[str, str] | None = None,
 ) -> RunSummary:
     """Drive exactly one task through the existing coordinator until DONE, BLOCKED or a safe stop."""
     if max_steps < 1:
@@ -810,6 +829,7 @@ def run_ready(
             )
         _ensure_contract(store, project, selected, auto_plan, plan_info, note)
         _enforce_planning_gate(store, project, selected, planning_gate)
+        adverse_policy = _configured_adverse_policy(project, selected, adverse_policy)
         if any(row["task_id"] == selected for row in store.running_executions()):
             raise RunReadyRefusal(
                 "active_execution", f"task {selected} has a live or unknown execution; not recovering it", task_id=selected
@@ -852,8 +872,23 @@ def run_ready(
         on_step=on_step,
         on_start=on_start,
         worktree_root_path=worktree_root_path,
+        adverse_policy=adverse_policy,
+        adverse_override=adverse_override,
     )
     return summary
+
+
+def _adverse_integration_block(
+    store: Store, project: Path, task_id: str, policy: AdverseReviewPolicy, override: dict[str, str] | None
+) -> tuple[str, ...] | None:
+    """Reasons the adverse gate refuses integration of the task's candidate, or None when it may proceed."""
+    task = store.get_task(task_id)
+    candidate = store.latest_candidate(task_id)
+    if task is None or candidate is None or Stage(task["stage"]) is not Stage.INTEGRATE:
+        return None
+    sha = str(candidate["sha"])
+    decision = adverse_gate(store, task_id, sha, contract_for_candidate(store, task_id, sha, project).digest, policy, override=override)
+    return None if decision.allowed else decision.reasons
 
 
 def drive_task(
@@ -869,12 +904,24 @@ def drive_task(
     global_health: bool = True,
     should_stop: Callable[[], bool] | None = None,
     worktree_root_path: Path | None = None,
+    adverse_policy: AdverseReviewPolicy | None = None,
+    adverse_override: dict[str, str] | None = None,
 ) -> None:
     """Tick one task until DONE, BLOCKED or a safe stop, filling `summary`.
+
+    When `adverse_policy` is given, integration is never ticked unless the adverse review gate allows it; `adverse_override` ({actor, reason}) is audited.
 
     `global_health=False` is for parallel runs: another task's failure or a blocked task elsewhere says nothing about this
     one, so only this task's own progress decides when it stops.
     """
+    if adverse_policy is None:
+        try:
+            adverse_policy = _configured_adverse_policy(project, selected, None)
+        except RunReadyRefusal as refusal:
+            summary.stop_reason = f"REFUSED:{refusal.reason}"
+            summary.message = refusal.message
+            summary.detail.update(refusal.detail)
+            return
     summary.detail["workspace"] = workspace_info(project, selected, worktree_root_path)
     summary.detail["task"] = _task_heading(store, selected)
     if on_start is not None:
@@ -888,6 +935,13 @@ def drive_task(
             summary.stop_reason, summary.message = "INTERRUPTED", "the run was interrupted; claims were released and the worktree kept"
             break
         summary.recovered.extend(_recover_dead(store, selected))
+        refused = _adverse_integration_block(store, project, selected, adverse_policy, adverse_override)
+        if refused is not None:
+            store.block_task(selected)
+            record_audit(store, "adverse_review.blocked", {"task_id": selected, "reasons": list(refused)})
+            summary.stop_reason, summary.message = "BLOCKED", "adverse review gate refused integration: " + "; ".join(refused)
+            summary.detail["adverse_review"] = list(refused)
+            break
         previous = _snapshot(store, selected)
         if on_start is not None:
             on_start(format_running(number, selected, previous))
