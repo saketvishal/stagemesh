@@ -66,6 +66,21 @@ def test_high_severity_finding_blocks_even_with_passing_review(tmp_path):
     assert not decision.allowed and "sql injection" in decision.reasons[0]
 
 
+def test_same_candidate_cannot_replace_a_failed_adverse_review_with_a_pass(tmp_path):
+    store = _store(tmp_path)
+    store.add_evidence(
+        TASK,
+        NEW,
+        EvidenceKind.REVIEW,
+        EvidenceStatus.FAILED,
+        {"contract_hash": DIGEST, "findings": [{"severity": "major", "message": "needs repair"}]},
+    )
+    _review(store)
+    decision = _gate(store)
+    assert not decision.allowed
+    assert "must be replaced" in decision.reasons[0]
+
+
 def test_findings_feed_remediation_and_must_be_resolved_on_new_candidate(tmp_path):
     store = _store(tmp_path)
     store.upsert_finding("f-old", TASK, OLD, "high", "unchecked path")

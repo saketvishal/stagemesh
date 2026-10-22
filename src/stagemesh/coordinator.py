@@ -128,6 +128,7 @@ class Coordinator:
         self.remediation_policy = remediation_policy or RemediationPolicy()
         self.target = target
         self.adverse_policy = adverse_policy
+        self.adverse_override: dict[str, str] | None = None
         self.last_adverse_block: tuple[str, ...] | None = None
         self.outbound_sync = outbound_sync
         self.outbound_sources = outbound_sources
@@ -427,6 +428,7 @@ class Coordinator:
                     sha,
                     bound.digest,
                     self.adverse_policy,
+                    override=self.adverse_override,
                 )
                 if not decision.allowed:
                     self.last_adverse_block = decision.reasons
