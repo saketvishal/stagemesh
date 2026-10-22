@@ -126,7 +126,13 @@ def test_coordinator_blocks_integration_and_records_the_exact_reasons(tmp_path, 
     store = _store(tmp_path)
     store.advance_task(TASK, Stage.INTEGRATE)
     monkeypatch.setattr("stagemesh.coordinator.contract_for_candidate", lambda *a: SimpleNamespace(digest=DIGEST))
-    coordinator = Coordinator(store, tmp_path, target=TargetSelection(TASK), require_independent_review=True)
+    coordinator = Coordinator(
+        store,
+        tmp_path,
+        target=TargetSelection(TASK),
+        require_independent_review=True,
+        adverse_policy=POLICY,
+    )
 
     assert coordinator.tick() == 1
     assert store.get_task(TASK)["status"] == "BLOCKED"
@@ -139,7 +145,13 @@ def test_drive_task_propagates_an_audited_override_to_the_coordinator(tmp_path, 
     store.advance_task(TASK, Stage.INTEGRATE)
     monkeypatch.setattr(run_ready, "contract_for_candidate", lambda *a: SimpleNamespace(digest=DIGEST))
     monkeypatch.setattr("stagemesh.coordinator.contract_for_candidate", lambda *a: SimpleNamespace(digest=DIGEST))
-    coordinator = Coordinator(store, tmp_path, target=TargetSelection(TASK), require_independent_review=True)
+    coordinator = Coordinator(
+        store,
+        tmp_path,
+        target=TargetSelection(TASK),
+        require_independent_review=True,
+        adverse_policy=POLICY,
+    )
     monkeypatch.setattr(coordinator, "_workspace_intact", lambda *a, **k: False)
     summary = run_ready.RunSummary(True, "UNSET", task_id=TASK)
     monkeypatch.setattr(run_ready, "workspace_info", lambda *a: {})
