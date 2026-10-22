@@ -73,8 +73,18 @@ def _project(
     dependencies: dict[str, list[str]] | None = None,
 ) -> Path:
     project = tmp_path / "repo"
-    assert _BASE_REPO is not None
-    shutil.copytree(_BASE_REPO, project)
+    if _BASE_REPO is None:
+        # Other test modules import this helper without activating this
+        # module's fixture, so retain the standalone construction path.
+        project.mkdir(parents=True)
+        git = GitWorkspace(project)
+        git.init_if_needed()
+        git.run("config", "user.email", "test@example.invalid")
+        git.run("config", "user.name", "StageMesh Test")
+        (project / "README.md").write_text("base\n", encoding="utf-8")
+        git.commit_all("base")
+    else:
+        shutil.copytree(_BASE_REPO, project)
     git = GitWorkspace(project)
     runtime = project / ".stagemesh"
     (runtime / "contracts").mkdir(parents=True)
