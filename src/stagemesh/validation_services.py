@@ -122,6 +122,8 @@ def discover_validation_services(
     if package_json.is_file():
         try:
             pkg_data = json.loads(package_json.read_bytes())
+            if not isinstance(pkg_data, dict):
+                raise ValidationServiceError("package.json root must be an object")
             scripts = pkg_data.get("scripts", {})
             if isinstance(scripts, dict):
                 # Detect browser service / gate
@@ -162,7 +164,10 @@ def discover_validation_services(
         if not package.is_file():
             raise ValidationServiceError("npm script service has no package.json")
         try:
-            scripts = json.loads(package.read_bytes()).get("scripts", {})
+            pkg_data = json.loads(package.read_bytes())
+            if not isinstance(pkg_data, dict):
+                raise ValidationServiceError("package.json root must be an object")
+            scripts = pkg_data.get("scripts", {})
             script = scripts.get(script_name) if isinstance(scripts, dict) else None
         except (OSError, ValueError, UnicodeError) as exc:
             raise ValidationServiceError("invalid service package metadata") from exc

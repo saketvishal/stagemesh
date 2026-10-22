@@ -11,6 +11,7 @@ import pytest
 from stagemesh.contracts import BoundChangeContract, ChangeContract, canonical_contract_json
 from stagemesh.validation_services import (
     ConfiguredService,
+    ValidationServiceError,
     ValidationServicesManifest,
     compute_service_fingerprint,
     discover_validation_services,
@@ -276,7 +277,9 @@ def test_reject_incomplete_results_and_empty_commands(test_env):
 def test_record_e2e_evidence_in_validation_integrates_cleanly(test_env):
     project, artifact_root, bound, _, api_log = test_env
     api_ref = build_artifact_reference("api_log", api_log, artifact_root, content_type="application/json")
-    fp = compute_service_fingerprint([])
+    # Recording consumes the discovered identity, including configuration and
+    # environment binding, even when no services are configured.
+    fp = discover_validation_services(project).fingerprint
 
     manifest = build_e2e_evidence(
         bound,
@@ -306,6 +309,23 @@ def test_record_e2e_evidence_in_validation_integrates_cleanly(test_env):
     assert updated["e2e_evidence"]["candidate_sha"] == bound.candidate_sha
     assert updated["e2e_evidence"]["result"] == "PASS"
     assert updated["e2e_evidence"]["artifacts"][0]["name"] == "api_log"
+    assert updated["e2e_evidence"] == manifest.to_dict()
+
+
+def test_record_rejects_unbound_empty_service_fingerprint(test_env):
+    project, artifact_root, bound, _, _ = test_env
+    manifest = build_e2e_evidence(
+        bound, candidate_sha=bound.candidate_sha,
+        service_fingerprint=compute_service_fingerprint([]),
+        kind="api", command=["pytest", "tests/api"], result="PASS",
+    )
+    payload = {"candidate_sha": bound.candidate_sha, "status": "PASSED"}
+    before = payload.copy()
+    with pytest.raises(E2EEvidenceValidationError, match="service fingerprint mismatch"):
+        record_e2e_evidence_in_validation(
+            payload, manifest, bound, project=project, artifact_root=artifact_root,
+        )
+    assert payload == before
 
 
 @pytest.fixture
@@ -389,10 +409,11 @@ def test_npm_run_with_extra_arguments_binds_the_script_body(test_env):
     assert changed.fingerprint != bound.fingerprint
 
 
-def test_broken_package_json_does_not_drop_service_discovery(test_env):
+@pytest.mark.parametrize("contents", ["{", "[]", "null", "1"])
+def test_broken_package_json_does_not_drop_service_discovery(test_env, contents):
     project, _, _, _, _ = test_env
-    (project / "package.json").write_text("{", encoding="utf-8")
-    with pytest.raises(Exception, match="package.json"):
+    (project / "package.json").write_text(contents, encoding="utf-8")
+    with pytest.raises(ValidationServiceError, match="package.json"):
         discover_validation_services(project)
 
 
