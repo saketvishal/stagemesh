@@ -1054,6 +1054,40 @@ def test_continue_once_keeps_single_tick_behavior(tmp_path: Path) -> None:
     assert Store(project / ".stagemesh" / "stagemesh.sqlite3").get_task("T-1")["stage"] == "IMPLEMENT"
 
 
+def test_continue_once_returns_failure_when_adverse_gate_blocks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    project = _project(tmp_path, ["T-1"])
+
+    class BlockedCoordinator:
+        last_adverse_block = None
+
+        def tick(self) -> int:
+            self.last_adverse_block = ("missing required adverse review",)
+            return 1
+
+    coordinator = BlockedCoordinator()
+    monkeypatch.setattr(
+        cli_module,
+        "_build_coordinator",
+        lambda *args, **kwargs: (
+            coordinator,
+            {
+                "provider": "fake",
+                "review_provider": "claude",
+                "independent_review_configured": True,
+                "require_independent_review": True,
+                "integration_ref": "refs/heads/main",
+            },
+        ),
+    )
+
+    code, result = _continue(project, "--once", "--task", "T-1")
+
+    assert code == 1
+    assert result["stop_reason"] == "BLOCKED"
+    assert result["progressed"] == 1
+    assert result["message"] == "adverse review gate refused integration: missing required adverse review"
+
+
 def test_refuses_contract_larger_than_the_store_limit(tmp_path: Path) -> None:
     project = _project(tmp_path, ["T-1"])
     contract = dict(FAKE_CONTRACT, objective="x" * 11000)

@@ -921,6 +921,8 @@ def drive_task(
             summary.message = refusal.message
             summary.detail.update(refusal.detail)
             return
+    if adverse_policy is not None:
+        coordinator.adverse_policy = adverse_policy
     if adverse_override is not None:
         coordinator.adverse_override = adverse_override
     summary.detail["workspace"] = workspace_info(project, selected, worktree_root_path)
