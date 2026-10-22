@@ -9,6 +9,7 @@ from .audit import record_audit
 from .baseline import resolve_integration_ref
 from .block_kinds import BlockKind, block_kind_for, record_block, runtime_fingerprint
 from .contract_binding import contract_for_candidate
+from .config import AdverseReviewPolicy
 from .contracts import _matches, task_contract_path
 from .diagnosis import (
     CONTRACT_SCOPE,
@@ -126,7 +127,7 @@ class Coordinator:
         self.integrator = integrator or Integrator(require_independent_review=require_independent_review)
         self.remediation_policy = remediation_policy or RemediationPolicy()
         self.target = target
-        self.adverse_policy = adverse_policy
+        self.adverse_policy = adverse_policy or (AdverseReviewPolicy() if require_independent_review else None)
         self.adverse_override: dict[str, str] | None = None
         self.last_adverse_block: tuple[str, ...] | None = None
         self.outbound_sync = outbound_sync
