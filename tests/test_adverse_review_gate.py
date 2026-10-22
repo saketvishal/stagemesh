@@ -101,3 +101,10 @@ def test_drive_task_refuses_to_tick_integration_without_adverse_review(tmp_path,
     run_ready.drive_task(store, tmp_path, coordinator, TASK, summary, max_steps=1, adverse_policy=POLICY)
     assert ticked == [] and summary.stop_reason == "BLOCKED" and "adverse review" in summary.message
     assert store.conn.execute("SELECT 1 FROM audit_events WHERE event_type='adverse_review.blocked'").fetchone()
+
+
+def test_run_ready_resolves_the_configured_adverse_policy(tmp_path, monkeypatch):
+    configured = AdverseReviewPolicy(("critical",), "hold")
+    monkeypatch.setattr(run_ready, "load_config", lambda _project: SimpleNamespace(adverse_review=configured))
+    assert run_ready._configured_adverse_policy(tmp_path, TASK, None) is configured
+    assert run_ready._configured_adverse_policy(tmp_path, TASK, POLICY) is POLICY

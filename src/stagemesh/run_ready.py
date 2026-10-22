@@ -309,6 +309,20 @@ def _enforce_planning_gate(store: Store, project: Path, task_id: str, enabled: b
         )
 
 
+def _configured_adverse_policy(
+    project: Path, task_id: str, explicit: AdverseReviewPolicy | None,
+) -> AdverseReviewPolicy:
+    """Resolve the integration gate policy; production runs never silently omit it."""
+    if explicit is not None:
+        return explicit
+    try:
+        return load_config(project).adverse_review
+    except ConfigValidationError as exc:
+        raise RunReadyRefusal(
+            "invalid_config", f"config is invalid, adverse review policy unknown: {exc}", task_id=task_id,
+        ) from exc
+
+
 _FAILURE_EVENTS = (
     "task.implementation_unsuccessful",
     "task.capacity_failure",
@@ -815,6 +829,7 @@ def run_ready(
             )
         _ensure_contract(store, project, selected, auto_plan, plan_info, note)
         _enforce_planning_gate(store, project, selected, planning_gate)
+        adverse_policy = _configured_adverse_policy(project, selected, adverse_policy)
         if any(row["task_id"] == selected for row in store.running_executions()):
             raise RunReadyRefusal(
                 "active_execution", f"task {selected} has a live or unknown execution; not recovering it", task_id=selected

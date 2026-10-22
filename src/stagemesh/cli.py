@@ -551,13 +551,21 @@ def _build_coordinator(
         review_eligible = [adapter_by_name[v.provider] for v in review_verdicts if v.eligible]
         chosen_provider = pool.order(store, IMPLEMENT, impl_eligible)[0][0].name if impl_eligible else "deferred"
         if staged:
-            reviewer = Reviewer(require_independent=require_independent_review, review_pool=pool)
+            reviewer = Reviewer(
+                require_independent=require_independent_review,
+                review_pool=pool,
+                adverse_policy=config.adverse_review,
+            )
             ordered_reviewers = [a.name for a in pool.order(store, REVIEW, review_eligible)[0]]
             chosen_review_provider = "dynamic-pool:" + ",".join(ordered_reviewers)
             independent_review_configured = True
         else:
             chosen_review_provider = "single-agent-deterministic-fallback"
-            reviewer = Reviewer(provider_name=chosen_review_provider, require_independent=require_independent_review)
+            reviewer = Reviewer(
+                provider_name=chosen_review_provider,
+                require_independent=require_independent_review,
+                adverse_policy=config.adverse_review,
+            )
         info_extra.update(
             selection_policy=config.provider_selection_policy,
             implementation_pool=list(pools[IMPLEMENT]),
@@ -1413,6 +1421,7 @@ def command_run_ready(args: argparse.Namespace) -> int:
                 chooser=_interactive_chooser if getattr(args, "choose", False) else None,
                 worktree_root_path=config.runtime.worktree_root if config.runtime else None,
                 no_auto_retry=held_for_retry,
+                adverse_policy=config.adverse_review,
             )
             if blocked_tasks and summary.stop_reason == "REFUSED:no_eligible_task":
                 retryable = [item for item in blocked_tasks if can_auto_retry(store, str(item.task_id))]
