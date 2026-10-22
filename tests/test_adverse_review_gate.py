@@ -122,7 +122,7 @@ def test_drive_task_fails_closed_when_adverse_policy_config_is_invalid(tmp_path,
     run_ready.drive_task(
         store,
         tmp_path,
-        SimpleNamespace(tick=lambda: ticked.append(1) or 1),
+        SimpleNamespace(require_independent_review=True, tick=lambda: ticked.append(1) or 1),
         TASK,
         summary,
         max_steps=1,

@@ -40,6 +40,7 @@ stage = "review" if review else "implement"
 rules = plan.get(me, {})
 mode = rules.get(f"{stage}:{task}", rules.get(stage, "pass" if review else "ok"))
 previous = sum(1 for line in log.read_text(encoding="utf-8").splitlines() if line.split()[:3] == [me, stage, task]) if log.exists() else 0
+task_attempt = sum(1 for line in log.read_text(encoding="utf-8").splitlines() if line.split()[1:3] == [stage, task]) if log.exists() else 0
 if isinstance(mode, list):
     mode = mode[min(previous, len(mode) - 1)]
 with log.open("a", encoding="utf-8") as handle:
@@ -66,7 +67,7 @@ out.mkdir(exist_ok=True)
 # that it inspected the repaired revision instead of silently clearing a
 # finding against the unchanged commit.
 if not str(mode).startswith("bad"):
-    (out / f"{task}.attempt").write_text(f"{previous + 1}\n", encoding="utf-8")
+    (out / f"{task}.attempt").write_text(f"{task_attempt + 1}\n", encoding="utf-8")
 '''
 
 # Operator detours that normal recovery must never ask for.

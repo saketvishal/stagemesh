@@ -829,7 +829,6 @@ def run_ready(
             )
         _ensure_contract(store, project, selected, auto_plan, plan_info, note)
         _enforce_planning_gate(store, project, selected, planning_gate)
-        adverse_policy = _configured_adverse_policy(project, selected, adverse_policy)
         if any(row["task_id"] == selected for row in store.running_executions()):
             raise RunReadyRefusal(
                 "active_execution", f"task {selected} has a live or unknown execution; not recovering it", task_id=selected
@@ -914,7 +913,7 @@ def drive_task(
     `global_health=False` is for parallel runs: another task's failure or a blocked task elsewhere says nothing about this
     one, so only this task's own progress decides when it stops.
     """
-    if adverse_policy is None:
+    if adverse_policy is None and getattr(coordinator, "require_independent_review", True):
         try:
             adverse_policy = _configured_adverse_policy(project, selected, None)
         except RunReadyRefusal as refusal:
@@ -935,7 +934,11 @@ def drive_task(
             summary.stop_reason, summary.message = "INTERRUPTED", "the run was interrupted; claims were released and the worktree kept"
             break
         summary.recovered.extend(_recover_dead(store, selected))
-        refused = _adverse_integration_block(store, project, selected, adverse_policy, adverse_override)
+        refused = (
+            _adverse_integration_block(store, project, selected, adverse_policy, adverse_override)
+            if adverse_policy is not None
+            else None
+        )
         if refused is not None:
             store.block_task(selected)
             record_audit(store, "adverse_review.blocked", {"task_id": selected, "reasons": list(refused)})
