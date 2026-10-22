@@ -19,6 +19,7 @@ the orchestration is tested with fakes.
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -508,7 +509,12 @@ def run_wave(
             stop = True
             report.stopped_early, report.stop_reason = True, reason
 
-    with ThreadPoolExecutor(max_workers=max(1, concurrency)) as pool:
+    from .validation_slot import set_window_deadline
+
+    set_window_deadline(deadline)
+    pool_cm = ThreadPoolExecutor(max_workers=max(1, concurrency))
+    pool = pool_cm.__enter__()
+    try:
         while pending or running:
             if control.blocks_admission():
                 halt(f"queue admission {control.state_label()}")
@@ -569,6 +575,9 @@ def run_wave(
                     main_now = hooks.main_sha()
                     if main_now is not None and main_now != main_before:
                         halt(f"local main moved in PR mode ({main_before[:7]} -> {main_now[:7]}) after task {task_id}")
+    finally:
+        pool_cm.__exit__(None, None, None)
+        set_window_deadline(None)
     for task_id in pending:
         why = "time budget reached before this task started" if report.time_limit_reached else "wave stopped before this task started"
         records[task_id].outcome, records[task_id].reason = "not_started", why
@@ -806,7 +815,13 @@ def subprocess_task_runner(
             argv += ["--integration-ref", integration_ref]
         if live_acceptance is not None:
             argv += ["--live-acceptance", live_acceptance]
-        proc = subprocess.run(argv, capture_output=True, text=True, check=False)
+        from .validation_slot import current_window_deadline
+
+        env = os.environ.copy()
+        window_deadline = current_window_deadline()
+        if window_deadline is not None:
+            env["STAGEMESH_WINDOW_DEADLINE"] = repr(float(window_deadline))
+        proc = subprocess.run(argv, capture_output=True, text=True, check=False, env=env)
         try:
             data = json.loads(proc.stdout)
         except ValueError:

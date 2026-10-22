@@ -224,14 +224,11 @@ def test_contract_gate_none_output_records_failure_without_type_error(tmp_path: 
     (project / "src" / "app.py").write_text("VALUE = 5\n", encoding="utf-8")
     sha = workspace.commit_all("candidate")
 
-    real_run = subprocess.run
+    def fake_run(command, cwd, env, timeout):
+        del cwd, env, timeout
+        return subprocess.CompletedProcess(command, 9, stdout=None, stderr=None)
 
-    def fake_run(*args, **kwargs):
-        if args[0][0] == "git":
-            return real_run(*args, **kwargs)
-        return subprocess.CompletedProcess(args=args[0], returncode=9, stdout=None, stderr=None)
-
-    monkeypatch.setattr("stagemesh.contracts.subprocess.run", fake_run)
+    monkeypatch.setattr("stagemesh.contracts._run_gate_process", fake_run)
 
     result = evaluate_contract(
         project,
@@ -256,14 +253,11 @@ def test_contract_gate_timeout_output_is_normalized_to_strings(tmp_path: Path, m
     (project / "src" / "app.py").write_text("VALUE = 6\n", encoding="utf-8")
     sha = workspace.commit_all("candidate")
 
-    real_run = subprocess.run
+    def fake_run(command, cwd, env, timeout):
+        del cwd, env, timeout
+        raise subprocess.TimeoutExpired(command, timeout=1, output=b"partial \xe2\x9c\x93", stderr=None)
 
-    def fake_run(*args, **kwargs):
-        if args[0][0] == "git":
-            return real_run(*args, **kwargs)
-        raise subprocess.TimeoutExpired(args[0], timeout=1, output=b"partial \xe2\x9c\x93", stderr=None)
-
-    monkeypatch.setattr("stagemesh.contracts.subprocess.run", fake_run)
+    monkeypatch.setattr("stagemesh.contracts._run_gate_process", fake_run)
 
     result = evaluate_contract(
         project,

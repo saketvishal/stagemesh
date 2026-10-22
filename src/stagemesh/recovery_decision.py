@@ -41,6 +41,7 @@ STEP_BUDGET_EXHAUSTED = "step_budget_exhausted"
 UNSAFE_MUTATION = "unsafe_mutation"
 JUDGMENT_REQUIRED = "judgment_required"  # the remaining issue is a product/spec/security/legal choice
 ENVIRONMENT_BLOCKED = "environment_blocked"  # a baseline that cannot advance or a gate that cannot run: no provider attempt can fix it
+INCONCLUSIVE_VALIDATION = "inconclusive_validation"  # a gate timed out without a finished result; the cause is not established
 
 # base relation of the candidate to the integration ref
 BASE_UNCHANGED, BASE_ADVANCED, BASE_DIVERGED, BASE_MISSING, BASE_UNKNOWN = "unchanged", "advanced", "diverged", "missing", "unknown"
@@ -143,6 +144,12 @@ def rules(ctx: RecoveryContext) -> RecoveryDecision | None:
         return RecoveryDecision(RecoveryAction.BLOCK_HUMAN_DECISION, "rules", "the remaining issue is a product, spec, security or legal choice that repository state cannot settle")
     if category == ENVIRONMENT_BLOCKED:
         return RecoveryDecision(RecoveryAction.BLOCK_EXTERNAL, "rules", "the environment, not the change, is what fails; it clears when the baseline or gate environment does")
+    if category == INCONCLUSIVE_VALIDATION:
+        return RecoveryDecision(
+            RecoveryAction.BLOCK_EXTERNAL,
+            "rules",
+            "validation timed out without a finished result; the candidate stays as it is and another implementation pass is not justified until that gate is rerun and diagnosed",
+        )
     if category == INTEGRATION_TARGET_MISSING or ctx.base_relation == BASE_MISSING:
         return RecoveryDecision(RecoveryAction.BLOCK_EXTERNAL, "rules", "the integration target does not exist, so there is nothing to refresh or retry against", external_dependency=True)
     if category in {INTEGRATION_CONFLICT, INTEGRATION_TARGET_ADVANCED} and ctx.changed_files and not ctx.task_scoped:
