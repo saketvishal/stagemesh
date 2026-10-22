@@ -309,6 +309,20 @@ def _enforce_planning_gate(store: Store, project: Path, task_id: str, enabled: b
         )
 
 
+def _configured_adverse_policy(
+    project: Path, task_id: str, explicit: AdverseReviewPolicy | None,
+) -> AdverseReviewPolicy:
+    """Resolve the integration gate policy; production runs never silently omit it."""
+    if explicit is not None:
+        return explicit
+    try:
+        return load_config(project).adverse_review
+    except ConfigValidationError as exc:
+        raise RunReadyRefusal(
+            "invalid_config", f"config is invalid, adverse review policy unknown: {exc}", task_id=task_id,
+        ) from exc
+
+
 _FAILURE_EVENTS = (
     "task.implementation_unsuccessful",
     "task.capacity_failure",
@@ -899,6 +913,18 @@ def drive_task(
     `global_health=False` is for parallel runs: another task's failure or a blocked task elsewhere says nothing about this
     one, so only this task's own progress decides when it stops.
     """
+    if adverse_policy is None and getattr(coordinator, "require_independent_review", True):
+        try:
+            adverse_policy = _configured_adverse_policy(project, selected, None)
+        except RunReadyRefusal as refusal:
+            summary.stop_reason = f"REFUSED:{refusal.reason}"
+            summary.message = refusal.message
+            summary.detail.update(refusal.detail)
+            return
+    if adverse_policy is not None:
+        coordinator.adverse_policy = adverse_policy
+    if adverse_override is not None:
+        coordinator.adverse_override = adverse_override
     summary.detail["workspace"] = workspace_info(project, selected, worktree_root_path)
     summary.detail["task"] = _task_heading(store, selected)
     if on_start is not None:

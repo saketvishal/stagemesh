@@ -551,13 +551,21 @@ def _build_coordinator(
         review_eligible = [adapter_by_name[v.provider] for v in review_verdicts if v.eligible]
         chosen_provider = pool.order(store, IMPLEMENT, impl_eligible)[0][0].name if impl_eligible else "deferred"
         if staged:
-            reviewer = Reviewer(require_independent=require_independent_review, review_pool=pool)
+            reviewer = Reviewer(
+                require_independent=require_independent_review,
+                review_pool=pool,
+                adverse_policy=config.adverse_review,
+            )
             ordered_reviewers = [a.name for a in pool.order(store, REVIEW, review_eligible)[0]]
             chosen_review_provider = "dynamic-pool:" + ",".join(ordered_reviewers)
             independent_review_configured = True
         else:
             chosen_review_provider = "single-agent-deterministic-fallback"
-            reviewer = Reviewer(provider_name=chosen_review_provider, require_independent=require_independent_review)
+            reviewer = Reviewer(
+                provider_name=chosen_review_provider,
+                require_independent=require_independent_review,
+                adverse_policy=config.adverse_review,
+            )
         info_extra.update(
             selection_policy=config.provider_selection_policy,
             implementation_pool=list(pools[IMPLEMENT]),
@@ -615,6 +623,7 @@ def _build_coordinator(
         integrator=integrator,
         target=target,
         require_independent_review=require_independent_review,
+        adverse_policy=config.adverse_review if require_independent_review else None,
         diagnosis_policy=_diagnosis_policy(config, project, {} if getattr(args, "dry_run", False) else adapter_by_name),
         guard=guard,
         outbound_sync=outbound_sync,
@@ -1131,6 +1140,7 @@ def command_continue(args: argparse.Namespace) -> int:
         count += progressed
         if args.once or progressed == 0:
             break
+    adverse_block = getattr(coord, "last_adverse_block", None)
     if args.json:
         print(
             json.dumps(
@@ -1143,13 +1153,21 @@ def command_continue(args: argparse.Namespace) -> int:
                     "integration_ref": integration_ref,
                     "targeted_mode": targeted_mode,
                     "targeted_task_id": str(targeted_task_id) if targeted_task_id is not None else None,
+                    **(
+                        {
+                            "stop_reason": "BLOCKED",
+                            "message": "adverse review gate refused integration: " + "; ".join(adverse_block),
+                        }
+                        if adverse_block
+                        else {}
+                    ),
                 },
                 indent=2,
                 sort_keys=True,
             )
         )
         store.close()
-        return 0
+        return 1 if adverse_block else 0
     print(f"progressed: {count}")
     print(f"provider: {chosen_provider}")
     print(f"review_provider: {chosen_review_provider}")
@@ -1159,6 +1177,9 @@ def command_continue(args: argparse.Namespace) -> int:
     print(f"targeted_mode: {targeted_mode}")
     print(f"targeted_task_id: {targeted_task_id}")
     store.close()
+    if adverse_block:
+        print("adverse review gate refused integration: " + "; ".join(adverse_block), file=sys.stderr)
+        return 1
     return 0
 
 

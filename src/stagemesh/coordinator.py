@@ -65,7 +65,7 @@ from .remediation_recovery import (
     rounds,
     stalled_since_last_round,
 )
-from .review import Reviewer, independent_review_verified
+from .review import Reviewer, adverse_gate, independent_review_verified
 from .scheduling import Scheduler
 from .task_completion import record_task_owner_state
 from .task_selection import contract_state
@@ -110,6 +110,7 @@ class Coordinator:
         outbound_sources: frozenset[str] = frozenset(),
         max_integration_recoveries: int = DEFAULT_MAX_RECOVERIES,
         recovery_advisor: DecisionAdvisor | None = None,
+        adverse_policy: Any | None = None,
     ):
         self.max_integration_recoveries = max_integration_recoveries
         self.recovery_advisor = recovery_advisor  # only consulted for contexts the deterministic rules leave ambiguous
@@ -125,6 +126,9 @@ class Coordinator:
         self.integrator = integrator or Integrator(require_independent_review=require_independent_review)
         self.remediation_policy = remediation_policy or RemediationPolicy()
         self.target = target
+        self.adverse_policy = adverse_policy
+        self.adverse_override: dict[str, str] | None = None
+        self.last_adverse_block: tuple[str, ...] | None = None
         self.outbound_sync = outbound_sync
         self.outbound_sources = outbound_sources
 
@@ -415,6 +419,26 @@ class Coordinator:
                 return 0  # review infrastructure failure or unsatisfied independence: stay in REVIEW, no remediation
             return 0
         if stage is Stage.INTEGRATE:
+            if self.adverse_policy is not None:
+                bound = contract_for_candidate(self.store, task_id, sha, self.project)
+                decision = adverse_gate(
+                    self.store,
+                    task_id,
+                    sha,
+                    bound.digest,
+                    self.adverse_policy,
+                    override=self.adverse_override,
+                )
+                if not decision.allowed:
+                    self.last_adverse_block = decision.reasons
+                    self.store.block_task(task_id)
+                    record_audit(
+                        self.store,
+                        "adverse_review.blocked",
+                        {"task_id": task_id, "reasons": list(decision.reasons)},
+                    )
+                    record_task_owner_state(self.store, task_id, "adverse_review_blocked", self.project)
+                    return 1
             if not self._workspace_intact(task_id, sha, "INTEGRATE:before_integration", require=(EvidenceKind.VALIDATION, EvidenceKind.REVIEW)):
                 return 1
             bound = contract_for_candidate(self.store, task_id, sha, self.project)

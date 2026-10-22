@@ -3,8 +3,11 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from stagemesh import run_ready
 from stagemesh.config import AdverseReviewPolicy
+from stagemesh.coordinator import Coordinator, TargetSelection
 from stagemesh.domain import EvidenceKind, EvidenceStatus, Stage
 from stagemesh.persistence import Store
 from stagemesh.remediation import findings_to_verify, unresolved_findings
@@ -66,6 +69,21 @@ def test_high_severity_finding_blocks_even_with_passing_review(tmp_path):
     assert not decision.allowed and "sql injection" in decision.reasons[0]
 
 
+def test_same_candidate_cannot_replace_a_failed_adverse_review_with_a_pass(tmp_path):
+    store = _store(tmp_path)
+    store.add_evidence(
+        TASK,
+        NEW,
+        EvidenceKind.REVIEW,
+        EvidenceStatus.FAILED,
+        {"contract_hash": DIGEST, "findings": [{"severity": "major", "message": "needs repair"}]},
+    )
+    _review(store)
+    decision = _gate(store)
+    assert not decision.allowed
+    assert "must be replaced" in decision.reasons[0]
+
+
 def test_findings_feed_remediation_and_must_be_resolved_on_new_candidate(tmp_path):
     store = _store(tmp_path)
     store.upsert_finding("f-old", TASK, OLD, "high", "unchecked path")
@@ -90,7 +108,8 @@ def test_override_needs_actor_and_reason_and_is_audited(tmp_path):
     assert "accepted risk" in row["payload"] and "op" in row["payload"]
 
 
-def test_drive_task_refuses_to_tick_integration_without_adverse_review(tmp_path, monkeypatch):
+@pytest.mark.parametrize("global_health", [True, False])
+def test_drive_task_refuses_to_tick_integration_without_adverse_review(tmp_path, monkeypatch, global_health):
     store = _store(tmp_path)
     store.advance_task(TASK, Stage.INTEGRATE)
     monkeypatch.setattr(run_ready, "contract_for_candidate", lambda *a: SimpleNamespace(digest=DIGEST))
@@ -98,6 +117,84 @@ def test_drive_task_refuses_to_tick_integration_without_adverse_review(tmp_path,
     coordinator = SimpleNamespace(tick=lambda: ticked.append(1) or 1)
     summary = run_ready.RunSummary(True, "UNSET", task_id=TASK)
     monkeypatch.setattr(run_ready, "workspace_info", lambda *a: {})
-    run_ready.drive_task(store, tmp_path, coordinator, TASK, summary, max_steps=1, adverse_policy=POLICY)
+    run_ready.drive_task(store, tmp_path, coordinator, TASK, summary, max_steps=1, global_health=global_health)
     assert ticked == [] and summary.stop_reason == "BLOCKED" and "adverse review" in summary.message
     assert store.conn.execute("SELECT 1 FROM audit_events WHERE event_type='adverse_review.blocked'").fetchone()
+
+
+def test_coordinator_blocks_integration_and_records_the_exact_reasons(tmp_path, monkeypatch):
+    store = _store(tmp_path)
+    store.advance_task(TASK, Stage.INTEGRATE)
+    monkeypatch.setattr("stagemesh.coordinator.contract_for_candidate", lambda *a: SimpleNamespace(digest=DIGEST))
+    coordinator = Coordinator(
+        store,
+        tmp_path,
+        target=TargetSelection(TASK),
+        require_independent_review=True,
+        adverse_policy=POLICY,
+    )
+
+    assert coordinator.tick() == 1
+    assert store.get_task(TASK)["status"] == "BLOCKED"
+    assert coordinator.last_adverse_block == ("missing required adverse review bound to this candidate, contract and policy",)
+    assert store.conn.execute("SELECT 1 FROM audit_events WHERE event_type='adverse_review.blocked'").fetchone()
+
+
+def test_drive_task_propagates_an_audited_override_to_the_coordinator(tmp_path, monkeypatch):
+    store = _store(tmp_path)
+    store.advance_task(TASK, Stage.INTEGRATE)
+    monkeypatch.setattr(run_ready, "contract_for_candidate", lambda *a: SimpleNamespace(digest=DIGEST))
+    monkeypatch.setattr("stagemesh.coordinator.contract_for_candidate", lambda *a: SimpleNamespace(digest=DIGEST))
+    coordinator = Coordinator(
+        store,
+        tmp_path,
+        target=TargetSelection(TASK),
+        require_independent_review=True,
+        adverse_policy=POLICY,
+    )
+    monkeypatch.setattr(coordinator, "_workspace_intact", lambda *a, **k: False)
+    summary = run_ready.RunSummary(True, "UNSET", task_id=TASK)
+    monkeypatch.setattr(run_ready, "workspace_info", lambda *a: {})
+
+    run_ready.drive_task(
+        store,
+        tmp_path,
+        coordinator,
+        TASK,
+        summary,
+        max_steps=1,
+        adverse_override={"actor": "operator", "reason": "accepted risk"},
+    )
+
+    assert store.get_task(TASK)["status"] != "BLOCKED"
+    audits = store.conn.execute("SELECT payload FROM audit_events WHERE event_type='adverse_review.override'").fetchall()
+    assert audits and all("accepted risk" in row["payload"] for row in audits)
+
+
+def test_run_ready_resolves_the_configured_adverse_policy(tmp_path, monkeypatch):
+    configured = AdverseReviewPolicy(("critical",), "hold")
+    monkeypatch.setattr(run_ready, "load_config", lambda _project: SimpleNamespace(adverse_review=configured))
+    assert run_ready._configured_adverse_policy(tmp_path, TASK, None) is configured
+    assert run_ready._configured_adverse_policy(tmp_path, TASK, POLICY) is POLICY
+
+
+def test_drive_task_fails_closed_when_adverse_policy_config_is_invalid(tmp_path, monkeypatch):
+    store = _store(tmp_path)
+    ticked = []
+    summary = run_ready.RunSummary(True, "UNSET", task_id=TASK)
+    monkeypatch.setattr(
+        run_ready,
+        "load_config",
+        lambda _project: (_ for _ in ()).throw(run_ready.ConfigValidationError("bad adverse policy")),
+    )
+    run_ready.drive_task(
+        store,
+        tmp_path,
+        SimpleNamespace(require_independent_review=True, tick=lambda: ticked.append(1) or 1),
+        TASK,
+        summary,
+        max_steps=1,
+    )
+    assert ticked == []
+    assert summary.stop_reason == "REFUSED:invalid_config"
+    assert "adverse review policy unknown" in summary.message
