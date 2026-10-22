@@ -173,6 +173,28 @@ def _require_approved_spec(data: dict[str, object]) -> bool:
 
 
 @dataclass(frozen=True)
+class ResearchConfig:
+    """Opt-in read-only researcher run before implementation. Absent config means no research stage."""
+
+    provider: str
+    command: str
+
+
+def _research_config(data: dict[str, object], known_providers: set[str]) -> ResearchConfig | None:
+    if not data:
+        return None
+    unknown = set(data) - {"provider", "command"}
+    if unknown:
+        raise ConfigValidationError(f"research has unsupported keys: {', '.join(sorted(unknown))}")
+    provider, command = _string(data.get("provider")), _string(data.get("command"))
+    if not provider or not command or not command.strip():
+        raise ConfigValidationError("research requires a provider and a read-only command")
+    if provider not in known_providers:
+        raise ConfigValidationError(f"research.provider references unknown provider: {provider}")
+    return ResearchConfig(provider, command)
+
+
+@dataclass(frozen=True)
 class StageMeshConfig:
     project: Path
     github: GitHubConfig
@@ -199,6 +221,7 @@ class StageMeshConfig:
     merging: MergeConfig = field(default_factory=MergeConfig)
     adverse_review: AdverseReviewPolicy = field(default_factory=AdverseReviewPolicy)
     require_approved_spec: bool = False
+    research: ResearchConfig | None = None
 
 
 @dataclass(frozen=True)
@@ -318,6 +341,7 @@ def load_config(project: Path, config_path: Path | None = None) -> StageMeshConf
         merging=_merging(_optional_mapping(data, "merging"), require_review),
         adverse_review=_adverse_review_policy(_optional_mapping(data, "adverse_review")),
         require_approved_spec=_require_approved_spec(_optional_mapping(data, "planning_gate")),
+        research=_research_config(_optional_mapping(data, "research"), known),
     )
 
 
