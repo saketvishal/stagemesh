@@ -117,8 +117,20 @@ class Rig:
     ):
         """modes: provider name -> behavior ('ok', 'auth-fail', 'review-rate-limit') or None for a missing CLI."""
         self.project = tmp_path / "repo"
-        assert _BASE_REPO is not None
-        shutil.copytree(_BASE_REPO, self.project)
+        if _BASE_REPO is None:
+            # Other test modules import this rig without activating this
+            # module's fixture, so retain the standalone construction path.
+            self.project.mkdir(parents=True)
+            git = GitWorkspace(self.project)
+            git.init_if_needed()
+            git.run("config", "user.email", "t@example.invalid")
+            git.run("config", "user.name", "T")
+            (self.project / "docs").mkdir()
+            (self.project / "docs" / "a.md").write_text("a\n", encoding="utf-8")
+            git.commit_all("base")
+            git.run("branch", "integration")
+        else:
+            shutil.copytree(_BASE_REPO, self.project)
         git = self.git = GitWorkspace(self.project)
         self.base = git.head()
         contracts = self.project / ".stagemesh" / "contracts"
