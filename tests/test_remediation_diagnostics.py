@@ -6,6 +6,7 @@ from pathlib import Path
 
 from test_parallel import Rig
 
+from stagemesh.diagnosis import diagnose
 from stagemesh.domain import EvidenceKind, EvidenceStatus, Stage
 from stagemesh.providers import _remediation_prompt
 from stagemesh.remediation import remediation_context
@@ -78,3 +79,64 @@ def test_remediation_context_and_prompt_enrichment(tmp_path: Path) -> None:
     assert "Failing validation gates (command and failure output):" in prompt
     assert "Gate focused-tests (exit code -15 after 240.2s):" in prompt
     assert "command: pytest -q tests/test_core.py" in prompt
+
+
+def test_progress_only_timeout_is_an_operational_gate_failure(tmp_path: Path) -> None:
+    rig = Rig(tmp_path, [TASK])
+    sha = "a" * 40
+    rig.store.add_candidate(TASK, sha, "tester", True)
+    rig.store.add_evidence(
+        TASK,
+        sha,
+        EvidenceKind.VALIDATION,
+        EvidenceStatus.FAILED,
+        {
+            "findings": [
+                {
+                    "code": "gate_failed",
+                    "message": "stagemesh-lifecycle-smoke failed",
+                    "failure_kind": "timeout",
+                    "returncode": None,
+                    "stdout": "tests/test_error_handling.py ...... [ 45%]\n",
+                    "stderr": "timed out after 360s\n",
+                }
+            ]
+        },
+    )
+    diagnosis = diagnose(rig.store, TASK, rig.project)
+    assert diagnosis is not None
+    assert diagnosis.category == "validation_gate"
+    assert diagnosis.environment_unavailable is False
+    assert diagnosis.inconclusive_validation is True
+    assert diagnosis.stops_remediation is True
+    assert "another implementation" in diagnosis.recommendation
+    assert "environment fault" in diagnosis.recommendation
+
+
+def test_timeout_that_captured_an_assertion_stays_a_code_defect(tmp_path: Path) -> None:
+    rig = Rig(tmp_path, [TASK])
+    sha = "b" * 40
+    rig.store.add_candidate(TASK, sha, "tester", True)
+    rig.store.add_evidence(
+        TASK,
+        sha,
+        EvidenceKind.VALIDATION,
+        EvidenceStatus.FAILED,
+        {
+            "findings": [
+                {
+                    "code": "gate_failed",
+                    "message": "focused-tests failed",
+                    "failure_kind": "timeout",
+                    "returncode": None,
+                    "stdout": "FAILED tests/test_core.py::test_fail\nAssertionError: expected\n",
+                    "stderr": "timed out after 240s\n",
+                }
+            ]
+        },
+    )
+    diagnosis = diagnose(rig.store, TASK, rig.project)
+    assert diagnosis is not None
+    assert diagnosis.category == "implementation_defect"
+    assert diagnosis.environment_unavailable is False
+    assert diagnosis.inconclusive_validation is False

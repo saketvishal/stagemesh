@@ -260,15 +260,33 @@ def test_unavailable_gate_stops_before_any_code_remediation(tmp_path: Path, stop
 
 
 @pytest.mark.parametrize("stop_on_repeat", [False, True])
-@pytest.mark.parametrize("defect", ["timeout", "import", "missing_data", "launch_phrase_in_test"])
+def test_inconclusive_gate_timeout_does_not_start_another_implementation(tmp_path: Path, stop_on_repeat: bool) -> None:
+    gate = {"name": "docs-static-unit", "command": [PY, "-c", "import time; time.sleep(2)"], "timeout_seconds": 1}
+    project, store = _setup(tmp_path, dict(DOCS_CONTRACT, required_tests=[gate]))
+    executor = Attempts()
+
+    drive(project, store, executor, DiagnosisPolicy(stop_on_repeat=stop_on_repeat), ticks=3)
+
+    assert executor.calls == 1
+    assert store.get_task(TASK)["status"] == TaskStatus.BLOCKED
+    assert store.latest_candidate(TASK) is not None
+    assert not events(store, "task.remediation_queued")
+    stop, = events(store, "task.diagnosis_stop")
+    assert stop["category"] == VALIDATION_GATE
+    assert stop["inconclusive_validation"] is True
+    assert stop["environment_unavailable"] is False
+    assert "validation_inconclusive" in events(store, "task.block_classified")[-1]["reason"]
+
+
+@pytest.mark.parametrize("stop_on_repeat", [False, True])
+@pytest.mark.parametrize("defect", ["import", "missing_data", "launch_phrase_in_test"])
 def test_ambiguous_gate_failures_still_receive_code_remediation(tmp_path: Path, stop_on_repeat: bool, defect: str) -> None:
     scripts = {
-        "timeout": "import time; time.sleep(2)",
         "import": "import stagemesh_nonexistent_candidate_module",
         "missing_data": "from pathlib import Path; Path('missing-candidate-data.json').read_text()",
         "launch_phrase_in_test": "raise AssertionError('expected FileNotFoundError: [WinError 2] in subprocess.py _execute_child')",
     }
-    gate = {"name": "docs-static-unit", "command": [PY, "-c", scripts[defect]], "timeout_seconds": 1 if defect == "timeout" else 15}
+    gate = {"name": "docs-static-unit", "command": [PY, "-c", scripts[defect]], "timeout_seconds": 15}
     project, store = _setup(tmp_path, dict(DOCS_CONTRACT, required_tests=[gate]))
     executor = Attempts()
 
