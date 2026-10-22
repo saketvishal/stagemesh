@@ -159,3 +159,34 @@ def _validate_optional_text(value: str | None, field: str, max_length: int = 200
     if value is None:
         return None
     return _validate_text(value, field, max_length)
+
+
+def tool_recovery_plan(
+    store: Store, task_id: str, evidence: dict[str, object], setup_actions: dict[str, list[str]] | None = None
+) -> dict[str, object]:
+    """Bounded recovery decision for new tool failure evidence, consuming this task's earlier evidence for the signature.
+
+    Each earlier occurrence of the same signature is treated as one spent recovery (retry first, then configured
+    setup), so a repeated signature reaches ``stop`` instead of looping. Other tasks' evidence is never consulted.
+    """
+    import json
+
+    from .diagnosis import TOOL_FAILURE_EVENT, plan_tool_recovery, tool_failure_signature
+
+    signature = tool_failure_signature(evidence)
+    attempted: list[str] = []
+    rows = store.audit_events(200)
+    for row in reversed(rows):
+        if row["event_type"] != TOOL_FAILURE_EVENT:
+            continue
+        try:
+            payload = json.loads(row["payload"])
+        except (TypeError, ValueError):
+            continue
+        prior = payload.get("evidence") if isinstance(payload, dict) else None
+        if payload.get("task_id") != task_id or not isinstance(prior, dict) or tool_failure_signature(prior) != signature:
+            continue
+        recovery = prior.get("recovery")
+        taken = recovery.get("action") if isinstance(recovery, dict) else None
+        attempted.append({"retry_once": "retry", "setup": "setup"}.get(str(taken), "stop"))
+    return plan_tool_recovery(evidence, [a for a in attempted if a != "stop"], setup_actions)

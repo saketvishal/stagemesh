@@ -20,7 +20,7 @@ from .git_identity import provider_environment
 from .persistence import Store
 from .process_identity import classify_process, popen_identity, process_identity
 from .queue_control import OperatorStopRequested, QueueStopControl, current_provider_stop
-from .remediation import remediation_context
+from .remediation import remediation_context, tool_recovery_plan
 from .workspace_guard import EXTERNAL_WORKSPACE_MUTATION, WorkspaceMutation, owned_workspace
 from .workspaces import (
     NO_IMPLEMENTATION_CHANGE,
@@ -342,6 +342,8 @@ class SubprocessExecutor(Executor):
             self.command, cwd, code, stdout, stderr, timed_out=timed_out, reason=None if timed_out else reason
         )
         if evidence is not None:
+            if hasattr(store, "audit_events"):
+                evidence["recovery"] = tool_recovery_plan(store, task_id, evidence)
             record_audit(store, TOOL_FAILURE_EVENT, {"task_id": task_id, "execution_id": execution_id, "evidence": evidence})
 
     def _run_owned(self, store, task_id, claim_id, project, task, lease, build_prompt) -> ExecutionResult:  # type: ignore[no-untyped-def]
