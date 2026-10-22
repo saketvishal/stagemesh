@@ -623,6 +623,7 @@ def _build_coordinator(
         integrator=integrator,
         target=target,
         require_independent_review=require_independent_review,
+        adverse_policy=config.adverse_review if require_independent_review else None,
         diagnosis_policy=_diagnosis_policy(config, project, {} if getattr(args, "dry_run", False) else adapter_by_name),
         guard=guard,
         outbound_sync=outbound_sync,
@@ -1105,9 +1106,81 @@ def command_continue(args: argparse.Namespace) -> int:
                 print(f"--parallel selects tasks automatically and cannot be combined with {', '.join(conflicts)}", file=sys.stderr)
                 return 2
             return command_run_parallel(args)
-    if getattr(args, "once", False):
-        args.max_steps = 1
-    return command_run_ready(args)
+    if not getattr(args, "once", False):
+        return command_run_ready(args)  # default: supervise one task to completion; --once keeps the single tick
+    project = Path(args.project).resolve()
+    targeted_task_id = getattr(args, "task", None) or getattr(args, "task_id", None)
+    targeted_mode = targeted_task_id is not None
+    if targeted_task_id is not None and not str(targeted_task_id).strip():
+        print("target task id must not be empty", file=sys.stderr)
+        return 2
+    target = TargetSelection(str(targeted_task_id)) if targeted_task_id is not None else None
+    config = load_config(project)
+    store = Store(db_path(project))
+    store.migrate()
+    _sync_all_sources(store, project, config, targeted_task_id)
+    try:
+        coord, info = _build_coordinator(args, project, config, store, target)
+    except _SetupError as exc:
+        store.close()
+        return exc.code
+    chosen_provider = info["provider"]
+    chosen_review_provider = info["review_provider"]
+    independent_review_configured = info["independent_review_configured"]
+    require_independent_review = info["require_independent_review"]
+    integration_ref = info["integration_ref"]
+    count = 0
+    while True:
+        try:
+            progressed = coord.tick()
+        except TargetSelectionError as exc:
+            print(f"target selection error: {exc}", file=sys.stderr)
+            store.close()
+            return 2
+        count += progressed
+        if args.once or progressed == 0:
+            break
+    adverse_block = getattr(coord, "last_adverse_block", None)
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "progressed": count,
+                    "provider": chosen_provider,
+                    "review_provider": chosen_review_provider,
+                    "independent_review_configured": independent_review_configured,
+                    "require_independent_review": require_independent_review,
+                    "integration_ref": integration_ref,
+                    "targeted_mode": targeted_mode,
+                    "targeted_task_id": str(targeted_task_id) if targeted_task_id is not None else None,
+                    **(
+                        {
+                            "stop_reason": "BLOCKED",
+                            "message": "adverse review gate refused integration: " + "; ".join(adverse_block),
+                        }
+                        if adverse_block
+                        else {}
+                    ),
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        store.close()
+        return 1 if adverse_block else 0
+    print(f"progressed: {count}")
+    print(f"provider: {chosen_provider}")
+    print(f"review_provider: {chosen_review_provider}")
+    print(f"independent_review_configured: {independent_review_configured}")
+    print(f"require_independent_review: {require_independent_review}")
+    print(f"integration_ref: {integration_ref}")
+    print(f"targeted_mode: {targeted_mode}")
+    print(f"targeted_task_id: {targeted_task_id}")
+    store.close()
+    if adverse_block:
+        print("adverse review gate refused integration: " + "; ".join(adverse_block), file=sys.stderr)
+        return 1
+    return 0
 
 
 def _current_branch_ref(project: Path) -> str | None:
@@ -1361,7 +1434,6 @@ def command_run_ready(args: argparse.Namespace) -> int:
                 chooser=_interactive_chooser if getattr(args, "choose", False) else None,
                 worktree_root_path=config.runtime.worktree_root if config.runtime else None,
                 no_auto_retry=held_for_retry,
-                adverse_policy=config.adverse_review,
             )
             if blocked_tasks and summary.stop_reason == "REFUSED:no_eligible_task":
                 retryable = [item for item in blocked_tasks if can_auto_retry(store, str(item.task_id))]
@@ -1409,12 +1481,7 @@ def command_run_ready(args: argparse.Namespace) -> int:
         return exc.code
     store.close()
     info["provider_events"] = provider_log.lines
-    return _report_run_ready(
-        summary,
-        info,
-        as_json=args.json,
-        single_tick=bool(getattr(args, "once", False)),
-    )
+    return _report_run_ready(summary, info, as_json=args.json)
 
 
 def _continue_after_task_block(summary: RunSummary, requested: str | None) -> bool:
@@ -1692,20 +1759,14 @@ def _format_recovered(item: object) -> str:
     return f"recovered{where}: {detail}"
 
 
-def _report_run_ready(
-    summary: RunSummary,
-    info: dict[str, object],
-    *,
-    as_json: bool,
-    single_tick: bool = False,
-) -> int:
+def _report_run_ready(summary: RunSummary, info: dict[str, object], *, as_json: bool) -> int:
     if as_json:
         print(json.dumps({**summary.to_dict(), "providers": info}, indent=2, sort_keys=True))
     else:
         for item in summary.recovered:
             print(_format_recovered(item))
         print(format_stop(summary))
-    if summary.succeeded or (single_tick and summary.stop_reason == "MAX_STEPS"):
+    if summary.succeeded:
         return 0
     return 2 if summary.stop_reason.startswith("REFUSED:") else 1
 

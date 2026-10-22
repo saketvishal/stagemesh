@@ -135,6 +135,14 @@ def test_review_failure_is_remediated_automatically(tmp_path: Path) -> None:
     assert r.stop == "REFUSED:no_eligible_task" and m.integrated("T-1"), r.brief
     assert [mode for p, stage, _, mode in r.calls if stage == "review"] == ["fail", "pass"]
     assert len(r.implementers("T-1")) == 2
+    store = m.store()
+    try:
+        reviewed = store.conn.execute(
+            "SELECT DISTINCT candidate_sha FROM evidence WHERE task_id='T-1' AND kind='REVIEW'"
+        ).fetchall()
+        assert len(reviewed) == 2
+    finally:
+        store.close()
     r.assert_hands_off()
 
 
