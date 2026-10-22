@@ -137,6 +137,14 @@ def adverse_gate(
     ]
     if not passed:
         reasons.append("missing required adverse review bound to this candidate, contract and policy")
+    if store.has_bound_evidence(
+        task_id,
+        candidate_sha,
+        EvidenceKind.REVIEW,
+        contract_hash,
+        EvidenceStatus.FAILED,
+    ):
+        reasons.append("candidate previously failed adverse review and must be replaced before integration")
     for row in store.open_findings_for_candidate(task_id, candidate_sha):
         if policy.is_blocking(row["severity"]):
             reasons.append(f"blocking {row['severity']} finding: {row['message']}")
