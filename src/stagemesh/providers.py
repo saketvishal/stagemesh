@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import os
@@ -34,7 +35,14 @@ from .persistence import Store
 from .process_identity import popen_identity
 from .redaction import redact_command_secrets
 from .remediation import remediation_context
-from .research_context import build_research_brief
+from .research_context import (
+    ResearchBlocked,
+    build_research_brief,
+    parse_research_report,
+    research_findings_prompt,
+    research_request,
+    source_snapshot,
+)
 from .workspace_guard import (
     EXTERNAL_WORKSPACE_MUTATION,
     WorkspaceLease,
@@ -127,6 +135,12 @@ def resolve_executable(executable: str, provider_name: str | None = None) -> str
 
 
 @dataclass(frozen=True)
+class ResearchRole:
+    name: str
+    command: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class RuntimeCommandAdapter:
     """SDK adapter for command-line coding agents such as Codex, Claude, or Grok."""
 
@@ -138,6 +152,8 @@ class RuntimeCommandAdapter:
     # (one `name`), so a candidate it implemented is never reviewed by it, whichever command each stage runs.
     implement_command: tuple[str, ...] | None = None
     review_command: tuple[str, ...] | None = None
+    # Opt-in read-only research role run in the task workspace before this provider implements; None keeps the old behavior.
+    research: ResearchRole | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "name", _validate_name(self.name))
@@ -196,10 +212,18 @@ class RuntimeCommandAdapter:
         except ContractRejected as exc:
             return ExecutionResult(ExecutionStatus.FAILED, failure_reason=f"{exc.reason}: {exc}")
         task = store.get_task(task_id)
+        research_text = ""
+        if self.research is not None:
+            try:
+                research_text = self._run_research(store, task_id, run_path, bound)
+            except ResearchBlocked as exc:
+                store.add_audit_event("research_stage", {"task_id": task_id, "researcher": self.research.name, "outcome": "blocked", "reason": exc.reason})
+                return ExecutionResult(ExecutionStatus.FAILED, failure_reason=str(exc))
         try:
             task_prompt = _build_task_prompt(
                 task_id, task, run_path, contract=bound.contract, remediation=remediation_context(store, task_id, project),
                 planning_project=project,
+                research_findings=research_text,
             )
         except SkillPackError as exc:
             return ExecutionResult(ExecutionStatus.FAILED, failure_reason=f"skill_pack_unavailable: {exc}")
@@ -283,6 +307,35 @@ class RuntimeCommandAdapter:
             if _is_external_workspace_mutation(exc):
                 return ExecutionResult(ExecutionStatus.FAILED, failure_reason=EXTERNAL_WORKSPACE_MUTATION)
             raise
+
+    def _run_research(self, store: Store, task_id: str, run_path: Path, bound: object) -> str:
+        """Run the read-only researcher; any failure raises ResearchBlocked so implementation never starts."""
+        role = self.research
+        try:
+            before = source_snapshot(run_path)
+            command, provider_input = _command_and_input(role.command, research_request(bound))
+            try:
+                proc = subprocess.Popen(
+                    command, cwd=run_path, text=True, encoding="utf-8", errors="replace",
+                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    env=provider_environment(run_path), **popen_session_kwargs(),
+                )
+            except OSError as exc:
+                raise ResearchBlocked("research_failed", "researcher could not start") from exc
+            stdout, _stderr, timed_out = communicate_bounded(proc, provider_input, provider_timeout_seconds(self.timeout_seconds))
+            if source_snapshot(run_path) != before:
+                raise ResearchBlocked("research_mutated_source", "researcher changed the workspace")
+            if timed_out or proc.returncode != 0:
+                raise ResearchBlocked("research_failed", PROVIDER_TIMEOUT if timed_out else f"exit {proc.returncode}")
+            evidence = parse_research_report(_provider_text_response(stdout), run_path, bound)
+        except (subprocess.CalledProcessError, OSError) as exc:
+            raise ResearchBlocked("research_failed", "could not snapshot the workspace") from exc
+        store.add_audit_event("research_stage", {
+            "task_id": task_id, "researcher": role.name, "outcome": "accepted",
+            "baseline_sha": evidence.baseline_sha, "contract_digest": evidence.contract_digest,
+            "inspected_paths": list(evidence.inspected_paths), "finding_count": len(evidence.findings),
+        })
+        return research_findings_prompt(evidence)
 
     def run(self, store: Store, task_id: str, claim_id: str | None, project: Path) -> ExecutionResult:
         return self.execute(store, task_id, claim_id, project)
@@ -597,6 +650,10 @@ def adapters_from_config(config: StageMeshConfig) -> list[RuntimeCommandAdapter]
                 implement_command=_stage_command(adapter.name, spec.implement_command),
                 review_command=_stage_command(adapter.name, spec.review_command),
             )
+        if config.research is not None:
+            adapter = dataclasses.replace(
+                adapter, research=ResearchRole(config.research.provider, _stage_command(config.research.provider, config.research.command))
+            )
         resolved.append(adapter)
     return resolved
 
@@ -689,6 +746,7 @@ def _build_task_prompt(
     contract: object = None,
     remediation: dict[str, object] | None = None,
     planning_project: Path | None = None,
+    research_findings: str = "",
 ) -> str:
     """Build the prompt string sent via stdin to a provider CLI.
 
@@ -726,6 +784,7 @@ def _build_task_prompt(
         f"{contract_text}"
         f"{spec_text}"
         f"{research_text}"
+        f"{research_findings}"
         f"{remediation_text}"
         "Please implement the changes described above.\n\n"
         f"{SPEC_PLANNING_DISCIPLINE}"
