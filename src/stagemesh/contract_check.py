@@ -38,7 +38,7 @@ def check_contract_text(
     limit: int = MAX_CANONICAL_CONTRACT_CHARS,
     *,
     require_spec: bool = False,
-    prerequisite_manifest: dict[str, Any] | None = None,
+    prerequisite_manifest: Any | None = None,
     manifest_load_error: str | None = None,
     expected_candidate_revision: str | None = None,
     expected_base_revision: str | None = None,
@@ -87,8 +87,8 @@ def check_contract_text(
     if prerequisite_manifest is not None:
         from .spec_integrity import resolve_pinned_adapter, validate_prerequisite_manifest
 
-        adapter_info = prerequisite_manifest.get("adapter", {})
-        if isinstance(adapter_info, dict):
+        adapter_info = prerequisite_manifest.get("adapter", {}) if isinstance(prerequisite_manifest, dict) else {}
+        if isinstance(adapter_info, dict) and isinstance(prerequisite_manifest, dict):
             name = adapter_info.get("name")
             version = adapter_info.get("version")
             if isinstance(name, str) and isinstance(version, str):

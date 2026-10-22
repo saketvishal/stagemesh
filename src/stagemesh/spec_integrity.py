@@ -347,6 +347,8 @@ def spec_governance_gate(
     expected_candidate_revision: str | None = None,
     expected_base_revision: str | None = None,
     expected_changed_files: tuple[str, ...] | list[str] | None = None,
+    sync_status: str | None = None,
+    validation_status: str | None = None,
 ) -> SpecGovernanceVerdict:
     if prerequisite_manifest is not None:
         return validate_prerequisite_manifest(
@@ -363,6 +365,8 @@ def spec_governance_gate(
             changed_files or (),
             base_revision=base_revision,
             candidate_revision=candidate_revision,
+            sync_status=sync_status,
+            validation_status=validation_status,
         )
         return validate_prerequisite_manifest(
             manifest,
@@ -510,6 +514,8 @@ def structural_impact_manifest(
     *,
     base_revision: str,
     candidate_revision: str,
+    sync_status: str | None = None,
+    validation_status: str | None = None,
 ) -> dict[str, object]:
     """Return JSON-ready structural evidence for explicitly supplied changed paths.
 
@@ -556,7 +562,7 @@ def structural_impact_manifest(
                     unresolved.append({"source_id": record.id, "target": target,
                                        "reason": "no-active-target"})
     owners = {o.id: o for o in all_owners}
-    return {
+    manifest: dict[str, object] = {
         "schema_version": 1,
         "assessment": "structural-only",
         "adapter": {"name": after.adapter, "version": after.adapter_version},
@@ -567,9 +573,12 @@ def structural_impact_manifest(
         "requirements": changes,
         "unmapped_files": sorted(set(paths) - {o.path for o in all_owners} - contract_paths),
         "unresolved_references": sorted(unresolved, key=lambda r: (r["source_id"], r["target"])),
-        "sync_status": "in_sync",
-        "validation_status": "passed",
     }
+    if sync_status is not None:
+        manifest["sync_status"] = sync_status
+    if validation_status is not None:
+        manifest["validation_status"] = validation_status
+    return manifest
 
 
 def _owner_record(owner: SpecOwner) -> dict[str, object]:

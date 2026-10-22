@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,7 @@ from stagemesh.spec_integrity import (
     SpecGovernanceVerdict,
     resolve_pinned_adapter,
     spec_governance_gate,
+    structural_impact_manifest,
     validate_prerequisite_manifest,
 )
 from stagemesh.spec_refs import SpecAdapterError, SpecOwner, SpecSnapshot
@@ -62,6 +64,44 @@ def valid_manifest(**overrides) -> dict:
     }
     manifest.update(overrides)
     return manifest
+
+
+def test_generated_manifest_requires_explicit_validation_and_sync_evidence() -> None:
+    snapshot = SpecSnapshot("openspec", "layout-v1", ())
+    generated = structural_impact_manifest(
+        snapshot, snapshot, (), base_revision="base", candidate_revision="candidate",
+    )
+    assert "validation_status" not in generated
+    assert "sync_status" not in generated
+    verdict = validate_prerequisite_manifest(generated)
+    assert not verdict.ok
+    assert any("validation" in error for error in verdict.errors)
+    assert any("sync" in error for error in verdict.errors)
+
+    evidenced = structural_impact_manifest(
+        snapshot,
+        snapshot,
+        (),
+        base_revision="base",
+        candidate_revision="candidate",
+        validation_status="passed",
+        sync_status="in_sync",
+    )
+    assert validate_prerequisite_manifest(evidenced).ok
+
+
+def test_non_object_manifest_fails_closed_in_contract_preflight() -> None:
+    contract = json.dumps(
+        {
+            "objective": "governed",
+            "explicit": True,
+            "spec_refs": ["openspec/specs/auth/spec.md"],
+            "required_tests": [{"name": "unit", "command": ["pytest", "-q"]}],
+        }
+    )
+    report = check_contract_text(contract, prerequisite_manifest=[])
+    assert not report["ok"]
+    assert any("JSON object" in error for error in report["errors"])
 
 
 # --- 1. Configured pinned adapter validation vs unpinned rejection ---
@@ -377,7 +417,7 @@ def test_missing_affected_ids_and_dependencies_validated_against_declared_record
     assert any("nonexistent" in err for err in verdict.errors)
 
 
-def test_validator_binds_candidate_base_and_diff(tmp_path: Path) -> None:
+def test_validator_binds_candidate_base_and_diff(tmp_path: Path, monkeypatch) -> None:
     # Finding 2: Validator must compare candidate_revision, base_revision, and changed_files
     project = tmp_path / "project"
     project.mkdir()
@@ -407,7 +447,32 @@ def test_validator_binds_candidate_base_and_diff(tmp_path: Path) -> None:
     cand_sha = git.commit_all("implementation")
     store.add_candidate(task_id, cand_sha, "implementer", True)
 
+    candidate_root = tmp_path / "exact-candidate"
+    candidate_root.mkdir()
+    discovered_roots: list[Path] = []
+
+    class RecordingAdapter:
+        def discover(self, root: Path) -> SpecSnapshot:
+            discovered_roots.append(Path(root))
+            return SpecSnapshot("openspec", "layout-v1", ())
+
+    @contextmanager
+    def exact_candidate(_project: Path, sha: str):
+        assert sha == cand_sha
+        yield candidate_root
+
+    monkeypatch.setattr("stagemesh.validation.candidate_workspace", exact_candidate)
+    monkeypatch.setattr("stagemesh.spec_integrity.resolve_pinned_adapter", lambda *args, **kwargs: RecordingAdapter())
+
     try:
+        # A malformed JSON root is typed validation evidence, never an escaped
+        # AttributeError that strands the VALIDATION execution.
+        malformed_status = Validator().validate(
+            store, task_id, cand_sha, project, prerequisite_manifest=[],  # type: ignore[arg-type]
+        )
+        assert malformed_status is EvidenceStatus.FAILED
+        assert not list(store.running_executions())
+
         # 1. Stale manifest with mismatched candidate_revision must fail
         stale_cand = valid_manifest(
             base_revision=base_sha,
@@ -443,6 +508,8 @@ def test_validator_binds_candidate_base_and_diff(tmp_path: Path) -> None:
         )
         status4 = Validator().validate(store, task_id, cand_sha, project, prerequisite_manifest=correct)
         assert status4 is EvidenceStatus.PASSED
+        assert discovered_roots
+        assert set(discovered_roots) == {candidate_root}
     finally:
         store.close()
 

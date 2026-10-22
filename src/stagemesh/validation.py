@@ -9,6 +9,7 @@ from .audit import record_audit
 from .contract_binding import contract_for_candidate
 from .contracts import (
     ContractError,
+    candidate_workspace,
     changed_files,
     declarative_invariants,
     evaluate_contract,
@@ -151,8 +152,11 @@ class Validator:
             if prerequisite_manifest is not None:
                 from .spec_integrity import resolve_pinned_adapter, validate_prerequisite_manifest
 
-                adapter_info = prerequisite_manifest.get("adapter", {})
-                if isinstance(adapter_info, dict):
+                if isinstance(prerequisite_manifest, dict):
+                    adapter_info = prerequisite_manifest.get("adapter", {})
+                else:
+                    adapter_info = {}
+                if isinstance(adapter_info, dict) and isinstance(prerequisite_manifest, dict):
                     name = adapter_info.get("name")
                     version = adapter_info.get("version")
                     if isinstance(name, str) and isinstance(version, str):
@@ -164,8 +168,8 @@ class Validator:
                                 or prerequisite_manifest.get("contract_path")
                                 or "adapter.json",
                             )
-                            if (project / "openspec").is_dir():
-                                adapter.discover(project)
+                            with candidate_workspace(project, candidate_sha) as candidate_project:
+                                adapter.discover(candidate_project)
                         except Exception as exc:
                             findings.append({
                                 "severity": "error",
