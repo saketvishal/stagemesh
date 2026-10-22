@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sys
 import threading
 from pathlib import Path
@@ -29,6 +30,36 @@ from stagemesh.review import Reviewer
 from stagemesh.workspaces import task_workspace
 
 TASK = "TASK-1"
+_BASE_REPO: Path | None = None
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _base_repo(tmp_path_factory: pytest.TempPathFactory):
+    """Build the identical synthetic base once; every test still gets a private copy."""
+    global _BASE_REPO
+    project = tmp_path_factory.mktemp("provider-pool-base") / "repo"
+    project.mkdir()
+    git = GitWorkspace(project)
+    git.init_if_needed()
+    git.run("config", "user.email", "t@example.invalid")
+    git.run("config", "user.name", "T")
+    (project / "docs").mkdir()
+    (project / "docs" / "a.md").write_text("a\n", encoding="utf-8")
+    git.commit_all("base")
+    git.run("branch", "integration")
+    _BASE_REPO = project
+    try:
+        yield
+    finally:
+        _BASE_REPO = None
+
+
+@pytest.fixture(autouse=True)
+def _skip_irrelevant_github_detection(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These synthetic repos have no remote; GitHub discovery is tested separately."""
+    monkeypatch.setattr("stagemesh.config.detect_github_repository", lambda _project: None)
+
+
 SCRIPT = (
     "import pathlib, sys\n"
     "mode = sys.argv[1]\n"
@@ -86,15 +117,10 @@ class Rig:
     ):
         """modes: provider name -> behavior ('ok', 'auth-fail', 'review-rate-limit') or None for a missing CLI."""
         self.project = tmp_path / "repo"
-        self.project.mkdir(parents=True)
+        assert _BASE_REPO is not None
+        shutil.copytree(_BASE_REPO, self.project)
         git = self.git = GitWorkspace(self.project)
-        git.init_if_needed()
-        git.run("config", "user.email", "t@example.invalid")
-        git.run("config", "user.name", "T")
-        (self.project / "docs").mkdir()
-        (self.project / "docs" / "a.md").write_text("a\n", encoding="utf-8")
-        self.base = git.commit_all("base")
-        git.run("branch", "integration")
+        self.base = git.head()
         contracts = self.project / ".stagemesh" / "contracts"
         contracts.mkdir(parents=True)
         (contracts / f"{TASK}.json").write_text(
