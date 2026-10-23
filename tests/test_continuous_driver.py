@@ -282,7 +282,7 @@ def test_hard_timeout_terminates_a_real_subprocess_tree(project: Path, monkeypat
 
         gated = False
 
-        def communicate(self, input=None, timeout=None):  # noqa: A002
+        def communicate(self, input=None, timeout=None):
             if self.gated:
                 return super().communicate(input, timeout=timeout)
             self.gated = True
@@ -335,9 +335,10 @@ def test_driver_scheduler_is_project_owned_idempotent_and_reversible(project: Pa
     assert handle == same == scheduler.handle
     assert scheduler.launcher.is_file()
     assert calls[0][0:2] == ["schtasks", "/Create"]
-    assert calls[0][calls[0].index("/RL") + 1] == "LIMITED"
+    assert calls[0][calls[0].index("/XML") + 1] == str(scheduler.definition)
+    assert "/SC" not in calls[0] and "/TR" not in calls[0]
     scheduler.remove(handle)
-    assert not scheduler.launcher.exists()
+    assert not scheduler.launcher.exists() and not scheduler.definition.exists()
     with pytest.raises(DriverSchedulerError, match="another project"):
         scheduler.remove("StageMesh\\driver-not-ours")
 
@@ -424,3 +425,32 @@ def test_uninstall_removes_only_driver_startup_and_preserves_the_ledger(
     assert removed == ["StageMesh\\driver-test"]
     assert not config_path(project).exists()
     assert (project / ".stagemesh" / "stagemesh.sqlite3").is_file()
+
+
+def test_task_definition_has_startup_recovery_power_and_bounding_behavior(project: Path) -> None:
+    from datetime import datetime
+    from xml.etree import ElementTree
+
+    from stagemesh.driver_scheduler import TASK_NAMESPACE, build_task_xml
+
+    xml = build_task_xml(
+        project / "run.cmd", 600, user_id="HOST\\owner & co", start=datetime(2026, 10, 23, 14, 0, 0), execution_limit_seconds=7200
+    )
+    root = ElementTree.fromstring(xml.split("\n", 1)[1])
+    ns = {"t": TASK_NAMESPACE}
+
+    assert root.find("t:Triggers/t:LogonTrigger/t:UserId", ns).text == "HOST\\owner & co"
+    assert root.find("t:Triggers/t:TimeTrigger/t:Repetition/t:Interval", ns).text == "PT10M"
+    assert root.find("t:Triggers/t:TimeTrigger/t:Repetition/t:StopAtDurationEnd", ns).text == "false"
+    assert root.find("t:Triggers/t:TimeTrigger/t:StartBoundary", ns).text == "2026-10-23T14:00:00"
+    settings = {child.tag.split("}")[1]: child.text for child in root.find("t:Settings", ns)}
+    assert settings["StartWhenAvailable"] == "true"
+    assert settings["DisallowStartIfOnBatteries"] == "false" and settings["StopIfGoingOnBatteries"] == "false"
+    assert settings["MultipleInstancesPolicy"] == "IgnoreNew"
+    assert settings["ExecutionTimeLimit"] == "PT120M"
+    principal = root.find("t:Principals/t:Principal", ns)
+    assert principal.find("t:RunLevel", ns).text == "LeastPrivilege"
+    assert principal.find("t:LogonType", ns).text == "InteractiveToken"
+    assert root.find("t:Actions/t:Exec/t:Command", ns).text == str(project / "run.cmd")
+    with pytest.raises(DriverSchedulerError):
+        build_task_xml(project / "run.cmd", 90, user_id="u", start=datetime(2026, 1, 1))
