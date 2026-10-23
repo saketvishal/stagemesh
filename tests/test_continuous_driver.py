@@ -269,8 +269,31 @@ def test_child_finishes_after_driver_parent_crash_and_next_tick_recovers(project
             parent_process.wait(timeout=10)
 
 
-def test_hard_timeout_terminates_a_real_subprocess_tree(project: Path) -> None:
+def test_hard_timeout_terminates_a_real_subprocess_tree(project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     child_pid = project / "child.pid"
+    real_popen = subprocess.Popen
+
+    class ReadinessGatedPopen(real_popen):  # type: ignore[misc, valid-type]
+        """Start the hard-timeout clock only after the grandchild is provably alive.
+
+        A fixed short timeout raced interpreter start-up on loaded hosts. The tree-ready marker removes the
+        race without lengthening the test: the deadline still fires, but only once the tree exists.
+        """
+
+        gated = False
+
+        def communicate(self, input=None, timeout=None):  # noqa: A002
+            if self.gated:
+                return super().communicate(input, timeout=timeout)
+            self.gated = True
+            ready_deadline = time.monotonic() + 60
+            while not child_pid.is_file() or not child_pid.read_text(encoding="utf-8").strip():
+                if self.poll() is not None or time.monotonic() > ready_deadline:
+                    raise AssertionError("the test process tree never became ready")
+                time.sleep(0.02)
+            return super().communicate(input, timeout=0.5)
+
+    monkeypatch.setattr(continuous_driver.subprocess, "Popen", ReadinessGatedPopen)
     script = project / "tree.py"
     script.write_text(
         "import pathlib, subprocess, sys, time\n"
