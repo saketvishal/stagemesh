@@ -1112,6 +1112,145 @@ def command_follow_up(args: argparse.Namespace) -> int:
         store.close()
 
 
+def command_driver(args: argparse.Namespace) -> int:
+    from dataclasses import asdict
+
+    from . import continuous_driver
+    from .driver_scheduler import DriverSchedulerError, default_driver_scheduler, driver_command
+    from .run_window import parse_duration
+
+    project = Path(args.project).resolve()
+    store = Store(db_path(project))
+    store.migrate()
+    scheduler = default_driver_scheduler(project)
+    try:
+        if args.driver_command == "install":
+            if not args.acknowledge_provider_use:
+                print(
+                    "refusing persistent startup without --acknowledge-provider-use; scheduled windows may invoke configured providers",
+                    file=sys.stderr,
+                )
+                return 2
+            if scheduler is None:
+                print("the local continuous driver currently supports Windows Task Scheduler only", file=sys.stderr)
+                return 2
+            prepared = continuous_driver.DriverConfig(
+                project=str(project),
+                state="paused",
+                interval_seconds=int(parse_duration(args.interval)),
+                window_seconds=int(parse_duration(args.window_duration)),
+                concurrency=args.concurrency,
+                max_tasks=args.max_tasks,
+                max_steps_per_task=args.max_steps_per_task,
+                max_consecutive_failures=args.max_consecutive_failures,
+                auto_merge_ff=args.auto_merge_ff,
+                strict_live=args.strict_live,
+            ).validate(project)
+            continuous_driver.save_config(project, prepared)
+            handle = scheduler.ensure(driver_command(project), prepared.interval_seconds)
+            config = continuous_driver.DriverConfig(**{**asdict(prepared), "state": "running"})
+            continuous_driver.install(store, project, config, handle)
+            payload = {"installed": True, "handle": handle, "config": asdict(config)}
+        elif args.driver_command == "tick":
+            payload = continuous_driver.run_tick(store, project).to_dict()
+        elif args.driver_command == "status":
+            config = continuous_driver.load_config(project)
+            exists = scheduler.exists(scheduler.handle) if scheduler is not None else None
+            payload = continuous_driver.status(store, project, schedule_exists=exists)
+            payload["config"] = asdict(config)
+        elif args.driver_command == "pause":
+            from .parallel import request_queue_control
+
+            continuous_driver.set_state(project, "paused")
+            request_queue_control(store, "paused", args.reason)
+            continuous_driver.record_state(store, "paused", args.reason)
+            payload = continuous_driver.status(
+                store,
+                project,
+                schedule_exists=scheduler.exists(scheduler.handle) if scheduler is not None else None,
+            )
+        elif args.driver_command == "resume":
+            from .parallel import request_queue_control
+
+            current = continuous_driver.set_state(project, "paused")
+            child_state, _child_identity = continuous_driver.child_owner_state(project)
+            if child_state == "ORPHANED":
+                continuous_driver.release_orphaned_child(project)
+            elif child_state is not None:
+                raise continuous_driver.DriverConfigError(
+                    f"cannot resume while prior run-window process identity is {child_state}"
+                )
+            if scheduler is None:
+                raise continuous_driver.DriverConfigError(
+                    "Windows Task Scheduler is unavailable; the driver cannot resume persistently"
+                )
+            handle = scheduler.ensure(driver_command(project), current.interval_seconds)
+            config = continuous_driver.set_state(project, "running")
+            request_queue_control(store, "resumed", args.reason)
+            continuous_driver.record_state(store, "running", args.reason)
+            payload = continuous_driver.status(store, project, schedule_exists=scheduler.exists(handle))
+        elif args.driver_command == "stop":
+            from .parallel import request_queue_control
+
+            config = continuous_driver.set_state(project, "stopped")
+            request_queue_control(
+                store,
+                "stopping",
+                args.reason,
+                terminate_running=args.terminate_running,
+            )
+            continuous_driver.record_state(store, "stopped", args.reason)
+            handle = scheduler.handle if scheduler is not None else None
+            if scheduler is not None and scheduler.exists(handle):
+                scheduler.remove(handle)
+                continuous_driver.record_descheduled(store, handle)
+            payload = {
+                **continuous_driver.status(
+                    store,
+                    project,
+                    schedule_exists=False if scheduler is not None else None,
+                ),
+                "config": asdict(config),
+            }
+        else:
+            from .parallel import request_queue_control
+
+            config = continuous_driver.set_state(project, "stopped")
+            request_queue_control(store, "stopping", args.reason, terminate_running=False)
+            continuous_driver.record_state(store, "stopped", args.reason)
+            handle = scheduler.handle if scheduler is not None else None
+            if scheduler is not None and scheduler.exists(handle):
+                scheduler.remove(handle)
+                continuous_driver.record_descheduled(store, handle)
+            continuous_driver.remove_config(project)
+            payload = {
+                "installed": False,
+                "state": "uninstalled",
+                "schedule_exists": False if scheduler is not None else None,
+                "preserved": [
+                    str(project / ".stagemesh" / "stagemesh.sqlite3"),
+                    str(project / ".stagemesh" / "driver" / "driver.log"),
+                ],
+                "previous_config": asdict(config),
+            }
+    except (continuous_driver.DriverConfigError, DriverSchedulerError, ValueError) as exc:
+        print(f"driver error: {exc}", file=sys.stderr)
+        return 2
+    finally:
+        store.close()
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True, default=str))
+    elif args.driver_command == "tick":
+        print(f"driver tick: {payload['state']} - {payload['detail']}")
+    else:
+        print(f"local continuous driver: {payload.get('state', 'running')}")
+        if payload.get("handle"):
+            print(f"schedule: {payload['handle']}")
+        if payload.get("latest_tick"):
+            print(f"last tick: {payload['latest_tick']['state']} - {payload['latest_tick']['detail']}")
+    return 1 if payload.get("state") in {"blocked", "crashed", "timeout"} else 0
+
+
 def command_survivor_wave(args: argparse.Namespace) -> int:
     from .baseline import resolve_integration_ref
     from .runtime_freshness import check_runtime
@@ -3516,6 +3655,45 @@ def build_parser() -> argparse.ArgumentParser:
     follow.add_argument("--reason", default="cancelled by the operator")
     follow.add_argument("--json", action="store_true")
     follow.set_defaults(func=command_follow_up)
+    driver = sub.add_parser(
+        "driver",
+        help="Opt-in Windows-local continuous run-window supervisor (install, status, pause, resume, stop, uninstall, tick)",
+    )
+    driver_sub = driver.add_subparsers(dest="driver_command", required=True)
+    driver_install = driver_sub.add_parser(
+        "install",
+        help="Explicitly install the reversible Windows Task Scheduler supervisor; does not run a window immediately",
+    )
+    driver_install.add_argument(
+        "--acknowledge-provider-use",
+        action="store_true",
+        help="Required acknowledgement that later scheduled ticks may invoke the already configured provider CLIs",
+    )
+    driver_install.add_argument("--interval", default="10m", help="Scheduler interval (default 10m)")
+    driver_install.add_argument("--window-duration", default="45m", help="Bound for each run-window tick (default 45m)")
+    driver_install.add_argument("--concurrency", type=int, default=2)
+    driver_install.add_argument("--max-tasks", type=int, default=10)
+    driver_install.add_argument("--max-steps-per-task", type=int, default=8)
+    driver_install.add_argument("--max-consecutive-failures", type=int, default=3)
+    driver_install.add_argument("--auto-merge-ff", action="store_true", help="Explicitly authorize the existing guarded merge policy")
+    driver_install.add_argument("--strict-live", action="store_true")
+    driver_install.add_argument("--json", action="store_true")
+    driver_install.set_defaults(func=command_driver)
+    for name, help_text in (
+        ("status", "Show durable state, scheduler presence, interrupted ticks and the last outcome"),
+        ("pause", "Pause new admissions; active work drains under existing queue policy"),
+        ("resume", "Resume admissions and recreate the exact project-owned schedule"),
+        ("stop", "Stop admissions and remove the project-owned schedule"),
+        ("uninstall", "Remove the project-owned schedule and driver config; preserve ledger and logs"),
+        ("tick", "Run one bounded, single-instance supervised run-window cycle"),
+    ):
+        command = driver_sub.add_parser(name, help=help_text)
+        command.add_argument("--json", action="store_true")
+        if name in {"pause", "resume", "stop", "uninstall"}:
+            command.add_argument("--reason", default=f"operator requested driver {name}")
+        if name == "stop":
+            command.add_argument("--terminate-running", action="store_true")
+        command.set_defaults(func=command_driver)
     efficiency = sub.add_parser(
         "efficiency",
         help="Provider attempts, equivalent-failure retries, checks run/reused, validation time and provider-reported usage (unknown is never zero)",

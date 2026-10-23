@@ -23,7 +23,7 @@ are rejected at construction time.
 |---|---|
 | **Founder Hands-Off gate** | **NOT MET** |
 | Ten-task autonomy streak | **0 / 10** (no real task has been run under the supervisor yet) |
-| Capability readiness | **60%** (level model below; 3/3 requires proof on real tasks, which no capability has) |
+| Capability readiness | **62%** (level model below; 3/3 requires proof on real tasks, which no capability has) |
 | Incident scenarios with permanent regression tests | **12 of 12** (A to L), 34 mapped tests, all passing |
 | First milestone (A, B, C, E/F) | implemented and passing end to end through the real coordinator |
 | Human escalations observed on real tasks | **0** (no real tasks yet) |
@@ -101,7 +101,7 @@ checkouts this one must never touch in `.stagemesh/isolation.json` (`{"forbidden
 | 2 | External workspace mutation | 2 | hooks in the executors; quarantine and restore; remote branch moves via fetch |
 | 3 | Ordinary main advancement | 2 | `SupervisedIntegrator` refreshes the candidate and returns the task to VALIDATE |
 | 4 | History rewrite detection | 2 | retargeted replacement with tree-equivalence proof and lineage |
-| 5 | PR dependency / stacked PR handling | 1 | policy, supervisor entry points and GitHub adapter; nothing schedules them yet |
+| 5 | PR dependency / stacked PR handling | 2 | `run-window` schedules eligible dependency work and delivery follow-through rechecks pending PRs |
 | 6 | CI diagnosis (candidate vs base) | 2 | gates integration when a `HostedCI` is supplied, and runs in `autonomy deliver` against hosted check runs |
 | 7 | Broken/fragile test detection | 1 | classification and remediation guard; no test harness emits observations yet |
 | 8 | Independent review lifecycle | 2 | scope policy wraps the reviewer adapter in the CLI |
@@ -138,8 +138,11 @@ Ordered by value for reaching the gate:
 
 1. **No real task has run under the supervisor.** Every claim above is proven on deterministic local fixtures and, for the GitHub
    boundary, on recorded and read-only live payloads. The ten-task streak is the only thing that can raise any capability to level 3.
-2. **No autonomous driver loop.** `continue` runs a task to a verified local DONE and `autonomy deliver` is one bounded publish/observe/judge pass;
-   nothing yet chains them, re-delivers on a schedule, evaluates dependencies continuously or selects the next task. (`finish_task` records the outcome.)
+2. **The executable driver exists but is not live-proven.** `run-window` now selects and advances multiple eligible tasks, continues
+   through guarded PR delivery/landing when explicitly authorized, and delivery follow-through rechecks pending PRs. The opt-in
+   Windows-local `stagemesh driver` supervisor adds single-instance scheduled ticks, durable crash checkpoints, bounded failed-tick
+   suspension and status/pause/resume/stop. Deterministic fixtures are not a real provider run, a real Task Scheduler round trip or a
+   ten-task streak; no persistent driver was installed while implementing this slice.
 3. **Hosted CI observation is on-demand.** `GitHubHostedCI` is used by `autonomy deliver` and verified read-only against live GitHub, but the
    integration guard of `continue` does not consult it. Check runs carry no logs, so baseline comparison is gate-level (`GATE_LEVEL` evidence, reported in the
    trace) and, by default (`baseline_requires_detail: true`), is not enough to call a candidate merge-ready: the policy asks for log-level base
@@ -147,7 +150,8 @@ Ordered by value for reaching the gate:
 4. **Test-observation convention has no producer.** Scenario G relies on `STAGEMESH_TEST_OBSERVATION` lines; no StageMesh test fixture emits them yet.
 5. **Destructive git requests are not intercepted.** `decide_git_operation` is policy only; StageMesh's own git calls are not routed through it.
 6. **Reruns cannot be requested.** A failure classified as infrastructure is retried only by waiting for a new observation; StageMesh cannot yet ask the host to rerun failed jobs (the bounded budget ends in a typed escalation).
-7. **`recover_unknown` runs only when a task needs implementation**; there is no periodic sweep of UNKNOWN reviews/validations.
+7. A scheduled driver tick runs `run-window` preflight across active executions and automatically recovers only identities proven DEAD.
+   UNKNOWN identities intentionally remain a typed operator inspection gate; there is no unsafe periodic release.
 8. Escalations are persisted and shown in the trace, but there is no push notification to the founder.
 9. `Coordinator.recover` and `recover-stale --release-unknown` remain available as manual operator tools and are outside the supervisor.
 10. **Providers that commit on their own fail closed.** StageMesh registers its own commits; a provider CLI that commits itself is treated as
@@ -155,6 +159,36 @@ Ordered by value for reaching the gate:
 11. **Refresh budget.** Supervised runs allow at least 5 automatic refreshes (`SUPERVISED_MIN_REFRESH_ATTEMPTS`); a ref that advances
     more often still ends in the typed `integration_stale_base` block and needs `retry-task`.
 12. **Supervisor settings are read from `.stagemesh/autonomy.json` only**; there is no `config.json` section or CLI flag yet.
+
+## Local continuous driver evidence (2026-10-23)
+
+Implementation branch: `feat/local-continuous-driver`, based on `main` at `726a74de6054f6e0e2d1bb90b73ffbc764fd1fda` (`v0.4.0`).
+
+Focused command:
+
+```powershell
+$env:PYTHONPATH='src'
+python -m pytest tests/test_continuous_driver.py tests/test_driver_acceptance.py tests/test_autonomy_corpus.py -q
+python -m pytest tests/test_bounded_execution.py tests/test_builtin_execution_ownership.py -q
+```
+
+Observed result: **16 driver lifecycle tests and 4 deterministic multi-task acceptance fixtures passed**. Covered: exact project-bound
+`run-window` command, three dependent tasks across simulated PR boundaries with one intentional first-attempt validation failure,
+parent-crash continuation and recovery with real subprocesses, pre-launch ownership, live/orphan process fail-closed behavior,
+idempotent durable work,
+workspace and owner-file preservation, real Windows hard-timeout process-tree termination, scheduler query failures, exact cadence,
+no-work `idle` rather than autonomy success, bounded failed-tick suspension, paused/stopped no-op behavior, project-owned reversible
+Task Scheduler commands and explicit provider-use acknowledgement. The shared execution ownership regression suite also passed
+**23 tests** after the process-tree change.
+
+The existing `test_run_window.py`, `test_autonomous_window.py` and `test_delivery_followup.py` milestone suite produced **143 passed**
+plus one Windows sandbox-only local Git-process failure; that exact test passed when rerun outside the sandbox, for **144/144 behavior
+tests passing**. Independent review initially found launch ownership, timeout cleanup, scheduler diagnostics and evidence-overclaim gaps;
+all were fixed, regression-tested and accepted on re-review.
+
+Acceptance status: **VERIFIED_COMPONENT** for deterministic local fixtures. **NOT_RUN** for real provider CLIs, real Windows Task
+Scheduler execution, hosted CI/PR landing and the real ten-task streak. No service/schedule was installed and no provider credit was
+consumed by this evidence.
 
 ## Baseline failures observed (deferred, deliberately not fixed here)
 

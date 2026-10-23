@@ -139,10 +139,14 @@ def popen_session_kwargs() -> dict[str, object]:
     return {} if sys.platform == "win32" else {"start_new_session": True}
 
 
-def kill_process_tree(proc: subprocess.Popen[str]) -> None:
+def kill_process_tree(proc: subprocess.Popen[str]) -> bool:
+    confirmed = False
     if sys.platform == "win32":
         try:
-            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True, check=False, timeout=5)
+            result = subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True, check=False, timeout=5
+            )
+            confirmed = result.returncode == 0
         except subprocess.TimeoutExpired:
             pass
     else:
@@ -150,12 +154,14 @@ def kill_process_tree(proc: subprocess.Popen[str]) -> None:
             group = os.getpgid(proc.pid)
             if group == proc.pid:
                 os.killpg(group, signal.SIGKILL)
+                confirmed = True
         except OSError:
             pass
     try:
         proc.kill()
     except OSError:
         pass
+    return confirmed
 
 
 _ACTIVE_PROVIDER_PROCESSES: set[subprocess.Popen[str]] = set()
