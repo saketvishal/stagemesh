@@ -163,6 +163,7 @@ Ordered by value for reaching the gate:
 ## Local continuous driver evidence (2026-10-23)
 
 Implementation branch: `feat/local-continuous-driver`, based on `main` at `726a74de6054f6e0e2d1bb90b73ffbc764fd1fda` (`v0.4.0`).
+Implementation commit: `18d0eb2e7621bd93b64a1f968da970124b29806b`.
 
 Focused command:
 
