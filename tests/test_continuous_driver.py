@@ -31,6 +31,12 @@ from stagemesh.persistence import Store
 from stagemesh.process_identity import popen_identity, process_identity
 
 
+@pytest.fixture(autouse=True)
+def windows_user(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("USERNAME", "owner")
+    monkeypatch.setenv("USERDOMAIN", "HOST")
+
+
 @pytest.fixture
 def project(tmp_path: Path) -> Path:
     (tmp_path / ".stagemesh").mkdir()
@@ -269,8 +275,34 @@ def test_child_finishes_after_driver_parent_crash_and_next_tick_recovers(project
             parent_process.wait(timeout=10)
 
 
-def test_hard_timeout_terminates_a_real_subprocess_tree(project: Path) -> None:
+def test_hard_timeout_terminates_a_real_subprocess_tree(project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     child_pid = project / "child.pid"
+    real_popen = subprocess.Popen
+
+    class ReadinessGatedPopen(real_popen):  # type: ignore[misc, valid-type]
+        """Start the hard-timeout clock only after the grandchild is provably alive.
+
+        A fixed short timeout raced interpreter start-up on loaded hosts. The tree-ready marker removes the race
+        without lengthening the test and without overriding the caller's timeout: the deadline still fires, but only
+        once the tree exists. Only the driver's own `subprocess` binding is replaced, never the process-wide module.
+        """
+
+        def communicate(self, input=None, timeout=None):
+            ready_deadline = time.monotonic() + 60
+            while not child_pid.is_file() or not child_pid.read_text(encoding="utf-8").strip():
+                if self.poll() is not None or time.monotonic() > ready_deadline:
+                    kill_process_tree(self)
+                    raise AssertionError("the test process tree never became ready")
+                time.sleep(0.02)
+            return super().communicate(input, timeout=timeout)
+
+    class GatedSubprocess:
+        Popen = ReadinessGatedPopen
+
+        def __getattr__(self, name: str):
+            return getattr(subprocess, name)
+
+    monkeypatch.setattr(continuous_driver, "subprocess", GatedSubprocess())
     script = project / "tree.py"
     script.write_text(
         "import pathlib, subprocess, sys, time\n"
@@ -310,11 +342,15 @@ def test_driver_scheduler_is_project_owned_idempotent_and_reversible(project: Pa
     same = scheduler.ensure(driver_command(project), 600)
 
     assert handle == same == scheduler.handle
-    assert scheduler.launcher.is_file()
+    assert scheduler.definition.is_file()
+    definition = scheduler.definition.read_text(encoding="utf-16")
+    assert f"<Command>{sys.executable}</Command>" in definition and "driver tick" in definition  # direct exec, no cmd.exe
+    assert "--log-file" in definition
     assert calls[0][0:2] == ["schtasks", "/Create"]
-    assert calls[0][calls[0].index("/RL") + 1] == "LIMITED"
+    assert calls[0][calls[0].index("/XML") + 1] == str(scheduler.definition)
+    assert "/SC" not in calls[0] and "/TR" not in calls[0]
     scheduler.remove(handle)
-    assert not scheduler.launcher.exists()
+    assert not scheduler.definition.exists()
     with pytest.raises(DriverSchedulerError, match="another project"):
         scheduler.remove("StageMesh\\driver-not-ours")
 
@@ -327,7 +363,7 @@ def test_scheduler_query_errors_fail_closed_and_cadence_is_exact(project: Path) 
         scheduler.exists(scheduler.handle)
     with pytest.raises(DriverSchedulerError, match="whole number of minutes"):
         scheduler.ensure(driver_command(project), 90)
-    assert not scheduler.launcher.exists()
+    assert not scheduler.definition.exists()
 
 
 def test_config_is_written_atomically_inside_the_project(project: Path) -> None:
@@ -356,7 +392,7 @@ def test_failed_scheduler_install_leaves_an_inert_recoverable_configuration(
     class BrokenScheduler:
         handle = "StageMesh\\driver-test"
 
-        def ensure(self, argv, interval_seconds):
+        def ensure(self, argv, interval_seconds, execution_limit_seconds=None):
             raise DriverSchedulerError("fixture scheduler failure")
 
     monkeypatch.setattr(driver_scheduler, "default_driver_scheduler", lambda project: BrokenScheduler())
@@ -401,3 +437,104 @@ def test_uninstall_removes_only_driver_startup_and_preserves_the_ledger(
     assert removed == ["StageMesh\\driver-test"]
     assert not config_path(project).exists()
     assert (project / ".stagemesh" / "stagemesh.sqlite3").is_file()
+
+
+def test_task_definition_has_startup_recovery_power_and_bounding_behavior(project: Path) -> None:
+    from datetime import datetime
+    from xml.etree import ElementTree
+
+    from stagemesh.driver_scheduler import TASK_NAMESPACE, build_task_xml
+
+    xml = build_task_xml(
+        project / "run.cmd", 600, user_id="HOST\\owner & co", start=datetime(2026, 10, 23, 14, 0, 0), execution_limit_seconds=7200
+    )
+    root = ElementTree.fromstring(xml.split("\n", 1)[1])
+    ns = {"t": TASK_NAMESPACE}
+
+    assert root.find("t:Triggers/t:LogonTrigger/t:UserId", ns).text == "HOST\\owner & co"
+    assert root.find("t:Triggers/t:TimeTrigger/t:Repetition/t:Interval", ns).text == "PT10M"
+    assert root.find("t:Triggers/t:TimeTrigger/t:Repetition/t:StopAtDurationEnd", ns).text == "false"
+    assert root.find("t:Triggers/t:TimeTrigger/t:StartBoundary", ns).text == "2026-10-23T14:00:00"
+    settings = {child.tag.split("}")[1]: child.text for child in root.find("t:Settings", ns)}
+    assert settings["StartWhenAvailable"] == "true"
+    assert settings["DisallowStartIfOnBatteries"] == "false" and settings["StopIfGoingOnBatteries"] == "false"
+    assert settings["MultipleInstancesPolicy"] == "IgnoreNew"
+    assert settings["ExecutionTimeLimit"] == "PT120M"
+    principal = root.find("t:Principals/t:Principal", ns)
+    assert principal.find("t:RunLevel", ns).text == "LeastPrivilege"
+    assert principal.find("t:LogonType", ns).text == "InteractiveToken"
+    assert root.find("t:Actions/t:Exec/t:Command", ns).text == str(project / "run.cmd")
+    with pytest.raises(DriverSchedulerError):
+        build_task_xml(project / "run.cmd", 90, user_id="u", start=datetime(2026, 1, 1))
+
+
+def test_task_definition_can_exec_a_program_directly_with_escaped_arguments(project: Path) -> None:
+    from datetime import datetime
+    from xml.etree import ElementTree
+
+    from stagemesh.driver_scheduler import TASK_NAMESPACE, build_task_xml
+
+    xml = build_task_xml(
+        Path("C:/Python/python.exe"), 600, user_id="u", start=datetime(2026, 1, 1), arguments='-m stagemesh.cli --project "C:/a & b" driver tick'
+    )
+    root = ElementTree.fromstring(xml.split("\n", 1)[1])
+    exec_node = root.find("t:Actions/t:Exec", {"t": TASK_NAMESPACE})
+
+    assert exec_node.find("t:Arguments", {"t": TASK_NAMESPACE}).text == '-m stagemesh.cli --project "C:/a & b" driver tick'
+
+
+def test_failed_registration_leaves_no_definition_and_limit_rounds_up(project: Path) -> None:
+    from datetime import datetime
+
+    from stagemesh.driver_scheduler import build_task_xml
+
+    failing = lambda argv: subprocess.CompletedProcess(argv, 1, "", "ERROR: Access is denied.")
+    scheduler = WindowsDriverScheduler(project, runner=failing)
+
+    with pytest.raises(DriverSchedulerError, match="Access is denied"):
+        scheduler.ensure(driver_command(project), 600)
+    assert not scheduler.definition.exists() and not scheduler.definition.with_suffix(".xml.tmp").exists()
+    assert "<ExecutionTimeLimit>PT2M</ExecutionTimeLimit>" in build_task_xml(
+        Path("python.exe"), 600, user_id="u", start=datetime(2026, 1, 1), execution_limit_seconds=119
+    )
+
+
+def test_scheduler_watchdog_outlasts_the_tick_hard_timeout() -> None:
+    config = DriverConfig(project="p", window_seconds=5400)
+
+    assert continuous_driver.scheduler_limit_seconds(config) > config.window_seconds + 1800
+
+
+def test_tick_log_file_receives_the_tick_output(project: Path) -> None:
+    from stagemesh.cli import main as cli_main
+
+    save_config(project, DriverConfig(project=str(project), state="paused"))
+    log = project / ".stagemesh" / "driver" / "driver.log"
+
+    assert cli_main(["--project", str(project), "driver", "tick", "--log-file", str(log)]) == 0
+    assert "driver tick: paused" in log.read_text(encoding="utf-8")
+
+
+def test_a_dead_recorded_owner_is_cleared_even_when_it_differs_from_the_launched_process(project: Path) -> None:
+    """Windows venv launcher stub: the process Popen started is not the process that wrote the owner record."""
+    from stagemesh.continuous_driver import clear_dead_child_owner, save_child_owner
+    from stagemesh.process_identity import ProcessIdentity
+
+    launched = ProcessIdentity(pid=os.getpid(), create_time=1.0, boot_id="b", executable="launcher-stub.exe")
+    dead_real = ProcessIdentity(pid=2**22 + 12345, create_time=2.0, boot_id="b", executable="python.exe")
+    save_child_owner(project, dead_real)
+
+    assert not continuous_driver.clear_child_owner(project, launched)  # exact-identity clearing cannot succeed
+    assert clear_dead_child_owner(project)
+    assert not child_owner_path(project).exists()
+
+
+def test_a_live_recorded_owner_is_never_cleared_as_dead(project: Path) -> None:
+    from stagemesh.continuous_driver import clear_dead_child_owner, save_child_owner
+
+    live = process_identity(os.getpid())
+    assert live is not None
+    save_child_owner(project, live)
+
+    assert not clear_dead_child_owner(project)
+    assert child_owner_path(project).exists()

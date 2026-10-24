@@ -160,6 +160,40 @@ Ordered by value for reaching the gate:
     more often still ends in the typed `integration_stale_base` block and needs `retry-task`.
 12. **Supervisor settings are read from `.stagemesh/autonomy.json` only**; there is no `config.json` section or CLI flag yet.
 
+## Windows verification ledger (2026-10-23 and 2026-10-24)
+
+Labels: IMPLEMENTED (code exists), SIMULATED (fakes or Linux), LIVE_VERIFIED (real Windows, environment named), NOT_RUN.
+"Hosted Windows" is a disposable GitHub-hosted `windows-latest` runner (Python 3.11 and 3.13, a bootstrap venv and a plain
+editable venv; workflow `windows-triage.yml`, which runs only on `ci/windows-triage-*` branches and publishes junit and JSON
+evidence to `ci-evidence/<run_id>` branches). "Owner's PC" is the founder's Windows machine (Python 3.13, git 2.43.0.windows.1).
+
+| Claim | Status | Evidence |
+|---|---|---|
+| Ownership, autonomy and driver suites on a real Windows host | LIVE_VERIFIED (owner's PC) | ownership 84 passed, autonomy 67 passed, driver 19 passed and 1 failed (hard-timeout test, see below) |
+| Full suite on a real Windows host | LIVE_VERIFIED (owner's PC) | 2280 passed, 14 failed in 93 minutes; classified below; not re-run in full |
+| Task Scheduler registration from XML (logon trigger, repetition, StartWhenAvailable, battery-safe, IgnoreNew, execution limit) | LIVE_VERIFIED (hosted Windows) | `schtasks /Query /XML` round trip returned every setting, both Pythons |
+| `/Run` starts the tick; a second `/Run` while running starts nothing | LIVE_VERIFIED (hosted Windows) | `scheduler_started_the_task`, `overlap_prevented_ignore_new` |
+| `/End` and `ExecutionTimeLimit` end the task's own process only, never descendants | LIVE_VERIFIED (hosted Windows) | grandchild survived both; with a `cmd.exe` launcher the worker survived too, so the tick is now the task's direct process |
+| Temporary tasks always removed | LIVE_VERIFIED (hosted Windows) | `cleanup_verified remaining=[]` in every run |
+| `kill_process_tree` (taskkill /F /T) removes a 5-process venv tree | LIVE_VERIFIED (hosted Windows) | all four environments |
+| Hard timeout clears the durable child-owner record | LIVE_VERIFIED (hosted Windows) after a fix | defect: on a venv the parent compared its Popen identity (launcher stub) with the identity the wrapper recorded (real interpreter), so the record was never cleared and later ticks would report an orphaned owner. `clear_dead_child_owner` now clears a record whose process is proven dead. Fails before, passes after, in all four environments |
+| Logon and reboot recovery, sleep catch-up, battery behavior on the owner's PC | NOT_RUN | registered and read back on hosted Windows only |
+| Real coding-provider execution and cross-provider review | NOT_RUN | provider CLIs exist only on the owner's PC |
+| Real GitHub lifecycle on a disposable repository | NOT_RUN | no repository created |
+| Ten-task streak | NOT_RUN (0 of 10) | gate not met |
+
+### The 14 full-run failures, re-run on pre-driver main (726a74d) and the driver in four hosted environments
+
+| Class | Tests | Evidence |
+|---|---|---|
+| Demonstrated regression (fixed) | `test_hard_timeout_terminates_a_real_subprocess_tree` | fails only on the driver, original test unmodified; passes after the fix |
+| Demonstrated baseline defect (identical on main and driver) | review budget exhaustion recovery ladder, failed integration preserves candidate and worktree, python gate runtime and candidate src, continue step duration, task doctor no-progress path, both `test_queue_reconcile_*`, review clone failure message, noop after failed review | same failure on both trees in every environment; not caused by the driver; not root-caused here |
+| Demonstrated environment issue on the owner's PC | both `test_git_identity_policy` tests, `test_terminate_stop_reaps_provider_tree` child-cli case, `test_windows_interruption_cannot_inherit_source_readiness_marker` | pass on both trees in every hosted environment |
+| Unresolved | owner's-PC variant of the hard-timeout failure (sleeping grandchild alive 10 s after the kill) | does not reproduce on hosted Windows |
+
+Correction: an earlier reading counted the triage step's `success` conclusion as passing tests. That step is `continue-on-error`;
+the junit files are the evidence, and 10 of the 14 did fail there.
+
 ## Local continuous driver evidence (2026-10-23)
 
 Implementation branch: `feat/local-continuous-driver`, based on `main` at `726a74de6054f6e0e2d1bb90b73ffbc764fd1fda` (`v0.4.0`).
