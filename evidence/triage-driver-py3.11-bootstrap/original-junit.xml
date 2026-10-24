@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="1" skipped="0" tests="1" time="1.841" timestamp="2026-10-24T17:04:44.230057+00:00" hostname="runnervmdaln5"><testcase classname="tests.test_continuous_driver_original" name="test_hard_timeout_terminates_a_real_subprocess_tree" time="1.100"><failure message="AssertionError: assert not True&#10; +  where True = exists()&#10; +    where exists = WindowsPath('C:/Users/runneradmin/AppData/Local/Temp/pytest-of-runneradmin/pytest-1/test_hard_timeout_terminates_a0/.stagemesh/driver/active-window.json').exists&#10; +      where WindowsPath('C:/Users/runneradmin/AppData/Local/Temp/pytest-of-runneradmin/pytest-1/test_hard_timeout_terminates_a0/.stagemesh/driver/active-window.json') = child_owner_path(WindowsPath('C:/Users/runneradmin/AppData/Local/Temp/pytest-of-runneradmin/pytest-1/test_hard_timeout_terminates_a0'))">project = WindowsPath('C:/Users/runneradmin/AppData/Local/Temp/pytest-of-runneradmin/pytest-1/test_hard_timeout_terminates_a0')
+
+    def test_hard_timeout_terminates_a_real_subprocess_tree(project: Path) -&gt; None:
+        child_pid = project / "child.pid"
+        script = project / "tree.py"
+        script.write_text(
+            "import pathlib, subprocess, sys, time\n"
+            "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+            "pathlib.Path(sys.argv[1]).write_text(str(child.pid), encoding='utf-8')\n"
+            "time.sleep(60)\n",
+            encoding="utf-8",
+        )
+    
+        assert continuous_driver._default_runner([sys.executable, str(script), str(child_pid)], project, 1) == 124
+        assert child_pid.is_file()
+        pid = int(child_pid.read_text(encoding="utf-8"))
+        deadline = time.time() + 10
+        while process_identity(pid) is not None and time.time() &lt; deadline:
+            time.sleep(0.05)
+    
+        assert process_identity(pid) is None
+&gt;       assert not child_owner_path(project).exists()
+E       AssertionError: assert not True
+E        +  where True = exists()
+E        +    where exists = WindowsPath('C:/Users/runneradmin/AppData/Local/Temp/pytest-of-runneradmin/pytest-1/test_hard_timeout_terminates_a0/.stagemesh/driver/active-window.json').exists
+E        +      where WindowsPath('C:/Users/runneradmin/AppData/Local/Temp/pytest-of-runneradmin/pytest-1/test_hard_timeout_terminates_a0/.stagemesh/driver/active-window.json') = child_owner_path(WindowsPath('C:/Users/runneradmin/AppData/Local/Temp/pytest-of-runneradmin/pytest-1/test_hard_timeout_terminates_a0'))
+
+tests\test_continuous_driver_original.py:291: AssertionError</failure></testcase></testsuite></testsuites>

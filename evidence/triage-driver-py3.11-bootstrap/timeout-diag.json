@@ -1,0 +1,54 @@
+{
+  "python": "D:\\a\\stagemesh\\stagemesh\\tree\\.stagemesh\\tooling\\venv\\Scripts\\python.exe",
+  "return_code": 124,
+  "marker_exists": true,
+  "owner_file_exists_after": true,
+  "owner_file": "{\n  \"boot_id\": \"Windows:runnervmdaln5\",\n  \"create_time\": 1.3437335077639656e+17,\n  \"executable\": \"C:\\\\hostedtoolcache\\\\windows\\\\Python\\\\3.11.9\\\\x64\\\\python.exe\",\n  \"pid\": 6616\n}\n",
+  "calls": [
+    {
+      "t": 0.02,
+      "call": "save_child_owner",
+      "result": "WindowsPath('C:/Users/runneradmin/AppData/Local/Temp/sm-timeout-do97y42i/.stagemesh/driver/active-window.json')"
+    },
+    {
+      "t": 0.02,
+      "call": "popen_identity",
+      "result": "ProcessIdentity(pid=7864, create_time=1.3437335077633978e+17, boot_id='Windows:runnervmdaln5', executable='D:\\\\a\\\\stagemesh\\\\stagemesh\\\\tree\\\\.stagemesh\\\\tooling\\\\venv\\\\Scripts\\\\python.exe')"
+    },
+    {
+      "t": 0.02,
+      "call": "save_child_owner",
+      "result": "WindowsPath('C:/Users/runneradmin/AppData/Local/Temp/sm-timeout-do97y42i/.stagemesh/driver/active-window.json')"
+    },
+    {
+      "t": 6.08,
+      "call": "kill_process_tree",
+      "result": "True"
+    },
+    {
+      "t": 6.08,
+      "call": "process_identity",
+      "result": "None"
+    },
+    {
+      "t": 6.08,
+      "call": "classify_process",
+      "result": "'DEAD'"
+    },
+    {
+      "t": 6.08,
+      "call": "process_identity",
+      "result": "None"
+    },
+    {
+      "t": 6.08,
+      "call": "classify_process",
+      "result": "'DEAD'"
+    },
+    {
+      "t": 6.08,
+      "call": "clear_child_owner",
+      "result": "False"
+    }
+  ]
+}

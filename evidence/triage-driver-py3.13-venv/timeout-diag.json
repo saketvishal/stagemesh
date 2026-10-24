@@ -1,0 +1,54 @@
+{
+  "python": "D:\\a\\_temp\\venv\\Scripts\\python.exe",
+  "return_code": 124,
+  "marker_exists": true,
+  "owner_file_exists_after": true,
+  "owner_file": "{\n  \"boot_id\": \"Windows:runnervmdaln5\",\n  \"create_time\": 1.3437335065717701e+17,\n  \"executable\": \"C:\\\\hostedtoolcache\\\\windows\\\\Python\\\\3.13.16\\\\x64\\\\python.exe\",\n  \"pid\": 3632\n}\n",
+  "calls": [
+    {
+      "t": 0.04,
+      "call": "save_child_owner",
+      "result": "WindowsPath('C:/Users/runneradmin/AppData/Local/Temp/sm-timeout-p2n1s83r/.stagemesh/driver/active-window.json')"
+    },
+    {
+      "t": 0.04,
+      "call": "popen_identity",
+      "result": "ProcessIdentity(pid=7228, create_time=1.343733506571319e+17, boot_id='Windows:runnervmdaln5', executable='D:\\\\a\\\\_temp\\\\venv\\\\Scripts\\\\python.exe')"
+    },
+    {
+      "t": 0.05,
+      "call": "save_child_owner",
+      "result": "WindowsPath('C:/Users/runneradmin/AppData/Local/Temp/sm-timeout-p2n1s83r/.stagemesh/driver/active-window.json')"
+    },
+    {
+      "t": 6.1,
+      "call": "kill_process_tree",
+      "result": "True"
+    },
+    {
+      "t": 6.1,
+      "call": "process_identity",
+      "result": "None"
+    },
+    {
+      "t": 6.1,
+      "call": "classify_process",
+      "result": "'DEAD'"
+    },
+    {
+      "t": 6.1,
+      "call": "process_identity",
+      "result": "None"
+    },
+    {
+      "t": 6.1,
+      "call": "classify_process",
+      "result": "'DEAD'"
+    },
+    {
+      "t": 6.1,
+      "call": "clear_child_owner",
+      "result": "False"
+    }
+  ]
+}
