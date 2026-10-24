@@ -1,0 +1,55 @@
+﻿**********************
+Windows PowerShell transcript start
+Start time: 20261024190626
+Username: runnervmdaln5\runneradmin
+RunAs User: runnervmdaln5\runneradmin
+Configuration Name: 
+Machine: runnervmdaln5 (Microsoft Windows NT 10.0.26100.0)
+Host Application: C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\Users\RUNNER~1\AppData\Local\Temp\sm-native-daa7f95f\scripts\windows-acceptance\run-native-acceptance.ps1 -Work C:\Users\RUNNER~1\AppData\Local\Temp\sm-native-daa7f95f -Commit 3bd34b7e2289d1c5558176c9cf2305da55ddbd11 -EvidenceRoot D:\a\_temp\native-evidence
+Process ID: 5836
+PSVersion: 5.1.26100.33648
+PSEdition: Desktop
+PSCompatibleVersions: 1.0, 2.0, 3.0, 4.0, 5.0, 5.1.26100.33648
+BuildVersion: 10.0.26100.33648
+CLRVersion: 4.0.30319.42000
+WSManStackVersion: 3.0
+PSRemotingProtocolVersion: 2.3
+SerializationVersion: 1.1.0.1
+**********************
+[PASS] no_provider_command_overrides
+[PASS] python_3_11_or_newer C:\hostedtoolcache\windows\Python\3.13.16\x64\python.exe
+python.exe : Actual environment location may have moved due to redirects, links or junctions.
+At C:\Users\runneradmin\AppData\Local\Temp\sm-native-daa7f95f\scripts\windows-acceptance\run-native-acceptance.ps1:79 
+char:5
++     & $py -m venv $venv *> $pipLog
++     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (Actual environm...s or junctions.:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+  Requested location: "C:\Users\RUNNER~1\AppData\Local\Temp\sm-native-daa7f95f\.venv-accept\Scripts\python.exe"
+[PASS] install_stagemesh log: pip.txt
+[PASS] provider_login_state_recorded see summary.json (no model call made)
+[PASS] focused_driver_tests_on_this_host log: pytest-driver.txt
+[PASS] process_tree_diagnostic_ran evidence: diag-killtree
+[FAIL] driver_lifecycle_mock_providers exit=1 failures=[no_overlapping_run_windows]
+schtasks : ERROR: The system cannot find the file specified.
+At C:\Users\runneradmin\AppData\Local\Temp\sm-native-daa7f95f\scripts\windows-acceptance\run-native-acceptance.ps1:140 
+char:13
++             schtasks /Delete /TN $handle /F *> $null
++             ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (ERROR: The syst...file specified.:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+
+schtasks : ERROR: The system cannot find the path specified.
+At C:\Users\runneradmin\AppData\Local\Temp\sm-native-daa7f95f\scripts\windows-acceptance\run-native-acceptance.ps1:141 
+char:13
++             schtasks /Query /TN $handle *> $null
++             ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (ERROR: The syst...path specified.:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+
+
+RESULT: FAIL   evidence: D:\a\_temp\native-evidence\native-20261024-190626
+**********************
+Windows PowerShell transcript end
+End time: 20261024192043
+**********************

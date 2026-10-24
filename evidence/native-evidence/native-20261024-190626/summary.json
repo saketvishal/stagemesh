@@ -1,0 +1,63 @@
+﻿{
+    "commit":  "3bd34b7e2289d1c5558176c9cf2305da55ddbd11",
+    "started":  "2026-10-24T19:06:26.7018446+00:00",
+    "steps":  {
+                  "no_provider_command_overrides":  {
+                                                        "ok":  true,
+                                                        "detail":  ""
+                                                    },
+                  "python_3_11_or_newer":  {
+                                               "ok":  true,
+                                               "detail":  "C:\\hostedtoolcache\\windows\\Python\\3.13.16\\x64\\python.exe"
+                                           },
+                  "install_stagemesh":  {
+                                            "ok":  true,
+                                            "detail":  "log: pip.txt"
+                                        },
+                  "provider_login_state_recorded":  {
+                                                        "ok":  true,
+                                                        "detail":  "see summary.json (no model call made)"
+                                                    },
+                  "focused_driver_tests_on_this_host":  {
+                                                            "ok":  true,
+                                                            "detail":  "log: pytest-driver.txt"
+                                                        },
+                  "process_tree_diagnostic_ran":  {
+                                                      "ok":  true,
+                                                      "detail":  "evidence: diag-killtree"
+                                                  },
+                  "driver_lifecycle_mock_providers":  {
+                                                          "ok":  false,
+                                                          "detail":  "exit=1 failures=[no_overlapping_run_windows]"
+                                                      }
+              },
+    "provider_state":  {
+                           "api_key_environment_variables_present":  [
+
+                                                                     ],
+                           "stagemesh_command_overrides_present":  [
+
+                                                                   ],
+                           "claude_code":  {
+                                               "installed":  false
+                                           },
+                           "codex":  {
+                                         "installed":  false
+                                     }
+                       },
+    "cleanup":  {
+                    "task_handle":  "StageMesh\\driver-93c27e55506e",
+                    "task_removed":  true,
+                    "processes_killed":  [
+
+                                         ],
+                    "temp_removed":  true
+                },
+    "host":  {
+                 "os":  "Microsoft Windows Server 2025 Datacenter",
+                 "git":  "git version 2.56.0.windows.2",
+                 "user_is_admin":  true
+             },
+    "finished":  "2026-10-24T19:20:43.8125500+00:00",
+    "result":  "FAIL"
+}
