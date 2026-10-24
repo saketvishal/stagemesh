@@ -1,0 +1,99 @@
+{
+  "python": "D:\\a\\stagemesh\\stagemesh\\tree\\.stagemesh\\tooling\\venv\\Scripts\\python.exe",
+  "version": "3.13.16 (tags/v3.13.16:cbc944f, Sep 30 2026, 19:17:50) [MSC v.1944 64 bit (AMD64)]",
+  "started": "2026-10-24T17:08:37+0000",
+  "experiments": [
+    {
+      "name": "venv_python-kill_process_tree",
+      "exe": "D:\\a\\stagemesh\\stagemesh\\tree\\.stagemesh\\tooling\\venv\\Scripts\\python.exe",
+      "wrapper_pid": 1520,
+      "grandchild_pid": 1544,
+      "tree_before": [
+        [
+          3508,
+          "python.exe",
+          1520
+        ],
+        [
+          2656,
+          "python.exe",
+          3508
+        ],
+        [
+          7812,
+          "python.exe",
+          2656
+        ],
+        [
+          1544,
+          "python.exe",
+          7812
+        ],
+        [
+          3760,
+          "python.exe",
+          1544
+        ]
+      ],
+      "grandchild_in_tree_before": true,
+      "kill_returned": true,
+      "kill_seconds": 0.052,
+      "survivors": [],
+      "grandchild_alive_after_2s": false
+    },
+    {
+      "name": "venv_python-taskkill_verbose",
+      "error": "MemoryError()"
+    },
+    {
+      "name": "base_python-kill_process_tree",
+      "exe": "C:\\hostedtoolcache\\windows\\Python\\3.13.16\\x64\\python.exe",
+      "wrapper_pid": 840,
+      "grandchild_pid": 7924,
+      "tree_before": [
+        [
+          4104,
+          "python.exe",
+          840
+        ],
+        [
+          7924,
+          "python.exe",
+          4104
+        ]
+      ],
+      "grandchild_in_tree_before": true,
+      "kill_returned": true,
+      "kill_seconds": 0.056,
+      "survivors": [],
+      "grandchild_alive_after_2s": false
+    },
+    {
+      "name": "base_python-taskkill_verbose",
+      "exe": "C:\\hostedtoolcache\\windows\\Python\\3.13.16\\x64\\python.exe",
+      "wrapper_pid": 6916,
+      "grandchild_pid": 4056,
+      "tree_before": [
+        [
+          8052,
+          "python.exe",
+          6916
+        ],
+        [
+          4056,
+          "python.exe",
+          8052
+        ]
+      ],
+      "grandchild_in_tree_before": true,
+      "taskkill": {
+        "rc": 0,
+        "out": "SUCCESS: The process with PID 4056 (child process of PID 8052) has been terminated.\nSUCCESS: The process with PID 8052 (child process of PID 6916) has been terminated.\nSUCCESS: The process with PID 6916 (child process of PID 8536) has been terminated.\n",
+        "err": ""
+      },
+      "kill_seconds": 0.056,
+      "survivors": [],
+      "grandchild_alive_after_2s": false
+    }
+  ]
+}
