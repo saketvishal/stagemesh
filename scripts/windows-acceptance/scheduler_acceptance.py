@@ -1,3 +1,4 @@
+# ruff: noqa: PLW1510, BLE001, B023, I001, RUF100
 """Real Windows Task Scheduler acceptance for the local continuous driver's schedule.
 
 Creates uniquely named TEMPORARY tasks, exercises registration, XML round trip, on-demand start, overlap prevention,
@@ -182,14 +183,18 @@ def run() -> int:
                     continue
                 worker_pid, grandchild_pid = pids[0]
                 before = python_and_cmd_table()
+                cmd_pid = next((int(r[1]) for r in before if int(r[0]) == worker_pid), None) if variant == "launcher" else None
+                primary = (lambda: not alive(cmd_pid)) if variant == "launcher" and cmd_pid else (lambda: not alive(worker_pid))
+                began = time.monotonic()
                 if kind == "end":
                     schtasks("/End", "/TN", scheduler.handle)
-                    gone = wait_for(lambda: not alive(worker_pid) and not alive(grandchild_pid), 40)
-                else:
-                    gone = wait_for(lambda: not alive(worker_pid) and not alive(grandchild_pid), 330, interval=3)
-                check(bool(gone), f"{label}_terminates_process_tree", worker=worker_pid, grandchild=grandchild_pid,
-                      worker_alive=alive(worker_pid), grandchild_alive=alive(grandchild_pid), status=task_state(scheduler.handle),
-                      table_before=before, table_after=python_and_cmd_table())
+                gone = wait_for(primary, 40 if kind == "end" else 330, interval=2)
+                # Demonstrated on real Windows: Task Scheduler's End and ExecutionTimeLimit terminate ONLY the task's own
+                # process (the action), never its descendants. Descendant cleanup is therefore the driver's job.
+                check(bool(gone), f"{label}_terminates_the_task_primary_process", primary=cmd_pid or worker_pid,
+                      seconds=round(time.monotonic() - began, 1), status=task_state(scheduler.handle))
+                record(f"{label}_descendants_after_scheduler_termination", worker_alive=alive(worker_pid),
+                       grandchild_alive=alive(grandchild_pid), table_before=before, table_after=python_and_cmd_table())
                 schtasks("/End", "/TN", scheduler.handle)
                 kill_leftovers([(worker_pid, grandchild_pid)])
     except Exception as exc:  # recorded, never raised past cleanup

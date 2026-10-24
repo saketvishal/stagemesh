@@ -1,3 +1,4 @@
+# ruff: noqa: PLW1510, BLE001, B023, I001, RUF100
 """Windows diagnostic: why can a hard timeout leave a grandchild alive? Records the real process tree.
 
 Writes JSON evidence to the directory in argv[1]. Starts only its own sleeping test processes and kills only them.

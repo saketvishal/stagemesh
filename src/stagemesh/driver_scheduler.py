@@ -59,7 +59,9 @@ def build_task_xml(
     * `StartWhenAvailable` runs a tick that was missed while the machine slept or was off.
     * Battery power neither blocks a start nor stops a running tick, so a laptop is not silently idle.
     * `IgnoreNew` plus the driver's own project lock means a slow tick is never overlapped by the next one.
-    * `ExecutionTimeLimit` is a last-resort bound: Task Scheduler terminates the whole task process tree at the limit.
+    * `ExecutionTimeLimit` is a watchdog for a hung tick process only. Real-Windows evidence shows that Task Scheduler's
+      End and time limit terminate just the task's own process, never its descendants, so a tick that must stop its
+      `run-window` child tree does so itself (`kill_process_tree`, verified) or via `driver stop --terminate-running`.
     * Least privilege, interactive token: no stored credentials and no elevation.
     """
     if interval_seconds < 60 or interval_seconds % 60:

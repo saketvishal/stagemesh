@@ -25,6 +25,16 @@ Automatic landing remains separately gated. The driver defaults to PR-only mode.
 and still uses `run-window`'s exact-candidate, hosted-check, branch-policy and Git-lease gates. It never authorizes a protected merge,
 production change, destructive Git operation or credential change.
 
+## What Task Scheduler does and does not guarantee
+
+Measured on a real Windows Task Scheduler (hosted runner, Python 3.11 and 3.13): the XML definition registers with its logon trigger,
+10-minute repetition, `StartWhenAvailable`, battery-safe and `IgnoreNew` settings exactly as written; `schtasks /Run` starts the task and
+reports `Running`; a second `/Run` while it is running starts nothing. `schtasks /End` and the `ExecutionTimeLimit` terminate **only the
+task's own process** (`cmd.exe` for the launcher, or the program itself when executed directly). Their children and grandchildren keep
+running. The driver therefore never relies on Task Scheduler to stop provider work: the tick bounds its `run-window` child with
+`kill_process_tree`, the child's durable ownership identity makes a surviving tree visible to the next tick (which refuses to overlap it),
+and `driver stop --terminate-running` uses the verified process-tree cancellation.
+
 ## Operations
 
 ```powershell

@@ -454,3 +454,18 @@ def test_task_definition_has_startup_recovery_power_and_bounding_behavior(projec
     assert root.find("t:Actions/t:Exec/t:Command", ns).text == str(project / "run.cmd")
     with pytest.raises(DriverSchedulerError):
         build_task_xml(project / "run.cmd", 90, user_id="u", start=datetime(2026, 1, 1))
+
+
+def test_task_definition_can_exec_a_program_directly_with_escaped_arguments(project: Path) -> None:
+    from datetime import datetime
+    from xml.etree import ElementTree
+
+    from stagemesh.driver_scheduler import TASK_NAMESPACE, build_task_xml
+
+    xml = build_task_xml(
+        Path("C:/Python/python.exe"), 600, user_id="u", start=datetime(2026, 1, 1), arguments='-m stagemesh.cli --project "C:/a & b" driver tick'
+    )
+    root = ElementTree.fromstring(xml.split("\n", 1)[1])
+    exec_node = root.find("t:Actions/t:Exec", {"t": TASK_NAMESPACE})
+
+    assert exec_node.find("t:Arguments", {"t": TASK_NAMESPACE}).text == '-m stagemesh.cli --project "C:/a & b" driver tick'
