@@ -1,0 +1,2 @@
+ROOT=C:\Users\runneradmin\AppData\Local\Temp\sm-driver-accept-6jttoiyn
+TASK_HANDLE=StageMesh\driver-62ce798e6185

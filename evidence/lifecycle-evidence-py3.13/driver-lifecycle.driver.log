@@ -1,0 +1,44 @@
+driver tick: progress - run-window handled 1 task(s) and landed 0 pull request(s)
+driver tick: progress - run-window handled 1 task(s) and landed 0 pull request(s)
+driver tick: paused - driver is paused
+driver tick: paused - driver is paused
+driver tick: paused - driver is paused
+driver tick: progress - run-window handled 1 task(s) and landed 0 pull request(s)
+driver tick: progress - run-window handled 1 task(s) and landed 0 pull request(s)
+"queue admission stopped",
+  "task_limit_reached": false,
+  "tasks": [
+    {
+      "baseline_advanced": false,
+      "baseline_after": "25aa57eb356d057bb33e0719a16f879ee4445a08",
+      "baseline_before": "25aa57eb356d057bb33e0719a16f879ee4445a08",
+      "candidates": [
+        "8159607e6ca863beaced24af7fce05c10a7e6432"
+      ],
+      "final_stage": "DONE",
+      "final_status": "DONE",
+      "infrastructure_signature": null,
+      "integrated_candidate": "8159607e6ca863beaced24af7fce05c10a7e6432",
+      "integration": "PASSED",
+      "landing": "locally_integrated",
+      "outcome": "done",
+      "pr_error": null,
+      "pr_state": null,
+      "pr_url": null,
+      "ready_for_merge": false,
+      "reason": "",
+      "resumable": false,
+      "review": "PASSED",
+      "runs": 1,
+      "stop_reason": "DONE",
+      "task_id": "MOCK-5",
+      "title": "mock task 5",
+      "unblocked": false,
+      "validation": "PASSED"
+    }
+  ],
+  "time_limit_reached": false,
+  "window_id": "bc1c1f2c"
+}
+
+driver tick: blocked - queue admission stopped
