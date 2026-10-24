@@ -15,7 +15,19 @@ import sys
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 
-BILLING_ENVIRONMENT_VARIABLES = ("OPENAI_API_KEY", "CODEX_API_KEY", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
+BILLING_ENVIRONMENT_VARIABLES = (
+    "OPENAI_API_KEY",
+    "CODEX_API_KEY",
+    "AZURE_OPENAI_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_BASE_URL",
+    "OPENAI_BASE_URL",
+    "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CODE_USE_VERTEX",
+    "CLAUDE_CODE_USE_FOUNDRY",
+)
+KNOWN_CLAUDE_METHODS = frozenset({"none", "claude.ai", "oauth_token", "api_key", "api_key_helper", "third_party"})
 REAL_PROVIDER_EXECUTABLES = frozenset({"codex", "claude", "grok", "agy"})
 SUBSCRIPTION_MODES = frozenset({"claude.ai", "chatgpt_subscription"})
 _STATUS_COMMANDS = {"claude": ("claude", "auth", "status"), "codex": ("codex", "login", "status")}
@@ -44,21 +56,30 @@ def _run(argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
 
 
 def classify_claude(stdout: str, exit_code: int) -> str:
+    """Only an exit-0 report that says `claude.ai` is a subscription; every other outcome is named or fails closed."""
     try:
         payload = json.loads(stdout)
-        method = str(payload.get("authMethod") or "").strip()
-    except (ValueError, AttributeError):
+    except ValueError:
         return "not_logged_in" if exit_code != 0 else "unparsed"
-    return method or ("not_logged_in" if exit_code != 0 else "unparsed")
+    if not isinstance(payload, dict):
+        return "unparsed"
+    method = str(payload.get("authMethod") or "").strip()
+    if exit_code != 0 or payload.get("loggedIn") is False:
+        return "not_logged_in"
+    return method if method in KNOWN_CLAUDE_METHODS else "unparsed"
+
+
+_CODEX_SUBSCRIPTION = re.compile(r"^\s*logged in (?:using|with|via)\s+chatgpt\b", re.IGNORECASE | re.MULTILINE)
 
 
 def classify_codex(output: str, exit_code: int) -> str:
-    if re.search(r"api[ -]?key", output, re.IGNORECASE):
-        return "api_key"  # checked first: an API-key login is metered even if the text also says ChatGPT
-    if re.search(r"chatgpt", output, re.IGNORECASE) and exit_code == 0:
-        return "chatgpt_subscription"
-    if exit_code != 0 or re.search(r"not logged", output, re.IGNORECASE):
+    """Checked in this order so that doubt never becomes a subscription: API key, not logged in, then an exact ChatGPT line."""
+    if re.search(r"api[ _-]?key", output, re.IGNORECASE):
+        return "api_key"
+    if exit_code != 0 or re.search(r"not logged|logged out|not signed", output, re.IGNORECASE):
         return "not_logged_in"
+    if _CODEX_SUBSCRIPTION.search(output):
+        return "chatgpt_subscription"
     return "unparsed"
 
 
@@ -101,14 +122,25 @@ def billing_environment(environ: Mapping[str, str] | None = None) -> list[str]:
     return found
 
 
-def check(providers: Sequence[str] = ("claude", "codex"), *, runner: Runner = _run, environ: Mapping[str, str] | None = None) -> dict[str, object]:
-    states = [probe(name, runner) for name in providers]
+def check(
+    providers: Sequence[str] = ("claude", "codex"),
+    *,
+    runner: Runner = _run,
+    environ: Mapping[str, str] | None = None,
+    require_installed: bool = False,
+    which: Callable[[str], str | None] = shutil.which,
+) -> dict[str, object]:
+    states = [probe(name, runner, which) for name in providers]
     billing = billing_environment(environ)
     installed = [state for state in states if state.installed]
     blockers: list[str] = []
     if billing:
         blockers.append("API billing variables are set (" + ", ".join(billing) + "); unset them so subscription login is used")
     blockers.extend(f"{state.provider} is logged in as {state.auth_mode}, not a subscription" for state in installed if not state.subscription)
+    if require_installed:
+        blockers.extend(f"{state.provider} CLI is not installed" for state in states if not state.installed)
+    elif not installed:
+        blockers.append("no coding CLI (claude or codex) is installed")
     return {
         "providers": [state.to_dict() for state in states],
         "api_billing_environment": billing,

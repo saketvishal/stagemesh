@@ -1,38 +1,49 @@
 <#
 One-time installation of the PERSISTENT StageMesh driver in an isolated development project (textkit sandbox).
 
-Refuses to run unless ALL of these hold, and changes nothing before they do:
-  * the native mock-provider acceptance (run-native-acceptance.ps1) passed for exactly this commit;
+Refuses to run unless ALL of these hold, and leaves nothing behind if any fails before `driver install` succeeds:
+  * the newest native mock-provider acceptance evidence (run-native-acceptance.ps1) is PASS for exactly this commit;
   * `stagemesh provider-auth` finds BOTH coding CLIs installed and logged in with a subscription, and no API-billing
     environment variable is visible (no model call is made to find out);
   * the target directory does not exist yet.
-It then creates C:\development\stagemesh-handsoff\{runtime,textkit}, installs the pinned StageMesh into its own venv, builds the
-sandbox repo with ten real tasks and independent specs, and registers ONE Task Scheduler task through `driver install`
-(bounded windows, bounded provider calls, local integration inside the sandbox repo only, no PRs, no pushes, no deploys).
+It then creates <Base>\{runtime,textkit}, installs the pinned StageMesh into its own venv, builds the sandbox repo with ten real
+tasks and independent specs, and registers ONE Task Scheduler task through `driver install` (bounded windows, bounded provider
+calls, local integration inside the sandbox repo only, no PRs, no pushes, no deploys).
 Pause, resume, stop and uninstall are in README-handsoff.txt next to the project.
 #>
 param(
     [Parameter(Mandatory = $true)][string]$Commit,
     [string]$Source = 'https://github.com/saketvishal/stagemesh.git',
     [string]$Base = 'C:\development\stagemesh-handsoff',
-    [string]$EvidenceRoot = 'C:\development\stagemesh\main\.stagemesh\acceptance-evidence',
+    [string]$EvidenceRoot = '',
     [string]$Python = ''
 )
 $ErrorActionPreference = 'Continue'
-function Fail($message) { Write-Host "REFUSED: $message" -ForegroundColor Red; exit 1 }
-
-# 1. gate: native acceptance passed for this exact commit ---------------------------------------------------------------------
-$passed = $false
-if (Test-Path $EvidenceRoot) {
-    foreach ($dir in (Get-ChildItem $EvidenceRoot -Directory -Filter 'native-*' | Sort-Object Name -Descending)) {
-        $file = Join-Path $dir.FullName 'summary.json'
-        if (Test-Path $file) {
-            $s = Get-Content $file -Raw | ConvertFrom-Json
-            if ($s.commit -eq $Commit -and $s.result -eq 'PASS') { $passed = $true; break }
-        }
-    }
+if ($Commit -notmatch '^[0-9a-f]{40}$') { Write-Host 'REFUSED: -Commit must be a full 40-character sha'; exit 2 }
+if (-not $EvidenceRoot) {
+    $main = 'C:\development\stagemesh\main'
+    if (Test-Path $main) { $EvidenceRoot = Join-Path $main '.stagemesh\acceptance-evidence' }
+    else { $EvidenceRoot = Join-Path $env:USERPROFILE 'stagemesh-acceptance-evidence' }
 }
-if (-not $passed) { Fail "no passing native acceptance evidence for commit $Commit under $EvidenceRoot" }
+$createdBase = $false
+function Fail($message) {
+    Write-Host "REFUSED: $message" -ForegroundColor Red
+    if ($createdBase -and (Test-Path $Base)) {
+        Set-Location $env:TEMP
+        Remove-Item -Recurse -Force $Base -ErrorAction SilentlyContinue
+        Write-Host "Removed the partial $Base"
+    }
+    exit 1
+}
+
+# 1. gate: the NEWEST native acceptance evidence must be a PASS for this exact commit -----------------------------------------
+$newest = $null
+if (Test-Path $EvidenceRoot) { $newest = Get-ChildItem $EvidenceRoot -Directory -Filter 'native-*' | Sort-Object Name -Descending | Select-Object -First 1 }
+if (-not $newest) { Fail "no native acceptance evidence under $EvidenceRoot" }
+$summaryFile = Join-Path $newest.FullName 'summary.json'
+$s = $null
+if (Test-Path $summaryFile) { try { $s = Get-Content $summaryFile -Raw | ConvertFrom-Json } catch { } }
+if (-not $s -or $s.commit -ne $Commit -or $s.result -ne 'PASS') { Fail "the newest native acceptance ($($newest.Name)) is not a PASS for commit $Commit" }
 if (Test-Path $Base) { Fail "$Base already exists; refusing to reuse or overwrite it" }
 
 # 2. python ---------------------------------------------------------------------------------------------------------------------
@@ -42,46 +53,50 @@ if ($Python) { $candidates += , @($Python) }
 $candidates += , @('py', '-3.13'); $candidates += , @('py', '-3.12'); $candidates += , @('py', '-3.11'); $candidates += , @('python')
 foreach ($c in $candidates) {
     $exe = $c[0]; $rest = @(); if ($c.Count -gt 1) { $rest = $c[1..($c.Count - 1)] }
-    $out = & $exe @rest -c "import sys; print(sys.version_info >= (3, 11)); print(sys.executable)" 2>$null
-    if ($LASTEXITCODE -eq 0 -and $out -and $out[0] -eq 'True') { $py = $out[1]; break }
+    $found = & $exe @rest -c "import sys; print(sys.version_info >= (3, 11)); print(sys.executable)" 2>$null
+    if ($LASTEXITCODE -eq 0 -and $found -and $found[0] -eq 'True') { $py = $found[1]; break }
 }
 if (-not $py) { Fail 'Python 3.11 or newer was not found' }
 
-# 3. build runtime in a staging dir; only move into place after every check passed ------------------------------------------
-$stage = Join-Path $env:TEMP ("sm-handsoff-stage-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
-New-Item -ItemType Directory -Path $stage | Out-Null
-$runtime = Join-Path $stage 'runtime'
+# 3. build the runtime at its FINAL location (a venv cannot be moved) --------------------------------------------------------------
+New-Item -ItemType Directory -Path $Base | Out-Null
+$createdBase = $true
+$runtime = Join-Path $Base 'runtime'
 git init -q $runtime
 git -C $runtime fetch -q --depth 1 $Source $Commit
+if ($LASTEXITCODE -ne 0) { Fail "could not fetch $Commit from $Source" }
 git -C $runtime checkout -q FETCH_HEAD
-if ((git -C $runtime rev-parse HEAD) -ne $Commit) { Remove-Item -Recurse -Force $stage; Fail 'pinned commit mismatch' }
+if ((git -C $runtime rev-parse HEAD) -ne $Commit) { Fail 'pinned commit mismatch' }
 & $py -m venv (Join-Path $runtime '.venv')
 $vpy = Join-Path $runtime '.venv\Scripts\python.exe'
-& $vpy -m pip install --quiet --disable-pip-version-check -e $runtime
-if ($LASTEXITCODE -ne 0) { Remove-Item -Recurse -Force $stage; Fail 'pip install failed' }
+if (-not (Test-Path $vpy)) { Fail 'venv creation failed' }
+& $vpy -m pip install --quiet --disable-pip-version-check -e "${runtime}[dev]"
+if ($LASTEXITCODE -ne 0) { Fail 'pip install failed' }
 
-# 4. subscription gate (no model call) ------------------------------------------------------------------------------------------
-$auth = (& $vpy -m stagemesh.cli provider-auth --json) | ConvertFrom-Json
+# 4. subscription gate (no model call); fails closed on anything unexpected ------------------------------------------------------
+$authText = (& $vpy -m stagemesh.cli provider-auth --json --require-installed 2>$null | Out-String)
+$authExit = $LASTEXITCODE
+$auth = $null
+try { $auth = $authText | ConvertFrom-Json } catch { }
 $problems = @()
-foreach ($p in $auth.providers) {
-    if (-not $p.installed) { $problems += "$($p.provider) CLI is not installed" }
-    elseif (-not $p.subscription) { $problems += "$($p.provider) is logged in as '$($p.auth_mode)', not a subscription" }
+if (-not $auth) { $problems += 'provider-auth output was unreadable' }
+else {
+    foreach ($name in 'claude', 'codex') {
+        $p = @($auth.providers | Where-Object { $_.provider -eq $name })[0]
+        if (-not $p) { $problems += "$name state missing" }
+        elseif ($p.installed -ne $true) { $problems += "$name CLI is not installed" }
+        elseif ($p.subscription -ne $true) { $problems += "$name is logged in as '$($p.auth_mode)', not a subscription" }
+    }
+    foreach ($b in @($auth.blockers)) { $problems += "$b" }
+    if ($auth.ok -ne $true) { $problems += 'provider-auth did not report ok' }
 }
-foreach ($b in $auth.blockers) { $problems += $b }
-if ($problems.Count -gt 0) {
-    Remove-Item -Recurse -Force $stage
-    Fail ("subscription check failed: " + ($problems -join '; ') + '. No model call was made and nothing was installed.')
-}
+if ($authExit -ne 0) { $problems += "provider-auth exit code $authExit" }
+if ($problems.Count -gt 0) { Fail ("subscription check failed: " + (($problems | Select-Object -Unique) -join '; ') + '. No model call was made and nothing was installed.') }
 Write-Host 'Subscription logins verified for claude and codex (no model call made, no API billing variables set).'
 
-# 5. move into place, build the sandbox project, configure bounds ----------------------------------------------------------------
-New-Item -ItemType Directory -Path $Base | Out-Null
-Move-Item $runtime (Join-Path $Base 'runtime')
-Remove-Item -Recurse -Force $stage
-$runtime = Join-Path $Base 'runtime'
-$vpy = Join-Path $runtime '.venv\Scripts\python.exe'
+# 5. sandbox project and bounds -------------------------------------------------------------------------------------------------
 $project = Join-Path $Base 'textkit'
-& $vpy (Join-Path $runtime 'scripts\handsoff_sandbox.py') $project | Out-Null
+& $vpy (Join-Path $runtime 'scripts\handsoff_sandbox.py') $project
 if ($LASTEXITCODE -ne 0) { Fail 'sandbox creation failed (is a global git user.name/user.email configured?)' }
 $config = @{
     budgets = @{ max_provider_calls_per_task = 12; max_equivalent_failures = 3; max_provider_calls_per_window = 30 }
@@ -90,10 +105,16 @@ $config = @{
 Set-Content -Path (Join-Path $project '.stagemesh\config.json') -Value $config -Encoding UTF8
 
 # 6. register the driver (the product's own install path) ----------------------------------------------------------------------
-& $vpy -m stagemesh.cli --project $project driver install --acknowledge-provider-use --interval 10m --window-duration 40m `
-    --concurrency 1 --max-tasks 2 --max-steps-per-task 6 --max-consecutive-failures 3 --integration local --json | Out-File (Join-Path $Base 'install.json') -Encoding UTF8
-if ($LASTEXITCODE -ne 0) { Fail 'driver install failed; see output above (nothing is scheduled)' }
-$status = (& $vpy -m stagemesh.cli --project $project driver status --json) | ConvertFrom-Json
+$installOut = & $vpy -m stagemesh.cli --project $project driver install --acknowledge-provider-use --interval 10m --window-duration 40m `
+    --concurrency 1 --max-tasks 2 --max-steps-per-task 6 --max-consecutive-failures 3 --integration local --json
+$installExit = $LASTEXITCODE
+$installOut | Out-File (Join-Path $Base 'install.json') -Encoding UTF8
+if ($installExit -ne 0) {
+    & $vpy -m stagemesh.cli --project $project driver uninstall 2>$null | Out-Null
+    Fail 'driver install failed; see install.json (nothing is scheduled)'
+}
+$createdBase = $false   # from here on the installation is real and is never auto-removed
+$status = (& $vpy -m stagemesh.cli --project $project driver status --json | Out-String) | ConvertFrom-Json
 
 $cli = "`"$vpy`" -m stagemesh.cli --project `"$project`""
 @"

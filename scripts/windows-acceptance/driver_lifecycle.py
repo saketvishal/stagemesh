@@ -208,10 +208,15 @@ def run(direct: bool, tasks: int) -> int:
     try:
         assert_mock_only(project)
         print(f"ROOT={root}", flush=True)  # the native wrapper uses these two lines for guaranteed cleanup
+        handle_line = ""
         if not direct:
             from stagemesh.driver_scheduler import WindowsDriverScheduler as _Scheduler
 
-            print(f"TASK_HANDLE={_Scheduler(project).handle}", flush=True)
+            handle_line = f"TASK_HANDLE={_Scheduler(project).handle}"
+            print(handle_line, flush=True)
+        ids_file = os.environ.get("STAGEMESH_ACCEPT_IDS")
+        if ids_file:
+            Path(ids_file).write_text(f"ROOT={root}\n{handle_line}\n", encoding="utf-8")
         record("project_ready", project=str(project), mock_only=True, tasks=tasks, mode="direct" if direct else "task-scheduler")
         if direct:
             from stagemesh import continuous_driver

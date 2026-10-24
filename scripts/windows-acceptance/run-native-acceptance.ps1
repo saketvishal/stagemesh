@@ -2,14 +2,14 @@
 One-shot native Windows acceptance of the StageMesh local continuous driver, MOCK providers only.
 
 What it does (all inside a temp directory it creates and removes):
-  1. verifies the pinned commit, builds a venv, installs StageMesh and pytest;
-  2. checks provider login STATE without any model call (claude auth status, codex login status) and reports the billing risk
-     of API-key environment variables; raw output is never stored, only a classification;
+  1. builds a venv from the pinned checkout and installs StageMesh and pytest;
+  2. records provider login STATE with `stagemesh provider-auth` (no model call, only a classification is stored);
   3. runs the focused driver tests and the process-tree diagnostic on this host;
   4. runs driver_lifecycle.py: installs the REAL driver through its own `driver install` into a throw-away git project with
      mock providers, lets Task Scheduler launch the ticks, then pauses, resumes, tests overlap, kills the whole process tree,
      verifies automatic recovery, stops and uninstalls;
   5. always removes its one Task Scheduler task, its processes and its temp files, and saves evidence.
+Every external command has a time limit. PASS requires the lifecycle evidence file with zero failures AND a clean cleanup.
 It never touches other scheduled tasks, other projects, credentials or any persistent setting. No real provider is invoked.
 #>
 param(
@@ -20,6 +20,14 @@ param(
 )
 $ErrorActionPreference = 'Continue'
 $started = Get-Date
+$tempRoot = [IO.Path]::GetFullPath($env:TEMP).TrimEnd('\')
+$Work = [IO.Path]::GetFullPath($Work).TrimEnd('\')
+$workLeaf = Split-Path $Work -Leaf
+if (($Work -notlike "$tempRoot\*") -or ($workLeaf -notmatch '^sm-native-[0-9a-f]{8}$') -or ((Split-Path $Work -Parent) -ne $tempRoot)) {
+    Write-Host "REFUSED: -Work must be a directory named sm-native-<8 hex> directly under $tempRoot (got $Work)"
+    exit 2
+}
+if ($Commit -notmatch '^[0-9a-f]{40}$') { Write-Host 'REFUSED: -Commit must be a full 40-character sha'; exit 2 }
 if (-not $EvidenceRoot) {
     $main = 'C:\development\stagemesh\main'
     if (Test-Path $main) { $EvidenceRoot = Join-Path $main '.stagemesh\acceptance-evidence' }
@@ -30,119 +38,129 @@ $evidence = Join-Path $EvidenceRoot "native-$stamp"
 New-Item -ItemType Directory -Force -Path $evidence | Out-Null
 Start-Transcript -Path (Join-Path $evidence 'transcript.txt') -Force | Out-Null
 
-$summary = [ordered]@{ commit = $Commit; started = $started.ToString('o'); steps = [ordered]@{}; provider_state = [ordered]@{}; cleanup = [ordered]@{} }
+$summary = [ordered]@{ commit = $Commit; started = $started.ToString('o'); steps = [ordered]@{}; provider_state = $null; cleanup = [ordered]@{} }
 function Step($name, $ok, $detail = '') {
     $summary.steps[$name] = [ordered]@{ ok = [bool]$ok; detail = "$detail" }
     $tag = if ($ok) { 'PASS' } else { 'FAIL' }
     Write-Host "[$tag] $name $detail"
 }
-$root = $null
-$handle = $null
-$lifecycleLog = Join-Path $evidence 'lifecycle-stdout.txt'
-
-try {
-    $summary.host = [ordered]@{ os = (Get-CimInstance Win32_OperatingSystem).Caption; git = (git --version); user_is_admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) }
-
-    # --- environment that could silently change what runs or what is billed (names only, never values) ----------------------
-    $overrides = @(); $billing = @()
-    foreach ($scope in 'Process', 'User', 'Machine') {
-        $vars = [Environment]::GetEnvironmentVariables($scope)
-        foreach ($k in $vars.Keys) {
-            if ($k -match '^STAGEMESH_.*_CMD$') { $overrides += "$scope`:$k" }
-            if ($k -in 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'CODEX_API_KEY') { $billing += "$scope`:$k" }
+function Quote($s) { '"' + ($s -replace '"', '\"') + '"' }
+# Runs a program with a hard time limit; the whole process tree is killed on timeout. Returns the exit code (-1 on timeout).
+function Invoke-Bounded($label, $exe, $argList, $timeoutSeconds, $cwd) {
+    $out = Join-Path $evidence "$label.out.txt"
+    $err = Join-Path $evidence "$label.err.txt"
+    $p = Start-Process -FilePath $exe -ArgumentList ($argList | ForEach-Object { Quote $_ }) -WorkingDirectory $cwd `
+        -RedirectStandardOutput $out -RedirectStandardError $err -PassThru -NoNewWindow
+    $null = $p.Handle
+    $deadline = (Get-Date).AddSeconds($timeoutSeconds)
+    while (-not $p.WaitForExit(120000)) {
+        if ((Get-Date) -gt $deadline) {
+            taskkill /F /T /PID $p.Id *> $null
+            Write-Host "  $label timed out after $timeoutSeconds s and was killed"
+            return -1
+        }
+        Write-Host ("  {0} still running ({1:N0} s)" -f $label, ((Get-Date) - $started).TotalSeconds)
+    }
+    $p.WaitForExit()
+    return [int]$p.ExitCode
+}
+function Read-Ids($file) {
+    $ids = @{ root = $null; handle = $null }
+    if (Test-Path $file) {
+        foreach ($line in Get-Content $file -ErrorAction SilentlyContinue) {
+            if ($line -like 'ROOT=*') { $ids.root = $line.Substring(5).Trim() }
+            if ($line -like 'TASK_HANDLE=*') { $ids.handle = $line.Substring(12).Trim() }
         }
     }
-    $summary.provider_state.api_key_environment_variables_present = $billing
-    $summary.provider_state.stagemesh_command_overrides_present = $overrides
+    return $ids
+}
+
+$idsFile = Join-Path $evidence 'ids.txt'
+$lifecycleEvidence = Join-Path $evidence 'driver-lifecycle.json'
+try {
+    $summary.host = [ordered]@{ os = (Get-CimInstance Win32_OperatingSystem).Caption; git = (git --version); powershell = $PSVersionTable.PSVersion.ToString() }
+
+    $overrides = @()
+    foreach ($scope in 'Process', 'User', 'Machine') {
+        $vars = [Environment]::GetEnvironmentVariables($scope)
+        foreach ($k in $vars.Keys) { if ($k -match '^STAGEMESH_.*_CMD$') { $overrides += "${scope}:$k" } }
+    }
     if ($overrides.Count -gt 0) {
         Step 'no_provider_command_overrides' $false ("set: " + ($overrides -join ', ') + ' (unset them; the mock guard refuses to run)')
         throw 'provider command overrides present'
     }
     Step 'no_provider_command_overrides' $true
 
-    # --- python ------------------------------------------------------------------------------------------------------------
+    $head = (git -C $Work rev-parse HEAD)
+    Step 'checkout_is_pinned_commit' ($head -eq $Commit) $head
+    if ($head -ne $Commit) { throw 'checkout is not the pinned commit' }
+
     $py = $null
     $candidates = @()
     if ($Python) { $candidates += , @($Python) }
     $candidates += , @('py', '-3.13'); $candidates += , @('py', '-3.12'); $candidates += , @('py', '-3.11'); $candidates += , @('python')
     foreach ($c in $candidates) {
         $exe = $c[0]; $rest = @(); if ($c.Count -gt 1) { $rest = $c[1..($c.Count - 1)] }
-        $out = & $exe @rest -c "import sys; print(sys.version_info >= (3, 11)); print(sys.executable)" 2>$null
-        if ($LASTEXITCODE -eq 0 -and $out -and $out[0] -eq 'True') { $py = $out[1]; break }
+        $found = & $exe @rest -c "import sys; print(sys.version_info >= (3, 11)); print(sys.executable)" 2>$null
+        if ($LASTEXITCODE -eq 0 -and $found -and $found[0] -eq 'True') { $py = $found[1]; break }
     }
     if (-not $py) { Step 'python_3_11_or_newer' $false 'none found'; throw 'no python' }
     Step 'python_3_11_or_newer' $true $py
 
-    # --- venv + install ----------------------------------------------------------------------------------------------------
     $venv = Join-Path $Work '.venv-accept'
-    $pipLog = Join-Path $evidence 'pip.txt'
-    & $py -m venv $venv *> $pipLog
     $vpy = Join-Path $venv 'Scripts\python.exe'
-    & $vpy -m pip install --quiet --disable-pip-version-check -e "${Work}[dev]" *>> $pipLog
-    Step 'install_stagemesh' ($LASTEXITCODE -eq 0 -and (Test-Path $vpy)) "log: pip.txt"
-    if ($LASTEXITCODE -ne 0) { throw 'pip install failed' }
+    $code = Invoke-Bounded 'venv' $py @('-m', 'venv', $venv) 300 $Work
+    if ($code -eq 0) { $code = Invoke-Bounded 'pip' $vpy @('-m', 'pip', 'install', '--quiet', '--disable-pip-version-check', '-e', "${Work}[dev]") 900 $Work }
+    Step 'install_stagemesh' (($code -eq 0) -and (Test-Path $vpy)) 'logs: venv/pip'
+    if ($code -ne 0) { throw 'install failed' }
 
-    # --- provider LOGIN STATE only (no model call, no credential output) -----------------------------------------------------
-    function Probe($label, $exe, $arguments, $pattern) {
-        $cmd = Get-Command $exe -ErrorAction SilentlyContinue
-        if (-not $cmd) { $summary.provider_state[$label] = [ordered]@{ installed = $false }; return }
-        $text = (& $cmd.Source @arguments 2>&1 | Out-String)
-        $code = $LASTEXITCODE
-        $mode = 'unknown'
-        if ($pattern -eq 'claude') {
-            try { $j = $text | ConvertFrom-Json; $mode = "$($j.authMethod)" } catch { $mode = 'unparsed' }
-        } else {
-            if ($text -match '(?i)api[ -]?key') { $mode = 'api_key' } elseif ($text -match '(?i)chatgpt') { $mode = 'chatgpt_subscription' } elseif ($code -ne 0 -or $text -match '(?i)not logged') { $mode = 'not_logged_in' }
-        }
-        if (-not $mode) { $mode = 'unparsed' }
-        $summary.provider_state[$label] = [ordered]@{ installed = $true; exit_code = $code; auth_mode = $mode; version = ((& $cmd.Source --version 2>&1 | Out-String).Trim() -replace '[^\x20-\x7E]', '') }
-    }
-    Probe 'claude_code' 'claude' @('auth', 'status') 'claude'
-    Probe 'codex' 'codex' @('login', 'status') 'codex'
-    Step 'provider_login_state_recorded' $true 'see summary.json (no model call made)'
+    # Provider login STATE only (no model call). Exit 1 just means "not ready for real providers", which is information here.
+    $authCode = Invoke-Bounded 'provider-auth' $vpy @('-m', 'stagemesh.cli', 'provider-auth', '--json') 120 $Work
+    try { $summary.provider_state = (Get-Content (Join-Path $evidence 'provider-auth.out.txt') -Raw | ConvertFrom-Json) } catch { $summary.provider_state = "unreadable (exit $authCode)" }
+    Step 'provider_login_state_recorded' ($authCode -ne -1) 'classification only; no model call made'
 
-    # --- focused tests and the process-tree diagnostic on THIS host --------------------------------------------------------
-    Push-Location $Work
-    $testLog = Join-Path $evidence 'pytest-driver.txt'
-    & $vpy -m pytest tests/test_continuous_driver.py tests/test_driver_acceptance.py -q -p no:cacheprovider *> $testLog
-    Step 'focused_driver_tests_on_this_host' ($LASTEXITCODE -eq 0) 'log: pytest-driver.txt'
-    $diagDir = Join-Path $evidence 'diag-killtree'
-    & $vpy scripts\windows-acceptance\diag-killtree.py $diagDir *> (Join-Path $evidence 'diag-killtree-stdout.txt')
-    Step 'process_tree_diagnostic_ran' ($LASTEXITCODE -eq 0) 'evidence: diag-killtree'
+    $code = Invoke-Bounded 'pytest-driver' $vpy @('-m', 'pytest', 'tests/test_continuous_driver.py', 'tests/test_driver_acceptance.py', '-q', '-p', 'no:cacheprovider') 600 $Work
+    Step 'focused_driver_tests_on_this_host' ($code -eq 0) "exit=$code"
+    $code = Invoke-Bounded 'diag-killtree' $vpy @('scripts\windows-acceptance\diag-killtree.py', (Join-Path $evidence 'diag-killtree')) 300 $Work
+    Step 'process_tree_diagnostic_ran' ($code -eq 0) "exit=$code"
 
-    # --- the real lifecycle ------------------------------------------------------------------------------------------------
     $env:STAGEMESH_ACCEPT_DRIVER = '1'
-    $env:STAGEMESH_ACCEPT_EVIDENCE = Join-Path $evidence 'driver-lifecycle.json'
-    & $vpy scripts\windows-acceptance\driver_lifecycle.py --tasks 6 *> $lifecycleLog
-    $lifecycleExit = $LASTEXITCODE
-    Pop-Location
-    foreach ($line in Get-Content $lifecycleLog -ErrorAction SilentlyContinue) {
-        if ($line -like 'ROOT=*') { $root = $line.Substring(5).Trim() }
-        if ($line -like 'TASK_HANDLE=*') { $handle = $line.Substring(12).Trim() }
-    }
-    $failures = '?'
-    if (Test-Path $env:STAGEMESH_ACCEPT_EVIDENCE) { try { $failures = ((Get-Content $env:STAGEMESH_ACCEPT_EVIDENCE -Raw | ConvertFrom-Json).failures) -join ',' } catch { } }
-    Step 'driver_lifecycle_mock_providers' ($lifecycleExit -eq 0) "exit=$lifecycleExit failures=[$failures]"
+    $env:STAGEMESH_ACCEPT_EVIDENCE = $lifecycleEvidence
+    $env:STAGEMESH_ACCEPT_IDS = $idsFile
+    Write-Host 'Running the real Task Scheduler lifecycle (about 15 to 20 minutes). Heartbeats appear every 2 minutes.'
+    $code = Invoke-Bounded 'lifecycle' $vpy @('scripts\windows-acceptance\driver_lifecycle.py', '--tasks', '6') 2700 $Work
+    $failures = @('evidence file missing')
+    if (Test-Path $lifecycleEvidence) { try { $failures = @((Get-Content $lifecycleEvidence -Raw | ConvertFrom-Json).failures) } catch { $failures = @('evidence unreadable') } }
+    $ids = Read-Ids $idsFile
+    $ok = ($code -eq 0) -and ($failures.Count -eq 0) -and $ids.root -and $ids.handle
+    Step 'driver_lifecycle_mock_providers' $ok ("exit=$code failures=[" + ($failures -join ',') + "] ids_recorded=" + [bool]($ids.root -and $ids.handle))
 }
 catch {
     Step 'unexpected_error' $false "$($_.Exception.Message)"
 }
 finally {
-    # --- cleanup: only what this run created -----------------------------------------------------------------------------
     try {
-        if (-not $handle -and (Test-Path $lifecycleLog)) {
-            foreach ($line in Get-Content $lifecycleLog -ErrorAction SilentlyContinue) {
-                if ($line -like 'ROOT=*') { $root = $line.Substring(5).Trim() }
-                if ($line -like 'TASK_HANDLE=*') { $handle = $line.Substring(12).Trim() }
-            }
+        Set-Location $env:TEMP
+        $ids = Read-Ids $idsFile
+        $root = $ids.root; $handle = $ids.handle
+        $taskOk = $true
+        if ($handle) {
+            if ($handle -match '^StageMesh\\driver-[0-9a-zA-Z_-]+$') {
+                schtasks /Delete /TN $handle /F *> $null
+                schtasks /Query /TN $handle *> $null
+                $taskOk = ($LASTEXITCODE -ne 0)
+                $summary.cleanup.task_handle = $handle
+            } else { $taskOk = $false; $summary.cleanup.task_handle_rejected = $handle }
         }
-        if ($handle -and $handle -like 'StageMesh\driver-*') {
-            schtasks /Delete /TN $handle /F *> $null
-            schtasks /Query /TN $handle *> $null
-            $summary.cleanup.task_handle = $handle
-            $summary.cleanup.task_removed = ($LASTEXITCODE -ne 0)
+        $summary.cleanup.task_removed = $taskOk
+        $rootOk = $true
+        $needles = @($Work)
+        if ($root) {
+            $rootLeaf = Split-Path $root -Leaf
+            $rootParentLeaf = Split-Path (Split-Path $root -Parent) -Leaf
+            if (($rootLeaf -match '^sm-driver-accept-[A-Za-z0-9_]+$') -and ($rootParentLeaf -ieq (Split-Path $tempRoot -Leaf))) { $needles += $root }
+            else { $rootOk = $false; $summary.cleanup.root_rejected = $root }
         }
-        $needles = @($Work); if ($root) { $needles += $root }
         $killed = @()
         foreach ($p in (Get-CimInstance Win32_Process | Where-Object { $_.Name -in 'python.exe', 'pythonw.exe' -and $_.CommandLine -and $_.ProcessId -ne $PID })) {
             foreach ($n in $needles) {
@@ -150,19 +168,21 @@ finally {
             }
         }
         $summary.cleanup.processes_killed = $killed
-        if ($root -and (Test-Path $root)) {
-            foreach ($f in 'driver.log') { Get-ChildItem -Path $root -Recurse -Filter $f -ErrorAction SilentlyContinue | Select-Object -First 1 | ForEach-Object { Copy-Item $_.FullName (Join-Path $evidence 'tick-driver.log') -ErrorAction SilentlyContinue } }
+        Start-Sleep -Seconds 2
+        if ($rootOk -and $root -and (Test-Path $root)) {
+            Get-ChildItem -Path $root -Recurse -Filter 'driver.log' -ErrorAction SilentlyContinue | Select-Object -First 1 | ForEach-Object { Copy-Item $_.FullName (Join-Path $evidence 'tick-driver.log') -ErrorAction SilentlyContinue }
             Remove-Item -Recurse -Force $root -ErrorAction SilentlyContinue
         }
-        Set-Location $env:TEMP
         Remove-Item -Recurse -Force $Work -ErrorAction SilentlyContinue
-        $summary.cleanup.temp_removed = (-not (Test-Path $Work)) -and ((-not $root) -or (-not (Test-Path $root)))
+        $tempOk = (-not (Test-Path $Work)) -and ((-not $root) -or (-not (Test-Path $root)))
+        $summary.cleanup.temp_removed = $tempOk
+        Step 'cleanup_complete' ($taskOk -and $rootOk -and $tempOk) ("task_removed=$taskOk temp_removed=$tempOk")
     }
-    catch { $summary.cleanup.error = "$($_.Exception.Message)" }
+    catch { $summary.cleanup.error = "$($_.Exception.Message)"; Step 'cleanup_complete' $false $summary.cleanup.error }
     $summary.finished = (Get-Date).ToString('o')
-    $allOk = ($summary.steps.Values | Where-Object { -not $_.ok }).Count -eq 0
+    $allOk = (@($summary.steps.Values | Where-Object { -not $_.ok }).Count -eq 0) -and ($summary.steps.Count -ge 8)
     $summary.result = if ($allOk) { 'PASS' } else { 'FAIL' }
-    $summary | ConvertTo-Json -Depth 6 | Set-Content -Path (Join-Path $evidence 'summary.json') -Encoding UTF8
+    $summary | ConvertTo-Json -Depth 8 | Set-Content -Path (Join-Path $evidence 'summary.json') -Encoding UTF8
     Write-Host ''
     Write-Host "RESULT: $($summary.result)   evidence: $evidence"
     Stop-Transcript | Out-Null

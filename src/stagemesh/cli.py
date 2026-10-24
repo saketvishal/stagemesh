@@ -8,6 +8,7 @@ import re
 import shlex
 import sqlite3
 import sys
+import uuid
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -1131,6 +1132,22 @@ def command_driver(args: argparse.Namespace) -> int:
             return 1
 
 
+def _real_provider_auth_blockers(project: Path) -> list[str]:
+    """Why real coding CLIs may not run unattended: API billing in the environment, or a non-subscription login. Empty when fine
+    or when no real CLI is configured (mock acceptance projects). Makes no model call."""
+    from . import provider_auth
+    from .config import load_config as load_project_config
+    from .providers import adapters_from_config
+
+    configured = [
+        command for adapter in adapters_from_config(load_project_config(project)) for command in adapter.all_commands()
+    ]
+    if not provider_auth.uses_real_providers(configured):
+        return []
+    report = provider_auth.check()
+    return [] if report["ok"] else [str(item) for item in report["blockers"]]
+
+
 def _stopped_config(project: Path):
     """Mark the driver stopped. A missing or unreadable config is reported, not fatal: stop and uninstall must still remove the schedule."""
     from . import continuous_driver
@@ -1164,25 +1181,15 @@ def _command_driver(args: argparse.Namespace) -> int:
             if scheduler is None:
                 print("the local continuous driver currently supports Windows Task Scheduler only", file=sys.stderr)
                 return 2
-            from . import provider_auth
-            from .config import load_config as _load_project_config
-            from .providers import adapters_from_config
-
-            configured = [
-                command
-                for adapter in adapters_from_config(_load_project_config(project))
-                for command in adapter.all_commands()
-            ]
-            if provider_auth.uses_real_providers(configured):
-                auth = provider_auth.check()
-                if not auth["ok"]:
-                    print(
-                        "refusing persistent real-provider startup: "
-                        + "; ".join(auth["blockers"])
-                        + " (no model call was made; fix the login or the environment, then install again)",
-                        file=sys.stderr,
-                    )
-                    return 2
+            blockers = _real_provider_auth_blockers(project)
+            if blockers:
+                print(
+                    "refusing persistent real-provider startup: "
+                    + "; ".join(blockers)
+                    + " (no model call was made; fix the login or the environment, then install again)",
+                    file=sys.stderr,
+                )
+                return 2
             prepared = continuous_driver.DriverConfig(
                 project=str(project),
                 state="paused",
@@ -1215,7 +1222,16 @@ def _command_driver(args: argparse.Namespace) -> int:
             continuous_driver.install(store, project, config, handle)
             payload = {"installed": True, "handle": handle, "config": asdict(config)}
         elif args.driver_command == "tick":
-            payload = continuous_driver.run_tick(store, project).to_dict()
+            blockers = _real_provider_auth_blockers(project)
+            if blockers:  # never fall back to metered billing: stop the driver loudly and keep every task as it was
+                detail = "provider authentication blocked: " + "; ".join(blockers)
+                tick_id = uuid.uuid4().hex
+                continuous_driver.record_audit(
+                    store, continuous_driver.TICK_FINISHED, {"tick_id": tick_id, "state": "blocked", "exit_code": None, "detail": detail}
+                )
+                payload = continuous_driver.DriverTick(tick_id, "blocked", None, None, detail).to_dict()
+            else:
+                payload = continuous_driver.run_tick(store, project).to_dict()
         elif args.driver_command == "status":
             config = continuous_driver.load_config(project)
             exists = scheduler.exists(scheduler.handle) if scheduler is not None else None
@@ -1236,6 +1252,9 @@ def _command_driver(args: argparse.Namespace) -> int:
             from .parallel import request_queue_control
 
             current = continuous_driver.load_config(project)
+            blockers = _real_provider_auth_blockers(project)
+            if blockers:
+                raise continuous_driver.DriverConfigError("provider authentication blocked: " + "; ".join(blockers))
             child_state, _child_identity = continuous_driver.child_owner_state(project)
             if child_state == "ORPHANED":
                 continuous_driver.release_orphaned_child(project)
@@ -3067,7 +3086,7 @@ def command_provider_auth(args: argparse.Namespace) -> int:
     """Report coding-CLI login state and API-billing environment variables. Makes no model call; prints no credential."""
     from . import provider_auth
 
-    report = provider_auth.check()
+    report = provider_auth.check(require_installed=bool(getattr(args, "require_installed", False)))
     if args.json:
         print(json.dumps(report, indent=2, sort_keys=True))
     else:
@@ -4026,6 +4045,7 @@ def build_parser() -> argparse.ArgumentParser:
         "provider-auth", help="Check coding-CLI login state and API-billing variables without any model call"
     )
     provider_auth_parser.add_argument("--json", action="store_true")
+    provider_auth_parser.add_argument("--require-installed", action="store_true", help="Block unless both claude and codex are installed")
     provider_auth_parser.set_defaults(func=command_provider_auth)
     provider_acceptance = sub.add_parser("provider-acceptance")
     provider_acceptance.add_argument("--provider", help="Configured provider name to exercise with --live")

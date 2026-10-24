@@ -176,7 +176,8 @@ jobs:
           if ((git -C $w rev-parse HEAD) -ne $sha) { throw 'pinned commit mismatch' }
           powershell -NoProfile -ExecutionPolicy Bypass -File "$w\scripts\windows-acceptance\run-native-acceptance.ps1" -Work $w -Commit $sha -EvidenceRoot "$env:RUNNER_TEMP\native-evidence"
           $code = $LASTEXITCODE
-          Copy-Item "$env:RUNNER_TEMP\native-evidence" native-evidence -Recurse -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path native-evidence | Out-Null
+          Copy-Item "$env:RUNNER_TEMP\native-evidence\*" native-evidence -Recurse -ErrorAction SilentlyContinue
           schtasks /Query /FO CSV /NH | Select-String "StageMesh" | Out-File native-evidence\remaining-tasks.txt
           Get-Process python -ErrorAction SilentlyContinue | Out-File native-evidence\remaining-python.txt
           exit $code
