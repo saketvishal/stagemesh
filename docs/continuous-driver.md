@@ -54,8 +54,10 @@ project-owned schedule. `stop` requests the existing queue stop policy and remov
 ticks. Tick start and finish checkpoints live in the existing SQLite audit ledger. A small child wrapper owns the bounded
 `run-window`, so closing ChatGPT or losing the scheduler parent does not terminate or replay the in-flight window. The wrapper clears
 its durable process identity after a normal finish; the next tick then records deterministic recovery and lets `run-window` reconcile
-dead executions and preserved task state. A live, unverifiable or unexpectedly orphaned wrapper fails closed. Explicit `driver resume`
-can release only an owner proven dead after the operator has inspected the blocker.
+dead executions and preserved task state. The owner record names both the wrapper and the `run-window` process under it. When both are proven dead (a reboot, a logoff, or a hard
+kill of the whole tree) the next tick clears the record itself, audits `driver.owner_recovered`, and lets `run-window` reconcile task
+state, so no human step is needed. A live or unverifiable owner fails closed; so does a dead wrapper whose child was never recorded,
+which only an explicit `driver resume` releases. A dead wrapper with a live child counts as live.
 
 ## Outcomes
 
@@ -63,9 +65,20 @@ can release only an owner proven dead after the operator has inspected the block
 - `idle`: no eligible work existed. This is an observation, not a successful autonomy task and never increments the ten-task streak.
 - `blocked`: `run-window` refused or stopped; after the configured consecutive-failure budget, no provider is invoked again until an
   explicit `driver resume` records a fresh budget.
-- `busy`: another tick already owns the project; no duplicate work starts.
+- `busy`: another tick, or a still-running window, owns the project; no duplicate work starts. A busy tick never counts toward the
+  consecutive-failure budget.
 - `timeout` or `crashed`: the bounded child failed to produce a usable report. Durable coordinator state is preserved for the next
   reconciliation.
+
+## Disposable acceptance projects
+
+`driver install --integration local` makes the window integrate into the project's own local base branch and never open a PR. It
+exists so the whole lifecycle can be exercised against a throw-away repository with no GitHub remote. The default is `pr`, and a
+production project should never use `local`. `scripts/windows-acceptance/driver_lifecycle.py` installs the real driver into such a
+project with a deterministic mock provider (no model, no network), then drives repeated scheduled ticks, pause, resume, overlap
+prevention, a hard kill of the whole process tree with automatic recovery, stop and uninstall. It refuses to run unless
+`STAGEMESH_ACCEPT_DRIVER=1`, refuses if any provider command override is set, and verifies that every configured provider resolves to
+the mock before installing anything.
 
 ## Evidence boundary
 

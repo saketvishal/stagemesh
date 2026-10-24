@@ -148,9 +148,10 @@ def project_processes(project: Path) -> list[tuple[int, str]]:
     needle = str(project)
     found: list[tuple[int, str]] = []
     if sys.platform == "win32":
-        script = ("Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and $_.CommandLine.Contains('"
-                  + needle.replace("'", "''") + "') } | ForEach-Object { '{0}|{1}' -f $_.ProcessId,$_.CommandLine }")
-        out = subprocess.run(["powershell", "-NoProfile", "-Command", script], capture_output=True, text=True, timeout=60).stdout
+        script = ("Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and $_.Name -ne 'powershell.exe' -and "
+                  "$_.CommandLine.IndexOf('" + needle.replace("'", "''") + "', [StringComparison]::OrdinalIgnoreCase) -ge 0 } | "
+                  "ForEach-Object { '{0}|{1}' -f $_.ProcessId,$_.CommandLine }")
+        out = subprocess.run(["powershell", "-NoProfile", "-Command", script], capture_output=True, text=True, timeout=60, check=False).stdout
         for line in out.splitlines():
             pid, _, command = line.partition("|")
             if pid.strip().isdigit() and int(pid) != os.getpid():
@@ -169,7 +170,7 @@ def project_processes(project: Path) -> list[tuple[int, str]]:
 
 def kill_tree(pid: int) -> None:
     if sys.platform == "win32":
-        subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], capture_output=True)
+        subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], check=False, capture_output=True)
     else:
         import signal
         try:
@@ -194,7 +195,7 @@ def run(direct: bool, tasks: int) -> int:
     if not direct and sys.platform != "win32":
         print("scheduler mode needs Windows; use --direct for a dry run", file=sys.stderr)
         return 2
-    root = Path(tempfile.mkdtemp(prefix="sm-driver-accept-"))
+    root = Path(tempfile.mkdtemp(prefix="sm-driver-accept-")).resolve()  # long form: 8.3 names never match real command lines
     failures: list[str] = []
 
     def check(ok: bool, label: str, **details) -> None:

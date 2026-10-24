@@ -82,12 +82,12 @@ def python_and_cmd_table() -> list[list]:
 
 def kill_leftovers(root: Path) -> None:
     """Kill only processes whose command line points into this run's own temp directory (never by a remembered PID)."""
-    script = ("Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and $_.CommandLine.Contains('"
+    script = ("Get-CimInstance Win32_Process | Where-Object { $_.Name -ne 'powershell.exe' -and $_.CommandLine -and $_.CommandLine.Contains('"
               + str(root).replace("'", "''") + "') -and $_.ProcessId -ne $PID } | ForEach-Object { $_.ProcessId }")
     out = subprocess.run(["powershell", "-NoProfile", "-Command", script], capture_output=True, text=True, timeout=60).stdout
     for line in out.split():
         if line.isdigit() and int(line) != os.getpid():
-            subprocess.run(["taskkill", "/F", "/T", "/PID", line], capture_output=True)
+            subprocess.run(["taskkill", "/F", "/T", "/PID", line], check=False, capture_output=True)
 
 
 def sweep_stale_temp_tasks() -> list[str]:
@@ -117,7 +117,7 @@ def run() -> int:
     if os.environ.get("STAGEMESH_ACCEPT_TEMP_TASKS") != "1":
         print("refusing to create temporary scheduled tasks: set STAGEMESH_ACCEPT_TEMP_TASKS=1 to authorize this run", file=sys.stderr)
         return 2
-    root = Path(tempfile.mkdtemp(prefix="sm-accept-"))
+    root = Path(tempfile.mkdtemp(prefix="sm-accept-")).resolve()
     record("swept_stale_temp_tasks", names=sweep_stale_temp_tasks())
     project = root / "project"
     (project / ".stagemesh").mkdir(parents=True)
