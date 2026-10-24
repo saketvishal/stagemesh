@@ -143,6 +143,9 @@ def wait_for(predicate, seconds: float, label: str, interval: float = 5.0):
     return value
 
 
+PARENTS: dict[int, int] = {}  # pid -> parent pid, refreshed by each Windows project_processes call
+
+
 def project_processes(root: Path) -> list[tuple[int, str]]:
     """(pid, commandline) of processes whose command line names this run's temp root (project, mock calls file); CIM or /proc."""
     needle = str(root)
@@ -150,12 +153,15 @@ def project_processes(root: Path) -> list[tuple[int, str]]:
     if sys.platform == "win32":
         script = ("Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and $_.Name -ne 'powershell.exe' -and "
                   "$_.CommandLine.IndexOf('" + needle.replace("'", "''") + "', [StringComparison]::OrdinalIgnoreCase) -ge 0 } | "
-                  "ForEach-Object { '{0}|{1}' -f $_.ProcessId,$_.CommandLine }")
+                  "ForEach-Object { '{0}|{1}|{2}' -f $_.ProcessId,$_.ParentProcessId,$_.CommandLine }")
         out = subprocess.run(["powershell", "-NoProfile", "-Command", script], capture_output=True, text=True, timeout=60, check=False).stdout
         for line in out.splitlines():
-            pid, _, command = line.partition("|")
+            pid, _, rest = line.partition("|")
+            parent, _, command = rest.partition("|")
             if pid.strip().isdigit() and int(pid) != os.getpid():
                 found.append((int(pid), command))
+                if parent.strip().isdigit():
+                    PARENTS[int(pid)] = int(parent)
     else:
         for entry in Path("/proc").iterdir():
             if entry.name.isdigit() and int(entry.name) != os.getpid():
@@ -291,17 +297,24 @@ def run(direct: bool, tasks: int) -> int:
                 second = cli(project, "driver", "tick", "--json", timeout=60)
                 record("direct_second_tick", out=second.stdout[-300:])
             peak = 0
+            peak_sample: list = []
             deadline = time.time() + (200 if not direct else 40)
             seen_window = False
             while time.time() < deadline:
                 windows = [p for p in project_processes(root) if "run-window" in p[1] and "driver_child" not in p[1]]
+                # a venv python.exe is a launcher that starts the real interpreter as a child with the same command line:
+                # that pair is ONE run window, so only count windows whose parent is not itself a window process
+                window_pids = {p[0] for p in windows}
+                windows = [p for p in windows if PARENTS.get(p[0]) not in window_pids]
                 if windows:
                     seen_window = True
-                peak = max(peak, len(windows))
+                if len(windows) > peak:
+                    peak = len(windows)
+                    peak_sample = [(pid, PARENTS.get(pid), command[:160]) for pid, command in windows]
                 if seen_window and not windows:
                     break
                 time.sleep(3)
-            check(seen_window and peak <= 1, "no_overlapping_run_windows", peak_concurrent_windows=peak)
+            check(seen_window and peak <= 1, "no_overlapping_run_windows", peak_concurrent_windows=peak, sample=peak_sample)
             check(len([c for c in calls(calls_file)[overlap_calls:] if c["stage"] == "implement"]) <= 2, "bounded_provider_calls_during_overlap")
 
         # 5. crash recovery: kill the entire driver process tree mid-window, the next tick recovers by itself
