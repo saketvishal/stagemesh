@@ -12,6 +12,7 @@ env:
 
 jobs:
   triage:
+    if: contains(github.event.head_commit.message, '[triage]')
     name: triage (${{ matrix.tree }}, py${{ matrix.python }}, ${{ matrix.env }})
     runs-on: windows-latest
     timeout-minutes: 45
@@ -92,6 +93,7 @@ jobs:
             original-junit.xml
 
   scheduler:
+    if: contains(github.event.head_commit.message, '[triage]')
     name: real Task Scheduler acceptance (py${{ matrix.python }})
     runs-on: windows-latest
     timeout-minutes: 30
@@ -157,9 +159,36 @@ jobs:
             driver-lifecycle*
             remaining-tasks.txt
 
+  native:
+    name: native acceptance wrapper (Windows PowerShell 5.1, exact bootstrap)
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run the same bootstrap the owner runs, sourcing the commit from this checkout
+        shell: powershell
+        run: |
+          $sha = "${{ github.sha }}"
+          $w = Join-Path $env:TEMP ("sm-native-" + [guid]::NewGuid().ToString('N').Substring(0,8))
+          git init -q $w
+          git -C $w fetch -q --depth 1 $env:GITHUB_WORKSPACE $sha
+          git -C $w checkout -q FETCH_HEAD
+          if ((git -C $w rev-parse HEAD) -ne $sha) { throw 'pinned commit mismatch' }
+          powershell -NoProfile -ExecutionPolicy Bypass -File "$w\scripts\windows-acceptance\run-native-acceptance.ps1" -Work $w -Commit $sha -EvidenceRoot "$env:RUNNER_TEMP\native-evidence"
+          $code = $LASTEXITCODE
+          Copy-Item "$env:RUNNER_TEMP\native-evidence" native-evidence -Recurse -ErrorAction SilentlyContinue
+          schtasks /Query /FO CSV /NH | Select-String "StageMesh" | Out-File native-evidence\remaining-tasks.txt
+          Get-Process python -ErrorAction SilentlyContinue | Out-File native-evidence\remaining-python.txt
+          exit $code
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-evidence
+          path: native-evidence
+
   collect:
     name: collect evidence
-    needs: [triage, scheduler, lifecycle]
+    needs: [triage, scheduler, lifecycle, native]
     if: always()
     runs-on: ubuntu-latest
     permissions:
