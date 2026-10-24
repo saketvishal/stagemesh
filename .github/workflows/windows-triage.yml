@@ -25,6 +25,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           path: tools
+          fetch-depth: 0
       - uses: actions/checkout@v4
         with:
           ref: ${{ matrix.tree == 'main' && '726a74de6054f6e0e2d1bb90b73ffbc764fd1fda' || github.sha }}
@@ -69,6 +70,15 @@ jobs:
         run: |
           & $env:PYEXE tools\scripts\windows-acceptance\diag-killtree.py "$env:RUNNER_TEMP\killtree"
           Copy-Item "$env:RUNNER_TEMP\killtree\result.json" killtree-result.json -ErrorAction SilentlyContinue
+      - name: Hard-timeout deep dive (instrumented, plus the unmodified original test)
+        if: matrix.tree == 'driver'
+        shell: pwsh
+        working-directory: tree
+        continue-on-error: true
+        run: |
+          & $env:PYEXE ..\tools\scripts\windows-acceptance\diag-timeout.py ..\timeout-diag.json
+          git -C ..\tools show d0d833d:tests/test_continuous_driver.py | Out-File -Encoding utf8 tests\test_continuous_driver_original.py
+          & $env:PYEXE -m pytest -p no:cacheprovider -q -rf tests/test_continuous_driver_original.py -k hard_timeout --junitxml=..\original-junit.xml 2>&1 | Tee-Object -FilePath ..\original.log
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -77,6 +87,9 @@ jobs:
             triage.log
             triage-junit.xml
             killtree-result.json
+            timeout-diag.json
+            original.log
+            original-junit.xml
 
   scheduler:
     name: real Task Scheduler acceptance (py${{ matrix.python }})
