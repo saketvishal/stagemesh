@@ -711,3 +711,55 @@ def test_tick_stays_blocked_for_a_dead_wrapper_with_no_recorded_child(project: P
     result = run_tick(store, project, runner=lambda *_: pytest.fail("started without proof the child is gone"))
 
     assert result.state == "blocked" and child_owner_path(project).is_file()
+
+
+def test_driver_child_interrupt_kills_the_window_and_clears_its_record(project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from stagemesh import driver_child
+
+    started: list[subprocess.Popen] = []
+    real_popen = subprocess.Popen
+
+    class InterruptedPopen(real_popen):  # type: ignore[misc, valid-type]
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            started.append(self)
+            self._interrupt = True
+
+        def wait(self, timeout=None):
+            if self._interrupt:
+                self._interrupt = False
+                raise KeyboardInterrupt
+            return super().wait(timeout)
+
+    monkeypatch.setattr(driver_child.subprocess, "Popen", InterruptedPopen)
+    with pytest.raises(KeyboardInterrupt):
+        driver_child.main([str(project), sys.executable, "-c", "import time; time.sleep(60)"])
+
+    assert started and started[0].poll() is not None  # the window did not survive the interrupt
+    assert not child_owner_path(project).exists()
+
+
+def test_malformed_child_record_is_unknown_not_a_crash(project: Path) -> None:
+    child_owner_path(project).parent.mkdir(parents=True, exist_ok=True)
+    wrapper = subprocess.Popen([sys.executable, "-c", "pass"])
+    identity = popen_identity(wrapper)
+    wrapper.wait(timeout=30)
+    from dataclasses import asdict
+
+    child_owner_path(project).write_text(json.dumps({**asdict(identity), "child": {"pid": "oops", "create_time": 1}}), encoding="utf-8")
+
+    assert continuous_driver.child_owner_state(project)[0] == "UNKNOWN"
+    assert continuous_driver.clear_dead_child_owner(project) is False
+
+
+def test_scheduler_exists_matches_the_exact_task_name_only(tmp_path: Path) -> None:
+    scheduler = WindowsDriverScheduler(tmp_path)
+    handle = scheduler.handle
+
+    def runner(argv):
+        if "/TN" in argv:
+            return subprocess.CompletedProcess(argv, 1, "", "")
+        listing = f'"\\\\{handle}-old","N/A","Ready"\n"\\\\Other\\\\{handle}","N/A","Ready"\n'
+        return subprocess.CompletedProcess(argv, 0, listing, "")
+
+    assert WindowsDriverScheduler(tmp_path, runner=runner).exists(handle) is False

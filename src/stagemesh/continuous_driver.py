@@ -188,9 +188,11 @@ def child_owner_state(project: Path) -> tuple[str | None, ProcessIdentity | None
                 boot_id=recorded.get("boot_id"),
                 executable=recorded.get("executable"),
             )
-        except (AttributeError, TypeError, ValueError):
+            if isinstance(child.pid, bool) or not isinstance(child.pid, int):
+                return "UNKNOWN", identity
+            child_state = classify_process(child, process_identity(child.pid))
+        except (AttributeError, TypeError, ValueError, OSError):
             return "UNKNOWN", identity
-        child_state = classify_process(child, process_identity(child.pid))
         if child_state != "DEAD":
             return child_state, identity  # the wrapper is gone but the run-window it started is not
     return "ORPHANED", identity

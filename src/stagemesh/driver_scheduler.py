@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import hashlib
 import os
 import subprocess
@@ -196,7 +197,8 @@ class WindowsDriverScheduler:
         if listed.returncode != 0:
             detail = (listed.stderr or listed.stdout or queried.stderr or queried.stdout).strip()
             raise DriverSchedulerError(f"could not query the local driver schedule: {detail[-300:] or 'unknown error'}")
-        return ("\\" + handle).casefold() in listed.stdout.casefold()
+        wanted = ("\\" + handle).casefold()
+        return any(row and row[0].strip().casefold() == wanted for row in csv.reader(listed.stdout.splitlines()))
 
 
 def default_driver_scheduler(project: Path) -> DriverScheduler | None:

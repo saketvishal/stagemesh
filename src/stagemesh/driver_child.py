@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 from .continuous_driver import clear_child_owner, save_child_owner
+from .execution import kill_process_tree
 from .process_identity import owner_identity, process_identity
 
 
@@ -25,7 +26,12 @@ def main(argv: list[str] | None = None) -> int:
             save_child_owner(project, identity, process_identity(process.pid))
         except OSError:
             pass  # the wrapper record already exists; the child identity only tightens ownership
-        return process.wait()
+        try:
+            return process.wait()
+        except BaseException:
+            kill_process_tree(process)  # subprocess.run did this for us; an interrupt must not orphan a running window
+            process.wait()
+            raise
     finally:
         try:
             clear_child_owner(project, identity, allow_live=True)

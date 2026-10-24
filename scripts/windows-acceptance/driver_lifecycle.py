@@ -143,9 +143,9 @@ def wait_for(predicate, seconds: float, label: str, interval: float = 5.0):
     return value
 
 
-def project_processes(project: Path) -> list[tuple[int, str]]:
-    """(pid, commandline) of processes whose command line names this project; Windows via CIM, else /proc."""
-    needle = str(project)
+def project_processes(root: Path) -> list[tuple[int, str]]:
+    """(pid, commandline) of processes whose command line names this run's temp root (project, mock calls file); CIM or /proc."""
+    needle = str(root)
     found: list[tuple[int, str]] = []
     if sys.platform == "win32":
         script = ("Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and $_.Name -ne 'powershell.exe' -and "
@@ -284,7 +284,7 @@ def run(direct: bool, tasks: int) -> int:
             deadline = time.time() + (200 if not direct else 40)
             seen_window = False
             while time.time() < deadline:
-                windows = [p for p in project_processes(project) if "run-window" in p[1] and "driver_child" not in p[1]]
+                windows = [p for p in project_processes(root) if "run-window" in p[1] and "driver_child" not in p[1]]
                 if windows:
                     seen_window = True
                 peak = max(peak, len(windows))
@@ -303,18 +303,24 @@ def run(direct: bool, tasks: int) -> int:
                 import threading
                 threading.Thread(target=tick_now, daemon=True).start()
             wait_for(lambda: len(calls(calls_file)) > started, 240, "window_started_for_crash", 2)
-            victims = project_processes(project)
+            victims = project_processes(root)
             record("killing_process_tree", processes=[(p, c[:120]) for p, c in victims])
             for pid, _command in victims:
                 kill_tree(pid)
             time.sleep(3)
-            check(not [p for p in project_processes(project) if "run-window" in p[1]], "tree_fully_killed")
+            survivors = [p for p in project_processes(root) if "run-window" in p[1] or "mock_provider" in p[1]]
+            check(not survivors, "tree_fully_killed", survivors=[(pid, c[:100]) for pid, c in survivors])
             write_providers(project, calls_file)
             done_before = len(tasks_done(project))
             reached = wait_for(lambda: (tick_now() or len(tasks_done(project)) > done_before), 420 if not direct else 90, "recovery_progress", 20 if not direct else 1)
             check(bool(reached), "recovered_after_crash_and_continued", done=tasks_done(project))
-            owner = project / ".stagemesh" / "driver" / "active-window.json"
-            check(not owner.exists() or reached, "no_stale_owner_blocks_progress", owner_exists=owner.exists())
+            audit_types = {e["event_type"] for e in ticks(project)}
+            recovery_states = {f.get("state") for f in finished(project)}
+            check(
+                "recovered_after_crash" in recovery_states or "driver.owner_recovered" in audit_types,
+                "recovery_was_audited",
+                states=sorted(map(str, recovery_states)),
+            )
         states = [f.get("state") for f in finished(project)]
         record("tick_history", states=states, done=tasks_done(project), calls=len(calls(calls_file)))
         done = tasks_done(project)
@@ -332,7 +338,7 @@ def run(direct: bool, tasks: int) -> int:
         un = cli(project, "driver", "uninstall", "--reason", "acceptance uninstall", "--json")
         check(un.returncode == 0, "uninstall_command", out=un.stdout[-300:], err=un.stderr[-200:])
         check((project / ".stagemesh" / "stagemesh.sqlite3").is_file(), "ledger_preserved_after_uninstall")
-        check(not [p for p in project_processes(project)], "no_project_processes_remain", left=project_processes(project)[:3])
+        check(not [p for p in project_processes(root)], "no_project_processes_remain", left=project_processes(root)[:3])
     finally:
         if not direct:
             try:
@@ -345,7 +351,7 @@ def run(direct: bool, tasks: int) -> int:
                 record("cleanup_verified", schedule_exists=scheduler.exists(scheduler.handle))
             except Exception as exc:  # noqa: BLE001 -- cleanup must report, never mask the result
                 record("cleanup_error", error=str(exc))
-        for pid, _command in project_processes(project):
+        for pid, _command in project_processes(root):
             kill_tree(pid)
         out = os.environ.get("STAGEMESH_ACCEPT_EVIDENCE")
         payload = {"failures": failures, "evidence": EVIDENCE}
