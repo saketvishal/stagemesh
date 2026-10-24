@@ -1,0 +1,183 @@
+{
+  "failures": [
+    "end_terminates_process_tree",
+    "restart_starts_a_new_process",
+    "execution_time_limit_terminates_tree"
+  ],
+  "evidence": [
+    {
+      "t": "2026-10-24T16:28:21.695858+00:00",
+      "step": "environment",
+      "platform": "win32",
+      "python": "3.11.9 (tags/v3.11.9:de54cf5, Apr  2 2024, 10:12:12) [MSC v.1938 64 bit (AMD64)]",
+      "executable": "C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\python.exe"
+    },
+    {
+      "t": "2026-10-24T16:28:21.767840+00:00",
+      "step": "created",
+      "task": "StageMesh\\accept-5871daa0e2",
+      "python": "3.11.9",
+      "limit_seconds": 7200
+    },
+    {
+      "t": "2026-10-24T16:28:21.784959+00:00",
+      "step": "registered_task_exists",
+      "ok": true,
+      "task": "StageMesh\\accept-5871daa0e2"
+    },
+    {
+      "t": "2026-10-24T16:28:21.800839+00:00",
+      "step": "xml_round_trip_query",
+      "ok": true,
+      "rc": 0
+    },
+    {
+      "t": "2026-10-24T16:28:21.800839+00:00",
+      "step": "logon_trigger_registered",
+      "ok": true
+    },
+    {
+      "t": "2026-10-24T16:28:21.800839+00:00",
+      "step": "repetition_registered",
+      "ok": true
+    },
+    {
+      "t": "2026-10-24T16:28:21.800839+00:00",
+      "step": "start_when_available_registered",
+      "ok": true
+    },
+    {
+      "t": "2026-10-24T16:28:21.800839+00:00",
+      "step": "battery_start_allowed_registered",
+      "ok": true
+    },
+    {
+      "t": "2026-10-24T16:28:21.800839+00:00",
+      "step": "battery_stop_disabled_registered",
+      "ok": true
+    },
+    {
+      "t": "2026-10-24T16:28:21.800839+00:00",
+      "step": "ignore_new_registered",
+      "ok": true
+    },
+    {
+      "t": "2026-10-24T16:28:21.800839+00:00",
+      "step": "time_limit_registered",
+      "ok": true,
+      "value": "PT2H"
+    },
+    {
+      "t": "2026-10-24T16:28:21.816741+00:00",
+      "step": "run_on_demand",
+      "rc": 0
+    },
+    {
+      "t": "2026-10-24T16:28:22.859137+00:00",
+      "step": "scheduler_started_the_task",
+      "ok": true,
+      "pids": [
+        [
+          5428,
+          2436
+        ]
+      ],
+      "status": "Running"
+    },
+    {
+      "t": "2026-10-24T16:28:22.943277+00:00",
+      "step": "status_running",
+      "ok": true,
+      "status": "Running"
+    },
+    {
+      "t": "2026-10-24T16:28:37.960141+00:00",
+      "step": "overlap_prevented_ignore_new",
+      "ok": true,
+      "rc": 0,
+      "starts": 1
+    },
+    {
+      "t": "2026-10-24T16:29:08.470824+00:00",
+      "step": "end_terminates_process_tree",
+      "ok": false,
+      "end_rc": 0,
+      "worker": 5428,
+      "grandchild": 2436,
+      "worker_alive": true,
+      "grandchild_alive": true
+    },
+    {
+      "t": "2026-10-24T16:29:08.486715+00:00",
+      "step": "restart",
+      "rc": 0
+    },
+    {
+      "t": "2026-10-24T16:31:08.566888+00:00",
+      "step": "restart_starts_a_new_process",
+      "ok": false,
+      "pids": false
+    },
+    {
+      "t": "2026-10-24T16:31:08.612687+00:00",
+      "step": "created",
+      "task": "StageMesh\\accept-478e24ddeb",
+      "python": "3.11.9",
+      "limit_seconds": 60
+    },
+    {
+      "t": "2026-10-24T16:31:09.628436+00:00",
+      "step": "limited_task_started",
+      "ok": true,
+      "pids": [
+        [
+          8028,
+          7728
+        ]
+      ]
+    },
+    {
+      "t": "2026-10-24T16:35:11.233891+00:00",
+      "step": "execution_time_limit_terminates_tree",
+      "ok": false,
+      "worker": 8028,
+      "grandchild": 7728,
+      "worker_alive": true,
+      "grandchild_alive": true
+    },
+    {
+      "t": "2026-10-24T16:35:11.263633+00:00",
+      "step": "removed",
+      "task": "StageMesh\\accept-5871daa0e2",
+      "exists_after": false
+    },
+    {
+      "t": "2026-10-24T16:35:11.293407+00:00",
+      "step": "removed",
+      "task": "StageMesh\\accept-478e24ddeb",
+      "exists_after": false
+    },
+    {
+      "t": "2026-10-24T16:35:11.319378+00:00",
+      "step": "cleanup_verified",
+      "remaining": []
+    },
+    {
+      "t": "2026-10-24T16:35:11.321402+00:00",
+      "step": "worker_log",
+      "file": "limited.log",
+      "lines": [
+        "2026-10-24T16:31:08.825618+00:00 start pid=8028 grandchild=7728"
+      ]
+    },
+    {
+      "t": "2026-10-24T16:35:11.321402+00:00",
+      "step": "worker_log",
+      "file": "main.log",
+      "lines": [
+        "2026-10-24T16:28:22.077509+00:00 start pid=5428 grandchild=2436",
+        "2026-10-24T16:33:22.079524+00:00 end pid=5428"
+      ]
+    }
+  ]
+}
