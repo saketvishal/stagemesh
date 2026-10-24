@@ -1,0 +1,197 @@
+{
+  "failures": [],
+  "evidence": [
+    {
+      "step": "project_ready",
+      "at": 1792867295.4411724,
+      "project": "C:\\Users\\runneradmin\\AppData\\Local\\Temp\\sm-driver-accept-1d40jldh\\project",
+      "mock_only": true,
+      "tasks": 6,
+      "mode": "task-scheduler"
+    },
+    {
+      "step": "install",
+      "at": 1792867295.969884,
+      "rc": 0,
+      "out": "urrency\": 1,\n    \"integration\": \"local\",\n    \"interval_seconds\": 60,\n    \"max_consecutive_failures\": 3,\n    \"max_steps_per_task\": 8,\n    \"max_tasks\": 1,\n    \"project\": \"C:\\\\Users\\\\runneradmin\\\\AppData\\\\Local\\\\Temp\\\\sm-driver-accept-1d40jldh\\\\project\",\n    \"state\": \"running\",\n    \"strict_live\": false,\n    \"window_seconds\": 90\n  },\n  \"handle\": \"StageMesh\\\\driver-a2076d3821e1\",\n  \"installed\": true\n}\n",
+      "err": ""
+    },
+    {
+      "step": "PASS driver_installed",
+      "at": 1792867295.969884
+    },
+    {
+      "step": "PASS schedule_registered",
+      "at": 1792867295.9918816
+    },
+    {
+      "step": "PASS repeated_execution_completes_tasks",
+      "at": 1792867436.0199695,
+      "done": [
+        "MOCK-1",
+        "MOCK-2"
+      ],
+      "ticks": 2
+    },
+    {
+      "step": "PASS mock_provider_ran_implement_and_independent_review",
+      "at": 1792867436.0199695,
+      "stages": [
+        "implement",
+        "review",
+        "implement",
+        "review"
+      ]
+    },
+    {
+      "step": "PASS pause_command",
+      "at": 1792867436.4425535,
+      "out": "\\\\.stagemesh\\\\driver\\\\reports\\\\cf2181ac0c304084b2c73bf377ce3c64.json\",\n    \"state\": \"progress\",\n    \"tick_id\": \"cf2181ac0c304084b2c73bf377ce3c64\"\n  },\n  \"schedule_exists\": true,\n  \"state\": \"paused\"\n}\n",
+      "err": ""
+    },
+    {
+      "step": "PASS paused_driver_makes_no_provider_calls",
+      "at": 1792867636.4447284,
+      "before": 4,
+      "after": 4
+    },
+    {
+      "step": "PASS resume_command",
+      "at": 1792867636.9105327,
+      "out": "\\.stagemesh\\\\driver\\\\reports\\\\cf2181ac0c304084b2c73bf377ce3c64.json\",\n    \"state\": \"progress\",\n    \"tick_id\": \"cf2181ac0c304084b2c73bf377ce3c64\"\n  },\n  \"schedule_exists\": true,\n  \"state\": \"running\"\n}\n",
+      "err": ""
+    },
+    {
+      "step": "PASS resume_continues_work",
+      "at": 1792867716.9256768,
+      "done": [
+        "MOCK-1",
+        "MOCK-2",
+        "MOCK-3"
+      ]
+    },
+    {
+      "step": "PASS no_overlapping_run_windows",
+      "at": 1792867908.473478,
+      "peak_concurrent_windows": 1
+    },
+    {
+      "step": "PASS bounded_provider_calls_during_overlap",
+      "at": 1792867908.473478
+    },
+    {
+      "step": "killing_process_tree",
+      "at": 1792867942.8406315,
+      "processes": [
+        [
+          2152,
+          "\"C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\python.exe\" -m stagemesh.cli --project C:\\Users\\runneradmin\\AppData\\Local\\"
+        ],
+        [
+          5632,
+          "C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\python.exe -m stagemesh.driver_child C:\\Users\\runneradmin\\AppData\\Local\\Tem"
+        ],
+        [
+          3396,
+          "C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\python.exe -m stagemesh.cli --project C:\\Users\\runneradmin\\AppData\\Local\\Te"
+        ],
+        [
+          6596,
+          "C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\python.exe -c \"import sys; from stagemesh.cli import main; sys.exit(main(sy"
+        ],
+        [
+          1624,
+          "C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\python.exe D:\\a\\stagemesh\\stagemesh\\scripts\\windows-acceptance\\mock_provide"
+        ]
+      ]
+    },
+    {
+      "step": "PASS tree_fully_killed",
+      "at": 1792867946.505837,
+      "survivors": []
+    },
+    {
+      "step": "PASS recovered_after_crash_and_continued",
+      "at": 1792868006.5446174,
+      "done": [
+        "MOCK-1",
+        "MOCK-2",
+        "MOCK-3",
+        "MOCK-4",
+        "MOCK-5"
+      ]
+    },
+    {
+      "step": "PASS recovery_was_audited",
+      "at": 1792868006.54942,
+      "states": [
+        "progress",
+        "recovered_after_crash"
+      ]
+    },
+    {
+      "step": "tick_history",
+      "at": 1792868006.5527015,
+      "states": [
+        "progress",
+        "progress",
+        "progress",
+        "progress",
+        "recovered_after_crash"
+      ],
+      "done": [
+        "MOCK-1",
+        "MOCK-2",
+        "MOCK-3",
+        "MOCK-4",
+        "MOCK-5"
+      ],
+      "calls": 11
+    },
+    {
+      "step": "PASS no_task_completed_twice",
+      "at": 1792868006.5534623,
+      "done": [
+        "MOCK-1",
+        "MOCK-2",
+        "MOCK-3",
+        "MOCK-4",
+        "MOCK-5"
+      ]
+    },
+    {
+      "step": "PASS stop_command",
+      "at": 1792868007.0632162,
+      "out": "recovered_by_tick\": \"2e3dcb5fce9c4f5088c591a7c094f2c8\",\n    \"state\": \"recovered_after_crash\",\n    \"tick_id\": \"85367ac79bda48bba7c503772ebf65ef\"\n  },\n  \"schedule_exists\": false,\n  \"state\": \"stopped\"\n}\n",
+      "err": ""
+    },
+    {
+      "step": "PASS schedule_removed_by_stop",
+      "at": 1792868007.9974933
+    },
+    {
+      "step": "PASS stopped_driver_makes_no_provider_calls",
+      "at": 1792868085.0005028
+    },
+    {
+      "step": "PASS uninstall_command",
+      "at": 1792868086.244519,
+      "out": "ve_failures\": 3,\n    \"max_steps_per_task\": 8,\n    \"max_tasks\": 1,\n    \"project\": \"C:\\\\Users\\\\runneradmin\\\\AppData\\\\Local\\\\Temp\\\\sm-driver-accept-1d40jldh\\\\project\",\n    \"state\": \"stopped\",\n    \"strict_live\": false,\n    \"window_seconds\": 90\n  },\n  \"schedule_exists\": false,\n  \"state\": \"uninstalled\"\n}\n",
+      "err": ""
+    },
+    {
+      "step": "PASS ledger_preserved_after_uninstall",
+      "at": 1792868086.244519
+    },
+    {
+      "step": "PASS no_project_processes_remain",
+      "at": 1792868086.9862568,
+      "left": []
+    },
+    {
+      "step": "cleanup_verified",
+      "at": 1792868088.639404,
+      "schedule_exists": false
+    }
+  ]
+}
