@@ -70,7 +70,9 @@ StageMesh is being extended so a founder can give only `Implement objective X.` 
 base movement and recovery handled by deterministic, typed, evidence-backed policy instead of operator instructions. The gate, the
 capabilities, the incident scenarios enforced by tests, the remaining gaps and the ten-task streak live in one canonical document:
 [docs/founder-hands-off.md](docs/founder-hands-off.md). The supervisor is opt-in per project (`.stagemesh/autonomy.json`) and is
-inspected with `stagemesh autonomy isolation | trace | streak | readiness`.
+inspected with `stagemesh autonomy isolation | trace | streak | readiness`. For explicitly authorized Windows-local continuous
+operation, the reversible Task Scheduler supervisor is documented in [docs/continuous-driver.md](docs/continuous-driver.md); it wraps
+the existing bounded `run-window` path and is never installed implicitly.
 
 ## Provider pools and task isolation
 
