@@ -106,3 +106,26 @@ jobs:
         with:
           name: scheduler-evidence-py${{ matrix.python }}
           path: scheduler-evidence.json
+
+  collect:
+    name: collect evidence
+    needs: [triage, scheduler]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: evidence
+      - name: Publish evidence to a non-protected evidence branch
+        run: |
+          set -e
+          mkdir -p "$RUNNER_TEMP/out" && cp -r evidence/. "$RUNNER_TEMP/out/"
+          git checkout -q --orphan "evidence-${{ github.run_id }}"
+          git rm -rfq .
+          mkdir -p evidence && cp -r "$RUNNER_TEMP/out/." evidence/
+          git add evidence
+          git -c user.name="Vishal Singh" -c user.email="20689561+saketvishal@users.noreply.github.com" commit -qm "Windows triage evidence for run ${{ github.run_id }} (source ${{ github.sha }})"
+          git push -q origin "HEAD:refs/heads/ci-evidence/${{ github.run_id }}"
