@@ -51,6 +51,7 @@ def build_task_xml(
     user_id: str,
     start: datetime,
     execution_limit_seconds: int = DEFAULT_EXECUTION_LIMIT_SECONDS,
+    arguments: str | None = None,
 ) -> str:
     """Task Scheduler definition with the reliability behavior `schtasks /SC MINUTE` cannot express.
 
@@ -92,7 +93,9 @@ def build_task_xml(
         f"    <ExecutionTimeLimit>PT{execution_limit_seconds // 60}M</ExecutionTimeLimit>\n"
         "  </Settings>\n"
         '  <Actions Context="Author"><Exec>'
-        f"<Command>{escape(str(launcher))}</Command></Exec></Actions>\n"
+        f"<Command>{escape(str(launcher))}</Command>"
+        + (f"<Arguments>{escape(arguments)}</Arguments>" if arguments else "")
+        + "</Exec></Actions>\n"
         "</Task>\n"
     )
 

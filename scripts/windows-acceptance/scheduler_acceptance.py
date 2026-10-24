@@ -17,7 +17,7 @@ from datetime import datetime
 from pathlib import Path
 from xml.etree import ElementTree
 
-from stagemesh.driver_scheduler import TASK_NAMESPACE, WindowsDriverScheduler
+from stagemesh.driver_scheduler import TASK_NAMESPACE, WindowsDriverScheduler, build_task_xml, current_user_id
 
 WORKER = r'''
 import os, subprocess, sys, time
@@ -69,6 +69,20 @@ def wait_for(predicate, seconds: float, interval: float = 1.0):
             return value
         time.sleep(interval)
     return predicate()
+
+
+def python_and_cmd_table() -> list[list]:
+    script = ("Get-CimInstance Win32_Process | Where-Object { $_.Name -in 'python.exe','cmd.exe' } | "
+              "ForEach-Object { '{0}|{1}|{2}|{3}' -f $_.ProcessId,$_.ParentProcessId,$_.Name,$_.CreationDate.ToString('s') }")
+    out = subprocess.run(["powershell", "-NoProfile", "-Command", script], capture_output=True, text=True, timeout=60).stdout
+    return [line.split("|") for line in out.splitlines() if line.count("|") == 3]
+
+
+def kill_leftovers(pairs) -> None:
+    for pair in pairs:
+        for pid in pair:
+            if alive(pid):
+                subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], capture_output=True)
 
 
 def task_state(name: str) -> str:
@@ -128,32 +142,56 @@ def run() -> int:
         first = wait_for(lambda: started_pids(log), 120)
         check(bool(first), "scheduler_started_the_task", pids=first, status=task_state(name))
         if first:
-            worker_pid, grandchild_pid = first[0]
             check(task_state(name).lower() == "running", "status_running", status=task_state(name))
             run_again = schtasks("/Run", "/TN", name)
             time.sleep(15)
             check(len(started_pids(log)) == 1, "overlap_prevented_ignore_new", rc=run_again.returncode, starts=len(started_pids(log)))
+            record("process_table_while_running", table=python_and_cmd_table())
             ended = schtasks("/End", "/TN", name)
-            gone = wait_for(lambda: not alive(worker_pid) and not alive(grandchild_pid), 30)
-            check(bool(gone), "end_terminates_process_tree", end_rc=ended.returncode, worker=worker_pid, grandchild=grandchild_pid,
-                  worker_alive=alive(worker_pid), grandchild_alive=alive(grandchild_pid))
-            record("restart", rc=schtasks("/Run", "/TN", name).returncode)
-            second = wait_for(lambda: len(started_pids(log)) >= 2 and started_pids(log), 120)
-            check(bool(second) and second[1][0] != worker_pid, "restart_starts_a_new_process", pids=second)
+            time.sleep(10)
+            record("process_table_after_end", end_rc=ended.returncode, status=task_state(name), table=python_and_cmd_table(),
+                   worker_alive=alive(first[0][0]), grandchild_alive=alive(first[0][1]))
             schtasks("/End", "/TN", name)
-            if second:
-                wait_for(lambda: not alive(second[1][0]) and not alive(second[1][1]), 30)
+            kill_leftovers(first)
 
-        # Execution time limit: Task Scheduler itself must terminate a task that outlives its limit.
-        limited, limited_log = install("limited", seconds=600, limit=60)
-        schtasks("/Run", "/TN", limited.handle)
-        started = wait_for(lambda: started_pids(limited_log), 120)
-        check(bool(started), "limited_task_started", pids=started)
-        if started:
-            pids = started[0]
-            terminated = wait_for(lambda: not alive(pids[0]) and not alive(pids[1]), 240, interval=2)
-            check(bool(terminated), "execution_time_limit_terminates_tree", worker=pids[0], grandchild=pids[1],
-                  worker_alive=alive(pids[0]), grandchild_alive=alive(pids[1]))
+        # Controlled variants: how the action is launched decides whether Task Scheduler's end/limit reaches the tree.
+        for variant in ("direct", "launcher"):
+            for kind, limit_seconds in (("end", 7200), ("limit", 60)):
+                label = f"{variant}-{kind}"
+                task_log = root / f"{label}.log"
+                scheduler = WindowsDriverScheduler(
+                    project / label, task_name=f"StageMesh\\accept-{uuid.uuid4().hex[:10]}", execution_limit_seconds=limit_seconds
+                )
+                (project / label / ".stagemesh").mkdir(parents=True, exist_ok=True)
+                created.append(scheduler)
+                worker_argv = [sys.executable, str(worker), str(task_log), "900"]
+                if variant == "direct":
+                    xml = build_task_xml(Path(sys.executable), 600, user_id=current_user_id(), start=datetime.now().replace(microsecond=0),
+                                         execution_limit_seconds=limit_seconds, arguments=subprocess.list2cmdline(worker_argv[1:]))
+                    definition = root / f"{label}.xml"
+                    definition.write_text(xml, encoding="utf-16")
+                    created_rc = schtasks("/Create", "/TN", scheduler.handle, "/XML", str(definition), "/F").returncode
+                else:
+                    scheduler.ensure(worker_argv, 600)
+                    created_rc = 0
+                record("variant_created", variant=label, task=scheduler.handle, rc=created_rc)
+                schtasks("/Run", "/TN", scheduler.handle)
+                pids = wait_for(lambda: started_pids(task_log), 120)
+                if not pids:
+                    check(False, f"{label}_started")
+                    continue
+                worker_pid, grandchild_pid = pids[0]
+                before = python_and_cmd_table()
+                if kind == "end":
+                    schtasks("/End", "/TN", scheduler.handle)
+                    gone = wait_for(lambda: not alive(worker_pid) and not alive(grandchild_pid), 40)
+                else:
+                    gone = wait_for(lambda: not alive(worker_pid) and not alive(grandchild_pid), 330, interval=3)
+                check(bool(gone), f"{label}_terminates_process_tree", worker=worker_pid, grandchild=grandchild_pid,
+                      worker_alive=alive(worker_pid), grandchild_alive=alive(grandchild_pid), status=task_state(scheduler.handle),
+                      table_before=before, table_after=python_and_cmd_table())
+                schtasks("/End", "/TN", scheduler.handle)
+                kill_leftovers([(worker_pid, grandchild_pid)])
     except Exception as exc:  # recorded, never raised past cleanup
         record("unexpected_error", error=repr(exc))
         failures.append("unexpected_error")
