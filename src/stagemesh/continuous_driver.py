@@ -333,6 +333,15 @@ def _default_runner(argv: list[str], project: Path, timeout_seconds: float) -> i
     return int(process.returncode or 0)
 
 
+TICK_HARD_TIMEOUT_MARGIN_SECONDS = 1800
+SCHEDULER_WATCHDOG_MARGIN_SECONDS = 900
+
+
+def scheduler_limit_seconds(config: DriverConfig) -> int:
+    """Task Scheduler's watchdog must outlast the tick's own hard timeout so the driver kills its child tree first."""
+    return config.window_seconds + TICK_HARD_TIMEOUT_MARGIN_SECONDS + SCHEDULER_WATCHDOG_MARGIN_SECONDS
+
+
 def _read_report(path: Path) -> dict[str, Any] | None:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -427,7 +436,7 @@ def run_tick(
                     "report": str(report_path),
                 },
             )
-            exit_code = runner(config.window_argv(project, report_path), project, config.window_seconds + 1800)
+            exit_code = runner(config.window_argv(project, report_path), project, config.window_seconds + TICK_HARD_TIMEOUT_MARGIN_SECONDS)
             report = _read_report(report_path)
             state, detail = _classify(exit_code, report)
             record_audit(

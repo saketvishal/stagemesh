@@ -9,6 +9,7 @@ disposable CI runner or a machine whose owner authorized a temporary task. Evide
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -95,6 +96,9 @@ def task_state(name: str) -> str:
 
 
 def run() -> int:
+    if os.environ.get("STAGEMESH_ACCEPT_TEMP_TASKS") != "1":
+        print("refusing to create temporary scheduled tasks: set STAGEMESH_ACCEPT_TEMP_TASKS=1 to authorize this run", file=sys.stderr)
+        return 2
     root = Path(tempfile.mkdtemp(prefix="sm-accept-"))
     project = root / "project"
     (project / ".stagemesh").mkdir(parents=True)
@@ -156,7 +160,7 @@ def run() -> int:
             kill_leftovers(first)
 
         # Controlled variants: how the action is launched decides whether Task Scheduler's end/limit reaches the tree.
-        for variant in ("direct", "launcher"):
+        for variant in ("direct", "cmd"):
             for kind, limit_seconds in (("end", 7200), ("limit", 60)):
                 label = f"{variant}-{kind}"
                 task_log = root / f"{label}.log"
@@ -166,15 +170,17 @@ def run() -> int:
                 (project / label / ".stagemesh").mkdir(parents=True, exist_ok=True)
                 created.append(scheduler)
                 worker_argv = [sys.executable, str(worker), str(task_log), "900"]
-                if variant == "direct":
-                    xml = build_task_xml(Path(sys.executable), 600, user_id=current_user_id(), start=datetime.now().replace(microsecond=0),
-                                         execution_limit_seconds=limit_seconds, arguments=subprocess.list2cmdline(worker_argv[1:]))
+                if variant == "direct":  # the production path: the tick (here a stand-in worker) is the task's own process
+                    scheduler.ensure(worker_argv, 600, limit_seconds)
+                    created_rc = 0
+                else:  # comparison only: the pre-XML shape, where cmd.exe is the task's process
+                    launcher = root / f"{label}.cmd"
+                    launcher.write_text(f"@echo off\r\n{subprocess.list2cmdline(worker_argv)}\r\n", encoding="utf-8")
+                    xml = build_task_xml(launcher, 600, user_id=current_user_id(), start=datetime.now().replace(microsecond=0),
+                                         execution_limit_seconds=limit_seconds)
                     definition = root / f"{label}.xml"
                     definition.write_text(xml, encoding="utf-16")
                     created_rc = schtasks("/Create", "/TN", scheduler.handle, "/XML", str(definition), "/F").returncode
-                else:
-                    scheduler.ensure(worker_argv, 600)
-                    created_rc = 0
                 record("variant_created", variant=label, task=scheduler.handle, rc=created_rc)
                 schtasks("/Run", "/TN", scheduler.handle)
                 pids = wait_for(lambda: started_pids(task_log), 120)
@@ -183,8 +189,8 @@ def run() -> int:
                     continue
                 worker_pid, grandchild_pid = pids[0]
                 before = python_and_cmd_table()
-                cmd_pid = next((int(r[1]) for r in before if int(r[0]) == worker_pid), None) if variant == "launcher" else None
-                primary = (lambda: not alive(cmd_pid)) if variant == "launcher" and cmd_pid else (lambda: not alive(worker_pid))
+                cmd_pid = next((int(r[1]) for r in before if int(r[0]) == worker_pid), None) if variant == "cmd" else None
+                primary = (lambda: not alive(cmd_pid)) if variant == "cmd" and cmd_pid else (lambda: not alive(worker_pid))
                 began = time.monotonic()
                 if kind == "end":
                     schtasks("/End", "/TN", scheduler.handle)

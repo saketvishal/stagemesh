@@ -23,7 +23,7 @@ class DriverSchedulerError(RuntimeError):
 class DriverScheduler(Protocol):
     name: str
 
-    def ensure(self, argv: Sequence[str], interval_seconds: int) -> str: ...
+    def ensure(self, argv: Sequence[str], interval_seconds: int, execution_limit_seconds: int | None = None) -> str: ...
 
     def remove(self, handle: str) -> None: ...
 
@@ -39,13 +39,15 @@ def _run(argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
 
 def current_user_id() -> str:
     """DOMAIN\\user for the account that installs the schedule (the task runs only as that interactive user)."""
-    user = os.environ.get("USERNAME") or os.environ.get("USER") or "unknown"
+    user = os.environ.get("USERNAME") or os.environ.get("USER")
+    if not user:
+        raise DriverSchedulerError("cannot determine the Windows user that should own the schedule (USERNAME is not set)")
     domain = os.environ.get("USERDOMAIN")
     return f"{domain}\\{user}" if domain else user
 
 
 def build_task_xml(
-    launcher: Path,
+    command: Path,
     interval_seconds: int,
     *,
     user_id: str,
@@ -59,9 +61,11 @@ def build_task_xml(
     * `StartWhenAvailable` runs a tick that was missed while the machine slept or was off.
     * Battery power neither blocks a start nor stops a running tick, so a laptop is not silently idle.
     * `IgnoreNew` plus the driver's own project lock means a slow tick is never overlapped by the next one.
-    * `ExecutionTimeLimit` is a watchdog for a hung tick process only. Real-Windows evidence shows that Task Scheduler's
-      End and time limit terminate just the task's own process, never its descendants, so a tick that must stop its
-      `run-window` child tree does so itself (`kill_process_tree`, verified) or via `driver stop --terminate-running`.
+    * `ExecutionTimeLimit` is a watchdog for a hung tick process. The tick is the task's own process (the action runs
+      Python directly, not through `cmd.exe`), so the limit really ends it. Real-Windows evidence shows End and the
+      limit terminate only that process, never its descendants; the limit must therefore exceed the tick's own hard
+      timeout so the driver bounds and kills its `run-window` child tree first (`kill_process_tree`, verified).
+      A tick the watchdog ends can leave that child running; the next tick sees its durable owner and does not overlap.
     * Least privilege, interactive token: no stored credentials and no elevation.
     """
     if interval_seconds < 60 or interval_seconds % 60:
@@ -92,10 +96,10 @@ def build_task_xml(
         "    <AllowHardTerminate>true</AllowHardTerminate>\n"
         "    <WakeToRun>false</WakeToRun>\n"
         "    <Enabled>true</Enabled>\n"
-        f"    <ExecutionTimeLimit>PT{execution_limit_seconds // 60}M</ExecutionTimeLimit>\n"
+        f"    <ExecutionTimeLimit>PT{-(-execution_limit_seconds // 60)}M</ExecutionTimeLimit>\n"
         "  </Settings>\n"
         '  <Actions Context="Author"><Exec>'
-        f"<Command>{escape(str(launcher))}</Command>"
+        f"<Command>{escape(str(command))}</Command>"
         + (f"<Arguments>{escape(arguments)}</Arguments>" if arguments else "")
         + "</Exec></Actions>\n"
         "</Task>\n"
@@ -132,35 +136,37 @@ class WindowsDriverScheduler:
     def definition(self) -> Path:
         return self.directory / "task.xml"
 
-    @property
-    def launcher(self) -> Path:
-        return self.directory / "run.cmd"
-
-    def ensure(self, argv: Sequence[str], interval_seconds: int) -> str:
+    def ensure(self, argv: Sequence[str], interval_seconds: int, execution_limit_seconds: int | None = None) -> str:
         if interval_seconds < 60 or interval_seconds % 60:
             raise DriverSchedulerError("Task Scheduler cadence must be an exact whole number of minutes")
+        if not argv:
+            raise DriverSchedulerError("a scheduled command is required")
         self.directory.mkdir(parents=True, exist_ok=True)
-        log = self.directory / "driver.log"
-        command = subprocess.list2cmdline(list(argv))
-        temporary = self.launcher.with_suffix(".cmd.tmp")
-        temporary.write_text(f'@echo off\r\n{command} >> "{log}" 2>&1\r\n', encoding="utf-8")
-        temporary.replace(self.launcher)
         xml = build_task_xml(
-            self.launcher,
+            Path(argv[0]),
             interval_seconds,
             user_id=current_user_id(),
             start=self.clock().replace(microsecond=0),
-            execution_limit_seconds=self.execution_limit_seconds,
+            execution_limit_seconds=execution_limit_seconds or self.execution_limit_seconds,
+            arguments=subprocess.list2cmdline(list(argv[1:])) or None,
         )
         temporary_definition = self.definition.with_suffix(".xml.tmp")
         temporary_definition.write_text(xml, encoding="utf-16")  # schtasks /XML expects UTF-16 with a BOM
         temporary_definition.replace(self.definition)
         created = self.runner(["schtasks", "/Create", "/TN", self.handle, "/XML", str(self.definition), "/F"])
         if created.returncode != 0:
+            self._discard_definition()
             raise DriverSchedulerError(
                 f"could not schedule the local driver: {(created.stderr or created.stdout).strip()[-300:]}"
             )
         return self.handle
+
+    def _discard_definition(self) -> None:
+        for leftover in (self.definition, self.definition.with_suffix(".xml.tmp")):
+            try:
+                leftover.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     def remove(self, handle: str) -> None:
         if handle != self.handle:
@@ -170,11 +176,7 @@ class WindowsDriverScheduler:
             raise DriverSchedulerError(
                 f"could not remove the local driver schedule: {(deleted.stderr or deleted.stdout).strip()[-300:]}"
             )
-        for leftover in (self.launcher, self.definition):
-            try:
-                leftover.unlink(missing_ok=True)
-            except OSError:
-                pass
+        self._discard_definition()
 
     def exists(self, handle: str) -> bool:
         if handle != self.handle:
@@ -194,4 +196,6 @@ def default_driver_scheduler(project: Path) -> DriverScheduler | None:
 
 
 def driver_command(project: Path) -> list[str]:
-    return [sys.executable, "-m", "stagemesh.cli", "--project", str(Path(project).resolve()), "driver", "tick"]
+    resolved = Path(project).resolve()
+    log = resolved / ".stagemesh" / "driver" / "driver.log"
+    return [sys.executable, "-m", "stagemesh.cli", "--project", str(resolved), "driver", "tick", "--log-file", str(log)]
