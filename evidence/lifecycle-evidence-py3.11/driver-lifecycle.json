@@ -1,0 +1,184 @@
+{
+  "failures": [
+    "no_overlapping_run_windows",
+    "no_project_processes_remain"
+  ],
+  "evidence": [
+    {
+      "step": "project_ready",
+      "at": 1792864839.9897614,
+      "project": "C:\\Users\\RUNNER~1\\AppData\\Local\\Temp\\sm-driver-accept-1vqm3uoh\\project",
+      "mock_only": true,
+      "tasks": 6,
+      "mode": "task-scheduler"
+    },
+    {
+      "step": "install",
+      "at": 1792864840.3716764,
+      "rc": 0,
+      "out": "urrency\": 1,\n    \"integration\": \"local\",\n    \"interval_seconds\": 60,\n    \"max_consecutive_failures\": 3,\n    \"max_steps_per_task\": 8,\n    \"max_tasks\": 1,\n    \"project\": \"C:\\\\Users\\\\runneradmin\\\\AppData\\\\Local\\\\Temp\\\\sm-driver-accept-1vqm3uoh\\\\project\",\n    \"state\": \"running\",\n    \"strict_live\": false,\n    \"window_seconds\": 90\n  },\n  \"handle\": \"StageMesh\\\\driver-183e9bb05283\",\n  \"installed\": true\n}\n",
+      "err": ""
+    },
+    {
+      "step": "PASS driver_installed",
+      "at": 1792864840.3716764
+    },
+    {
+      "step": "PASS schedule_registered",
+      "at": 1792864840.38815
+    },
+    {
+      "step": "PASS repeated_execution_completes_tasks",
+      "at": 1792864980.4057896,
+      "done": [
+        "MOCK-1",
+        "MOCK-2"
+      ],
+      "ticks": 2
+    },
+    {
+      "step": "PASS mock_provider_ran_implement_and_independent_review",
+      "at": 1792864980.4057896,
+      "stages": [
+        "implement",
+        "review",
+        "implement",
+        "review"
+      ]
+    },
+    {
+      "step": "PASS pause_command",
+      "at": 1792864980.7019322,
+      "out": "\\\\.stagemesh\\\\driver\\\\reports\\\\e4bb693893ce4ce5ad44b8eeabcf9439.json\",\n    \"state\": \"progress\",\n    \"tick_id\": \"e4bb693893ce4ce5ad44b8eeabcf9439\"\n  },\n  \"schedule_exists\": true,\n  \"state\": \"paused\"\n}\n",
+      "err": ""
+    },
+    {
+      "step": "PASS paused_driver_makes_no_provider_calls",
+      "at": 1792865180.7004118,
+      "before": 4,
+      "after": 4
+    },
+    {
+      "step": "PASS resume_command",
+      "at": 1792865181.098447,
+      "out": "\\.stagemesh\\\\driver\\\\reports\\\\e4bb693893ce4ce5ad44b8eeabcf9439.json\",\n    \"state\": \"progress\",\n    \"tick_id\": \"e4bb693893ce4ce5ad44b8eeabcf9439\"\n  },\n  \"schedule_exists\": true,\n  \"state\": \"running\"\n}\n",
+      "err": ""
+    },
+    {
+      "step": "PASS resume_continues_work",
+      "at": 1792865261.1163855,
+      "done": [
+        "MOCK-1",
+        "MOCK-2",
+        "MOCK-3"
+      ]
+    },
+    {
+      "step": "FAIL no_overlapping_run_windows",
+      "at": 1792865461.6872773,
+      "peak_concurrent_windows": 0
+    },
+    {
+      "step": "PASS bounded_provider_calls_during_overlap",
+      "at": 1792865461.6877563
+    },
+    {
+      "step": "killing_process_tree",
+      "at": 1792865485.956957,
+      "processes": [
+        [
+          7800,
+          "powershell -NoProfile -Command \"Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and $_.CommandLine.Contai"
+        ]
+      ]
+    },
+    {
+      "step": "PASS tree_fully_killed",
+      "at": 1792865489.2499387
+    },
+    {
+      "step": "PASS recovered_after_crash_and_continued",
+      "at": 1792865569.2591364,
+      "done": [
+        "MOCK-1",
+        "MOCK-2",
+        "MOCK-3",
+        "MOCK-4",
+        "MOCK-5"
+      ]
+    },
+    {
+      "step": "PASS no_stale_owner_blocks_progress",
+      "at": 1792865569.2591364,
+      "owner_exists": true
+    },
+    {
+      "step": "tick_history",
+      "at": 1792865569.2611525,
+      "states": [
+        "progress",
+        "progress",
+        "progress",
+        "progress"
+      ],
+      "done": [
+        "MOCK-1",
+        "MOCK-2",
+        "MOCK-3",
+        "MOCK-4",
+        "MOCK-5"
+      ],
+      "calls": 10
+    },
+    {
+      "step": "PASS no_task_completed_twice",
+      "at": 1792865569.2629209,
+      "done": [
+        "MOCK-1",
+        "MOCK-2",
+        "MOCK-3",
+        "MOCK-4",
+        "MOCK-5"
+      ]
+    },
+    {
+      "step": "PASS stop_command",
+      "at": 1792865569.6273808,
+      "out": ".stagemesh\\\\driver\\\\reports\\\\6d5fd02cd5d34dfda9a71e46589c4d6f.json\",\n    \"state\": \"progress\",\n    \"tick_id\": \"6d5fd02cd5d34dfda9a71e46589c4d6f\"\n  },\n  \"schedule_exists\": false,\n  \"state\": \"stopped\"\n}\n",
+      "err": ""
+    },
+    {
+      "step": "PASS schedule_removed_by_stop",
+      "at": 1792865570.1697266
+    },
+    {
+      "step": "PASS stopped_driver_makes_no_provider_calls",
+      "at": 1792865647.1711702
+    },
+    {
+      "step": "PASS uninstall_command",
+      "at": 1792865647.9803383,
+      "out": "ve_failures\": 3,\n    \"max_steps_per_task\": 8,\n    \"max_tasks\": 1,\n    \"project\": \"C:\\\\Users\\\\runneradmin\\\\AppData\\\\Local\\\\Temp\\\\sm-driver-accept-1vqm3uoh\\\\project\",\n    \"state\": \"stopped\",\n    \"strict_live\": false,\n    \"window_seconds\": 90\n  },\n  \"schedule_exists\": false,\n  \"state\": \"uninstalled\"\n}\n",
+      "err": ""
+    },
+    {
+      "step": "PASS ledger_preserved_after_uninstall",
+      "at": 1792865647.9803383
+    },
+    {
+      "step": "FAIL no_project_processes_remain",
+      "at": 1792865648.551272,
+      "left": [
+        [
+          9020,
+          "powershell -NoProfile -Command \"Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and $_.CommandLine.Contains('C:\\Users\\RUNNER~1\\AppData\\Local\\Temp\\sm-driver-accept-1vqm3uoh\\project') } | ForEach-Object { '{0}|{1}' -f $_.ProcessId,$_.CommandLine }\""
+        ]
+      ]
+    },
+    {
+      "step": "cleanup_verified",
+      "at": 1792865649.6579952,
+      "schedule_exists": false
+    }
+  ]
+}

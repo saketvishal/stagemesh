@@ -1,0 +1,280 @@
+FFFF..F.FFFF.                                                            [100%]
+================================== FAILURES ===================================
+_ test_review_budget_exhaustion_runs_the_recovery_ladder_and_is_not_a_founder_decision _
+
+tmp_path = WindowsPath('C:/Users/runneradmin/AppData/Local/Temp/pytest-of-runneradmin/pytest-0/test_review_budget_exhaustion_0')
+
+    def test_review_budget_exhaustion_runs_the_recovery_ladder_and_is_not_a_founder_decision(tmp_path: Path) -> None:
+        from stagemesh.block_kinds import BlockKind, classify_block
+        from stagemesh.survivor_wave import blocked_needs_decision
+    
+        store, executor = review_rig(tmp_path, "Handle the empty input case")
+    
+        assert store.get_task("TASK-1")["status"] == TaskStatus.BLOCKED
+>       assert executor.calls == 4  # first attempt + 2 budgeted remediations + 1 recovery round
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       assert 6 == 4
+E        +  where 6 = <test_diagnosis.Attempts object at 0x0000018999586990>.calls
+
+tests\test_autonomous_recovery.py:232: AssertionError
+_ test_failed_integration_never_marks_task_done_and_preserves_candidate_and_worktree _
+
+tmp_path = WindowsPath('C:/Users/runneradmin/AppData/Local/Temp/pytest-of-runneradmin/pytest-0/test_failed_integration_never_0')
+
+    def test_failed_integration_never_marks_task_done_and_preserves_candidate_and_worktree(tmp_path: Path) -> None:
+        files = {TASK: ("shared.txt", "from A\n")}
+        rig = Rig(tmp_path, [TASK], files=files)
+        executor = ScriptedExecutor(files)
+        coord = _single_task_coordinator(rig, executor)
+        _advance_until(rig, coord, Stage.INTEGRATE)
+        candidate = rig.store.latest_candidate(TASK)["sha"]
+        tip = _land_on_main(rig, "shared.txt", "from elsewhere\n")
+        for _ in range(8):
+            coord.tick()
+    
+        assert _tip(rig) == tip
+        assert rig.store.get_task(TASK)["status"] != TaskStatus.DONE
+        assert not rig.store.has_evidence(TASK, candidate, EvidenceKind.INTEGRATION) or not rig.store.has_bound_evidence(
+            TASK, candidate, EvidenceKind.INTEGRATION, rig.store.contract_binding(TASK, candidate)["digest"], EvidenceStatus.PASSED
+        )
+        worktree = executor.worktrees[TASK]
+>       assert GitWorkspace(worktree).head() == candidate  # the valuable change is preserved, not reset
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       AssertionError: assert 'b7950f961cab...5531a529762ed' == '4c927da5aaec...7c24dd5f564b4'
+E         
+E         - 4c927da5aaec5f4d023f5af7ed17c24dd5f564b4
+E         + b7950f961cab3d68d539d588d955531a529762ed
+
+tests\test_candidate_isolation_integration.py:89: AssertionError
+___________ test_python_gate_uses_current_runtime_and_candidate_src ___________
+
+tmp_path = WindowsPath('C:/Users/runneradmin/AppData/Local/Temp/pytest-of-runneradmin/pytest-0/test_python_gate_uses_current_0')
+
+    def test_python_gate_uses_current_runtime_and_candidate_src(tmp_path: Path) -> None:
+        project = tmp_path / "repo"
+        (project / "src").mkdir(parents=True)
+        (project / "src" / "probe_runtime.py").write_text('VALUE = "candidate-src"\n', encoding="utf-8")
+    
+        gate = run_gate(
+            project,
+            GateCommand(
+                "python-runtime",
+                [
+                    "python",
+                    "-c",
+                    "import probe_runtime, sys; print(sys.executable); print(probe_runtime.VALUE)",
+                ],
+                timeout_seconds=5,
+            ),
+        )
+    
+        assert gate.status == "PASSED", gate.stderr
+>       assert Path(sys.executable).resolve() == Path(gate.stdout.splitlines()[0]).resolve()
+E       AssertionError: assert WindowsPath('D:/a/stagemesh/stagemesh/tree/.stagemesh/tooling/venv/Scripts/python.exe') == WindowsPath('C:/hostedtoolcache/windows/Python/3.11.9/x64/python.exe')
+E        +  where WindowsPath('D:/a/stagemesh/stagemesh/tree/.stagemesh/tooling/venv/Scripts/python.exe') = resolve()
+E        +    where resolve = WindowsPath('D:/a/stagemesh/stagemesh/tree/.stagemesh/tooling/venv/Scripts/python.exe').resolve
+E        +      where WindowsPath('D:/a/stagemesh/stagemesh/tree/.stagemesh/tooling/venv/Scripts/python.exe') = Path('D:\\a\\stagemesh\\stagemesh\\tree\\.stagemesh\\tooling\\venv\\Scripts\\python.exe')
+E        +        where 'D:\\a\\stagemesh\\stagemesh\\tree\\.stagemesh\\tooling\\venv\\Scripts\\python.exe' = sys.executable
+E        +  and   WindowsPath('C:/hostedtoolcache/windows/Python/3.11.9/x64/python.exe') = resolve()
+E        +    where resolve = WindowsPath('C:/hostedtoolcache/windows/Python/3.11.9/x64/python.EXE').resolve
+E        +      where WindowsPath('C:/hostedtoolcache/windows/Python/3.11.9/x64/python.EXE') = Path('C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\python.EXE')
+
+tests\test_change_contracts.py:103: AssertionError
+_________ test_continue_step_output_and_json_show_execution_duration __________
+
+tmp_path = WindowsPath('C:/Users/runneradmin/AppData/Local/Temp/pytest-of-runneradmin/pytest-0/test_continue_step_output_and_0')
+capsys = <_pytest.capture.CaptureFixture object at 0x000001899CE65090>
+
+    def test_continue_step_output_and_json_show_execution_duration(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        from test_run_ready import _project
+    
+        project = _project(tmp_path, ["T-1"])
+        assert cli_module.main(["--project", str(project), "continue", "--dry-run", "--task", "T-1"]) == 0
+        human = capsys.readouterr().out
+>       assert any(line.startswith("  duration: ") and line.endswith("s") for line in human.splitlines())
+E       assert False
+E        +  where False = any(<generator object test_continue_step_output_and_json_show_execution_duration.<locals>.<genexpr> at 0x000001899B3FB680>)
+
+tests\test_execution_timing.py:243: AssertionError
+________ test_task_doctor_keeps_provider_no_progress_on_continue_path _________
+
+tmp_path = WindowsPath('C:/Users/runneradmin/AppData/Local/Temp/pytest-of-runneradmin/pytest-0/test_task_doctor_keeps_provide0')
+
+    def test_task_doctor_keeps_provider_no_progress_on_continue_path(tmp_path) -> None:
+        project, store = _setup(tmp_path, DOCS_CONTRACT)
+        drive(project, store, Attempts(nothing=True), ticks=10)
+    
+        assert store.get_task(TASK)["status"] == TaskStatus.BLOCKED
+        report = task_doctor(store, project, TASK)
+    
+        assert report["diagnosis"]["category"] == PROVIDER_NO_PROGRESS
+        assert report["recommended_command"] == "stagemesh continue"
+        assert "--provider" not in report["recommendation_reason"]
+        assert "task-doctor" not in report["recommendation_reason"]
+        assert "retry-task" not in report["recommendation_reason"]
+>       (stop,) = events(store, "task.diagnosis_stop")
+        ^^^^^^^
+E       ValueError: too many values to unpack (expected 1)
+
+tests\test_hands_off_provider_recovery.py:39: ValueError
+____ test_queue_reconcile_dry_run_classifies_noise_without_changing_tasks _____
+
+tmp_path = WindowsPath('C:/Users/runneradmin/AppData/Local/Temp/pytest-of-runneradmin/pytest-0/test_queue_reconcile_dry_run_c0')
+
+    def test_queue_reconcile_dry_run_classifies_noise_without_changing_tasks(tmp_path: Path) -> None:
+        store, _project = make_store(tmp_path, ["run", "retry", "decide", "closed", "operator"])
+        store.block_task("retry")
+        _decision_block(store, "decide")
+        closed = store.get_task("closed")
+        store.cache_source(closed["source"], closed["source_id"], {"retirement_reason": "source closed"}, "CLOSED")
+        store.block_task("closed")
+        operator = store.get_task("operator")
+        store.retire_source_task(operator["source"], operator["source_id"], "duplicate or already satisfied")
+    
+        report = reconcile_queue(store, ReconcileOptions(park_design_decisions=True, unblock_retryable=True), sync_sources=False)
+        items = _by_id(report)
+    
+        assert items["run"].classification == "runnable"
+        assert items["retry"].classification == "retryable_blocked" and items["retry"].action == "unblock_retryable"
+>       assert items["decide"].classification == "needs_decision" and items["decide"].action == "park_design_decision"
+E       AssertionError: assert ('retryable_blocked' == 'needs_decision'
+E         
+E         - needs_decision
+E         + retryable_blocked)
+
+tests\test_queue_reconcile.py:42: AssertionError
+_ test_queue_reconcile_write_applies_only_explicit_actions_and_audits_summary _
+
+tmp_path = WindowsPath('C:/Users/runneradmin/AppData/Local/Temp/pytest-of-runneradmin/pytest-0/test_queue_reconcile_write_app0')
+
+    def test_queue_reconcile_write_applies_only_explicit_actions_and_audits_summary(tmp_path: Path) -> None:
+        store, _project = make_store(tmp_path, ["retry", "decide"])
+        store.block_task("retry")
+        _decision_block(store, "decide")
+        decide = store.get_task("decide")
+    
+        report = reconcile_queue(
+            store,
+            ReconcileOptions(write=True, park_design_decisions=True, unblock_retryable=True),
+            sync_sources=False,
+        )
+        items = _by_id(report)
+    
+        assert items["retry"].applied and store.get_task("retry")["status"] == "OPEN"
+        assert items["decide"].applied
+>       assert store.operator_retirement_reason(decide["source"], decide["source_id"]) == "Parked by queue reconcile: needs design decision"
+E       AssertionError: assert None == 'Parked by queue reconcile: needs design decision'
+E        +  where None = operator_retirement_reason('local-backlog', 'decide')
+E        +    where operator_retirement_reason = <stagemesh.persistence.Store object at 0x000001899B1931D0>.operator_retirement_reason
+
+tests\test_queue_reconcile.py:64: AssertionError
+__________ test_review_clone_failure_preserves_the_underlying_error ___________
+
+tmp_path = WindowsPath('C:/Users/runneradmin/AppData/Local/Temp/pytest-of-runneradmin/pytest-0/test_review_clone_failure_pres0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x00000189995AF250>
+
+    def test_review_clone_failure_preserves_the_underlying_error(tmp_path, monkeypatch):
+        import json
+        from stagemesh.providers import RuntimeCommandAdapter
+        from stagemesh.capacity import CapacityKind
+    
+        monkeypatch.setattr(RuntimeCommandAdapter, "check_capacity", lambda self: CapacityKind.AVAILABLE)
+        monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: subprocess.CompletedProcess(args, 128, "", "MSYS shell failed: 0xC0000022"))
+        adapter = RuntimeCommandAdapter("reviewer", ("tool",))
+        result = json.loads(adapter.review_candidate("review", tmp_path, "candidate"))
+        assert result["decision"] == "INFRASTRUCTURE_FAILURE"
+>       assert "0xC0000022" in result["reason"]
+E       AssertionError: assert '0xC0000022' in 'provider_unavailable'
+
+tests\test_recovery_loop_regressions.py:143: AssertionError
+__________ test_noop_after_failed_review_rechecks_existing_candidate __________
+
+tmp_path = WindowsPath('C:/Users/runneradmin/AppData/Local/Temp/pytest-of-runneradmin/pytest-0/test_noop_after_failed_review_0')
+
+    def test_noop_after_failed_review_rechecks_existing_candidate(tmp_path: Path) -> None:
+        project = _project(tmp_path, ["T-1"])
+        store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+        store.migrate()
+        cli_module._sync_all_sources(store, project, cli_module.load_config(project), "T-1")
+    
+        class FailOnceReviewer:
+            calls = 0
+    
+            def review(self, store: Store, task_id: str, candidate_sha: str, project: Path):
+                self.calls += 1
+                if self.calls == 1:
+                    return Reviewer(
+                        findings=[
+                            ReviewFinding(
+                                identity=f"{candidate_sha}:first-review-failed",
+                                severity="error",
+                                message="first review failed",
+                            )
+                        ]
+                    ).review(store, task_id, candidate_sha, project)
+                return Reviewer().review(store, task_id, candidate_sha, project)
+    
+        class NoChangeExecutor(Executor):
+            name = "fake"
+    
+            def run(self, store: Store, task_id: str, claim_id: str | None, project: Path) -> ExecutionResult:
+                return ExecutionResult(ExecutionStatus.FAILED, failure_reason=NO_IMPLEMENTATION_CHANGE)
+    
+        reviewer = FailOnceReviewer()
+        first = run_ready(
+            store,
+            project,
+            lambda target: cli_module.Coordinator(store, project, reviewer=reviewer, target=target),
+            task_id="T-1",
+            max_steps=4,
+        )
+        assert first.stop_reason == "MAX_STEPS" and first.final["stage"] == "IMPLEMENT", first.to_dict()
+    
+        second = run_ready(
+            store,
+            project,
+            lambda target: cli_module.Coordinator(store, project, executor=NoChangeExecutor(), reviewer=reviewer, target=target),
+            task_id="T-1",
+            max_steps=6,
+        )
+    
+>       assert second.stop_reason == "DONE", second.to_dict()
+E       AssertionError: {'started': True, 'stop_reason': 'BLOCKED', 'succeeded': False, 'task_id': 'T-1', ...}
+E       assert 'BLOCKED' == 'DONE'
+E         
+E         - DONE
+E         + BLOCKED
+
+tests\test_run_ready.py:859: AssertionError
+=========================== short test summary info ===========================
+FAILED tests/test_autonomous_recovery.py::test_review_budget_exhaustion_runs_the_recovery_ladder_and_is_not_a_founder_decision - assert 6 == 4
+ +  where 6 = <test_diagnosis.Attempts object at 0x0000018999586990>.calls
+FAILED tests/test_candidate_isolation_integration.py::test_failed_integration_never_marks_task_done_and_preserves_candidate_and_worktree - AssertionError: assert 'b7950f961cab...5531a529762ed' == '4c927da5aaec...7c24dd5f564b4'
+  
+  - 4c927da5aaec5f4d023f5af7ed17c24dd5f564b4
+  + b7950f961cab3d68d539d588d955531a529762ed
+FAILED tests/test_change_contracts.py::test_python_gate_uses_current_runtime_and_candidate_src - AssertionError: assert WindowsPath('D:/a/stagemesh/stagemesh/tree/.stagemesh/tooling/venv/Scripts/python.exe') == WindowsPath('C:/hostedtoolcache/windows/Python/3.11.9/x64/python.exe')
+ +  where WindowsPath('D:/a/stagemesh/stagemesh/tree/.stagemesh/tooling/venv/Scripts/python.exe') = resolve()
+ +    where resolve = WindowsPath('D:/a/stagemesh/stagemesh/tree/.stagemesh/tooling/venv/Scripts/python.exe').resolve
+ +      where WindowsPath('D:/a/stagemesh/stagemesh/tree/.stagemesh/tooling/venv/Scripts/python.exe') = Path('D:\\a\\stagemesh\\stagemesh\\tree\\.stagemesh\\tooling\\venv\\Scripts\\python.exe')
+ +        where 'D:\\a\\stagemesh\\stagemesh\\tree\\.stagemesh\\tooling\\venv\\Scripts\\python.exe' = sys.executable
+ +  and   WindowsPath('C:/hostedtoolcache/windows/Python/3.11.9/x64/python.exe') = resolve()
+ +    where resolve = WindowsPath('C:/hostedtoolcache/windows/Python/3.11.9/x64/python.EXE').resolve
+ +      where WindowsPath('C:/hostedtoolcache/windows/Python/3.11.9/x64/python.EXE') = Path('C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\python.EXE')
+FAILED tests/test_execution_timing.py::test_continue_step_output_and_json_show_execution_duration - assert False
+ +  where False = any(<generator object test_continue_step_output_and_json_show_execution_duration.<locals>.<genexpr> at 0x000001899B3FB680>)
+FAILED tests/test_hands_off_provider_recovery.py::test_task_doctor_keeps_provider_no_progress_on_continue_path - ValueError: too many values to unpack (expected 1)
+FAILED tests/test_queue_reconcile.py::test_queue_reconcile_dry_run_classifies_noise_without_changing_tasks - AssertionError: assert ('retryable_blocked' == 'needs_decision'
+  
+  - needs_decision
+  + retryable_blocked)
+FAILED tests/test_queue_reconcile.py::test_queue_reconcile_write_applies_only_explicit_actions_and_audits_summary - AssertionError: assert None == 'Parked by queue reconcile: needs design decision'
+ +  where None = operator_retirement_reason('local-backlog', 'decide')
+ +    where operator_retirement_reason = <stagemesh.persistence.Store object at 0x000001899B1931D0>.operator_retirement_reason
+FAILED tests/test_recovery_loop_regressions.py::test_review_clone_failure_preserves_the_underlying_error - AssertionError: assert '0xC0000022' in 'provider_unavailable'
+FAILED tests/test_run_ready.py::test_noop_after_failed_review_rechecks_existing_candidate - AssertionError: {'started': True, 'stop_reason': 'BLOCKED', 'succeeded': False, 'task_id': 'T-1', ...}
+assert 'BLOCKED' == 'DONE'
+  
+  - DONE
+  + BLOCKED
+9 failed, 4 passed in 42.84s
