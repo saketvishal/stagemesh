@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 from .continuous_driver import clear_child_owner, save_child_owner
-from .process_identity import owner_identity
+from .process_identity import owner_identity, process_identity
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -20,9 +20,17 @@ def main(argv: list[str] | None = None) -> int:
     identity = owner_identity()
     save_child_owner(project, identity)
     try:
-        return subprocess.run(command, cwd=project, check=False).returncode
+        process = subprocess.Popen(command, cwd=project)
+        try:
+            save_child_owner(project, identity, process_identity(process.pid))
+        except OSError:
+            pass  # the wrapper record already exists; the child identity only tightens ownership
+        return process.wait()
     finally:
-        clear_child_owner(project, identity, allow_live=True)
+        try:
+            clear_child_owner(project, identity, allow_live=True)
+        except OSError:
+            pass
 
 
 if __name__ == "__main__":

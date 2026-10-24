@@ -1122,7 +1122,24 @@ def command_driver(args: argparse.Namespace) -> int:
     log_path = Path(log_file)
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open("a", encoding="utf-8", buffering=1) as handle, contextlib.redirect_stdout(handle), contextlib.redirect_stderr(handle):
-        return _command_driver(args)
+        try:
+            return _command_driver(args)
+        except Exception:  # noqa: BLE001 -- a scheduled action has no console; the log is the only place the failure can land
+            import traceback
+
+            traceback.print_exc(file=handle)
+            return 1
+
+
+def _stopped_config(project: Path):
+    """Mark the driver stopped. A missing or unreadable config is reported, not fatal: stop and uninstall must still remove the schedule."""
+    from . import continuous_driver
+
+    try:
+        return continuous_driver.set_state(project, "stopped")
+    except continuous_driver.DriverConfigError as exc:
+        print(f"driver warning: {exc}; removing the schedule anyway", file=sys.stderr)
+        return None
 
 
 def _command_driver(args: argparse.Namespace) -> int:
@@ -1158,11 +1175,23 @@ def _command_driver(args: argparse.Namespace) -> int:
                 max_consecutive_failures=args.max_consecutive_failures,
                 auto_merge_ff=args.auto_merge_ff,
                 strict_live=args.strict_live,
+                integration=args.integration,
             ).validate(project)
+            try:
+                previous = continuous_driver.load_config(project)
+            except continuous_driver.DriverConfigError:
+                previous = None
             continuous_driver.save_config(project, prepared)
-            handle = scheduler.ensure(
-                driver_command(project), prepared.interval_seconds, continuous_driver.scheduler_limit_seconds(prepared)
-            )
+            try:
+                handle = scheduler.ensure(
+                    driver_command(project),
+                    prepared.interval_seconds,
+                    continuous_driver.scheduler_limit_seconds(prepared),
+                )
+            except DriverSchedulerError:
+                if previous is not None:
+                    continuous_driver.save_config(project, previous)  # a failed install must not pause a working driver
+                raise  # with no previous driver the paused config stays: inert, and `driver resume` retries the schedule
             config = continuous_driver.DriverConfig(**{**asdict(prepared), "state": "running"})
             continuous_driver.install(store, project, config, handle)
             payload = {"installed": True, "handle": handle, "config": asdict(config)}
@@ -1187,7 +1216,7 @@ def _command_driver(args: argparse.Namespace) -> int:
         elif args.driver_command == "resume":
             from .parallel import request_queue_control
 
-            current = continuous_driver.set_state(project, "paused")
+            current = continuous_driver.load_config(project)
             child_state, _child_identity = continuous_driver.child_owner_state(project)
             if child_state == "ORPHANED":
                 continuous_driver.release_orphaned_child(project)
@@ -1209,7 +1238,7 @@ def _command_driver(args: argparse.Namespace) -> int:
         elif args.driver_command == "stop":
             from .parallel import request_queue_control
 
-            config = continuous_driver.set_state(project, "stopped")
+            config = _stopped_config(project)  # an unreadable config must not keep the schedule alive
             request_queue_control(
                 store,
                 "stopping",
@@ -1222,24 +1251,31 @@ def _command_driver(args: argparse.Namespace) -> int:
                 scheduler.remove(handle)
                 continuous_driver.record_descheduled(store, handle)
             payload = {
-                **continuous_driver.status(
-                    store,
-                    project,
-                    schedule_exists=False if scheduler is not None else None,
+                **(
+                    continuous_driver.status(
+                        store,
+                        project,
+                        schedule_exists=False if scheduler is not None else None,
+                    )
+                    if config is not None
+                    else {"installed": False, "state": "stopped", "schedule_exists": False if scheduler is not None else None}
                 ),
-                "config": asdict(config),
+                "config": None if config is None else asdict(config),
             }
         else:
             from .parallel import request_queue_control
 
-            config = continuous_driver.set_state(project, "stopped")
+            config = _stopped_config(project)
             request_queue_control(store, "stopping", args.reason, terminate_running=False)
             continuous_driver.record_state(store, "stopped", args.reason)
             handle = scheduler.handle if scheduler is not None else None
             if scheduler is not None and scheduler.exists(handle):
                 scheduler.remove(handle)
                 continuous_driver.record_descheduled(store, handle)
-            continuous_driver.remove_config(project)
+            try:
+                continuous_driver.remove_config(project)
+            except continuous_driver.DriverConfigError:
+                pass
             payload = {
                 "installed": False,
                 "state": "uninstalled",
@@ -1248,7 +1284,7 @@ def _command_driver(args: argparse.Namespace) -> int:
                     str(project / ".stagemesh" / "stagemesh.sqlite3"),
                     str(project / ".stagemesh" / "driver" / "driver.log"),
                 ],
-                "previous_config": asdict(config),
+                "previous_config": None if config is None else asdict(config),
             }
     except (continuous_driver.DriverConfigError, DriverSchedulerError, ValueError) as exc:
         print(f"driver error: {exc}", file=sys.stderr)
@@ -3694,6 +3730,12 @@ def build_parser() -> argparse.ArgumentParser:
     driver_install.add_argument("--max-consecutive-failures", type=int, default=3)
     driver_install.add_argument("--auto-merge-ff", action="store_true", help="Explicitly authorize the existing guarded merge policy")
     driver_install.add_argument("--strict-live", action="store_true")
+    driver_install.add_argument(
+        "--integration",
+        choices=("pr", "local"),
+        default="pr",
+        help="'pr' (default) opens PRs; 'local' integrates into the project's local base branch and is for disposable acceptance projects only",
+    )
     driver_install.add_argument("--json", action="store_true")
     driver_install.set_defaults(func=command_driver)
     for name, help_text in (

@@ -80,11 +80,26 @@ def python_and_cmd_table() -> list[list]:
     return [line.split("|") for line in out.splitlines() if line.count("|") == 3]
 
 
-def kill_leftovers(pairs) -> None:
-    for pair in pairs:
-        for pid in pair:
-            if alive(pid):
-                subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], capture_output=True)
+def kill_leftovers(root: Path) -> None:
+    """Kill only processes whose command line points into this run's own temp directory (never by a remembered PID)."""
+    script = ("Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and $_.CommandLine.Contains('"
+              + str(root).replace("'", "''") + "') -and $_.ProcessId -ne $PID } | ForEach-Object { $_.ProcessId }")
+    out = subprocess.run(["powershell", "-NoProfile", "-Command", script], capture_output=True, text=True, timeout=60).stdout
+    for line in out.split():
+        if line.isdigit() and int(line) != os.getpid():
+            subprocess.run(["taskkill", "/F", "/T", "/PID", line], capture_output=True)
+
+
+def sweep_stale_temp_tasks() -> list[str]:
+    """Remove temporary tasks left by an earlier killed run. Only names this script creates (StageMesh\\accept-*) match."""
+    listed = schtasks("/Query", "/FO", "CSV", "/NH")
+    swept = []
+    for line in listed.stdout.splitlines():
+        name = line.split(",")[0].strip('"')
+        if name.startswith("\\StageMesh\\accept-"):
+            schtasks("/Delete", "/TN", name.lstrip("\\"), "/F")
+            swept.append(name)
+    return swept
 
 
 def task_state(name: str) -> str:
@@ -96,10 +111,14 @@ def task_state(name: str) -> str:
 
 
 def run() -> int:
+    if sys.platform != "win32":
+        print("this acceptance script needs Windows Task Scheduler", file=sys.stderr)
+        return 2
     if os.environ.get("STAGEMESH_ACCEPT_TEMP_TASKS") != "1":
         print("refusing to create temporary scheduled tasks: set STAGEMESH_ACCEPT_TEMP_TASKS=1 to authorize this run", file=sys.stderr)
         return 2
     root = Path(tempfile.mkdtemp(prefix="sm-accept-"))
+    record("swept_stale_temp_tasks", names=sweep_stale_temp_tasks())
     project = root / "project"
     (project / ".stagemesh").mkdir(parents=True)
     worker = root / "worker.py"
@@ -157,7 +176,7 @@ def run() -> int:
             record("process_table_after_end", end_rc=ended.returncode, status=task_state(name), table=python_and_cmd_table(),
                    worker_alive=alive(first[0][0]), grandchild_alive=alive(first[0][1]))
             schtasks("/End", "/TN", name)
-            kill_leftovers(first)
+            kill_leftovers(root)
 
         # Controlled variants: how the action is launched decides whether Task Scheduler's end/limit reaches the tree.
         for variant in ("direct", "cmd"):
@@ -202,7 +221,7 @@ def run() -> int:
                 record(f"{label}_descendants_after_scheduler_termination", worker_alive=alive(worker_pid),
                        grandchild_alive=alive(grandchild_pid), table_before=before, table_after=python_and_cmd_table())
                 schtasks("/End", "/TN", scheduler.handle)
-                kill_leftovers([(worker_pid, grandchild_pid)])
+                kill_leftovers(root)
     except Exception as exc:  # recorded, never raised past cleanup
         record("unexpected_error", error=repr(exc))
         failures.append("unexpected_error")

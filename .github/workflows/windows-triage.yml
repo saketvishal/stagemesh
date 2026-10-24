@@ -122,9 +122,44 @@ jobs:
           name: scheduler-evidence-py${{ matrix.python }}
           path: scheduler-evidence.json
 
+  lifecycle:
+    name: driver lifecycle with mock providers (py${{ matrix.python }})
+    runs-on: windows-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install -e .
+      - name: Install, tick repeatedly, pause, resume, overlap, crash-recover, stop, uninstall (mock providers only)
+        shell: pwsh
+        env:
+          STAGEMESH_ACCEPT_DRIVER: "1"
+          STAGEMESH_ACCEPT_EVIDENCE: ${{ runner.temp }}\driver-lifecycle.json
+        run: |
+          whoami
+          Get-Date -Format o
+          python scripts\windows-acceptance\driver_lifecycle.py --tasks 6
+          $code = $LASTEXITCODE
+          Copy-Item "$env:RUNNER_TEMP\driver-lifecycle*" . -ErrorAction SilentlyContinue
+          schtasks /Query /FO CSV /NH | Select-String "StageMesh" | Out-File remaining-tasks.txt
+          exit $code
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: lifecycle-evidence-py${{ matrix.python }}
+          path: |
+            driver-lifecycle*
+            remaining-tasks.txt
+
   collect:
     name: collect evidence
-    needs: [triage, scheduler]
+    needs: [triage, scheduler, lifecycle]
     if: always()
     runs-on: ubuntu-latest
     permissions:

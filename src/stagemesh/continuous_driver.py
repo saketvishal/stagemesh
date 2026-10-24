@@ -33,6 +33,7 @@ TICK_STARTED = "driver.tick_started"
 TICK_FINISHED = "driver.tick_finished"
 SCHEDULED = "driver.scheduled"
 DESCHEDULED = "driver.descheduled"
+OWNER_RECOVERED = "driver.owner_recovered"
 _STATES = {"running", "paused", "stopped"}
 
 
@@ -52,6 +53,7 @@ class DriverConfig:
     max_consecutive_failures: int = 3
     auto_merge_ff: bool = False
     strict_live: bool = False
+    integration: str = "pr"
 
     def validate(self, project: Path) -> DriverConfig:
         resolved = str(Path(project).resolve())
@@ -68,6 +70,8 @@ class DriverConfig:
         ):
             if int(getattr(self, name)) < 1:
                 raise DriverConfigError(f"{name} must be at least 1")
+        if self.integration not in {"pr", "local"}:
+            raise DriverConfigError("integration must be 'pr' or 'local'")
         if self.interval_seconds < 60 or self.interval_seconds % 60:
             raise DriverConfigError("interval_seconds must be an exact whole number of minutes")
         return self
@@ -93,7 +97,10 @@ class DriverConfig:
             "--json",
             "--no-progress",
         ]
-        if self.auto_merge_ff:
+        if self.integration == "local":
+            # Disposable acceptance projects only: integrates into the project's own local base branch and never opens a PR.
+            argv.extend(["--integration", "local"])
+        elif self.auto_merge_ff:
             argv.append("--auto-merge-ff")
         else:
             argv.append("--pr-only")
@@ -126,13 +133,33 @@ def child_owner_path(project: Path) -> Path:
     return Path(project).resolve() / ".stagemesh" / "driver" / CHILD_OWNER_NAME
 
 
-def save_child_owner(project: Path, identity: ProcessIdentity) -> Path:
+def _retry_file_operation(operation: Callable[[], Any], *, attempts: int = 8, delay: float = 0.05) -> Any:
+    """Windows refuses to replace or unlink a file another process holds open for a moment; retry briefly."""
+    for attempt in range(attempts):
+        try:
+            return operation()
+        except PermissionError:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(delay * (attempt + 1))
+
+
+def save_child_owner(project: Path, identity: ProcessIdentity, child: ProcessIdentity | None = None) -> Path:
+    """Durable owner record. `child` is the run-window process under the wrapper, so a dead wrapper with a live child is not
+    mistaken for a free project."""
     path = child_owner_path(project)
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(".json.tmp")
-    temporary.write_text(json.dumps(asdict(identity), indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    temporary.replace(path)
+    payload = asdict(identity)
+    if child is not None:
+        payload["child"] = asdict(child)
+    temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    _retry_file_operation(lambda: temporary.replace(path))
     return path
+
+
+def _unlink_owner(project: Path) -> None:
+    _retry_file_operation(lambda: child_owner_path(project).unlink(missing_ok=True))
 
 
 def child_owner_state(project: Path) -> tuple[str | None, ProcessIdentity | None]:
@@ -150,14 +177,30 @@ def child_owner_state(project: Path) -> tuple[str | None, ProcessIdentity | None
     except (AttributeError, OSError, TypeError, ValueError, json.JSONDecodeError):
         return "UNKNOWN", None
     state = classify_process(identity, process_identity(identity.pid))
-    return ("ORPHANED" if state == "DEAD" else state), identity
+    if state != "DEAD":
+        return state, identity
+    recorded = raw.get("child")
+    if isinstance(recorded, dict):
+        try:
+            child = ProcessIdentity(
+                pid=recorded.get("pid"),
+                create_time=recorded.get("create_time"),
+                boot_id=recorded.get("boot_id"),
+                executable=recorded.get("executable"),
+            )
+        except (AttributeError, TypeError, ValueError):
+            return "UNKNOWN", identity
+        child_state = classify_process(child, process_identity(child.pid))
+        if child_state != "DEAD":
+            return child_state, identity  # the wrapper is gone but the run-window it started is not
+    return "ORPHANED", identity
 
 
 def clear_child_owner(project: Path, identity: ProcessIdentity, *, allow_live: bool = False) -> bool:
     state, saved = child_owner_state(project)
     if saved != identity or (not allow_live and state not in {"ORPHANED", None}):
         return False
-    child_owner_path(project).unlink(missing_ok=True)
+    _unlink_owner(project)
     return True
 
 
@@ -172,8 +215,24 @@ def clear_dead_child_owner(project: Path) -> bool:
     state, _identity = child_owner_state(project)
     if state != "ORPHANED":
         return False
-    child_owner_path(project).unlink(missing_ok=True)
+    _unlink_owner(project)
     return True
+
+
+def child_owner_fully_dead(project: Path) -> bool:
+    """True when the record names BOTH the wrapper and its run-window child and both are proven dead.
+
+    That is what a reboot, logoff or a hard kill of the whole tree leaves behind. With nothing known about the child (an
+    older record, or a crash between writing the wrapper record and the child record) a human release stays required.
+    """
+    state, _identity = child_owner_state(project)
+    if state != "ORPHANED":
+        return False
+    try:
+        raw = json.loads(child_owner_path(project).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    return isinstance(raw, dict) and isinstance(raw.get("child"), dict)
 
 
 def release_orphaned_child(project: Path) -> bool:
@@ -284,6 +343,8 @@ def consecutive_failures(store: Store) -> int:
         if event["event_type"] != TICK_FINISHED:
             continue
         state = str(event["payload"].get("state"))
+        if state == "busy":
+            continue
         if state in {"blocked", "crashed", "timeout"}:
             count += 1
             continue
@@ -401,6 +462,14 @@ def run_tick(
     try:
         with lock.hold("continuous-driver"):
             child_state, child_identity = child_owner_state(project)
+            if child_state == "ORPHANED" and child_owner_fully_dead(project):
+                clear_dead_child_owner(project)  # reboot or tree kill: nothing recorded survives, run-window recovery takes over
+                record_audit(
+                    store,
+                    OWNER_RECOVERED,
+                    {"tick_id": tick_id, "child_identity": None if child_identity is None else asdict(child_identity)},
+                )
+                child_state, child_identity = None, None
             if child_state in {"LIVE", "UNKNOWN", "ORPHANED"}:
                 detail = (
                     "a prior run-window child is still live"
@@ -412,19 +481,20 @@ def run_tick(
                     )
                 )
                 detail += "; refusing overlapping provider work until its identity is proven dead"
+                outcome = "busy" if child_state == "LIVE" else "blocked"  # a running window is not a failure
                 record_audit(
                     store,
                     TICK_FINISHED,
                     {
                         "tick_id": tick_id,
-                        "state": "blocked",
+                        "state": outcome,
                         "exit_code": None,
                         "detail": detail,
                         "child_state": child_state,
                         "child_identity": None if child_identity is None else asdict(child_identity),
                     },
                 )
-                return DriverTick(tick_id, "blocked", None, None, detail)
+                return DriverTick(tick_id, outcome, None, None, detail)
             recovered = interrupted_tick(store)
             reports = project / ".stagemesh" / "driver" / "reports"
             reports.mkdir(parents=True, exist_ok=True)

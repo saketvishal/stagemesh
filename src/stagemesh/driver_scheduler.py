@@ -153,7 +153,11 @@ class WindowsDriverScheduler:
         temporary_definition = self.definition.with_suffix(".xml.tmp")
         temporary_definition.write_text(xml, encoding="utf-16")  # schtasks /XML expects UTF-16 with a BOM
         temporary_definition.replace(self.definition)
-        created = self.runner(["schtasks", "/Create", "/TN", self.handle, "/XML", str(self.definition), "/F"])
+        try:
+            created = self.runner(["schtasks", "/Create", "/TN", self.handle, "/XML", str(self.definition), "/F"])
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            self._discard_definition()
+            raise DriverSchedulerError(f"could not schedule the local driver: {exc}") from exc
         if created.returncode != 0:
             self._discard_definition()
             raise DriverSchedulerError(
@@ -179,16 +183,20 @@ class WindowsDriverScheduler:
         self._discard_definition()
 
     def exists(self, handle: str) -> bool:
+        """True when the task is registered. Decided from exit codes and the task list, never from localized message text."""
         if handle != self.handle:
             return False
-        queried = self.runner(["schtasks", "/Query", "/TN", handle])
-        if queried.returncode == 0:
-            return True
-        detail = (queried.stderr or queried.stdout).strip()
-        lowered = detail.casefold()
-        if "cannot find" in lowered or "not found" in lowered or "does not exist" in lowered:
-            return False
-        raise DriverSchedulerError(f"could not query the local driver schedule: {detail[-300:] or 'unknown error'}")
+        try:
+            queried = self.runner(["schtasks", "/Query", "/TN", handle])
+            if queried.returncode == 0:
+                return True
+            listed = self.runner(["schtasks", "/Query", "/FO", "CSV", "/NH"])
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise DriverSchedulerError(f"could not query the local driver schedule: {exc}") from exc
+        if listed.returncode != 0:
+            detail = (listed.stderr or listed.stdout or queried.stderr or queried.stdout).strip()
+            raise DriverSchedulerError(f"could not query the local driver schedule: {detail[-300:] or 'unknown error'}")
+        return ("\\" + handle).casefold() in listed.stdout.casefold()
 
 
 def default_driver_scheduler(project: Path) -> DriverScheduler | None:

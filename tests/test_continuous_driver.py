@@ -186,9 +186,10 @@ def test_surviving_run_window_identity_blocks_an_overlapping_tick(project: Path,
 
         result = run_tick(store, project, runner=lambda *_: pytest.fail("overlapping window started"))
 
-        assert result.state == "blocked"
+        assert result.state == "busy"  # a running window is neither a failure nor a reason to start another
         assert "still live" in result.detail
         assert child_owner_path(project).is_file()
+        assert continuous_driver.consecutive_failures(store) == 0
     finally:
         kill_process_tree(process)
         process.wait(timeout=10)
@@ -538,3 +539,175 @@ def test_a_live_recorded_owner_is_never_cleared_as_dead(project: Path) -> None:
 
     assert not clear_dead_child_owner(project)
     assert child_owner_path(project).exists()
+
+
+def test_busy_ticks_do_not_consume_the_failure_budget(project: Path, store: Store) -> None:
+    installed(project, max_consecutive_failures=2)
+    for index, state in enumerate(["crashed", "busy", "busy", "busy"]):
+        record_audit(store, continuous_driver.TICK_FINISHED, {"tick_id": f"t{index}", "state": state, "exit_code": 1, "detail": "x"})
+
+    assert continuous_driver.consecutive_failures(store) == 1
+
+
+def test_dead_wrapper_with_live_run_window_child_is_not_orphaned(project: Path) -> None:
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        **popen_session_kwargs(),
+    )
+    try:
+        dead_wrapper = subprocess.Popen([sys.executable, "-c", "pass"])
+        dead_identity = popen_identity(dead_wrapper)
+        dead_wrapper.wait(timeout=30)
+        continuous_driver.save_child_owner(project, dead_identity, popen_identity(child))
+
+        state, _identity = continuous_driver.child_owner_state(project)
+
+        assert state == "LIVE"
+        assert continuous_driver.clear_dead_child_owner(project) is False
+        assert continuous_driver.release_orphaned_child is not None
+        kill_process_tree(child)
+        child.wait(timeout=30)
+        assert continuous_driver.child_owner_state(project)[0] == "ORPHANED"
+        assert continuous_driver.clear_dead_child_owner(project) is True
+    finally:
+        kill_process_tree(child)
+
+
+def test_scheduler_existence_does_not_depend_on_message_language(tmp_path: Path) -> None:
+    scheduler = WindowsDriverScheduler(tmp_path)
+    handle = scheduler.handle
+    registered = "\"\\" + handle + "\",\"N/A\",\"Ready\"\n"
+
+    def run(listed_stdout: str, listed_code: int = 0):
+        def runner(argv):
+            if "/TN" in argv:
+                return subprocess.CompletedProcess(argv, 1, "", "FEHLER: Das System kann die Datei nicht finden.")
+            return subprocess.CompletedProcess(argv, listed_code, listed_stdout, "" if listed_code == 0 else "boom")
+
+        return WindowsDriverScheduler(tmp_path, runner=runner)
+
+    assert run("").exists(handle) is False
+    assert run(registered).exists(handle) is True
+    with pytest.raises(DriverSchedulerError):
+        run("", listed_code=1).exists(handle)
+
+
+def test_registration_runner_errors_become_scheduler_errors_and_clean_up(tmp_path: Path) -> None:
+    def runner(argv):
+        raise subprocess.TimeoutExpired(argv, 60)
+
+    scheduler = WindowsDriverScheduler(tmp_path, runner=runner)
+    with pytest.raises(DriverSchedulerError):
+        scheduler.ensure([sys.executable, "-m", "stagemesh.cli"], 60)
+    assert not scheduler.definition.exists()
+    assert not scheduler.definition.with_suffix(".xml.tmp").exists()
+
+
+def test_local_integration_is_opt_in_and_never_adds_pr_or_merge_flags(project: Path) -> None:
+    default = installed(project).window_argv(project, project / "r.json")
+    assert "--integration" not in default and "--pr-only" in default
+    local = installed(project, integration="local").window_argv(project, project / "r.json")
+    assert local[local.index("--integration") + 1] == "local"
+    assert "--pr-only" not in local and "--auto-merge-ff" not in local
+    with pytest.raises(continuous_driver.DriverConfigError):
+        DriverConfig(project=str(project), integration="merge").validate(project)
+
+
+class MemoryScheduler:
+    name = "memory"
+    handle = "StageMesh\\driver-memory"
+
+    def __init__(self, *, fail_ensure: bool = False) -> None:
+        self.registered = False
+        self.fail_ensure = fail_ensure
+
+    def ensure(self, argv, interval_seconds, execution_limit_seconds=None):
+        if self.fail_ensure:
+            raise DriverSchedulerError("simulated registration failure")
+        self.registered = True
+        return self.handle
+
+    def remove(self, handle):
+        self.registered = False
+
+    def exists(self, handle):
+        return self.registered
+
+
+def drive(project: Path, *args: str) -> int:
+    return main(["--project", str(project), "driver", *args])
+
+
+def test_resume_never_pauses_a_running_driver_whose_window_is_live(project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    scheduler = MemoryScheduler()
+    monkeypatch.setattr(driver_scheduler, "default_driver_scheduler", lambda _project: scheduler)
+    installed(project, state="running")
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], **popen_session_kwargs())
+    try:
+        continuous_driver.save_child_owner(project, popen_identity(child))
+
+        assert drive(project, "resume") == 2
+        assert continuous_driver.load_config(project).state == "running"
+    finally:
+        kill_process_tree(child)
+
+
+def test_stop_and_uninstall_remove_the_schedule_even_when_the_config_is_unreadable(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scheduler = MemoryScheduler()
+    scheduler.registered = True
+    monkeypatch.setattr(driver_scheduler, "default_driver_scheduler", lambda _project: scheduler)
+    installed(project)
+    config_path(project).write_text("{not json", encoding="utf-8")
+
+    assert drive(project, "stop") == 0
+    assert scheduler.registered is False
+
+    scheduler.registered = True
+    assert drive(project, "uninstall") == 0
+    assert scheduler.registered is False
+
+
+def test_failed_reinstall_restores_the_previous_running_configuration(project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    scheduler = MemoryScheduler(fail_ensure=True)
+    monkeypatch.setattr(driver_scheduler, "default_driver_scheduler", lambda _project: scheduler)
+    before = installed(project, state="running", max_tasks=3)
+
+    assert drive(project, "install", "--acknowledge-provider-use", "--max-tasks", "5") == 2
+    assert continuous_driver.load_config(project) == before
+
+
+def test_tick_recovers_automatically_when_wrapper_and_child_are_both_proven_dead(project: Path, store: Store) -> None:
+    installed(project)
+    dead = [subprocess.Popen([sys.executable, "-c", "pass"]) for _ in range(2)]
+    identities = [popen_identity(proc) for proc in dead]
+    for proc in dead:
+        proc.wait(timeout=30)
+    continuous_driver.save_child_owner(project, identities[0], identities[1])
+    started: list[list[str]] = []
+
+    def runner(argv, _project, _timeout):
+        started.append(argv)
+        report_path(argv).write_text(json.dumps({"selected": [], "tasks": []}), encoding="utf-8")
+        return 0
+
+    result = run_tick(store, project, runner=runner)
+
+    assert started and result.state != "blocked"
+    assert not child_owner_path(project).exists()
+    assert any(event["event_type"] == continuous_driver.OWNER_RECOVERED for event in continuous_driver.latest_events(store))
+
+
+def test_tick_stays_blocked_for_a_dead_wrapper_with_no_recorded_child(project: Path, store: Store) -> None:
+    installed(project)
+    wrapper = subprocess.Popen([sys.executable, "-c", "pass"])
+    identity = popen_identity(wrapper)
+    wrapper.wait(timeout=30)
+    continuous_driver.save_child_owner(project, identity)
+
+    result = run_tick(store, project, runner=lambda *_: pytest.fail("started without proof the child is gone"))
+
+    assert result.state == "blocked" and child_owner_path(project).is_file()
