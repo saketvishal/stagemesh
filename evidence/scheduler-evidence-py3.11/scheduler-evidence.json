@@ -1,0 +1,575 @@
+{
+  "failures": [],
+  "evidence": [
+    {
+      "t": "2026-10-24T18:15:49.609539+00:00",
+      "step": "swept_stale_temp_tasks",
+      "names": []
+    },
+    {
+      "t": "2026-10-24T18:15:49.609539+00:00",
+      "step": "environment",
+      "platform": "win32",
+      "python": "3.11.9 (tags/v3.11.9:de54cf5, Apr  2 2024, 10:12:12) [MSC v.1938 64 bit (AMD64)]",
+      "executable": "C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\python.exe"
+    },
+    {
+      "t": "2026-10-24T18:15:49.639411+00:00",
+      "step": "created",
+      "task": "StageMesh\\accept-a214b74b58",
+      "python": "3.11.9",
+      "limit_seconds": 7200
+    },
+    {
+      "t": "2026-10-24T18:15:49.649214+00:00",
+      "step": "registered_task_exists",
+      "ok": true,
+      "task": "StageMesh\\accept-a214b74b58"
+    },
+    {
+      "t": "2026-10-24T18:15:49.659015+00:00",
+      "step": "xml_round_trip_query",
+      "ok": true,
+      "rc": 0
+    },
+    {
+      "t": "2026-10-24T18:15:49.659015+00:00",
+      "step": "logon_trigger_registered",
+      "ok": true
+    },
+    {
+      "t": "2026-10-24T18:15:49.659015+00:00",
+      "step": "repetition_registered",
+      "ok": true
+    },
+    {
+      "t": "2026-10-24T18:15:49.659015+00:00",
+      "step": "start_when_available_registered",
+      "ok": true
+    },
+    {
+      "t": "2026-10-24T18:15:49.659015+00:00",
+      "step": "battery_start_allowed_registered",
+      "ok": true
+    },
+    {
+      "t": "2026-10-24T18:15:49.659015+00:00",
+      "step": "battery_stop_disabled_registered",
+      "ok": true
+    },
+    {
+      "t": "2026-10-24T18:15:49.659015+00:00",
+      "step": "ignore_new_registered",
+      "ok": true
+    },
+    {
+      "t": "2026-10-24T18:15:49.659015+00:00",
+      "step": "time_limit_registered",
+      "ok": true,
+      "value": "PT2H"
+    },
+    {
+      "t": "2026-10-24T18:15:49.669075+00:00",
+      "step": "run_on_demand",
+      "rc": 0
+    },
+    {
+      "t": "2026-10-24T18:15:50.695724+00:00",
+      "step": "scheduler_started_the_task",
+      "ok": true,
+      "pids": [
+        [
+          8612,
+          7592
+        ]
+      ],
+      "status": "Running"
+    },
+    {
+      "t": "2026-10-24T18:15:50.741238+00:00",
+      "step": "status_running",
+      "ok": true,
+      "status": "Running"
+    },
+    {
+      "t": "2026-10-24T18:16:05.752082+00:00",
+      "step": "overlap_prevented_ignore_new",
+      "ok": true,
+      "rc": 0,
+      "starts": 1
+    },
+    {
+      "t": "2026-10-24T18:16:07.617748+00:00",
+      "step": "process_table_while_running",
+      "table": [
+        [
+          "9620",
+          "5176",
+          "python.exe",
+          "2026-10-24T18:15:48"
+        ],
+        [
+          "8612",
+          "2560",
+          "python.exe",
+          "2026-10-24T18:15:49"
+        ],
+        [
+          "7592",
+          "8612",
+          "python.exe",
+          "2026-10-24T18:15:49"
+        ]
+      ]
+    },
+    {
+      "t": "2026-10-24T18:16:17.971420+00:00",
+      "step": "process_table_after_end",
+      "end_rc": 0,
+      "status": "Ready",
+      "table": [
+        [
+          "9620",
+          "5176",
+          "python.exe",
+          "2026-10-24T18:15:48"
+        ],
+        [
+          "7592",
+          "8612",
+          "python.exe",
+          "2026-10-24T18:15:49"
+        ]
+      ],
+      "worker_alive": false,
+      "grandchild_alive": true
+    },
+    {
+      "t": "2026-10-24T18:16:18.230932+00:00",
+      "step": "variant_created",
+      "variant": "direct-end",
+      "task": "StageMesh\\accept-f02b82a83f",
+      "rc": 0
+    },
+    {
+      "t": "2026-10-24T18:16:21.579001+00:00",
+      "step": "direct-end_terminates_the_task_primary_process",
+      "ok": true,
+      "primary": 7020,
+      "seconds": 2.1,
+      "status": "Ready"
+    },
+    {
+      "t": "2026-10-24T18:16:21.879434+00:00",
+      "step": "direct-end_descendants_after_scheduler_termination",
+      "worker_alive": false,
+      "grandchild_alive": true,
+      "table_before": [
+        [
+          "9620",
+          "5176",
+          "python.exe",
+          "2026-10-24T18:15:48"
+        ],
+        [
+          "7592",
+          "8612",
+          "python.exe",
+          "2026-10-24T18:15:49"
+        ],
+        [
+          "7020",
+          "2560",
+          "python.exe",
+          "2026-10-24T18:16:18"
+        ],
+        [
+          "5452",
+          "7020",
+          "python.exe",
+          "2026-10-24T18:16:18"
+        ]
+      ],
+      "table_after": [
+        [
+          "9620",
+          "5176",
+          "python.exe",
+          "2026-10-24T18:15:48"
+        ],
+        [
+          "7592",
+          "8612",
+          "python.exe",
+          "2026-10-24T18:15:49"
+        ],
+        [
+          "5452",
+          "7020",
+          "python.exe",
+          "2026-10-24T18:16:18"
+        ]
+      ]
+    },
+    {
+      "t": "2026-10-24T18:16:22.143283+00:00",
+      "step": "variant_created",
+      "variant": "direct-limit",
+      "task": "StageMesh\\accept-b07bb561b8",
+      "rc": 0
+    },
+    {
+      "t": "2026-10-24T18:17:24.492602+00:00",
+      "step": "direct-limit_terminates_the_task_primary_process",
+      "ok": true,
+      "primary": 6856,
+      "seconds": 61.1,
+      "status": "Ready"
+    },
+    {
+      "t": "2026-10-24T18:17:24.778966+00:00",
+      "step": "direct-limit_descendants_after_scheduler_termination",
+      "worker_alive": false,
+      "grandchild_alive": true,
+      "table_before": [
+        [
+          "9620",
+          "5176",
+          "python.exe",
+          "2026-10-24T18:15:48"
+        ],
+        [
+          "7592",
+          "8612",
+          "python.exe",
+          "2026-10-24T18:15:49"
+        ],
+        [
+          "5452",
+          "7020",
+          "python.exe",
+          "2026-10-24T18:16:18"
+        ],
+        [
+          "6856",
+          "2560",
+          "python.exe",
+          "2026-10-24T18:16:22"
+        ],
+        [
+          "9384",
+          "6856",
+          "python.exe",
+          "2026-10-24T18:16:22"
+        ]
+      ],
+      "table_after": [
+        [
+          "9620",
+          "5176",
+          "python.exe",
+          "2026-10-24T18:15:48"
+        ],
+        [
+          "7592",
+          "8612",
+          "python.exe",
+          "2026-10-24T18:15:49"
+        ],
+        [
+          "5452",
+          "7020",
+          "python.exe",
+          "2026-10-24T18:16:18"
+        ],
+        [
+          "9384",
+          "6856",
+          "python.exe",
+          "2026-10-24T18:16:22"
+        ]
+      ]
+    },
+    {
+      "t": "2026-10-24T18:17:25.030148+00:00",
+      "step": "variant_created",
+      "variant": "cmd-end",
+      "task": "StageMesh\\accept-ed13a7007b",
+      "rc": 0
+    },
+    {
+      "t": "2026-10-24T18:17:28.376801+00:00",
+      "step": "cmd-end_terminates_the_task_primary_process",
+      "ok": true,
+      "primary": 9388,
+      "seconds": 2.1,
+      "status": "Ready"
+    },
+    {
+      "t": "2026-10-24T18:17:28.670689+00:00",
+      "step": "cmd-end_descendants_after_scheduler_termination",
+      "worker_alive": true,
+      "grandchild_alive": true,
+      "table_before": [
+        [
+          "9620",
+          "5176",
+          "python.exe",
+          "2026-10-24T18:15:48"
+        ],
+        [
+          "7592",
+          "8612",
+          "python.exe",
+          "2026-10-24T18:15:49"
+        ],
+        [
+          "5452",
+          "7020",
+          "python.exe",
+          "2026-10-24T18:16:18"
+        ],
+        [
+          "9384",
+          "6856",
+          "python.exe",
+          "2026-10-24T18:16:22"
+        ],
+        [
+          "9388",
+          "2560",
+          "cmd.exe",
+          "2026-10-24T18:17:25"
+        ],
+        [
+          "3588",
+          "9388",
+          "python.exe",
+          "2026-10-24T18:17:25"
+        ],
+        [
+          "3964",
+          "3588",
+          "python.exe",
+          "2026-10-24T18:17:25"
+        ]
+      ],
+      "table_after": [
+        [
+          "9620",
+          "5176",
+          "python.exe",
+          "2026-10-24T18:15:48"
+        ],
+        [
+          "7592",
+          "8612",
+          "python.exe",
+          "2026-10-24T18:15:49"
+        ],
+        [
+          "5452",
+          "7020",
+          "python.exe",
+          "2026-10-24T18:16:18"
+        ],
+        [
+          "9384",
+          "6856",
+          "python.exe",
+          "2026-10-24T18:16:22"
+        ],
+        [
+          "3588",
+          "9388",
+          "python.exe",
+          "2026-10-24T18:17:25"
+        ],
+        [
+          "3964",
+          "3588",
+          "python.exe",
+          "2026-10-24T18:17:25"
+        ]
+      ]
+    },
+    {
+      "t": "2026-10-24T18:17:28.998625+00:00",
+      "step": "variant_created",
+      "variant": "cmd-limit",
+      "task": "StageMesh\\accept-1a4eefdec0",
+      "rc": 0
+    },
+    {
+      "t": "2026-10-24T18:18:31.325917+00:00",
+      "step": "cmd-limit_terminates_the_task_primary_process",
+      "ok": true,
+      "primary": 7328,
+      "seconds": 61.1,
+      "status": "Ready"
+    },
+    {
+      "t": "2026-10-24T18:18:31.599842+00:00",
+      "step": "cmd-limit_descendants_after_scheduler_termination",
+      "worker_alive": true,
+      "grandchild_alive": true,
+      "table_before": [
+        [
+          "9620",
+          "5176",
+          "python.exe",
+          "2026-10-24T18:15:48"
+        ],
+        [
+          "7592",
+          "8612",
+          "python.exe",
+          "2026-10-24T18:15:49"
+        ],
+        [
+          "5452",
+          "7020",
+          "python.exe",
+          "2026-10-24T18:16:18"
+        ],
+        [
+          "9384",
+          "6856",
+          "python.exe",
+          "2026-10-24T18:16:22"
+        ],
+        [
+          "7328",
+          "2560",
+          "cmd.exe",
+          "2026-10-24T18:17:29"
+        ],
+        [
+          "6364",
+          "7328",
+          "python.exe",
+          "2026-10-24T18:17:29"
+        ],
+        [
+          "1660",
+          "6364",
+          "python.exe",
+          "2026-10-24T18:17:29"
+        ]
+      ],
+      "table_after": [
+        [
+          "9620",
+          "5176",
+          "python.exe",
+          "2026-10-24T18:15:48"
+        ],
+        [
+          "7592",
+          "8612",
+          "python.exe",
+          "2026-10-24T18:15:49"
+        ],
+        [
+          "5452",
+          "7020",
+          "python.exe",
+          "2026-10-24T18:16:18"
+        ],
+        [
+          "9384",
+          "6856",
+          "python.exe",
+          "2026-10-24T18:16:22"
+        ],
+        [
+          "6364",
+          "7328",
+          "python.exe",
+          "2026-10-24T18:17:29"
+        ],
+        [
+          "1660",
+          "6364",
+          "python.exe",
+          "2026-10-24T18:17:29"
+        ]
+      ]
+    },
+    {
+      "t": "2026-10-24T18:18:32.354823+00:00",
+      "step": "removed",
+      "task": "StageMesh\\accept-a214b74b58",
+      "exists_after": false
+    },
+    {
+      "t": "2026-10-24T18:18:32.816323+00:00",
+      "step": "removed",
+      "task": "StageMesh\\accept-f02b82a83f",
+      "exists_after": false
+    },
+    {
+      "t": "2026-10-24T18:18:33.282948+00:00",
+      "step": "removed",
+      "task": "StageMesh\\accept-b07bb561b8",
+      "exists_after": false
+    },
+    {
+      "t": "2026-10-24T18:18:33.745522+00:00",
+      "step": "removed",
+      "task": "StageMesh\\accept-ed13a7007b",
+      "exists_after": false
+    },
+    {
+      "t": "2026-10-24T18:18:34.200021+00:00",
+      "step": "removed",
+      "task": "StageMesh\\accept-1a4eefdec0",
+      "exists_after": false
+    },
+    {
+      "t": "2026-10-24T18:18:34.247504+00:00",
+      "step": "cleanup_verified",
+      "remaining": []
+    },
+    {
+      "t": "2026-10-24T18:18:34.247504+00:00",
+      "step": "worker_log",
+      "file": "cmd-end.log",
+      "lines": [
+        "2026-10-24T18:17:25.192563+00:00 start pid=3588 grandchild=3964"
+      ]
+    },
+    {
+      "t": "2026-10-24T18:18:34.247504+00:00",
+      "step": "worker_log",
+      "file": "cmd-limit.log",
+      "lines": [
+        "2026-10-24T18:17:29.160686+00:00 start pid=6364 grandchild=1660"
+      ]
+    },
+    {
+      "t": "2026-10-24T18:18:34.247504+00:00",
+      "step": "worker_log",
+      "file": "direct-end.log",
+      "lines": [
+        "2026-10-24T18:16:18.351926+00:00 start pid=7020 grandchild=5452"
+      ]
+    },
+    {
+      "t": "2026-10-24T18:18:34.247504+00:00",
+      "step": "worker_log",
+      "file": "direct-limit.log",
+      "lines": [
+        "2026-10-24T18:16:22.267095+00:00 start pid=6856 grandchild=9384"
+      ]
+    },
+    {
+      "t": "2026-10-24T18:18:34.247504+00:00",
+      "step": "worker_log",
+      "file": "main.log",
+      "lines": [
+        "2026-10-24T18:15:49.788182+00:00 start pid=8612 grandchild=7592"
+      ]
+    }
+  ]
+}
