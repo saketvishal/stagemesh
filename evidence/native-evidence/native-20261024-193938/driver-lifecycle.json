@@ -1,0 +1,225 @@
+{
+  "failures": [],
+  "evidence": [
+    {
+      "step": "project_ready",
+      "at": 1792870816.1862154,
+      "project": "C:\\Users\\runneradmin\\AppData\\Local\\Temp\\sm-driver-accept-a5_z7nqq\\project",
+      "mock_only": true,
+      "tasks": 6,
+      "mode": "task-scheduler"
+    },
+    {
+      "step": "install",
+      "at": 1792870816.792694,
+      "rc": 0,
+      "out": "urrency\": 1,\n    \"integration\": \"local\",\n    \"interval_seconds\": 60,\n    \"max_consecutive_failures\": 3,\n    \"max_steps_per_task\": 8,\n    \"max_tasks\": 1,\n    \"project\": \"C:\\\\Users\\\\runneradmin\\\\AppData\\\\Local\\\\Temp\\\\sm-driver-accept-a5_z7nqq\\\\project\",\n    \"state\": \"running\",\n    \"strict_live\": false,\n    \"window_seconds\": 90\n  },\n  \"handle\": \"StageMesh\\\\driver-5b86fc8cab52\",\n  \"installed\": true\n}\n",
+      "err": ""
+    },
+    {
+      "step": "PASS driver_installed",
+      "at": 1792870816.7929802
+    },
+    {
+      "step": "PASS schedule_registered",
+      "at": 1792870816.8076582
+    },
+    {
+      "step": "PASS repeated_execution_completes_tasks",
+      "at": 1792870956.8319893,
+      "done": [
+        "MOCK-1",
+        "MOCK-2"
+      ],
+      "ticks": 2
+    },
+    {
+      "step": "PASS mock_provider_ran_implement_and_independent_review",
+      "at": 1792870956.832662,
+      "stages": [
+        "implement",
+        "review",
+        "implement",
+        "review"
+      ]
+    },
+    {
+      "step": "PASS pause_command",
+      "at": 1792870957.168074,
+      "out": "\\\\.stagemesh\\\\driver\\\\reports\\\\a57d06f3a1434bbf92c0c91409cf5b5d.json\",\n    \"state\": \"progress\",\n    \"tick_id\": \"a57d06f3a1434bbf92c0c91409cf5b5d\"\n  },\n  \"schedule_exists\": true,\n  \"state\": \"paused\"\n}\n",
+      "err": ""
+    },
+    {
+      "step": "PASS paused_driver_makes_no_provider_calls",
+      "at": 1792871157.1731834,
+      "before": 4,
+      "after": 4
+    },
+    {
+      "step": "PASS resume_command",
+      "at": 1792871157.5919309,
+      "out": "\\.stagemesh\\\\driver\\\\reports\\\\a57d06f3a1434bbf92c0c91409cf5b5d.json\",\n    \"state\": \"progress\",\n    \"tick_id\": \"a57d06f3a1434bbf92c0c91409cf5b5d\"\n  },\n  \"schedule_exists\": true,\n  \"state\": \"running\"\n}\n",
+      "err": ""
+    },
+    {
+      "step": "PASS resume_continues_work",
+      "at": 1792871237.6112037,
+      "done": [
+        "MOCK-1",
+        "MOCK-2",
+        "MOCK-3"
+      ]
+    },
+    {
+      "step": "PASS no_overlapping_run_windows",
+      "at": 1792871429.1037102,
+      "peak_concurrent_windows": 1,
+      "sample": [
+        [
+          1860,
+          7588,
+          "C:\\Users\\runneradmin\\AppData\\Local\\Temp\\sm-native-75e1a420\\.venv-accept\\Scripts\\python.exe -m stagemesh.cli --project C:\\Users\\runneradmin\\AppData\\Local\\Temp\\sm"
+        ]
+      ]
+    },
+    {
+      "step": "PASS bounded_provider_calls_during_overlap",
+      "at": 1792871429.1042888
+    },
+    {
+      "step": "killing_process_tree",
+      "at": 1792871463.4967892,
+      "processes": [
+        [
+          7936,
+          "\"C:\\Users\\runneradmin\\AppData\\Local\\Temp\\sm-native-75e1a420\\.venv-accept\\Scripts\\python.exe\" -m stagemesh.cli --project "
+        ],
+        [
+          8616,
+          "\"C:\\Users\\runneradmin\\AppData\\Local\\Temp\\sm-native-75e1a420\\.venv-accept\\Scripts\\python.exe\" -m stagemesh.cli --project "
+        ],
+        [
+          6868,
+          "C:\\Users\\runneradmin\\AppData\\Local\\Temp\\sm-native-75e1a420\\.venv-accept\\Scripts\\python.exe -m stagemesh.driver_child C:\\"
+        ],
+        [
+          8384,
+          "C:\\Users\\runneradmin\\AppData\\Local\\Temp\\sm-native-75e1a420\\.venv-accept\\Scripts\\python.exe -m stagemesh.driver_child C:\\"
+        ],
+        [
+          8604,
+          "C:\\Users\\runneradmin\\AppData\\Local\\Temp\\sm-native-75e1a420\\.venv-accept\\Scripts\\python.exe -m stagemesh.cli --project C:"
+        ],
+        [
+          2576,
+          "C:\\Users\\runneradmin\\AppData\\Local\\Temp\\sm-native-75e1a420\\.venv-accept\\Scripts\\python.exe -m stagemesh.cli --project C:"
+        ],
+        [
+          4680,
+          "C:\\Users\\runneradmin\\AppData\\Local\\Temp\\sm-native-75e1a420\\.venv-accept\\Scripts\\python.exe -c \"import sys; from stagemes"
+        ],
+        [
+          8144,
+          "C:\\Users\\runneradmin\\AppData\\Local\\Temp\\sm-native-75e1a420\\.venv-accept\\Scripts\\python.exe -c \"import sys; from stagemes"
+        ],
+        [
+          9132,
+          "C:\\Users\\runneradmin\\AppData\\Local\\Temp\\sm-native-75e1a420\\.venv-accept\\Scripts\\python.exe C:\\Users\\runneradmin\\AppData\\"
+        ],
+        [
+          4604,
+          "C:\\Users\\runneradmin\\AppData\\Local\\Temp\\sm-native-75e1a420\\.venv-accept\\Scripts\\python.exe C:\\Users\\runneradmin\\AppData\\"
+        ]
+      ]
+    },
+    {
+      "step": "PASS tree_fully_killed",
+      "at": 1792871467.3271365,
+      "survivors": []
+    },
+    {
+      "step": "PASS recovered_after_crash_and_continued",
+      "at": 1792871527.393125,
+      "done": [
+        "MOCK-1",
+        "MOCK-2",
+        "MOCK-3",
+        "MOCK-4",
+        "MOCK-5"
+      ]
+    },
+    {
+      "step": "PASS recovery_was_audited",
+      "at": 1792871527.3972461,
+      "states": [
+        "blocked",
+        "progress"
+      ]
+    },
+    {
+      "step": "tick_history",
+      "at": 1792871527.4008038,
+      "states": [
+        "progress",
+        "progress",
+        "progress",
+        "progress",
+        "blocked",
+        "progress"
+      ],
+      "done": [
+        "MOCK-1",
+        "MOCK-2",
+        "MOCK-3",
+        "MOCK-4",
+        "MOCK-5"
+      ],
+      "calls": 11
+    },
+    {
+      "step": "PASS no_task_completed_twice",
+      "at": 1792871527.4023106,
+      "done": [
+        "MOCK-1",
+        "MOCK-2",
+        "MOCK-3",
+        "MOCK-4",
+        "MOCK-5"
+      ]
+    },
+    {
+      "step": "PASS stop_command",
+      "at": 1792871527.8303914,
+      "out": ".stagemesh\\\\driver\\\\reports\\\\d2be1048d5bc40aa9ff1dff7b5222d3a.json\",\n    \"state\": \"progress\",\n    \"tick_id\": \"d2be1048d5bc40aa9ff1dff7b5222d3a\"\n  },\n  \"schedule_exists\": false,\n  \"state\": \"stopped\"\n}\n",
+      "err": ""
+    },
+    {
+      "step": "PASS schedule_removed_by_stop",
+      "at": 1792871528.425618
+    },
+    {
+      "step": "PASS stopped_driver_makes_no_provider_calls",
+      "at": 1792871605.42866
+    },
+    {
+      "step": "PASS uninstall_command",
+      "at": 1792871606.6950197,
+      "out": "ve_failures\": 3,\n    \"max_steps_per_task\": 8,\n    \"max_tasks\": 1,\n    \"project\": \"C:\\\\Users\\\\runneradmin\\\\AppData\\\\Local\\\\Temp\\\\sm-driver-accept-a5_z7nqq\\\\project\",\n    \"state\": \"stopped\",\n    \"strict_live\": false,\n    \"window_seconds\": 90\n  },\n  \"schedule_exists\": false,\n  \"state\": \"uninstalled\"\n}\n",
+      "err": ""
+    },
+    {
+      "step": "PASS ledger_preserved_after_uninstall",
+      "at": 1792871606.6953979
+    },
+    {
+      "step": "PASS no_project_processes_remain",
+      "at": 1792871607.4452019,
+      "left": []
+    },
+    {
+      "step": "cleanup_verified",
+      "at": 1792871608.6048927,
+      "schedule_exists": false
+    }
+  ]
+}

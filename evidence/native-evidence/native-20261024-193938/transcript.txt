@@ -1,0 +1,56 @@
+﻿**********************
+Windows PowerShell transcript start
+Start time: 20261024193938
+Username: runnervmdaln5\runneradmin
+RunAs User: runnervmdaln5\runneradmin
+Configuration Name: 
+Machine: runnervmdaln5 (Microsoft Windows NT 10.0.26100.0)
+Host Application: C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\Users\RUNNER~1\AppData\Local\Temp\sm-native-75e1a420\scripts\windows-acceptance\run-native-acceptance.ps1 -Work C:\Users\RUNNER~1\AppData\Local\Temp\sm-native-75e1a420 -Commit 7446cf07492c302ea0a9f74938b80e2136ed0b7a -EvidenceRoot D:\a\_temp\native-evidence
+Process ID: 7332
+PSVersion: 5.1.26100.33648
+PSEdition: Desktop
+PSCompatibleVersions: 1.0, 2.0, 3.0, 4.0, 5.0, 5.1.26100.33648
+BuildVersion: 10.0.26100.33648
+CLRVersion: 4.0.30319.42000
+WSManStackVersion: 3.0
+PSRemotingProtocolVersion: 2.3
+SerializationVersion: 1.1.0.1
+**********************
+[PASS] no_provider_command_overrides
+[PASS] checkout_is_pinned_commit 7446cf07492c302ea0a9f74938b80e2136ed0b7a
+[PASS] python_3_11_or_newer C:\hostedtoolcache\windows\Python\3.13.16\x64\python.exe
+[PASS] install_stagemesh logs: venv/pip
+[PASS] provider_login_state_recorded classification only; no model call made
+[PASS] focused_driver_tests_on_this_host exit=0
+[PASS] process_tree_diagnostic_ran exit=0
+Running the real Task Scheduler lifecycle (about 15 to 20 minutes). Heartbeats appear every 2 minutes.
+  lifecycle still running (156 s)
+  lifecycle still running (276 s)
+  lifecycle still running (396 s)
+  lifecycle still running (516 s)
+  lifecycle still running (636 s)
+  lifecycle still running (756 s)
+[PASS] driver_lifecycle_mock_providers exit=0 failures=[] ids_recorded=True
+schtasks : ERROR: The system cannot find the file specified.
+At C:\Users\runneradmin\AppData\Local\Temp\sm-native-75e1a420\scripts\windows-acceptance\run-native-acceptance.ps1:149 
+char:17
++                 schtasks /Delete /TN $handle /F *> $null
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (ERROR: The syst...file specified.:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+
+schtasks : ERROR: The system cannot find the path specified.
+At C:\Users\runneradmin\AppData\Local\Temp\sm-native-75e1a420\scripts\windows-acceptance\run-native-acceptance.ps1:150 
+char:17
++                 schtasks /Query /TN $handle *> $null
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (ERROR: The syst...path specified.:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+
+[PASS] cleanup_complete task_removed=True temp_removed=True
+
+RESULT: PASS   evidence: D:\a\_temp\native-evidence\native-20261024-193938
+**********************
+Windows PowerShell transcript end
+End time: 20261024195332
+**********************

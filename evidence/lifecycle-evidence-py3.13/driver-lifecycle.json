@@ -1,0 +1,204 @@
+{
+  "failures": [],
+  "evidence": [
+    {
+      "step": "project_ready",
+      "at": 1792870783.0828378,
+      "project": "C:\\Users\\runneradmin\\AppData\\Local\\Temp\\sm-driver-accept-ad94p0al\\project",
+      "mock_only": true,
+      "tasks": 6,
+      "mode": "task-scheduler"
+    },
+    {
+      "step": "install",
+      "at": 1792870783.636863,
+      "rc": 0,
+      "out": "urrency\": 1,\n    \"integration\": \"local\",\n    \"interval_seconds\": 60,\n    \"max_consecutive_failures\": 3,\n    \"max_steps_per_task\": 8,\n    \"max_tasks\": 1,\n    \"project\": \"C:\\\\Users\\\\runneradmin\\\\AppData\\\\Local\\\\Temp\\\\sm-driver-accept-ad94p0al\\\\project\",\n    \"state\": \"running\",\n    \"strict_live\": false,\n    \"window_seconds\": 90\n  },\n  \"handle\": \"StageMesh\\\\driver-3642d80d08c9\",\n  \"installed\": true\n}\n",
+      "err": ""
+    },
+    {
+      "step": "PASS driver_installed",
+      "at": 1792870783.6369462
+    },
+    {
+      "step": "PASS schedule_registered",
+      "at": 1792870783.6559958
+    },
+    {
+      "step": "PASS repeated_execution_completes_tasks",
+      "at": 1792870923.6835017,
+      "done": [
+        "MOCK-1",
+        "MOCK-2"
+      ],
+      "ticks": 2
+    },
+    {
+      "step": "PASS mock_provider_ran_implement_and_independent_review",
+      "at": 1792870923.6839807,
+      "stages": [
+        "implement",
+        "review",
+        "implement",
+        "review"
+      ]
+    },
+    {
+      "step": "PASS pause_command",
+      "at": 1792870924.1318772,
+      "out": "\\\\.stagemesh\\\\driver\\\\reports\\\\e2f451de3e394f30acf62d2386299f39.json\",\n    \"state\": \"progress\",\n    \"tick_id\": \"e2f451de3e394f30acf62d2386299f39\"\n  },\n  \"schedule_exists\": true,\n  \"state\": \"paused\"\n}\n",
+      "err": ""
+    },
+    {
+      "step": "PASS paused_driver_makes_no_provider_calls",
+      "at": 1792871124.132554,
+      "before": 4,
+      "after": 4
+    },
+    {
+      "step": "PASS resume_command",
+      "at": 1792871124.6313531,
+      "out": "\\.stagemesh\\\\driver\\\\reports\\\\e2f451de3e394f30acf62d2386299f39.json\",\n    \"state\": \"progress\",\n    \"tick_id\": \"e2f451de3e394f30acf62d2386299f39\"\n  },\n  \"schedule_exists\": true,\n  \"state\": \"running\"\n}\n",
+      "err": ""
+    },
+    {
+      "step": "PASS resume_continues_work",
+      "at": 1792871204.6477733,
+      "done": [
+        "MOCK-1",
+        "MOCK-2",
+        "MOCK-3"
+      ]
+    },
+    {
+      "step": "PASS no_overlapping_run_windows",
+      "at": 1792871400.3437634,
+      "peak_concurrent_windows": 1,
+      "sample": [
+        [
+          4692,
+          8696,
+          "C:\\hostedtoolcache\\windows\\Python\\3.13.16\\x64\\python.exe -m stagemesh.cli --project C:\\Users\\runneradmin\\AppData\\Local\\Temp\\sm-driver-accept-ad94p0al\\project ru"
+        ]
+      ]
+    },
+    {
+      "step": "PASS bounded_provider_calls_during_overlap",
+      "at": 1792871400.3441718
+    },
+    {
+      "step": "killing_process_tree",
+      "at": 1792871430.7174735,
+      "processes": [
+        [
+          5692,
+          "\"C:\\hostedtoolcache\\windows\\Python\\3.13.16\\x64\\python.exe\" -m stagemesh.cli --project C:\\Users\\runneradmin\\AppData\\Local"
+        ],
+        [
+          6724,
+          "C:\\hostedtoolcache\\windows\\Python\\3.13.16\\x64\\python.exe -m stagemesh.driver_child C:\\Users\\runneradmin\\AppData\\Local\\Te"
+        ],
+        [
+          8684,
+          "C:\\hostedtoolcache\\windows\\Python\\3.13.16\\x64\\python.exe -m stagemesh.cli --project C:\\Users\\runneradmin\\AppData\\Local\\T"
+        ],
+        [
+          4596,
+          "C:\\hostedtoolcache\\windows\\Python\\3.13.16\\x64\\python.exe -c \"import sys; from stagemesh.cli import main; sys.exit(main(s"
+        ],
+        [
+          4068,
+          "C:\\hostedtoolcache\\windows\\Python\\3.13.16\\x64\\python.exe D:\\a\\stagemesh\\stagemesh\\scripts\\windows-acceptance\\mock_provid"
+        ]
+      ]
+    },
+    {
+      "step": "PASS tree_fully_killed",
+      "at": 1792871434.3947306,
+      "survivors": []
+    },
+    {
+      "step": "PASS recovered_after_crash_and_continued",
+      "at": 1792871494.4342778,
+      "done": [
+        "MOCK-1",
+        "MOCK-2",
+        "MOCK-3",
+        "MOCK-4",
+        "MOCK-5"
+      ]
+    },
+    {
+      "step": "PASS recovery_was_audited",
+      "at": 1792871494.4388757,
+      "states": [
+        "progress",
+        "recovered_after_crash"
+      ]
+    },
+    {
+      "step": "tick_history",
+      "at": 1792871494.4420385,
+      "states": [
+        "progress",
+        "progress",
+        "progress",
+        "progress",
+        "recovered_after_crash"
+      ],
+      "done": [
+        "MOCK-1",
+        "MOCK-2",
+        "MOCK-3",
+        "MOCK-4",
+        "MOCK-5"
+      ],
+      "calls": 11
+    },
+    {
+      "step": "PASS no_task_completed_twice",
+      "at": 1792871494.4433787,
+      "done": [
+        "MOCK-1",
+        "MOCK-2",
+        "MOCK-3",
+        "MOCK-4",
+        "MOCK-5"
+      ]
+    },
+    {
+      "step": "PASS stop_command",
+      "at": 1792871494.9168122,
+      "out": "recovered_by_tick\": \"113da393755a4ac2aa049dbda35a6728\",\n    \"state\": \"recovered_after_crash\",\n    \"tick_id\": \"4fa8458c55c945cf932679b5f47d0476\"\n  },\n  \"schedule_exists\": false,\n  \"state\": \"stopped\"\n}\n",
+      "err": ""
+    },
+    {
+      "step": "PASS schedule_removed_by_stop",
+      "at": 1792871495.7965834
+    },
+    {
+      "step": "PASS stopped_driver_makes_no_provider_calls",
+      "at": 1792871572.7984648
+    },
+    {
+      "step": "PASS uninstall_command",
+      "at": 1792871574.0604873,
+      "out": "ve_failures\": 3,\n    \"max_steps_per_task\": 8,\n    \"max_tasks\": 1,\n    \"project\": \"C:\\\\Users\\\\runneradmin\\\\AppData\\\\Local\\\\Temp\\\\sm-driver-accept-ad94p0al\\\\project\",\n    \"state\": \"stopped\",\n    \"strict_live\": false,\n    \"window_seconds\": 90\n  },\n  \"schedule_exists\": false,\n  \"state\": \"uninstalled\"\n}\n",
+      "err": ""
+    },
+    {
+      "step": "PASS ledger_preserved_after_uninstall",
+      "at": 1792871574.0607362
+    },
+    {
+      "step": "PASS no_project_processes_remain",
+      "at": 1792871574.7978199,
+      "left": []
+    },
+    {
+      "step": "cleanup_verified",
+      "at": 1792871576.4698498,
+      "schedule_exists": false
+    }
+  ]
+}

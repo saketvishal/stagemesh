@@ -1,0 +1,28 @@
+ROOT=C:\Users\runneradmin\AppData\Local\Temp\sm-driver-accept-a5_z7nqq
+TASK_HANDLE=StageMesh\driver-5b86fc8cab52
+[19:40:16] project_ready {"project": "C:\\Users\\runneradmin\\AppData\\Local\\Temp\\sm-driver-accept-a5_z7nqq\\project", "mock_only": true, "tasks": 6, "mode": "task-scheduler"}
+[19:40:16] install {"rc": 0, "out": "urrency\": 1,\n    \"integration\": \"local\",\n    \"interval_seconds\": 60,\n    \"max_consecutive_failures\": 3,\n    \"max_steps_per_task\": 8,\n    \"max_tasks\": 1,\n    \"project\": \"C:\\\\Users\\\\runneradmin\\\\AppData\\\\Local\\\\Temp\\\\sm-driver-accept-a5_z7nqq\\\\proj
+[19:40:16] PASS driver_installed {}
+[19:40:16] PASS schedule_registered {}
+[19:42:36] PASS repeated_execution_completes_tasks {"done": ["MOCK-1", "MOCK-2"], "ticks": 2}
+[19:42:36] PASS mock_provider_ran_implement_and_independent_review {"stages": ["implement", "review", "implement", "review"]}
+[19:42:37] PASS pause_command {"out": "\\\\.stagemesh\\\\driver\\\\reports\\\\a57d06f3a1434bbf92c0c91409cf5b5d.json\",\n    \"state\": \"progress\",\n    \"tick_id\": \"a57d06f3a1434bbf92c0c91409cf5b5d\"\n  },\n  \"schedule_exists\": true,\n  \"state\": \"paused\"\n}\n", "err": ""}
+[19:45:57] PASS paused_driver_makes_no_provider_calls {"before": 4, "after": 4}
+[19:45:57] PASS resume_command {"out": "\\.stagemesh\\\\driver\\\\reports\\\\a57d06f3a1434bbf92c0c91409cf5b5d.json\",\n    \"state\": \"progress\",\n    \"tick_id\": \"a57d06f3a1434bbf92c0c91409cf5b5d\"\n  },\n  \"schedule_exists\": true,\n  \"state\": \"running\"\n}\n", "err": ""}
+[19:47:17] PASS resume_continues_work {"done": ["MOCK-1", "MOCK-2", "MOCK-3"]}
+[19:50:29] PASS no_overlapping_run_windows {"peak_concurrent_windows": 1, "sample": [[1860, 7588, "C:\\Users\\runneradmin\\AppData\\Local\\Temp\\sm-native-75e1a420\\.venv-accept\\Scripts\\python.exe -m stagemesh.cli --project C:\\Users\\runneradmin\\AppData\\Local\\Temp\\sm"]]}
+[19:50:29] PASS bounded_provider_calls_during_overlap {}
+[19:51:03] killing_process_tree {"processes": [[7936, "\"C:\\Users\\runneradmin\\AppData\\Local\\Temp\\sm-native-75e1a420\\.venv-accept\\Scripts\\python.exe\" -m stagemesh.cli --project "], [8616, "\"C:\\Users\\runneradmin\\AppData\\Local\\Temp\\sm-native-75e1a420\\.venv-accept\\Scripts\\python.exe\" -m stagemesh.cli --project "],
+[19:51:07] PASS tree_fully_killed {"survivors": []}
+[19:52:07] PASS recovered_after_crash_and_continued {"done": ["MOCK-1", "MOCK-2", "MOCK-3", "MOCK-4", "MOCK-5"]}
+[19:52:07] PASS recovery_was_audited {"states": ["blocked", "progress"]}
+[19:52:07] tick_history {"states": ["progress", "progress", "progress", "progress", "blocked", "progress"], "done": ["MOCK-1", "MOCK-2", "MOCK-3", "MOCK-4", "MOCK-5"], "calls": 11}
+[19:52:07] PASS no_task_completed_twice {"done": ["MOCK-1", "MOCK-2", "MOCK-3", "MOCK-4", "MOCK-5"]}
+[19:52:07] PASS stop_command {"out": ".stagemesh\\\\driver\\\\reports\\\\d2be1048d5bc40aa9ff1dff7b5222d3a.json\",\n    \"state\": \"progress\",\n    \"tick_id\": \"d2be1048d5bc40aa9ff1dff7b5222d3a\"\n  },\n  \"schedule_exists\": false,\n  \"state\": \"stopped\"\n}\n", "err": ""}
+[19:52:08] PASS schedule_removed_by_stop {}
+[19:53:25] PASS stopped_driver_makes_no_provider_calls {}
+[19:53:26] PASS uninstall_command {"out": "ve_failures\": 3,\n    \"max_steps_per_task\": 8,\n    \"max_tasks\": 1,\n    \"project\": \"C:\\\\Users\\\\runneradmin\\\\AppData\\\\Local\\\\Temp\\\\sm-driver-accept-a5_z7nqq\\\\project\",\n    \"state\": \"stopped\",\n    \"strict_live\": false,\n    \"window_seconds\": 90\n  },\n  \"sch
+[19:53:26] PASS ledger_preserved_after_uninstall {}
+[19:53:27] PASS no_project_processes_remain {"left": []}
+[19:53:28] cleanup_verified {"schedule_exists": false}
+[19:53:28] failures: []
