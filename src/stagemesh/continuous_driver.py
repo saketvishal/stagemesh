@@ -161,6 +161,21 @@ def clear_child_owner(project: Path, identity: ProcessIdentity, *, allow_live: b
     return True
 
 
+def clear_dead_child_owner(project: Path) -> bool:
+    """Remove the child-owner record once its recorded process is proven DEAD (state ORPHANED).
+
+    The wrapper records its own interpreter's identity. On Windows, a virtual environment's `python.exe` is a launcher stub
+    that starts the real interpreter, so the identity the parent captured from `Popen` is the stub, not the process that
+    wrote the record. Matching the two never succeeds there, and a hard-timeout kill left the record behind forever,
+    blocking every later tick. After a confirmed tree kill the only question is whether the recorded process is dead.
+    """
+    state, _identity = child_owner_state(project)
+    if state != "ORPHANED":
+        return False
+    child_owner_path(project).unlink(missing_ok=True)
+    return True
+
+
 def release_orphaned_child(project: Path) -> bool:
     state, identity = child_owner_state(project)
     if state is None:
@@ -325,12 +340,21 @@ def _default_runner(argv: list[str], project: Path, timeout_seconds: float) -> i
         except subprocess.TimeoutExpired:
             pass
         if tree_killed and wrapper_exited:
-            clear_child_owner(project, identity)
+            clear_child_owner(project, identity) or clear_dead_child_owner(project)
         return 124
     clear_child_owner(project, identity)
     if process.returncode and (stderr or stdout):
         print((stderr or stdout)[-1000:], file=sys.stderr)
     return int(process.returncode or 0)
+
+
+TICK_HARD_TIMEOUT_MARGIN_SECONDS = 1800
+SCHEDULER_WATCHDOG_MARGIN_SECONDS = 900
+
+
+def scheduler_limit_seconds(config: DriverConfig) -> int:
+    """Task Scheduler's watchdog must outlast the tick's own hard timeout so the driver kills its child tree first."""
+    return config.window_seconds + TICK_HARD_TIMEOUT_MARGIN_SECONDS + SCHEDULER_WATCHDOG_MARGIN_SECONDS
 
 
 def _read_report(path: Path) -> dict[str, Any] | None:
@@ -427,7 +451,7 @@ def run_tick(
                     "report": str(report_path),
                 },
             )
-            exit_code = runner(config.window_argv(project, report_path), project, config.window_seconds + 1800)
+            exit_code = runner(config.window_argv(project, report_path), project, config.window_seconds + TICK_HARD_TIMEOUT_MARGIN_SECONDS)
             report = _read_report(report_path)
             state, detail = _classify(exit_code, report)
             record_audit(

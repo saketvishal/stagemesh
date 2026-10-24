@@ -1113,6 +1113,19 @@ def command_follow_up(args: argparse.Namespace) -> int:
 
 
 def command_driver(args: argparse.Namespace) -> int:
+    """Run a driver subcommand; `tick --log-file` appends all of its output to that file (the scheduled action has no shell)."""
+    import contextlib
+
+    log_file = getattr(args, "log_file", None)
+    if not log_file:
+        return _command_driver(args)
+    log_path = Path(log_file)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("a", encoding="utf-8", buffering=1) as handle, contextlib.redirect_stdout(handle), contextlib.redirect_stderr(handle):
+        return _command_driver(args)
+
+
+def _command_driver(args: argparse.Namespace) -> int:
     from dataclasses import asdict
 
     from . import continuous_driver
@@ -1147,7 +1160,9 @@ def command_driver(args: argparse.Namespace) -> int:
                 strict_live=args.strict_live,
             ).validate(project)
             continuous_driver.save_config(project, prepared)
-            handle = scheduler.ensure(driver_command(project), prepared.interval_seconds)
+            handle = scheduler.ensure(
+                driver_command(project), prepared.interval_seconds, continuous_driver.scheduler_limit_seconds(prepared)
+            )
             config = continuous_driver.DriverConfig(**{**asdict(prepared), "state": "running"})
             continuous_driver.install(store, project, config, handle)
             payload = {"installed": True, "handle": handle, "config": asdict(config)}
@@ -1184,7 +1199,9 @@ def command_driver(args: argparse.Namespace) -> int:
                 raise continuous_driver.DriverConfigError(
                     "Windows Task Scheduler is unavailable; the driver cannot resume persistently"
                 )
-            handle = scheduler.ensure(driver_command(project), current.interval_seconds)
+            handle = scheduler.ensure(
+                driver_command(project), current.interval_seconds, continuous_driver.scheduler_limit_seconds(current)
+            )
             config = continuous_driver.set_state(project, "running")
             request_queue_control(store, "resumed", args.reason)
             continuous_driver.record_state(store, "running", args.reason)
@@ -3693,6 +3710,8 @@ def build_parser() -> argparse.ArgumentParser:
             command.add_argument("--reason", default=f"operator requested driver {name}")
         if name == "stop":
             command.add_argument("--terminate-running", action="store_true")
+        if name == "tick":
+            command.add_argument("--log-file", default=None, help="Append this tick's output to a file (used by the scheduled action)")
         command.set_defaults(func=command_driver)
     efficiency = sub.add_parser(
         "efficiency",
