@@ -1,0 +1,137 @@
+{
+  "python": "D:\\a\\stagemesh\\stagemesh\\tree\\.stagemesh\\tooling\\venv\\Scripts\\python.exe",
+  "version": "3.11.9 (tags/v3.11.9:de54cf5, Apr  2 2024, 10:12:12) [MSC v.1938 64 bit (AMD64)]",
+  "started": "2026-10-24T16:53:15+0000",
+  "experiments": [
+    {
+      "name": "venv_python-kill_process_tree",
+      "exe": "D:\\a\\stagemesh\\stagemesh\\tree\\.stagemesh\\tooling\\venv\\Scripts\\python.exe",
+      "wrapper_pid": 2592,
+      "grandchild_pid": 1620,
+      "tree_before": [
+        [
+          4576,
+          "python.exe",
+          2592
+        ],
+        [
+          6632,
+          "python.exe",
+          4576
+        ],
+        [
+          6256,
+          "python.exe",
+          6632
+        ],
+        [
+          1620,
+          "python.exe",
+          6256
+        ],
+        [
+          7208,
+          "python.exe",
+          1620
+        ]
+      ],
+      "grandchild_in_tree_before": true,
+      "kill_returned": true,
+      "kill_seconds": 0.047,
+      "survivors": [],
+      "grandchild_alive_after_2s": false
+    },
+    {
+      "name": "venv_python-taskkill_verbose",
+      "exe": "D:\\a\\stagemesh\\stagemesh\\tree\\.stagemesh\\tooling\\venv\\Scripts\\python.exe",
+      "wrapper_pid": 4984,
+      "grandchild_pid": 1792,
+      "tree_before": [
+        [
+          6628,
+          "python.exe",
+          4984
+        ],
+        [
+          1984,
+          "python.exe",
+          6628
+        ],
+        [
+          1504,
+          "python.exe",
+          1984
+        ],
+        [
+          1792,
+          "python.exe",
+          1504
+        ],
+        [
+          1476,
+          "python.exe",
+          1792
+        ]
+      ],
+      "grandchild_in_tree_before": true,
+      "taskkill": {
+        "rc": 0,
+        "out": " with PID 1792 (child process of PID 1504) has been terminated.\nSUCCESS: The process with PID 1504 (child process of PID 1984) has been terminated.\nSUCCESS: The process with PID 1984 (child process of PID 6628) has been terminated.\nSUCCESS: The process with PID 6628 (child process of PID 4984) has been terminated.\nSUCCESS: The process with PID 4984 (child process of PID 6520) has been terminated.\n",
+        "err": ""
+      },
+      "kill_seconds": 0.062,
+      "survivors": [],
+      "grandchild_alive_after_2s": false
+    },
+    {
+      "name": "base_python-kill_process_tree",
+      "exe": "C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\python.exe",
+      "wrapper_pid": 864,
+      "grandchild_pid": 6568,
+      "tree_before": [
+        [
+          5204,
+          "python.exe",
+          864
+        ],
+        [
+          6568,
+          "python.exe",
+          5204
+        ]
+      ],
+      "grandchild_in_tree_before": true,
+      "kill_returned": true,
+      "kill_seconds": 0.047,
+      "survivors": [],
+      "grandchild_alive_after_2s": false
+    },
+    {
+      "name": "base_python-taskkill_verbose",
+      "exe": "C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\python.exe",
+      "wrapper_pid": 4004,
+      "grandchild_pid": 5740,
+      "tree_before": [
+        [
+          7892,
+          "python.exe",
+          4004
+        ],
+        [
+          5740,
+          "python.exe",
+          7892
+        ]
+      ],
+      "grandchild_in_tree_before": true,
+      "taskkill": {
+        "rc": 0,
+        "out": "SUCCESS: The process with PID 5740 (child process of PID 7892) has been terminated.\nSUCCESS: The process with PID 7892 (child process of PID 4004) has been terminated.\nSUCCESS: The process with PID 4004 (child process of PID 6520) has been terminated.\n",
+        "err": ""
+      },
+      "kill_seconds": 0.047,
+      "survivors": [],
+      "grandchild_alive_after_2s": false
+    }
+  ]
+}
