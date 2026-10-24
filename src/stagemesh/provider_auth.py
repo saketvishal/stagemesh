@@ -52,7 +52,16 @@ class ProviderAuth:
 
 
 def _run(argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(list(argv), capture_output=True, text=True, timeout=30, check=False)
+    return subprocess.run(
+        list(argv),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        stdin=subprocess.DEVNULL,
+        timeout=30,
+        check=False,
+    )
 
 
 def classify_claude(stdout: str, exit_code: int) -> str:
@@ -90,7 +99,7 @@ def probe(provider: str, runner: Runner = _run, which: Callable[[str], str | Non
         return ProviderAuth(provider, False, "not_installed", False)
     try:
         result = runner([executable, *argv[1:]])
-    except (OSError, subprocess.TimeoutExpired):
+    except (OSError, ValueError, subprocess.TimeoutExpired):
         return ProviderAuth(provider, True, "unparsed", False)
     if provider == "claude":
         mode = classify_claude(result.stdout or "", result.returncode)
@@ -153,8 +162,8 @@ def check(
 def uses_real_providers(commands: Sequence[Sequence[str]]) -> bool:
     """True when any configured provider command launches a real coding CLI (codex, claude, grok, agy)."""
     for command in commands:
-        if command:
-            name = os.path.basename(command[0]).lower()
+        for token in command:
+            name = os.path.basename(str(token).replace("\\", "/")).lower()
             if name.rsplit(".", 1)[0] in REAL_PROVIDER_EXECUTABLES:
-                return True
+                return True  # any argv token: wrappers such as `cmd /c codex` or `npx claude` still launch a real CLI
     return False

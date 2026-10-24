@@ -92,8 +92,9 @@ try {
     Step 'no_provider_command_overrides' $true
 
     $head = (git -C $Work rev-parse HEAD)
-    Step 'checkout_is_pinned_commit' ($head -eq $Commit) $head
-    if ($head -ne $Commit) { throw 'checkout is not the pinned commit' }
+    $dirty = @(git -C $Work status --porcelain)
+    Step 'checkout_is_pinned_commit_and_clean' (($head -eq $Commit) -and ($dirty.Count -eq 0)) "$head dirty_entries=$($dirty.Count)"
+    if (($head -ne $Commit) -or ($dirty.Count -ne 0)) { throw 'checkout is not the clean pinned commit' }
 
     $py = $null
     $candidates = @()
@@ -132,8 +133,14 @@ try {
     $failures = @('evidence file missing')
     if (Test-Path $lifecycleEvidence) { try { $failures = @((Get-Content $lifecycleEvidence -Raw | ConvertFrom-Json).failures) } catch { $failures = @('evidence unreadable') } }
     $ids = Read-Ids $idsFile
-    $ok = ($code -eq 0) -and ($failures.Count -eq 0) -and $ids.root -and $ids.handle
-    Step 'driver_lifecycle_mock_providers' $ok ("exit=$code failures=[" + ($failures -join ',') + "] ids_recorded=" + [bool]($ids.root -and $ids.handle))
+    # every key phase must have an explicit PASS record; a silently skipped phase must not count
+    $required = 'schedule_registered', 'repeated_execution_completes_tasks', 'paused_driver_makes_no_provider_calls', 'no_overlapping_run_windows',
+        'tree_fully_killed', 'recovered_after_crash_and_continued', 'recovery_was_audited', 'schedule_removed_by_stop', 'uninstall_command'
+    $passed = @()
+    if (Test-Path $lifecycleEvidence) { try { $passed = @((Get-Content $lifecycleEvidence -Raw | ConvertFrom-Json).evidence | ForEach-Object { $_.step }) } catch { } }
+    $missing = @($required | Where-Object { $passed -notcontains "PASS $_" })
+    $ok = ($code -eq 0) -and ($failures.Count -eq 0) -and ($missing.Count -eq 0) -and $ids.root -and $ids.handle
+    Step 'driver_lifecycle_mock_providers' $ok ("exit=$code failures=[" + ($failures -join ',') + "] missing_phases=[" + ($missing -join ',') + "] ids_recorded=" + [bool]($ids.root -and $ids.handle))
 }
 catch {
     Step 'unexpected_error' $false "$($_.Exception.Message)"
@@ -155,10 +162,10 @@ finally {
         $summary.cleanup.task_removed = $taskOk
         $rootOk = $true
         $needles = @($Work)
+        $rootSafe = $null
         if ($root) {
             $rootLeaf = Split-Path $root -Leaf
-            $rootParentLeaf = Split-Path (Split-Path $root -Parent) -Leaf
-            if (($rootLeaf -match '^sm-driver-accept-[A-Za-z0-9_]+$') -and ($rootParentLeaf -ieq (Split-Path $tempRoot -Leaf))) { $needles += $root }
+            if ($rootLeaf -match '^sm-driver-accept-[A-Za-z0-9_]+$') { $rootSafe = Join-Path $tempRoot $rootLeaf; $needles += $rootLeaf }  # only ever TEMP\<leaf>
             else { $rootOk = $false; $summary.cleanup.root_rejected = $root }
         }
         $killed = @()
@@ -169,12 +176,12 @@ finally {
         }
         $summary.cleanup.processes_killed = $killed
         Start-Sleep -Seconds 2
-        if ($rootOk -and $root -and (Test-Path $root)) {
-            Get-ChildItem -Path $root -Recurse -Filter 'driver.log' -ErrorAction SilentlyContinue | Select-Object -First 1 | ForEach-Object { Copy-Item $_.FullName (Join-Path $evidence 'tick-driver.log') -ErrorAction SilentlyContinue }
-            Remove-Item -Recurse -Force $root -ErrorAction SilentlyContinue
+        if ($rootSafe -and (Test-Path $rootSafe)) {
+            Get-ChildItem -Path $rootSafe -Recurse -Filter 'driver.log' -ErrorAction SilentlyContinue | Select-Object -First 1 | ForEach-Object { Copy-Item $_.FullName (Join-Path $evidence 'tick-driver.log') -ErrorAction SilentlyContinue }
+            Remove-Item -Recurse -Force $rootSafe -ErrorAction SilentlyContinue
         }
         Remove-Item -Recurse -Force $Work -ErrorAction SilentlyContinue
-        $tempOk = (-not (Test-Path $Work)) -and ((-not $root) -or (-not (Test-Path $root)))
+        $tempOk = (-not (Test-Path $Work)) -and ((-not $rootSafe) -or (-not (Test-Path $rootSafe)))
         $summary.cleanup.temp_removed = $tempOk
         Step 'cleanup_complete' ($taskOk -and $rootOk -and $tempOk) ("task_removed=$taskOk temp_removed=$tempOk")
     }

@@ -26,6 +26,19 @@ if (-not $EvidenceRoot) {
     else { $EvidenceRoot = Join-Path $env:USERPROFILE 'stagemesh-acceptance-evidence' }
 }
 $createdBase = $false
+$env:GIT_TERMINAL_PROMPT = '0'
+function Invoke-Bounded($exe, $argList, $timeoutSeconds) {
+    $out = [IO.Path]::GetTempFileName(); $err = [IO.Path]::GetTempFileName()
+    $quoted = $argList | ForEach-Object { '"' + ($_ -replace '"', '\"') + '"' }
+    $p = Start-Process -FilePath $exe -ArgumentList $quoted -RedirectStandardOutput $out -RedirectStandardError $err -PassThru -NoNewWindow
+    $null = $p.Handle
+    if (-not $p.WaitForExit($timeoutSeconds * 1000)) { taskkill /F /T /PID $p.Id *> $null; Remove-Item $out, $err -ErrorAction SilentlyContinue; return @{ code = -1; text = 'timed out' } }
+    $p.WaitForExit()
+    $text = (Get-Content $out -Raw -ErrorAction SilentlyContinue)
+    $result = @{ code = [int]$p.ExitCode; text = "$text" }
+    Remove-Item $out, $err -ErrorAction SilentlyContinue
+    return $result
+}
 function Fail($message) {
     Write-Host "REFUSED: $message" -ForegroundColor Red
     if ($createdBase -and (Test-Path $Base)) {
@@ -63,19 +76,21 @@ New-Item -ItemType Directory -Path $Base | Out-Null
 $createdBase = $true
 $runtime = Join-Path $Base 'runtime'
 git init -q $runtime
-git -C $runtime fetch -q --depth 1 $Source $Commit
-if ($LASTEXITCODE -ne 0) { Fail "could not fetch $Commit from $Source" }
+$fetch = Invoke-Bounded 'git' @('-C', $runtime, 'fetch', '-q', '--depth', '1', $Source, $Commit) 300
+if ($fetch.code -ne 0) { Fail "could not fetch $Commit from $Source" }
 git -C $runtime checkout -q FETCH_HEAD
 if ((git -C $runtime rev-parse HEAD) -ne $Commit) { Fail 'pinned commit mismatch' }
-& $py -m venv (Join-Path $runtime '.venv')
+$venvRun = Invoke-Bounded $py @('-m', 'venv', (Join-Path $runtime '.venv')) 300
+if ($venvRun.code -ne 0) { Fail 'venv creation failed' }
 $vpy = Join-Path $runtime '.venv\Scripts\python.exe'
 if (-not (Test-Path $vpy)) { Fail 'venv creation failed' }
-& $vpy -m pip install --quiet --disable-pip-version-check -e "${runtime}[dev]"
-if ($LASTEXITCODE -ne 0) { Fail 'pip install failed' }
+$pip = Invoke-Bounded $vpy @('-m', 'pip', 'install', '--quiet', '--disable-pip-version-check', '-e', "${runtime}[dev]") 900
+if ($pip.code -ne 0) { Fail 'pip install failed or timed out' }
 
 # 4. subscription gate (no model call); fails closed on anything unexpected ------------------------------------------------------
-$authText = (& $vpy -m stagemesh.cli provider-auth --json --require-installed 2>$null | Out-String)
-$authExit = $LASTEXITCODE
+$authRun = Invoke-Bounded $vpy @('-m', 'stagemesh.cli', 'provider-auth', '--json', '--require-installed') 180
+$authText = $authRun.text
+$authExit = $authRun.code
 $auth = $null
 try { $auth = $authText | ConvertFrom-Json } catch { }
 $problems = @()
@@ -102,7 +117,7 @@ $config = @{
     budgets = @{ max_provider_calls_per_task = 12; max_equivalent_failures = 3; max_provider_calls_per_window = 30 }
     routing = @{ require_independent_review = $true }
 } | ConvertTo-Json -Depth 5
-Set-Content -Path (Join-Path $project '.stagemesh\config.json') -Value $config -Encoding UTF8
+[IO.File]::WriteAllText((Join-Path $project '.stagemesh\config.json'), $config, (New-Object Text.UTF8Encoding($false)))
 
 # 6. register the driver (the product's own install path) ----------------------------------------------------------------------
 $installOut = & $vpy -m stagemesh.cli --project $project driver install --acknowledge-provider-use --interval 10m --window-duration 40m `
@@ -116,7 +131,7 @@ if ($installExit -ne 0) {
 $createdBase = $false   # from here on the installation is real and is never auto-removed
 $status = (& $vpy -m stagemesh.cli --project $project driver status --json | Out-String) | ConvertFrom-Json
 
-$cli = "`"$vpy`" -m stagemesh.cli --project `"$project`""
+$cli = "& `"$vpy`" -m stagemesh.cli --project `"$project`""
 @"
 StageMesh hands-off sandbox  (commit $Commit)
 Project:  $project

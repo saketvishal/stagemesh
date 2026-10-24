@@ -157,3 +157,10 @@ def test_cli_exposes_require_installed(monkeypatch, capsys):
     monkeypatch.setattr(provider_auth, "check", fake_check)
     assert main(["provider-auth", "--json", "--require-installed"]) == 0
     assert seen == {"require_installed": True}
+
+
+def test_wrapped_real_provider_commands_are_detected():
+    assert provider_auth.uses_real_providers([["cmd", "/c", "codex", "exec"]])
+    assert provider_auth.uses_real_providers([["npx", "claude", "-p"]])
+    assert provider_auth.uses_real_providers([["C:\\bin\\codex.cmd"]])
+    assert not provider_auth.uses_real_providers([["python", "mock_provider.py"]])

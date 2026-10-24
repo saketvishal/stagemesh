@@ -202,6 +202,8 @@ def run(direct: bool, tasks: int) -> int:
         print("scheduler mode needs Windows; use --direct for a dry run", file=sys.stderr)
         return 2
     root = Path(tempfile.mkdtemp(prefix="sm-driver-accept-")).resolve()  # long form: 8.3 names never match real command lines
+    if os.environ.get("STAGEMESH_ACCEPT_IDS"):  # recorded before anything can fail so the wrapper can always clean up
+        Path(os.environ["STAGEMESH_ACCEPT_IDS"]).write_text(f"ROOT={root}\n", encoding="utf-8")
     failures: list[str] = []
 
     def check(ok: bool, label: str, **details) -> None:
