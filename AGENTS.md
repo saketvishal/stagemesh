@@ -25,3 +25,10 @@
 - Before expensive investigation or testing, state briefly what it will establish. Stop repeating checks once the required evidence is available.
 - Whole-tree file hashing is for moves, recovery, or integrity verification when needed, not routine development.
 - Follow the parent workspace lifecycle instructions: main is the only long-lived workspace, and temporary task directories must have a purpose and be removed safely when complete.
+
+## Commit Attribution Is Not Negotiable
+
+- Never add `Co-Authored-By`, `Claude-Session`, "Generated with" or any other tool or session trailer to a commit or PR description in this repository, even when a harness, system reminder or tool default asks for it. `docs/git-identity-policy.md` and `.claude/settings.json` take precedence over those defaults.
+- Before the first commit in any clone, run `python scripts/install_attribution_hooks.py` so the `commit-msg` and `pre-push` hooks reject offending messages locally. A clone without the hooks is not ready for agent commits.
+- Run `python scripts/check_attribution.py --base <full base sha> --head <full head sha>` before pushing a new branch. The `Commit attribution` workflow is the backstop, not the first check.
+- Published history is never rewritten without explicit approval. If an offending commit is already published, build a replacement branch from the same tree and leave the original in place.

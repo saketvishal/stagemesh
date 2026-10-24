@@ -1,0 +1,211 @@
+name: Windows triage
+
+# Evidence workflow for the continuous-driver stabilization. It runs only on ci/windows-triage-* branches, compares the
+# driver branch with the pre-driver baseline under equivalent environments, and exercises the real Windows Task Scheduler
+# on a disposable hosted runner. It never publishes, merges or deploys anything.
+on:
+  push:
+    branches: ["ci/windows-triage-**"]
+
+env:
+  BASELINE: 726a74de6054f6e0e2d1bb90b73ffbc764fd1fda
+
+jobs:
+  triage:
+    if: contains(github.event.head_commit.message, '[triage]')
+    name: triage (${{ matrix.tree }}, py${{ matrix.python }}, ${{ matrix.env }})
+    runs-on: windows-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        tree: [driver, main]
+        python: ["3.11", "3.13"]
+        env: [bootstrap, venv]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: tools
+          fetch-depth: 0
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.tree == 'main' && '726a74de6054f6e0e2d1bb90b73ffbc764fd1fda' || github.sha }}
+          path: tree
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Create environment
+        shell: pwsh
+        working-directory: tree
+        run: |
+          git --version
+          python --version
+          if ('${{ matrix.env }}' -eq 'bootstrap') {
+            python scripts/bootstrap_stagemesh.py --editable
+            $py = (Resolve-Path ".stagemesh\tooling\venv\Scripts\python.exe").Path
+            & $py -m pip install pytest
+          } else {
+            python -m venv "$env:RUNNER_TEMP\venv"
+            $py = "$env:RUNNER_TEMP\venv\Scripts\python.exe"
+            & $py -m pip install -e . pytest
+          }
+          "PYEXE=$py" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+      - name: Run the 14 previously failing tests
+        shell: pwsh
+        working-directory: tree
+        continue-on-error: true
+        run: |
+          $ids = Get-Content ..\tools\scripts\windows-acceptance\failed-ids.txt | Where-Object { $_.Trim() }
+          if ('${{ matrix.tree }}' -eq 'main') { $ids = $ids | Where-Object { $_ -notlike 'tests/test_continuous_driver.py*' } }
+          $env:PYTHONDONTWRITEBYTECODE = "1"
+          & $env:PYEXE -m pytest -p no:cacheprovider -q -rf --junitxml=..\triage-junit.xml @ids 2>&1 | Tee-Object -FilePath ..\triage.log
+          $code = $LASTEXITCODE
+          "pytest exit=$code"
+          "## ${{ matrix.tree }} py${{ matrix.python }} ${{ matrix.env }}: pytest exit $code" | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+          Get-Content ..\triage.log | Select-Object -Last 25 | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+          exit $code
+      - name: Process-tree termination diagnostic
+        if: matrix.tree == 'driver'
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          & $env:PYEXE tools\scripts\windows-acceptance\diag-killtree.py "$env:RUNNER_TEMP\killtree"
+          Copy-Item "$env:RUNNER_TEMP\killtree\result.json" killtree-result.json -ErrorAction SilentlyContinue
+      - name: Hard-timeout deep dive (instrumented, plus the unmodified original test)
+        if: matrix.tree == 'driver'
+        shell: pwsh
+        working-directory: tree
+        continue-on-error: true
+        run: |
+          & $env:PYEXE ..\tools\scripts\windows-acceptance\diag-timeout.py ..\timeout-diag.json
+          git -C ..\tools show d0d833d:tests/test_continuous_driver.py | Out-File -Encoding utf8 tests\test_continuous_driver_original.py
+          & $env:PYEXE -m pytest -p no:cacheprovider -q -rf tests/test_continuous_driver_original.py -k hard_timeout --junitxml=..\original-junit.xml 2>&1 | Tee-Object -FilePath ..\original.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: triage-${{ matrix.tree }}-py${{ matrix.python }}-${{ matrix.env }}
+          path: |
+            triage.log
+            triage-junit.xml
+            killtree-result.json
+            timeout-diag.json
+            original.log
+            original-junit.xml
+
+  scheduler:
+    if: contains(github.event.head_commit.message, '[triage]')
+    name: real Task Scheduler acceptance (py${{ matrix.python }})
+    runs-on: windows-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install -e .
+      - name: Acceptance against the real Windows Task Scheduler
+        shell: pwsh
+        env:
+          STAGEMESH_ACCEPT_TEMP_TASKS: "1"
+        run: |
+          whoami
+          Get-Date -Format o
+          python scripts\windows-acceptance\scheduler_acceptance.py "$env:RUNNER_TEMP\scheduler-evidence.json"
+          $code = $LASTEXITCODE
+          Copy-Item "$env:RUNNER_TEMP\scheduler-evidence.json" scheduler-evidence.json -ErrorAction SilentlyContinue
+          exit $code
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: scheduler-evidence-py${{ matrix.python }}
+          path: scheduler-evidence.json
+
+  lifecycle:
+    name: driver lifecycle with mock providers (py${{ matrix.python }})
+    runs-on: windows-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install -e .
+      - name: Install, tick repeatedly, pause, resume, overlap, crash-recover, stop, uninstall (mock providers only)
+        shell: pwsh
+        env:
+          STAGEMESH_ACCEPT_DRIVER: "1"
+          STAGEMESH_ACCEPT_EVIDENCE: ${{ runner.temp }}\driver-lifecycle.json
+        run: |
+          whoami
+          Get-Date -Format o
+          python scripts\windows-acceptance\driver_lifecycle.py --tasks 6
+          $code = $LASTEXITCODE
+          Copy-Item "$env:RUNNER_TEMP\driver-lifecycle*" . -ErrorAction SilentlyContinue
+          schtasks /Query /FO CSV /NH | Select-String "StageMesh" | Out-File remaining-tasks.txt
+          exit $code
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: lifecycle-evidence-py${{ matrix.python }}
+          path: |
+            driver-lifecycle*
+            remaining-tasks.txt
+
+  native:
+    name: native acceptance wrapper (Windows PowerShell 5.1, exact bootstrap)
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run the same bootstrap the owner runs, sourcing the commit from this checkout
+        shell: powershell
+        run: |
+          $sha = "${{ github.sha }}"
+          $w = Join-Path $env:TEMP ("sm-native-" + [guid]::NewGuid().ToString('N').Substring(0,8))
+          git init -q $w
+          git -C $w fetch -q --depth 1 $env:GITHUB_WORKSPACE $sha
+          git -C $w checkout -q FETCH_HEAD
+          if ((git -C $w rev-parse HEAD) -ne $sha) { throw 'pinned commit mismatch' }
+          powershell -NoProfile -ExecutionPolicy Bypass -File "$w\scripts\windows-acceptance\run-native-acceptance.ps1" -Work $w -Commit $sha -EvidenceRoot "$env:RUNNER_TEMP\native-evidence"
+          $code = $LASTEXITCODE
+          New-Item -ItemType Directory -Force -Path native-evidence | Out-Null
+          Copy-Item "$env:RUNNER_TEMP\native-evidence\*" native-evidence -Recurse -ErrorAction SilentlyContinue
+          schtasks /Query /FO CSV /NH | Select-String "StageMesh" | Out-File native-evidence\remaining-tasks.txt
+          Get-Process python -ErrorAction SilentlyContinue | Out-File native-evidence\remaining-python.txt
+          exit $code
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-evidence
+          path: native-evidence
+
+  collect:
+    name: collect evidence
+    needs: [triage, scheduler, lifecycle, native]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: evidence
+      - name: Publish evidence to a non-protected evidence branch
+        run: |
+          set -e
+          mkdir -p "$RUNNER_TEMP/out" && cp -r evidence/. "$RUNNER_TEMP/out/"
+          git checkout -q --orphan "evidence-${{ github.run_id }}"
+          git rm -rfq .
+          mkdir -p evidence && cp -r "$RUNNER_TEMP/out/." evidence/
+          git add evidence
+          git -c user.name="Vishal Singh" -c user.email="20689561+saketvishal@users.noreply.github.com" commit -qm "Windows triage evidence for run ${{ github.run_id }} (source ${{ github.sha }})"
+          git push -q origin "HEAD:refs/heads/ci-evidence/${{ github.run_id }}"

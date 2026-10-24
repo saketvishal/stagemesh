@@ -110,7 +110,7 @@ CAPABILITY_LEVELS: dict[str, tuple[int, str]] = {
     "2 External workspace mutation": (2, "hooks in the executors and coordinator guard; quarantine and restore"),
     "3 Ordinary main advancement": (2, "SupervisedIntegrator refreshes the candidate and sends it back to VALIDATE"),
     "4 History rewrite detection": (2, "retargeted replacement with equivalence proof and provenance, original preserved"),
-    "5 PR dependency / stacked PR handling": (1, "policy, supervisor entry points and GitHub adapter exist; no scheduler drives them yet"),
+    "5 PR dependency / stacked PR handling": (2, "run-window schedules eligible dependency work and delivery follow-through rechecks pending PRs"),
     "6 CI diagnosis (candidate vs base)": (2, "diagnosis gates integration and runs in `autonomy deliver` against hosted check runs"),
     "7 Broken/fragile test detection": (1, "classification and remediation guard exist; no test harness emits observations yet"),
     "8 Independent review lifecycle": (2, "scope policy wraps the reviewer adapter in the CLI"),
