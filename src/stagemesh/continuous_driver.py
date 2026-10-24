@@ -161,6 +161,21 @@ def clear_child_owner(project: Path, identity: ProcessIdentity, *, allow_live: b
     return True
 
 
+def clear_dead_child_owner(project: Path) -> bool:
+    """Remove the child-owner record once its recorded process is proven DEAD (state ORPHANED).
+
+    The wrapper records its own interpreter's identity. On Windows, a virtual environment's `python.exe` is a launcher stub
+    that starts the real interpreter, so the identity the parent captured from `Popen` is the stub, not the process that
+    wrote the record. Matching the two never succeeds there, and a hard-timeout kill left the record behind forever,
+    blocking every later tick. After a confirmed tree kill the only question is whether the recorded process is dead.
+    """
+    state, _identity = child_owner_state(project)
+    if state != "ORPHANED":
+        return False
+    child_owner_path(project).unlink(missing_ok=True)
+    return True
+
+
 def release_orphaned_child(project: Path) -> bool:
     state, identity = child_owner_state(project)
     if state is None:
@@ -325,7 +340,7 @@ def _default_runner(argv: list[str], project: Path, timeout_seconds: float) -> i
         except subprocess.TimeoutExpired:
             pass
         if tree_killed and wrapper_exited:
-            clear_child_owner(project, identity)
+            clear_child_owner(project, identity) or clear_dead_child_owner(project)
         return 124
     clear_child_owner(project, identity)
     if process.returncode and (stderr or stdout):

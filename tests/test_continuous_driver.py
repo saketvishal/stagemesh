@@ -513,3 +513,28 @@ def test_tick_log_file_receives_the_tick_output(project: Path) -> None:
 
     assert cli_main(["--project", str(project), "driver", "tick", "--log-file", str(log)]) == 0
     assert "driver tick: paused" in log.read_text(encoding="utf-8")
+
+
+def test_a_dead_recorded_owner_is_cleared_even_when_it_differs_from_the_launched_process(project: Path) -> None:
+    """Windows venv launcher stub: the process Popen started is not the process that wrote the owner record."""
+    from stagemesh.continuous_driver import clear_dead_child_owner, save_child_owner
+    from stagemesh.process_identity import ProcessIdentity
+
+    launched = ProcessIdentity(pid=os.getpid(), create_time=1.0, boot_id="b", executable="launcher-stub.exe")
+    dead_real = ProcessIdentity(pid=2**22 + 12345, create_time=2.0, boot_id="b", executable="python.exe")
+    save_child_owner(project, dead_real)
+
+    assert not continuous_driver.clear_child_owner(project, launched)  # exact-identity clearing cannot succeed
+    assert clear_dead_child_owner(project)
+    assert not child_owner_path(project).exists()
+
+
+def test_a_live_recorded_owner_is_never_cleared_as_dead(project: Path) -> None:
+    from stagemesh.continuous_driver import clear_dead_child_owner, save_child_owner
+
+    live = process_identity(os.getpid())
+    assert live is not None
+    save_child_owner(project, live)
+
+    assert not clear_dead_child_owner(project)
+    assert child_owner_path(project).exists()
