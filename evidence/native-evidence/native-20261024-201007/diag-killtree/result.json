@@ -1,0 +1,137 @@
+{
+  "python": "C:\\Users\\runneradmin\\AppData\\Local\\Temp\\sm-native-f4cd5b69\\.venv-accept\\Scripts\\python.exe",
+  "version": "3.13.16 (tags/v3.13.16:cbc944f, Sep 30 2026, 19:17:50) [MSC v.1944 64 bit (AMD64)]",
+  "started": "2026-10-24T20:10:32+0000",
+  "experiments": [
+    {
+      "name": "venv_python-kill_process_tree",
+      "exe": "C:\\Users\\runneradmin\\AppData\\Local\\Temp\\sm-native-f4cd5b69\\.venv-accept\\Scripts\\python.exe",
+      "wrapper_pid": 8716,
+      "grandchild_pid": 6720,
+      "tree_before": [
+        [
+          2708,
+          "python.exe",
+          8716
+        ],
+        [
+          6652,
+          "python.exe",
+          2708
+        ],
+        [
+          7624,
+          "python.exe",
+          6652
+        ],
+        [
+          6720,
+          "python.exe",
+          7624
+        ],
+        [
+          6724,
+          "python.exe",
+          6720
+        ]
+      ],
+      "grandchild_in_tree_before": true,
+      "kill_returned": true,
+      "kill_seconds": 0.052,
+      "survivors": [],
+      "grandchild_alive_after_2s": false
+    },
+    {
+      "name": "venv_python-taskkill_verbose",
+      "exe": "C:\\Users\\runneradmin\\AppData\\Local\\Temp\\sm-native-f4cd5b69\\.venv-accept\\Scripts\\python.exe",
+      "wrapper_pid": 4292,
+      "grandchild_pid": 4268,
+      "tree_before": [
+        [
+          1508,
+          "python.exe",
+          4292
+        ],
+        [
+          4956,
+          "python.exe",
+          1508
+        ],
+        [
+          4428,
+          "python.exe",
+          4956
+        ],
+        [
+          4268,
+          "python.exe",
+          4428
+        ],
+        [
+          3460,
+          "python.exe",
+          4268
+        ]
+      ],
+      "grandchild_in_tree_before": true,
+      "taskkill": {
+        "rc": 0,
+        "out": " with PID 4268 (child process of PID 4428) has been terminated.\nSUCCESS: The process with PID 4428 (child process of PID 4956) has been terminated.\nSUCCESS: The process with PID 4956 (child process of PID 1508) has been terminated.\nSUCCESS: The process with PID 1508 (child process of PID 4292) has been terminated.\nSUCCESS: The process with PID 4292 (child process of PID 6780) has been terminated.\n",
+        "err": ""
+      },
+      "kill_seconds": 0.052,
+      "survivors": [],
+      "grandchild_alive_after_2s": false
+    },
+    {
+      "name": "base_python-kill_process_tree",
+      "exe": "C:\\hostedtoolcache\\windows\\Python\\3.13.16\\x64\\python.exe",
+      "wrapper_pid": 6432,
+      "grandchild_pid": 4016,
+      "tree_before": [
+        [
+          8864,
+          "python.exe",
+          6432
+        ],
+        [
+          4016,
+          "python.exe",
+          8864
+        ]
+      ],
+      "grandchild_in_tree_before": true,
+      "kill_returned": true,
+      "kill_seconds": 0.052,
+      "survivors": [],
+      "grandchild_alive_after_2s": false
+    },
+    {
+      "name": "base_python-taskkill_verbose",
+      "exe": "C:\\hostedtoolcache\\windows\\Python\\3.13.16\\x64\\python.exe",
+      "wrapper_pid": 8536,
+      "grandchild_pid": 2524,
+      "tree_before": [
+        [
+          2720,
+          "python.exe",
+          8536
+        ],
+        [
+          2524,
+          "python.exe",
+          2720
+        ]
+      ],
+      "grandchild_in_tree_before": true,
+      "taskkill": {
+        "rc": 0,
+        "out": "SUCCESS: The process with PID 2524 (child process of PID 2720) has been terminated.\nSUCCESS: The process with PID 2720 (child process of PID 8536) has been terminated.\nSUCCESS: The process with PID 8536 (child process of PID 6780) has been terminated.\n",
+        "err": ""
+      },
+      "kill_seconds": 0.053,
+      "survivors": [],
+      "grandchild_alive_after_2s": false
+    }
+  ]
+}

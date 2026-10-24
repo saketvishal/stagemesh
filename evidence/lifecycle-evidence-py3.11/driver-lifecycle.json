@@ -1,0 +1,204 @@
+{
+  "failures": [],
+  "evidence": [
+    {
+      "step": "project_ready",
+      "at": 1792872610.7711399,
+      "project": "C:\\Users\\runneradmin\\AppData\\Local\\Temp\\sm-driver-accept-x_ds1isr\\project",
+      "mock_only": true,
+      "tasks": 6,
+      "mode": "task-scheduler"
+    },
+    {
+      "step": "install",
+      "at": 1792872611.3081415,
+      "rc": 0,
+      "out": "urrency\": 1,\n    \"integration\": \"local\",\n    \"interval_seconds\": 60,\n    \"max_consecutive_failures\": 3,\n    \"max_steps_per_task\": 8,\n    \"max_tasks\": 1,\n    \"project\": \"C:\\\\Users\\\\runneradmin\\\\AppData\\\\Local\\\\Temp\\\\sm-driver-accept-x_ds1isr\\\\project\",\n    \"state\": \"running\",\n    \"strict_live\": false,\n    \"window_seconds\": 90\n  },\n  \"handle\": \"StageMesh\\\\driver-5dd7a07d20a3\",\n  \"installed\": true\n}\n",
+      "err": ""
+    },
+    {
+      "step": "PASS driver_installed",
+      "at": 1792872611.3081415
+    },
+    {
+      "step": "PASS schedule_registered",
+      "at": 1792872611.3260229
+    },
+    {
+      "step": "PASS repeated_execution_completes_tasks",
+      "at": 1792872751.3527713,
+      "done": [
+        "MOCK-1",
+        "MOCK-2"
+      ],
+      "ticks": 2
+    },
+    {
+      "step": "PASS mock_provider_ran_implement_and_independent_review",
+      "at": 1792872751.3527713,
+      "stages": [
+        "implement",
+        "review",
+        "implement",
+        "review"
+      ]
+    },
+    {
+      "step": "PASS pause_command",
+      "at": 1792872751.8047326,
+      "out": "\\\\.stagemesh\\\\driver\\\\reports\\\\47732907807441d5b3b02bf480282160.json\",\n    \"state\": \"progress\",\n    \"tick_id\": \"47732907807441d5b3b02bf480282160\"\n  },\n  \"schedule_exists\": true,\n  \"state\": \"paused\"\n}\n",
+      "err": ""
+    },
+    {
+      "step": "PASS paused_driver_makes_no_provider_calls",
+      "at": 1792872951.8053546,
+      "before": 4,
+      "after": 4
+    },
+    {
+      "step": "PASS resume_command",
+      "at": 1792872952.3087714,
+      "out": "\\.stagemesh\\\\driver\\\\reports\\\\47732907807441d5b3b02bf480282160.json\",\n    \"state\": \"progress\",\n    \"tick_id\": \"47732907807441d5b3b02bf480282160\"\n  },\n  \"schedule_exists\": true,\n  \"state\": \"running\"\n}\n",
+      "err": ""
+    },
+    {
+      "step": "PASS resume_continues_work",
+      "at": 1792873032.3253653,
+      "done": [
+        "MOCK-1",
+        "MOCK-2",
+        "MOCK-3"
+      ]
+    },
+    {
+      "step": "PASS no_overlapping_run_windows",
+      "at": 1792873224.3994844,
+      "peak_concurrent_windows": 1,
+      "sample": [
+        [
+          8916,
+          5488,
+          "C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\python.exe -m stagemesh.cli --project C:\\Users\\runneradmin\\AppData\\Local\\Temp\\sm-driver-accept-x_ds1isr\\project run"
+        ]
+      ]
+    },
+    {
+      "step": "PASS bounded_provider_calls_during_overlap",
+      "at": 1792873224.4000611
+    },
+    {
+      "step": "killing_process_tree",
+      "at": 1792873258.7668943,
+      "processes": [
+        [
+          3592,
+          "\"C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\python.exe\" -m stagemesh.cli --project C:\\Users\\runneradmin\\AppData\\Local\\"
+        ],
+        [
+          5364,
+          "C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\python.exe -m stagemesh.driver_child C:\\Users\\runneradmin\\AppData\\Local\\Tem"
+        ],
+        [
+          7780,
+          "C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\python.exe -m stagemesh.cli --project C:\\Users\\runneradmin\\AppData\\Local\\Te"
+        ],
+        [
+          7392,
+          "C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\python.exe -c \"import sys; from stagemesh.cli import main; sys.exit(main(sy"
+        ],
+        [
+          6624,
+          "C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\python.exe D:\\a\\stagemesh\\stagemesh\\scripts\\windows-acceptance\\mock_provide"
+        ]
+      ]
+    },
+    {
+      "step": "PASS tree_fully_killed",
+      "at": 1792873262.4792008,
+      "survivors": []
+    },
+    {
+      "step": "PASS recovered_after_crash_and_continued",
+      "at": 1792873322.5151362,
+      "done": [
+        "MOCK-1",
+        "MOCK-2",
+        "MOCK-3",
+        "MOCK-4",
+        "MOCK-5"
+      ]
+    },
+    {
+      "step": "PASS recovery_was_audited",
+      "at": 1792873322.521222,
+      "states": [
+        "progress",
+        "recovered_after_crash"
+      ]
+    },
+    {
+      "step": "tick_history",
+      "at": 1792873322.525258,
+      "states": [
+        "progress",
+        "progress",
+        "progress",
+        "progress",
+        "recovered_after_crash"
+      ],
+      "done": [
+        "MOCK-1",
+        "MOCK-2",
+        "MOCK-3",
+        "MOCK-4",
+        "MOCK-5"
+      ],
+      "calls": 11
+    },
+    {
+      "step": "PASS no_task_completed_twice",
+      "at": 1792873322.5272822,
+      "done": [
+        "MOCK-1",
+        "MOCK-2",
+        "MOCK-3",
+        "MOCK-4",
+        "MOCK-5"
+      ]
+    },
+    {
+      "step": "PASS stop_command",
+      "at": 1792873323.0491638,
+      "out": ".stagemesh\\\\driver\\\\reports\\\\69ace7f4a1644cb88d5d4d31d0a0569b.json\",\n    \"state\": \"progress\",\n    \"tick_id\": \"69ace7f4a1644cb88d5d4d31d0a0569b\"\n  },\n  \"schedule_exists\": false,\n  \"state\": \"stopped\"\n}\n",
+      "err": ""
+    },
+    {
+      "step": "PASS schedule_removed_by_stop",
+      "at": 1792873323.8950987
+    },
+    {
+      "step": "PASS stopped_driver_makes_no_provider_calls",
+      "at": 1792873400.8980672
+    },
+    {
+      "step": "PASS uninstall_command",
+      "at": 1792873402.1557024,
+      "out": "ve_failures\": 3,\n    \"max_steps_per_task\": 8,\n    \"max_tasks\": 1,\n    \"project\": \"C:\\\\Users\\\\runneradmin\\\\AppData\\\\Local\\\\Temp\\\\sm-driver-accept-x_ds1isr\\\\project\",\n    \"state\": \"stopped\",\n    \"strict_live\": false,\n    \"window_seconds\": 90\n  },\n  \"schedule_exists\": false,\n  \"state\": \"uninstalled\"\n}\n",
+      "err": ""
+    },
+    {
+      "step": "PASS ledger_preserved_after_uninstall",
+      "at": 1792873402.1557024
+    },
+    {
+      "step": "PASS no_project_processes_remain",
+      "at": 1792873402.8788931,
+      "left": []
+    },
+    {
+      "step": "cleanup_verified",
+      "at": 1792873404.553206,
+      "schedule_exists": false
+    }
+  ]
+}
