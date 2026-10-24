@@ -1164,6 +1164,25 @@ def _command_driver(args: argparse.Namespace) -> int:
             if scheduler is None:
                 print("the local continuous driver currently supports Windows Task Scheduler only", file=sys.stderr)
                 return 2
+            from . import provider_auth
+            from .config import load_config as _load_project_config
+            from .providers import adapters_from_config
+
+            configured = [
+                command
+                for adapter in adapters_from_config(_load_project_config(project))
+                for command in adapter.all_commands()
+            ]
+            if provider_auth.uses_real_providers(configured):
+                auth = provider_auth.check()
+                if not auth["ok"]:
+                    print(
+                        "refusing persistent real-provider startup: "
+                        + "; ".join(auth["blockers"])
+                        + " (no model call was made; fix the login or the environment, then install again)",
+                        file=sys.stderr,
+                    )
+                    return 2
             prepared = continuous_driver.DriverConfig(
                 project=str(project),
                 state="paused",
@@ -3044,6 +3063,21 @@ def command_backend(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_provider_auth(args: argparse.Namespace) -> int:
+    """Report coding-CLI login state and API-billing environment variables. Makes no model call; prints no credential."""
+    from . import provider_auth
+
+    report = provider_auth.check()
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        for state in report["providers"]:
+            print(f"{state['provider']}: installed={state['installed']} auth={state['auth_mode']} subscription={state['subscription']}")
+        print("api billing environment: " + (", ".join(report["api_billing_environment"]) or "none"))
+        print("ok" if report["ok"] else "BLOCKED: " + "; ".join(report["blockers"]))
+    return 0 if report["ok"] else 1
+
+
 def command_provider_acceptance(args: argparse.Namespace) -> int:
     project = Path(args.project).resolve()
     if getattr(args, "live", False) or getattr(args, "provider", None):
@@ -3988,6 +4022,11 @@ def build_parser() -> argparse.ArgumentParser:
     backend.add_argument("--migrate", action="store_true")
     backend.add_argument("--json", action="store_true")
     backend.set_defaults(func=command_backend)
+    provider_auth_parser = sub.add_parser(
+        "provider-auth", help="Check coding-CLI login state and API-billing variables without any model call"
+    )
+    provider_auth_parser.add_argument("--json", action="store_true")
+    provider_auth_parser.set_defaults(func=command_provider_auth)
     provider_acceptance = sub.add_parser("provider-acceptance")
     provider_acceptance.add_argument("--provider", help="Configured provider name to exercise with --live")
     provider_acceptance.add_argument("--live", action="store_true", help="Run the provider against a temporary one-file fixture")

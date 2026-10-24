@@ -32,6 +32,14 @@ from stagemesh.process_identity import popen_identity, process_identity
 
 
 @pytest.fixture(autouse=True)
+def no_real_provider_auth_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Install tests must not shell out to whatever coding CLIs the developer machine has logged in."""
+    from stagemesh import provider_auth
+
+    monkeypatch.setattr(provider_auth, "uses_real_providers", lambda _commands: False)
+
+
+@pytest.fixture(autouse=True)
 def windows_user(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("USERNAME", "owner")
     monkeypatch.setenv("USERDOMAIN", "HOST")
