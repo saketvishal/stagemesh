@@ -1,0 +1,22 @@
+{
+  "api_billing_environment": [],
+  "blockers": [
+    "no coding CLI (claude or codex) is installed"
+  ],
+  "model_calls_made": 0,
+  "ok": false,
+  "providers": [
+    {
+      "auth_mode": "not_installed",
+      "installed": false,
+      "provider": "claude",
+      "subscription": false
+    },
+    {
+      "auth_mode": "not_installed",
+      "installed": false,
+      "provider": "codex",
+      "subscription": false
+    }
+  ]
+}
