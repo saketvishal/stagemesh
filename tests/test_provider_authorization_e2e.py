@@ -38,6 +38,10 @@ pathlib.Path("docs/a.md").write_text("by " + name + "\n")
 '''
 
 
+def shim_path(bin_dir: Path, name: str) -> Path:
+    return bin_dir / (f"{name}.cmd" if os.name == "nt" else name)
+
+
 def install_shims(bin_dir: Path, calls: Path) -> None:
     bin_dir.mkdir()
     script = bin_dir / "shim.py"
@@ -78,7 +82,16 @@ def world(tmp_path, monkeypatch):
 
     monkeypatch.setattr(_providers.subprocess, "Popen", recording_popen)
     (rig.project / ".stagemesh" / "config.json").write_text(
-        json.dumps({"authorization": {"unattended_providers": ["codex", "claude"]}}), encoding="utf-8"
+        json.dumps({
+            "authorization": {"unattended_providers": ["codex", "claude"]},
+            # Windows cannot start a bare `codex` that is only a .cmd shim, so the stand-ins are configured by absolute path
+            # (the genuine-CLI check still applies: the program must be named codex or claude, outside the project).
+            "providers": {
+                "codex": {"command": f"{shim_path(tmp_path / 'bin', 'codex').as_posix()} exec", "capabilities": ["IMPLEMENT", "REVIEW"]},
+                "claude": {"command": f"{shim_path(tmp_path / 'bin', 'claude').as_posix()} -p", "capabilities": ["IMPLEMENT", "REVIEW"]},
+            },
+        }),
+        encoding="utf-8",
     )
     config = load_config(rig.project)
     adapters = adapters_from_config(config)
