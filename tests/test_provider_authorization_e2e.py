@@ -62,6 +62,21 @@ def world(tmp_path, monkeypatch):
     for var in ("STAGEMESH_CODEX_CMD", "STAGEMESH_CLAUDE_CMD", "STAGEMESH_GROK_CMD", "STAGEMESH_AGY_CMD"):
         monkeypatch.delenv(var, raising=False)
     rig = Rig(tmp_path, {"unused": "ok"})
+    import subprocess as _subprocess
+
+    from stagemesh import providers as _providers
+
+    rig.spawn_errors = []
+    real_popen = _subprocess.Popen
+
+    def recording_popen(*args, **kwargs):
+        try:
+            return real_popen(*args, **kwargs)
+        except Exception as exc:  # noqa: BLE001 -- recorded for diagnosis, then re-raised unchanged
+            rig.spawn_errors.append(f"{type(exc).__name__}: {exc} argv0={args[0][0] if args and args[0] else None!r} cwd={kwargs.get('cwd')!r}")
+            raise
+
+    monkeypatch.setattr(_providers.subprocess, "Popen", recording_popen)
     (rig.project / ".stagemesh" / "config.json").write_text(
         json.dumps({"authorization": {"unattended_providers": ["codex", "claude"]}}), encoding="utf-8"
     )
@@ -77,7 +92,7 @@ def world(tmp_path, monkeypatch):
 
 def failures(rig) -> str:
     rows = rig.store.conn.execute("SELECT payload FROM audit_events WHERE event_type IN ('provider.failure', 'provider.call')").fetchall()
-    return "\n".join(str(r["payload"])[:700] for r in rows)
+    return "\n".join([*(str(r["payload"])[:700] for r in rows), *getattr(rig, "spawn_errors", [])])
 
 
 def invoked(calls: Path) -> list[str]:
