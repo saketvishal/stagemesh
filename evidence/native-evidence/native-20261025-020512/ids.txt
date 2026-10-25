@@ -1,0 +1,2 @@
+ROOT=C:\Users\runneradmin\AppData\Local\Temp\sm-driver-accept-nhnxf_la
+TASK_HANDLE=StageMesh\driver-e943b3fdde63

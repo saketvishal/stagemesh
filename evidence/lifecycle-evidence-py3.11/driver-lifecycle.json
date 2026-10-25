@@ -1,0 +1,191 @@
+{
+  "failures": [
+    "repeated_execution_completes_tasks",
+    "mock_provider_ran_implement_and_independent_review",
+    "resume_continues_work",
+    "no_overlapping_run_windows",
+    "recovered_after_crash_and_continued",
+    "recovery_was_audited"
+  ],
+  "evidence": [
+    {
+      "step": "project_ready",
+      "at": 1792893928.4132512,
+      "project": "C:\\Users\\runneradmin\\AppData\\Local\\Temp\\sm-driver-accept-zosud698\\project",
+      "mock_only": true,
+      "tasks": 6,
+      "mode": "task-scheduler"
+    },
+    {
+      "step": "install",
+      "at": 1792893928.8995006,
+      "rc": 0,
+      "out": "urrency\": 1,\n    \"integration\": \"local\",\n    \"interval_seconds\": 60,\n    \"max_consecutive_failures\": 3,\n    \"max_steps_per_task\": 8,\n    \"max_tasks\": 1,\n    \"project\": \"C:\\\\Users\\\\runneradmin\\\\AppData\\\\Local\\\\Temp\\\\sm-driver-accept-zosud698\\\\project\",\n    \"state\": \"running\",\n    \"strict_live\": false,\n    \"window_seconds\": 90\n  },\n  \"handle\": \"StageMesh\\\\driver-3da53dc45910\",\n  \"installed\": true\n}\n",
+      "err": ""
+    },
+    {
+      "step": "PASS driver_installed",
+      "at": 1792893928.8995006
+    },
+    {
+      "step": "PASS schedule_registered",
+      "at": 1792893928.9153316
+    },
+    {
+      "step": "TIMEOUT repeated_ticks",
+      "at": 1792894348.9711967
+    },
+    {
+      "step": "FAIL repeated_execution_completes_tasks",
+      "at": 1792894348.9752283,
+      "done": [],
+      "ticks": 6
+    },
+    {
+      "step": "FAIL mock_provider_ran_implement_and_independent_review",
+      "at": 1792894348.9752283,
+      "stages": []
+    },
+    {
+      "step": "PASS pause_command",
+      "at": 1792894349.6333487,
+      "out": "ks; resume explicitly after fixing the blocker\",\n    \"exit_code\": null,\n    \"state\": \"blocked\",\n    \"tick_id\": \"93305588ce8149b49b1770524b7bbbad\"\n  },\n  \"schedule_exists\": true,\n  \"state\": \"paused\"\n}\n",
+      "err": ""
+    },
+    {
+      "step": "PASS paused_driver_makes_no_provider_calls",
+      "at": 1792894549.6369503,
+      "before": 0,
+      "after": 0
+    },
+    {
+      "step": "PASS resume_command",
+      "at": 1792894550.0788748,
+      "out": "s; resume explicitly after fixing the blocker\",\n    \"exit_code\": null,\n    \"state\": \"blocked\",\n    \"tick_id\": \"93305588ce8149b49b1770524b7bbbad\"\n  },\n  \"schedule_exists\": true,\n  \"state\": \"running\"\n}\n",
+      "err": ""
+    },
+    {
+      "step": "TIMEOUT resume_progress",
+      "at": 1792894970.1449103
+    },
+    {
+      "step": "FAIL resume_continues_work",
+      "at": 1792894970.1469316,
+      "done": []
+    },
+    {
+      "step": "FAIL no_overlapping_run_windows",
+      "at": 1792895172.3771257,
+      "peak_concurrent_windows": 0,
+      "sample": []
+    },
+    {
+      "step": "PASS bounded_provider_calls_during_overlap",
+      "at": 1792895172.3771257
+    },
+    {
+      "step": "TIMEOUT window_started_for_crash",
+      "at": 1792895412.4409084
+    },
+    {
+      "step": "killing_process_tree",
+      "at": 1792895412.761952,
+      "processes": []
+    },
+    {
+      "step": "PASS tree_fully_killed",
+      "at": 1792895416.0488868,
+      "survivors": []
+    },
+    {
+      "step": "TIMEOUT recovery_progress",
+      "at": 1792895836.1055613
+    },
+    {
+      "step": "FAIL recovered_after_crash_and_continued",
+      "at": 1792895836.1055613,
+      "done": []
+    },
+    {
+      "step": "FAIL recovery_was_audited",
+      "at": 1792895836.1100762,
+      "states": [
+        "blocked"
+      ]
+    },
+    {
+      "step": "tick_history",
+      "at": 1792895836.1120834,
+      "states": [
+        "blocked",
+        "blocked",
+        "blocked",
+        "blocked",
+        "blocked",
+        "blocked",
+        "blocked",
+        "blocked",
+        "blocked",
+        "blocked",
+        "blocked",
+        "blocked",
+        "blocked",
+        "blocked",
+        "blocked",
+        "blocked",
+        "blocked",
+        "blocked",
+        "blocked",
+        "blocked",
+        "blocked",
+        "blocked",
+        "blocked",
+        "blocked",
+        "blocked",
+        "blocked",
+        "blocked"
+      ],
+      "done": [],
+      "calls": 0
+    },
+    {
+      "step": "PASS no_task_completed_twice",
+      "at": 1792895836.1140916,
+      "done": []
+    },
+    {
+      "step": "PASS stop_command",
+      "at": 1792895836.6794763,
+      "out": "; resume explicitly after fixing the blocker\",\n    \"exit_code\": null,\n    \"state\": \"blocked\",\n    \"tick_id\": \"576c446e2af44ab981aca0ffc8280b16\"\n  },\n  \"schedule_exists\": false,\n  \"state\": \"stopped\"\n}\n",
+      "err": ""
+    },
+    {
+      "step": "PASS schedule_removed_by_stop",
+      "at": 1792895837.2669935
+    },
+    {
+      "step": "PASS stopped_driver_makes_no_provider_calls",
+      "at": 1792895914.2699213
+    },
+    {
+      "step": "PASS uninstall_command",
+      "at": 1792895915.2741363,
+      "out": "ve_failures\": 3,\n    \"max_steps_per_task\": 8,\n    \"max_tasks\": 1,\n    \"project\": \"C:\\\\Users\\\\runneradmin\\\\AppData\\\\Local\\\\Temp\\\\sm-driver-accept-zosud698\\\\project\",\n    \"state\": \"stopped\",\n    \"strict_live\": false,\n    \"window_seconds\": 90\n  },\n  \"schedule_exists\": false,\n  \"state\": \"uninstalled\"\n}\n",
+      "err": ""
+    },
+    {
+      "step": "PASS ledger_preserved_after_uninstall",
+      "at": 1792895915.2754366
+    },
+    {
+      "step": "PASS no_project_processes_remain",
+      "at": 1792895915.8617597,
+      "left": []
+    },
+    {
+      "step": "cleanup_verified",
+      "at": 1792895917.0191963,
+      "schedule_exists": false
+    }
+  ]
+}
