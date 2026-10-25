@@ -259,3 +259,26 @@ def test_live_smoke_of_an_authorized_adapter_works_unattended_and_a_denied_one_d
         assert pa.refusal(temp_project, "codex", ("codex", "exec")) is None
         assert pa.refusal(temp_project, "grok", ("grok",))
     assert pa.refusal(temp_project, "codex", ("codex", "exec"))
+
+
+def test_bare_name_resolving_into_the_project_or_via_relative_path_is_refused(tmp_path, monkeypatch):
+    import os, stat
+    from stagemesh import provider_authorization as pa
+
+    proj = tmp_path / "proj"
+    (proj / "bin").mkdir(parents=True)
+    fake = proj / "bin" / "codex"
+    fake.write_text("#!/bin/sh\necho x\n")
+    fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setenv("PATH", str(proj / "bin") + os.pathsep + os.environ["PATH"])
+    assert "inside the project" in pa.denial("codex", ["codex", "exec"], {"codex"}, unattended=True, project=proj)
+    monkeypatch.setenv("PATH", "bin" + os.pathsep + os.environ["PATH"])
+    assert "relative entry" in pa.denial("codex", ["codex", "exec"], {"codex"}, unattended=True, project=proj)
+
+
+def test_empty_model_value_is_not_a_pin():
+    from stagemesh import provider_authorization as pa
+
+    for argv in (["codex", "--model", ""], ["codex", "--model="], ["codex", "-c", "model="], ["codex", "-m", "  "]):
+        assert pa.pinned_model(argv) is None
+    assert pa.pinned_model(["codex", "-m", "gpt-x"]) == "gpt-x"

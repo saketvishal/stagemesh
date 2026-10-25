@@ -15,6 +15,7 @@ from __future__ import annotations
 import contextlib
 import contextvars
 import os
+import shutil
 import re
 from collections.abc import Iterator, Sequence
 from pathlib import Path
@@ -63,7 +64,13 @@ def _path_problem(token: str, project: Path | None) -> str | None:
     if text.startswith(("\\\\", "//")):
         return "network path"
     if "/" not in text and "\\" not in text:
-        return None  # a bare name; the adapter resolves it to an absolute path before this check runs
+        # A bare name is resolved against PATH exactly as the spawn would; PATH entries that are relative resolve inside the worktree.
+        if any(entry in ("", ".") or not (os.path.isabs(entry) or re.match(r"^[A-Za-z]:[\\/]", entry)) for entry in os.environ.get("PATH", "").split(os.pathsep)):
+            return "PATH contains a relative entry, so a bare executable name could resolve inside the project"
+        found = shutil.which(text)
+        if found is None:
+            return None
+        text = found
     if not (os.path.isabs(text) or re.match(r"^[A-Za-z]:[\\/]", text)):
         return "relative path"
     suffix = os.path.splitext(text)[1].lower()
@@ -145,9 +152,9 @@ def pinned_model(argv: Sequence[str]) -> str | None:
     tokens = list(argv)
     for index, token in enumerate(tokens):
         if token in ("--model", "-m") and index + 1 < len(tokens):
-            return tokens[index + 1]
+            return tokens[index + 1].strip() or None
         if token.startswith("--model="):
-            return token.split("=", 1)[1]
+            return token.split("=", 1)[1].strip() or None
         if token in ("-c", "--config") and index + 1 < len(tokens) and tokens[index + 1].startswith("model="):
-            return tokens[index + 1].split("=", 1)[1].strip("\"'")
+            return tokens[index + 1].split("=", 1)[1].strip("\"' ") or None
     return None
