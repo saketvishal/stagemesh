@@ -1,0 +1,181 @@
+T pool: codex: not_authorized: command for 'codex' runs 'python', not the codex CLI (substitution or wrapper); grok: not_authorized: command for 'grok' runs 'python', not the grok CLI (substitution or wrapper)",
+      "window_id": "04a15ee8"
+    },
+    "worktrees": {
+      "cleanable_worktrees": 0,
+      "done_unmerged_worktrees": 0,
+      "other_worktrees": 0,
+      "resumable_worktrees": 0
+    }
+  },
+  "recovered": [],
+  "reentered": [],
+  "refused": true,
+  "repo_after": null,
+  "repo_before": null,
+  "report_error": null,
+  "selected": [],
+  "started_at": 1792896712.3754783,
+  "stop_reason": "preflight refused: providers: no implementation provider is available. IMPLEMENT pool: codex: not_authorized: command for 'codex' runs 'python', not the codex CLI (substitution or wrapper); grok: not_authorized: command for 'grok' runs 'python', not the grok CLI (substitution or wrapper)",
+  "task_limit_reached": false,
+  "tasks": [],
+  "time_limit_reached": false,
+  "window_id": "04a15ee8"
+}
+
+driver tick: blocked - preflight refused: providers: no implementation provider is available. IMPLEMENT pool: codex: not_authorized: command for 'codex' runs 'python', not the codex CLI (substitution or wrapper); grok: not_authorized: command for 'grok' runs 'python', not the grok CLI (substitution or wrapper)
+T pool: codex: not_authorized: command for 'codex' runs 'python', not the codex CLI (substitution or wrapper); grok: not_authorized: command for 'grok' runs 'python', not the grok CLI (substitution or wrapper)",
+      "window_id": "d9444412"
+    },
+    "worktrees": {
+      "cleanable_worktrees": 0,
+      "done_unmerged_worktrees": 0,
+      "other_worktrees": 0,
+      "resumable_worktrees": 0
+    }
+  },
+  "recovered": [],
+  "reentered": [],
+  "refused": true,
+  "repo_after": null,
+  "repo_before": null,
+  "report_error": null,
+  "selected": [],
+  "started_at": 1792896772.3151634,
+  "stop_reason": "preflight refused: providers: no implementation provider is available. IMPLEMENT pool: codex: not_authorized: command for 'codex' runs 'python', not the codex CLI (substitution or wrapper); grok: not_authorized: command for 'grok' runs 'python', not the grok CLI (substitution or wrapper)",
+  "task_limit_reached": false,
+  "tasks": [],
+  "time_limit_reached": false,
+  "window_id": "d9444412"
+}
+
+driver tick: blocked - preflight refused: providers: no implementation provider is available. IMPLEMENT pool: codex: not_authorized: command for 'codex' runs 'python', not the codex CLI (substitution or wrapper); grok: not_authorized: command for 'grok' runs 'python', not the grok CLI (substitution or wrapper)
+T pool: codex: not_authorized: command for 'codex' runs 'python', not the codex CLI (substitution or wrapper); grok: not_authorized: command for 'grok' runs 'python', not the grok CLI (substitution or wrapper)",
+      "window_id": "e9740e7e"
+    },
+    "worktrees": {
+      "cleanable_worktrees": 0,
+      "done_unmerged_worktrees": 0,
+      "other_worktrees": 0,
+      "resumable_worktrees": 0
+    }
+  },
+  "recovered": [],
+  "reentered": [],
+  "refused": true,
+  "repo_after": null,
+  "repo_before": null,
+  "report_error": null,
+  "selected": [],
+  "started_at": 1792896832.3691385,
+  "stop_reason": "preflight refused: providers: no implementation provider is available. IMPLEMENT pool: codex: not_authorized: command for 'codex' runs 'python', not the codex CLI (substitution or wrapper); grok: not_authorized: command for 'grok' runs 'python', not the grok CLI (substitution or wrapper)",
+  "task_limit_reached": false,
+  "tasks": [],
+  "time_limit_reached": false,
+  "window_id": "e9740e7e"
+}
+
+driver tick: blocked - preflight refused: providers: no implementation provider is available. IMPLEMENT pool: codex: not_authorized: command for 'codex' runs 'python', not the codex CLI (substitution or wrapper); grok: not_authorized: command for 'grok' runs 'python', not the grok CLI (substitution or wrapper)
+driver tick: blocked - bounded retry budget exhausted after 3 consecutive failed ticks; resume explicitly after fixing the blocker
+driver tick: blocked - bounded retry budget exhausted after 4 consecutive failed ticks; resume explicitly after fixing the blocker
+driver tick: blocked - bounded retry budget exhausted after 5 consecutive failed ticks; resume explicitly after fixing the blocker
+driver tick: paused - driver is paused
+driver tick: paused - driver is paused
+driver tick: paused - driver is paused
+driver tick: paused - driver is paused
+T pool: codex: not_authorized: command for 'codex' runs 'python', not the codex CLI (substitution or wrapper); grok: not_authorized: command for 'grok' runs 'python', not the grok CLI (substitution or wrapper)",
+      "window_id": "3de1965d"
+    },
+    "worktrees": {
+      "cleanable_worktrees": 0,
+      "done_unmerged_worktrees": 0,
+      "other_worktrees": 0,
+      "resumable_worktrees": 0
+    }
+  },
+  "recovered": [],
+  "reentered": [],
+  "refused": true,
+  "repo_after": null,
+  "repo_before": null,
+  "report_error": null,
+  "selected": [],
+  "started_at": 1792897334.3716345,
+  "stop_reason": "preflight refused: providers: no implementation provider is available. IMPLEMENT pool: codex: not_authorized: command for 'codex' runs 'python', not the codex CLI (substitution or wrapper); grok: not_authorized: command for 'grok' runs 'python', not the grok CLI (substitution or wrapper)",
+  "task_limit_reached": false,
+  "tasks": [],
+  "time_limit_reached": false,
+  "window_id": "3de1965d"
+}
+
+driver tick: blocked - preflight refused: providers: no implementation provider is available. IMPLEMENT pool: codex: not_authorized: command for 'codex' runs 'python', not the codex CLI (substitution or wrapper); grok: not_authorized: command for 'grok' runs 'python', not the grok CLI (substitution or wrapper)
+T pool: codex: not_authorized: command for 'codex' runs 'python', not the codex CLI (substitution or wrapper); grok: not_authorized: command for 'grok' runs 'python', not the grok CLI (substitution or wrapper)",
+      "window_id": "1a430d59"
+    },
+    "worktrees": {
+      "cleanable_worktrees": 0,
+      "done_unmerged_worktrees": 0,
+      "other_worktrees": 0,
+      "resumable_worktrees": 0
+    }
+  },
+  "recovered": [],
+  "reentered": [],
+  "refused": true,
+  "repo_after": null,
+  "repo_before": null,
+  "report_error": null,
+  "selected": [],
+  "started_at": 1792897394.3749287,
+  "stop_reason": "preflight refused: providers: no implementation provider is available. IMPLEMENT pool: codex: not_authorized: command for 'codex' runs 'python', not the codex CLI (substitution or wrapper); grok: not_authorized: command for 'grok' runs 'python', not the grok CLI (substitution or wrapper)",
+  "task_limit_reached": false,
+  "tasks": [],
+  "time_limit_reached": false,
+  "window_id": "1a430d59"
+}
+
+driver tick: blocked - preflight refused: providers: no implementation provider is available. IMPLEMENT pool: codex: not_authorized: command for 'codex' runs 'python', not the codex CLI (substitution or wrapper); grok: not_authorized: command for 'grok' runs 'python', not the grok CLI (substitution or wrapper)
+T pool: codex: not_authorized: command for 'codex' runs 'python', not the codex CLI (substitution or wrapper); grok: not_authorized: command for 'grok' runs 'python', not the grok CLI (substitution or wrapper)",
+      "window_id": "dec688f7"
+    },
+    "worktrees": {
+      "cleanable_worktrees": 0,
+      "done_unmerged_worktrees": 0,
+      "other_worktrees": 0,
+      "resumable_worktrees": 0
+    }
+  },
+  "recovered": [],
+  "reentered": [],
+  "refused": true,
+  "repo_after": null,
+  "repo_before": null,
+  "report_error": null,
+  "selected": [],
+  "started_at": 1792897454.3776827,
+  "stop_reason": "preflight refused: providers: no implementation provider is available. IMPLEMENT pool: codex: not_authorized: command for 'codex' runs 'python', not the codex CLI (substitution or wrapper); grok: not_authorized: command for 'grok' runs 'python', not the grok CLI (substitution or wrapper)",
+  "task_limit_reached": false,
+  "tasks": [],
+  "time_limit_reached": false,
+  "window_id": "dec688f7"
+}
+
+driver tick: blocked - preflight refused: providers: no implementation provider is available. IMPLEMENT pool: codex: not_authorized: command for 'codex' runs 'python', not the codex CLI (substitution or wrapper); grok: not_authorized: command for 'grok' runs 'python', not the grok CLI (substitution or wrapper)
+driver tick: blocked - bounded retry budget exhausted after 3 consecutive failed ticks; resume explicitly after fixing the blocker
+driver tick: blocked - bounded retry budget exhausted after 4 consecutive failed ticks; resume explicitly after fixing the blocker
+driver tick: blocked - bounded retry budget exhausted after 5 consecutive failed ticks; resume explicitly after fixing the blocker
+driver tick: blocked - bounded retry budget exhausted after 6 consecutive failed ticks; resume explicitly after fixing the blocker
+driver tick: blocked - bounded retry budget exhausted after 7 consecutive failed ticks; resume explicitly after fixing the blocker
+driver tick: blocked - bounded retry budget exhausted after 8 consecutive failed ticks; resume explicitly after fixing the blocker
+driver tick: blocked - bounded retry budget exhausted after 9 consecutive failed ticks; resume explicitly after fixing the blocker
+driver tick: blocked - bounded retry budget exhausted after 10 consecutive failed ticks; resume explicitly after fixing the blocker
+driver tick: blocked - bounded retry budget exhausted after 11 consecutive failed ticks; resume explicitly after fixing the blocker
+driver tick: blocked - bounded retry budget exhausted after 12 consecutive failed ticks; resume explicitly after fixing the blocker
+driver tick: blocked - bounded retry budget exhausted after 13 consecutive failed ticks; resume explicitly after fixing the blocker
+driver tick: blocked - bounded retry budget exhausted after 14 consecutive failed ticks; resume explicitly after fixing the blocker
+driver tick: blocked - bounded retry budget exhausted after 15 consecutive failed ticks; resume explicitly after fixing the blocker
+driver tick: blocked - bounded retry budget exhausted after 16 consecutive failed ticks; resume explicitly after fixing the blocker
+driver tick: blocked - bounded retry budget exhausted after 17 consecutive failed ticks; resume explicitly after fixing the blocker
+driver tick: blocked - bounded retry budget exhausted after 18 consecutive failed ticks; resume explicitly after fixing the blocker
+driver tick: blocked - bounded retry budget exhausted after 19 consecutive failed ticks; resume explicitly after fixing the blocker
+driver tick: blocked - bounded retry budget exhausted after 20 consecutive failed ticks; resume explicitly after fixing the blocker

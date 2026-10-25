@@ -1,0 +1,191 @@
+{
+  "failures": [
+    "repeated_execution_completes_tasks",
+    "mock_provider_ran_implement_and_independent_review",
+    "resume_continues_work",
+    "no_overlapping_run_windows",
+    "recovered_after_crash_and_continued",
+    "recovery_was_audited"
+  ],
+  "evidence": [
+    {
+      "step": "project_ready",
+      "at": 1792896675.6039696,
+      "project": "C:\\Users\\runneradmin\\AppData\\Local\\Temp\\sm-driver-accept-abj_k74c\\project",
+      "mock_only": true,
+      "tasks": 6,
+      "mode": "task-scheduler"
+    },
+    {
+      "step": "install",
+      "at": 1792896675.9551249,
+      "rc": 0,
+      "out": "urrency\": 1,\n    \"integration\": \"local\",\n    \"interval_seconds\": 60,\n    \"max_consecutive_failures\": 3,\n    \"max_steps_per_task\": 8,\n    \"max_tasks\": 1,\n    \"project\": \"C:\\\\Users\\\\runneradmin\\\\AppData\\\\Local\\\\Temp\\\\sm-driver-accept-abj_k74c\\\\project\",\n    \"state\": \"running\",\n    \"strict_live\": false,\n    \"window_seconds\": 90\n  },\n  \"handle\": \"StageMesh\\\\driver-b8f778abb9db\",\n  \"installed\": true\n}\n",
+      "err": ""
+    },
+    {
+      "step": "PASS driver_installed",
+      "at": 1792896675.9554064
+    },
+    {
+      "step": "PASS schedule_registered",
+      "at": 1792896675.968386
+    },
+    {
+      "step": "TIMEOUT repeated_ticks",
+      "at": 1792897096.1080523
+    },
+    {
+      "step": "FAIL repeated_execution_completes_tasks",
+      "at": 1792897096.1116772,
+      "done": [],
+      "ticks": 6
+    },
+    {
+      "step": "FAIL mock_provider_ran_implement_and_independent_review",
+      "at": 1792897096.1119018,
+      "stages": []
+    },
+    {
+      "step": "PASS pause_command",
+      "at": 1792897097.086025,
+      "out": "ks; resume explicitly after fixing the blocker\",\n    \"exit_code\": null,\n    \"state\": \"blocked\",\n    \"tick_id\": \"cf2596fb09f347d5ac1c8aa5f7494b80\"\n  },\n  \"schedule_exists\": true,\n  \"state\": \"paused\"\n}\n",
+      "err": ""
+    },
+    {
+      "step": "PASS paused_driver_makes_no_provider_calls",
+      "at": 1792897297.0907757,
+      "before": 0,
+      "after": 0
+    },
+    {
+      "step": "PASS resume_command",
+      "at": 1792897297.4287746,
+      "out": "s; resume explicitly after fixing the blocker\",\n    \"exit_code\": null,\n    \"state\": \"blocked\",\n    \"tick_id\": \"cf2596fb09f347d5ac1c8aa5f7494b80\"\n  },\n  \"schedule_exists\": true,\n  \"state\": \"running\"\n}\n",
+      "err": ""
+    },
+    {
+      "step": "TIMEOUT resume_progress",
+      "at": 1792897718.2896233
+    },
+    {
+      "step": "FAIL resume_continues_work",
+      "at": 1792897718.291156,
+      "done": []
+    },
+    {
+      "step": "FAIL no_overlapping_run_windows",
+      "at": 1792897919.745215,
+      "peak_concurrent_windows": 0,
+      "sample": []
+    },
+    {
+      "step": "PASS bounded_provider_calls_during_overlap",
+      "at": 1792897919.7456868
+    },
+    {
+      "step": "TIMEOUT window_started_for_crash",
+      "at": 1792898159.8081937
+    },
+    {
+      "step": "killing_process_tree",
+      "at": 1792898160.1462235,
+      "processes": []
+    },
+    {
+      "step": "PASS tree_fully_killed",
+      "at": 1792898163.4534783,
+      "survivors": []
+    },
+    {
+      "step": "TIMEOUT recovery_progress",
+      "at": 1792898583.509273
+    },
+    {
+      "step": "FAIL recovered_after_crash_and_continued",
+      "at": 1792898583.510633,
+      "done": []
+    },
+    {
+      "step": "FAIL recovery_was_audited",
+      "at": 1792898583.513229,
+      "states": [
+        "blocked"
+      ]
+    },
+    {
+      "step": "tick_history",
+      "at": 1792898583.5154786,
+      "states": [
+        "blocked",
+        "blocked",
+        "blocked",
+        "blocked",
+        "blocked",
+        "blocked",
+        "blocked",
+        "blocked",
+        "blocked",
+        "blocked",
+        "blocked",
+        "blocked",
+        "blocked",
+        "blocked",
+        "blocked",
+        "blocked",
+        "blocked",
+        "blocked",
+        "blocked",
+        "blocked",
+        "blocked",
+        "blocked",
+        "blocked",
+        "blocked",
+        "blocked",
+        "blocked",
+        "blocked"
+      ],
+      "done": [],
+      "calls": 0
+    },
+    {
+      "step": "PASS no_task_completed_twice",
+      "at": 1792898583.516572,
+      "done": []
+    },
+    {
+      "step": "PASS stop_command",
+      "at": 1792898583.8035429,
+      "out": "; resume explicitly after fixing the blocker\",\n    \"exit_code\": null,\n    \"state\": \"blocked\",\n    \"tick_id\": \"c5b2930d972e4bbfaa6547276dce9a9d\"\n  },\n  \"schedule_exists\": false,\n  \"state\": \"stopped\"\n}\n",
+      "err": ""
+    },
+    {
+      "step": "PASS schedule_removed_by_stop",
+      "at": 1792898584.2600083
+    },
+    {
+      "step": "PASS stopped_driver_makes_no_provider_calls",
+      "at": 1792898661.262289
+    },
+    {
+      "step": "PASS uninstall_command",
+      "at": 1792898661.9714775,
+      "out": "ve_failures\": 3,\n    \"max_steps_per_task\": 8,\n    \"max_tasks\": 1,\n    \"project\": \"C:\\\\Users\\\\runneradmin\\\\AppData\\\\Local\\\\Temp\\\\sm-driver-accept-abj_k74c\\\\project\",\n    \"state\": \"stopped\",\n    \"strict_live\": false,\n    \"window_seconds\": 90\n  },\n  \"schedule_exists\": false,\n  \"state\": \"uninstalled\"\n}\n",
+      "err": ""
+    },
+    {
+      "step": "PASS ledger_preserved_after_uninstall",
+      "at": 1792898661.9718268
+    },
+    {
+      "step": "PASS no_project_processes_remain",
+      "at": 1792898662.5562525,
+      "left": []
+    },
+    {
+      "step": "cleanup_verified",
+      "at": 1792898663.4592395,
+      "schedule_exists": false
+    }
+  ]
+}
