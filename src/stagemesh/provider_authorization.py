@@ -64,16 +64,30 @@ def _path_problem(token: str, project: Path | None) -> str | None:
     if text.startswith(("\\\\", "//")):
         return "network path"
     if "/" not in text and "\\" not in text:
-        # A bare name is resolved against PATH exactly as the spawn would; PATH entries that are relative resolve inside the worktree.
+        # A bare name is resolved the way the spawn would: in PATH order, and (on Windows) the working directory first.
+        # Relative PATH entries are harmless unless the executable would actually be found through one of them.
+        exts = [""] + ([e.lower() for e in os.environ.get("PATHEXT", ".COM;.EXE;.BAT;.CMD").split(";") if e] if os.name == "nt" else [])
+        root = Path(project) if project is not None else Path.cwd()
+        hit: str | None = None
         entries = [e.strip().strip('"') for e in os.environ.get("PATH", "").split(os.pathsep)]
-        if os.name == "nt":
-            entries = [e for e in entries if e]  # Windows ignores empty PATH entries; it does not search the working directory for them
-        if any(e in ("", ".") or not (os.path.isabs(e) or re.match(r"^[A-Za-z]:[\\/]", e)) for e in entries):
-            return "PATH contains a relative entry, so a bare executable name could resolve inside the project"
-        found = shutil.which(text)
-        if found is None:
+        search = ([""] if os.name == "nt" else []) + entries
+        for entry in search:
+            if os.name == "nt" and entry == "" and search.index(entry) != 0:
+                continue  # Windows ignores empty PATH entries
+            absolute = entry != "" and (os.path.isabs(entry) or re.match(r"^[A-Za-z]:[\\/]", entry))
+            base = Path(entry) if absolute else root / entry
+            for ext in exts:
+                candidate = base / (text + ext)
+                if candidate.is_file():
+                    hit = str(candidate)
+                    if not absolute:
+                        return "the executable would be found through the working directory or a relative PATH entry, inside the project"
+                    break
+            if hit:
+                break
+        if hit is None:
             return None
-        text = found
+        text = hit
     if not (os.path.isabs(text) or re.match(r"^[A-Za-z]:[\\/]", text)):
         return "relative path"
     suffix = os.path.splitext(text)[1].lower()

@@ -273,7 +273,13 @@ def test_bare_name_resolving_into_the_project_or_via_relative_path_is_refused(tm
     monkeypatch.setenv("PATH", str(proj / "bin") + os.pathsep + os.environ["PATH"])
     assert "inside the project" in pa.denial("codex", ["codex", "exec"], {"codex"}, unattended=True, project=proj)
     monkeypatch.setenv("PATH", "bin" + os.pathsep + os.environ["PATH"])
-    assert "relative entry" in pa.denial("codex", ["codex", "exec"], {"codex"}, unattended=True, project=proj)
+    assert "relative PATH entry" in pa.denial("codex", ["codex", "exec"], {"codex"}, unattended=True, project=proj)
+    # a relative entry that does not contain the executable is harmless (common on Windows: unexpanded or odd PATH entries)
+    monkeypatch.setenv("PATH", "nothing-here" + os.pathsep + str(tmp_path / "elsewhere") + os.pathsep + os.environ["PATH"])
+    (tmp_path / "elsewhere").mkdir()
+    ok = tmp_path / "elsewhere" / fake.name
+    ok.write_text(fake.read_text()); ok.chmod(ok.stat().st_mode | stat.S_IXUSR)
+    assert pa.denial("codex", ["codex", "exec"], {"codex"}, unattended=True, project=proj) is None
 
 
 def test_empty_model_value_is_not_a_pin():
