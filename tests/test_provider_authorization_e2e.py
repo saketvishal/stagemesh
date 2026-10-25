@@ -84,7 +84,7 @@ def test_codex_down_never_falls_through_to_grok_or_agy_and_review_blocks(world, 
     monkeypatch.setenv("SHIM_MODE_CODEX", "down")
     rig.tick(6)
     used = invoked(calls)
-    assert "claude" in used  # the authorized fallback implemented
+    assert "claude" in used, rig.text()  # the authorized fallback implemented
     assert "grok" not in used and "agy" not in used
     assert rig.stage != Stage.DONE  # nobody independent of claude is available: a blocker, not a substitution
     assert "not_authorized" in rig.text()
@@ -94,6 +94,6 @@ def test_authorized_pair_completes_a_task_with_independent_review(world):
     rig, calls = world
     rig.tick(8)
     used = invoked(calls)
-    assert rig.stage == Stage.DONE
+    assert rig.stage == Stage.DONE, rig.text()
     assert set(used) <= {"codex", "claude"} and {"codex", "claude"} <= set(used)
     assert rig.store.latest_candidate(TASK)["produced_by"] != "unused"
