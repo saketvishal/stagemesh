@@ -1,0 +1,81 @@
+﻿{
+    "commit":  "77253c4483e2783c0e0e26972debcba17523e11c",
+    "started":  "2026-10-25T01:29:43.6584463+00:00",
+    "steps":  {
+                  "no_provider_command_overrides":  {
+                                                        "ok":  true,
+                                                        "detail":  ""
+                                                    },
+                  "checkout_is_pinned_commit_and_clean":  {
+                                                              "ok":  true,
+                                                              "detail":  "77253c4483e2783c0e0e26972debcba17523e11c dirty_entries=0"
+                                                          },
+                  "python_3_11_or_newer":  {
+                                               "ok":  true,
+                                               "detail":  "C:\\hostedtoolcache\\windows\\Python\\3.13.16\\x64\\python.exe"
+                                           },
+                  "install_stagemesh":  {
+                                            "ok":  true,
+                                            "detail":  "logs: venv/pip"
+                                        },
+                  "provider_login_state_recorded":  {
+                                                        "ok":  true,
+                                                        "detail":  "classification only; no model call made"
+                                                    },
+                  "focused_driver_tests_on_this_host":  {
+                                                            "ok":  true,
+                                                            "detail":  "exit=0"
+                                                        },
+                  "process_tree_diagnostic_ran":  {
+                                                      "ok":  true,
+                                                      "detail":  "exit=0"
+                                                  },
+                  "driver_lifecycle_mock_providers":  {
+                                                          "ok":  false,
+                                                          "detail":  "exit=1 failures=[repeated_execution_completes_tasks,mock_provider_ran_implement_and_independent_review,resume_continues_work,no_overlapping_run_windows,recovered_after_crash_and_continued,recovery_was_audited] missing_phases=[repeated_execution_completes_tasks,no_overlapping_run_windows,recovered_after_crash_and_continued,recovery_was_audited] ids_recorded=True"
+                                                      },
+                  "cleanup_complete":  {
+                                           "ok":  true,
+                                           "detail":  "task_removed=True temp_removed=True"
+                                       }
+              },
+    "provider_state":  {
+                           "api_billing_environment":  [
+
+                                                       ],
+                           "blockers":  [
+                                            "no coding CLI (claude or codex) is installed"
+                                        ],
+                           "model_calls_made":  0,
+                           "ok":  false,
+                           "providers":  [
+                                             {
+                                                 "auth_mode":  "not_installed",
+                                                 "installed":  false,
+                                                 "provider":  "claude",
+                                                 "subscription":  false
+                                             },
+                                             {
+                                                 "auth_mode":  "not_installed",
+                                                 "installed":  false,
+                                                 "provider":  "codex",
+                                                 "subscription":  false
+                                             }
+                                         ]
+                       },
+    "cleanup":  {
+                    "task_handle":  "StageMesh\\driver-dae3b67c990f",
+                    "task_removed":  true,
+                    "processes_killed":  [
+
+                                         ],
+                    "temp_removed":  true
+                },
+    "host":  {
+                 "os":  "Microsoft Windows Server 2025 Datacenter",
+                 "git":  "git version 2.56.0.windows.2",
+                 "powershell":  "5.1.26100.33648"
+             },
+    "finished":  "2026-10-25T02:03:40.8311619+00:00",
+    "result":  "FAIL"
+}

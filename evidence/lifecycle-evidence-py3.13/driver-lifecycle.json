@@ -1,0 +1,191 @@
+{
+  "failures": [
+    "repeated_execution_completes_tasks",
+    "mock_provider_ran_implement_and_independent_review",
+    "resume_continues_work",
+    "no_overlapping_run_windows",
+    "recovered_after_crash_and_continued",
+    "recovery_was_audited"
+  ],
+  "evidence": [
+    {
+      "step": "project_ready",
+      "at": 1792891788.0638342,
+      "project": "C:\\Users\\runneradmin\\AppData\\Local\\Temp\\sm-driver-accept-nffel5ye\\project",
+      "mock_only": true,
+      "tasks": 6,
+      "mode": "task-scheduler"
+    },
+    {
+      "step": "install",
+      "at": 1792891788.6417973,
+      "rc": 0,
+      "out": "urrency\": 1,\n    \"integration\": \"local\",\n    \"interval_seconds\": 60,\n    \"max_consecutive_failures\": 3,\n    \"max_steps_per_task\": 8,\n    \"max_tasks\": 1,\n    \"project\": \"C:\\\\Users\\\\runneradmin\\\\AppData\\\\Local\\\\Temp\\\\sm-driver-accept-nffel5ye\\\\project\",\n    \"state\": \"running\",\n    \"strict_live\": false,\n    \"window_seconds\": 90\n  },\n  \"handle\": \"StageMesh\\\\driver-d2f795f74027\",\n  \"installed\": true\n}\n",
+      "err": ""
+    },
+    {
+      "step": "PASS driver_installed",
+      "at": 1792891788.6418943
+    },
+    {
+      "step": "PASS schedule_registered",
+      "at": 1792891788.6621566
+    },
+    {
+      "step": "TIMEOUT repeated_ticks",
+      "at": 1792892208.715753
+    },
+    {
+      "step": "FAIL repeated_execution_completes_tasks",
+      "at": 1792892208.7195575,
+      "done": [],
+      "ticks": 6
+    },
+    {
+      "step": "FAIL mock_provider_ran_implement_and_independent_review",
+      "at": 1792892208.7197044,
+      "stages": []
+    },
+    {
+      "step": "PASS pause_command",
+      "at": 1792892209.1431665,
+      "out": "ks; resume explicitly after fixing the blocker\",\n    \"exit_code\": null,\n    \"state\": \"blocked\",\n    \"tick_id\": \"cc17b81733164d6fa510a585f0050f4e\"\n  },\n  \"schedule_exists\": true,\n  \"state\": \"paused\"\n}\n",
+      "err": ""
+    },
+    {
+      "step": "PASS paused_driver_makes_no_provider_calls",
+      "at": 1792892409.1412156,
+      "before": 0,
+      "after": 0
+    },
+    {
+      "step": "PASS resume_command",
+      "at": 1792892409.659051,
+      "out": "s; resume explicitly after fixing the blocker\",\n    \"exit_code\": null,\n    \"state\": \"blocked\",\n    \"tick_id\": \"cc17b81733164d6fa510a585f0050f4e\"\n  },\n  \"schedule_exists\": true,\n  \"state\": \"running\"\n}\n",
+      "err": ""
+    },
+    {
+      "step": "TIMEOUT resume_progress",
+      "at": 1792892829.7089949
+    },
+    {
+      "step": "FAIL resume_continues_work",
+      "at": 1792892829.7108192,
+      "done": []
+    },
+    {
+      "step": "FAIL no_overlapping_run_windows",
+      "at": 1792893031.8551707,
+      "peak_concurrent_windows": 0,
+      "sample": []
+    },
+    {
+      "step": "PASS bounded_provider_calls_during_overlap",
+      "at": 1792893031.855387
+    },
+    {
+      "step": "TIMEOUT window_started_for_crash",
+      "at": 1792893271.9067006
+    },
+    {
+      "step": "killing_process_tree",
+      "at": 1792893272.281358,
+      "processes": []
+    },
+    {
+      "step": "PASS tree_fully_killed",
+      "at": 1792893275.6027813,
+      "survivors": []
+    },
+    {
+      "step": "TIMEOUT recovery_progress",
+      "at": 1792893695.6535394
+    },
+    {
+      "step": "FAIL recovered_after_crash_and_continued",
+      "at": 1792893695.655297,
+      "done": []
+    },
+    {
+      "step": "FAIL recovery_was_audited",
+      "at": 1792893695.6594121,
+      "states": [
+        "blocked"
+      ]
+    },
+    {
+      "step": "tick_history",
+      "at": 1792893695.6629317,
+      "states": [
+        "blocked",
+        "blocked",
+        "blocked",
+        "blocked",
+        "blocked",
+        "blocked",
+        "blocked",
+        "blocked",
+        "blocked",
+        "blocked",
+        "blocked",
+        "blocked",
+        "blocked",
+        "blocked",
+        "blocked",
+        "blocked",
+        "blocked",
+        "blocked",
+        "blocked",
+        "blocked",
+        "blocked",
+        "blocked",
+        "blocked",
+        "blocked",
+        "blocked",
+        "blocked",
+        "blocked"
+      ],
+      "done": [],
+      "calls": 0
+    },
+    {
+      "step": "PASS no_task_completed_twice",
+      "at": 1792893695.6645498,
+      "done": []
+    },
+    {
+      "step": "PASS stop_command",
+      "at": 1792893696.130818,
+      "out": "; resume explicitly after fixing the blocker\",\n    \"exit_code\": null,\n    \"state\": \"blocked\",\n    \"tick_id\": \"7cae0fce5d41431685c9dbe17399d36c\"\n  },\n  \"schedule_exists\": false,\n  \"state\": \"stopped\"\n}\n",
+      "err": ""
+    },
+    {
+      "step": "PASS schedule_removed_by_stop",
+      "at": 1792893696.9398038
+    },
+    {
+      "step": "PASS stopped_driver_makes_no_provider_calls",
+      "at": 1792893773.9397264
+    },
+    {
+      "step": "PASS uninstall_command",
+      "at": 1792893775.1144576,
+      "out": "ve_failures\": 3,\n    \"max_steps_per_task\": 8,\n    \"max_tasks\": 1,\n    \"project\": \"C:\\\\Users\\\\runneradmin\\\\AppData\\\\Local\\\\Temp\\\\sm-driver-accept-nffel5ye\\\\project\",\n    \"state\": \"stopped\",\n    \"strict_live\": false,\n    \"window_seconds\": 90\n  },\n  \"schedule_exists\": false,\n  \"state\": \"uninstalled\"\n}\n",
+      "err": ""
+    },
+    {
+      "step": "PASS ledger_preserved_after_uninstall",
+      "at": 1792893775.1146958
+    },
+    {
+      "step": "PASS no_project_processes_remain",
+      "at": 1792893775.8198292,
+      "left": []
+    },
+    {
+      "step": "cleanup_verified",
+      "at": 1792893777.3418062,
+      "schedule_exists": false
+    }
+  ]
+}
