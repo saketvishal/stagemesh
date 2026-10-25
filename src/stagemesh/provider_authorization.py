@@ -99,26 +99,44 @@ def denial(
     return None
 
 
+def read_allowlist(project: Path) -> tuple[str, ...] | None:
+    """The project's allowlist straight from its config file (no git or network): None when none is declared; ValueError if malformed."""
+    import json
+
+    path = Path(project) / ".stagemesh" / "config.json"
+    if not path.exists():
+        return None
+    data = json.loads(path.read_text(encoding="utf-8-sig"))
+    if not isinstance(data, dict):
+        raise ValueError("config root must be an object")
+    section = data.get("authorization", {})
+    if not isinstance(section, dict):
+        raise ValueError("authorization must be an object")
+    if "unattended_providers" not in section:
+        return None
+    names = section["unattended_providers"]
+    if not isinstance(names, list) or not names or not all(isinstance(n, str) and n.strip() for n in names):
+        raise ValueError("authorization.unattended_providers must be a non-empty list of names")
+    return tuple(n.strip() for n in names)
+
+
 def refusal(project: Path, name: str, argv: Sequence[str], *, build_time_allowed: Sequence[str] | None = None) -> str | None:
     """The execution-boundary check: re-reads the project's own config so it holds however the adapter was built.
 
     `build_time_allowed` is the allowlist the adapter was built under: if the config becomes unreadable later, that list still binds.
     """
-    from .config import ConfigValidationError, load_config
-
     mode = unattended()
     pre = _PRE_AUTHORIZED.get()
     if pre is not None:
         return denial(name, argv, set(pre), unattended=mode, project=Path(project))
     try:
-        config = load_config(Path(project))
-    except (ConfigValidationError, OSError, ValueError) as exc:
+        allowed = read_allowlist(Path(project))
+    except (OSError, ValueError) as exc:
         if build_time_allowed is not None:
             return denial(name, argv, set(build_time_allowed), unattended=mode, project=Path(project)) or (
                 f"project configuration could not be re-verified ({type(exc).__name__})"
             )
         return f"project configuration could not be verified ({type(exc).__name__})" if mode else None
-    allowed = config.authorized_providers
     return denial(name, argv, None if allowed is None else set(allowed), unattended=mode, project=Path(project))
 
 
