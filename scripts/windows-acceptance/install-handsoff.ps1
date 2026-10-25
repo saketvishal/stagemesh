@@ -16,7 +16,8 @@ param(
     [string]$Source = 'https://github.com/saketvishal/stagemesh.git',
     [string]$Base = 'C:\development\stagemesh-handsoff',
     [string]$EvidenceRoot = '',
-    [string]$Python = ''
+    [string]$Python = '',
+    [string]$CodexModel = 'gpt-5.6-terra'
 )
 $ErrorActionPreference = 'Continue'
 if ($Commit -notmatch '^[0-9a-f]{40}$') { Write-Host 'REFUSED: -Commit must be a full 40-character sha'; exit 2 }
@@ -115,7 +116,8 @@ $project = Join-Path $Base 'textkit'
 if ($LASTEXITCODE -ne 0) { Fail 'sandbox creation failed (is a global git user.name/user.email configured?)' }
 $config = @{
     budgets = @{ max_provider_calls_per_task = 12; max_equivalent_failures = 3; max_provider_calls_per_window = 30 }
-    routing = @{ require_independent_review = $true }
+    routing = @{ require_independent_review = $true; pools = @{ IMPLEMENT = @('codex', 'claude'); REVIEW = @('codex', 'claude') } }
+    providers = @{ codex = @{ command = "codex exec --sandbox workspace-write -m $CodexModel"; capabilities = @('IMPLEMENT', 'REVIEW') } }
 } | ConvertTo-Json -Depth 5
 [IO.File]::WriteAllText((Join-Path $project '.stagemesh\config.json'), $config, (New-Object Text.UTF8Encoding($false)))
 
