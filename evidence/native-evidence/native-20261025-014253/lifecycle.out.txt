@@ -1,0 +1,32 @@
+ROOT=C:\Users\runneradmin\AppData\Local\Temp\sm-driver-accept-vxc7gcts
+TASK_HANDLE=StageMesh\driver-7f52944030ca
+[01:43:37] project_ready {"project": "C:\\Users\\runneradmin\\AppData\\Local\\Temp\\sm-driver-accept-vxc7gcts\\project", "mock_only": true, "tasks": 6, "mode": "task-scheduler"}
+[01:43:38] install {"rc": 0, "out": "urrency\": 1,\n    \"integration\": \"local\",\n    \"interval_seconds\": 60,\n    \"max_consecutive_failures\": 3,\n    \"max_steps_per_task\": 8,\n    \"max_tasks\": 1,\n    \"project\": \"C:\\\\Users\\\\runneradmin\\\\AppData\\\\Local\\\\Temp\\\\sm-driver-accept-vxc7gcts\\\\proj
+[01:43:38] PASS driver_installed {}
+[01:43:38] PASS schedule_registered {}
+[01:50:38] TIMEOUT repeated_ticks {}
+[01:50:38] FAIL repeated_execution_completes_tasks {"done": [], "ticks": 6}
+[01:50:38] FAIL mock_provider_ran_implement_and_independent_review {"stages": []}
+[01:50:38] PASS pause_command {"out": "ks; resume explicitly after fixing the blocker\",\n    \"exit_code\": null,\n    \"state\": \"blocked\",\n    \"tick_id\": \"c6e8d4086d074e0fa419bad21853c6e0\"\n  },\n  \"schedule_exists\": true,\n  \"state\": \"paused\"\n}\n", "err": ""}
+[01:53:58] PASS paused_driver_makes_no_provider_calls {"before": 0, "after": 0}
+[01:53:59] PASS resume_command {"out": "s; resume explicitly after fixing the blocker\",\n    \"exit_code\": null,\n    \"state\": \"blocked\",\n    \"tick_id\": \"c6e8d4086d074e0fa419bad21853c6e0\"\n  },\n  \"schedule_exists\": true,\n  \"state\": \"running\"\n}\n", "err": ""}
+[02:00:59] TIMEOUT resume_progress {}
+[02:00:59] FAIL resume_continues_work {"done": []}
+[02:04:21] FAIL no_overlapping_run_windows {"peak_concurrent_windows": 0, "sample": []}
+[02:04:21] PASS bounded_provider_calls_during_overlap {}
+[02:08:21] TIMEOUT window_started_for_crash {}
+[02:08:21] killing_process_tree {"processes": []}
+[02:08:25] PASS tree_fully_killed {"survivors": []}
+[02:15:26] TIMEOUT recovery_progress {}
+[02:15:26] FAIL recovered_after_crash_and_continued {"done": []}
+[02:15:26] FAIL recovery_was_audited {"states": ["blocked"]}
+[02:15:26] tick_history {"states": ["blocked", "blocked", "blocked", "blocked", "blocked", "blocked", "blocked", "blocked", "blocked", "blocked", "blocked", "blocked", "blocked", "blocked", "blocked", "blocked", "blocked", "blocked", "blocked", "blocked", "blocked", "blocked", "blocked", "blocked", "blocked", "blocked", "b
+[02:15:26] PASS no_task_completed_twice {"done": []}
+[02:15:27] PASS stop_command {"out": "; resume explicitly after fixing the blocker\",\n    \"exit_code\": null,\n    \"state\": \"blocked\",\n    \"tick_id\": \"14dc3b35bec146fda9048d1aaf996ca2\"\n  },\n  \"schedule_exists\": false,\n  \"state\": \"stopped\"\n}\n", "err": ""}
+[02:15:28] PASS schedule_removed_by_stop {}
+[02:16:45] PASS stopped_driver_makes_no_provider_calls {}
+[02:16:46] PASS uninstall_command {"out": "ve_failures\": 3,\n    \"max_steps_per_task\": 8,\n    \"max_tasks\": 1,\n    \"project\": \"C:\\\\Users\\\\runneradmin\\\\AppData\\\\Local\\\\Temp\\\\sm-driver-accept-vxc7gcts\\\\project\",\n    \"state\": \"stopped\",\n    \"strict_live\": false,\n    \"window_seconds\": 90\n  },\n  \"sch
+[02:16:46] PASS ledger_preserved_after_uninstall {}
+[02:16:47] PASS no_project_processes_remain {"left": []}
+[02:16:48] cleanup_verified {"schedule_exists": false}
+[02:16:48] failures: ['repeated_execution_completes_tasks', 'mock_provider_ran_implement_and_independent_review', 'resume_continues_work', 'no_overlapping_run_windows', 'recovered_after_crash_and_continued', 'recovery_was_audited']
