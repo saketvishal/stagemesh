@@ -1,0 +1,32 @@
+ROOT=C:\Users\runneradmin\AppData\Local\Temp\sm-driver-accept-fa5cm8lq
+TASK_HANDLE=StageMesh\driver-c568a2eda09c
+[02:10:15] project_ready {"project": "C:\\Users\\runneradmin\\AppData\\Local\\Temp\\sm-driver-accept-fa5cm8lq\\project", "mock_only": true, "tasks": 6, "mode": "task-scheduler"}
+[02:10:15] install {"rc": 0, "out": "urrency\": 1,\n    \"integration\": \"local\",\n    \"interval_seconds\": 60,\n    \"max_consecutive_failures\": 3,\n    \"max_steps_per_task\": 8,\n    \"max_tasks\": 1,\n    \"project\": \"C:\\\\Users\\\\runneradmin\\\\AppData\\\\Local\\\\Temp\\\\sm-driver-accept-fa5cm8lq\\\\proj
+[02:10:15] PASS driver_installed {}
+[02:10:15] PASS schedule_registered {}
+[02:17:15] TIMEOUT repeated_ticks {}
+[02:17:15] FAIL repeated_execution_completes_tasks {"done": [], "ticks": 6}
+[02:17:15] FAIL mock_provider_ran_implement_and_independent_review {"stages": []}
+[02:17:15] PASS pause_command {"out": "ks; resume explicitly after fixing the blocker\",\n    \"exit_code\": null,\n    \"state\": \"blocked\",\n    \"tick_id\": \"e9a74e7de8ed4a9badeefeec93ae98c0\"\n  },\n  \"schedule_exists\": true,\n  \"state\": \"paused\"\n}\n", "err": ""}
+[02:20:35] PASS paused_driver_makes_no_provider_calls {"before": 0, "after": 0}
+[02:20:36] PASS resume_command {"out": "s; resume explicitly after fixing the blocker\",\n    \"exit_code\": null,\n    \"state\": \"blocked\",\n    \"tick_id\": \"e9a74e7de8ed4a9badeefeec93ae98c0\"\n  },\n  \"schedule_exists\": true,\n  \"state\": \"running\"\n}\n", "err": ""}
+[02:27:36] TIMEOUT resume_progress {}
+[02:27:36] FAIL resume_continues_work {"done": []}
+[02:30:57] FAIL no_overlapping_run_windows {"peak_concurrent_windows": 0, "sample": []}
+[02:30:57] PASS bounded_provider_calls_during_overlap {}
+[02:34:57] TIMEOUT window_started_for_crash {}
+[02:34:57] killing_process_tree {"processes": []}
+[02:35:01] PASS tree_fully_killed {"survivors": []}
+[02:42:01] TIMEOUT recovery_progress {}
+[02:42:01] FAIL recovered_after_crash_and_continued {"done": []}
+[02:42:01] FAIL recovery_was_audited {"states": ["blocked"]}
+[02:42:01] tick_history {"states": ["blocked", "blocked", "blocked", "blocked", "blocked", "blocked", "blocked", "blocked", "blocked", "blocked", "blocked", "blocked", "blocked", "blocked", "blocked", "blocked", "blocked", "blocked", "blocked", "blocked", "blocked", "blocked", "blocked", "blocked", "blocked", "blocked", "b
+[02:42:01] PASS no_task_completed_twice {"done": []}
+[02:42:01] PASS stop_command {"out": "; resume explicitly after fixing the blocker\",\n    \"exit_code\": null,\n    \"state\": \"blocked\",\n    \"tick_id\": \"39c1fba6baf245eca3163fc91324fcbc\"\n  },\n  \"schedule_exists\": false,\n  \"state\": \"stopped\"\n}\n", "err": ""}
+[02:42:02] PASS schedule_removed_by_stop {}
+[02:43:19] PASS stopped_driver_makes_no_provider_calls {}
+[02:43:20] PASS uninstall_command {"out": "ve_failures\": 3,\n    \"max_steps_per_task\": 8,\n    \"max_tasks\": 1,\n    \"project\": \"C:\\\\Users\\\\runneradmin\\\\AppData\\\\Local\\\\Temp\\\\sm-driver-accept-fa5cm8lq\\\\project\",\n    \"state\": \"stopped\",\n    \"strict_live\": false,\n    \"window_seconds\": 90\n  },\n  \"sch
+[02:43:20] PASS ledger_preserved_after_uninstall {}
+[02:43:20] PASS no_project_processes_remain {"left": []}
+[02:43:22] cleanup_verified {"schedule_exists": false}
+[02:43:22] failures: ['repeated_execution_completes_tasks', 'mock_provider_ran_implement_and_independent_review', 'resume_continues_work', 'no_overlapping_run_windows', 'recovered_after_crash_and_continued', 'recovery_was_audited']

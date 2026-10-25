@@ -1,0 +1,66 @@
+﻿**********************
+Windows PowerShell transcript start
+Start time: 20261025020938
+Username: runnervmdaln5\runneradmin
+RunAs User: runnervmdaln5\runneradmin
+Configuration Name: 
+Machine: runnervmdaln5 (Microsoft Windows NT 10.0.26100.0)
+Host Application: C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\Users\RUNNER~1\AppData\Local\Temp\sm-native-a4a90a78\scripts\windows-acceptance\run-native-acceptance.ps1 -Work C:\Users\RUNNER~1\AppData\Local\Temp\sm-native-a4a90a78 -Commit 10b8011ffe7068461dbba67d97b89cde4079ba3a -EvidenceRoot D:\a\_temp\native-evidence
+Process ID: 9308
+PSVersion: 5.1.26100.33648
+PSEdition: Desktop
+PSCompatibleVersions: 1.0, 2.0, 3.0, 4.0, 5.0, 5.1.26100.33648
+BuildVersion: 10.0.26100.33648
+CLRVersion: 4.0.30319.42000
+WSManStackVersion: 3.0
+PSRemotingProtocolVersion: 2.3
+SerializationVersion: 1.1.0.1
+**********************
+[PASS] no_provider_command_overrides
+[PASS] checkout_is_pinned_commit_and_clean 10b8011ffe7068461dbba67d97b89cde4079ba3a dirty_entries=0
+[PASS] python_3_11_or_newer C:\hostedtoolcache\windows\Python\3.13.16\x64\python.exe
+[PASS] install_stagemesh logs: venv/pip
+[PASS] provider_login_state_recorded classification only; no model call made
+[PASS] focused_driver_tests_on_this_host exit=0
+[PASS] process_tree_diagnostic_ran exit=0
+Running the real Task Scheduler lifecycle (about 15 to 20 minutes). Heartbeats appear every 2 minutes.
+  lifecycle still running (156 s)
+  lifecycle still running (276 s)
+  lifecycle still running (396 s)
+  lifecycle still running (516 s)
+  lifecycle still running (636 s)
+  lifecycle still running (756 s)
+  lifecycle still running (876 s)
+  lifecycle still running (996 s)
+  lifecycle still running (1,116 s)
+  lifecycle still running (1,236 s)
+  lifecycle still running (1,356 s)
+  lifecycle still running (1,476 s)
+  lifecycle still running (1,596 s)
+  lifecycle still running (1,716 s)
+  lifecycle still running (1,836 s)
+  lifecycle still running (1,956 s)
+[FAIL] driver_lifecycle_mock_providers exit=1 failures=[repeated_execution_completes_tasks,mock_provider_ran_implement_and_independent_review,resume_continues_work,no_overlapping_run_windows,recovered_after_crash_and_continued,recovery_was_audited] missing_phases=[repeated_execution_completes_tasks,no_overlapping_run_windows,recovered_after_crash_and_continued,recovery_was_audited] ids_recorded=True
+schtasks : ERROR: The system cannot find the file specified.
+At C:\Users\runneradmin\AppData\Local\Temp\sm-native-a4a90a78\scripts\windows-acceptance\run-native-acceptance.ps1:156 
+char:17
++                 schtasks /Delete /TN $handle /F *> $null
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (ERROR: The syst...file specified.:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+
+schtasks : ERROR: The system cannot find the path specified.
+At C:\Users\runneradmin\AppData\Local\Temp\sm-native-a4a90a78\scripts\windows-acceptance\run-native-acceptance.ps1:157 
+char:17
++                 schtasks /Query /TN $handle *> $null
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (ERROR: The syst...path specified.:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+
+[PASS] cleanup_complete task_removed=True temp_removed=True
+
+RESULT: FAIL   evidence: D:\a\_temp\native-evidence\native-20261025-020938
+**********************
+Windows PowerShell transcript end
+End time: 20261025024325
+**********************
