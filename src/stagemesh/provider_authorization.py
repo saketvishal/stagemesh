@@ -65,7 +65,10 @@ def _path_problem(token: str, project: Path | None) -> str | None:
         return "network path"
     if "/" not in text and "\\" not in text:
         # A bare name is resolved against PATH exactly as the spawn would; PATH entries that are relative resolve inside the worktree.
-        if any(entry in ("", ".") or not (os.path.isabs(entry) or re.match(r"^[A-Za-z]:[\\/]", entry)) for entry in os.environ.get("PATH", "").split(os.pathsep)):
+        entries = [e.strip().strip('"') for e in os.environ.get("PATH", "").split(os.pathsep)]
+        if os.name == "nt":
+            entries = [e for e in entries if e]  # Windows ignores empty PATH entries; it does not search the working directory for them
+        if any(e in ("", ".") or not (os.path.isabs(e) or re.match(r"^[A-Za-z]:[\\/]", e)) for e in entries):
             return "PATH contains a relative entry, so a bare executable name could resolve inside the project"
         found = shutil.which(text)
         if found is None:
@@ -79,6 +82,13 @@ def _path_problem(token: str, project: Path | None) -> str | None:
     if project is not None and _inside(text, project):
         return "executable lives inside the project or its worktrees"
     return None
+
+
+def _words(token: str) -> list[str]:
+    """Words of a command token; a plain path is judged by its file name only (a directory called 'claude' is not the claude CLI)."""
+    if re.search(r"[\\/]", token) and not re.search(r"\s", token):
+        return [program_name(re.split(r"[\\/]", token)[-1]).lower()]
+    return _WORD.findall(token.lower())
 
 
 def denial(
@@ -100,7 +110,7 @@ def denial(
             return f"command for '{name}' runs '{program or '(empty)'}', not the {name} CLI (substitution or wrapper)"
         problem = _path_problem(argv[0], project)
         return f"command for '{name}' is not the installed CLI ({problem})" if problem else None
-    wrapped = sorted({word for token in argv for word in _WORD.findall(str(token).lower()) if word in REAL_CLIS})
+    wrapped = sorted({word for token in argv for word in _words(str(token)) if word in REAL_CLIS})
     if wrapped:
         return f"custom provider '{name}' references the real CLI {', '.join(wrapped)}; name it after the CLI and authorize that"
     return None

@@ -22,7 +22,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 MOCK = HERE / "mock_provider.py"
-CAPS = {"codex": "IMPLEMENT", "grok": "IMPLEMENT", "claude": "REVIEW", "agy": "REVIEW"}
+CAPS = {"mock-impl-a": "IMPLEMENT", "mock-impl-b": "IMPLEMENT", "mock-review-a": "REVIEW", "mock-review-b": "REVIEW"}
 EVIDENCE: list[dict] = []
 
 
@@ -69,8 +69,8 @@ def assert_mock_only(project: Path) -> None:
     if leaked:
         raise SystemExit(f"refusing to run: provider command overrides are set in the environment: {leaked}")
     adapters = adapters_from_config(load_config(project))
-    offenders = [a.name for a in adapters for command in a.all_commands() if str(MOCK) not in " ".join(command)]
-    if offenders or not adapters:
+    offenders = [a.name for a in adapters if a.name in CAPS for command in a.all_commands() if str(MOCK) not in " ".join(command)]
+    if offenders or not any(a.name in CAPS for a in adapters):
         raise SystemExit(f"refusing to run: non-mock provider commands resolved: {offenders}")
 
 

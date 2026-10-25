@@ -267,8 +267,8 @@ def test_bare_name_resolving_into_the_project_or_via_relative_path_is_refused(tm
 
     proj = tmp_path / "proj"
     (proj / "bin").mkdir(parents=True)
-    fake = proj / "bin" / "codex"
-    fake.write_text("#!/bin/sh\necho x\n")
+    fake = proj / "bin" / ("codex.cmd" if os.name == "nt" else "codex")
+    fake.write_text("@echo off\r\n" if os.name == "nt" else "#!/bin/sh\necho x\n")
     fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
     monkeypatch.setenv("PATH", str(proj / "bin") + os.pathsep + os.environ["PATH"])
     assert "inside the project" in pa.denial("codex", ["codex", "exec"], {"codex"}, unattended=True, project=proj)
@@ -282,3 +282,11 @@ def test_empty_model_value_is_not_a_pin():
     for argv in (["codex", "--model", ""], ["codex", "--model="], ["codex", "-c", "model="], ["codex", "-m", "  "]):
         assert pa.pinned_model(argv) is None
     assert pa.pinned_model(["codex", "-m", "gpt-x"]) == "gpt-x"
+
+
+def test_custom_provider_in_a_directory_named_like_a_cli_is_not_a_wrapper():
+    from stagemesh import provider_authorization as pa
+
+    assert pa.denial("mock", ["/home/claude/venv/bin/python", "/home/claude/x/mock.py"], {"mock"}, unattended=True) is None
+    assert pa.denial("mock", ["sh", "-c", "codex exec"], {"mock"}, unattended=True)
+    assert pa.denial("mock", ["/opt/bin/codex.exe"], {"mock"}, unattended=True)
