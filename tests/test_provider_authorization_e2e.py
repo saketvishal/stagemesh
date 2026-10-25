@@ -102,3 +102,19 @@ def test_authorized_pair_completes_a_task_with_independent_review(world):
     assert rig.stage == Stage.DONE, rig.text() + failures(rig)
     assert set(used) <= {"codex", "claude"} and {"codex", "claude"} <= set(used)
     assert rig.store.latest_candidate(TASK)["produced_by"] != "unused"
+
+
+def test_stand_in_cli_is_runnable_on_this_platform(world):
+    """Diagnostic for the harness itself: the stand-in must start and answer through subprocess exactly as StageMesh starts it."""
+    import shutil
+    import subprocess
+
+    rig, calls = world
+    found = shutil.which("claude")
+    assert found, "stand-in claude is not on PATH"
+    try:
+        done = subprocess.run([found, "-p", "--flag", "a b"], input="Review candidate", capture_output=True, text=True, cwd=rig.project, timeout=60, check=False)
+    except Exception as exc:  # noqa: BLE001 -- the point is to see exactly what fails
+        raise AssertionError(f"{found}: {type(exc).__name__}: {exc}") from exc
+    assert done.returncode == 0 and "PASS" in done.stdout, f"{found}: rc={done.returncode} out={done.stdout!r} err={done.stderr!r}"
+    assert invoked(calls) == ["claude"]
