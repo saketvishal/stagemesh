@@ -257,3 +257,18 @@ the gate is met without ten consecutive clean rows.
 | # | Task | Date | Interventions | Verified DONE |
 |---|---|---|---|---|
 <!-- streak:end -->
+
+
+## Incident 2026-10-24: unauthorized provider dispatch (blocking safety incident)
+
+Facts from the sandbox ledger (read only): in the first live window, 2026-10-25 00:21 to 00:25 UTC, SANDBOX-01's review fell through
+from Codex to `grok` (3 runs, every answer `REVIEW_INCOMPLETE`) and `agy` (3 runs, empty or malformed answers, 9.6k to 9.8k input tokens
+each, 805 to 1,524 output tokens). Accounts used and whether any billing occurred are UNKNOWN: StageMesh does not record them.
+Root causes: (1) the sandbox config had no `routing.pools`, so every installed built-in CLI was a fallback; installing a CLI implicitly
+authorized it. (2) the sandbox ran the built-in `codex exec` with no `--model`, so Codex's own default (`gpt-5.5`) applied, which a ChatGPT
+sign-in rejects; the owner's working project pins `--model gpt-6-astra` with the full executable path and `-c features.code_mode_host=true`.
+Fixes: per-project `authorization.unattended_providers`, enforced at selection, at the two spawn sites (re-read at dispatch) and on the
+command itself (genuine CLI only: no relative or in-project executable, no wrapper, no custom name wrapping a real CLI), fail closed
+when unattended with no allowlist; unpinned Codex model blocks unattended start; installer and upgrade copy the owner's known-good Codex
+command. Evidence labels: authorization boundary IMPLEMENTED and SIMULATED (stand-in CLIs, Linux and hosted Windows); native Windows proof NOT_RUN
+until the pinned upgrade runs. SANDBOX-02 is kept as historical evidence and the new clean streak starts at the upgrade.

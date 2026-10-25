@@ -324,6 +324,11 @@ class SubprocessExecutor(Executor):
 
     def run(self, store: Store, task_id: str, claim_id: str | None, project: Path) -> ExecutionResult:
         import shutil
+
+        from . import provider_authorization
+
+        if provider_authorization.unattended():  # a bare command runner has no per-provider allowlist: never use it unattended
+            return ExecutionResult(ExecutionStatus.FAILED, failure_reason="provider_not_authorized: SubprocessExecutor is not available unattended")
         executable = self.command[0] if self.command else ""
         if not executable or not shutil.which(executable):
             return ExecutionResult(

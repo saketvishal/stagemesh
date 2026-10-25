@@ -12,14 +12,14 @@ import sys
 from pathlib import Path
 
 import pytest
-from test_provider_pool import TASK, Rig  # noqa: I001 (sibling test module)
+from test_provider_pool import TASK, Rig
 
 from stagemesh import provider_authorization as pa
 from stagemesh.config import load_config
 from stagemesh.coordinator import Coordinator
 from stagemesh.domain import Stage
 from stagemesh.integration import Integrator
-from stagemesh.provider_pool import IMPLEMENT, REVIEW, PooledExecutor, ProviderPool, default_pools
+from stagemesh.provider_pool import PooledExecutor, ProviderPool, default_pools
 from stagemesh.providers import adapters_from_config
 from stagemesh.review import Reviewer
 

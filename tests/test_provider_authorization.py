@@ -214,3 +214,48 @@ def test_provider_authorization_report_lists_only_authorized_providers(tmp_path,
     assert all("grok" not in names and "agy" not in names for names in report["unattended_pools"].values())
     codex = next(p for p in report["providers"] if p["provider"] == "codex")
     assert codex["stages"]["code"]["model"] == "known-good"
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ("./codex", "exec"),  # a script committed in the repository
+        ("../x/claude", "-p"),
+        ("\\\\evil\\share\\codex.exe",),
+        ("C:\\evil\\codex.bat",),
+        ("/tmp/x/codex.ps1",),
+    ],
+)
+def test_a_file_that_merely_borrows_the_name_is_rejected(argv, tmp_path):
+    name = "codex" if "codex" in argv[0] else "claude"
+    assert pa.denial(name, argv, allowed={"codex", "claude"}, unattended=True, project=tmp_path)
+
+
+def test_executables_inside_the_project_or_its_worktrees_are_rejected(tmp_path):
+    inside = tmp_path / ".stagemesh" / "worktrees" / "t" / "codex"
+    assert pa.denial("codex", (str(inside), "exec"), allowed={"codex"}, unattended=True, project=tmp_path)
+    outside = tmp_path.parent / "elsewhere" / "codex"
+    assert pa.denial("codex", (str(outside), "exec"), allowed={"codex"}, unattended=True, project=tmp_path) is None
+
+
+def test_custom_provider_cannot_hide_a_real_cli_inside_a_shell_string():
+    assert pa.denial("mine", ("sh", "-c", "grok -p x"), allowed={"mine"}, unattended=True)
+    assert pa.denial("mine", ("python", "mock.py"), allowed={"mine"}, unattended=True) is None
+
+
+def test_adapter_built_under_an_allowlist_stays_bound_when_the_config_becomes_unreadable(tmp_path, monkeypatch):
+    monkeypatch.setenv(pa.UNATTENDED_ENV, "1")
+    project = project_with(tmp_path, {"authorization": {"unattended_providers": ["codex"]}})
+    (project / ".stagemesh" / "config.json").write_text("{broken", encoding="utf-8")
+    assert pa.refusal(project, "grok", ("grok",), build_time_allowed=("codex",))
+    monkeypatch.delenv(pa.UNATTENDED_ENV)
+    assert pa.refusal(project, "grok", ("grok",), build_time_allowed=("codex",))  # even outside unattended mode
+
+
+def test_live_smoke_of_an_authorized_adapter_works_unattended_and_a_denied_one_does_not(tmp_path, monkeypatch):
+    monkeypatch.setenv(pa.UNATTENDED_ENV, "1")
+    temp_project = project_with(tmp_path, None)  # a smoke project has no allowlist of its own
+    with pa.pre_authorized(["codex"]):
+        assert pa.refusal(temp_project, "codex", ("codex", "exec")) is None
+        assert pa.refusal(temp_project, "grok", ("grok",))
+    assert pa.refusal(temp_project, "codex", ("codex", "exec"))

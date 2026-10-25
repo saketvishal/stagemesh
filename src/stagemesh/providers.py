@@ -164,6 +164,7 @@ class RuntimeCommandAdapter:
     review_command: tuple[str, ...] | None = None
     # Why this provider may not run in this project (set from the project's authorization when the adapter is built); selection skips it.
     denied: str | None = None
+    allowed_at_build: tuple[str, ...] | None = None  # the allowlist this adapter was built under; still binds if the config later cannot be read
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "name", _validate_name(self.name))
@@ -577,7 +578,7 @@ def _authorization_refusal(adapter: RuntimeCommandAdapter, project: Path, capabi
 
     if adapter.denied:
         return adapter.denied
-    return provider_authorization.refusal(Path(project), adapter.name, adapter.command_for(capability))
+    return provider_authorization.refusal(Path(project), adapter.name, adapter.command_for(capability), build_time_allowed=adapter.allowed_at_build)
 
 
 def _is_external_workspace_mutation(exc: Exception) -> bool:
@@ -663,9 +664,12 @@ def _mark_authorization(adapters: list[RuntimeCommandAdapter], config: StageMesh
     mode = provider_authorization.unattended()
     marked = []
     for adapter in adapters:
-        reasons = [provider_authorization.denial(adapter.name, command, allowed, unattended=mode) for command in adapter.all_commands()]
+        reasons = [
+            provider_authorization.denial(adapter.name, command, allowed, unattended=mode, project=config.project)
+            for command in adapter.all_commands()
+        ]
         reason = next((r for r in reasons if r), None)
-        marked.append(replace(adapter, denied=reason) if reason else adapter)
+        marked.append(replace(adapter, denied=reason, allowed_at_build=config.authorized_providers))
     return marked
 
 
