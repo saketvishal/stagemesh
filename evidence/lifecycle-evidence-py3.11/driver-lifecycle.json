@@ -1,0 +1,204 @@
+{
+  "failures": [],
+  "evidence": [
+    {
+      "step": "project_ready",
+      "at": 1792909990.9014373,
+      "project": "C:\\Users\\runneradmin\\AppData\\Local\\Temp\\sm-driver-accept-umogdu1i\\project",
+      "mock_only": true,
+      "tasks": 6,
+      "mode": "task-scheduler"
+    },
+    {
+      "step": "install",
+      "at": 1792909991.843328,
+      "rc": 0,
+      "out": "urrency\": 1,\n    \"integration\": \"local\",\n    \"interval_seconds\": 60,\n    \"max_consecutive_failures\": 3,\n    \"max_steps_per_task\": 8,\n    \"max_tasks\": 1,\n    \"project\": \"C:\\\\Users\\\\runneradmin\\\\AppData\\\\Local\\\\Temp\\\\sm-driver-accept-umogdu1i\\\\project\",\n    \"state\": \"running\",\n    \"strict_live\": false,\n    \"window_seconds\": 90\n  },\n  \"handle\": \"StageMesh\\\\driver-2b0ce15fb226\",\n  \"installed\": true\n}\n",
+      "err": ""
+    },
+    {
+      "step": "PASS driver_installed",
+      "at": 1792909991.843328
+    },
+    {
+      "step": "PASS schedule_registered",
+      "at": 1792909991.8609734
+    },
+    {
+      "step": "PASS repeated_execution_completes_tasks",
+      "at": 1792910131.886726,
+      "done": [
+        "MOCK-1",
+        "MOCK-2"
+      ],
+      "ticks": 2
+    },
+    {
+      "step": "PASS mock_provider_ran_implement_and_independent_review",
+      "at": 1792910131.886726,
+      "stages": [
+        "implement",
+        "review",
+        "implement",
+        "review"
+      ]
+    },
+    {
+      "step": "PASS pause_command",
+      "at": 1792910132.306358,
+      "out": "\\\\.stagemesh\\\\driver\\\\reports\\\\736161f6391b46598f8e4058431f274b.json\",\n    \"state\": \"progress\",\n    \"tick_id\": \"736161f6391b46598f8e4058431f274b\"\n  },\n  \"schedule_exists\": true,\n  \"state\": \"paused\"\n}\n",
+      "err": ""
+    },
+    {
+      "step": "PASS paused_driver_makes_no_provider_calls",
+      "at": 1792910332.308073,
+      "before": 4,
+      "after": 4
+    },
+    {
+      "step": "PASS resume_command",
+      "at": 1792910333.226882,
+      "out": "\\.stagemesh\\\\driver\\\\reports\\\\736161f6391b46598f8e4058431f274b.json\",\n    \"state\": \"progress\",\n    \"tick_id\": \"736161f6391b46598f8e4058431f274b\"\n  },\n  \"schedule_exists\": true,\n  \"state\": \"running\"\n}\n",
+      "err": ""
+    },
+    {
+      "step": "PASS resume_continues_work",
+      "at": 1792910413.242001,
+      "done": [
+        "MOCK-1",
+        "MOCK-2",
+        "MOCK-3"
+      ]
+    },
+    {
+      "step": "PASS no_overlapping_run_windows",
+      "at": 1792910608.185507,
+      "peak_concurrent_windows": 1,
+      "sample": [
+        [
+          8228,
+          2568,
+          "C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\python.exe -m stagemesh.cli --project C:\\Users\\runneradmin\\AppData\\Local\\Temp\\sm-driver-accept-umogdu1i\\project run"
+        ]
+      ]
+    },
+    {
+      "step": "PASS bounded_provider_calls_during_overlap",
+      "at": 1792910608.185507
+    },
+    {
+      "step": "killing_process_tree",
+      "at": 1792910640.559047,
+      "processes": [
+        [
+          5776,
+          "\"C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\python.exe\" -m stagemesh.cli --project C:\\Users\\runneradmin\\AppData\\Local\\"
+        ],
+        [
+          3656,
+          "C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\python.exe -m stagemesh.driver_child C:\\Users\\runneradmin\\AppData\\Local\\Tem"
+        ],
+        [
+          2296,
+          "C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\python.exe -m stagemesh.cli --project C:\\Users\\runneradmin\\AppData\\Local\\Te"
+        ],
+        [
+          8864,
+          "C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\python.exe -c \"import sys; from stagemesh.cli import main; sys.exit(main(sy"
+        ],
+        [
+          2348,
+          "C:\\hostedtoolcache\\windows\\Python\\3.11.9\\x64\\python.exe D:\\a\\stagemesh\\stagemesh\\scripts\\windows-acceptance\\mock_provide"
+        ]
+      ]
+    },
+    {
+      "step": "PASS tree_fully_killed",
+      "at": 1792910644.2318256,
+      "survivors": []
+    },
+    {
+      "step": "PASS recovered_after_crash_and_continued",
+      "at": 1792910704.2636118,
+      "done": [
+        "MOCK-1",
+        "MOCK-2",
+        "MOCK-3",
+        "MOCK-4",
+        "MOCK-5"
+      ]
+    },
+    {
+      "step": "PASS recovery_was_audited",
+      "at": 1792910704.269687,
+      "states": [
+        "progress",
+        "recovered_after_crash"
+      ]
+    },
+    {
+      "step": "tick_history",
+      "at": 1792910704.2740695,
+      "states": [
+        "progress",
+        "progress",
+        "progress",
+        "progress",
+        "recovered_after_crash"
+      ],
+      "done": [
+        "MOCK-1",
+        "MOCK-2",
+        "MOCK-3",
+        "MOCK-4",
+        "MOCK-5"
+      ],
+      "calls": 11
+    },
+    {
+      "step": "PASS no_task_completed_twice",
+      "at": 1792910704.2740695,
+      "done": [
+        "MOCK-1",
+        "MOCK-2",
+        "MOCK-3",
+        "MOCK-4",
+        "MOCK-5"
+      ]
+    },
+    {
+      "step": "PASS stop_command",
+      "at": 1792910704.7630613,
+      "out": "recovered_by_tick\": \"1cca1e597b3048cb90a2fda0cc1ab346\",\n    \"state\": \"recovered_after_crash\",\n    \"tick_id\": \"30af11ad304d4d0cb2225e636f4fb72a\"\n  },\n  \"schedule_exists\": false,\n  \"state\": \"stopped\"\n}\n",
+      "err": ""
+    },
+    {
+      "step": "PASS schedule_removed_by_stop",
+      "at": 1792910705.7492998
+    },
+    {
+      "step": "PASS stopped_driver_makes_no_provider_calls",
+      "at": 1792910782.7520401
+    },
+    {
+      "step": "PASS uninstall_command",
+      "at": 1792910784.0231235,
+      "out": "ve_failures\": 3,\n    \"max_steps_per_task\": 8,\n    \"max_tasks\": 1,\n    \"project\": \"C:\\\\Users\\\\runneradmin\\\\AppData\\\\Local\\\\Temp\\\\sm-driver-accept-umogdu1i\\\\project\",\n    \"state\": \"stopped\",\n    \"strict_live\": false,\n    \"window_seconds\": 90\n  },\n  \"schedule_exists\": false,\n  \"state\": \"uninstalled\"\n}\n",
+      "err": ""
+    },
+    {
+      "step": "PASS ledger_preserved_after_uninstall",
+      "at": 1792910784.0231235
+    },
+    {
+      "step": "PASS no_project_processes_remain",
+      "at": 1792910784.7378502,
+      "left": []
+    },
+    {
+      "step": "cleanup_verified",
+      "at": 1792910786.3781452,
+      "schedule_exists": false
+    }
+  ]
+}
