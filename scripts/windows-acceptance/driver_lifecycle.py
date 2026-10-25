@@ -57,7 +57,7 @@ def write_providers(project: Path, calls_file: Path, *, sleep: float = 0.0) -> N
     config = {"providers": {
         name: {"command": base + (" --role review" if stage == "REVIEW" else " --role implement"), "capabilities": [stage]}
         for name, stage in CAPS.items()
-    }}
+    }, "authorization": {"unattended_providers": list(CAPS)}}
     (project / ".stagemesh" / "config.json").write_text(json.dumps(config), encoding="utf-8")
 
 

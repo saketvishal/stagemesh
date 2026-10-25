@@ -240,6 +240,8 @@ class ProviderPool:
             adapter = self.adapters.get(name)
             if adapter is None:
                 verdicts.append(Verdict(name, False, "not_configured: no command configured for this provider"))
+            elif getattr(adapter, "denied", None):
+                verdicts.append(Verdict(name, False, f"not_authorized: {adapter.denied}"))
             elif capability not in adapter.capabilities:
                 verdicts.append(Verdict(name, False, f"missing_capability: does not support '{capability}'"))
             elif (capacity := _stage_capacity(adapter, capability)) != CapacityKind.AVAILABLE:

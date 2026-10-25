@@ -17,7 +17,7 @@ param(
     [string]$Base = 'C:\development\stagemesh-handsoff',
     [string]$EvidenceRoot = '',
     [string]$Python = '',
-    [string]$CodexModel = 'gpt-5.6-terra'
+    [string]$KnownGoodConfig = 'C:\development\stagemesh\main\.stagemesh\config.json'
 )
 $ErrorActionPreference = 'Continue'
 if ($Commit -notmatch '^[0-9a-f]{40}$') { Write-Host 'REFUSED: -Commit must be a full 40-character sha'; exit 2 }
@@ -114,12 +114,30 @@ Write-Host 'Subscription logins verified for claude and codex (no model call mad
 $project = Join-Path $Base 'textkit'
 & $vpy (Join-Path $runtime 'scripts\handsoff_sandbox.py') $project
 if ($LASTEXITCODE -ne 0) { Fail 'sandbox creation failed (is a global git user.name/user.email configured?)' }
+# The Codex command comes from a project where Codex is known to work (pinned model, working flags), never from a guess.
+$codexCommand = $null
+if (Test-Path $KnownGoodConfig) {
+    try {
+        $known = (Get-Content $KnownGoodConfig -Raw | ConvertFrom-Json).providers.codex
+        if ($known -is [string]) { $codexCommand = $known } elseif ($known) { $codexCommand = "$($known.command)" }
+    } catch { }
+}
+if (-not $codexCommand -or $codexCommand -notmatch '(--model|\s-m)\s') { Fail "no known-good pinned Codex command found in $KnownGoodConfig" }
 $config = @{
     budgets = @{ max_provider_calls_per_task = 12; max_equivalent_failures = 3; max_provider_calls_per_window = 30 }
     routing = @{ require_independent_review = $true; pools = @{ IMPLEMENT = @('codex', 'claude'); REVIEW = @('codex', 'claude') } }
-    providers = @{ codex = @{ command = "codex exec --sandbox workspace-write -m $CodexModel"; capabilities = @('IMPLEMENT', 'REVIEW') } }
+    authorization = @{ unattended_providers = @('codex', 'claude') }
+    providers = @{ codex = @{ command = $codexCommand; capabilities = @('IMPLEMENT', 'REVIEW') } }
 } | ConvertTo-Json -Depth 5
 [IO.File]::WriteAllText((Join-Path $project '.stagemesh\config.json'), $config, (New-Object Text.UTF8Encoding($false)))
+
+# 5b. prove authorization offline (no model call): only codex and claude may be eligible
+$authz = (& $vpy -m stagemesh.cli --project $project provider-authorization | Out-String)
+$authzExit = $LASTEXITCODE
+$authzObj = $null
+try { $authzObj = $authz | ConvertFrom-Json } catch { }
+if ($authzExit -ne 0 -or -not $authzObj -or $authzObj.ok -ne $true) { Fail "provider authorization check failed: $authz" }
+$authz | Out-File (Join-Path $Base 'provider-authorization.json') -Encoding UTF8
 
 # 6. register the driver (the product's own install path) ----------------------------------------------------------------------
 $installOut = & $vpy -m stagemesh.cli --project $project driver install --acknowledge-provider-use --interval 10m --window-duration 40m `

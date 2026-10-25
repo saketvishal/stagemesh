@@ -161,6 +161,7 @@ class StageMeshConfig:
     diagnosis: DiagnosisConfig = field(default_factory=DiagnosisConfig)
     budgets: BudgetConfig = field(default_factory=BudgetConfig)
     merging: MergeConfig = field(default_factory=MergeConfig)
+    authorized_providers: tuple[str, ...] | None = None  # None: the project has not authorized any provider list
 
 
 @dataclass(frozen=True)
@@ -279,6 +280,7 @@ def load_config(project: Path, config_path: Path | None = None) -> StageMeshConf
         diagnosis=_diagnosis(_optional_mapping(data, "diagnosis"), known),
         merging=_merging(_optional_mapping(data, "merging"), require_review),
         budgets=_budgets(_optional_mapping(data, "budgets")),
+        authorized_providers=_authorization(_optional_mapping(data, "authorization"), known),
     )
 
 
@@ -410,6 +412,24 @@ def _budgets(data: dict[str, object]) -> BudgetConfig:
             raise ConfigValidationError("budgets.max_equivalent_failures must be at least 2 (one failure is not a repeat) or 0 to disable")
         values[name] = value or None
     return BudgetConfig(**values)
+
+
+def _authorization(data: dict[str, object], known_providers: set[str]) -> tuple[str, ...] | None:
+    unknown = set(data) - {"unattended_providers"}
+    if unknown:
+        raise ConfigValidationError(f"authorization has unsupported keys: {', '.join(sorted(unknown))}")
+    if "unattended_providers" not in data:
+        return None
+    names = data["unattended_providers"]
+    if not isinstance(names, list) or not names or not all(isinstance(n, str) and n.strip() for n in names):
+        raise ConfigValidationError("authorization.unattended_providers must be a non-empty list of provider names")
+    cleaned = tuple(n.strip() for n in names)
+    if len(set(cleaned)) != len(cleaned):
+        raise ConfigValidationError("authorization.unattended_providers must not contain duplicates")
+    unlisted = [n for n in cleaned if n not in known_providers]
+    if unlisted:
+        raise ConfigValidationError(f"authorization.unattended_providers references unknown provider: {', '.join(unlisted)}")
+    return cleaned
 
 
 def _diagnosis(data: dict[str, object], known_providers: set[str]) -> DiagnosisConfig:

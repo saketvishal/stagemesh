@@ -131,8 +131,11 @@ def billing_environment(environ: Mapping[str, str] | None = None) -> list[str]:
     return found
 
 
+PROVIDERS = ("claude", "codex")  # the CLIs whose login mode can be verified without a model call
+
+
 def check(
-    providers: Sequence[str] = ("claude", "codex"),
+    providers: Sequence[str] = PROVIDERS,
     *,
     runner: Runner = _run,
     environ: Mapping[str, str] | None = None,

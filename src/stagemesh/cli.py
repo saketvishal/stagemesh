@@ -1114,6 +1114,21 @@ def command_follow_up(args: argparse.Namespace) -> int:
 
 
 def command_driver(args: argparse.Namespace) -> int:
+    """Driver subcommands run unattended: provider authorization fails closed for them and for every child they start."""
+    from . import provider_authorization
+
+    previous = os.environ.get(provider_authorization.UNATTENDED_ENV)
+    os.environ[provider_authorization.UNATTENDED_ENV] = "1"
+    try:
+        return _command_driver_logged(args)
+    finally:
+        if previous is None:
+            os.environ.pop(provider_authorization.UNATTENDED_ENV, None)
+        else:
+            os.environ[provider_authorization.UNATTENDED_ENV] = previous
+
+
+def _command_driver_logged(args: argparse.Namespace) -> int:
     """Run a driver subcommand; `tick --log-file` appends all of its output to that file (the scheduled action has no shell)."""
     import contextlib
 
@@ -1135,17 +1150,39 @@ def command_driver(args: argparse.Namespace) -> int:
 def _real_provider_auth_blockers(project: Path) -> list[str]:
     """Why real coding CLIs may not run unattended: API billing in the environment, or a non-subscription login. Empty when fine
     or when no real CLI is configured (mock acceptance projects). Makes no model call."""
-    from . import provider_auth
+    from . import provider_auth, provider_authorization
     from .config import load_config as load_project_config
     from .providers import adapters_from_config
 
-    configured = [
-        command for adapter in adapters_from_config(load_project_config(project)) for command in adapter.all_commands()
-    ]
-    if not provider_auth.uses_real_providers(configured):
+    config = load_project_config(project)
+    adapters = adapters_from_config(config)
+    every_command = [command for adapter in adapters for command in adapter.all_commands()]
+    if not provider_auth.uses_real_providers(every_command):
         return []
-    report = provider_auth.check()
-    return [] if report["ok"] else [str(item) for item in report["blockers"]]
+    if config.authorized_providers is None:
+        return ["no explicit provider allowlist: add authorization.unattended_providers to .stagemesh/config.json (installing a CLI does not authorize it)"]
+    authorized = [adapter for adapter in adapters if not adapter.denied]
+    blockers = [f"{adapter.name}: {adapter.denied}" for adapter in adapters if adapter.denied and adapter.name in config.authorized_providers]
+    names = [name for name in config.authorized_providers if name in provider_auth.PROVIDERS]
+    unverifiable = [
+        f"{name}: billing mode cannot be verified without a model call, so it cannot be authorized for unattended use"
+        for name in config.authorized_providers
+        if name in ("codex", "claude", "grok", "agy") and name not in provider_auth.PROVIDERS
+    ]
+    blockers += unverifiable
+    for adapter in authorized:
+        if adapter.name == "codex":
+            for capability in ("code", "review"):
+                if adapter.name in config.authorized_providers and provider_authorization.pinned_model(adapter.command_for(capability)) is None:
+                    blockers.append(
+                        "codex model is not pinned: the CLI's default model depends on its version and sign-in and was rejected in the first live trial; "
+                        "set providers.codex.command with --model taken from a project where Codex works"
+                    )
+                    break
+    if not provider_auth.uses_real_providers([c for a in authorized for c in a.all_commands()]):
+        return blockers
+    report = provider_auth.check(names or provider_auth.PROVIDERS)
+    return blockers + ([] if report["ok"] else [str(item) for item in report["blockers"]])
 
 
 def _stopped_config(project: Path):
@@ -3082,6 +3119,44 @@ def command_backend(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_provider_authorization(args: argparse.Namespace) -> int:
+    """Show, without any model call, which providers may run unattended in this project and exactly what each would run."""
+    from . import provider_authorization
+    from .config import load_config as load_project_config
+    from .provider_pool import default_pools
+    from .providers import adapters_from_config
+
+    previous = os.environ.get(provider_authorization.UNATTENDED_ENV)
+    os.environ[provider_authorization.UNATTENDED_ENV] = "1"
+    try:
+        config = load_project_config(Path(args.project))
+        adapters = adapters_from_config(config)
+    finally:
+        if previous is None:
+            os.environ.pop(provider_authorization.UNATTENDED_ENV, None)
+        else:
+            os.environ[provider_authorization.UNATTENDED_ENV] = previous
+    providers = []
+    for adapter in adapters:
+        stages = {}
+        for capability in ("code", "review"):
+            command = adapter.command_for(capability)
+            stages[capability] = {"executable": command[0] if command else "", "model": provider_authorization.pinned_model(command)}
+        providers.append({"provider": adapter.name, "authorized": adapter.denied is None, "denied": adapter.denied, "stages": stages})
+    pools = default_pools([a.name for a in adapters], config.stage_routes, config.provider_pools)
+    usable = {stage: [n for n in names if next((p for p in providers if p["provider"] == n), {}).get("authorized")] for stage, names in pools.items()}
+    allow = config.authorized_providers
+    problems = []
+    if allow is None:
+        problems.append("no explicit provider allowlist")
+    else:
+        problems += [f"{p['provider']} is allowlisted but denied: {p['denied']}" for p in providers if p["provider"] in allow and p["denied"]]
+        problems += [f"{p['provider']} is authorized but not allowlisted" for p in providers if p["authorized"] and p["provider"] not in allow]
+    report = {"allowlist": list(allow) if allow is not None else None, "providers": providers, "unattended_pools": usable, "problems": problems, "ok": not problems, "model_calls_made": 0}
+    print(json.dumps(report, indent=2, sort_keys=True))
+    return 0 if report["ok"] else 1
+
+
 def command_provider_auth(args: argparse.Namespace) -> int:
     """Report coding-CLI login state and API-billing environment variables. Makes no model call; prints no credential."""
     from . import provider_auth
@@ -4041,6 +4116,10 @@ def build_parser() -> argparse.ArgumentParser:
     backend.add_argument("--migrate", action="store_true")
     backend.add_argument("--json", action="store_true")
     backend.set_defaults(func=command_backend)
+    provider_authorization_parser = sub.add_parser(
+        "provider-authorization", help="Show which providers may run unattended in this project and what each would run (no model call)"
+    )
+    provider_authorization_parser.set_defaults(func=command_provider_authorization)
     provider_auth_parser = sub.add_parser(
         "provider-auth", help="Check coding-CLI login state and API-billing variables without any model call"
     )

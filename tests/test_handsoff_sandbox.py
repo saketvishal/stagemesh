@@ -203,6 +203,16 @@ def csv_column_stats(csv_text: str, column: str) -> dict:
         raise ValueError("no numeric values")
     return {"count": len(values), "min": min(values), "max": max(values), "mean": sum(values) / len(values)}
 ''',
+    'caesar': 'def caesar(text: str, shift: int) -> str:\n    out = []\n    for ch in text:\n        if "a" <= ch <= "z":\n            out.append(chr((ord(ch) - 97 + shift) % 26 + 97))\n        elif "A" <= ch <= "Z":\n            out.append(chr((ord(ch) - 65 + shift) % 26 + 65))\n        else:\n            out.append(ch)\n    return "".join(out)\n',
+    'anagram': 'def group_anagrams(words: list[str]) -> list[list[str]]:\n    groups: dict[str, list[str]] = {}\n    for word in words:\n        groups.setdefault("".join(sorted(word.lower())), []).append(word)\n    return sorted(groups.values(), key=lambda group: group[0].lower())\n',
+    'brackets': 'def is_balanced(text: str) -> bool:\n    pairs = {")": "(", "]": "[", "}": "{"}\n    stack = []\n    for ch in text:\n        if ch in "([{":\n            stack.append(ch)\n        elif ch in pairs:\n            if not stack or stack.pop() != pairs[ch]:\n                return False\n    return not stack\n',
+    'snake': 'import re\n\n\ndef to_snake_case(text: str) -> str:\n    text = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\\1_\\2", text)\n    text = re.sub(r"([a-z0-9])([A-Z])", r"\\1_\\2", text)\n    return re.sub(r"[^A-Za-z0-9]+", "_", text).strip("_").lower()\n',
+    'camel': 'import re\n\n\ndef to_camel_case(text: str) -> str:\n    words = [w for w in re.split(r"[^A-Za-z0-9]+", text) if w]\n    if not words:\n        return ""\n    return words[0].lower() + "".join(w.capitalize() for w in words[1:])\n',
+    'rle': 'def rle_encode(text: str) -> str:\n    out = []\n    i = 0\n    while i < len(text):\n        j = i\n        while j < len(text) and text[j] == text[i]:\n            j += 1\n        out.append(f"{j - i}{text[i]}")\n        i = j\n    return "".join(out)\n',
+    'truncate': 'def truncate(text: str, width: int, suffix: str = "...") -> str:\n    if width < len(suffix):\n        raise ValueError(width)\n    if len(text) <= width:\n        return text\n    room = width - len(suffix)\n    head = text[:room]\n    if text[room : room + 1] != " " and " " in head:\n        head = head[: head.rindex(" ")]\n    return head.rstrip() + suffix\n',
+    'median': 'def median(values: list[float]) -> float:\n    if not values:\n        raise ValueError("empty")\n    ordered = sorted(values)\n    mid = len(ordered) // 2\n    return ordered[mid] if len(ordered) % 2 else (ordered[mid - 1] + ordered[mid]) / 2\n',
+    'chunk': 'def chunked(items: list, size: int) -> list[list]:\n    if size < 1:\n        raise ValueError(size)\n    return [list(items[i : i + size]) for i in range(0, len(items), size)]\n',
+    'flatten': 'def flatten(nested) -> list:\n    out: list = []\n    for item in nested:\n        if isinstance(item, (list, tuple)):\n            out.extend(flatten(item))\n        else:\n            out.append(item)\n    return out\n',
 }
 
 
@@ -213,7 +223,7 @@ def run_spec(project: Path, name: str) -> int:
 def test_every_task_has_a_reference_and_the_specs_discriminate(tmp_path: Path) -> None:
     project = tmp_path / "sandbox"
     ids = sandbox.create_sandbox(project, sys.executable)
-    assert len(ids) == 10 and {task["name"] for task in sandbox.TASKS} == set(REFERENCE)
+    assert len(ids) == 20 and {task["name"] for task in sandbox.TASKS} == set(REFERENCE)
     for task in sandbox.TASKS:
         assert run_spec(project, task["name"]) != 0, f"{task['name']} spec passes on the empty scaffold"
     for name, source in REFERENCE.items():
@@ -237,3 +247,23 @@ def test_sandbox_refuses_a_non_empty_directory(tmp_path: Path) -> None:
     (tmp_path / "keep.txt").write_text("x", encoding="utf-8")
     with pytest.raises(SystemExit):
         sandbox.create_sandbox(tmp_path, sys.executable)
+
+
+def test_extend_adds_only_missing_tasks_and_leaves_existing_rows_alone(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    project = tmp_path / "sandbox"
+    sandbox.create_sandbox(project, sys.executable)
+    # simulate a live sandbox that was created with only the first ten tasks
+    from stagemesh.persistence import Store
+
+    store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+    store.migrate()
+    store.conn.execute("DELETE FROM tasks WHERE source_id > 'SANDBOX-10'")
+    store.conn.commit()
+    store.close()
+    for task in sandbox.TASKS[10:]:
+        (project / "spec" / f"check_{task['name']}.py").unlink()
+    subprocess.run(["git", "add", "-A"], cwd=project, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "drop"], cwd=project, check=True, env={**__import__("os").environ})
+    added = sandbox.extend_sandbox(project, sys.executable)
+    assert added and len(added) == 10
+    assert sandbox.extend_sandbox(project, sys.executable) == []

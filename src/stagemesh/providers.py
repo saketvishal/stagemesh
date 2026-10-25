@@ -162,6 +162,8 @@ class RuntimeCommandAdapter:
     # (one `name`), so a candidate it implemented is never reviewed by it, whichever command each stage runs.
     implement_command: tuple[str, ...] | None = None
     review_command: tuple[str, ...] | None = None
+    # Why this provider may not run in this project (set from the project's authorization when the adapter is built); selection skips it.
+    denied: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "name", _validate_name(self.name))
@@ -205,6 +207,9 @@ class RuntimeCommandAdapter:
         return CapacityKind.AVAILABLE if command and shutil.which(command[0]) else CapacityKind.UNKNOWN
 
     def execute(self, store: Store, task_id: str, claim_id: str | None, project: Path) -> ExecutionResult:
+        refused = _authorization_refusal(self, project, "code")
+        if refused:
+            return ExecutionResult(ExecutionStatus.FAILED, failure_reason=f"provider_not_authorized: {refused}")
         if self.check_stage_capacity("code") != CapacityKind.AVAILABLE:
             return ExecutionResult(ExecutionStatus.FAILED, capacity_failure=True, failure_reason="provider_unavailable")
         try:
@@ -323,6 +328,9 @@ class RuntimeCommandAdapter:
         return self.execute(store, task_id, claim_id, project)
 
     def review_candidate(self, prompt: str, project: Path, candidate_sha: str) -> str:
+        refused = _authorization_refusal(self, project, "review")
+        if refused:
+            return _review_infrastructure_failure("provider_not_authorized", refused)
         if self.check_stage_capacity("review") != CapacityKind.AVAILABLE:
             return _review_infrastructure_failure("provider_unavailable")
         temp_dir = tempfile.mkdtemp(prefix="stagemesh-review-")
@@ -563,6 +571,15 @@ def _bounded_process_output(result: subprocess.CompletedProcess[str]) -> str:
     return " ".join((result.stderr or result.stdout or "").split())[:MAX_EXECUTION_RESULT_CHARS]
 
 
+def _authorization_refusal(adapter: RuntimeCommandAdapter, project: Path, capability: str) -> str | None:
+    """Last check before anything is spawned: the adapter's own flag, then the project's current authorization and the exact command."""
+    from . import provider_authorization
+
+    if adapter.denied:
+        return adapter.denied
+    return provider_authorization.refusal(Path(project), adapter.name, adapter.command_for(capability))
+
+
 def _is_external_workspace_mutation(exc: Exception) -> bool:
     return getattr(exc, "code", None) == EXTERNAL_WORKSPACE_MUTATION
 
@@ -634,7 +651,22 @@ def adapters_from_config(config: StageMeshConfig) -> list[RuntimeCommandAdapter]
                 review_command=_stage_command(adapter.name, spec.review_command),
             )
         resolved.append(adapter)
-    return resolved
+    return _mark_authorization(resolved, config)
+
+
+def _mark_authorization(adapters: list[RuntimeCommandAdapter], config: StageMeshConfig) -> list[RuntimeCommandAdapter]:
+    from dataclasses import replace
+
+    from . import provider_authorization
+
+    allowed = None if config.authorized_providers is None else set(config.authorized_providers)
+    mode = provider_authorization.unattended()
+    marked = []
+    for adapter in adapters:
+        reasons = [provider_authorization.denial(adapter.name, command, allowed, unattended=mode) for command in adapter.all_commands()]
+        reason = next((r for r in reasons if r), None)
+        marked.append(replace(adapter, denied=reason) if reason else adapter)
+    return marked
 
 
 def stage_command_summary(adapter: RuntimeCommandAdapter) -> dict[str, dict[str, object]]:

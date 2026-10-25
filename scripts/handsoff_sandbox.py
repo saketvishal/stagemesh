@@ -186,6 +186,66 @@ for text, column, exc in (("a\\n1\\n", "zzz", KeyError), ("a\\nx\\n", "a", Value
         raise AssertionError((text, column))
 ''',
     },
+    {
+        "name": 'caesar',
+        "title": 'Add textkit.caesar',
+        "objective": 'Add `caesar(text: str, shift: int) -> str` in src/textkit/caesar.py. Shift ASCII letters by `shift` positions (negative and large values allowed, wrapping A-Z and a-z separately), keeping case. All other characters are unchanged.',
+        "spec": 'from textkit.caesar import caesar as c\nassert c("abc xyz", 3) == "def abc"\nassert c("Hello, World!", 13) == "Uryyb, Jbeyq!"\nassert c("abc", -1) == "zab"\nassert c("abc", 29) == "def"\nassert c("", 5) == "" and c("123", 4) == "123"\n',
+    },
+    {
+        "name": 'anagram',
+        "title": 'Add textkit.group_anagrams',
+        "objective": 'Add `group_anagrams(words: list[str]) -> list[list[str]]` in src/textkit/anagram.py. Words are anagrams when their lowercase letters sorted are equal. Each group keeps input order; groups are ordered by their first member alphabetically (case-insensitive).',
+        "spec": 'from textkit.anagram import group_anagrams as g\nassert g(["listen", "silent", "enlist", "google"]) == [["google"], ["listen", "silent", "enlist"]]\nassert g([]) == []\nassert g(["Bat", "tab", "cat"]) == [["Bat", "tab"], ["cat"]]\nassert g(["a"]) == [["a"]]\n',
+    },
+    {
+        "name": 'brackets',
+        "title": 'Add textkit.is_balanced',
+        "objective": 'Add `is_balanced(text: str) -> bool` in src/textkit/brackets.py. True when every (), [] and {} is correctly nested and closed; other characters are ignored; the empty string is balanced.',
+        "spec": 'from textkit.brackets import is_balanced as b\nassert b("") and b("a(b)[c]{d}") and b("{[()]}")\nassert not b("(") and not b(")") and not b("([)]") and not b("{[}")\nassert b("no brackets at all")\n',
+    },
+    {
+        "name": 'snake',
+        "title": 'Add textkit.to_snake_case',
+        "objective": "Add `to_snake_case(text: str) -> str` in src/textkit/snake.py. Convert camelCase, PascalCase, kebab-case and space separated text to lower snake_case. Acronyms stay together: 'HTTPServer' becomes 'http_server'. Repeated separators collapse and the result has no leading or trailing underscore.",
+        "spec": 'from textkit.snake import to_snake_case as s\nassert s("camelCase") == "camel_case"\nassert s("PascalCase") == "pascal_case"\nassert s("HTTPServer") == "http_server"\nassert s("kebab-case-here") == "kebab_case_here"\nassert s("  two  words ") == "two_words"\nassert s("already_snake") == "already_snake"\nassert s("") == ""\n',
+    },
+    {
+        "name": 'camel',
+        "title": 'Add textkit.to_camel_case',
+        "objective": "Add `to_camel_case(text: str) -> str` in src/textkit/camel.py. Convert snake_case, kebab-case or space separated text to lowerCamelCase: the first word lowercase, later words capitalised, other letters lowercased. Empty input returns ''.",
+        "spec": 'from textkit.camel import to_camel_case as c\nassert c("snake_case_name") == "snakeCaseName"\nassert c("kebab-case") == "kebabCase"\nassert c("Two Words") == "twoWords"\nassert c("ALL_CAPS") == "allCaps"\nassert c("") == "" and c("_") == ""\nassert c("one") == "one"\n',
+    },
+    {
+        "name": 'rle',
+        "title": 'Add textkit.rle_encode',
+        "objective": "Add `rle_encode(text: str) -> str` in src/textkit/rle.py. Run-length encode as count followed by the character, for example 'aaabcc' becomes '3a1b2c'. The empty string encodes to ''. Runs longer than nine are written with the full count ('a'*12 becomes '12a').",
+        "spec": 'from textkit.rle import rle_encode as r\nassert r("aaabcc") == "3a1b2c"\nassert r("") == ""\nassert r("a" * 12) == "12a"\nassert r("abc") == "1a1b1c"\nassert r("zzzzzzzzzzzzy") == "12z1y"\n',
+    },
+    {
+        "name": 'truncate',
+        "title": 'Add textkit.truncate',
+        "objective": "Add `truncate(text: str, width: int, suffix: str = '...') -> str` in src/textkit/truncate.py. If len(text) <= width return text unchanged. Otherwise cut at a word boundary so that the result including the suffix is at most width characters; when no space fits, hard cut. Raise ValueError if width is smaller than len(suffix).",
+        "spec": 'from textkit.truncate import truncate as t\nassert t("short", 10) == "short"\nassert t("the quick brown fox", 12) == "the quick..."\nassert t("abcdefghijklmnop", 8) == "abcde..."\nassert t("hello world", 11) == "hello world"\nassert len(t("one two three four five", 14)) <= 14\ntry:\n    t("hello world", 2)\nexcept ValueError:\n    pass\nelse:\n    raise AssertionError("width")\n',
+    },
+    {
+        "name": 'median',
+        "title": 'Add textkit.median',
+        "objective": 'Add `median(values: list[float]) -> float` in src/textkit/median.py. The middle value of the sorted list, or the mean of the two middle values for an even count. Raise ValueError on an empty list. The input list must not be modified.',
+        "spec": 'from textkit.median import median as m\nassert m([3, 1, 2]) == 2\nassert m([4, 1, 3, 2]) == 2.5\nassert m([5]) == 5\nassert m([-1, -3]) == -2\nv = [3, 1, 2]\nm(v)\nassert v == [3, 1, 2]\ntry:\n    m([])\nexcept ValueError:\n    pass\nelse:\n    raise AssertionError("empty")\n',
+    },
+    {
+        "name": 'chunk',
+        "title": 'Add textkit.chunked',
+        "objective": 'Add `chunked(items: list, size: int) -> list[list]` in src/textkit/chunk.py. Split into consecutive lists of `size`; the last may be shorter. Raise ValueError if size < 1. The input is not modified.',
+        "spec": 'from textkit.chunk import chunked as c\nassert c([1, 2, 3, 4, 5], 2) == [[1, 2], [3, 4], [5]]\nassert c([], 3) == []\nassert c([1, 2], 5) == [[1, 2]]\nassert c(list("abcd"), 4) == [list("abcd")]\ntry:\n    c([1], 0)\nexcept ValueError:\n    pass\nelse:\n    raise AssertionError("size")\n',
+    },
+    {
+        "name": 'flatten',
+        "title": 'Add textkit.flatten',
+        "objective": 'Add `flatten(nested) -> list` in src/textkit/flatten.py. Flatten arbitrarily nested lists and tuples into one list, preserving order. Strings and bytes are NOT flattened. Other iterables such as dicts and sets are treated as single items.',
+        "spec": 'from textkit.flatten import flatten as f\nassert f([1, [2, [3, (4, 5)]], 6]) == [1, 2, 3, 4, 5, 6]\nassert f([]) == [] and f([[], [[]]]) == []\nassert f(["ab", ["cd"]]) == ["ab", "cd"]\nassert f([{"a": 1}, [{2}]]) == [{"a": 1}, {2}]\nassert f([b"xy", [1]]) == [b"xy", 1]\n',
+    },
 ]
 
 PYPROJECT = """[project]
@@ -209,6 +269,27 @@ README = (
 
 def _git(project: Path, *args: str) -> str:
     return subprocess.run(["git", *args], cwd=project, capture_output=True, text=True, check=True).stdout.strip()
+
+
+def _register_tasks(project: Path, python: str, store, numbered: list[tuple[int, dict[str, str]]]) -> list[str]:
+    contracts = project / ".stagemesh" / "contracts"
+    contracts.mkdir(parents=True, exist_ok=True)
+    ids: list[str] = []
+    for number, task in numbered:
+        task_id = store.upsert_task(task["title"], source_id=f"SANDBOX-{number:02d}", project=str(project))
+        name = task["name"]
+        module = f"src/textkit/{name}.py"
+        tests = f"tests/test_{name}.py"
+        (contracts / f"{task_id}.json").write_text(json.dumps({
+            "objective": task["objective"],
+            "allowed_files": [module, tests, "src/textkit/__init__.py"],
+            "required_tests": [
+                {"name": f"{name}-own-tests", "command": [python, "-m", "pytest", "-q", tests]},
+                {"name": f"{name}-independent-spec", "command": [python, f"spec/check_{name}.py"]},
+            ],
+        }, indent=2), encoding="utf-8")
+        ids.append(task_id)
+    return ids
 
 
 def create_sandbox(project: Path, python: str = sys.executable) -> list[str]:
@@ -235,31 +316,39 @@ def create_sandbox(project: Path, python: str = sys.executable) -> list[str]:
 
     store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
     store.migrate()
-    contracts = project / ".stagemesh" / "contracts"
-    contracts.mkdir(parents=True, exist_ok=True)
-    ids: list[str] = []
     try:
-        for number, task in enumerate(TASKS, start=1):
-            task_id = store.upsert_task(task["title"], source_id=f"SANDBOX-{number:02d}", project=str(project))
-            name = task["name"]
-            module = f"src/textkit/{name}.py"
-            tests = f"tests/test_{name}.py"
-            (contracts / f"{task_id}.json").write_text(json.dumps({
-                "objective": task["objective"],
-                "allowed_files": [module, tests, "src/textkit/__init__.py"],
-                "required_tests": [
-                    {"name": f"{name}-own-tests", "command": [python, "-m", "pytest", "-q", tests]},
-                    {"name": f"{name}-independent-spec", "command": [python, f"spec/check_{name}.py"]},
-                ],
-            }, indent=2), encoding="utf-8")
-            ids.append(task_id)
+        ids = _register_tasks(project, python, store, list(enumerate(TASKS, start=1)))
     finally:
         store.close()
     return ids
 
 
+def extend_sandbox(project: Path, python: str = sys.executable) -> list[str]:
+    """Add the tasks (and their independent specs) that an existing sandbox does not have yet, without touching existing ledger rows."""
+    project = Path(project)
+    if not (project / ".git").exists() or not (project / ".stagemesh").exists():
+        raise SystemExit(f"not a sandbox project: {project}")
+    new = [(number, task) for number, task in enumerate(TASKS, start=1) if not (project / "spec" / f"check_{task['name']}.py").exists()]
+    if not new:
+        return []
+    for _number, task in new:
+        (project / "spec" / f"check_{task['name']}.py").write_text(SPEC_HEADER + task["spec"], encoding="utf-8")
+    _git(project, "add", "spec")
+    _git(project, "commit", "-q", "-m", "Add independent specs for the next sandbox tasks")
+    from stagemesh.persistence import Store
+
+    store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+    store.migrate()
+    try:
+        return _register_tasks(project, python, store, new)
+    finally:
+        store.close()
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("project")
+    parser.add_argument("--extend", action="store_true", help="add the tasks an existing sandbox does not have yet")
     arguments = parser.parse_args()
-    print(json.dumps(create_sandbox(Path(arguments.project)), indent=2))
+    action = extend_sandbox if arguments.extend else create_sandbox
+    print(json.dumps(action(Path(arguments.project)), indent=2))
