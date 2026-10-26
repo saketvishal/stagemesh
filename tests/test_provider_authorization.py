@@ -252,6 +252,19 @@ def test_adapter_built_under_an_allowlist_stays_bound_when_the_config_becomes_un
     assert pa.refusal(project, "grok", ("grok",), build_time_allowed=("codex",))  # even outside unattended mode
 
 
+@pytest.mark.parametrize("change", ["delete_file", "delete_section", "delete_allowlist"])
+def test_bound_adapter_fails_closed_when_authorization_disappears_interactively(tmp_path, monkeypatch, change):
+    monkeypatch.delenv(pa.UNATTENDED_ENV, raising=False)
+    project = project_with(tmp_path, {"authorization": {"unattended_providers": ["codex"]}})
+    config = project / ".stagemesh" / "config.json"
+    if change == "delete_file":
+        config.unlink()
+    else:
+        config.write_text(json.dumps({} if change == "delete_section" else {"authorization": {}}), encoding="utf-8")
+    assert pa.refusal(project, "codex", ("codex", "exec"), build_time_allowed=("codex",))
+    assert pa.refusal(project, "grok", ("grok",), build_time_allowed=("codex",))
+
+
 def test_live_smoke_of_an_authorized_adapter_works_unattended_and_a_denied_one_does_not(tmp_path, monkeypatch):
     monkeypatch.setenv(pa.UNATTENDED_ENV, "1")
     temp_project = project_with(tmp_path, None)  # a smoke project has no allowlist of its own

@@ -208,6 +208,8 @@ def refusal(project: Path, name: str, argv: Sequence[str], *, build_time_allowed
                 f"project configuration could not be re-verified ({type(exc).__name__})"
             )
         return f"project configuration could not be verified ({type(exc).__name__})" if mode else None
+    if allowed is None and build_time_allowed is not None:
+        return "project provider authorization disappeared after this adapter was built; reload an explicitly authorized configuration"
     return denial(name, argv, None if allowed is None else set(allowed), unattended=mode, project=Path(project))
 
 
