@@ -13,8 +13,9 @@
 * one operator report: what ran, what completed, which PRs (in merge order, including older wave PRs), what blocked and why, what
   stopped the window, claims and executions left, provider and ledger health, repo state, and the next command.
 
-By default it never merges. Automatic fast-forward mode develops a bounded batch
-in parallel, then lands its exact candidates serially after all workers exit.
+Coding and verification have separate process capacities. The survivor-wave
+engine continuously admits ready work and yields at bounded stage boundaries;
+automatic landing remains serialized after the current workers quiesce.
 """
 
 from __future__ import annotations
@@ -96,6 +97,7 @@ class Check:
 class WindowOptions:
     duration_seconds: float = 7200.0
     concurrency: int = 2
+    verification_concurrency: int = 2
     max_steps_per_task: int = 8
     max_tasks: int = 10
     max_continuations: int = 3  # extra runs a task gets after hitting the step cap, while each run still made progress
@@ -225,6 +227,7 @@ class WindowReport:
             "options": {
                 "duration_seconds": self.options.duration_seconds,
                 "concurrency": self.options.concurrency,
+                "verification_concurrency": self.options.verification_concurrency,
                 "max_steps_per_task": self.options.max_steps_per_task,
                 "max_tasks": self.options.max_tasks,
                 "integration_mode": self.options.integration_mode,
@@ -244,6 +247,7 @@ class WindowReport:
             "continued": self.continued,
             "not_selected": self.not_selected,
             "counts": self.counts(),
+            "capacity": [wave.capacity for wave in self.waves if wave.capacity],
             "orphan_events_before": None if first is None else first.orphan_events_before,
             "orphan_events_after": None if last is None else last.orphan_events_after,
             "main_moved": any(wave.main_moved for wave in self.waves) or bool(
@@ -702,7 +706,6 @@ def run_window(
     deadline = report.started_at + options.duration_seconds
     control = QueueStopControl(store)
     window_wall_start = time.time()  # ledger timestamps are wall-clock even when the window runs on an injected clock
-
     report.preflight, report.recovered = preflight(
         store, project, config, options, base_ref=base_ref, runtime=runtime, provider_check=provider_check, repo_state=hooks.repo_state,
         checkout_ref=checkout_ref,
@@ -946,7 +949,7 @@ def run_window(
             if window_budget is not None:  # a wave boundary: nothing is running, nothing is interrupted
                 report.stop_reason = f"provider-call budget reached for this window ({window_budget.detail}; limit {window_budget.limit}); work is preserved"
                 break
-            room = options.concurrency if options.auto_merge_ff else options.concurrency * 2
+            room = options.max_tasks - len(attempted) + len(resume)
             # Fill the bounded wave with compatible work, not merely the first
             # N queue entries that the wave would then have to serialize.
             continuing, deferred = select_tasks(
@@ -954,6 +957,7 @@ def run_window(
                 project=project, compatible_with=[],
             )
             report.not_selected.update(deferred)
+
             if len(attempted) >= options.max_tasks and not continuing:
                 report.task_limit_reached = True
                 break
@@ -962,9 +966,9 @@ def run_window(
                     from .task_sources import LocalBacklogSource, sync_source, task_sources_from_config
                     backlog = project / ".stagemesh" / "backlog.json"
                     if backlog.is_file():
-                        sync_source(store, LocalBacklogSource(backlog).discover())
+                        sync_source(store, LocalBacklogSource(backlog).discover(), preserve_existing_dependencies=True)
                     for source in task_sources_from_config(config):
-                        sync_source(store, source.discover())
+                        sync_source(store, source.discover(), preserve_existing_dependencies=True)
                 except Exception:
                     pass
             fresh, skipped = (
@@ -1002,8 +1006,55 @@ def run_window(
                 entry = reenter_blocked_task(store, task_id, fingerprint)
                 if entry is not None:
                     report.reentered.append(entry)
-                    report.not_selected.pop(task_id, None)
+                report.not_selected.pop(task_id, None)
             before = {task_id: progress_state(store, task_id) for task_id in batch}
+
+            def admit_ready(*, fresh=fresh, batch=batch, before=before) -> list[str]:
+                remaining = options.max_tasks - len(attempted) - len(fresh)
+                if remaining <= 0:
+                    return []
+                added, reasons = select_tasks(
+                    store, attempted=attempted | set(resume) | set(fresh), limit=remaining,
+                    only=options.tasks, fingerprint=fingerprint, project=project,
+                )
+                report.not_selected.update(reasons)
+                if options.auto_merge_ff:
+                    # DONE on staging is not remote prerequisite delivery. Keep
+                    # those dependents for the next, safely landed frontier.
+                    safe = []
+                    for task_id in added:
+                        waiting = [str(row["depends_on_task_id"]) for row in store.conn.execute(
+                            "SELECT depends_on_task_id FROM task_dependencies WHERE task_id=?", (task_id,)
+                        ) if str(row["depends_on_task_id"]) in batch]
+                        if waiting:
+                            report.not_selected[task_id] = "waiting for prerequisite landing: " + ", ".join(waiting)
+                        else:
+                            safe.append(task_id)
+                    added = safe
+                for task_id in added:
+                    entry = reenter_blocked_task(store, task_id, fingerprint)
+                    if entry is not None:
+                        report.reentered.append(entry)
+                    report.not_selected.pop(task_id, None)
+                    before[task_id] = progress_state(store, task_id)
+                    record_task_context(
+                        store, report.window_id, task_id,
+                        {"integration_mode": options.integration_mode,
+                         "integration_ref": base_ref if local else staging_ref,
+                         "open_prs": options.open_prs, "resume_command": _resume_command(options)},
+                    )
+                fresh.extend(added)
+                batch.extend(added)
+                return added
+
+            def admission_problem() -> str | None:
+                verdict = check_window_budget(store, window_wall_start, BudgetPolicy.from_config(config.budgets))
+                if verdict is None:
+                    return None
+                return (f"provider-call budget reached for this window ({verdict.detail}; limit {verdict.limit}); "
+                        "work is preserved")
+
+
             wave = run_wave(
                 store,
                 batch,
@@ -1019,6 +1070,9 @@ def run_window(
                 clock=clock,
                 ordered_publication=options.auto_merge_ff,
                 project=project,
+                verification_concurrency=options.verification_concurrency,
+                admit_tasks=admit_ready,
+                admission_problem=admission_problem,
             )
             attempted.update(fresh)
             report.selected.extend(task_id for task_id in batch if task_id not in report.selected)
@@ -1134,6 +1188,11 @@ def format_window_report(report: WindowReport) -> str:
     lines += [f"  [{'ok' if c.ok else 'FAIL' if c.fatal else 'warn'}] {c.name}: {c.detail}" for c in report.preflight]
     if report.recovered:
         lines.append("recovered dead executions: " + ", ".join(f"{r['execution_id']} (task {r['task_id']}: {r['action']})" for r in report.recovered))
+    if report.waves:
+        coding_peak = max(wave.capacity.get("peak_coding", 0) for wave in report.waves)
+        verification_peak = max(wave.capacity.get("peak_verification", 0) for wave in report.waves)
+        lines.append(f"capacity: coding target {report.options.concurrency}, peak {coding_peak}; "
+                     f"verification limit {report.options.verification_concurrency}, peak {verification_peak}")
     counts = report.counts()
     lines.append(f"what ran: {len(report.tasks)} task(s)" + (" - " + ", ".join(f"{n} {k}" for k, n in sorted(counts.items())) if counts else ""))
     for task in report.tasks:

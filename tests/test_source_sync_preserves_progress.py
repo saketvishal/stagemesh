@@ -2,11 +2,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from test_completion_integrity import TASK, FakeReviewAdapter, Rig
+
 from stagemesh.coordinator import Coordinator, TargetSelection
 from stagemesh.domain import EvidenceKind, EvidenceStatus, Stage
+from stagemesh.persistence import Store
+from stagemesh.scheduling import Scheduler
 from stagemesh.task_sources import DiscoveredTask, sync_source
-
-from test_completion_integrity import TASK, FakeReviewAdapter, Rig
 
 
 def _targeted(rig: Rig) -> Coordinator:
@@ -49,3 +51,39 @@ def test_failed_independent_review_is_the_only_path_back_to_implement(tmp_path: 
     # history is preserved: candidate, passing validation and failed review evidence remain
     assert rig.evidence(EvidenceKind.VALIDATION)[0][0] == EvidenceStatus.PASSED
     assert rig.store.conn.execute("SELECT COUNT(*) FROM findings").fetchone()[0] >= 1
+
+
+def test_background_sync_preserves_registered_prerequisites_across_restart(tmp_path: Path) -> None:
+    path = tmp_path / "stagemesh.sqlite3"
+    declarations = [DiscoveredTask("local", "1", "prerequisite"), DiscoveredTask("local", "2", "dependent")]
+    store = Store(path)
+    store.migrate()
+    sync_source(store, declarations)
+    store.add_dependency("2", "1")
+    sync_source(store, declarations, preserve_existing_dependencies=True)
+    store.close()
+
+    reopened = Store(path)
+    try:
+        sync_source(reopened, declarations, preserve_existing_dependencies=True)
+        assert reopened.incomplete_dependencies("2") == ["1"]
+        assert not Scheduler(reopened).decision("2").eligible
+        # Explicit source reconciliation retains its existing ability to remove obsolete declarations.
+        sync_source(reopened, declarations)
+        assert reopened.incomplete_dependencies("2") == []
+        assert Scheduler(reopened).decision("2").eligible
+    finally:
+        reopened.close()
+
+
+def test_background_sync_adds_new_dependencies_without_replacing_existing_ones(tmp_path: Path) -> None:
+    store = Store(tmp_path / "stagemesh.sqlite3")
+    try:
+        store.migrate()
+        sync_source(store, [DiscoveredTask("local", name, name) for name in ("1", "2", "3")])
+        store.add_dependency("3", "1")
+        sync_source(store, [DiscoveredTask("local", "3", "dependent", dependencies=("2",))],
+                    preserve_existing_dependencies=True)
+        assert set(store.incomplete_dependencies("3")) == {"1", "2"}
+    finally:
+        store.close()

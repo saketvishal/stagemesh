@@ -354,7 +354,8 @@ def _description(item: dict[str, object]) -> str:
     return ""
 
 
-def sync_source(store: Store, tasks: list[DiscoveredTask]) -> list[str]:
+def sync_source(store: Store, tasks: list[DiscoveredTask], *, preserve_existing_dependencies: bool = False) -> list[str]:
+    """Reconcile declarations; background discovery may add dependencies without removing previously registered prerequisites."""
     ids: list[str] = []
     dependency_tasks: list[tuple[str, set[str]]] = []
     github_validation_errors = _github_validation_errors(tasks)
@@ -437,7 +438,7 @@ def sync_source(store: Store, tasks: list[DiscoveredTask]) -> list[str]:
             ids.append(task_id)
             dependency_tasks.append((task_id, set(task.dependencies)))
     for task_id, declared_deps in dependency_tasks:
-        if hasattr(store, "conn"):
+        if hasattr(store, "conn") and not preserve_existing_dependencies:
             rows = store.conn.execute("SELECT depends_on_task_id FROM task_dependencies WHERE task_id=?", (task_id,)).fetchall()
             existing_deps = {str(r[0]) for r in rows}
             removed_deps = existing_deps - declared_deps

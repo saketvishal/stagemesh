@@ -38,6 +38,10 @@ class Clock:
 
 def window(tmp_path: Path, ids: list[str], behaviour: dict | None = None, **opts):
     store, project = make_store(tmp_path, ids)
+    # These fake lifecycle runners model ready coding tasks. PLAN/verification
+    # now have separate capacity; phase-specific tests set those stages explicitly.
+    for task_id in ids:
+        store.advance_task(task_id, Stage.IMPLEMENT)
     rig = Rig(project, behaviour)
     hooks = rig.hooks()
     hooks.repo_state = lambda: IN_SYNC
@@ -786,6 +790,7 @@ def test_ff_window_lands_each_task_before_dispatching_the_next(tmp_path: Path) -
 def test_ff_window_stops_before_dependents_when_merge_is_refused(tmp_path: Path) -> None:
     store, project, rig, hooks, options, config, kwargs = window(
         tmp_path, ["1", "2"], auto_merge_ff=True, required_checks=("web",), concurrency=1)
+    store.add_dependency("2", "1")
     report = rw.run_window(store, project, config, options, hooks,
         base_ref="refs/heads/main", merge_pr=lambda record, deadline: {"merged": False, "reason": "CI failed"}, **kwargs)
     assert not report.ok and report.exit_code == 1 and rig.runs == ["1"]
@@ -1028,6 +1033,7 @@ def test_ff_window_honors_pause_after_landing_before_next_dispatch(tmp_path: Pat
     from stagemesh.parallel import request_queue_control
     store, project, rig, hooks, options, config, kwargs = window(
         tmp_path, ["1", "2"], auto_merge_ff=True, concurrency=1, required_checks=("web",))
+    store.add_dependency("2", "1")  # next delivery frontier, not independent work already admitted
     def land(record, deadline):
         request_queue_control(store, "paused", reason="pause after first landing")
         return {"merged": True, "pr": 1, "candidate_sha": record.integrated_candidate}
@@ -1049,6 +1055,7 @@ def test_ff_lookup_failure_is_a_reported_preflight_refusal(tmp_path: Path) -> No
 def test_ff_partial_landing_is_not_reported_as_a_completed_merge(tmp_path: Path) -> None:
     store, project, rig, hooks, options, config, kwargs = window(
         tmp_path, ["1", "2"], auto_merge_ff=True, concurrency=1, required_checks=("web",))
+    store.add_dependency("2", "1")  # remote/local landing must complete before dependent dispatch
     report = rw.run_window(store, project, config, options, hooks, base_ref="refs/heads/main",
         merge_pr=lambda record, deadline: {"merged": False, "remote_landed": True, "local_synced": False,
             "pr": 7, "reason": "local sync blocked"}, **kwargs)
