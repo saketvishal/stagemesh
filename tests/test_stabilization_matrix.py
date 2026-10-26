@@ -307,6 +307,8 @@ def test_controlled_merge_window_lands_before_continuing_and_reports_policy(tmp_
     store, project, rig, hooks, options, config, kwargs = window(
         tmp_path, ["1", "2"], auto_merge_ff=True, merge_policy="stagemesh", check_app_id=15368,
         required_checks=("web",), concurrency=1)
+    # This policy case requires remote prerequisite landing; independent tasks may pipeline across stage slots.
+    store.add_dependency("2", "1")
     landed = []
     run_task = hooks.run_task
     def run(task, steps):

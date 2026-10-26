@@ -616,6 +616,11 @@ def run_wave(
                         break
                 # Preparation can be slow and may move stale verification back
                 # to IMPLEMENT. Recheck both boundaries against the actual stage.
+                problem = admission_problem() if admission_problem is not None else None
+                if problem:
+                    pending.insert(0, task_id)
+                    halt(problem)
+                    break
                 if deadline is not None and clock() >= deadline:
                     pending.insert(0, task_id)
                     report.time_limit_reached = True

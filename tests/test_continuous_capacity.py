@@ -359,6 +359,27 @@ def test_baseline_preparation_rechecks_deadline_before_starting_a_child(tmp_path
     assert report.tasks[0].outcome == "not_started"
 
 
+def test_baseline_preparation_rechecks_provider_budget_before_starting_a_child(tmp_path):
+    store, project = make_store(tmp_path, ["1"])
+    rig = Rig(project)
+    hooks = rig.hooks()
+    exhausted = False
+
+    def prepare(task_id):
+        nonlocal exhausted
+        exhausted = True  # Another worker can consume the final call during preparation.
+        return {}
+
+    hooks.advance_baseline = prepare
+    report = run_wave(
+        store, ["1"], hooks, concurrency=1, verification_concurrency=1, project=project,
+        admission_problem=lambda: "provider budget exhausted during preparation" if exhausted else None,
+    )
+    assert rig.runs == []
+    assert report.stop_reason == "provider budget exhausted during preparation"
+    assert report.tasks[0].outcome == "not_started"
+
+
 def test_same_stage_recovery_keeps_running_within_the_task_budget(tmp_path):
     store, project = make_store(tmp_path, ["1"])
     store.advance_task("1", Stage.IMPLEMENT)
