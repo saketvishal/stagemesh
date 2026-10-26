@@ -300,3 +300,8 @@ pins are accepted. This does **not** establish billing equivalence for ambient C
 These corrections are source changes pending final-head CI, independent review and protected integration. They have not replaced
 the existing installed runtime or changed its schedule. Setup and stop/recovery commands are in [Windows driver setup](windows-driver-setup.md)
 and [continuous driver operations](continuous-driver.md). A new live worker run or persistent installation is separate evidence.
+
+New windows also persist `window.started.runtime`: the loaded package path, interpreter, process identity, and observed source
+commit/dirty state. Source checkouts must match the package's own tracked Git root; installed wheels use embedded build metadata.
+Missing or unverifiable provenance stays UNKNOWN. This is a start-time observation, not proof that editable source remained
+immutable for the whole window, and it does not reconstruct historical runtime evidence.
