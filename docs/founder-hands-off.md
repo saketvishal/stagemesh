@@ -22,7 +22,7 @@ are rejected at construction time.
 | | |
 |---|---|
 | **Founder Hands-Off gate** | **NOT MET** |
-| Ten-task autonomy streak | **0 / 10 recorded** (11 later local completions audited; clean streak remains unverified, see 2026-10-26 update) |
+| Ten-task autonomy streak | **0 / 10** recorded (11 later local completions audited; clean streak remains unverified, see 2026-10-26 update) |
 | Capability readiness | **62%** (level model below; 3/3 requires proof on real tasks, which no capability has) |
 | Incident scenarios with permanent regression tests | **12 of 12** (A to L), 34 mapped tests, all passing |
 | First milestone (A, B, C, E/F) | implemented and passing end to end through the real coordinator |
