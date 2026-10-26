@@ -818,17 +818,19 @@ def test_tick_stays_blocked_for_a_dead_wrapper_with_no_recorded_child(project: P
     assert result.state == "blocked" and child_owner_path(project).is_file()
 
 
-def test_driver_child_interrupt_kills_the_window_and_clears_its_record(project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_driver_child_interrupt_kills_the_window_and_preserves_unconfirmed_cleanup(project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from stagemesh import driver_child
 
     started: list[subprocess.Popen] = []
     real_popen = subprocess.Popen
+    real_kill = driver_child.kill_process_tree
+    confirmed: list[bool] = []
 
     class InterruptedPopen(real_popen):  # type: ignore[misc, valid-type]
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)
             started.append(self)
-            self._interrupt = True
+            self._interrupt = len(started) == 1  # interrupt the window, never the taskkill cleanup subprocess
 
         def wait(self, timeout=None):
             if self._interrupt:
@@ -836,11 +838,107 @@ def test_driver_child_interrupt_kills_the_window_and_clears_its_record(project: 
                 raise KeyboardInterrupt
             return super().wait(timeout)
 
+    def kill(process):
+        result = real_kill(process)
+        confirmed.append(result)
+        return result
+
     monkeypatch.setattr(driver_child.subprocess, "Popen", InterruptedPopen)
+    monkeypatch.setattr(driver_child, "kill_process_tree", kill)
     with pytest.raises(KeyboardInterrupt):
         driver_child.main([str(project), sys.executable, "-c", "import time; time.sleep(60)"])
 
     assert started and started[0].poll() is not None  # the window did not survive the interrupt
+    assert confirmed
+    if confirmed[0]:
+        assert not child_owner_path(project).exists()
+    else:
+        assert child_owner_path(project).exists()  # killing only the root never proves its descendants stopped
+        assert not continuous_driver.child_owner_fully_dead(project)
+
+
+@pytest.mark.parametrize("cleanup_failure", ["false_kill", "kill_raises", "wait_raises"])
+def test_driver_child_retains_uncertain_cleanup_and_cannot_auto_recover(
+    project: Path, store: Store, monkeypatch: pytest.MonkeyPatch, cleanup_failure: str
+) -> None:
+    from stagemesh import driver_child
+    from stagemesh.domain import ProcessIdentity
+
+    installed(project)
+    wrapper = ProcessIdentity(111, 1.0, "boot", "python.exe")
+    child = ProcessIdentity(222, 2.0, "boot", "python.exe")
+    child_live = True
+
+    class Interrupted:
+        pid = child.pid
+        waits = 0
+
+        def wait(self):
+            self.waits += 1
+            if self.waits == 1:
+                raise KeyboardInterrupt("fixture interruption")
+            if cleanup_failure == "wait_raises":
+                raise RuntimeError("fixture wait failure")
+            return -1
+
+    def kill(_process):
+        raw = json.loads(child_owner_path(project).read_text(encoding="utf-8"))
+        assert raw["pid"] == child.pid and "child" not in raw  # failure policy must precede cleanup
+        if cleanup_failure == "kill_raises":
+            raise OSError("fixture kill failure")
+        return cleanup_failure != "false_kill"
+
+    monkeypatch.setattr(driver_child, "owner_identity", lambda: wrapper)
+    monkeypatch.setattr(driver_child, "process_identity", lambda _pid: child)
+    monkeypatch.setattr(driver_child.subprocess, "Popen", lambda *a, **kw: Interrupted())
+    monkeypatch.setattr(driver_child, "kill_process_tree", kill)
+    monkeypatch.setattr(continuous_driver, "process_identity", lambda pid: child if child_live and pid == child.pid else None)
+    failure = {"false_kill": KeyboardInterrupt, "kill_raises": OSError, "wait_raises": RuntimeError}[cleanup_failure]
+
+    with pytest.raises(failure):
+        driver_child.main([str(project), "unused"])
+    assert continuous_driver.child_owner_state(project) == ("LIVE", child)
+    assert not continuous_driver.child_owner_fully_dead(project)
+    child_live = False
+    assert continuous_driver.child_owner_state(project) == ("ORPHANED", child)
+    assert not continuous_driver.child_owner_fully_dead(project)
+    result = run_tick(store, project, runner=lambda *_: pytest.fail("started despite unconfirmed descendant cleanup"))
+    assert result.state == "blocked" and child_owner_path(project).exists()
+
+
+@pytest.mark.parametrize("known_child", [True, False])
+def test_driver_child_confirmed_interrupt_cleanup_releases_exact_retained_owner(
+    project: Path, monkeypatch: pytest.MonkeyPatch, known_child: bool
+) -> None:
+    from stagemesh import driver_child
+    from stagemesh.domain import ProcessIdentity
+
+    wrapper = ProcessIdentity(111, 1.0, "boot", "python.exe")
+    child = ProcessIdentity(222, 2.0 if known_child else None, "boot", "python.exe")
+
+    class Interrupted:
+        pid = child.pid
+        waits = 0
+
+        def wait(self):
+            self.waits += 1
+            if self.waits == 1:
+                raise KeyboardInterrupt
+            return -1
+
+    def kill(_process):
+        raw = json.loads(child_owner_path(project).read_text(encoding="utf-8"))
+        assert raw["pid"] == (child.pid if known_child else wrapper.pid) and "child" not in raw
+        return True
+
+    monkeypatch.setattr(driver_child, "owner_identity", lambda: wrapper)
+    monkeypatch.setattr(driver_child, "process_identity", lambda _pid: child)
+    monkeypatch.setattr(driver_child.subprocess, "Popen", lambda *a, **kw: Interrupted())
+    monkeypatch.setattr(driver_child, "kill_process_tree", kill)
+    monkeypatch.setattr(continuous_driver, "process_identity", lambda pid: wrapper if pid == wrapper.pid else None)
+
+    with pytest.raises(KeyboardInterrupt):
+        driver_child.main([str(project), "unused"])
     assert not child_owner_path(project).exists()
 
 

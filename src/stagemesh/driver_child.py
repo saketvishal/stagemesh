@@ -19,24 +19,36 @@ def main(argv: list[str] | None = None) -> int:
     project = Path(arguments[0]).resolve()
     command = arguments[1:]
     identity = owner_identity()
+    cleanup_owner = identity
+    release_owner = True
     save_child_owner(project, identity)
     try:
         process = subprocess.Popen(command, cwd=project)
+        release_owner = False  # any failure after launch must retain ownership until cleanup is confirmed
+        child_identity = process_identity(process.pid)
         try:
-            save_child_owner(project, identity, process_identity(process.pid))
+            save_child_owner(project, identity, child_identity)
         except OSError:
             pass  # the wrapper record already exists; the child identity only tightens ownership
         try:
-            return process.wait()
+            result = process.wait()
+            release_owner = True
+            return result
         except BaseException:
-            kill_process_tree(process)  # subprocess.run did this for us; an interrupt must not orphan a running window
+            # A failed tree kill cannot be turned into automatic recovery merely because both recorded roots later die.
+            # Retain the known run-window as the sole owner: LIVE still blocks, DEAD requires explicit orphan release.
+            cleanup_owner = child_identity if child_identity is not None and child_identity.is_known else identity
+            save_child_owner(project, cleanup_owner)
+            tree_killed = kill_process_tree(process)
             process.wait()
+            release_owner = tree_killed
             raise
     finally:
-        try:
-            clear_child_owner(project, identity, allow_live=True)
-        except OSError:
-            pass
+        if release_owner:
+            try:
+                clear_child_owner(project, cleanup_owner, allow_live=True)
+            except OSError:
+                pass
 
 
 if __name__ == "__main__":

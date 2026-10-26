@@ -305,3 +305,17 @@ New windows also persist `window.started.runtime`: the loaded package path, inte
 commit/dirty state. Source checkouts must match the package's own tracked Git root; installed wheels use embedded build metadata.
 Missing or unverifiable provenance stays UNKNOWN. This is a start-time observation, not proof that editable source remained
 immutable for the whole window, and it does not reconstruct historical runtime evidence.
+
+A further interruption regression showed that a false or interrupted process-tree kill still erased the child wrapper's ownership.
+The correction retains the known run-window as the sole owner before attempting interruption cleanup. False/raised kill or failed
+follow-up wait leaves LIVE/ORPHANED ownership that cannot automatically authorize a new window; only confirmed tree kill plus
+completed wait releases it. Forty-five affected driver tests passed. Ordinary process completion is not asserted to prove that every
+descendant exited.
+
+The broader observation interval after the safety marker contained 27 blocked, six productive and 67 idle ticks. Across that
+64149.545-second interval, completion rate was **0.617 local tasks/hour**, compared with the productive-only rate above; exhausted
+inventory and blocked observations are not productive work. Recorded implementation/review/validation durations were 1495.023 /
+685.945 / 41.1 seconds respectively. Two review failures and one local integration failure were preserved alongside correction and
+successful later candidates. Provider seconds over the productive period were 55.8%; this is not CPU utilization. The founder has
+confirmed that the recorded October 25 resume was performed by an authorized agent. Historical per-window source evidence remains
+unverified independently of that clarified intervention attribution.
