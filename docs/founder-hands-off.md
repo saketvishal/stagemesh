@@ -22,11 +22,11 @@ are rejected at construction time.
 | | |
 |---|---|
 | **Founder Hands-Off gate** | **NOT MET** |
-| Ten-task autonomy streak | **0 / 10** (no real task has been run under the supervisor yet) |
+| Ten-task autonomy streak | **0 / 10 recorded** (11 later local completions audited; clean streak remains unverified, see 2026-10-26 update) |
 | Capability readiness | **62%** (level model below; 3/3 requires proof on real tasks, which no capability has) |
 | Incident scenarios with permanent regression tests | **12 of 12** (A to L), 34 mapped tests, all passing |
 | First milestone (A, B, C, E/F) | implemented and passing end to end through the real coordinator |
-| Human escalations observed on real tasks | **0** (no real tasks yet) |
+| Human escalations observed on real tasks | **UNKNOWN** (operator attribution is incomplete; see 2026-10-26 update) |
 
 Readiness is computed from `CAPABILITY_LEVELS` in `src/stagemesh/autonomy/corpus.py`
 (`stagemesh autonomy readiness`). Levels: 0 absent, 1 deterministic policy with unit tests, 2 wired into the real lifecycle and
@@ -184,7 +184,7 @@ evidence to `ci-evidence/<run_id>` branches). "Owner's PC" is the founder's Wind
 | Persistent sandbox installer (`install-handsoff.ps1`) and ten-task textkit sandbox | IMPLEMENTED (sandbox specs verified against reference solutions); installer LIVE_VERIFIED on the owner's PC (2026-10-24, commit 318b093): gates passed, task registered | see `docs/windows-driver-setup.md` |
 | Real coding-provider execution and cross-provider review | LIVE_VERIFIED for one task (SANDBOX-02: codex implemented, claude reviewed independently, DONE, integrated locally) | first live window also showed two defects, fixed in the sandbox config and `install-handsoff.ps1`: built-in `grok` and `agy` were eligible reviewers (outside the approved providers) and the Codex CLI default model `gpt-5.5` is rejected for ChatGPT sign-in; the installer now writes `routing.pools` limited to codex and claude and pins `-m gpt-5.6-terra` (parameter `-CodexModel`) |
 | Real GitHub lifecycle on a disposable repository | NOT_RUN | no repository created |
-| Ten-task streak | NOT_RUN (0 of 10) | gate not met |
+| Ten-task streak | NOT VERIFIED (0 of 10 formally recorded) | 11 later local completions audited; attribution/runtime gaps remain; gate not met |
 
 ### The 14 full-run failures, re-run on pre-driver main (726a74d) and the driver in four hosted environments
 
@@ -241,7 +241,7 @@ consumed by this evidence.
 
 ## Human escalations observed
 
-None on real tasks. This section records every escalation raised during the streak: date, task, typed reason, the specific question,
+Historical escalation attribution is incomplete; no clean streak is certified. This section records every escalation raised during the streak: date, task, typed reason, the specific question,
 and the founder's answer. An escalation that is not one of the typed reasons, or that asks an operational question, is a defect.
 
 | Date | Task | Reason | Question | Answer |
