@@ -65,8 +65,11 @@ source (for example `"ignore": ["AGENTS.md:12"]`) in the same file. Nothing is w
 same conflicts.
 
 GitHub dependency validation uses both the current source scan and the durable StageMesh ledger. A ready issue may depend on a closed
-or otherwise filtered issue that StageMesh already knows; it is not rejected as an unknown dependency merely because that prerequisite
-is absent from the current open-issue response. The scheduler still requires the recorded prerequisite task to be complete.
+or otherwise filtered issue with a durable StageMesh task; it is not rejected as an unknown dependency merely because that prerequisite
+is absent from the current open-issue response. A cached issue without a task does not establish a dependency or prove completion;
+the child stays blocked as an unknown dependency. The same rule applies to objective roots and closed issues discovered in the current
+scan without task rows. Forward references to tasks materialized by the scan remain supported. The scheduler still requires the
+recorded prerequisite task to be complete.
 
 ## Independent review
 

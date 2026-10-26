@@ -357,14 +357,23 @@ def _description(item: dict[str, object]) -> str:
 def sync_source(store: Store, tasks: list[DiscoveredTask]) -> list[str]:
     ids: list[str] = []
     dependency_tasks: list[tuple[str, set[str]]] = []
+    # Only durable tasks can carry scheduler dependency edges. Cached issues alone (including CLOSED issues) are not completion proof.
     known_github_ids = {
         str(row[0])
         for row in store.conn.execute(
-            "SELECT source_id FROM tasks WHERE source=? AND source_id IS NOT NULL "
-            "UNION SELECT source_id FROM source_cache WHERE source=?",
-            (GitHubIssueSource.name, GitHubIssueSource.name),
+            "SELECT source_id FROM tasks WHERE source=? AND source_id IS NOT NULL",
+            (GitHubIssueSource.name,),
         )
     }
+    # Forward references are safe only when this scan will materialize a task row. Objective roots and closed issues do not.
+    known_github_ids.update(
+        task.source_id
+        for task in tasks
+        if task.source == GitHubIssueSource.name
+        and _normalized_state(task.state) == "OPEN"
+        and not source_issue_is_objective(task.labels)
+        and (folded_labels(task.labels) & DIRECT_EXECUTION_LABELS or not _objective_exists(store, task.source_id))
+    )
     github_validation_errors = _github_validation_errors(tasks, known_github_ids)
     for task in tasks:
         state = _normalized_state(task.state)
@@ -459,13 +468,7 @@ def sync_source(store: Store, tasks: list[DiscoveredTask]) -> list[str]:
     return ids
 
 
-def _github_validation_errors(
-    tasks: list[DiscoveredTask], known_github_ids: set[str] | None = None
-) -> dict[str, tuple[str, ...]]:
-    github_ids = {
-        *(task.source_id for task in tasks if task.source == GitHubIssueSource.name),
-        *(known_github_ids or set()),
-    }
+def _github_validation_errors(tasks: list[DiscoveredTask], known_github_ids: set[str]) -> dict[str, tuple[str, ...]]:
     errors: dict[str, tuple[str, ...]] = {}
     blocked_labels = {"stagemesh:blocked", "stagemesh:deferred", "status:blocked", "status:remediating"}
     for task in tasks:
@@ -479,7 +482,7 @@ def _github_validation_errors(
             task_errors.append("ready label conflicts with objective label")
         if task.source_id in task.dependencies:
             task_errors.append("task depends on itself")
-        missing = sorted(set(task.dependencies) - github_ids, key=lambda value: int(value) if value.isdigit() else value)
+        missing = sorted(set(task.dependencies) - known_github_ids, key=lambda value: int(value) if value.isdigit() else value)
         if missing:
             task_errors.append(f"unknown dependency issue(s): {', '.join('#' + value for value in missing)}")
         if task_errors:
