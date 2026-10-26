@@ -219,6 +219,103 @@ def test_launch_sentinel_exists_before_process_creation_and_is_cleaned_on_launch
     assert not child_owner_path(project).exists()
 
 
+def test_parent_never_overwrites_the_wrappers_registered_run_window_child(project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The wrapper can register its real interpreter and child before the parent's Popen returns (Windows stub included)."""
+    from dataclasses import asdict
+
+    from stagemesh.domain import ProcessIdentity
+
+    wrapper = ProcessIdentity(pid=111, create_time=1.0, boot_id="boot", executable="python.exe")
+    child = ProcessIdentity(pid=222, create_time=2.0, boot_id="boot", executable="python.exe")
+    launcher = ProcessIdentity(pid=333, create_time=3.0, boot_id="boot", executable="launcher-stub.exe")
+
+    class ParentInterrupted(Exception):
+        pass
+
+    class Launched:
+        def communicate(self, *, timeout):
+            raw = json.loads(child_owner_path(project).read_text(encoding="utf-8"))
+            assert raw == {**asdict(wrapper), "child": asdict(child)}
+            raise ParentInterrupted
+
+    def start(*args, **kwargs):
+        assert continuous_driver.child_owner_state(project)[0] == "LIVE"  # sentinel precedes any child
+        continuous_driver.save_child_owner(project, wrapper, child)
+        return Launched()
+
+    monkeypatch.setattr(continuous_driver.subprocess, "Popen", start)
+    monkeypatch.setattr(continuous_driver, "popen_identity", lambda _process: launcher)
+
+    with pytest.raises(ParentInterrupted):
+        continuous_driver._default_runner(["unused"], project, 1)
+    assert json.loads(child_owner_path(project).read_text(encoding="utf-8"))["child"] == asdict(child)
+
+
+def test_wrapper_startup_failure_releases_only_the_prelaunch_sentinel(project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from stagemesh.domain import ProcessIdentity
+
+    class Launched:
+        returncode = 1
+
+        def communicate(self, *, timeout):
+            return "", "wrapper import failed"
+
+    monkeypatch.setattr(continuous_driver.subprocess, "Popen", lambda *a, **kw: Launched())
+    monkeypatch.setattr(continuous_driver, "popen_identity", lambda _p: ProcessIdentity(111, 1.0, "boot", "python.exe"))
+
+    assert continuous_driver._default_runner(["unused"], project, 1) == 1
+    assert not child_owner_path(project).exists()
+
+
+def test_parent_preserves_unconfirmed_child_after_wrapper_exit(project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from dataclasses import asdict
+
+    from stagemesh.domain import ProcessIdentity
+
+    wrapper = ProcessIdentity(111, 1.0, "boot", "python.exe")
+
+    class Launched:
+        returncode = 1
+
+        def communicate(self, *, timeout):
+            return "", "wrapper exited before confirming child cleanup"
+
+    def start(*args, **kwargs):
+        continuous_driver.save_child_owner(project, wrapper)
+        return Launched()
+
+    monkeypatch.setattr(continuous_driver.subprocess, "Popen", start)
+    monkeypatch.setattr(continuous_driver, "popen_identity", lambda _p: wrapper)
+    monkeypatch.setattr(continuous_driver, "process_identity", lambda _pid: None)
+
+    assert continuous_driver._default_runner(["unused"], project, 1) == 1
+    assert json.loads(child_owner_path(project).read_text(encoding="utf-8")) == asdict(wrapper)
+    assert continuous_driver.child_owner_state(project)[0] == "ORPHANED"
+
+
+def test_concurrent_owner_publications_use_separate_temporary_files(project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    from stagemesh.domain import ProcessIdentity
+
+    barrier = Barrier(2)
+    retry = continuous_driver._retry_file_operation
+
+    def publish_together(operation):
+        barrier.wait(timeout=10)
+        return retry(operation)
+
+    monkeypatch.setattr(continuous_driver, "_retry_file_operation", publish_together)
+    identities = [ProcessIdentity(pid, float(pid), "boot", "python.exe") for pid in (111, 222)]
+    with ThreadPoolExecutor(max_workers=2) as workers:
+        results = [workers.submit(continuous_driver.save_child_owner, project, identity) for identity in identities]
+        for result in results:
+            assert result.result(timeout=10) == child_owner_path(project)
+    assert json.loads(child_owner_path(project).read_text(encoding="utf-8"))["pid"] in {111, 222}
+    assert list(child_owner_path(project).parent.glob("*.tmp")) == []
+
+
 def test_child_finishes_after_driver_parent_crash_and_next_tick_recovers(project: Path, store: Store) -> None:
     installed(project)
     started = project / "child-started"

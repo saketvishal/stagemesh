@@ -105,6 +105,42 @@ def _words(token: str) -> list[str]:
     return _WORD.findall(token.lower())
 
 
+def _unattended_context_problem(name: str, argv: Sequence[str]) -> str | None:
+    """Login probes use the CLI's default account context; explicit context switches cannot inherit that proof.
+
+    Permit the few Codex configuration overrides supported by this unattended workflow. This deliberately does not try to
+    interpret arbitrary profiles, settings files, or ambient CLI configuration. Never include argument values in a refusal.
+    """
+    permitted_codex_overrides = {"model", "features.code_mode_host", "model_reasoning_effort"}
+    index = 1
+    while index < len(argv):
+        token = str(argv[index])
+        if token == "--":
+            break
+        flag = token.split("=", 1)[0]
+        if name == "claude" and flag in {"--settings", "--setting-sources"}:
+            return f"unattended {name} command changes account configuration with {flag}; login-state proof does not cover it"
+        if name == "codex":
+            if flag in {"--profile", "--oss", "--local-provider"} or token.startswith("-p") and not token.startswith("--"):
+                return "unattended codex command changes provider or profile context; login-state proof does not cover it"
+            override = None
+            if token in {"-c", "--config"}:
+                index += 1
+                if index >= len(argv):
+                    return "unattended codex command has an unverifiable configuration override"
+                override = str(argv[index])
+            elif token.startswith("--config="):
+                override = token.split("=", 1)[1]
+            elif token.startswith("-c") and not token.startswith("--"):
+                override = token[2:]
+            if override is not None:
+                key, separator, value = override.partition("=")
+                if not separator or key.strip() not in permitted_codex_overrides or not value.strip():
+                    return "unattended codex command has an unsupported or malformed configuration override; login-state proof does not cover it"
+        index += 1
+    return None
+
+
 def denial(
     name: str,
     argv: Sequence[str],
@@ -122,6 +158,10 @@ def denial(
     if name in REAL_CLIS:
         if program != name:
             return f"command for '{name}' runs '{program or '(empty)'}', not the {name} CLI (substitution or wrapper)"
+        if unattended:
+            problem = _unattended_context_problem(name, argv)
+            if problem:
+                return problem
         problem = _path_problem(argv[0], project)
         return f"command for '{name}' is not the installed CLI ({problem})" if problem else None
     wrapped = sorted({word for token in argv for word in _words(str(token)) if word in REAL_CLIS})

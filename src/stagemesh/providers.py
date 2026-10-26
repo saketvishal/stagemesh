@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -237,6 +238,9 @@ class RuntimeCommandAdapter:
             return ExecutionResult(ExecutionStatus.FAILED, failure_reason=f"skill_pack_unavailable: {exc}")
         command, provider_input = _command_and_input(self.command_for("code"), task_prompt)
         lease.check("before_agent")
+        refused = _authorization_refusal(self, project, "code", command=command)
+        if refused:
+            return ExecutionResult(ExecutionStatus.FAILED, failure_reason=f"provider_not_authorized: {refused}")
         try:
             proc = subprocess.Popen(
                 command,
@@ -348,6 +352,9 @@ class RuntimeCommandAdapter:
             except SkillPackError as exc:
                 return _review_infrastructure_failure(f"skill_pack_unavailable: {exc}")
             command, provider_input = _command_and_input(self.command_for("review"), review_prompt, structured_review=True)
+            refused = _authorization_refusal(self, project, "review", command=command)
+            if refused:
+                return _review_infrastructure_failure("provider_not_authorized", refused)
             try:
                 proc = subprocess.Popen(
                     command,
@@ -572,13 +579,18 @@ def _bounded_process_output(result: subprocess.CompletedProcess[str]) -> str:
     return " ".join((result.stderr or result.stdout or "").split())[:MAX_EXECUTION_RESULT_CHARS]
 
 
-def _authorization_refusal(adapter: RuntimeCommandAdapter, project: Path, capability: str) -> str | None:
+def _authorization_refusal(
+    adapter: RuntimeCommandAdapter, project: Path, capability: str, *, command: Sequence[str] | None = None
+) -> str | None:
     """Last check before anything is spawned: the adapter's own flag, then the project's current authorization and the exact command."""
     from . import provider_authorization
 
     if adapter.denied:
         return adapter.denied
-    return provider_authorization.refusal(Path(project), adapter.name, adapter.command_for(capability), build_time_allowed=adapter.allowed_at_build)
+    return provider_authorization.refusal(
+        Path(project), adapter.name, adapter.command_for(capability) if command is None else command,
+        build_time_allowed=adapter.allowed_at_build,
+    )
 
 
 def _is_external_workspace_mutation(exc: Exception) -> bool:

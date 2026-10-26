@@ -296,3 +296,42 @@ def test_custom_provider_in_a_directory_named_like_a_cli_is_not_a_wrapper():
     assert pa.denial("mock", ["/home/claude/venv/bin/python", "/home/claude/x/mock.py"], {"mock"}, unattended=True) is None
     assert pa.denial("mock", ["sh", "-c", "codex exec"], {"mock"}, unattended=True)
     assert pa.denial("mock", ["/opt/bin/codex.exe"], {"mock"}, unattended=True)
+
+
+@pytest.mark.parametrize("extra", [
+    ["--profile", "secret-profile"], ["--profile=secret-profile"], ["-p", "secret-profile"], ["-psecret-profile"],
+    ["--oss"], ["--oss=true"], ["--local-provider", "secret-provider"], ["--local-provider=secret-provider"],
+    ["-c", 'model_provider="secret-provider"'], ["-cmodel_provider=secret-provider"],
+    ["--config", 'model_providers.secret.api_key="secret-value"'], ["--config=model_provider=secret-provider"],
+    ["-c", "unknown=secret-value"], ["-c", "model"], ["-c"], ["--config"], ["--config="],
+    ["-c", "model="], ["-c", "features.code_mode_host= "],
+])
+def test_unattended_codex_cannot_select_an_unprobed_account_context(extra):
+    argv = ["codex", "exec", "--model", "known", *extra]
+    refusal = pa.denial("codex", argv, {"codex"}, unattended=True)
+    assert refusal and "unattended codex" in refusal
+    assert "secret" not in refusal  # argument values may be credentials
+    assert pa.denial("codex", argv, {"codex"}, unattended=False) is None
+
+
+@pytest.mark.parametrize("extra", [
+    ["--settings", '{"apiKeyHelper":"secret-helper"}'], ["--settings=secret-file.json"],
+    ["--setting-sources", "secret-source"], ["--setting-sources=secret-source"],
+])
+def test_unattended_claude_cannot_select_unprobed_settings(extra):
+    argv = ["claude", "-p", *extra]
+    refusal = pa.denial("claude", argv, {"claude"}, unattended=True)
+    assert refusal and "login-state proof does not cover it" in refusal
+    assert "secret" not in refusal
+    assert pa.denial("claude", argv, {"claude"}, unattended=False) is None
+
+
+@pytest.mark.parametrize("argv", [
+    ["codex", "exec", "--model", "known", "-c", "features.code_mode_host=true"],
+    ["codex", "exec", "-c", 'model="known"', "--config=model_reasoning_effort=high"],
+    ["codex", "exec", "-cmodel=known", "--config", "features.code_mode_host=false"],
+    ["codex", "exec", "--", "--profile", "prompt-content"],
+    ["claude", "-p", "--", "--settings=prompt-content"],
+])
+def test_unattended_known_model_and_feature_pins_and_positional_prompt_content_remain_supported(argv):
+    assert pa.denial(argv[0], argv, {argv[0]}, unattended=True) is None

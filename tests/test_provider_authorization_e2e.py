@@ -76,7 +76,7 @@ def world(tmp_path, monkeypatch):
     def recording_popen(*args, **kwargs):
         try:
             return real_popen(*args, **kwargs)
-        except Exception as exc:  # noqa: BLE001 -- recorded for diagnosis, then re-raised unchanged
+        except Exception as exc:  # recorded for diagnosis, then re-raised unchanged
             rig.spawn_errors.append(f"{type(exc).__name__}: {exc} argv0={args[0][0] if args and args[0] else None!r} cwd={kwargs.get('cwd')!r}")
             raise
 
@@ -142,7 +142,33 @@ def test_stand_in_cli_is_runnable_on_this_platform(world):
     assert found, "stand-in claude is not on PATH"
     try:
         done = subprocess.run([found, "-p", "--flag", "a b"], input="Review candidate", capture_output=True, text=True, cwd=rig.project, timeout=60, check=False)
-    except Exception as exc:  # noqa: BLE001 -- the point is to see exactly what fails
+    except Exception as exc:  # the point is to see exactly what fails
         raise AssertionError(f"{found}: {type(exc).__name__}: {exc}") from exc
     assert done.returncode == 0 and "PASS" in done.stdout, f"{found}: rc={done.returncode} out={done.stdout!r} err={done.stderr!r}"
     assert invoked(calls) == ["claude"]
+
+
+@pytest.mark.parametrize("capability", ["code", "review"])
+def test_authorization_revoked_during_workspace_preparation_prevents_spawn(world, monkeypatch, capability):
+    from stagemesh import providers
+
+    rig, calls = world
+    adapter = rig.coordinator.executor.pool.adapters["codex"]
+    original = providers._command_and_input
+
+    def revoke_before_spawn(*args, **kwargs):
+        command = original(*args, **kwargs)
+        config_path = rig.project / ".stagemesh" / "config.json"
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        config["authorization"]["unattended_providers"] = ["claude"]
+        config_path.write_text(json.dumps(config), encoding="utf-8")
+        return command
+
+    monkeypatch.setattr(providers, "_command_and_input", revoke_before_spawn)
+    if capability == "code":
+        result = adapter.execute(rig.store, TASK, None, rig.project)
+        assert "provider_not_authorized" in str(result.failure_reason)
+    else:
+        result = adapter.review_candidate("Review candidate", rig.project, rig.base)
+        assert "provider_not_authorized" in result
+    assert invoked(calls) == []

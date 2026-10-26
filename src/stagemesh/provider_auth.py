@@ -92,9 +92,12 @@ def classify_codex(output: str, exit_code: int) -> str:
     return "unparsed"
 
 
-def probe(provider: str, runner: Runner = _run, which: Callable[[str], str | None] = shutil.which) -> ProviderAuth:
+def probe(
+    provider: str, runner: Runner = _run, which: Callable[[str], str | None] = shutil.which,
+    *, executable: str | None = None,
+) -> ProviderAuth:
     argv = _STATUS_COMMANDS[provider]
-    executable = which(argv[0])
+    executable = which(argv[0] if executable is None else executable)
     if executable is None:
         return ProviderAuth(provider, False, "not_installed", False)
     try:
@@ -141,8 +144,17 @@ def check(
     environ: Mapping[str, str] | None = None,
     require_installed: bool = False,
     which: Callable[[str], str | None] = shutil.which,
+    executables: Mapping[str, Sequence[str]] | None = None,
 ) -> dict[str, object]:
-    states = [probe(name, runner, which) for name in providers]
+    states = []
+    for name in providers:
+        if executables is None:
+            states.append(probe(name, runner, which))
+        else:
+            configured = tuple(dict.fromkeys(executables.get(name, ())))
+            if not configured:
+                states.append(ProviderAuth(name, False, "not_installed", False))
+            states.extend(probe(name, runner, which, executable=command) for command in configured)
     billing = billing_environment(environ)
     installed = [state for state in states if state.installed]
     blockers: list[str] = []

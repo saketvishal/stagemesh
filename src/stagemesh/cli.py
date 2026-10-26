@@ -1181,7 +1181,14 @@ def _real_provider_auth_blockers(project: Path) -> list[str]:
                     break
     if not provider_auth.uses_real_providers([c for a in authorized for c in a.all_commands()]):
         return blockers
-    report = provider_auth.check(names or provider_auth.PROVIDERS)
+    executables = {
+        adapter.name: tuple(dict.fromkeys(
+            adapter.command_for(capability)[0]
+            for capability in ("code", "review") if capability in adapter.capabilities
+        ))
+        for adapter in authorized if adapter.name in provider_auth.PROVIDERS
+    }
+    report = provider_auth.check(names, executables=executables, require_installed=True)
     return blockers + ([] if report["ok"] else [str(item) for item in report["blockers"]])
 
 

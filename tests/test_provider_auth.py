@@ -164,3 +164,56 @@ def test_wrapped_real_provider_commands_are_detected():
     assert provider_auth.uses_real_providers([["npx", "claude", "-p"]])
     assert provider_auth.uses_real_providers([["C:\\bin\\codex.cmd"]])
     assert not provider_auth.uses_real_providers([["python", "mock_provider.py"]])
+
+
+def test_authentication_checks_each_configured_stage_executable_instead_of_path():
+    calls = []
+
+    def runner(argv):
+        calls.append(argv)
+        mode = "api_key" if "review" in argv[0] else "claude.ai"
+        return subprocess.CompletedProcess(argv, 0, json.dumps({"authMethod": mode}), "")
+
+    report = provider_auth.check(
+        ["claude"], runner=runner, environ={}, which=lambda name: name,
+        executables={"claude": ["C:/coding/claude.exe", "C:/review/claude.exe"]},
+    )
+    assert calls == [["C:/coding/claude.exe", "auth", "status"], ["C:/review/claude.exe", "auth", "status"]]
+    assert report["ok"] is False
+    assert report["providers"][1]["auth_mode"] == "api_key"
+
+
+def test_configured_authentication_never_falls_back_to_a_different_path_cli():
+    calls = []
+    report = provider_auth.check(
+        ["codex"], runner=lambda argv: calls.append(argv), environ={}, require_installed=True,
+        which=lambda name: "C:/other/codex.exe" if name == "codex" else None,
+        executables={"codex": ["C:/missing/codex.exe"]},
+    )
+    assert report["ok"] is False and calls == []
+
+
+def test_driver_authentication_is_bound_to_effective_implementation_and_review_commands(tmp_path, monkeypatch):
+    from stagemesh.cli import _real_provider_auth_blockers
+
+    config_dir = tmp_path / ".stagemesh"
+    config_dir.mkdir()
+    (config_dir / "config.json").write_text(json.dumps({
+        "authorization": {"unattended_providers": ["claude"]},
+        "providers": {"claude": {
+            "command": "C:/coding/claude.exe -p", "review_command": "C:/review/claude.exe -p",
+        }},
+    }), encoding="utf-8")
+    monkeypatch.setenv("STAGEMESH_UNATTENDED", "1")
+    monkeypatch.setattr("stagemesh.providers.resolve_executable", lambda *args: None)
+    monkeypatch.setattr("stagemesh.providers.shutil.which", lambda name: name if ":/" in name else None)
+    seen = {}
+
+    def check(names, **kwargs):
+        seen.update(kwargs)
+        return {"ok": True, "blockers": []}
+
+    monkeypatch.setattr(provider_auth, "check", check)
+    assert _real_provider_auth_blockers(tmp_path) == []
+    assert seen["executables"] == {"claude": ("C:/coding/claude.exe", "C:/review/claude.exe")}
+    assert seen["require_installed"] is True

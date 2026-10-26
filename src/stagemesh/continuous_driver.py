@@ -10,6 +10,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from collections.abc import Callable
@@ -149,12 +150,17 @@ def save_child_owner(project: Path, identity: ProcessIdentity, child: ProcessIde
     mistaken for a free project."""
     path = child_owner_path(project)
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(".json.tmp")
     payload = asdict(identity)
     if child is not None:
         payload["child"] = asdict(child)
-    temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    _retry_file_operation(lambda: temporary.replace(path))
+    descriptor, temporary_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+        _retry_file_operation(lambda: temporary.replace(path))
+    finally:
+        temporary.unlink(missing_ok=True)
     return path
 
 
@@ -391,7 +397,8 @@ def _default_runner(argv: list[str], project: Path, timeout_seconds: float) -> i
         clear_child_owner(project, launch_identity, allow_live=True)
         raise
     identity = popen_identity(process)
-    save_child_owner(project, identity)
+    # The wrapper takes ownership itself, then records its run-window child. Never publish the launcher's identity here:
+    # the wrapper may already have written that stronger record, and Windows venv launchers have a different identity.
     try:
         stdout, stderr = process.communicate(timeout=timeout_seconds)
     except subprocess.TimeoutExpired:
@@ -404,8 +411,13 @@ def _default_runner(argv: list[str], project: Path, timeout_seconds: float) -> i
             pass
         if tree_killed and wrapper_exited:
             clear_child_owner(project, identity) or clear_dead_child_owner(project)
+            clear_child_owner(project, launch_identity, allow_live=True)
         return 124
-    clear_child_owner(project, identity)
+    if child_owner_fully_dead(project):
+        clear_dead_child_owner(project)
+    # An import/startup failure can exit before the wrapper replaces the pre-launch sentinel. Only that exact sentinel
+    # may be released here; a different wrapper or a recorded live child stays owned.
+    clear_child_owner(project, launch_identity, allow_live=True)
     if process.returncode and (stderr or stdout):
         print((stderr or stdout)[-1000:], file=sys.stderr)
     return int(process.returncode or 0)

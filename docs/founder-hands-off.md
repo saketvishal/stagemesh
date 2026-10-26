@@ -181,7 +181,7 @@ evidence to `ci-evidence/<run_id>` branches). "Owner's PC" is the founder's Wind
 | Automatic recovery when wrapper and run-window are both proven dead | LIVE_VERIFIED (hosted Windows) and SIMULATED (unit) | owner record now names the child; no human `resume` needed after a tree kill or reboot-like loss; a dead wrapper with a live or unrecorded child still fails closed |
 | Logon trigger firing after a real sign-in, reboot, sleep catch-up and battery behavior on the owner's PC | NOT_RUN | the XML is registered and read back on hosted Windows; a reboot or sign-in cannot be exercised on a hosted runner |
 | Provider login-state and API-billing guard (`stagemesh provider-auth`, enforced by `driver install` for real providers) | IMPLEMENTED and SIMULATED (unit tests with fake CLIs) | classification of `claude auth status` and `codex login status`; billing variables reported by name only; `codex login status` output format is undocumented, so unrecognised output fails closed. LIVE_VERIFIED only after the native run reports it on the owner's PC |
-| Persistent sandbox installer (`install-handsoff.ps1`) and ten-task textkit sandbox | IMPLEMENTED (sandbox specs verified against reference solutions); installer LIVE_VERIFIED on the owner's PC (2026-10-24, commit 318b093): gates passed, task registered | see `docs/handsoff-setup.md` |
+| Persistent sandbox installer (`install-handsoff.ps1`) and ten-task textkit sandbox | IMPLEMENTED (sandbox specs verified against reference solutions); installer LIVE_VERIFIED on the owner's PC (2026-10-24, commit 318b093): gates passed, task registered | see `docs/windows-driver-setup.md` |
 | Real coding-provider execution and cross-provider review | LIVE_VERIFIED for one task (SANDBOX-02: codex implemented, claude reviewed independently, DONE, integrated locally) | first live window also showed two defects, fixed in the sandbox config and `install-handsoff.ps1`: built-in `grok` and `agy` were eligible reviewers (outside the approved providers) and the Codex CLI default model `gpt-5.5` is rejected for ChatGPT sign-in; the installer now writes `routing.pools` limited to codex and claude and pins `-m gpt-5.6-terra` (parameter `-CodexModel`) |
 | Real GitHub lifecycle on a disposable repository | NOT_RUN | no repository created |
 | Ten-task streak | NOT_RUN (0 of 10) | gate not met |
@@ -272,3 +272,31 @@ command itself (genuine CLI only: no relative or in-project executable, no wrapp
 when unattended with no allowlist; unpinned Codex model blocks unattended start; installer and upgrade copy the owner's known-good Codex
 command. Evidence labels: authorization boundary IMPLEMENTED and SIMULATED (stand-in CLIs, Linux and hosted Windows); native Windows proof NOT_RUN
 until the pinned upgrade runs. SANDBOX-02 is kept as historical evidence and the new clean streak starts at the upgrade.
+
+
+## Mission verification update (2026-10-26)
+
+The recorded formal streak above remains unchanged. Read-only inspection of the existing owner-PC sandbox found **11** tasks
+reaching DONE after its 2026-10-25 safety-upgrade marker (SANDBOX-11, SANDBOX-01, SANDBOX-12 through SANDBOX-20). Each had
+exact-candidate passing validation, an invoked independent Codex/Claude review, passing local integration and candidate ancestry
+in sandbox main. Across six productive windows there were 28 provider calls (15 Codex, 13 Claude), zero Grok/AGY calls after the
+marker, and 2172.585 provider seconds. Eleven completions over the 3893.775-second productive interval is **10.17 tasks/hour**;
+this excludes idle time and establishes neither concurrent real coding nor hosted GitHub delivery. Tokens and billing cost are
+**UNKNOWN**, since all corresponding usage events report `usage.reported=false`.
+
+The current clean deployment, scheduled action and marker agree on source `6f90948550b7125fb45d2b570120644027975d7b`.
+Historical windows did not persist their runtime source, and an operator resume after the marker lacks founder-versus-agent
+attribution. Consequently these are verified local delivery observations, **not a certified clean ten-task streak**. No historical
+outcome or intervention was reset, invented or credited. The sanitized per-task audit is retained in the operator's local mission ledger.
+
+Source review also reproduced three remaining defects in that deployment: authorization could be revoked during workspace setup
+but the provider still spawned; login checks could inspect a different executable on PATH than the configured stage executable;
+and the scheduler parent could overwrite the wrapper's stronger child-ownership record. The candidate correction checks the exact
+prepared command again before both provider spawns, probes each configured stage executable, leaves postlaunch ownership publication
+to the wrapper, uses unique atomic temporary files, and preserves uncertain child ownership. Explicit unattended account/profile or
+config-source switches are refused; only the documented model and `features.code_mode_host`/`model_reasoning_effort` Codex config
+pins are accepted. This does **not** establish billing equivalence for ambient CLI configuration files.
+
+These corrections are source changes pending final-head CI, independent review and protected integration. They have not replaced
+the existing installed runtime or changed its schedule. Setup and stop/recovery commands are in [Windows driver setup](windows-driver-setup.md)
+and [continuous driver operations](continuous-driver.md). A new live worker run or persistent installation is separate evidence.
