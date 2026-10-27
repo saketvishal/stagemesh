@@ -448,3 +448,43 @@ def test_sanitize_redacts_secret_keys_recursively_and_bounds_text(tmp_path: Path
 def test_sanitize_leaves_ordinary_text_alone(tmp_path: Path) -> None:
     ordinary = {"reason": "validation failed: docs/a.md is outside the allowed files", "n": 3, "ok": True, "none": None}
     assert sanitize(ordinary, tmp_path, secrets=[]) == ordinary
+
+
+@pytest.mark.parametrize("parent_state", ["LIVE", "DEAD", "UNKNOWN"])
+def test_validation_handoff_requires_tree_inspection(tmp_path: Path, monkeypatch, parent_state):
+    project, store = _setup(tmp_path)
+    execution = store.start_execution(task_id=TASK, claim_id=None, kind=ExecutionKind.VALIDATION)
+    monkeypatch.setattr("stagemesh.handoff.classify_process", lambda *_: parent_state)
+    monkeypatch.setattr("stagemesh.observability.classify_process", lambda *_: parent_state)
+    before = snapshot(project, store)
+    doc = build_handoff(project)
+    row, = doc["active_executions"]
+    assert row["id"] == execution
+    assert row["process_state"] == ("LIVE" if parent_state == "LIVE" else "UNKNOWN")
+    assert row["parent_process_state"] == parent_state
+    assert row["cleanup_state"] == "UNCONFIRMED_VALIDATION_TREE"
+    assert doc["queue_control"]["health"]["unresolved_validation_trees"] == int(parent_state != "LIVE")
+    assert doc["next_action"]["command"] is None
+    if parent_state == "LIVE":
+        assert "wait" in doc["next_action"]["reason"]
+    else:
+        assert "validation tree" in doc["next_action"]["reason"]
+        assert "inspect" in doc["next_action"]["reason"]
+        assert "--execution" in doc["next_action"]["reason"]
+    assert validate_handoff(doc) == []
+    assert snapshot(project, store) == before
+    store.close()
+
+
+def test_unconfirmed_validation_handoff_is_not_hidden_by_an_unrelated_dead_parent(tmp_path: Path, monkeypatch):
+    project, store = _setup(tmp_path)
+    held = store.start_execution(task_id=TASK, claim_id=None, kind=ExecutionKind.VALIDATION)
+    other = store.upsert_task("unrelated", source_id="OTHER")
+    store.start_execution(task_id=other, claim_id=None, kind=ExecutionKind.REVIEW)
+    monkeypatch.setattr("stagemesh.handoff.classify_process", lambda *_: "DEAD")
+    before = snapshot(project, store)
+    doc = build_handoff(project)
+    assert next(row for row in doc["active_executions"] if row["id"] == held)["process_state"] == "UNKNOWN"
+    assert doc["next_action"]["command"] is None and "validation tree" in doc["next_action"]["reason"]
+    assert snapshot(project, store) == before
+    store.close()

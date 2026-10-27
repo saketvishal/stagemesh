@@ -274,7 +274,9 @@ execution status totals; a live validator does not itself raise a cleanup alert.
 Admission keeps its existing policy: a provably dead parent remains a global
 stale-parent hazard, while unknown parent identity alone does not block unrelated
 work. The new inspection warning cannot itself authorize or prevent a stage;
-existing task ownership and global hazard gates remain authoritative.
+existing task ownership and global hazard gates remain authoritative. Handoff
+exports retain the same parent/ownership distinction and advise inspecting a
+validation tree before a selected release, never ordinary automatic recovery.
 
 The deliberate safety tradeoff also holds legacy, prelaunch and static-only
 validation crashes: durable data cannot prove a child never started. After
