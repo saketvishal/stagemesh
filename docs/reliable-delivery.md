@@ -196,6 +196,19 @@ provider calls per task; optional per-window calls and reported-usage caps) come
 restarts, and are checked between stages and waves, with additional checks before staged pooled review attempts and fallbacks; reaching one is a single typed `BLOCKED_RECOVERABLE_OPERATIONAL` blocker
 (`budget_exhausted`) and a fresh start by the operator (`retry-task`) resets the task's counters. Budgets never skip validation or review.
 
+## Validation gate cleanup
+
+Validation-gate cleanup is confirmed separately from the root process exiting. Failed tree enumeration, identity,
+signal or reap/drain checks stop the current run with cleanup incomplete. The validator retains its claimless
+RUNNING execution and unknown cleanup fence; it records the gate identity and retains both the candidate checkout
+and private gate TEMP directory. It emits no failed/passed validation verdict or remediation attempt from uncertain
+cleanup. A new run cannot recover this fence merely because the old parent exited. Confirmed ordinary failure and
+timeout still clean their temporary directories. This covers the observed gate tree and task ownership; it does not
+establish universal detached-child cleanup, responsive cancellation of an active gate, or a durable cross-project
+validation-slot fence after a parent crash.
+
+If cleanup ownership cannot be durably stored, the current run still propagates cleanup-incomplete control flow; restart protection is not qualified until that fence is successfully persisted. A detail-audit failure after retention does not erase the saved UNKNOWN fence or turn cleanup uncertainty into an ordinary failure verdict.
+
 ## Runtime artifacts
 
 Build the versioned wheel from the reviewed commit, keep the previous wheel as the verified rollback, and install only when every
