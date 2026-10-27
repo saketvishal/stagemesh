@@ -848,22 +848,20 @@ def test_noop_after_failed_review_rechecks_existing_candidate(tmp_path: Path) ->
     store.migrate()
     cli_module._sync_all_sources(store, project, cli_module.load_config(project), "T-1")
 
+    from test_completion_integrity import FakeReviewAdapter
+
     class FailOnceReviewer:
-        calls = 0
+        def __init__(self):
+            self.adapter = FakeReviewAdapter("controlled-reviewer")
 
         def review(self, store: Store, task_id: str, candidate_sha: str, project: Path):
-            self.calls += 1
-            if self.calls == 1:
-                return Reviewer(
-                    findings=[
-                        ReviewFinding(
-                            identity=f"{candidate_sha}:first-review-failed",
-                            severity="error",
-                            message="first review failed",
-                        )
-                    ]
-                ).review(store, task_id, candidate_sha, project)
-            return Reviewer().review(store, task_id, candidate_sha, project)
+            # Withdrawal requires a fresh invoked PASS from the same independent
+            # reviewer, not a deterministic fallback with no review invocation.
+            self.adapter.response = json.dumps(
+                {"decision": "FAIL_WITH_FINDINGS", "findings": [{"severity": "error", "message": "first review failed"}]}
+                if self.adapter.calls == 0 else {"decision": "PASS"}
+            )
+            return Reviewer(adapter=self.adapter, require_independent=True).review(store, task_id, candidate_sha, project)
 
     class NoChangeExecutor(Executor):
         name = "fake"
@@ -892,6 +890,22 @@ def test_noop_after_failed_review_rechecks_existing_candidate(tmp_path: Path) ->
     assert second.stop_reason == "DONE", second.to_dict()
     assert second.final["latest_review"] == "PASSED"
     assert any(event["event_type"] == "task.recheck_existing_candidate" for event in store.audit_events())
+
+    assert reviewer.adapter.calls == 2
+    assert second.final["latest_candidate"] == first.final["latest_candidate"]
+    reviews = store.conn.execute(
+        "SELECT id, candidate_sha, status, payload FROM evidence WHERE kind='REVIEW' ORDER BY created_at, rowid"
+    ).fetchall()
+    assert [row["status"] for row in reviews] == ["FAILED", "PASSED"]
+    assert {row["candidate_sha"] for row in reviews} == {first.final["latest_candidate"]}
+    assert all(json.loads(row["payload"])["independent_reviewer"] for row in reviews)
+    assert all(json.loads(row["payload"])["review_execution_invoked"] for row in reviews)
+    assert store.conn.execute("SELECT COUNT(*) FROM candidates").fetchone()[0] == 1
+    withdrawals = [json.loads(row["payload"]) for row in store.audit_events()
+                   if row["event_type"] == "review.finding_disposition"]
+    assert len(withdrawals) == 1 and withdrawals[0]["disposition"] == "withdrawn_by_reviewer"
+    assert withdrawals[0]["actor"] == "controlled-reviewer"
+    assert withdrawals[0]["evidence_ref"] == f"review-evidence:{reviews[-1]['id']}"
 
 
 def test_unrelated_unknown_execution_still_refuses_run(tmp_path: Path) -> None:

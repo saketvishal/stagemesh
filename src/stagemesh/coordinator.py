@@ -188,6 +188,7 @@ class Coordinator:
     def tick(self) -> int:
         self.validate_target()
         self.recover()
+        self.last_execution_refusals: list[dict[str, Any]] = []
         progressed = 0
         before = outcomes(self._selected_tasks()) if self.outbound_sync is not None else {}
         for task in self._selected_tasks():
@@ -224,6 +225,23 @@ class Coordinator:
     def _advance_task(self, task_id: str) -> int:
         task = self.store.get_task(task_id)
         if task is None:
+            return 0
+        # Selection can precede another connection's ownership publication.
+        # Recovery has already removed only owners proven dead; never start a
+        # new stage over any remaining owner, including claimless cleanup fences.
+        owners = self.store.conn.execute(
+            "SELECT id, kind FROM executions WHERE task_id=? AND status='RUNNING' ORDER BY id",
+            (task_id,),
+        ).fetchall()
+        if owners:
+            if not hasattr(self, "last_execution_refusals"):
+                self.last_execution_refusals = []
+            self.last_execution_refusals.append({
+                "task_id": task_id,
+                "execution_ids": [str(row["id"]) for row in owners],
+                "kinds": sorted({str(row["kind"]) for row in owners}),
+                "reason": "task has an existing live or unknown stage execution",
+            })
             return 0
         stage = Stage(task["stage"])
         if self.store.task_contract(task_id) is not None or task_contract_path(self.project, task_id) is not None:

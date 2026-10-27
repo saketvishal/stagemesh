@@ -227,6 +227,15 @@ after ordinary root/pipe completion suppresses the verdict without a new signal;
 this does not add a universal detached-child guarantee. Storage unavailability
 still propagates the original control event; durable completion is not claimed.
 
+## Existing stage ownership at dispatch
+
+The coordinator rechecks persisted RUNNING executions after known-dead owner recovery and before advancing a task.
+An existing live or unknown execution, including a claimless cleanup fence, prevents another stage from starting.
+This also protects legacy `continue --once` and ownership published after parallel batch selection. A single-pass
+attempt with no work reports `REFUSED:active_execution`; unrelated tasks can still advance. Existing ownership,
+candidate evidence and stage remain unchanged. This recheck does not reserve an otherwise empty stage atomically
+against two simultaneous fresh callers; it is not a new global admission-lock guarantee.
+
 ## Runtime artifacts
 
 Build the versioned wheel from the reviewed commit, keep the previous wheel as the verified rollback, and install only when every
