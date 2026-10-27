@@ -32,6 +32,7 @@ class HealthReport:
     stale_execution_count: int = 0
     current_problems: tuple[str, ...] = ()
     unresolved_validation_count: int = 0
+    dead_validation_parent_count: int = 0
 
 
 def health(store: Store) -> HealthReport:
@@ -56,12 +57,15 @@ def health(store: Store) -> HealthReport:
     backlog_state = "EMPTY" if not tasks else "ACTIVE"
     current_failed = _current_failed_execution_count(store)
     ownership = [
-        (execution, recovery_identity_state(execution, classify_process(
+        (execution, classify_process(
             store.execution_process_identity(execution["id"]), process_identity(execution["pid"]),
-        )))
+        ))
         for execution in running
     ]
-    stale = sum(state == "DEAD" for _, state in ownership)
+    stale = sum(recovery_identity_state(execution, state) == "DEAD" for execution, state in ownership)
+    dead_validation_parent = sum(
+        validation_tree_unresolved(execution) and state == "DEAD" for execution, state in ownership
+    )
     unresolved_validation = sum(
         validation_tree_unresolved(execution) and state != "LIVE" for execution, state in ownership
     )
@@ -95,6 +99,7 @@ def health(store: Store) -> HealthReport:
         current_failed_execution_count=current_failed,
         stale_execution_count=stale,
         unresolved_validation_count=unresolved_validation,
+        dead_validation_parent_count=dead_validation_parent,
         current_problems=problems,
     )
 

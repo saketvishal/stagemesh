@@ -271,6 +271,10 @@ parent liveness separately from effective recovery ownership. Non-live validatio
 trees count as unresolved and require review, rather than stale automatically
 recoverable executions. This read-only count does not change persisted UNKNOWN
 execution status totals; a live validator does not itself raise a cleanup alert.
+Admission keeps its existing policy: a provably dead parent remains a global
+stale-parent hazard, while unknown parent identity alone does not block unrelated
+work. The new inspection warning cannot itself authorize or prevent a stage;
+existing task ownership and global hazard gates remain authoritative.
 
 The deliberate safety tradeoff also holds legacy, prelaunch and static-only
 validation crashes: durable data cannot prove a child never started. After

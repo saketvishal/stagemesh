@@ -191,6 +191,9 @@ def test_validation_tree_ownership_is_distinct_from_parent_liveness(store, monke
     assert current.unresolved_validation_count == retained
     assert current.stale_execution_count == int(effective == "DEAD")
     assert current.unknown_execution_count == 0  # durable UNKNOWN status is a separate metric
+    assert current.dead_validation_parent_count == int(pending and parent_state == "DEAD")
+    from stagemesh.run_ready import current_problems
+    assert current_problems(store) == (("stale_running_executions",) if parent_state == "DEAD" else ())
     assert ("unresolved_validation_trees" in current.current_problems) is bool(retained)
     attention = [row for row in sections(report)["Attention"] if row["kind"] == "unresolved_validation_trees"]
     assert attention == ([{"kind": "unresolved_validation_trees", "count": 1, "status": "REVIEW"}] if retained else [])

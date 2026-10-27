@@ -96,7 +96,15 @@ class RunSummary:
 
 
 def current_problems(store: Store) -> tuple[str, ...]:
-    return tuple(problem for problem in health(store).current_problems if problem not in _IGNORED_PROBLEMS)
+    report = health(store)
+    # Inspection visibility is task-local. Preserve the pre-existing admission
+    # policy: unknown parent identity alone does not stop unrelated work, while
+    # a provably dead parent remains a global stale-parent hazard.
+    problems = tuple(problem for problem in report.current_problems
+                     if problem not in _IGNORED_PROBLEMS and problem != "unresolved_validation_trees")
+    if report.dead_validation_parent_count and "stale_running_executions" not in problems:
+        problems += ("stale_running_executions",)
+    return problems
 
 
 def _recover_dead(store: Store, task_id: str, *, own_task: bool = True) -> list[dict[str, Any]]:
