@@ -586,7 +586,7 @@ def run_wave(
 
     from .validation_slot import set_window_deadline
 
-    set_window_deadline(deadline)
+    set_window_deadline(deadline, clock=clock)
     worker_limit = max(1, concurrency) + (verification_concurrency or 0)
     pool_cm = ThreadPoolExecutor(max_workers=worker_limit)
     pool = pool_cm.__enter__()
@@ -978,10 +978,10 @@ def subprocess_task_runner(
             argv += ["--integration-ref", integration_ref]
         if live_acceptance is not None:
             argv += ["--live-acceptance", live_acceptance]
-        from .validation_slot import current_window_deadline
+        from .validation_slot import window_deadline_for_subprocess
 
         env = os.environ.copy()
-        window_deadline = current_window_deadline()
+        window_deadline = window_deadline_for_subprocess()
         if window_deadline is not None:
             env["STAGEMESH_WINDOW_DEADLINE"] = repr(float(window_deadline))
         proc = subprocess.run(argv, capture_output=True, text=True, check=False, env=env)

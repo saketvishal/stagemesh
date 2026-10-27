@@ -22,10 +22,10 @@ import sys
 import tempfile
 import threading
 import time
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from pathlib import Path
-from typing import Iterator
 
 from .queue_control import OperatorStopRequested, current_provider_stop
 
@@ -33,7 +33,7 @@ _mu = threading.Lock()
 _depth = threading.local()
 _wait_deadline: ContextVar[float | None] = ContextVar("stagemesh_validation_wait_deadline", default=None)
 _cancel_wait: ContextVar[object | None] = ContextVar("stagemesh_validation_cancel", default=None)
-_window_deadline: float | None = None
+_window_deadline: tuple[float, Callable[[], float]] | None = None
 
 
 def canonical_lock_path(raw: str) -> Path:
@@ -57,13 +57,23 @@ def slot_path() -> Path:
 
 
 def current_window_deadline() -> float | None:
-    return _window_deadline
+    boundary = _window_deadline
+    return None if boundary is None else boundary[0]
 
 
-def set_window_deadline(deadline: float | None) -> None:
-    """Publish a wall-clock deadline (the same clock run_wave uses) to every worker."""
+def window_deadline_for_subprocess() -> float | None:
+    """Export the remaining window allowance as an absolute wall-clock deadline for a child."""
+    boundary = _window_deadline
+    if boundary is None:
+        return None
+    deadline, clock = boundary
+    return time.time() + (deadline - clock())
+
+
+def set_window_deadline(deadline: float | None, *, clock: Callable[[], float] | None = None) -> None:
+    """Publish the window's deadline together with its clock to every in-process worker."""
     global _window_deadline
-    _window_deadline = deadline
+    _window_deadline = None if deadline is None else (deadline, time.time if clock is None else clock)
 
 
 def bind_validation_wait(deadline: float | None = None, cancel=None):
@@ -77,9 +87,7 @@ def reset_validation_wait(tokens) -> None:
     _cancel_wait.reset(cancel_token)
 
 
-def _published_window_deadline() -> float | None:
-    if _window_deadline is not None:
-        return _window_deadline
+def _environment_window_deadline() -> float | None:
     raw = os.environ.get("STAGEMESH_WINDOW_DEADLINE")
     if raw is None or raw == "":
         return None
@@ -94,7 +102,11 @@ def _deadline_exceeded() -> bool:
     deadline = _wait_deadline.get()
     if deadline is not None and time.monotonic() >= deadline:
         return True
-    window = _published_window_deadline()
+    boundary = _window_deadline
+    if boundary is not None:
+        window, clock = boundary
+        return clock() >= window
+    window = _environment_window_deadline()
     return window is not None and time.time() >= window
 
 
