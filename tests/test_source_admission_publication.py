@@ -77,11 +77,11 @@ def test_failed_sync_and_unrelated_scan_cannot_publish_partial_dependencies(tmp_
         assert observer.acquire_claim("249", "observer") is None
         sync_source(store, [])
         sync_source(store, [DiscoveredTask("other-source", "unrelated", "unrelated")])
-        assert store.source_admission_pending("github", "249")
+        assert ("admission_pending" in store.source_state("github", "249"))
         assert observer.acquire_claim("249", "observer") is None
         monkeypatch.setattr(store, "add_dependency", add_dependency)
         sync_source(store, tasks)
-        assert not store.source_admission_pending("github", "249")
+        assert not ("admission_pending" in store.source_state("github", "249"))
         assert Scheduler(observer).decision("249").reason == "waiting for 248"
         store.advance_task("248", Stage.DONE)
         assert Scheduler(observer).decision("249").eligible
@@ -123,7 +123,7 @@ sync_source(store, [DiscoveredTask('github', '249', 'dependent', dependencies=('
         assert Scheduler(store).decision("249").reason == "source synchronization incomplete"
         assert store.acquire_claim("249", "observer") is None
         sync_source(store, [DiscoveredTask("github", "249", "dependent", dependencies=("248",))])
-        assert not store.source_admission_pending("github", "249")
+        assert not ("admission_pending" in store.source_state("github", "249"))
         assert Scheduler(store).decision("249").reason == "waiting for 248"
     finally:
         store.close()
@@ -176,7 +176,7 @@ def test_concurrent_source_writers_cannot_publish_another_writers_partial_state(
         second.join(5)
         assert not first.is_alive() and not second.is_alive() and not errors
         assert second_mutation.is_set()
-        assert not store.source_admission_pending("github", "249")
+        assert not ("admission_pending" in store.source_state("github", "249"))
         assert store.incomplete_dependencies("249") == ["250"]
     finally:
         release_first.set()
@@ -194,7 +194,7 @@ def test_memory_source_sync_does_not_create_an_invalid_lock_filename():
     try:
         assert sync_source(store, [DiscoveredTask("github", "249", "work")]) == ["249"]
         assert Scheduler(store).decision("249").eligible
-        assert not store.source_admission_pending("github", "249")
+        assert not ("admission_pending" in store.source_state("github", "249"))
     finally:
         store.close()
 
@@ -213,7 +213,7 @@ def test_stale_decision_cannot_claim_after_changed_source_state_is_fully_publish
     )
     try:
         sync_source(store, [task])
-        assert not store.source_admission_pending("github", "249")  # publication finished, so pending alone is insufficient
+        assert not ("admission_pending" in store.source_state("github", "249"))  # publication finished, so pending alone is insufficient
         assert not Scheduler(observer).decision("249").eligible
         assert observer.acquire_claim("249", "stale-worker") is None
         assert not observer.has_active_claim("249")
@@ -242,7 +242,7 @@ def test_restoring_a_source_retired_task_keeps_admission_fenced_until_dependenci
     monkeypatch.setattr(store, "restore_source_task", paused_restore)
     try:
         sync_source(store, [DiscoveredTask("github", "249", "restored", dependencies=("248",))])
-        assert observed and not store.source_admission_pending("github", "249")
+        assert observed and not ("admission_pending" in store.source_state("github", "249"))
         assert Scheduler(observer).decision("249").reason == "waiting for 248"
     finally:
         observer.close()
