@@ -361,3 +361,130 @@ def test_single_required_reviewer_cannot_finish_distinct_role_gate(tmp_path: Pat
         assert any(p.get("review_infrastructure_failure") == "independent_review_unavailable" for p in payloads)
     finally:
         store.close()
+
+
+def test_nested_git_failure_is_preserved_in_stabilization_brief(tmp_path: Path) -> None:
+    m = _matrix(tmp_path, ["T-1"], {"codex": {"implement": "mutate"}})
+    script = tmp_path / "fake_provider.py"
+    original = '["git", "commit", "--amend", "--allow-empty", "-q", "-m", "provider rewrote HEAD"]'
+    text = script.read_text(encoding="utf-8")
+    assert text.count(original) == 1
+    script.write_text(text.replace(original, '["git", "--stagemesh-controlled-failure"]'), encoding="utf-8")
+    result = m.continue_()
+    assert result.code != 0 and result.stop == "NO_PROGRESS"
+    assert not m.integrated("T-1") and not m.audit("provider.workspace_quarantined")
+    failure, = m.audit("task.implementation_unsuccessful")
+    assert failure["reason"] == "implementation_failure"
+    assert "--stagemesh-controlled-failure" in failure["provider_output"]
+    assert "--stagemesh-controlled-failure" in result.brief
+    assert "implementation_failure" in result.brief and "executions" in result.brief
+    saved = result.brief
+    # A Result is a snapshot; later runs/history cannot replace the failure evidence.
+    store = m.store()
+    try:
+        with store.conn:
+            store.conn.execute("DELETE FROM audit_events")
+    finally:
+        store.close()
+    assert result.brief == saved
+
+
+def test_stabilization_brief_is_bounded_redacted_and_missing_database_safe(tmp_path: Path) -> None:
+    from stabilization_support import Result
+    project = tmp_path / "missing-project"
+    result = Result(1, {"stop_reason": "NO_PROGRESS", "message": "password=private-message " + "x" * 20000},
+                    "Authorization: Bearer private-stderr " + "y" * 20000, project,
+                    [("codex", "implement", "T-1", "password=private-call")] * 200)
+    brief = result.brief
+    assert len(brief) <= 10000
+    assert all(secret not in brief for secret in ("private-message", "private-stderr", "private-call"))
+    assert "NO_PROGRESS" in brief and not project.exists()
+
+
+def test_stabilization_diagnostic_snapshot_is_read_only_bounded_and_redacts_before_clip(tmp_path: Path) -> None:
+    from stabilization_support import _failure_diagnostics
+
+    from stagemesh.domain import ExecutionKind, ExecutionStatus
+    m = _matrix(tmp_path, ["T-1"])
+    store = m.store()
+    task = store.upsert_task("diagnostic fixture", source_id="T-1")
+    for index in range(12):
+        execution = store.start_execution(task_id=task, claim_id=None, kind=ExecutionKind.IMPLEMENTATION, actor="fixture")
+        store.finish_execution(execution, ExecutionStatus.FAILED, result=f"controlled-error-{index}")
+        store.add_audit_event("task.implementation_unsuccessful", {
+            "task_id": task, "reason": f"controlled-error-{index}",
+            "provider_output": "password=private-audit " + "x" * 2000 + " password=private-tail",
+            "api_token": "private-unselected", "arbitrary_prompt": "private-unselected", "message": "controlled-noise " * 300,
+        })
+    store.add_audit_event("unrelated.event", {"provider_output": "private-unrelated"})
+    database = m.project / ".stagemesh" / "stagemesh.sqlite3"
+    store.close()
+    before = database.read_bytes()
+    snapshot = _failure_diagnostics(m.project)
+    assert database.read_bytes() == before
+    assert len(snapshot) <= 6050
+    assert snapshot.startswith("sample: latest6executions/latest8relevant-events;")
+    assert "controlled-error-11" in snapshot and "controlled-error-0" not in snapshot
+    assert all(secret not in snapshot for secret in ("private-audit", "private-tail", "private-unselected", "private-unrelated"))
+    assert "[truncated]" in snapshot
+
+
+def test_stabilization_diagnostics_do_not_create_missing_databases_or_expose_read_errors(tmp_path: Path, monkeypatch) -> None:
+    import sqlite3
+
+    from stabilization_support import _failure_diagnostics
+    project = tmp_path / "absent"
+    assert _failure_diagnostics(project) == "UNAVAILABLE: database_missing"
+    assert not project.exists()
+    database = project / ".stagemesh" / "stagemesh.sqlite3"
+    database.parent.mkdir(parents=True)
+    database.touch()
+    def refuse(database_uri, **kwargs):
+        assert database_uri.endswith("?mode=ro") and kwargs == {"uri": True}
+        raise sqlite3.OperationalError("password=private-sql-error")
+    monkeypatch.setattr("stabilization_support.sqlite3.connect", refuse)
+    assert _failure_diagnostics(project) == "UNAVAILABLE: OperationalError"
+
+
+def test_stabilization_diagnostics_label_malformed_audit_without_reading_unknown_fields(tmp_path: Path) -> None:
+    from stabilization_support import _failure_diagnostics
+    m = _matrix(tmp_path, ["T-1"])
+    store = m.store()
+    for index, payload in enumerate(("not-json password=private-bad-json", "[]", '{"evidence":{"excerpt":"fatal controlled","status":"password=private-evidence"},"env":"private-env"}')):
+        store.conn.execute("INSERT INTO audit_events VALUES (?,?,?,?)", (str(index), "task.tool_failure_evidence", payload, index))
+    store.conn.commit()
+    store.close()
+    snapshot = _failure_diagnostics(m.project)
+    assert snapshot.count("UNPARSEABLE") == 2
+    assert "fatal controlled" in snapshot
+    assert all(secret not in snapshot for secret in ("private-bad-json", "private-evidence", "private-env"))
+
+
+def test_stabilization_diagnostics_cannot_mask_failure_on_deep_json_or_blob_cells(tmp_path: Path) -> None:
+    from stabilization_support import _failure_diagnostics
+
+    from stagemesh.domain import ExecutionKind
+    m = _matrix(tmp_path, ["T-1"])
+    store = m.store()
+    task = store.upsert_task("diagnostics", source_id="T-1")
+    execution = store.start_execution(task_id=task, claim_id=None, kind=ExecutionKind.IMPLEMENTATION)
+    store.conn.execute("UPDATE executions SET result=? WHERE id=?", (b"password=private-blob", execution))
+    store.conn.execute("INSERT INTO audit_events VALUES (?,?,?,?)",
+                       ("deep", "task.tool_failure_evidence", "[" * 1500 + "0" + "]" * 1500, 0))
+    store.conn.commit()
+    store.close()
+    snapshot = _failure_diagnostics(m.project)
+    assert "UNPARSEABLE" in snapshot and "UNSUPPORTED" in snapshot
+    assert "private-blob" not in snapshot
+
+
+@pytest.mark.parametrize("credential", ['password="private quoted credential"', "token='private quoted token'",
+                                       r'--api-key \"private escaped credential\"', 'Authorization: Bearer private-bearer',
+                                       'password="' + 'PRIVATE_CREDENTIAL_' * 200 + '"', 'ghp_PRIVATE_CREDENTIAL_123'], ids=["double-quoted", "single-quoted", "escaped-flag", "bearer", "long-value", "token-shape"])
+def test_stabilization_brief_redacts_quoted_escaped_and_long_credentials_before_clipping(credential) -> None:
+    from stabilization_support import Result, _brief_text
+    shown = _brief_text("fatal controlled " + credential, 80)
+    assert "private" not in shown.lower() and "PRIVATE_CREDENTIAL" not in shown
+    result = Result(1, {"stop_reason": "NO_PROGRESS", "message": credential}, credential, Path("unused"),
+                    [("codex", "implement", "T-1", credential)])
+    assert "private" not in result.brief.lower() and "PRIVATE_CREDENTIAL" not in result.brief
