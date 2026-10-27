@@ -145,14 +145,37 @@ def _retry_file_operation(operation: Callable[[], Any], *, attempts: int = 8, de
             time.sleep(delay * (attempt + 1))
 
 
+def cleanup_pending_path(project: Path) -> Path:
+    return child_owner_path(project).with_name("cleanup-pending.json")
+
+
+def begin_child_cleanup(project: Path, identity: ProcessIdentity) -> None:
+    """Fence automatic recovery before termination, independently of the wrapper's owner publications."""
+    try:
+        payload = json.loads(child_owner_path(project).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        payload = asdict(identity)
+    if not isinstance(payload, dict):
+        payload = asdict(identity)
+    _save_owner_record(cleanup_pending_path(project), payload)
+
+
+def finish_child_cleanup(project: Path) -> None:
+    """Called only after process-tree termination and the corresponding wait both completed."""
+    _retry_file_operation(lambda: cleanup_pending_path(project).unlink(missing_ok=True))
+
+
 def save_child_owner(project: Path, identity: ProcessIdentity, child: ProcessIdentity | None = None) -> Path:
     """Durable owner record. `child` is the run-window process under the wrapper, so a dead wrapper with a live child is not
     mistaken for a free project."""
-    path = child_owner_path(project)
-    path.parent.mkdir(parents=True, exist_ok=True)
     payload = asdict(identity)
     if child is not None:
         payload["child"] = asdict(child)
+    return _save_owner_record(child_owner_path(project), payload)
+
+
+def _save_owner_record(path: Path, payload: dict[str, Any]) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     temporary = Path(temporary_name)
     try:
@@ -169,7 +192,17 @@ def _unlink_owner(project: Path) -> None:
 
 
 def child_owner_state(project: Path) -> tuple[str | None, ProcessIdentity | None]:
-    path = child_owner_path(project)
+    owner = _recorded_child_state(child_owner_path(project))
+    pending = _recorded_child_state(cleanup_pending_path(project))
+    # A later wrapper publication may omit a child recorded by the cleanup fence. Check both observations.
+    for state in ("LIVE", "UNKNOWN"):
+        for observed in (owner, pending):
+            if observed[0] == state:
+                return observed
+    return owner if owner[0] is not None else pending
+
+
+def _recorded_child_state(path: Path) -> tuple[str | None, ProcessIdentity | None]:
     if not path.is_file():
         return None, None
     try:
@@ -220,6 +253,8 @@ def clear_dead_child_owner(project: Path) -> bool:
     wrote the record. Matching the two never succeeds there, and a hard-timeout kill left the record behind forever,
     blocking every later tick. After a confirmed tree kill the only question is whether the recorded process is dead.
     """
+    if cleanup_pending_path(project).exists():
+        return False
     state, _identity = child_owner_state(project)
     if state != "ORPHANED":
         return False
@@ -233,6 +268,8 @@ def child_owner_fully_dead(project: Path) -> bool:
     That is what a reboot, logoff or a hard kill of the whole tree leaves behind. With nothing known about the child (an
     older record, or a crash between writing the wrapper record and the child record) a human release stays required.
     """
+    if cleanup_pending_path(project).exists():
+        return False
     state, _identity = child_owner_state(project)
     if state != "ORPHANED":
         return False
@@ -251,7 +288,11 @@ def release_orphaned_child(project: Path) -> bool:
         raise DriverConfigError(
             f"cannot release prior run-window ownership while process identity is {state or 'UNKNOWN'}"
         )
-    return clear_child_owner(project, identity)
+    released = clear_child_owner(project, identity)
+    if released:
+        # Existing explicit `driver resume` semantics acknowledge orphan recovery; automatic ticks never do.
+        finish_child_cleanup(project)
+    return released
 
 
 def save_config(project: Path, config: DriverConfig) -> Path:
@@ -402,6 +443,7 @@ def _default_runner(argv: list[str], project: Path, timeout_seconds: float) -> i
     try:
         stdout, stderr = process.communicate(timeout=timeout_seconds)
     except subprocess.TimeoutExpired:
+        begin_child_cleanup(project, identity)
         tree_killed = kill_process_tree(process)
         wrapper_exited = False
         try:
@@ -410,6 +452,7 @@ def _default_runner(argv: list[str], project: Path, timeout_seconds: float) -> i
         except subprocess.TimeoutExpired:
             pass
         if tree_killed and wrapper_exited:
+            finish_child_cleanup(project)
             clear_child_owner(project, identity) or clear_dead_child_owner(project)
             clear_child_owner(project, launch_identity, allow_live=True)
         return 124

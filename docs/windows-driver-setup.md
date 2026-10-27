@@ -32,8 +32,12 @@ calls per task and 30 per window; three consecutive failed ticks block the drive
 never overlapped (project lock, durable child-owner record, Task Scheduler `IgnoreNew`).
 
 Recovery: the owner record names the wrapper and its run-window. If both are provably dead (reboot, logoff, killed tree) the next
-tick recovers by itself; a live or unverifiable owner fails closed. Logon and repeating triggers plus `StartWhenAvailable` bring
-the driver back after a restart or sleep.
+tick recovers by itself unless a termination attempt left an unconfirmed cleanup fence. A live or unverifiable owner fails
+closed. Before terminating a tree, the driver persists `cleanup-pending.json` alongside the owner record; wrapper updates or exit
+cannot erase it. Automatic recovery remains blocked until termination and wait both complete. An explicit `driver resume` can
+acknowledge orphan recovery only when all identities retained by both records are proven dead. It does not independently prove
+that unrecorded descendants died, so investigate uncertain cleanup before resuming. Logon and repeating triggers plus
+`StartWhenAvailable` bring the driver back after a restart or sleep when the schedule is enabled.
 
 Logs: `textkit\.stagemesh\driver\driver.log` (every scheduled tick, including tracebacks), per-tick JSON reports beside it, and the
 SQLite ledger. Pause, resume, stop and uninstall commands are written to `README-handsoff.txt` next to the project.

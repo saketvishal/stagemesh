@@ -6,7 +6,12 @@ import subprocess
 import sys
 from pathlib import Path
 
-from .continuous_driver import clear_child_owner, save_child_owner
+from .continuous_driver import (
+    begin_child_cleanup,
+    clear_child_owner,
+    finish_child_cleanup,
+    save_child_owner,
+)
 from .execution import kill_process_tree
 from .process_identity import owner_identity, process_identity
 
@@ -37,11 +42,17 @@ def main(argv: list[str] | None = None) -> int:
         except BaseException:
             # A failed tree kill cannot be turned into automatic recovery merely because both recorded roots later die.
             # Retain the known run-window as the sole owner: LIVE still blocks, DEAD requires explicit orphan release.
+            begin_child_cleanup(project, identity)
             cleanup_owner = child_identity if child_identity is not None and child_identity.is_known else identity
-            save_child_owner(project, cleanup_owner)
+            try:
+                save_child_owner(project, cleanup_owner)
+            except OSError:
+                pass  # the cleanup fence survives failed owner publication; still attempt to stop the child
             tree_killed = kill_process_tree(process)
             process.wait()
             release_owner = tree_killed
+            if tree_killed:
+                finish_child_cleanup(project)
             raise
     finally:
         if release_owner:
