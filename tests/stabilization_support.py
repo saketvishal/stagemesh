@@ -20,7 +20,7 @@ import stagemesh.cli as cli_module
 from stagemesh.git import GitWorkspace
 from stagemesh.persistence import Store
 
-PROVIDERS = ("codex", "claude", "grok")  # the built-in names are always in the pool, so the fake CLI must own all of them
+PROVIDERS = ("codex", "claude", "grok")  # original implementation/exhaustion topology stays fixed
 
 # Implementation modes: ok, bad (fails validation), noop, quota, timeout, mutate (rewrites the sealed HEAD in the task workspace).
 # Review modes: pass, fail, quota. A list is consumed one entry per call (the last entry repeats).
@@ -173,7 +173,8 @@ class Matrix:
         (runtime / "config.json").write_text(
             json.dumps(
                 {
-                    "providers": {name: command(name) for name in PROVIDERS},
+                    "providers": {**{name: command(name) for name in PROVIDERS},
+                                  "review-adverse": {"command": command("review-adverse"), "capabilities": ["review"]}},
                     "integration_ref": "integration",
                     "routing": {"mode": "STAGED", "pools": {"IMPLEMENT": list(implement_pool), "REVIEW": list(review_pool)}},
                 }

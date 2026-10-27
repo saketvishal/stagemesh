@@ -20,6 +20,7 @@ from .config import BUILTIN_PROVIDERS, SELECTION_POLICIES
 from .contract_binding import bound_contract_from_record
 from .contracts import candidate_workspace, run_gate
 from .domain import ExecutionKind, ExecutionStatus
+from .efficiency import record_provider_call, take_call_usage
 from .execution import PROVIDER_TIMEOUT, ExecutionResult, Executor
 from .git import GitError, GitWorkspace
 from .persistence import Store
@@ -39,6 +40,7 @@ from .review import (
     classify_review_response,
     parse_review_response,
 )
+from .review_identity import command_digest, take_review_identity
 from .routing import RoutingMode
 from .workspace_guard import EXTERNAL_WORKSPACE_MUTATION, WorkspaceMutation, owned_workspace
 from .workspaces import (
@@ -675,9 +677,17 @@ class ProviderPool:
         return True, "", impl, review
 
     def review_adapter(
-        self, store: Store, task_id: str, candidate_sha: str, implementer: str | None
+        self, store: Store, task_id: str, candidate_sha: str, implementer: str | None,
+        *, excluded_providers: tuple[str, ...] = (), excluded_command_digests: tuple[str, ...] = (),
     ) -> tuple[FallbackReviewAdapter | None, list[Verdict]]:
         verdicts = self.evaluate(store, REVIEW, task_id, implementer)
+        if excluded_providers or excluded_command_digests:
+            blocked_names = {name.casefold() for name in excluded_providers}
+            blocked_commands = set(excluded_command_digests)
+            verdicts = [Verdict(v.provider, False, "not_independent: command/provider belongs to another role")
+                        if v.eligible and (v.provider.casefold() in blocked_names or any(
+                            command_digest(cmd) in blocked_commands for cmd in _commands(self.adapters[v.provider])))
+                        else v for v in verdicts]
         eligible = self.announce(store, REVIEW, task_id, verdicts, f" (candidate {candidate_sha[:10]}, implementer {implementer})")
         if not self.require_independent and implementer:
             # Independence is optional here, but a provider never reviews its own candidate: prefer others, else deterministic.
@@ -711,6 +721,8 @@ def _same(adapter: RuntimeCommandAdapter, implementer: str, implementer_adapter:
 
 class FallbackReviewAdapter:
     """Tries eligible reviewers in order; `name` always names the provider whose answer is returned."""
+
+    records_provider_calls = True
 
     def __init__(self, pool: ProviderPool, store: Store, task_id: str, adapters: list[RuntimeCommandAdapter]):
         self.pool = pool
@@ -746,11 +758,28 @@ class FallbackReviewAdapter:
             )
             self.name = adapter.name
             try:
-                response = adapter.review_candidate(prompt, project, candidate_sha)
+                from .providers import _provider_budget_refusal
+
+                budget_problem = _provider_budget_refusal(self.store, self.task_id, project)
+                if budget_problem:
+                    return json.dumps({"decision": INFRASTRUCTURE_FAILURE, "reason": "budget_exhausted", "provider_output": budget_problem})
+                take_review_identity()  # a failed fallback cannot authenticate the next actor
+                take_call_usage()
+                started = time.monotonic()
+                try:
+                    response = adapter.review_candidate(prompt, project, candidate_sha)
+                except BaseException:
+                    record_provider_call(self.store, task_id=self.task_id, purpose="review", provider=adapter.name,
+                                         candidate_sha=candidate_sha, outcome="failed", reason="review_interrupted",
+                                         duration_seconds=time.monotonic() - started, usage=take_call_usage())
+                    raise
+                reason = _infrastructure_reason(response)
+                record_provider_call(self.store, task_id=self.task_id, purpose="review", provider=adapter.name,
+                                     candidate_sha=candidate_sha, outcome="failed" if reason else "succeeded", reason=reason,
+                                     duration_seconds=time.monotonic() - started, usage=take_call_usage())
             finally:
                 if held is not None and limiter is not None:
                     limiter.release(held)
-            reason = _infrastructure_reason(response)
             if reason is None:
                 self.pool.log(f"  final review provider: {adapter.name} ({self.pool.kind(adapter.name)})")
                 self.pool.record_use(self.store, REVIEW, self.task_id, adapter.name, "ANSWERED")

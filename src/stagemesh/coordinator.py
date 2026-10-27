@@ -411,10 +411,18 @@ class Coordinator:
                         "finding_ids": [item["finding_id"] for item in pending.findings],
                     })
                     return self._remediate_or_block(task_id, sha, Stage.REVIEW)
-                self.reviewer.review(self.store, task_id, sha, self.project)
+                review_status = self.reviewer.review(self.store, task_id, sha, self.project)
                 if not self._workspace_intact(task_id, sha, "REVIEW:after_review", require=(EvidenceKind.VALIDATION,)):
                     return 1
                 reconcile_withdrawals(self.store, task_id, sha, bound.digest)
+                if (self.adverse_policy is not None and getattr(self.reviewer, "separate_roles", False) and review_status == EvidenceStatus.PASSED
+                        and not self._review_satisfied(task_id, sha, bound.digest)
+                        and not self.store.has_bound_evidence(task_id, sha, EvidenceKind.REVIEW, bound.digest, EvidenceStatus.FAILED)):
+                    current = [p for p in self.store.bound_evidence_payloads(task_id, sha, EvidenceKind.REVIEW, bound.digest)
+                               if p.get("adverse_policy_digest") == self.adverse_policy.digest()]
+                    if any(p.get("review_role") == "normal" for p in current) and not any(p.get("review_role") == "adverse" for p in current):
+                        record_task_owner_state(self.store, task_id, "normal_review_completed_adverse_pending", self.project)
+                        return 1  # normal completion is progress; the next budget-checked tick earns adverse review
             if self._review_satisfied(task_id, sha, bound.digest):
                 return self._advance_with_evidence(task_id, stage, sha, EvidenceKind.REVIEW, bound.digest)
             if self.store.has_bound_evidence(task_id, sha, EvidenceKind.REVIEW, bound.digest, EvidenceStatus.FAILED):
@@ -430,12 +438,22 @@ class Coordinator:
                     except (TypeError, ValueError):
                         cap_payload = {}
                     failure_reason = cap_payload.get("review_infrastructure_failure") or "review_infrastructure_failure"
+                    if failure_reason == "budget_exhausted":
+                        record_block(
+                            self.store, task_id, BlockKind.RECOVERABLE_OPERATIONAL,
+                            str(cap_payload.get("review_budget_reason") or "review provider budget exhausted"),
+                            stage=str(stage), candidate_sha=sha, runtime=runtime_fingerprint(self.project),
+                            detail={"failure_code": "budget_exhausted"},
+                        )
+                        return 1
                     if failure_reason in {
                         "authentication_failure",
                         "quota_exceeded",
                         "quota_rate_limit",
                         "provider_unavailable",
                         "independent_review_unavailable",
+                        "review_role_identity_unavailable",
+                        "implementation_identity_unavailable",
                         "provider_timeout",
                     }:
                         providers_text = ""
@@ -670,6 +688,8 @@ class Coordinator:
         return self.store.get_task(task_id)["status"] == TaskStatus.BLOCKED
 
     def _review_satisfied(self, task_id: str, sha: str, contract_hash: str) -> bool:
+        if self.adverse_policy is not None:
+            return adverse_gate(self.store, task_id, sha, contract_hash, self.adverse_policy).allowed
         if unresolved_adverse_review_findings(self.store, task_id, sha):
             return False  # a PASS from another reviewer never erases an unresolved adverse finding on the same candidate
         for payload in self.store.bound_evidence_payloads(task_id, sha, EvidenceKind.REVIEW, contract_hash):

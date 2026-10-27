@@ -562,6 +562,7 @@ def _build_coordinator(
                 require_independent=require_independent_review,
                 review_pool=pool,
                 adverse_policy=config.adverse_review,
+                separate_roles=require_independent_review,
             )
             ordered_reviewers = [a.name for a in pool.order(store, REVIEW, review_eligible)[0]]
             chosen_review_provider = "dynamic-pool:" + ",".join(ordered_reviewers)
