@@ -157,7 +157,7 @@ def begin_child_cleanup(project: Path, identity: ProcessIdentity) -> None:
         payload = asdict(identity)
     if not isinstance(payload, dict):
         payload = asdict(identity)
-    _save_owner_record(cleanup_pending_path(project), payload)
+    _save_driver_record(cleanup_pending_path(project), payload)
 
 
 def finish_child_cleanup(project: Path) -> None:
@@ -171,10 +171,10 @@ def save_child_owner(project: Path, identity: ProcessIdentity, child: ProcessIde
     payload = asdict(identity)
     if child is not None:
         payload["child"] = asdict(child)
-    return _save_owner_record(child_owner_path(project), payload)
+    return _save_driver_record(child_owner_path(project), payload)
 
 
-def _save_owner_record(path: Path, payload: dict[str, Any]) -> Path:
+def _save_driver_record(path: Path, payload: dict[str, Any]) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     temporary = Path(temporary_name)
@@ -298,15 +298,7 @@ def release_orphaned_child(project: Path) -> bool:
 def save_config(project: Path, config: DriverConfig) -> Path:
     project = Path(project).resolve()
     config.validate(project)
-    path = config_path(project)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(".json.tmp")
-    temporary.write_text(
-        json.dumps({"schema_version": SCHEMA_VERSION, **asdict(config)}, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-    temporary.replace(path)
-    return path
+    return _save_driver_record(config_path(project), {"schema_version": SCHEMA_VERSION, **asdict(config)})
 
 
 def load_config(project: Path) -> DriverConfig:

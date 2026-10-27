@@ -37,3 +37,37 @@ def test_control_change_before_dispatch_prevents_new_window(tmp_path: Path, monk
         assert not driver.child_owner_path(tmp_path).exists()
     finally:
         store.close()
+
+
+def test_concurrent_control_publications_do_not_share_a_temporary_file(tmp_path: Path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier, Event
+
+    path = driver.config_path(tmp_path)
+    replace = Path.replace
+    publishers = Barrier(2)
+    first_renamed = Event()
+    publications = []
+
+    def replace_together(temporary, target):
+        if Path(target).name == path.name:
+            first = not publications
+            publications.append(temporary)
+            publishers.wait(timeout=10)
+            if first:
+                try:
+                    return replace(temporary, target)
+                finally:
+                    first_renamed.set()
+            assert first_renamed.wait(timeout=10)
+        return replace(temporary, target)
+
+    monkeypatch.setattr(Path, "replace", replace_together)
+    configs = [driver.DriverConfig(project=str(tmp_path), state=state) for state in ("paused", "stopped")]
+    with ThreadPoolExecutor(max_workers=2) as workers:
+        results = [workers.submit(driver.save_config, tmp_path, config) for config in configs]
+        for result in results:
+            assert result.result(timeout=15) == path
+    assert driver.load_config(tmp_path) in configs
+    assert len(publications) == 2
+    assert not list(path.parent.glob("*.tmp"))
