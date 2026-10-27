@@ -165,3 +165,5 @@ restarts, and are checked only **between** stages and waves; reaching one is a s
 Build the versioned wheel from the reviewed commit, keep the previous wheel as the verified rollback, and install only when every
 StageMesh execution, claim and window is idle (see `project-local-runtime.md`). Verify installed files against the exact reviewed
 wheel. If a prior repair is already in the shared runtime, reconcile instead of overwriting.
+
+Source synchronization publishes task eligibility only after dependency and retirement updates finish. A task shown as `source synchronization incomplete` cannot be admitted or claimed, including by a worker holding an earlier scheduling decision. An interrupted import keeps that task unavailable until an authoritative retry reconciles it; an empty scan or an unrelated source does not release it. Source writers for the same database serialize their publication phases. This protects partial imports; it does not establish freshness of remote snapshots fetched before the synchronization lock.

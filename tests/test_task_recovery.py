@@ -385,7 +385,9 @@ def stale_worktree_task(tmp_path: Path):
 
 def test_advance_baseline_refuses_active_claim_running_execution_and_integration(tmp_path: Path) -> None:
     project, store, old_base, _, _, _ = stale_worktree_task(tmp_path)
+    assert store.unblock_task(TASK)  # simulate a valid active owner; BLOCKED tasks cannot acquire fresh claims
     claim = store.acquire_claim(TASK, "w1")
+    assert claim is not None
     with pytest.raises(RecoveryRefusal) as claimed:
         advance_baseline(store, project, TASK, yes=True)
     assert claimed.value.code == "active_claim"
