@@ -5,6 +5,7 @@ from __future__ import annotations
 import threading
 
 import pytest
+from stabilization_support import _brief_text
 from test_run_window import window
 from test_survivor_wave import Rig, make_store
 
@@ -60,7 +61,10 @@ def test_verification_releases_coding_capacity_before_the_slow_builder_finishes(
     hooks.run_task = step
     report = run_wave(store, ["1", "2", "3", "4"], hooks, concurrency=2,
                       verification_concurrency=1, max_steps=4, project=project)
-    assert report.ok and all(t.outcome == "done" for t in report.tasks)
+    assert report.ok and all(t.outcome == "done" for t in report.tasks), {
+        "task_count": len(report.tasks),
+        "task_outcomes": [(t.task_id, t.outcome, t.stop_reason, _brief_text(t.reason)) for t in report.tasks[:10]],
+    }
     assert peaks == {"coding": 2, "verification": 1}
     assert set(budgets) == {1}
     assert report.capacity["peak_coding"] == 2
