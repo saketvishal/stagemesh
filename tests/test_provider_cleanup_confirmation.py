@@ -67,9 +67,12 @@ def test_unconfirmed_timeout_retains_durable_implementation_ownership(tmp_path, 
 
     project, store = _setup(tmp_path)
     real_kill = execution.kill_process_tree
+    started, confirmations = [], []
 
     def unconfirmed(process):
-        real_kill(process)  # stop the actual disposable tree, then inject lost confirmation
+        started.append(process)
+        confirmations.append(real_kill(process))
+        process.wait(timeout=5)
         return False
 
     monkeypatch.setattr(execution, "kill_process_tree", unconfirmed)
@@ -80,6 +83,7 @@ def test_unconfirmed_timeout_retains_durable_implementation_ownership(tmp_path, 
         with pytest.raises(OperatorStopRequested) as caught:
             Coordinator(store, project, executor=executor, target=TargetSelection(TASK)).tick()
         assert not caught.value.cleanup_complete
+        assert confirmations == [True]  # the tree really stopped; only the reported proof was lost
         retained = list(store.running_executions())
         assert len(retained) == 1
         assert retained[0]["result"] == "cleanup_incomplete"
@@ -87,4 +91,10 @@ def test_unconfirmed_timeout_retains_durable_implementation_ownership(tmp_path, 
         assert store.has_active_claim(TASK)
         assert store.latest_candidate(TASK) is None
     finally:
-        store.close()
+        try:
+            for process in started:
+                if process.poll() is None:
+                    real_kill(process)
+                process.communicate(timeout=5)
+        finally:
+            store.close()
