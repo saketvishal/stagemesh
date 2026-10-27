@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .audit import record_audit
+from .concurrency import IntegrationLock
 from .config import StageMeshConfig
 from .domain import TaskStatus
 from .github import GitHubClient, GitHubResult, parse_retry_after
@@ -355,8 +356,18 @@ def _description(item: dict[str, object]) -> str:
 
 
 def sync_source(store: Store, tasks: list[DiscoveredTask], *, preserve_existing_dependencies: bool = False) -> list[str]:
-    """Reconcile declarations; background discovery may add dependencies without removing previously registered prerequisites."""
+    """Publish source eligibility only after its dependency/retirement updates are complete."""
+    if str(store.db_path) == ":memory:":  # a private SQLite connection cannot share a cross-process file lock
+        return _sync_source(store, tasks, preserve_existing_dependencies=preserve_existing_dependencies)
+    database = store.db_path.resolve()
+    lock = IntegrationLock(database.with_name(database.name + ".source-sync.lock"), timeout_seconds=30)
+    with lock.hold("source-sync"):
+        return _sync_source(store, tasks, preserve_existing_dependencies=preserve_existing_dependencies)
+
+
+def _sync_source(store: Store, tasks: list[DiscoveredTask], *, preserve_existing_dependencies: bool) -> list[str]:
     ids: list[str] = []
+    publications: list[tuple[str, str, dict[str, object], str]] = []
     dependency_tasks: list[tuple[str, set[str]]] = []
     # Only durable tasks can carry scheduler dependency edges. Cached issues alone (including CLOSED issues) are not completion proof.
     known_github_ids = {
@@ -414,9 +425,6 @@ def sync_source(store: Store, tasks: list[DiscoveredTask], *, preserve_existing_
             and not historical_objective
             and retirement_reason is not None
         )
-        if materialize_blocked_github_task:
-            task_id = store.upsert_task(task.title, task.source, task.source_id)
-            dependency_tasks.append((task_id, set(task.dependencies)))
         if retirement_reason is not None and is_github:
             cached["retirement_reason"] = retirement_reason
         if task.labels or is_github:
@@ -428,7 +436,14 @@ def sync_source(store: Store, tasks: list[DiscoveredTask], *, preserve_existing_
             cached["objective"] = task.body[:6000]
         if task.dependencies:
             cached["dependencies"] = list(task.dependencies)
+        publications.append((task.source, task.source_id, dict(cached), state))
+        # Every Store helper can commit independently. Fence readers BEFORE materialization/restoration, and leave
+        # the fence durable on failure. Only processed rows are published after the complete dependency phase.
+        cached["admission_pending"] = True
         store.cache_source(task.source, task.source_id, cached, state)
+        if materialize_blocked_github_task:
+            task_id = store.upsert_task(task.title, task.source, task.source_id)
+            dependency_tasks.append((task_id, set(task.dependencies)))
         if retirement_reason is not None and is_github:
             store.retire_source_task(
                 task.source,
@@ -466,6 +481,8 @@ def sync_source(store: Store, tasks: list[DiscoveredTask], *, preserve_existing_
         for dependency in declared_deps:
             if store.get_task(dependency) is not None:
                 store.add_dependency(task_id, dependency)
+    for source, source_id, published, state in publications:
+        store.cache_source(source, source_id, published, state)
     return ids
 
 

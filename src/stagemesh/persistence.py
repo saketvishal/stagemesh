@@ -297,6 +297,18 @@ class Store:
             return None
         now = time.time()
         with self.conn:
+            # Acquire SQLite's writer lock before the source fence check, without changing claim ownership. A stale
+            # Scheduler decision cannot race a committed pending marker into expired-claim cleanup or admission.
+            self.conn.execute("UPDATE tasks SET updated_at=updated_at WHERE id=?", (task_id,))
+            task = self.get_task(task_id)
+            if not task or task["status"] == TaskStatus.DONE or task["stage"] == Stage.DONE:
+                return None
+            # Import at execution time: Scheduler depends on Store. Reuse its complete policy under this writer
+            # lock so a pre-sync decision cannot claim newly blocked/objective/dependency-constrained work afterward.
+            from .scheduling import Scheduler
+
+            if not Scheduler(self).decision(task_id).eligible:
+                return None
             self.conn.execute(
                 "UPDATE claims SET active=0 WHERE task_id=? AND active=1 AND lease_expires_at < ?",
                 (task_id, now),
@@ -1037,6 +1049,10 @@ class Store:
             (source, source_id, json.dumps(state, sort_keys=True), status, retry_after, time.time()),
         )
         self.conn.commit()
+
+    def source_admission_pending(self, source: str, source_id: str | None) -> bool:
+        # Presence is fail-closed, including malformed/falsey marker values; successful publication removes it.
+        return source_id is not None and "admission_pending" in self.source_state(source, source_id)
 
     def source_state(self, source: str, source_id: str) -> dict[str, Any]:
         source = _validate_text(source, "source")
