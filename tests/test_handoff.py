@@ -488,3 +488,22 @@ def test_unconfirmed_validation_handoff_is_not_hidden_by_an_unrelated_dead_paren
     assert doc["next_action"]["command"] is None and "validation tree" in doc["next_action"]["reason"]
     assert snapshot(project, store) == before
     store.close()
+
+
+@pytest.mark.parametrize("parent_state", ["DEAD", "UNKNOWN"])
+def test_handoff_inspection_advice_uses_full_ownership_count_beyond_row_limit(tmp_path: Path, monkeypatch, parent_state):
+    project, store = _setup(tmp_path)
+    for _ in range(MAX_ROWS):
+        store.start_execution(task_id=TASK, claim_id=None, kind=ExecutionKind.REVIEW)
+    held = store.start_execution(task_id=TASK, claim_id=None, kind=ExecutionKind.VALIDATION)
+    monkeypatch.setattr("stagemesh.handoff.classify_process", lambda *_: parent_state)
+    monkeypatch.setattr("stagemesh.observability.classify_process", lambda *_: parent_state)
+    before = snapshot(project, store)
+    doc = build_handoff(project)
+    assert len(doc["active_executions"]) == MAX_ROWS
+    assert held not in {row["id"] for row in doc["active_executions"]}
+    assert doc["queue_control"]["health"]["unresolved_validation_trees"] == 1
+    assert doc["next_action"]["command"] is None
+    assert "validation tree" in doc["next_action"]["reason"] and "inspect" in doc["next_action"]["reason"]
+    assert snapshot(project, store) == before
+    store.close()

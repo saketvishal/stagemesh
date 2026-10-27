@@ -438,7 +438,7 @@ def _next_action(tasks: list[dict[str, Any]], queue: dict[str, Any], active: lis
     def action(command: str | None, reason: str) -> dict[str, Any]:
         return {"command": command, "reason": reason, "advisory": True}
 
-    if any(e.get("cleanup_state") == "UNCONFIRMED_VALIDATION_TREE" and e["process_state"] != "LIVE" for e in active):
+    if queue.get("health", {}).get("unresolved_validation_trees", 0) or any(e.get("cleanup_state") == "UNCONFIRMED_VALIDATION_TREE" and e["process_state"] != "LIVE" for e in active):
         return action(None, "an unfinished validation tree requires inspection of surviving processes and retained work; only after inspection use recover-stale --release-unknown with the exact --execution and a reason")
     dead = [e for e in active if e["process_state"] == "DEAD"]
     if dead:
