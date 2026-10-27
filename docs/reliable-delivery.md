@@ -50,7 +50,9 @@ Before a provider runs, `allowed_files` is reconciled with discoverable mandator
 
 1. `.stagemesh/policy/required-changes.json` (project owned, authoritative):
    `{"version":1,"requirements":[{"id","kind","description","paths":["docs/design/**"],"applies_to":["src/**"],"waived":false}]}`
-2. The contract's own objective, acceptance criteria, invariants and cited `spec_refs` ("... must update `docs/x.md`").
+2. The contract's own objective, acceptance criteria and invariants ("... must update `docs/x.md`"). Cited `spec_refs` remain
+   governing validation context, but path-changing prose discovered inside them is advisory because citing an authority does not mean
+   the task must edit every repository path mentioned anywhere in that specification.
 3. Unconditional "must/required ... update/add/record ... `path`" sentences in `AGENTS.md` and `CONTRIBUTING.md`, where the token is a
    plausible repository path (known extension, or a directory that exists) and the sentence has a documentation/record cue or the file
    exists. Conditional, negated and speculative (possible runtime output) sentences are advisory only. Documents are read only from
@@ -61,6 +63,13 @@ audited `rebind-contract` by the contract owner, a narrowly scoped prerequisite 
 owner-recorded exception (`"waived": true`). A prose-derived requirement that is a false positive is dismissed by listing its id or
 source (for example `"ignore": ["AGENTS.md:12"]`) in the same file. Nothing is widened, relocated or created automatically. `contract-check` reports the
 same conflicts.
+
+GitHub dependency validation uses both the current source scan and the durable StageMesh ledger. A ready issue may depend on a closed
+or otherwise filtered issue with a durable StageMesh task; it is not rejected as an unknown dependency merely because that prerequisite
+is absent from the current open-issue response. A cached issue without a task does not establish a dependency or prove completion;
+the child stays blocked as an unknown dependency. The same rule applies to objective roots and closed issues discovered in the current
+scan without task rows. Forward references to tasks materialized by the scan remain supported. The scheduler still requires the
+recorded prerequisite task to be complete.
 
 ## Independent review
 
