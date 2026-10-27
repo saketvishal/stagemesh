@@ -317,8 +317,7 @@ When an execution-aware caller supplies attempted actions for an exact failure s
 
 ## Coordinator dispatch before execution publication
 
-For persistent stores, Coordinator stages acquire a nonblocking native lock for the canonical Store
-database path and task ID before re-reading task state, current Scheduler eligibility, ownership and contract
+For persistent stores, Coordinator stages acquire a nonblocking native lock for the connected SQLite `main` database filename and task ID before re-reading task state, current Scheduler eligibility, ownership and contract
 gates. The lock spans the stage and its state publication, so two processes or
 threads cannot both pass an empty-owner check and dispatch the same stage.
 Different database/task keys remain independent. A busy or unavailable lock
@@ -346,3 +345,9 @@ Public continue/drive results distinguish `stage_dispatch_unavailable` and
 `stage_dispatch_ineligible` from `active_execution`. A lock failure or stale
 selection is not evidence that an execution exists. Mixed refusals retain each
 task reason without claiming that every refusal represents process ownership.
+
+The lock namespace comes from the open SQLite connection's `main` filename.
+Changing the working directory after opening a relative Store path cannot select
+another lock. Only a verified empty `main` filename takes memory behavior;
+missing, malformed or failed identity lookup refuses dispatch, never silently
+becomes an unlocked memory operation.

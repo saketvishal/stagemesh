@@ -2,9 +2,27 @@
 from __future__ import annotations
 
 import hashlib
+import sqlite3
 from pathlib import Path
 
 from .concurrency import IntegrationLock
+
+
+def connected_dispatch_database(connection: sqlite3.Connection) -> Path | None:
+    """Use the connected main database, not a relative/mutable constructor path."""
+    try:
+        rows = connection.execute("PRAGMA database_list").fetchall()
+        main = [row[2] for row in rows if row[1] == "main"]
+    except (sqlite3.Error, IndexError, KeyError, TypeError, ValueError) as exc:
+        raise OSError("cannot establish stage dispatch database identity") from exc
+    if len(main) != 1 or not isinstance(main[0], str) or "\0" in main[0]:
+        raise OSError("cannot establish stage dispatch database identity")
+    if main[0] == "":
+        return None  # verified connection-local memory in the supported Store API
+    database = Path(main[0])
+    if not database.is_absolute():
+        raise OSError("cannot establish stage dispatch database identity")
+    return database
 
 
 def stage_dispatch_lock(database: Path, task_id: str) -> IntegrationLock:

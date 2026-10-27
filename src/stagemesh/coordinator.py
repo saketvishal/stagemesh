@@ -81,7 +81,7 @@ from .review_disposition import (
     unresolved_adverse_review_findings,
 )
 from .scheduling import Scheduler
-from .stage_dispatch import stage_dispatch_lock
+from .stage_dispatch import connected_dispatch_database, stage_dispatch_lock
 from .task_completion import record_task_owner_state
 from .task_selection import contract_state
 from .validation import Validator
@@ -232,8 +232,9 @@ class Coordinator:
         entered = False
         try:
             admission = nullcontext()
-            if str(self.store.db_path) != ":memory:":
-                admission = stage_dispatch_lock(self.store.db_path, task_id).hold(f"stage:{task_id}")
+            database = connected_dispatch_database(self.store.conn)
+            if database is not None:
+                admission = stage_dispatch_lock(database, task_id).hold(f"stage:{task_id}")
             with admission:
                 entered = True
                 return self._advance_task_owned(task_id)
