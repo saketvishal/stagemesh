@@ -1,5 +1,21 @@
 # Operator flow: recovering and running the backlog
 
+## Inspect current work without opening the ledger
+
+Use `stagemesh operator` for text, `stagemesh operator --json` for structured output, or
+`stagemesh dashboard --output dashboard.html` for the same report in a static page. Existing task, worker, queue and evidence
+fields remain available. These reports do not retry work, change task state or grant permission.
+
+Attention marks current failed tasks as `ACTION`; superseded failures and failures on DONE tasks remain `INFO` history.
+`failed_executions` retains its lifetime meaning. Recent Failures shows the latest ten failed executions with task, candidate,
+provider, reason and current/history scope. Recent Efficiency And Usage samples at most 100 records of each type: provider attempts,
+purpose, duration, validation checks run/reused, validation time and provider-reported usage. These samples are not lifetime totals,
+CPU utilization or a measured coding-throughput rate. Missing token receipts remain unknown; billing cost remains `UNKNOWN`.
+
+Recorded Pending Decisions lists current typed human-decision blocks and candidate-bound external delivery-permission blocks found
+in the latest 100 relevant events. Cleared or obsolete-candidate records are excluded. Approval coverage remains `UNKNOWN`: an absent
+record proves neither permission nor zero pending approvals. Only existing durable blockers are shown; this view creates no approval.
+
 The normal loop has four steps. Do not hand-run individual stages (`continue --task`, `advance-baseline`, `rebaseline-task`, manual
 PRs) unless `survivor-wave` reports a task as blocked and needs a decision.
 

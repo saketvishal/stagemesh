@@ -217,3 +217,32 @@ def test_driver_authentication_is_bound_to_effective_implementation_and_review_c
     assert _real_provider_auth_blockers(tmp_path) == []
     assert seen["executables"] == {"claude": ("C:/coding/claude.exe", "C:/review/claude.exe")}
     assert seen["require_installed"] is True
+
+
+def test_driver_authentication_includes_the_distinct_research_executable(tmp_path, monkeypatch):
+    from stagemesh.cli import _real_provider_auth_blockers
+
+    config_dir = tmp_path / ".stagemesh"
+    config_dir.mkdir()
+    config_path = config_dir / "config.json"
+    config = {
+        "authorization": {"unattended_providers": ["claude"]},
+        "providers": {"claude": "C:/coding/claude.exe -p"},
+        "research": {"provider": "claude", "command": "C:/research/claude.exe -p"},
+    }
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    monkeypatch.setenv("STAGEMESH_UNATTENDED", "1")
+    monkeypatch.setattr("stagemesh.providers.resolve_executable", lambda *args: None)
+    monkeypatch.setattr("stagemesh.providers.shutil.which", lambda name: name if ":/" in name else None)
+    seen = {}
+
+    def check(names, **kwargs):
+        seen.update(kwargs)
+        return {"ok": True, "blockers": []}
+
+    monkeypatch.setattr(provider_auth, "check", check)
+    assert _real_provider_auth_blockers(tmp_path) == []
+    assert seen["executables"]["claude"] == ("C:/coding/claude.exe", "C:/research/claude.exe")
+    config["research"] = {"provider": "grok", "command": "C:/research/grok.exe"}
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    assert any("research provider grok" in blocker for blocker in _real_provider_auth_blockers(tmp_path))

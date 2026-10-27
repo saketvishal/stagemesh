@@ -138,11 +138,15 @@ def pr_url_repository(url: str | None) -> str | None:
     return None if match is None else f"{match.group(1)}/{match.group(2)}".casefold()
 
 
-def record_publication(store: Store, task_id: str, pr_url: str, head_sha: str, base: str, *, repository: str | None = None) -> None:
+def record_publication(
+    store: Store, task_id: str, pr_url: str, head_sha: str, base: str, *, repository: str | None = None,
+    task_candidate_sha: str | None = None,
+) -> None:
     """Record the PR's identity and the exact head it was opened for (and the repository, when known)."""
     repository = repository or pr_url_repository(pr_url)
     record_audit(store, PR_PUBLISHED, {
-        "task_id": task_id, "pr_url": pr_url, "candidate_sha": head_sha, "base": base, "repository": repository,
+        "task_id": task_id, "pr_url": pr_url, "candidate_sha": task_candidate_sha or head_sha,
+        "head_sha": head_sha, "base": base, "repository": repository,
     })
 
 
@@ -181,6 +185,7 @@ def task_delivery(store: Store, task_id: str, repository: str | None = None) -> 
         if url_repository is not None and url_repository != repository.casefold():
             published = None
     pr_url = None if published is None else str(published.get("pr_url"))
+    published_head = sha if published is None else str(published.get("head_sha") or published.get("candidate_sha"))
     blocked = externally_blocked(store, task_id)
     if blocked is not None and not _merged(store, task_id, sha):
         return Delivery("EXTERNALLY_BLOCKED", False, f"needs {blocked.get('needed')}: {blocked.get('reason')}", pr_url, sha)
@@ -189,8 +194,10 @@ def task_delivery(store: Store, task_id: str, repository: str | None = None) -> 
     if published is not None:
         status = _latest(store, LANDING_STATUS, task_id, sha, repository)
         if status is not None and status.get("state") in {"waiting", "refresh required", "blocked"}:
-            return Delivery("AWAITING_CHECKS", False, f"{status.get('state')}: {str(status.get('reason'))[:160]}", pr_url, sha)
-        return Delivery("PUBLISHED", False, "PR open for the exact integrated head; not merged", pr_url, sha)
+            return Delivery("AWAITING_CHECKS", False, f"{status.get('state')}: {str(status.get('reason'))[:160]}", pr_url, published_head)
+        detail = ("PR open for the reviewed batch head containing this candidate; not merged"
+                  if published.get("head_sha", sha) != sha else "PR open for the exact integrated head; not merged")
+        return Delivery("PUBLISHED", False, detail, pr_url, published_head)
     if not done:
         pending = _latest(store, PENDING, task_id, sha)
         if pending is not None:

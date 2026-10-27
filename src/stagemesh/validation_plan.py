@@ -60,6 +60,7 @@ _CORE_PATTERNS = (
     "src/stagemesh/security.py",
     "src/stagemesh/validation.py",
     "src/stagemesh/validation_plan.py",
+    "src/stagemesh/review.py",  # Independent review and candidate-bound evidence.
     "scripts/invariants.py",
     "migrations/**",
     "**/schema/**",

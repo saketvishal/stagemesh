@@ -2,12 +2,26 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
 from .persistence import Store
 from .task_completion import task_owner_state
+
+
+def bounded_failure_text(value: object, limit: int = 2500, secrets: tuple[str, ...] = ()) -> str:
+    """Redact complete diagnostics before taking a bounded tail for persistence or prompts."""
+    from .redaction import SECRET_MARKERS, redact_text
+
+    known = [v for k, v in os.environ.items() if any(m in k.lower() for m in SECRET_MARKERS)]
+    text = redact_text(str(value or ""), sorted((*known, *secrets), key=len, reverse=True))
+    text = re.sub(r"(?i)(bearer\s+)\S+|((?:token|secret|password|passwd|api[_-]?key|authorization)[\"']?\s*[=:]\s*[\"']?)[^\s\"',;]+",
+                  lambda m: (m.group(1) or m.group(2) or "") + "[redacted]", text)
+    text = re.sub(r"(?i)(https?://)[^/\s@]+@", r"\1[redacted]@", text)
+    return text[-limit:]
 
 
 class RemediationValidationError(ValueError):
@@ -65,6 +79,23 @@ def recorded_findings(store: Store, task_id: str, candidate_sha: str) -> list[di
     ]
 
 
+def findings_to_verify(store: Store, task_id: str, candidate_sha: str) -> list[dict[str, object]]:
+    """Concrete findings of the candidate being remediated that a review of `candidate_sha` must show resolved."""
+    latest = store.latest_task_remediation(task_id)
+    if latest is None or str(latest["candidate_sha"]) == candidate_sha:
+        return []
+    return [
+        {"id": r["id"], "severity": r["severity"], "message": r["message"]}
+        for r in store.open_findings_for_candidate(task_id, str(latest["candidate_sha"]))
+    ]
+
+
+def unresolved_findings(store: Store, task_id: str, candidate_sha: str) -> list[dict[str, object]]:
+    """Findings handed to remediation that the new candidate's own review raised again (same message, still OPEN)."""
+    current = {str(r["message"]) for r in store.open_findings_for_candidate(task_id, candidate_sha)}
+    return [f for f in findings_to_verify(store, task_id, candidate_sha) if f["message"] in current]
+
+
 def latest_candidate_findings(store: Store, task_id: str, open_only: bool = True) -> list[dict[str, object]]:
     candidate = store.latest_candidate(task_id)
     if candidate is None:
@@ -79,15 +110,53 @@ def remediation_context(store: Store, task_id: str, project: Path | None = None)
     if latest is None:
         return None
     findings = store.open_findings_for_candidate(task_id, str(latest["candidate_sha"]))
+    raw_findings = [{"id": row["id"], "severity": row["severity"], "message": row["message"]} for row in findings]
+    evidence_row = store.conn.execute(
+        "SELECT payload FROM evidence WHERE task_id=? AND candidate_sha=? AND status='FAILED' "
+        "ORDER BY created_at DESC, rowid DESC LIMIT 1",
+        (task_id, str(latest["candidate_sha"])),
+    ).fetchone()
+    failed_gates: list[dict[str, object]] = []
+    if evidence_row is not None:
+        import json
+        try:
+            ev_payload = json.loads(evidence_row["payload"])
+        except (TypeError, ValueError):
+            ev_payload = {}
+        ev_findings = {f.get("message"): f for f in ev_payload.get("findings", []) if isinstance(f, dict)}
+        for item in raw_findings:
+            msg = item.get("message")
+            if msg in ev_findings:
+                ev_f = ev_findings[msg]
+                for k in ("stdout", "stderr", "failure_kind", "code", "path"):
+                    if ev_f.get(k):
+                        item[k] = bounded_failure_text(ev_f[k])
+        gates = ev_payload.get("gates", [])
+        if isinstance(gates, list):
+            for g in gates:
+                if isinstance(g, dict) and g.get("status") not in (None, "PASSED"):
+                    failed_gates.append(
+                        {
+                            "name": g.get("name"),
+                            "returncode": g.get("returncode"),
+                            "command": [bounded_failure_text(p, 500) for p in g.get("command", [])],
+                            "duration_seconds": g.get("duration_seconds"),
+                            "failure_kind": g.get("failure_kind"),
+                            "stderr": bounded_failure_text(g.get("stderr_tail") or g.get("stderr"), 1500),
+                            "stdout": bounded_failure_text(g.get("stdout_tail") or g.get("stdout")),
+                        }
+                    )
     context: dict[str, object] = {
         "stage": str(latest["stage"]),
         "candidate_sha": str(latest["candidate_sha"]),
-        "findings": [{"id": row["id"], "severity": row["severity"], "message": row["message"]} for row in findings],
+        "findings": raw_findings,
         "task_owner_state": task_owner_state(store, task_id, project),
     }
     failure_details = _latest_failure_details(store, task_id, str(latest["candidate_sha"]))
     if failure_details:
         context["failure_details"] = failure_details
+    if failed_gates:
+        context["failed_gates"] = failed_gates
     diagnosis = _latest_diagnosis(store, task_id, str(latest["candidate_sha"]))
     if diagnosis is not None:
         context["diagnosis"] = diagnosis
@@ -154,3 +223,34 @@ def _validate_optional_text(value: str | None, field: str, max_length: int = 200
     if value is None:
         return None
     return _validate_text(value, field, max_length)
+
+
+def tool_recovery_plan(
+    store: Store, task_id: str, evidence: dict[str, object], setup_actions: dict[str, list[str]] | None = None
+) -> dict[str, object]:
+    """Bounded recovery decision for new tool failure evidence, consuming this task's earlier evidence for the signature.
+
+    Each earlier occurrence of the same signature is treated as one spent recovery (retry first, then configured
+    setup), so a repeated signature reaches ``stop`` instead of looping. Other tasks' evidence is never consulted.
+    """
+    import json
+
+    from .diagnosis import TOOL_FAILURE_EVENT, plan_tool_recovery, tool_failure_signature
+
+    signature = tool_failure_signature(evidence)
+    attempted: list[str] = []
+    rows = store.audit_events(200)
+    for row in reversed(rows):
+        if row["event_type"] != TOOL_FAILURE_EVENT:
+            continue
+        try:
+            payload = json.loads(row["payload"])
+        except (TypeError, ValueError):
+            continue
+        prior = payload.get("evidence") if isinstance(payload, dict) else None
+        if payload.get("task_id") != task_id or not isinstance(prior, dict) or tool_failure_signature(prior) != signature:
+            continue
+        recovery = prior.get("recovery")
+        taken = recovery.get("action") if isinstance(recovery, dict) else None
+        attempted.append({"retry_once": "retry", "setup": "setup"}.get(str(taken), "stop"))
+    return plan_tool_recovery(evidence, [a for a in attempted if a != "stop"], setup_actions)

@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -35,6 +36,32 @@ FAKE_CONTRACT = {
     "allowed_files": ["stagemesh-task-*.txt"],
     "required_tests": [{"name": "smoke", "command": [sys.executable, "-c", "pass"]}],
 }
+_BASE_REPO: Path | None = None
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _base_repo(tmp_path_factory: pytest.TempPathFactory):
+    """Build the identical synthetic base once; every test still gets a private copy."""
+    global _BASE_REPO
+    project = tmp_path_factory.mktemp("run-ready-base") / "repo"
+    project.mkdir()
+    git = GitWorkspace(project)
+    git.init_if_needed()
+    git.run("config", "user.email", "test@example.invalid")
+    git.run("config", "user.name", "StageMesh Test")
+    (project / "README.md").write_text("base\n", encoding="utf-8")
+    git.commit_all("base")
+    _BASE_REPO = project
+    try:
+        yield
+    finally:
+        _BASE_REPO = None
+
+
+@pytest.fixture(autouse=True)
+def _skip_irrelevant_github_detection(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These synthetic repos have no remote; GitHub discovery is tested separately."""
+    monkeypatch.setattr("stagemesh.config.detect_github_repository", lambda _project: None)
 
 
 def _project(
@@ -46,13 +73,19 @@ def _project(
     dependencies: dict[str, list[str]] | None = None,
 ) -> Path:
     project = tmp_path / "repo"
-    project.mkdir(parents=True)
+    if _BASE_REPO is None:
+        # Other test modules import this helper without activating this
+        # module's fixture, so retain the standalone construction path.
+        project.mkdir(parents=True)
+        git = GitWorkspace(project)
+        git.init_if_needed()
+        git.run("config", "user.email", "test@example.invalid")
+        git.run("config", "user.name", "StageMesh Test")
+        (project / "README.md").write_text("base\n", encoding="utf-8")
+        git.commit_all("base")
+    else:
+        shutil.copytree(_BASE_REPO, project)
     git = GitWorkspace(project)
-    git.init_if_needed()
-    git.run("config", "user.email", "test@example.invalid")
-    git.run("config", "user.name", "StageMesh Test")
-    (project / "README.md").write_text("base\n", encoding="utf-8")
-    git.commit_all("base")
     runtime = project / ".stagemesh"
     (runtime / "contracts").mkdir(parents=True)
     backlog = {
@@ -1019,6 +1052,40 @@ def test_continue_once_keeps_single_tick_behavior(tmp_path: Path) -> None:
     assert "stop_reason" not in result and result["progressed"] == 1  # legacy summary shape: exactly one tick
     assert result["targeted_task_id"] == "T-1"
     assert Store(project / ".stagemesh" / "stagemesh.sqlite3").get_task("T-1")["stage"] == "IMPLEMENT"
+
+
+def test_continue_once_returns_failure_when_adverse_gate_blocks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    project = _project(tmp_path, ["T-1"])
+
+    class BlockedCoordinator:
+        last_adverse_block = None
+
+        def tick(self) -> int:
+            self.last_adverse_block = ("missing required adverse review",)
+            return 1
+
+    coordinator = BlockedCoordinator()
+    monkeypatch.setattr(
+        cli_module,
+        "_build_coordinator",
+        lambda *args, **kwargs: (
+            coordinator,
+            {
+                "provider": "fake",
+                "review_provider": "claude",
+                "independent_review_configured": True,
+                "require_independent_review": True,
+                "integration_ref": "refs/heads/main",
+            },
+        ),
+    )
+
+    code, result = _continue(project, "--once", "--task", "T-1")
+
+    assert code == 1
+    assert result["stop_reason"] == "BLOCKED"
+    assert result["progressed"] == 1
+    assert result["message"] == "adverse review gate refused integration: missing required adverse review"
 
 
 def test_refuses_contract_larger_than_the_store_limit(tmp_path: Path) -> None:

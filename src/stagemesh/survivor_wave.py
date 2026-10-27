@@ -19,6 +19,7 @@ the orchestration is tested with fakes.
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -142,6 +143,10 @@ class WaveReport:
     runtime: dict[str, Any] | None = None
     time_limit_reached: bool = False  # the deadline passed with tasks still unstarted: a clean stop, not a failure
     capacity: dict[str, Any] = field(default_factory=dict)
+    duplicate_runs_avoided: int = 0
+    ci_wait_seconds: float = 0.0
+    batch_results: list[dict[str, Any]] = field(default_factory=list)
+    ci_mode: str = "immediate"
 
     @property
     def main_moved(self) -> bool:
@@ -191,6 +196,10 @@ class WaveReport:
             "runtime": self.runtime,
             "time_limit_reached": self.time_limit_reached,
             "capacity": self.capacity,
+            "duplicate_runs_avoided": self.duplicate_runs_avoided,
+            "ci_wait_seconds": self.ci_wait_seconds,
+            "batch_results": self.batch_results,
+            "ci_mode": self.ci_mode,
             "tasks": [task.to_dict() for task in self.tasks],
         }
 
@@ -428,6 +437,8 @@ def run_wave(
     verification_concurrency: int | None = None,
     admit_tasks: Callable[[], list[str]] | None = None,
     admission_problem: Callable[[], str | None] | None = None,
+    ci_mode: str = "immediate",
+    batch_ci: bool = False,
 ) -> WaveReport:
     """Dispatch bounded task runs; windows may reserve separate verification capacity.
 
@@ -441,12 +452,18 @@ def run_wave(
         raise ValueError("verification_concurrency must be at least 1")
     staged = verification_concurrency is not None
     local = integration_mode == INTEGRATION_LOCAL
+    if ci_mode == "batch" or batch_ci:
+        batch_ci = True
+        effective_ci_mode = "batch"
+    else:
+        effective_ci_mode = "immediate"
     report = WaveReport(
         started_at=clock(),
         orphan_events_before=orphan_event_count(store),
         integration_mode=integration_mode,
         staging_ref=None if local else staging_ref,
         repo_before=_safe_state(hooks),
+        ci_mode=effective_ci_mode,
     )
     report.orphan_events_after = report.orphan_events_before
     main_before = hooks.main_sha() if not local else None
@@ -567,8 +584,13 @@ def run_wave(
             stop = True
             report.stopped_early, report.stop_reason = True, reason
 
+    from .validation_slot import set_window_deadline
+
+    set_window_deadline(deadline)
     worker_limit = max(1, concurrency) + (verification_concurrency or 0)
-    with ThreadPoolExecutor(max_workers=worker_limit) as pool:
+    pool_cm = ThreadPoolExecutor(max_workers=worker_limit)
+    pool = pool_cm.__enter__()
+    try:
         while pending or running:
             if control.blocks_admission():
                 halt(f"queue admission {control.state_label()}")
@@ -616,6 +638,11 @@ def run_wave(
                         break
                 # Preparation can be slow and may move stale verification back
                 # to IMPLEMENT. Recheck both boundaries against the actual stage.
+                problem = admission_problem() if admission_problem is not None else None
+                if problem:
+                    pending.insert(0, task_id)
+                    halt(problem)
+                    break
                 if deadline is not None and clock() >= deadline:
                     pending.insert(0, task_id)
                     report.time_limit_reached = True
@@ -676,6 +703,9 @@ def run_wave(
                     owners.discard(task_id)
             discover()
             capacity_notice()
+    finally:
+        pool_cm.__exit__(None, None, None)
+        set_window_deadline(None)
     for task_id in pending:
         target = "next stage" if task_id in started_at else "this task started"
         why = f"time budget reached before {target}" if report.time_limit_reached else f"wave stopped before {target}"
@@ -689,56 +719,141 @@ def run_wave(
     for record in report.tasks:
         record.resumable = record.outcome in {"open", "stopped"}
     publication_records = report.tasks
-    if publish and ordered_publication:
+    if publish and (ordered_publication or batch_ci):
         try:
             publication_records = ordered_candidate_records([record for record in report.tasks if record.outcome == "done"], hooks.is_ancestor)
         except Exception as exc:
             halt(f"cannot verify publication order: {exc}")
-    for record in publication_records:
-        if record.outcome != "done":
-            continue
-        if local:
-            record.landing = "locally_integrated"
-        elif publish and deadline is not None and clock() >= deadline:
+    done_records = [record for record in publication_records if record.outcome == "done"]
+    if publish and batch_ci and len(done_records) > 1:
+        # Bounded batch integration: avoid pushing incomplete intermediate states that trigger redundant hosted CI.
+        combined = done_records[-1]
+        if deadline is not None and clock() >= deadline:
             report.time_limit_reached = True
-            record.landing = "staged_not_published"
-            _defer_pr_delivery(store, record, "window deadline reached before PR publication")
-        elif not publish or stop or control.blocks_admission():
-            record.landing = "staged_not_published"
-            if open_prs:
-                reason = report.stop_reason or ("queue admission " + control.state_label() if control.blocks_admission() else "PR opener unavailable")
-                _defer_pr_delivery(store, record, reason)
-                halt(reason)
+            for r in done_records:
+                r.landing = "staged_not_published"
+                _defer_pr_delivery(store, r, "window deadline reached before PR publication")
+        elif stop or control.blocks_admission():
+            reason = report.stop_reason or ("queue admission " + control.state_label() if control.blocks_admission() else "PR opener unavailable")
+            for r in done_records:
+                r.landing = "staged_not_published"
+                _defer_pr_delivery(store, r, reason)
+            halt(reason)
         else:
             try:
-                record.pr_url = hooks.open_pr(record)  # type: ignore[misc]
+                combined.pr_url = hooks.open_pr(combined)  # type: ignore[misc]
             except Exception as exc:  # noqa: BLE001 - retain verified work for a normal delivery retry
-                record.pr_error = f"{type(exc).__name__}: {exc}"
-                record.landing = "pr_failed"
-                reason = f"PR publication failed for task {record.task_id}: {record.pr_error}"
-                if is_permission_denial(record.pr_error):
+                combined.pr_error = f"{type(exc).__name__}: {exc}"
+                combined.landing = "pr_failed"
+                reason = f"PR publication failed for task {combined.task_id}: {combined.pr_error}"
+                if is_permission_denial(combined.pr_error):
                     # One blocker, recorded once; no alternative route (other branch, force, another credential) is tried.
                     first = record_external_block(
-                        store, record.task_id, record.integrated_candidate, record.pr_error,
+                        store, combined.task_id, combined.integrated_candidate, combined.pr_error,
                         "permission to push branches and open pull requests on this repository",
                     )
-                    record.landing = "externally_blocked"
+                    combined.landing = "externally_blocked"
                     reason = (
-                        f"delivery of task {record.task_id} needs permission to push branches and open pull requests: {record.pr_error}. "
+                        f"delivery of task {combined.task_id} needs permission to push branches and open pull requests: {combined.pr_error}. "
                         "The verified work is preserved; grant access, then `stagemesh delivery-unblock --task "
-                        f"{record.task_id}`." + ("" if first else " (already reported)")
+                        f"{combined.task_id}`." + ("" if first else " (already reported)")
                     )
-                _defer_pr_delivery(store, record, reason)
+                _defer_pr_delivery(store, combined, reason)
+                for earlier in done_records[:-1]:
+                    if is_permission_denial(combined.pr_error):
+                        record_external_block(store, earlier.task_id, earlier.integrated_candidate, combined.pr_error,
+                                              "permission to push branches and open pull requests on this repository")
+                        earlier.landing = "externally_blocked"
+                    else:
+                        earlier.landing = "staged_not_published"
+                    _defer_pr_delivery(store, earlier, reason)
                 halt(reason)
+            else:
+                combined.landing, combined.ready_for_merge = "pr_opened", True
+                try:
+                    combined.pr_state = hooks.pr_state(combined.pr_url) if deadline is None or clock() < deadline else None
+                except Exception:
+                    combined.pr_state = None
+                combined.pr_state = combined.pr_state or "OPEN"
+                for published in done_records:
+                    if published.integrated_candidate:
+                        record_publication(store, published.task_id, combined.pr_url, combined.integrated_candidate,
+                                           str(getattr(hooks.open_pr, "base", "") or ""), task_candidate_sha=published.integrated_candidate)
+                for r in done_records[:-1]:
+                    r.pr_url = combined.pr_url
+                    r.pr_state = combined.pr_state
+                    r.landing = "batched_intermediate"
+                    r.ready_for_merge = True
+
+                duplicate_runs = len(done_records) - 1
+                report.duplicate_runs_avoided += duplicate_runs
+                batch_entry = {
+                    "batch_id": f"batch-{int(report.started_at)}",
+                    "task_ids": [r.task_id for r in done_records],
+                    "combined_sha": combined.integrated_candidate,
+                    "intermediate_shas": [r.integrated_candidate for r in done_records[:-1]],
+                    "duplicate_runs_avoided": duplicate_runs,
+                    "status": "batched_published",
+                }
+                report.batch_results.append(batch_entry)
+                store.add_audit_event("batch.publication", batch_entry)
+    else:
+        for record in publication_records:
+            if record.outcome != "done":
                 continue
-            if record.integrated_candidate:
-                record_publication(store, record.task_id, record.pr_url, record.integrated_candidate, str(getattr(hooks.open_pr, "base", "") or ""))
-            record.landing, record.ready_for_merge = "pr_opened", True
-            try:
-                record.pr_state = hooks.pr_state(record.pr_url) if deadline is None or clock() < deadline else None
-            except Exception:  # noqa: BLE001 - the PR exists; only its state is unknown
-                record.pr_state = None
-            record.pr_state = record.pr_state or "OPEN"
+            if local:
+                record.landing = "locally_integrated"
+            elif publish and deadline is not None and clock() >= deadline:
+                report.time_limit_reached = True
+                record.landing = "staged_not_published"
+                _defer_pr_delivery(store, record, "window deadline reached before PR publication")
+            elif not publish or stop or control.blocks_admission():
+                record.landing = "staged_not_published"
+                if open_prs:
+                    reason = report.stop_reason or ("queue admission " + control.state_label() if control.blocks_admission() else "PR opener unavailable")
+                    _defer_pr_delivery(store, record, reason)
+                    halt(reason)
+            else:
+                try:
+                    record.pr_url = hooks.open_pr(record)  # type: ignore[misc]
+                except Exception as exc:  # noqa: BLE001 - retain verified work for a normal delivery retry
+                    record.pr_error = f"{type(exc).__name__}: {exc}"
+                    record.landing = "pr_failed"
+                    reason = f"PR publication failed for task {record.task_id}: {record.pr_error}"
+                    if is_permission_denial(record.pr_error):
+                        # One blocker, recorded once; no alternative route (other branch, force, another credential) is tried.
+                        first = record_external_block(
+                            store, record.task_id, record.integrated_candidate, record.pr_error,
+                            "permission to push branches and open pull requests on this repository",
+                        )
+                        record.landing = "externally_blocked"
+                        reason = (
+                            f"delivery of task {record.task_id} needs permission to push branches and open pull requests: {record.pr_error}. "
+                            "The verified work is preserved; grant access, then `stagemesh delivery-unblock --task "
+                            f"{record.task_id}`." + ("" if first else " (already reported)")
+                        )
+                    _defer_pr_delivery(store, record, reason)
+                    halt(reason)
+                    continue
+                if record.integrated_candidate:
+                    record_publication(store, record.task_id, record.pr_url, record.integrated_candidate, str(getattr(hooks.open_pr, "base", "") or ""))
+                record.landing, record.ready_for_merge = "pr_opened", True
+                try:
+                    record.pr_state = hooks.pr_state(record.pr_url) if deadline is None or clock() < deadline else None
+                except Exception:  # noqa: BLE001 - the PR exists; only its state is unknown
+                    record.pr_state = None
+                record.pr_state = record.pr_state or "OPEN"
+    if local and len(done_records) > 1:
+        duplicate_runs = len(done_records) - 1
+        report.duplicate_runs_avoided += duplicate_runs
+        report.batch_results.append({
+            "batch_id": f"batch-{int(report.started_at)}",
+            "task_ids": [r.task_id for r in done_records],
+            "combined_sha": done_records[-1].integrated_candidate,
+            "intermediate_shas": [r.integrated_candidate for r in done_records[:-1]],
+            "duplicate_runs_avoided": duplicate_runs,
+            "status": "locally_integrated",
+        })
     report.orphan_events_after = orphan_event_count(store)
     report.repo_after = _safe_state(hooks)
     for state, count in ((report.repo_before, report.orphan_events_before), (report.repo_after, report.orphan_events_after)):
@@ -838,6 +953,8 @@ def format_report(report: WaveReport) -> str:
             lines.append(f"      PR: {task.pr_url}")
         if task.pr_error:
             lines.append(f"      PR not opened: {task.pr_error}")
+    if report.ci_mode == "batch" or report.batch_results:
+        lines.append(f"  batched CI: {report.duplicate_runs_avoided} duplicate run(s) avoided; {report.ci_wait_seconds:.1f}s spent waiting for CI")
     return "\n".join(lines)
 
 
@@ -861,7 +978,13 @@ def subprocess_task_runner(
             argv += ["--integration-ref", integration_ref]
         if live_acceptance is not None:
             argv += ["--live-acceptance", live_acceptance]
-        proc = subprocess.run(argv, capture_output=True, text=True, check=False)
+        from .validation_slot import current_window_deadline
+
+        env = os.environ.copy()
+        window_deadline = current_window_deadline()
+        if window_deadline is not None:
+            env["STAGEMESH_WINDOW_DEADLINE"] = repr(float(window_deadline))
+        proc = subprocess.run(argv, capture_output=True, text=True, check=False, env=env)
         try:
             data = json.loads(proc.stdout)
         except ValueError:

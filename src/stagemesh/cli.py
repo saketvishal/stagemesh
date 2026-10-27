@@ -40,6 +40,7 @@ from .demo import DemoValidationError, create_demo_project
 from .diagnosis import DiagnosisPolicy, diagnose, format_findings, make_adapter_analyst
 from .efficiency import BudgetPolicy
 from .distributed import WorkQueue, WorkQueueError
+from .domain import TaskStatus
 from .e2e_acceptance import EndToEndAcceptanceValidationError, end_to_end_acceptance
 from .external_evidence import (
     ExternalEvidenceValidationError,
@@ -97,7 +98,7 @@ from .queue_reconcile import ReconcileOptions, reconcile_queue
 from .queue_run import QueueRunner
 from .queue_visibility import format_queue_control, queue_control_report
 from .contract_check import check_contract, format_report
-from .recovery import RecoveryRefusal, advance_baseline, format_doctor, rebaseline_task, rebind_contract, task_doctor
+from .recovery import RecoveryRefusal, advance_baseline, format_doctor, rebaseline_task, rebind_contract, resume_task, task_doctor
 from .redaction import redact_command_secrets, redact_url_credentials
 from .registry import (
     GlobalRegistry,
@@ -557,13 +558,21 @@ def _build_coordinator(
         review_eligible = [adapter_by_name[v.provider] for v in review_verdicts if v.eligible]
         chosen_provider = pool.order(store, IMPLEMENT, impl_eligible)[0][0].name if impl_eligible else "deferred"
         if staged:
-            reviewer = Reviewer(require_independent=require_independent_review, review_pool=pool)
+            reviewer = Reviewer(
+                require_independent=require_independent_review,
+                review_pool=pool,
+                adverse_policy=config.adverse_review,
+            )
             ordered_reviewers = [a.name for a in pool.order(store, REVIEW, review_eligible)[0]]
             chosen_review_provider = "dynamic-pool:" + ",".join(ordered_reviewers)
             independent_review_configured = True
         else:
             chosen_review_provider = "single-agent-deterministic-fallback"
-            reviewer = Reviewer(provider_name=chosen_review_provider, require_independent=require_independent_review)
+            reviewer = Reviewer(
+                provider_name=chosen_review_provider,
+                require_independent=require_independent_review,
+                adverse_policy=config.adverse_review,
+            )
         info_extra.update(
             selection_policy=config.provider_selection_policy,
             implementation_pool=list(pools[IMPLEMENT]),
@@ -621,6 +630,7 @@ def _build_coordinator(
         integrator=integrator,
         target=target,
         require_independent_review=require_independent_review,
+        adverse_policy=config.adverse_review if require_independent_review else None,
         diagnosis_policy=_diagnosis_policy(config, project, {} if getattr(args, "dry_run", False) else adapter_by_name),
         budget_policy=BudgetPolicy.from_config(config.budgets),
         guard=guard,
@@ -937,6 +947,8 @@ def command_run_window(args: argparse.Namespace) -> int:
         integration_mode=args.integration,
         open_prs=not args.no_pr,
         advance_baselines=not args.no_advance_baselines,
+        ci_mode=getattr(args, "ci_mode", "batch" if getattr(args, "batch_ci", False) else "immediate"),
+        batch_ci=getattr(args, "ci_mode", "") == "batch" or bool(getattr(args, "batch_ci", False)),
         strict_live=args.strict_live,
         allow_stale_runtime=args.allow_stale_runtime,
         tasks=parse_task_ids(args.tasks) if args.tasks else None,
@@ -1158,10 +1170,16 @@ def _real_provider_auth_blockers(project: Path) -> list[str]:
     or when no real CLI is configured (mock acceptance projects). Makes no model call."""
     from . import provider_auth, provider_authorization
     from .config import load_config as load_project_config
-    from .providers import adapters_from_config
+    from .providers import RuntimeCommandAdapter, _mark_authorization, adapters_from_config
 
     config = load_project_config(project)
     adapters = adapters_from_config(config)
+    researchers = {
+        (adapter.research.name, adapter.research.command)
+        for adapter in adapters if adapter.research is not None and not adapter.denied and "code" in adapter.capabilities
+    }
+    research_adapters = _mark_authorization([RuntimeCommandAdapter(name, command) for name, command in researchers], config)
+    adapters += research_adapters
     every_command = [command for adapter in adapters for command in adapter.all_commands()]
     if not provider_auth.uses_real_providers(every_command):
         return []
@@ -1169,6 +1187,7 @@ def _real_provider_auth_blockers(project: Path) -> list[str]:
         return ["no explicit provider allowlist: add authorization.unattended_providers to .stagemesh/config.json (installing a CLI does not authorize it)"]
     authorized = [adapter for adapter in adapters if not adapter.denied]
     blockers = [f"{adapter.name}: {adapter.denied}" for adapter in adapters if adapter.denied and adapter.name in config.authorized_providers]
+    blockers += [f"research provider {adapter.name}: {adapter.denied}" for adapter in research_adapters if adapter.denied]
     names = [name for name in config.authorized_providers if name in provider_auth.PROVIDERS]
     unverifiable = [
         f"{name}: billing mode cannot be verified without a model call, so it cannot be authorized for unattended use"
@@ -1187,13 +1206,13 @@ def _real_provider_auth_blockers(project: Path) -> list[str]:
                     break
     if not provider_auth.uses_real_providers([c for a in authorized for c in a.all_commands()]):
         return blockers
-    executables = {
-        adapter.name: tuple(dict.fromkeys(
-            adapter.command_for(capability)[0]
-            for capability in ("code", "review") if capability in adapter.capabilities
-        ))
-        for adapter in authorized if adapter.name in provider_auth.PROVIDERS
-    }
+    executables = {}
+    for adapter in authorized:
+        if adapter.name in provider_auth.PROVIDERS:
+            executables[adapter.name] = tuple(dict.fromkeys((
+                *executables.get(adapter.name, ()),
+                *(adapter.command_for(capability)[0] for capability in ("code", "review") if capability in adapter.capabilities),
+            )))
     report = provider_auth.check(names, executables=executables, require_installed=True)
     return blockers + ([] if report["ok"] else [str(item) for item in report["blockers"]])
 
@@ -1553,6 +1572,7 @@ def command_continue(args: argparse.Namespace) -> int:
         count += progressed
         if args.once or progressed == 0:
             break
+    adverse_block = getattr(coord, "last_adverse_block", None)
     if args.json:
         print(
             json.dumps(
@@ -1565,13 +1585,21 @@ def command_continue(args: argparse.Namespace) -> int:
                     "integration_ref": integration_ref,
                     "targeted_mode": targeted_mode,
                     "targeted_task_id": str(targeted_task_id) if targeted_task_id is not None else None,
+                    **(
+                        {
+                            "stop_reason": "BLOCKED",
+                            "message": "adverse review gate refused integration: " + "; ".join(adverse_block),
+                        }
+                        if adverse_block
+                        else {}
+                    ),
                 },
                 indent=2,
                 sort_keys=True,
             )
         )
         store.close()
-        return 0
+        return 1 if adverse_block else 0
     print(f"progressed: {count}")
     print(f"provider: {chosen_provider}")
     print(f"review_provider: {chosen_review_provider}")
@@ -1581,6 +1609,9 @@ def command_continue(args: argparse.Namespace) -> int:
     print(f"targeted_mode: {targeted_mode}")
     print(f"targeted_task_id: {targeted_task_id}")
     store.close()
+    if adverse_block:
+        print("adverse review gate refused integration: " + "; ".join(adverse_block), file=sys.stderr)
+        return 1
     return 0
 
 
@@ -1746,10 +1777,11 @@ def command_retry_task(args: argparse.Namespace) -> int:
         print(f"task does not exist: {args.task}", file=sys.stderr)
         store.close()
         return 2
-    if not store.unblock_task(args.task):
+    if task["status"] != TaskStatus.BLOCKED:
         print(f"task is not blocked: {args.task} (status {task['status']})", file=sys.stderr)
         store.close()
         return 2
+    resume_task(store, args.task)
     task = store.get_task(args.task)
     if args.json:
         print(json.dumps({"task_id": args.task, "status": task["status"], "stage": task["stage"]}, sort_keys=True))
@@ -3824,6 +3856,8 @@ def build_parser() -> argparse.ArgumentParser:
     merge_choice.add_argument("--auto-merge-ff", action="store_true", help="Opt in: parallel development, then serialized PR landing after named green hosted checks; fast-forward origin and local integration branch")
     window.add_argument("--required-checks", default="", help="Comma-separated hosted check names required by --auto-merge-ff; missing checks never count as green")
     window.add_argument("--no-pr", action="store_true", help="Do not open PRs (PR mode: finished work stays on the staging branch)")
+    window.add_argument("--ci-mode", choices=("immediate", "batch"), default="immediate", help="CI publishing mode: immediate (default: publish each task PR individually) or batch (combine compatible tasks and publish only the terminal candidate)")
+    window.add_argument("--batch-ci", action="store_true", default=False, help=argparse.SUPPRESS)
     window.add_argument("--no-advance-baselines", action="store_true", help="Do not advance stale baselines")
     window.add_argument("--strict-live", action="store_true", help="Release mode: refuse to start unless providers have fresh passing live acceptance results")
     window.add_argument("--allow-stale-runtime", action="store_true", help="Start even though the installed CLI is stale (development only; reported in the output)")

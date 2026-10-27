@@ -439,12 +439,19 @@ def make_merger(store, project: Path, base_ref: str, required_checks: tuple[str,
             if task is None or task["status"] != "DONE" or task["stage"] != "DONE":
                 return "pending PR task is not complete"
             pr = pulls.get(int(number))
-            if (pr is None or pr.number != int(number) or pr.base_ref != branch or pr.head_sha != record.integrated_candidate
-                    or not re.fullmatch(r"[0-9a-f]{40}", pr.head_sha)
-                    or not is_task_pr_branch(pr.head_ref, record.task_id, record.integrated_candidate)
-                    or pr.state is PRState.CLOSED):
+            if (pr is None or pr.number != int(number) or pr.base_ref != branch
+                    or pr.state is PRState.CLOSED or not re.fullmatch(r"[0-9a-f]{40}", pr.head_sha)):
                 return "pending PR observed head, base or ownership changed"
-            if pr.state is PRState.MERGED and pr.merge_commit_sha != record.integrated_candidate:
+            is_exact = pr.head_sha == record.integrated_candidate
+            is_ancestor = supervisor.facts.is_ancestor(record.integrated_candidate, pr.head_sha)
+            if not (is_exact or is_ancestor):
+                return "pending PR observed head, base or ownership changed"
+            is_owned = is_task_pr_branch(pr.head_ref, record.task_id, record.integrated_candidate) or (
+                is_ancestor and is_task_pr_branch(pr.head_ref, records[-1].task_id, records[-1].integrated_candidate)
+            )
+            if not is_owned:
+                return "pending PR observed head, base or ownership changed"
+            if pr.state is PRState.MERGED and pr.merge_commit_sha != record.integrated_candidate and not supervisor.facts.is_ancestor(record.integrated_candidate, pr.merge_commit_sha):
                 return "pending PR was not landed as the exact candidate"
             problem = landing_evidence_problem(store, record.task_id, record.integrated_candidate)
             if problem:
@@ -465,6 +472,7 @@ def make_merger(store, project: Path, base_ref: str, required_checks: tuple[str,
         observed_base = None
         unknown_since = None
         missing_since = None
+        t_start = time.time()
         while time.time() < deadline:
             if pulls.stop_control.blocks_admission():
                 return {"merged": False, "reason": "queue admission " + pulls.stop_control.state_label()}
@@ -551,8 +559,8 @@ def make_merger(store, project: Path, base_ref: str, required_checks: tuple[str,
                 store.add_audit_event("window.fast_forward_merged", {"task_id": record.task_id,
                     "repository": f"{repository.owner}/{repository.repo}", "base_ref": base_ref,
                     "pr": number, "candidate_sha": record.integrated_candidate, "required_checks": list(required_checks), "merge_policy": policy})
-                return {"merged": True, "remote_landed": True, "local_synced": True,
-                    "pr": number, "candidate_sha": record.integrated_candidate}
+                return {"merged": True, "task_id": record.task_id, "remote_landed": True, "local_synced": True,
+                    "pr": number, "candidate_sha": record.integrated_candidate, "ci_wait_seconds": max(0.0, time.time() - t_start)}
             if not missing:
                 progress(record, "waiting", "hosted checks pending for this exact candidate", heartbeat=True)
             time.sleep(min(10, max(0, deadline - time.time())))
