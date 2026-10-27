@@ -467,7 +467,7 @@ class SubprocessExecutor(Executor):
             self.command, cwd, code, stdout, stderr, timed_out=timed_out, reason=None if timed_out else reason
         )
         if evidence is not None:
-            if hasattr(store, "audit_events"):
+            if hasattr(store, "task_audit_events"):
                 evidence["recovery"] = tool_recovery_plan(store, task_id, evidence)
             record_audit(store, TOOL_FAILURE_EVENT, {"task_id": task_id, "execution_id": execution_id, "evidence": evidence})
 

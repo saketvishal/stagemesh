@@ -5,6 +5,7 @@ import json
 import os
 import re
 import time
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -228,29 +229,46 @@ def _validate_optional_text(value: str | None, field: str, max_length: int = 200
 def tool_recovery_plan(
     store: Store, task_id: str, evidence: dict[str, object], setup_actions: dict[str, list[str]] | None = None
 ) -> dict[str, object]:
-    """Bounded recovery decision for new tool failure evidence, consuming this task's earlier evidence for the signature.
+    """Recommend recovery without treating a recorded plan as an executed action.
 
-    Each earlier occurrence of the same signature is treated as one spent recovery (retry first, then configured
-    setup), so a repeated signature reaches ``stop`` instead of looping. Other tasks' evidence is never consulted.
+    The recorder has no retry/setup executor or execution receipt. A repeated failure therefore stops for an
+    operator to verify execution, rather than claiming an attempt or advancing an unexecuted retry to setup.
     """
     import json
 
     from .diagnosis import TOOL_FAILURE_EVENT, plan_tool_recovery, tool_failure_signature
 
     signature = tool_failure_signature(evidence)
-    attempted: list[str] = []
-    rows = store.audit_events(200)
-    for row in reversed(rows):
+    recommendations: deque[str] = deque(maxlen=20)
+    recommendation_count = 0
+    for row in store.task_audit_events(TOOL_FAILURE_EVENT, task_id):
         if row["event_type"] != TOOL_FAILURE_EVENT:
             continue
         try:
             payload = json.loads(row["payload"])
         except (TypeError, ValueError):
             continue
-        prior = payload.get("evidence") if isinstance(payload, dict) else None
+        if not isinstance(payload, dict):
+            continue
+        prior = payload.get("evidence")
         if payload.get("task_id") != task_id or not isinstance(prior, dict) or tool_failure_signature(prior) != signature:
             continue
         recovery = prior.get("recovery")
-        taken = recovery.get("action") if isinstance(recovery, dict) else None
-        attempted.append({"retry_once": "retry", "setup": "setup"}.get(str(taken), "stop"))
-    return plan_tool_recovery(evidence, [a for a in attempted if a != "stop"], setup_actions)
+        action = recovery.get("action") if isinstance(recovery, dict) else None
+        recommendations.append(action if action in ("retry_once", "setup", "stop") else "unknown")
+        recommendation_count += 1
+    if recommendations:
+        return {
+            "action": "stop",
+            "signature": signature,
+            "attempted": [],
+            "previous_recommendations": list(recommendations),
+            "previous_recommendation_count": recommendation_count,
+            "execution_status": "NOT_CONFIRMED",
+            "operator_action": (
+                "This failure signature was already recorded; recovery execution is not confirmed. "
+                "Verify what ran before retrying or running configured setup. "
+                + str(evidence.get("next_action") or "Inspect the failure evidence.")
+            ),
+        }
+    return {**plan_tool_recovery(evidence, setup_actions=setup_actions), "execution_status": "NOT_CONFIRMED"}

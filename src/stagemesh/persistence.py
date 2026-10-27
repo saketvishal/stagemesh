@@ -1441,6 +1441,17 @@ class Store:
             )
         )
 
+    def task_audit_events(self, event_type: str, task_id: str) -> Iterable[sqlite3.Row]:
+        """Stream this task's event history without a global lookback hiding earlier safety decisions."""
+        event_type = _validate_text(event_type, "event type")
+        task_id = _validate_text(task_id, "task id")
+        return self.conn.execute(
+            "SELECT * FROM audit_events WHERE event_type=? "
+            "AND json_extract(CASE WHEN json_valid(payload) THEN payload ELSE '{}' END, '$.task_id')=? "
+            "ORDER BY created_at, rowid",
+            (event_type, task_id),
+        )
+
     def get_retry_state(self, key: str) -> sqlite3.Row | None:
         key = _validate_text(key, "retry key")
         return self.conn.execute("SELECT * FROM retry_state WHERE key=?", (key,)).fetchone()
