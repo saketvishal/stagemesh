@@ -29,7 +29,7 @@ from .concurrency import IntegrationLockTimeout, ProviderLimiter, contract_confl
 from .config import RuntimeConfig, TaskSelectionConfig, load_config
 from .contracts import ChangeContract, ContractError, parse_contract, task_contract_path
 from .coordinator import Coordinator, TargetSelection, TargetSelectionError
-from .domain import ExecutionKind, Stage
+from .domain import ProcessIdentity, Stage
 from .execution import kill_active_provider_processes, retain_provider_cleanup
 from .git import GitWorkspace
 from .persistence import Store
@@ -274,21 +274,42 @@ def discard_partial_edits(project: Path, task_id: str) -> bool:
     return True
 
 
-def _kill_pid(pid: int) -> None:
+def _kill_pid(pid: int, expected: ProcessIdentity) -> bool:
+    """Recheck the saved owner, signal its tree, and return positive tree proof only."""
+    if pid == os.getpid() or expected.pid != pid or classify_process(expected, process_identity(pid)) != "LIVE":
+        return False
+    confirmed = False
     if sys.platform == "win32":
-        subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], capture_output=True, check=False)
-        return
-    try:
-        group = os.getpgid(pid)
-        if group == pid:
-            os.killpg(group, signal.SIGKILL)
-        else:
-            os.kill(pid, signal.SIGKILL)
-    except OSError:
         try:
-            os.kill(pid, signal.SIGKILL)
+            result = subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(pid)], capture_output=True, check=False, timeout=5,
+            )
+            confirmed = result.returncode == 0
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+    else:
+        try:
+            group = os.getpgid(pid)
+            if group == pid:
+                os.killpg(group, signal.SIGKILL)
+                confirmed = True
+            else:
+                os.kill(pid, signal.SIGKILL)  # root fallback cannot confirm shared-group descendants
         except OSError:
-            pass
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+    if not confirmed:
+        return False
+    deadline = time.monotonic() + 5
+    while True:
+        state = classify_process(expected, process_identity(pid))
+        if state != "LIVE":
+            return state == "DEAD"
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.05)
 
 
 class ParallelRunner:
@@ -799,8 +820,13 @@ class ParallelRunner:
         """Kill this task's provider processes, fail its running executions and release its claims; keep committed work."""
         protected_claims: set[str] = set()
         unresolved_execution = False
+        termination_results: dict[ProcessIdentity, bool] = {}
         for execution in [e for e in store.running_executions() if e["task_id"] == task_id]:
             saved = store.execution_process_identity(str(execution["id"]))
+            if any(not result and saved.matches(owner) for owner, result in termination_results.items()):
+                store.retain_execution_for_cleanup(str(execution["id"]), "PID-owned provider tree cleanup unconfirmed")
+                unresolved_execution = True
+                continue
             state = classify_process(saved, process_identity(execution["pid"]))
             if state == "UNKNOWN":
                 unresolved_execution = True
@@ -819,8 +845,16 @@ class ParallelRunner:
                     },
                 )
                 continue
-            if execution["kind"] == ExecutionKind.IMPLEMENTATION and execution["pid"] and state == "LIVE":
-                _kill_pid(int(execution["pid"]))
+            if execution["pid"] and state == "LIVE":
+                try:
+                    confirmed = _kill_pid(int(execution["pid"]), saved)
+                except Exception:  # noqa: BLE001 -- a cleanup error must never release ownership or discard partial edits
+                    confirmed = False
+                termination_results[saved] = confirmed
+                if not confirmed:
+                    store.retain_execution_for_cleanup(str(execution["id"]), "PID-owned provider tree cleanup unconfirmed")
+                    unresolved_execution = True
+                    continue
             store.mark_orphan_running_execution_failed(str(execution["id"]), f"PARALLEL_{why.upper()}")
         for claim in store.conn.execute("SELECT id FROM claims WHERE task_id=? AND active=1 AND worker_id LIKE ?", (task_id, WORKER_PREFIX + "%")).fetchall():
             if unresolved_execution or str(claim["id"]) in protected_claims:
@@ -945,22 +979,26 @@ class ParallelRunner:
 
     def _terminate_live_known_executions(self, store: Store, execution_ids: set[str]) -> list[int]:
         killed: list[int] = []
-        seen: set[int] = set()
-        for execution in store.running_executions():
+        outcomes: dict[ProcessIdentity, bool] = {}
+        for execution in list(store.running_executions()):
             if str(execution["id"]) not in execution_ids:
                 continue
-            pid = execution["pid"]
-            if not pid:
-                continue
             saved = store.execution_process_identity(str(execution["id"]))
-            if classify_process(saved, process_identity(pid)) != "LIVE":
-                continue
-            pid_int = int(pid)
-            if pid_int == os.getpid() or pid_int in seen:
-                continue
-            seen.add(pid_int)
-            _kill_pid(pid_int)
-            killed.append(pid_int)
+            previous = next((result for owner, result in outcomes.items() if saved.matches(owner)), None)
+            if previous is not None:
+                confirmed = previous
+            else:
+                if not saved.pid or saved.pid == os.getpid() or classify_process(saved, process_identity(saved.pid)) != "LIVE":
+                    continue
+                try:
+                    confirmed = _kill_pid(saved.pid, saved)
+                except Exception:  # noqa: BLE001 -- failed cleanup remains recoverable while other owned providers are stopped
+                    confirmed = False
+                outcomes[saved] = confirmed
+                if confirmed:
+                    killed.append(saved.pid)
+            if not confirmed:
+                store.retain_execution_for_cleanup(str(execution["id"]), "PID-owned provider tree cleanup unconfirmed")
         return killed
 
     def _finalize(self, summary: ParallelSummary) -> None:
