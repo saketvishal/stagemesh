@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import threading
 
 import pytest
@@ -61,10 +62,10 @@ def test_verification_releases_coding_capacity_before_the_slow_builder_finishes(
     hooks.run_task = step
     report = run_wave(store, ["1", "2", "3", "4"], hooks, concurrency=2,
                       verification_concurrency=1, max_steps=4, project=project)
-    assert report.ok and all(t.outcome == "done" for t in report.tasks), {
+    assert report.ok and all(t.outcome == "done" for t in report.tasks), json.dumps({
         "task_count": len(report.tasks),
         "task_outcomes": [(t.task_id, t.outcome, t.stop_reason, _brief_text(t.reason)) for t in report.tasks[:10]],
-    }
+    })
     assert peaks == {"coding": 2, "verification": 1}
     assert set(budgets) == {1}
     assert report.capacity["peak_coding"] == 2
@@ -412,3 +413,36 @@ def test_cli_has_separate_coding_and_verification_capacity():
     args = build_parser().parse_args(["run-window", "--concurrency", "5",
                                       "--verification-concurrency", "3"])
     assert args.concurrency == 5 and args.verification_concurrency == 3
+
+
+def test_capacity_failure_context_keeps_the_original_worker_error(tmp_path, monkeypatch):
+    original = Rig.finish_done
+
+    def fail_one(self, task_id, **kwargs):
+        if task_id == "1":
+            raise RuntimeError('controlled capacity completion failure token="capacity-canary-secret"')
+        return original(self, task_id, **kwargs)
+
+    monkeypatch.setattr(Rig, "finish_done", fail_one)
+    with pytest.raises(AssertionError, match="controlled capacity completion failure") as caught:
+        test_verification_releases_coding_capacity_before_the_slow_builder_finishes(tmp_path)
+    assert "capacity-canary-secret" not in str(caught.value)
+
+
+def test_window_failure_context_does_not_call_a_failed_worker_still_active(tmp_path, monkeypatch):
+    import test_run_window as fixture
+
+    monkeypatch.setattr(fixture.readiness, "check_runtime", lambda _: fixture.FRESH)
+    monkeypatch.setattr(fixture.readiness, "active_cooldowns", lambda *_: [])
+    original = Rig.finish_done
+
+    def fail_one(self, task_id, **kwargs):
+        if task_id == "1":
+            raise RuntimeError('controlled window completion failure token="window-canary-secret"')
+        return original(self, task_id, **kwargs)
+
+    monkeypatch.setattr(Rig, "finish_done", fail_one)
+    with pytest.raises(AssertionError, match="controlled window completion failure") as caught:
+        fixture.test_window_starts_five_compatible_workers_and_later_runs_deferred_tasks(tmp_path, True)
+    assert "assert not {'1'}" not in str(caught.value)
+    assert "window-canary-secret" not in str(caught.value)
