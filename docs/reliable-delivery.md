@@ -233,8 +233,9 @@ The coordinator rechecks persisted RUNNING executions after known-dead owner rec
 An existing live or unknown execution, including a claimless cleanup fence, prevents another stage from starting.
 This also protects legacy `continue --once` and ownership published after parallel batch selection. A single-pass
 attempt with no work reports `REFUSED:active_execution`; unrelated tasks can still advance. Existing ownership,
-candidate evidence and stage remain unchanged. This recheck does not reserve an otherwise empty stage atomically
-against two simultaneous fresh callers; it is not a new global admission-lock guarantee.
+candidate evidence and stage remain unchanged. This recheck alone does not reserve an otherwise empty stage
+against simultaneous fresh callers. The [Coordinator dispatch guard](#coordinator-dispatch-before-execution-publication)
+now serializes cooperating Coordinator entry points; arbitrary direct stage API calls remain outside its guarantee.
 
 ## Runtime command failure evidence
 
@@ -290,7 +291,9 @@ or durable cross-project slot recovery is claimed.
 The configured implementation-only quarantine policy remains available only at
 IMPLEMENT when every existing owner is an implementation. Ownership is read again
 after that policy runs: a boolean response alone, or a newly published validation
-owner, cannot authorize another stage. This is not atomic fresh admission.
+owner, cannot authorize another stage. That policy alone is not a fresh-stage reservation;
+the [Coordinator dispatch guard](#coordinator-dispatch-before-execution-publication) supplies serialized admission
+for cooperating Coordinator entry points.
 
 ## Runtime artifacts
 
@@ -310,3 +313,36 @@ separate unfinished work. No setup command is derived from provider output or ru
 Recovery history is streamed for the exact task and event type before signatures are compared. Unrelated events or other signatures cannot evict an earlier stop decision through a global recent-events limit. The full audit remains authoritative; the recovery summary is bounded.
 
 When an execution-aware caller supplies attempted actions for an exact failure signature, the planner allows only one recovery action in total. A prior retry, setup or unknown action stops with that history and the exact operator action; configuring setup cannot chain another action after a retry. The initial retry/configured-setup paths remain recommendations, not execution receipts.
+
+
+## Coordinator dispatch before execution publication
+
+For persistent stores, Coordinator stages acquire a nonblocking native lock for the canonical Store
+database path and task ID before re-reading task state, current Scheduler eligibility, ownership and contract
+gates. The lock spans the stage and its state publication, so two processes or
+threads cannot both pass an empty-owner check and dispatch the same stage.
+Different database/task keys remain independent. A busy or unavailable lock
+returns an explicit dispatch refusal without a fabricated failed execution,
+evidence, claim, or remediation attempt.
+
+This reuses the existing integration lock mechanism with a distinct hashed
+resource per task; it adds no scheduler, database migration or provider fallback.
+Lock files contain no authoritative PID and remain stable anchors across runs.
+Kernel release after parent death does not authorize child replacement: durable
+RUNNING ownership still applies, including the validation inspection fence.
+This guards Coordinator dispatch entry points, not arbitrary direct stage API
+calls or every external database writer. It does not prove universal child-tree
+cleanup or a durable cross-project validation slot after a crash.
+
+Stale selections are rechecked under the acquired lock, including DONE/BLOCKED,
+dependency and source-publication eligibility. This is the dispatch admission
+point; it is not a transaction over arbitrary external writers during an already
+admitted stage. Pre-entry filesystem errors refuse dispatch; errors raised by a
+stage after entry retain their original handling. Private `:memory:` databases
+keep connection-local behavior and do not create invalid native lock filenames;
+they do not establish durable, cross-process ownership.
+
+Public continue/drive results distinguish `stage_dispatch_unavailable` and
+`stage_dispatch_ineligible` from `active_execution`. A lock failure or stale
+selection is not evidence that an execution exists. Mixed refusals retain each
+task reason without claiming that every refusal represents process ownership.

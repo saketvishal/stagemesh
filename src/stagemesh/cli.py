@@ -112,6 +112,7 @@ from .retry import RetryRegistry, RetryValidationError
 from .review import Reviewer
 from .routing import RoutingMode
 from .run_ready import RunSummary, format_excerpt, format_step_update, format_stop, run_ready
+from .stage_dispatch import stage_dispatch_refusal
 from .security import SecurityBoundaryError, WorkspaceBoundary
 from .serialized_integration import SerializedIntegrator
 from .task_sources import (
@@ -1576,6 +1577,7 @@ def command_continue(args: argparse.Namespace) -> int:
     adverse_block = getattr(coord, "last_adverse_block", None)
     ownership_refusals = getattr(coord, "last_execution_refusals", [])
     ownership_refused = bool(ownership_refusals) and count == 0
+    refusal_code, refusal_message = stage_dispatch_refusal(ownership_refusals)
     if args.json:
         print(
             json.dumps(
@@ -1597,8 +1599,7 @@ def command_continue(args: argparse.Namespace) -> int:
                         if adverse_block
                         else {}
                     ),
-                    **({"stop_reason": "REFUSED:active_execution",
-                        "message": "existing stage ownership was retained; no new work started"}
+                    **({"stop_reason": refusal_code, "message": refusal_message}
                        if ownership_refused else {}),
                 },
                 indent=2,
@@ -1617,7 +1618,10 @@ def command_continue(args: argparse.Namespace) -> int:
     print(f"targeted_task_id: {targeted_task_id}")
     store.close()
     if ownership_refused:
-        print("continue refused: task has an existing live or unknown stage execution", file=sys.stderr)
+        if refusal_code == "REFUSED:active_execution":
+            print("continue refused: task has an existing live or unknown stage execution", file=sys.stderr)
+        else:
+            print("continue refused: " + refusal_message, file=sys.stderr)
         return 2
     if adverse_block:
         print("adverse review gate refused integration: " + "; ".join(adverse_block), file=sys.stderr)
