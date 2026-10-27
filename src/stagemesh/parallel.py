@@ -30,7 +30,7 @@ from .config import RuntimeConfig, TaskSelectionConfig, load_config
 from .contracts import ChangeContract, ContractError, parse_contract, task_contract_path
 from .coordinator import Coordinator, TargetSelection, TargetSelectionError
 from .domain import ExecutionKind, Stage
-from .execution import kill_active_provider_processes
+from .execution import kill_active_provider_processes, retain_provider_cleanup
 from .git import GitWorkspace
 from .persistence import Store
 from .process_identity import classify_process, process_identity
@@ -798,10 +798,12 @@ class ParallelRunner:
     def _abandon(self, store: Store, task_id: str, why: str) -> None:
         """Kill this task's provider processes, fail its running executions and release its claims; keep committed work."""
         protected_claims: set[str] = set()
+        unresolved_execution = False
         for execution in [e for e in store.running_executions() if e["task_id"] == task_id]:
             saved = store.execution_process_identity(str(execution["id"]))
             state = classify_process(saved, process_identity(execution["pid"]))
             if state == "UNKNOWN":
+                unresolved_execution = True
                 if execution["claim_id"]:
                     protected_claims.add(str(execution["claim_id"]))
                     self._protected_claims.add(str(execution["claim_id"]))
@@ -821,10 +823,11 @@ class ParallelRunner:
                 _kill_pid(int(execution["pid"]))
             store.mark_orphan_running_execution_failed(str(execution["id"]), f"PARALLEL_{why.upper()}")
         for claim in store.conn.execute("SELECT id FROM claims WHERE task_id=? AND active=1 AND worker_id LIKE ?", (task_id, WORKER_PREFIX + "%")).fetchall():
-            if str(claim["id"]) in protected_claims:
+            if unresolved_execution or str(claim["id"]) in protected_claims:
+                self._protected_claims.add(str(claim["id"]))
                 continue
             store.release_claim(str(claim["id"]))
-        if not protected_claims:
+        if not unresolved_execution and not protected_claims:
             discard_partial_edits(self.project, task_id)
         record_audit(store, "task.abandoned", {"task_id": task_id, "reason": why})
 
@@ -851,7 +854,16 @@ class ParallelRunner:
                 active_thread_task_ids
                 | self._stop_request_task_ids
             )
-            in_process_killed = kill_active_provider_processes()  # implementation and review providers started by this runner
+            unconfirmed_execution_ids: set[str] = set()
+
+            def retain_uncertain(identity):
+                # Refresh rows, including a provider registered after the initial snapshot. Parent-owned review rows
+                # are conservatively fenced only within this runner's active-at-stop tasks.
+                unconfirmed_execution_ids.update(retain_provider_cleanup(cleanup, stopped_task_ids, identity))
+
+            in_process_killed = kill_active_provider_processes(
+                database=self.store.db_path, task_ids=stopped_task_ids, on_uncertain=retain_uncertain,
+            )
             live_known_killed = self._terminate_live_known_executions(cleanup, {str(item["id"]) for item in active_before})
             record_audit(
                 cleanup,
@@ -863,6 +875,7 @@ class ParallelRunner:
                     "active_executions": active_before,
                     "active_execution_ids": [item["id"] for item in active_before],
                     "terminated_in_process_providers": in_process_killed,
+                    "unconfirmed_in_process_execution_ids": sorted(unconfirmed_execution_ids),
                     "terminated_live_execution_pids": live_known_killed,
                     "unknown_execution_ids": [item["id"] for item in active_before if item["process_state"] == "UNKNOWN"],
                 },
@@ -954,13 +967,15 @@ class ParallelRunner:
         # A live or incompletely reaped execution must keep its claim for recovery.
         final = Store(self.store.db_path)
         try:
-            protected = {str(e["claim_id"]) for e in final.running_executions() if e["claim_id"]}
+            running = list(final.running_executions())
+            protected = {str(e["claim_id"]) for e in running if e["claim_id"]}
+            protected_tasks = {str(e["task_id"]) for e in running}
             if any(str(e["task_id"]) in self._threads for e in final.running_executions()):
                 self.global_failure = "provider cleanup incomplete; execution ownership retained for recovery"
             for claim in final.conn.execute("SELECT id, task_id FROM claims WHERE active=1 AND worker_id LIKE ?", (f"{WORKER_PREFIX}{os.getpid()}-%",)).fetchall():
                 if str(claim["task_id"]) not in self._threads:
                     continue  # only tasks this run started; anything else is somebody else's claim
-                if str(claim["id"]) in self._protected_claims | protected:
+                if str(claim["id"]) in self._protected_claims | protected or str(claim["task_id"]) in protected_tasks:
                     continue  # unknown process identity: stays claimed until `recover-stale --release-unknown`
                 final.release_claim(str(claim["id"]))
                 self.note(str(claim["task_id"]), "claim_released")
