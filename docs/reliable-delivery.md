@@ -225,3 +225,5 @@ recording an unexecuted retry never authorizes progression to setup. Actual conf
 separate unfinished work. No setup command is derived from provider output or run by this accounting path.
 
 Recovery history is streamed for the exact task and event type before signatures are compared. Unrelated events or other signatures cannot evict an earlier stop decision through a global recent-events limit. The full audit remains authoritative; the recovery summary is bounded.
+
+When an execution-aware caller supplies attempted actions for an exact failure signature, the planner allows only one recovery action in total. A prior retry, setup or unknown action stops with that history and the exact operator action; configuring setup cannot chain another action after a retry. The initial retry/configured-setup paths remain recommendations, not execution receipts.

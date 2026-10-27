@@ -359,10 +359,13 @@ def plan_tool_recovery(
     configured = (setup_actions or {}).get(kind)
     setup = [str(part) for part in configured] if configured and kind not in _NO_SETUP_KINDS else None
     action, argv = "stop", None
-    if kind == "transient" and "retry" not in attempted:
-        action = "retry_once"
-    elif setup and "setup" not in attempted:
-        action, argv = "setup", setup
+    # One recovery action per signature, not one attempt of each action kind.
+    # Unknown prior actions also consume the allowance until an operator verifies them.
+    if not attempted:
+        if kind == "transient":
+            action = "retry_once"
+        elif setup:
+            action, argv = "setup", setup
     plan: dict[str, Any] = {
         "action": action,
         "signature": tool_failure_signature(evidence),
