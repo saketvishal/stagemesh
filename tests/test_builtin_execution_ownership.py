@@ -19,6 +19,7 @@ from test_run_ready import _continue, _project
 import stagemesh.cli as cli_module
 from stagemesh.domain import ExecutionKind, Stage
 from stagemesh.execution import kill_process_tree, popen_session_kwargs
+from stagemesh.operator_actions import release_unknown_execution
 from stagemesh.persistence import Store
 from stagemesh.process_identity import owner_execution_fields, popen_identity, process_identity
 from stagemesh.review import Reviewer
@@ -65,7 +66,7 @@ def test_a_live_sibling_runners_builtin_stage_is_left_alone(tmp_path: Path, sibl
 
 
 @pytest.mark.parametrize("kind", BUILTIN_KINDS)
-def test_a_dead_owners_builtin_stage_is_marked_orphaned(tmp_path: Path, kind) -> None:
+def test_dead_builtin_owner_requires_validation_inspection_before_orphaning(tmp_path: Path, kind) -> None:
     _project_dir, store, _base = _with_baseline(tmp_path)
     proc = subprocess.Popen(SLEEPER, **popen_session_kwargs())
     owner = _owned_by(proc)
@@ -74,16 +75,22 @@ def test_a_dead_owners_builtin_stage_is_marked_orphaned(tmp_path: Path, kind) ->
     assert process_identity(proc.pid) is None
     execution_id = store.start_execution(task_id=TASK, claim_id=None, kind=kind, actor="crashed-runner", **owner)
 
-    recovered = _recover_all_dead(store)  # provable death is recovered by any sweep, not only the owner's task
-
-    assert [item["execution_id"] for item in recovered] == [execution_id] and recovered[0]["action"] == "RELEASED"
+    recovered = _recover_all_dead(store)
+    if kind == ExecutionKind.VALIDATION:
+        # The parent is dead, but this durable record cannot prove child cleanup.
+        assert recovered == [] and _recover_dead(store, TASK) == []
+        assert _status(store, execution_id) == ("RUNNING", None) and _orphan_events(store) == []
+        action = release_unknown_execution(store, TASK, execution_id, reason="inspected fixture: no surviving gate")
+        assert action.action == "RELEASED_BY_OPERATOR" and action.process_state == "UNKNOWN"
+    else:
+        assert [item["execution_id"] for item in recovered] == [execution_id] and recovered[0]["action"] == "RELEASED"
     assert _status(store, execution_id) == ("FAILED", "orphaned")
     (event,) = _orphan_events(store)
     assert event["execution_id"] == execution_id and event["execution_kind"] == str(kind)
 
 
 @pytest.mark.parametrize("kind", BUILTIN_KINDS)
-def test_unknown_owner_identity_fails_closed_for_sweeps_and_only_the_runners_own_task_fences_it(tmp_path: Path, kind) -> None:
+def test_unknown_builtin_owner_requires_validation_inspection_even_on_own_task(tmp_path: Path, kind) -> None:
     _project_dir, store, _base = _with_baseline(tmp_path)
     anonymous = store.start_execution(task_id=TASK, claim_id=None, kind=kind, actor="legacy")  # no owner at all
     half_known = store.start_execution(  # a pid without a create time proves nothing either
@@ -95,8 +102,15 @@ def test_unknown_owner_identity_fails_closed_for_sweeps_and_only_the_runners_own
 
     recovered = _recover_dead(store, TASK)  # the runner about to drive this task: existing single-runner crash recovery
 
-    assert [item["execution_id"] for item in recovered] == [anonymous]
-    assert recovered[0]["reason"] == "ORPHANED_BUILTIN_STAGE_EXECUTION"
+    if kind == ExecutionKind.VALIDATION:
+        assert recovered == [] and _status(store, anonymous) == ("RUNNING", None)
+        assert _orphan_events(store) == []
+        action = release_unknown_execution(store, TASK, anonymous, reason="inspected legacy fixture: no surviving gate")
+        assert action.action == "RELEASED_BY_OPERATOR" and action.process_state == "UNKNOWN"
+        assert [event["execution_id"] for event in _orphan_events(store)] == [anonymous]
+    else:
+        assert [item["execution_id"] for item in recovered] == [anonymous]
+        assert recovered[0]["reason"] == "ORPHANED_BUILTIN_STAGE_EXECUTION"
     assert _status(store, anonymous) == ("FAILED", "orphaned")
     assert _status(store, half_known)[0] == "RUNNING"  # still unprovable: never failed automatically
 
