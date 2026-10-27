@@ -310,6 +310,7 @@ def test_missing_pack_stops_worker_before_launch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from stagemesh import agent_skills, providers
+    from stagemesh.persistence import Store
 
     monkeypatch.setattr(agent_skills, "SKILL_ROOT", tmp_path / "missing-pack")
     monkeypatch.setattr(providers, "record_task_baseline", lambda *_: "baseline")
@@ -319,20 +320,29 @@ def test_missing_pack_stops_worker_before_launch(
         lambda *_: SimpleNamespace(contract=contract("Update docs", "docs/guide.md")),
     )
     monkeypatch.setattr(providers, "remediation_context", lambda *_: None)
-    monkeypatch.setattr(
-        providers.subprocess,
-        "Popen",
-        lambda *_args, **_kwargs: pytest.fail("worker launched without skills"),
-    )
-    store = SimpleNamespace(get_task=lambda _: task_row("Update docs"))
-    lease = SimpleNamespace(path=tmp_path)
+    real_popen = providers.subprocess.Popen
 
-    result = RuntimeCommandAdapter("test", (sys.executable,))._execute_owned(
-        store, "skill-task", None, tmp_path, lease
-    )
+    def no_worker(argv, *args, **kwargs):
+        if Path(argv[0]).name.lower() in {"git", "git.exe"}:
+            return real_popen(argv, *args, **kwargs)  # configuration discovery is a read-only preflight
+        pytest.fail("worker launched without skills")
 
-    assert result.status == "FAILED"
-    assert result.failure_reason.startswith("skill_pack_unavailable:")
+    monkeypatch.setattr(providers.subprocess, "Popen", no_worker)
+    store = Store(tmp_path / "state.sqlite3")
+    store.migrate()
+    store.upsert_task("Update docs", source_id="skill-task")
+    lease = SimpleNamespace(path=tmp_path, check=lambda _phase: None)
+    try:
+        result = RuntimeCommandAdapter("test", (sys.executable,))._execute_owned(
+            store, "skill-task", None, tmp_path, lease
+        )
+
+        assert result.status == "FAILED"
+        assert result.failure_reason.startswith("skill_pack_unavailable:")
+        assert not list(store.running_executions())
+        assert store.latest_candidate("skill-task") is None
+    finally:
+        store.close()
 
 
 def test_reviewer_receives_skill_guidance_and_keeps_structured_response(
