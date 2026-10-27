@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from .git import GitError, GitWorkspace
+from .queue_control import OperatorStopRequested
 
 
 class ContractError(ValueError):
@@ -634,6 +635,7 @@ def candidate_workspace(project: Path, candidate_sha: str) -> Iterator[Path]:
     workspace.run("cat-file", "-e", f"{candidate_sha}^{{commit}}")
     temp_root = Path(tempfile.mkdtemp(prefix="stagemesh-candidate-"))
     target = temp_root / "checkout"
+    retain = False
     try:
         workspace.run("worktree", "add", "--detach", str(target), candidate_sha)
         expected = workspace.run("rev-parse", f"{candidate_sha}^{{commit}}").stdout.strip()
@@ -649,43 +651,68 @@ def candidate_workspace(project: Path, candidate_sha: str) -> Iterator[Path]:
         yield target
         if checkout.head() != expected:  # a gate moved HEAD: the tree that ran is no longer the candidate
             raise GitError(f"a gate moved the candidate checkout off {expected}")
+    except OperatorStopRequested as exc:
+        if not exc.cleanup_complete:
+            retain = True
+            exc.retained_workspace = str(target)
+        raise
     finally:
-        try:
-            workspace.run("worktree", "remove", "--force", str(target), check=False)
-        finally:
-            shutil.rmtree(temp_root, ignore_errors=True)
+        if not retain:
+            try:
+                workspace.run("worktree", "remove", "--force", str(target), check=False)
+            finally:
+                shutil.rmtree(temp_root, ignore_errors=True)
 
 
 def _run_gate_process(
     command: list[str], cwd: Path, env: dict[str, str] | None, timeout: int
 ) -> subprocess.CompletedProcess[str]:
-    """Run a gate and, on timeout, terminate only that gate's owned processes.
-
-    ``subprocess.run`` kills only the direct child. Descendants are reaped
-    after the saved process identity is checked, so a reused PID is not killed.
-    """
-    from .gate_process import spawn_gate_process, terminate_owned_gate
+    """A failed cleanup cannot become a timeout verdict or release owned work."""
+    from .gate_process import GateCleanupUnconfirmed, spawn_gate_process, terminate_owned_gate
 
     proc, identity = spawn_gate_process(command, cwd, env)
+
+    def unconfirmed(note: str, *causes: BaseException) -> GateCleanupUnconfirmed:
+        error = GateCleanupUnconfirmed(note, identity, cwd=str(cwd))
+        error.monitor_failed = any(getattr(cause, "monitor_failed", False) for cause in causes)
+        return error
+
     try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except BaseException as exc:
         try:
-            stdout, stderr = proc.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired as exc:
             termination = terminate_owned_gate(proc, identity)
-            try:
-                stdout, stderr = proc.communicate(timeout=5)
-            except subprocess.TimeoutExpired:
-                stdout, stderr = exc.stdout, exc.stderr
-            expired = subprocess.TimeoutExpired(command, timeout, output=stdout, stderr=stderr)
-            expired.stagemesh_note = termination.note  # type: ignore[attr-defined]
-            raise expired from exc
-        except BaseException:
-            terminate_owned_gate(proc, identity)
+        except BaseException as cleanup_error:  # even interrupted cleanup must retain uncertain ownership
+            raise unconfirmed(type(cleanup_error).__name__, exc, cleanup_error) from cleanup_error
+        if not termination.cleanup_confirmed:
+            raise unconfirmed(termination.note, exc) from exc
+        if not isinstance(exc, subprocess.TimeoutExpired):
             raise
-    finally:
-        if proc.poll() is None:
-            terminate_owned_gate(proc, identity)
+        try:
+            stdout, stderr = proc.communicate(timeout=5)
+        except BaseException as drain_error:
+            raise unconfirmed("owned pipes did not drain after termination", exc, drain_error) from drain_error
+        expired = subprocess.TimeoutExpired(command, timeout, output=stdout, stderr=stderr)
+        expired.stagemesh_note = termination.note  # type: ignore[attr-defined]
+        raise expired from exc
     return subprocess.CompletedProcess(command, proc.returncode if proc.returncode is not None else 1, stdout, stderr)
+
+
+@contextmanager
+def _gate_temporary_directory() -> Iterator[str]:
+    # Explicit cleanup avoids TemporaryDirectory's GC finalizer deleting retained files.
+    path = tempfile.mkdtemp(prefix="stagemesh-gate-")
+    retain = False
+    try:
+        yield path
+    except OperatorStopRequested as exc:
+        if not exc.cleanup_complete:
+            retain = True
+            exc.retained_gate_temp = path
+        raise
+    finally:
+        if not retain:
+            shutil.rmtree(path, ignore_errors=True)
 
 
 def run_gate(project: Path, gate: GateCommand) -> GateResult:
@@ -721,9 +748,7 @@ def run_gate(project: Path, gate: GateCommand) -> GateResult:
             # validator. Each gate needs its own host-owned temporary directory.
             temp_keys = ("TMPDIR", "TEMP", "TMP")
             if not set(temp_keys).intersection(dict(gate.env)):
-                temp_root = resources.enter_context(
-                    tempfile.TemporaryDirectory(prefix="stagemesh-gate-", ignore_cleanup_errors=True)
-                )
+                temp_root = resources.enter_context(_gate_temporary_directory())
                 environment = {**(environment or os.environ), **dict.fromkeys(temp_keys, temp_root)}
             with validation_slot() as waited:
                 from .validation_slot import raise_if_validation_blocked

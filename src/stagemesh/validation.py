@@ -20,6 +20,7 @@ from .focused_validation import discover_focused_gates, with_focused_gates
 from .git import GitError
 from .persistence import Store
 from .process_identity import owner_execution_fields
+from .queue_control import OperatorStopRequested
 from .remediation import finding_identity
 from .validation_reuse import GATE_REUSE_POLICY_VERSION, GateReuse, candidate_tree, load_prior_passes, select_files
 from .validation_plan import (
@@ -312,6 +313,30 @@ class Validator:
                 except E2EEvidenceValidationError as exc:
                     status = EvidenceStatus.FAILED
                     findings.append({"severity": "error", "code": "invalid_e2e_evidence", "message": str(exc)})
+        except OperatorStopRequested as exc:
+            if not exc.cleanup_complete:
+                try:
+                    store.retain_execution_for_cleanup(execution_id, "validation gate cleanup unconfirmed")
+                except Exception as ownership_error:  # preserve control flow when durable storage is unavailable
+                    exc.add_note("validation cleanup ownership could not be persisted")
+                    raise exc from ownership_error
+                try:
+                    identity = getattr(exc, "gate_identity", None)
+                    record_audit(store, "validation.cleanup_incomplete", {
+                        "execution_id": execution_id, "task_id": task_id, "candidate_sha": candidate_sha,
+                        **(bound.evidence_payload() if bound else {}),
+                        "gate_cwd": getattr(exc, "gate_cwd", None),
+                        "gate_identity": None if identity is None else {
+                            "pid": identity.pid, "create_time": identity.create_time,
+                            "boot_id": identity.boot_id, "executable": identity.executable,
+                        },
+                        "retained_workspace": exc.retained_workspace,
+                        "retained_gate_temp": getattr(exc, "retained_gate_temp", None),
+                    })
+                except Exception as audit_error:
+                    exc.add_note("validation cleanup detail audit could not be persisted")
+                    raise exc from audit_error
+            raise
         except ValidationServiceError as exc:
             from .remediation import bounded_failure_text
 
