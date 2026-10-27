@@ -167,3 +167,12 @@ StageMesh execution, claim and window is idle (see `project-local-runtime.md`). 
 wheel. If a prior repair is already in the shared runtime, reconcile instead of overwriting.
 
 Source synchronization publishes task eligibility only after dependency and retirement updates finish. A task shown as `source synchronization incomplete` cannot be admitted or claimed, including by a worker holding an earlier scheduling decision. An interrupted import keeps that task unavailable until an authoritative retry reconciles it; an empty scan or an unrelated source does not release it. Source writers for the same database serialize their publication phases. This protects partial imports; it does not establish freshness of remote snapshots fetched before the synchronization lock.
+
+
+Tool-failure recovery records are recommendations. The subprocess failure recorder does not execute the proposed
+retry or setup command, so its `attempted` list stays empty and `execution_status` is `NOT_CONFIRMED`. A matching
+failure in the task-scoped audit history stops and reports the latest 20 `previous_recommendations` and their total count for operator verification;
+recording an unexecuted retry never authorizes progression to setup. Actual configured recovery execution remains
+separate unfinished work. No setup command is derived from provider output or run by this accounting path.
+
+Recovery history is streamed for the exact task and event type before signatures are compared. Unrelated events or other signatures cannot evict an earlier stop decision through a global recent-events limit. The full audit remains authoritative; the recovery summary is bounded.
