@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import filecmp
 import dataclasses
+import filecmp
 import hashlib
 import json
 import os
@@ -23,7 +23,15 @@ from .capacity import CapacityKind, CapacityRegistry
 from .config import StageMeshConfig
 from .contract_binding import ContractRejected, bind_task_contract
 from .domain import ExecutionKind, ExecutionStatus
-from .efficiency import BUDGET_EXHAUSTED, BudgetPolicy, CallRecorder, check_task_budget, check_window_budget, extract_usage, note_call_usage
+from .efficiency import (
+    BUDGET_EXHAUSTED,
+    BudgetPolicy,
+    CallRecorder,
+    check_task_budget,
+    check_window_budget,
+    extract_usage,
+    note_call_usage,
+)
 from .execution import (
     PROVIDER_TIMEOUT,
     ExecutionResult,
@@ -37,6 +45,7 @@ from .focused_validation import focused_test_prompt
 from .git_identity import provider_environment
 from .persistence import Store
 from .process_identity import popen_identity
+from .queue_control import OperatorStopRequested
 from .redaction import redact_command_secrets
 from .remediation import remediation_context
 from .research_context import (
@@ -449,6 +458,7 @@ class RuntimeCommandAdapter:
             return _review_infrastructure_failure("provider_unavailable")
         temp_dir = tempfile.mkdtemp(prefix="stagemesh-review-")
         review_path = Path(temp_dir) / "candidate"
+        cleanup_confirmed = True  # no provider owns the checkout until Popen succeeds
         try:
             setup_error = _prepare_review_checkout(Path(project), review_path, candidate_sha)
             if setup_error:
@@ -464,6 +474,7 @@ class RuntimeCommandAdapter:
             refused = _authorization_refusal(self, project, "review", command=command)
             if refused:
                 return _review_infrastructure_failure("provider_not_authorized", refused)
+            cleanup_confirmed = False  # an interrupted Popen attempt may already have created a child
             try:
                 proc = subprocess.Popen(
                     command,
@@ -478,8 +489,13 @@ class RuntimeCommandAdapter:
                     **popen_session_kwargs(),
                 )
             except FileNotFoundError:
+                cleanup_confirmed = True  # construction failed without returning a child
                 return _review_infrastructure_failure("provider_unavailable")
+            except OSError:
+                cleanup_confirmed = True
+                raise
             stdout, stderr, timed_out = communicate_bounded(proc, provider_input, provider_timeout_seconds(self.timeout_seconds))
+            cleanup_confirmed = True
             note_call_usage(extract_usage(stdout, stderr))  # the caller records the call (it owns the store and the purpose)
             if timed_out:
                 return _review_infrastructure_failure(PROVIDER_TIMEOUT)
@@ -497,8 +513,22 @@ class RuntimeCommandAdapter:
                     return _review_infrastructure_failure(reason, output, retry_after)
                 return _review_infrastructure_failure(reason)
             return _provider_text_response(stdout)
+        except BaseException as exc:
+            if not cleanup_confirmed:
+                if isinstance(exc, OperatorStopRequested) and exc.cleanup_complete:
+                    cleanup_confirmed = True
+                else:
+                    # The caller persists this reason on its retained REVIEW execution. The path must survive for
+                    # recovery until an operator has verified the descendants are gone; root exit alone is insufficient.
+                    raise OperatorStopRequested(
+                        f"review provider cleanup unconfirmed; workspace retained at {review_path}",
+                        cleanup_complete=False, monitor_failed=getattr(exc, "monitor_failed", False),
+                        retained_workspace=str(review_path),
+                    ) from exc
+            raise
         finally:
-            _cleanup_review_workspace(Path(temp_dir))
+            if cleanup_confirmed:
+                _cleanup_review_workspace(Path(temp_dir))
 
 
 def _review_provider_environment(project: Path, review_path: Path) -> dict[str, str]:

@@ -29,7 +29,7 @@ jobs:
       - name: Existing queue stop compatibility
         run: .stagemesh\tooling\venv\Scripts\python.exe -m pytest -q tests/test_parallel.py tests/test_queue_run.py -k "stop or pause or interrupt"
       - name: Execution budgets and review ownership
-        run: .stagemesh\tooling\venv\Scripts\python.exe -m pytest -q tests/test_bounded_execution.py tests/test_review_terminalization.py tests/test_builtin_execution_ownership.py tests/test_provider_cleanup_confirmation.py tests/test_external_provider_cleanup.py
+        run: .stagemesh\tooling\venv\Scripts\python.exe -m pytest -q tests/test_bounded_execution.py tests/test_review_terminalization.py tests/test_builtin_execution_ownership.py tests/test_provider_cleanup_confirmation.py tests/test_external_provider_cleanup.py tests/test_review_workspace_retention.py
       - name: Continuous driver control and recovery
         run: .stagemesh\tooling\venv\Scripts\python.exe -m pytest -q tests/test_continuous_driver.py tests/test_driver_control_races.py tests/test_driver_cleanup_fence.py
       - name: Validation environment and fallback progress
@@ -67,7 +67,7 @@ jobs:
       - name: Existing queue stop compatibility
         run: .stagemesh/tooling/venv/bin/python -m pytest -q tests/test_parallel.py tests/test_queue_run.py -k "stop or pause or interrupt"
       - name: Execution budgets and review ownership
-        run: .stagemesh/tooling/venv/bin/python -m pytest -q tests/test_bounded_execution.py tests/test_review_terminalization.py tests/test_builtin_execution_ownership.py tests/test_provider_cleanup_confirmation.py tests/test_external_provider_cleanup.py
+        run: .stagemesh/tooling/venv/bin/python -m pytest -q tests/test_bounded_execution.py tests/test_review_terminalization.py tests/test_builtin_execution_ownership.py tests/test_provider_cleanup_confirmation.py tests/test_external_provider_cleanup.py tests/test_review_workspace_retention.py
       - name: Continuous driver control and recovery
         run: .stagemesh/tooling/venv/bin/python -m pytest -q tests/test_continuous_driver.py tests/test_driver_control_races.py tests/test_driver_cleanup_fence.py
       - name: Validation environment and fallback progress

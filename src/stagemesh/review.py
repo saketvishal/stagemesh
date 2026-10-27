@@ -10,7 +10,13 @@ from typing import Protocol
 from .audit import record_audit
 from .config import AdverseReviewPolicy
 from .contract_binding import contract_for_candidate
-from .contracts import ContractError, _split_command, contract_prompt, declarative_invariants, evaluate_contract
+from .contracts import (
+    ContractError,
+    _split_command,
+    contract_prompt,
+    declarative_invariants,
+    evaluate_contract,
+)
 from .domain import EvidenceKind, EvidenceStatus, ExecutionKind, ExecutionStatus
 from .efficiency import record_provider_call, take_call_usage
 from .persistence import Store
@@ -762,7 +768,12 @@ class Reviewer:
             return EvidenceStatus.PASSED
         except BaseException as exc:
             if isinstance(exc, OperatorStopRequested) and not exc.cleanup_complete:
-                store.retain_execution_for_cleanup(execution_id, str(exc))
+                store.retain_execution_for_cleanup(execution_id, str(exc)[:200])
+                if exc.retained_workspace is not None:
+                    store.add_audit_event("review.workspace_retained", {
+                        "execution_id": execution_id, "task_id": task_id, "candidate_sha": candidate_sha,
+                        "path": exc.retained_workspace, "reason": "cleanup_incomplete",
+                    })
                 raise
             finish_running(ExecutionStatus.FAILED, actor=reviewer_provider,
                            result="operator_stop" if isinstance(exc, OperatorStopRequested) else _review_exception_reason(exc))

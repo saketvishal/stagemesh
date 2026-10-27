@@ -38,10 +38,14 @@ def latest_queue_control(store: Store) -> dict[str, Any] | None:
 class OperatorStopRequested(KeyboardInterrupt):
     """Control flow, never a provider outage or a reason to try another provider."""
 
-    def __init__(self, message: str, *, cleanup_complete: bool = True, monitor_failed: bool = False):
+    def __init__(
+        self, message: str, *, cleanup_complete: bool = True, monitor_failed: bool = False,
+        retained_workspace: str | None = None,
+    ):
         super().__init__(message)
         self.cleanup_complete = cleanup_complete
         self.monitor_failed = monitor_failed
+        self.retained_workspace = retained_workspace
 
 
 class QueueStopControl:

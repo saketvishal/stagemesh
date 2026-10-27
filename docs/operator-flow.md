@@ -145,3 +145,5 @@ Nothing is force-pushed, no gate is skipped and no test is weakened. A task bloc
 Rerunning `stagemesh run-window` is safe because its preflight automatically recovers executions whose process is provably dead; executions that are LIVE are waited for, and executions with an unknown process identity fail closed and print the exact `stagemesh recover-stale --task <id> --release-unknown --execution <id> --reason ...` command to run after the operator has checked they are dead.
 
 Nobody should open the SQLite ledger by hand.
+
+When a review provider stops with unconfirmed process-tree cleanup, its temporary candidate checkout is retained. The raised stop reason and the `review.workspace_retained` audit event include the exact retained path. Keep that directory until the process tree is verified gone; then use the existing explicit unknown-execution recovery command and remove the retained temporary directory. Completed reviews and stops with confirmed cleanup still remove their temporary checkout.
