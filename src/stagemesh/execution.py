@@ -23,6 +23,7 @@ from .persistence import Store
 from .process_identity import classify_process, popen_identity, process_identity
 from .queue_control import OperatorStopRequested, QueueStopControl, current_provider_stop
 from .remediation import remediation_context, tool_recovery_plan
+from .review_identity import command_snapshot, record_implementation_identity
 from .workspace_guard import EXTERNAL_WORKSPACE_MUTATION, WorkspaceMutation, owned_workspace
 from .workspaces import (
     NO_IMPLEMENTATION_CHANGE,
@@ -481,9 +482,11 @@ class SubprocessExecutor(Executor):
         task_prompt = build_prompt(task_id, task, run_path, contract=bound.contract, remediation=remediation)
 
         lease.check("before_agent")
+        configured_command = tuple(self.command)
+        command_identity = command_snapshot(self.name, configured_command)
         try:
             proc = subprocess.Popen(
-                self.command,
+                configured_command,
                 cwd=run_path,
                 text=True,
                 encoding="utf-8",
@@ -551,6 +554,7 @@ class SubprocessExecutor(Executor):
             store.finish_execution(execution_id, ExecutionStatus.FAILED, result=NO_IMPLEMENTATION_CHANGE)
             return ExecutionResult(ExecutionStatus.FAILED, failure_reason=NO_IMPLEMENTATION_CHANGE)
         store.add_candidate(task_id, sha, self.name, durable_handoff=True)
+        record_implementation_identity(store, task_id, sha, execution_id, command_identity)
         lease.seal(sha)
         call.finish("succeeded", candidate=sha)
         store.finish_execution(execution_id, ExecutionStatus.SUCCEEDED, sha)

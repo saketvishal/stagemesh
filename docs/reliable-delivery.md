@@ -167,3 +167,30 @@ StageMesh execution, claim and window is idle (see `project-local-runtime.md`). 
 wheel. If a prior repair is already in the shared runtime, reconcile instead of overwriting.
 
 Source synchronization publishes task eligibility only after dependency and retirement updates finish. A task shown as `source synchronization incomplete` cannot be admitted or claimed, including by a worker holding an earlier scheduling decision. An interrupted import keeps that task unavailable until an authoritative retry reconciles it; an empty scan or an unrelated source does not release it. Source writers for the same database serialize their publication phases. This protects partial imports; it does not establish freshness of remote snapshots fetched before the synchronization lock.
+
+
+## Distinct normal and adverse review
+
+Staged execution with `require_independent_review` earns a normal review checkpoint, then a separate adverse review
+on a later coordinator tick. The task stays in REVIEW until both pass the prerequisite policy; the existing driver
+checks stop requests and task budgets between the two ticks. Each role dispatch and incomplete-answer retry also
+checks the shared configured task and originating-window budgets. Direct `Reviewer.review()` calls do not provide
+the driver's stop-request boundary. Normal findings require remediation. Adverse findings at configured blocking severities
+require remediation; actionable advisory findings stay in evidence. Missing, malformed or incomplete verdicts never
+become advisory passes. Custom severity names remain supported by the policy.
+
+Both roles must execute under distinct providers and configured command identities, independently of the implementer.
+Selection uses only the existing authorized provider pool, excludes actual fallback actors and their command aliases,
+and holds when another qualified reviewer is unavailable. This does not register or authorize another provider.
+Passed role evidence references separate successful REVIEW execution records and the exact candidate, contract and
+policy digest. A saved normal checkpoint can resume after reopening the database; it cannot stand in for adverse review.
+
+New real implementation candidates carry an audit receipt for the configured command and same-actor aliases frozen
+before prompt expansion, bound to their successful implementation execution. Review startup reports the actual winning
+provider's frozen command identity. Receipts contain provider names and command fingerprints, never raw command argv
+or prompts. Current configuration cannot reconstruct an older candidate's command provenance. Missing or conflicting
+historic receipts hold qualification; old single-role review evidence does not satisfy the distinct-role gate.
+This checks the configured provider/command independence policy, not universal semantic equivalence of different tools.
+No existing runtime task, frozen candidate, contract or provider authorization is rewritten by this source change.
+
+Each review fallback invocation is recorded and budget-checked individually. A provider that returns an incomplete answer or infrastructure failure spends an attempt before another configured reviewer can be tried; the outer review does not count the final attempt twice. Usage not reported by a provider remains unknown.

@@ -24,6 +24,7 @@ from .process_identity import owner_execution_fields
 from .queue_control import OperatorStopRequested
 from .remediation import finding_identity, findings_to_verify, unresolved_findings
 from .review_disposition import record_review_findings
+from .review_identity import implementation_identity, take_review_identity, valid_command_snapshot
 
 
 @dataclass(frozen=True)
@@ -143,6 +144,7 @@ def adverse_gate(
         p for p in store.bound_evidence_payloads(task_id, candidate_sha, EvidenceKind.REVIEW, contract_hash)
         if p.get("adverse_review_gate") is True and independent_review_verified(p)
         and p.get("adverse_policy_digest") == policy.digest()
+        and _review_pair_verified(store, task_id, candidate_sha, contract_hash, policy, p)
     ]
     if not passed:
         reasons.append("missing required adverse review bound to this candidate, contract and policy")
@@ -231,20 +233,89 @@ def validate_role_evidence(
     return errors
 
 
+def _payload_role(payload: dict, role: str) -> object:
+    roles = payload.get("review_roles")
+    return roles.get(role) if isinstance(roles, dict) else None
+
+
+def _role_execution_verified(
+    store: Store, task_id: str, candidate_sha: str, contract_hash: str, policy: AdverseReviewPolicy,
+    role: str, item: object,
+) -> bool:
+    if not isinstance(item, dict) or item.get("role") != role or item.get("executed") is not True:
+        return False
+    if item.get("candidate_sha") != candidate_sha or item.get("contract_hash") != contract_hash or item.get("policy_digest") != policy.digest():
+        return False
+    digest, aliases = item.get("command_digest"), item.get("alias_digests")
+    if (not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest)
+            or item.get("command") != "sha256:" + digest or not isinstance(aliases, list)
+            or digest not in aliases or not all(isinstance(a, str) and re.fullmatch(r"[0-9a-f]{64}", a) for a in aliases)):
+        return False
+    verdict, findings = item.get("verdict"), item.get("findings")
+    if (verdict == VERDICT_PASS and findings != []) or (
+        verdict in (VERDICT_FAIL_WITH_FINDINGS, LEGACY_FAIL) and not _complete_findings(findings)
+    ) or verdict not in (VERDICT_PASS, VERDICT_FAIL_WITH_FINDINGS, LEGACY_FAIL):
+        return False
+    execution_id = item.get("execution_id")
+    if not isinstance(execution_id, str) or not execution_id:
+        return False
+    execution = store.conn.execute("SELECT * FROM executions WHERE id=?", (execution_id,)).fetchone()
+    return bool(execution is not None and execution["task_id"] == task_id and execution["candidate_sha"] == candidate_sha
+                and execution["kind"] == ExecutionKind.REVIEW and execution["status"] == ExecutionStatus.SUCCEEDED
+                and execution["actor"] == item.get("provider"))
+
+
+def _review_pair_verified(
+    store: Store, task_id: str, candidate_sha: str, contract_hash: str, policy: AdverseReviewPolicy, payload: dict,
+) -> bool:
+    roles = payload.get("review_roles")
+    if payload.get("review_role") != ROLE_ADVERSE or not isinstance(roles, dict) or set(roles) != {ROLE_NORMAL, ROLE_ADVERSE}:
+        return False
+    if not all(_role_execution_verified(store, task_id, candidate_sha, contract_hash, policy, role, item)
+               for role, item in roles.items()):
+        return False
+    normal, adverse = roles[ROLE_NORMAL], roles[ROLE_ADVERSE]
+    if normal["execution_id"] == adverse["execution_id"] or normal.get("verdict") != VERDICT_PASS:
+        return False
+    if adverse_outcome(adverse, policy) != ADVERSE_OUTCOME_PASS:
+        return False
+    if adverse.get("provider") != payload.get("review_provider"):
+        return False
+    produced = store.conn.execute("SELECT produced_by FROM candidates WHERE task_id=? AND sha=?", (task_id, candidate_sha)).fetchone()
+    if produced is None or produced["produced_by"] != payload.get("implementer_provider"):
+        return False
+    frozen = implementation_identity(store, task_id, candidate_sha)
+    if (frozen is None or payload.get("implementer_command") != "sha256:" + frozen["command_digest"]
+            or payload.get("implementer_execution_id") not in frozen["execution_ids"]):
+        return False
+    if any(set(item["alias_digests"]) & set(frozen["alias_digests"]) for item in roles.values()):
+        return False
+    if set(normal["alias_digests"]) & set(adverse["alias_digests"]):
+        return False
+    if validate_role_evidence(roles, candidate_sha=candidate_sha, policy=policy,
+                              implementer={"provider": payload["implementer_provider"], "command": payload["implementer_command"]}):
+        return False
+    # A copied execution ID cannot relabel a previous adverse invocation as normal.
+    return any(p.get("review_role") == ROLE_NORMAL and _payload_role(p, ROLE_NORMAL) == normal
+               for p in store.bound_evidence_payloads(task_id, candidate_sha, EvidenceKind.REVIEW, contract_hash))
+
+
 def adverse_outcome(adverse: dict[str, object], policy: AdverseReviewPolicy) -> str:
-    """PASS, BLOCKED (a blocking finding or a FAIL without a usable finding) or UNAVAILABLE (fail closed, never a pass)."""
+    """Only complete actionable verdicts can pass; supported custom severity names remain policy-defined."""
     verdict = adverse.get("verdict")
+    findings = adverse.get("findings", [])
     if verdict == VERDICT_PASS:
-        return ADVERSE_OUTCOME_PASS
-    if verdict in (VERDICT_FAIL_WITH_FINDINGS, LEGACY_FAIL):
-        findings = adverse.get("findings")
-        findings = findings if isinstance(findings, list) else []
-        blocking = [f for f in findings if isinstance(f, dict) and policy.is_blocking(f.get("severity", "error"))]
-        # A FAIL whose findings are all advisory does not block; a FAIL with no findings at all is not a usable verdict.
-        if blocking:
-            return ADVERSE_OUTCOME_BLOCKED
-        return ADVERSE_OUTCOME_PASS if findings else ADVERSE_OUTCOME_UNAVAILABLE
+        return ADVERSE_OUTCOME_PASS if findings == [] else ADVERSE_OUTCOME_UNAVAILABLE
+    if verdict in (VERDICT_FAIL_WITH_FINDINGS, LEGACY_FAIL) and _complete_findings(findings):
+        return ADVERSE_OUTCOME_BLOCKED if any(policy.is_blocking(f["severity"]) for f in findings) else ADVERSE_OUTCOME_PASS
     return ADVERSE_OUTCOME_UNAVAILABLE
+
+
+def _complete_findings(raw: object) -> bool:
+    return bool(isinstance(raw, list) and raw
+                and all(isinstance(f, dict) and isinstance(f.get("message"), str) and f["message"].strip()
+                        and isinstance(f.get("severity"), str) and f["severity"].strip() for f in raw)
+                and len(_actionable_findings(raw)) == len(raw))
 
 
 # Progress chatter is not a verdict. _PRELIMINARY finds it anywhere in a short answer; findings are judged only by how they START
@@ -508,8 +579,10 @@ class Reviewer:
         review_pool: object | None = None,
         max_incomplete_retries: int = REVIEW_INCOMPLETE_RETRIES,
         adverse_policy: AdverseReviewPolicy | None = None,
+        separate_roles: bool = False,
     ):
         self.adverse_policy = adverse_policy or AdverseReviewPolicy()
+        self.separate_roles = separate_roles
         self.max_incomplete_retries = max(0, max_incomplete_retries)
         self.review_pool = review_pool
         self.require_independent = require_independent
@@ -519,6 +592,27 @@ class Reviewer:
         self.adapter = adapter
 
     def review(self, store: Store, task_id: str, candidate_sha: str, project: Path) -> EvidenceStatus:
+        if not self.separate_roles:
+            return self._review_role(store, task_id, candidate_sha, project)
+        # One role per coordinator tick preserves the existing between-stage budget/stop checks.
+        try:
+            bound = contract_for_candidate(store, task_id, candidate_sha, project)
+        except ContractError:
+            return self._review_role(store, task_id, candidate_sha, project, role=ROLE_NORMAL)
+        normal = next((p["review_roles"][ROLE_NORMAL]
+                       for p in reversed(store.bound_evidence_payloads(task_id, candidate_sha, EvidenceKind.REVIEW, bound.digest))
+                       if p.get("review_role") == ROLE_NORMAL and independent_review_verified(p)
+                       and _role_execution_verified(store, task_id, candidate_sha, bound.digest, self.adverse_policy,
+                                                   ROLE_NORMAL, _payload_role(p, ROLE_NORMAL))
+                       and p["review_roles"][ROLE_NORMAL].get("verdict") == VERDICT_PASS), None)
+        return self._review_role(store, task_id, candidate_sha, project,
+                                 role=ROLE_ADVERSE if normal else ROLE_NORMAL,
+                                 prior_roles={ROLE_NORMAL: normal} if normal else None)
+
+    def _review_role(
+        self, store: Store, task_id: str, candidate_sha: str, project: Path, *,
+        role: str | None = None, prior_roles: dict | None = None,
+    ) -> EvidenceStatus:
         execution_id = store.start_execution(
             task_id=task_id,
             claim_id=None,
@@ -549,11 +643,23 @@ class Reviewer:
                 "SELECT produced_by FROM candidates WHERE task_id=? AND sha=?", (task_id, candidate_sha)
             ).fetchone()
             implementer = str(produced["produced_by"]) if produced is not None else None
+            frozen_implementer = implementation_identity(store, task_id, candidate_sha) if role is not None else None
             adapter = self.adapter
             considered: list[dict[str, object]] = []
-            if self.review_pool is not None:
+            if self.review_pool is not None and (role is None or frozen_implementer is not None):
                 # Dynamic selection: first eligible provider that is not the implementer, with automatic fallback.
-                adapter, verdicts = self.review_pool.review_adapter(store, task_id, candidate_sha, implementer)
+                if role is not None:
+                    normal = (prior_roles or {}).get(ROLE_NORMAL)
+                    excluded_commands = set(frozen_implementer["alias_digests"])
+                    if normal:
+                        excluded_commands.update(normal["alias_digests"])
+                    adapter, verdicts = self.review_pool.review_adapter(
+                        store, task_id, candidate_sha, implementer,
+                        excluded_providers=(normal["provider"],) if normal else (),
+                        excluded_command_digests=tuple(excluded_commands),
+                    )
+                else:
+                    adapter, verdicts = self.review_pool.review_adapter(store, task_id, candidate_sha, implementer)
                 considered = [v.to_dict() for v in verdicts]
             adapter_name = getattr(adapter, "name", None)
             reviewer_provider = adapter_name or self.provider_name
@@ -565,13 +671,20 @@ class Reviewer:
                 "review_provider": reviewer_provider,
                 "implementer_provider": implementer,
                 "independent_reviewer": independent,
-                "adverse_review_gate": True,
+                "adverse_review_gate": role != ROLE_NORMAL,
                 "adverse_policy_digest": self.adverse_policy.digest(),
                 "deterministic_contract_gate": True,
                 "review_execution_provider": adapter_name,
                 "review_execution_invoked": False,
                 "independent_review_required": self.require_independent,
             }
+            role_findings: list[dict[str, str]] = []
+            final_identity: dict | None = None
+            if role is not None:
+                if frozen_implementer is None:
+                    infrastructure_failure = "implementation_identity_unavailable"
+                elif adapter is None:
+                    infrastructure_failure = "independent_review_unavailable"
             if considered:
                 review_payload["review_providers_considered"] = considered
             if same_provider and not self.require_independent:
@@ -612,8 +725,7 @@ class Reviewer:
                     )
                     for item in evaluation.findings
                 )
-                if adapter is not None and not findings and not (same_provider and self.require_independent):
-                    review_payload["review_execution_invoked"] = True
+                if adapter is not None and infrastructure_failure is None and not findings and not (same_provider and self.require_independent):
                     validation = store.bound_evidence_payloads(
                         task_id, candidate_sha, EvidenceKind.VALIDATION, bound.digest, EvidenceStatus.PASSED,
                     )
@@ -641,7 +753,8 @@ class Reviewer:
                         "Verify each is resolved in this candidate and report any that remain as findings.\n"
                     ) if prior else ""
                     prompt = (
-                        adverse_review_instructions(self.adverse_policy) +
+                        ("Normal review: independently check correctness, scope and contract compliance.\n\n"
+                         if role == ROLE_NORMAL else adverse_review_instructions(self.adverse_policy)) +
                         f"Review candidate {candidate_sha} for task {task_id} under contract {bound.digest} (version {bound.version}).\n"
                         f"Objective: {contract.objective}\n"
                         f"{contract_prompt(contract)}\n"
@@ -655,12 +768,25 @@ class Reviewer:
                     candidate_review = getattr(adapter, "review_candidate", None)
                     verdict = ReviewVerdict(VERDICT_REVIEW_INCOMPLETE, reason="review_not_attempted")
                     for attempt in range(1 + self.max_incomplete_retries):
+                        if role is not None:
+                            from .providers import _provider_budget_refusal
+
+                            budget_problem = _provider_budget_refusal(store, task_id, project)
+                            if budget_problem:
+                                review_payload["review_budget_reason"] = budget_problem
+                                verdict = ReviewVerdict(VERDICT_REVIEW_INCOMPLETE, reason="budget_exhausted", provider_failure=True)
+                                break
+                        review_payload["review_execution_invoked"] = True
                         take_call_usage()  # clear anything a previous call left on this thread
                         call_started = time.monotonic()
-                        if callable(candidate_review):
-                            response = candidate_review(prompt, project, candidate_sha)
-                        else:
-                            response = adapter.review(prompt)
+                        take_review_identity()
+                        try:
+                            if callable(candidate_review):
+                                response = candidate_review(prompt, project, candidate_sha)
+                            else:
+                                response = adapter.review(prompt)
+                        finally:
+                            final_identity = take_review_identity()
                         call_seconds = time.monotonic() - call_started
                         call_usage = take_call_usage()  # unknown unless the adapter noted what the provider reported
                         final_provider = getattr(adapter, "name", reviewer_provider)
@@ -673,16 +799,27 @@ class Reviewer:
                             review_payload["independent_reviewer"] = independent
                         review_payload["review_response"] = str(response)[:MAX_RECORDED_REVIEW_RESPONSE_CHARS]
                         review_payload["review_attempts"] = attempt + 1
+                        if not valid_command_snapshot(final_identity) or not _same_provider(str(final_identity.get("provider", "")), str(final_provider)):
+                            final_identity = None
                         verdict = classify_review_response(response)
-                        record_provider_call(
-                            store, task_id=task_id, purpose="review", provider=str(final_provider), candidate_sha=candidate_sha,
-                            outcome="failed" if verdict.kind == VERDICT_REVIEW_INCOMPLETE else "succeeded",
-                            reason=verdict.reason if verdict.kind == VERDICT_REVIEW_INCOMPLETE else None,
-                            duration_seconds=call_seconds, usage=call_usage,
-                        )
+                        if (role is not None and verdict.kind != VERDICT_REVIEW_INCOMPLETE
+                                and (final_identity is None or not _same_provider(str(final_identity.get("provider", "")), str(final_provider)))):
+                            verdict = ReviewVerdict(VERDICT_REVIEW_INCOMPLETE, reason="review_role_identity_unavailable", provider_failure=True)
+                        if not getattr(adapter, "records_provider_calls", False):
+                            record_provider_call(
+                                store, task_id=task_id, purpose="review", provider=str(final_provider), candidate_sha=candidate_sha,
+                                outcome="failed" if verdict.kind == VERDICT_REVIEW_INCOMPLETE else "succeeded",
+                                reason=verdict.reason if verdict.kind == VERDICT_REVIEW_INCOMPLETE else None,
+                                duration_seconds=call_seconds, usage=call_usage,
+                            )
+                        if verdict.reason == "budget_exhausted":
+                            parsed = parse_review_response(response)
+                            if isinstance(parsed, dict) and isinstance(parsed.get("provider_output"), str):
+                                review_payload["review_budget_reason"] = parsed["provider_output"][:1000]
                         if verdict.kind != VERDICT_REVIEW_INCOMPLETE or verdict.provider_failure:
                             break  # a provider outage was already walked through every eligible reviewer
                     review_payload["review_verdict"] = verdict.kind
+                    role_findings = [dict(item) for item in verdict.findings]
                     if self.require_independent and not independent:
                         # The answering provider is (or fell back to) the implementer: its verdict, PASS or FAIL, is void.
                         review_payload["review_verdict"] = VERDICT_REVIEW_INCOMPLETE
@@ -697,6 +834,9 @@ class Reviewer:
                         infrastructure_failure = verdict.reason or "review_incomplete"
                     elif verdict.kind == VERDICT_FAIL_WITH_FINDINGS:
                         for item in verdict.findings:
+                            if role == ROLE_ADVERSE and not self.adverse_policy.is_blocking(item["severity"]):
+                                review_payload.setdefault("advisory_findings", []).append(dict(item))
+                                continue
                             findings.append(
                                 ReviewFinding(
                                     finding_identity(candidate_sha, item["message"], item.get("path")), item["severity"], item["message"]
@@ -726,6 +866,29 @@ class Reviewer:
                     if not implementer
                     else "independent_review_unavailable"
                 )
+            if role is not None:
+                review_payload["review_role"] = role
+                review_payload["implementer_command"] = "sha256:" + frozen_implementer["command_digest"] if frozen_implementer else ""
+                review_payload["implementer_execution_id"] = frozen_implementer["execution_ids"][0] if frozen_implementer else None
+                digest = final_identity.get("command_digest", "") if final_identity else ""
+                review_payload["review_roles"] = {**(prior_roles or {}), role: {
+                    "role": role, "provider": reviewer_provider, "command": "sha256:" + digest,
+                    "command_digest": digest, "alias_digests": final_identity.get("alias_digests", []) if final_identity else [],
+                    "candidate_sha": candidate_sha, "contract_hash": review_payload.get("contract_hash"),
+                    "policy_digest": self.adverse_policy.digest(),
+                    "verdict": review_payload.get("review_verdict", VERDICT_REVIEW_INCOMPLETE), "findings": role_findings,
+                    "execution_id": execution_id, "executed": bool(review_payload["review_execution_invoked"] and final_identity),
+                }}
+                if role == ROLE_ADVERSE and infrastructure_failure is None:
+                    errors = validate_role_evidence(
+                        review_payload["review_roles"], candidate_sha=candidate_sha, policy=self.adverse_policy,
+                        implementer={"provider": implementer or "", "command": review_payload["implementer_command"]},
+                    )
+                    if errors:
+                        review_payload["role_evidence_errors"] = errors
+                        infrastructure_failure = "review_role_identity_unavailable"
+                        if review_payload["review_execution_invoked"]:
+                            findings.clear()  # an invalid role's answer is infrastructure trouble, not a candidate defect
             if infrastructure_failure is not None and not findings:
                 # Not a code defect: no findings, so no implementation remediation; the task stays in REVIEW.
                 review_payload["review_infrastructure_failure"] = infrastructure_failure
