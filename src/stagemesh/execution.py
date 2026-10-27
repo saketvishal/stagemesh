@@ -216,7 +216,7 @@ def _communicate_bounded(
     worker.start()
     deadline = time.monotonic() + timeout
     cleanup_deadline = None
-    timed_out, termination_attempted = False, False
+    timed_out, termination_attempted, termination_confirmed = False, False, False
     identity_unverified_reported = False
     monitor_failure, stop = None, None
     while True:
@@ -228,10 +228,10 @@ def _communicate_bounded(
         finished = done.is_set()
         if finished:
             worker.join(timeout=1)
-            if worker.is_alive() or failures or proc.poll() is None:
+            if worker.is_alive() or failures or proc.poll() is None or (termination_attempted and not termination_confirmed):
                 raise OperatorStopRequested(
                     "provider cleanup incomplete; execution ownership retained for recovery",
-                    cleanup_complete=False,
+                    cleanup_complete=False, monitor_failed=monitor_failure is not None,
                 )
             if monitor_failure is not None:
                 raise OperatorStopRequested(
@@ -251,7 +251,13 @@ def _communicate_bounded(
                     observed = popen_identity(proc)
                 if classify_process(identity, observed) == "LIVE":
                     termination_attempted = True
-                    kill_process_tree(proc)
+                    try:
+                        termination_confirmed = kill_process_tree(proc)
+                    except Exception as exc:
+                        raise OperatorStopRequested(
+                            "provider cleanup failed: " + type(exc).__name__,
+                            cleanup_complete=False, monitor_failed=monitor_failure is not None,
+                        ) from exc
                     cleanup_deadline = time.monotonic() + STOP_CLEANUP_SECONDS
                     if stop and stop["terminate_running"] and monitor_failure is None:
                         try:
