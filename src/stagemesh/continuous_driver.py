@@ -475,6 +475,10 @@ def run_tick(
     lock = IntegrationLock(project / ".stagemesh" / "driver" / "driver.lock", timeout_seconds=0.05)
     try:
         with lock.hold("continuous-driver"):
+            # A control command may have completed while this tick waited for the project lock.
+            config = load_config(project)
+            if config.state != "running":
+                return DriverTick(tick_id, config.state, None, None, f"driver is {config.state}")
             child_state, child_identity = child_owner_state(project)
             if child_state == "ORPHANED" and child_owner_fully_dead(project):
                 clear_dead_child_owner(project)  # reboot or tree kill: nothing recorded survives, run-window recovery takes over
@@ -535,6 +539,15 @@ def run_tick(
                     "report": str(report_path),
                 },
             )
+            # Ownership recovery and journaling can take time. Honor the latest control state at dispatch too.
+            config = load_config(project)
+            if config.state != "running":
+                detail = f"driver is {config.state}; window was not started"
+                record_audit(
+                    store, TICK_FINISHED,
+                    {"tick_id": tick_id, "state": config.state, "exit_code": None, "detail": detail},
+                )
+                return DriverTick(tick_id, config.state, None, None, detail, recovered)
             exit_code = runner(config.window_argv(project, report_path), project, config.window_seconds + TICK_HARD_TIMEOUT_MARGIN_SECONDS)
             report = _read_report(report_path)
             state, detail = _classify(exit_code, report)
