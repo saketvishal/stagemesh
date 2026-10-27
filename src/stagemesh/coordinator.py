@@ -25,8 +25,9 @@ from .diagnosis import (
     diagnose,
     normalize,
 )
-from .domain import EvidenceKind, EvidenceStatus, ExecutionStatus, Stage, TaskStatus
+from .domain import EvidenceKind, EvidenceStatus, ExecutionKind, ExecutionStatus, Stage, TaskStatus
 from .execution import Executor, FakeExecutor
+from .execution_ownership import validation_tree_unresolved
 from .git import GitWorkspace
 from .integration import Integrator
 from .integration_recovery import (
@@ -149,6 +150,8 @@ class Coordinator:
         for execution in self.store.running_executions():
             if not self._target_allows(str(execution["task_id"])):
                 continue
+            if validation_tree_unresolved(execution):
+                continue  # parent death or a DONE task does not establish child-tree cleanup
             task = self.store.get_task(str(execution["task_id"]))
             if task is not None and (task["status"] == TaskStatus.DONE or task["stage"] == Stage.DONE):
                 self.store.mark_orphan_running_execution_failed(execution["id"], "TASK_ALREADY_DONE")
@@ -233,6 +236,15 @@ class Coordinator:
             "SELECT id, kind FROM executions WHERE task_id=? AND status='RUNNING' ORDER BY id",
             (task_id,),
         ).fetchall()
+        if (owners and task["stage"] == Stage.IMPLEMENT
+                and all(row["kind"] == ExecutionKind.IMPLEMENTATION for row in owners)
+                and callable(getattr(self.guard, "recover_unknown", None))):
+            # The explicit implementation policy may preserve an old worktree
+            # and fence its output. Never apply it over a validation tree.
+            self._implementation_may_still_run(task_id)
+            owners = self.store.conn.execute(
+                "SELECT id, kind FROM executions WHERE task_id=? AND status='RUNNING' ORDER BY id", (task_id,),
+            ).fetchall()
         if owners:
             if not hasattr(self, "last_execution_refusals"):
                 self.last_execution_refusals = []

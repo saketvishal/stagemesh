@@ -252,6 +252,36 @@ is added. A repeated signature after reopening the store stops with
 `execution_status=NOT_CONFIRMED` and an empty actual-attempt history. This does not
 satisfy the nested-tool recovery executor or live unattended-delivery acceptance.
 
+## Validation ownership after parent loss
+
+A RUNNING validation row is committed before any gate can launch. It remains
+child-tree authority until actual validation completion or an explicit inspected
+release; a dead parent, absent child PID, DONE task, or old row without identity
+is not proof that no gate survives. Native Windows parent-only kill tests cover
+both the prelaunch window and an active surviving gate and refuse a new runner.
+
+Known-live parent identity remains visible as LIVE. Dead or unknown validation
+parents are UNKNOWN for automatic recovery. Coordinator, single-pass/parallel
+admission and autonomy recovery hold the row, claims and workspace; even a policy
+that normally fences unknown implementations cannot replace validation ownership.
+Storage mutation backstops reject automatic orphan/fence operations. The operator
+status includes UNCONFIRMED_VALIDATION_TREE rather than treating parent death as
+successful cleanup.
+
+The deliberate safety tradeoff also holds legacy, prelaunch and static-only
+validation crashes: durable data cannot prove a child never started. After
+inspection establishes that no child remains, per-execution release-unknown with
+a nonempty reason is available; LIVE parents remain protected. The selected
+validation release and full operator audit commit atomically. Confirmed normal
+success/failure/cancellation still closes the row and permits an ordinary new run.
+No automatic child-tree reconstruction/reaping, universal detached-child cleanup
+or durable cross-project slot recovery is claimed.
+
+The configured implementation-only quarantine policy remains available only at
+IMPLEMENT when every existing owner is an implementation. Ownership is read again
+after that policy runs: a boolean response alone, or a newly published validation
+owner, cannot authorize another stage. This is not atomic fresh admission.
+
 ## Runtime artifacts
 
 Build the versioned wheel from the reviewed commit, keep the previous wheel as the verified rollback, and install only when every

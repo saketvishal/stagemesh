@@ -18,6 +18,7 @@ from ..audit import record_audit
 from ..baseline import resolve_integration_ref
 from ..contract_binding import contract_for_candidate
 from ..domain import EvidenceKind, EvidenceStatus, Stage
+from ..execution_ownership import validation_tree_unresolved
 from ..git import GitError
 from ..persistence import Store
 from ..process_identity import classify_process, process_identity
@@ -1010,6 +1011,14 @@ class Supervisor:
     def _assess_execution(self, task_id: str, execution_id: str, age_seconds: float) -> AutonomyDecision:
         saved = self.store.execution_process_identity(execution_id)
         state = classify_process(saved, process_identity(saved.pid))
+        execution = self.store.conn.execute("SELECT * FROM executions WHERE id=?", (execution_id,)).fetchone()
+        if validation_tree_unresolved(execution):
+            return AutonomyDecision(
+                Condition.EXECUTION_IDENTITY_LIVE if state == "LIVE" else Condition.EXECUTION_IDENTITY_UNKNOWN,
+                "validation-tree-ownership/v1", Action.WAIT if state == "LIVE" else Action.HOLD_FAIL_CLOSED,
+                task_id, observed={"execution": execution_id, "parent_identity": state},
+                detail={"reason": "validation tree cleanup unconfirmed", "automatic_replacement_allowed": False},
+            )
         return decide_execution_recovery(task_id, execution_id, state, age_seconds=age_seconds, policy=self.recovery_policy)
 
     def assess_execution(self, task_id: str, execution_id: str, *, age_seconds: float = 0.0) -> AutonomyDecision:
@@ -1035,6 +1044,9 @@ class Supervisor:
 
     def _fence(self, task_id: str, execution_id: str) -> dict[str, object]:
         """Preserve the old worktree untouched, release the claim without declaring death, continue on a new worktree generation."""
+        execution = self.store.conn.execute("SELECT * FROM executions WHERE id=?", (execution_id,)).fetchone()
+        if validation_tree_unresolved(execution):
+            raise ValueError("validation tree cleanup unconfirmed; replacement refused")
         key = _task_key(task_id)
         old_path = task_workspace(self.project, task_id)
         preserved: str | None = None
@@ -1047,7 +1059,8 @@ class Supervisor:
         start = str(candidate["sha"]) if candidate is not None else self.store.task_baseline(task_id) or self.facts.resolve("HEAD")
         if start is None:
             raise GitError(f"cannot fence {task_id}: no commit to start the replacement worktree from")
-        self.store.fence_unknown_execution(execution_id, "process identity UNKNOWN; replaced under the explicit recovery policy")
+        if not self.store.fence_unknown_execution(execution_id, "process identity UNKNOWN; replaced under the explicit recovery policy"):
+            raise ValueError("execution fencing refused; replacement not created")
         old, new = advance_worktree_generation(self.project, task_id)
         with _WORKTREE_CREATION:
             self.facts.git.run("worktree", "add", "--detach", str(new), start)

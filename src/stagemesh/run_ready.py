@@ -125,10 +125,9 @@ def _recover_all_dead(store: Store) -> list[dict[str, Any]]:
 def _recover_detached_builtin_executions(store: Store, task_id: str, *, include_unidentified: bool = True) -> list[dict[str, Any]]:
     """Terminalize built-in stage executions that have no owner identity (rows written before owners were recorded).
 
-    Built-in validation/review/integration runs execute inside a StageMesh process. Current code records that process as the
-    row's owner, so those rows take the conservative stale-process path (`recover_stale`) like provider executions: LIVE is left
-    alone and only a provably DEAD owner is failed. A row without any owner cannot be judged; it is fenced only for the task the
-    caller is about to drive (`include_unidentified`), never in a sweep across tasks, where it may belong to a live sibling runner.
+    Validation may own child gates: neither an ownerless row nor a dead parent proves tree cleanup, so its durable fence stays.
+    Legacy ownerless review/integration rows retain their existing recovery for the one task this caller is about to drive
+    (`include_unidentified`), never in a sweep across tasks where they may belong to a live sibling runner.
     """
     if not include_unidentified:
         return []

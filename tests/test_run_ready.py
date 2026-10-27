@@ -644,7 +644,7 @@ def test_stale_running_execution_remains_fatal_for_current_problems(tmp_path: Pa
     store.close()
 
 
-def test_continue_recovers_orphaned_builtin_validation_execution(tmp_path: Path) -> None:
+def test_continue_holds_legacy_validation_until_inspected_release(tmp_path: Path) -> None:
     project = _project(tmp_path, ["T-1"])
     store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
     store.migrate()
@@ -655,9 +655,24 @@ def test_continue_recovers_orphaned_builtin_validation_execution(tmp_path: Path)
 
     code, result = _continue(project, "--max-steps", "1")
 
-    assert code == 1, result
-    assert result["stop_reason"] == "MAX_STEPS"
-    assert any(item["execution_id"] == execution_id and item["reason"] == "ORPHANED_BUILTIN_STAGE_EXECUTION" for item in result["recovered"])
+    assert code == 2, result
+    assert result["stop_reason"] == "REFUSED:active_execution"
+    assert not result["recovered"] and not result["started"]
+    reopened = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+    assert reopened.conn.execute("SELECT status FROM executions WHERE id=?", (execution_id,)).fetchone()[0] == "RUNNING"
+    assert reopened.conn.execute("SELECT COUNT(*) FROM evidence").fetchone()[0] == 0
+    reopened.close()
+    from test_operator_workflow import _cli
+
+    reason = "inspected controlled legacy fixture: no gate process exists"
+    code, raw = _cli(project, "recover-stale", "--task", "T-1", "--release-unknown",
+                     "--execution", execution_id, "--reason", reason, "--json")
+    assert code == 0 and json.loads(raw)["actions"][0]["action"] == "RELEASED_BY_OPERATOR"
+    reopened = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+    releases = [json.loads(row["payload"]) for row in reopened.audit_events()
+                if row["event_type"] == "recovery.operator_release_unknown"]
+    assert len(releases) == 1 and releases[0]["execution_id"] == execution_id and releases[0]["reason"] == reason
+    reopened.close()
 
     code, final = _continue(project, "--task", "T-1")
 

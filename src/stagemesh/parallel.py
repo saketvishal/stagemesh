@@ -31,6 +31,7 @@ from .contracts import ChangeContract, ContractError, parse_contract, task_contr
 from .coordinator import Coordinator, TargetSelection, TargetSelectionError
 from .domain import ProcessIdentity, Stage
 from .execution import kill_active_provider_processes, retain_provider_cleanup
+from .execution_ownership import validation_tree_unresolved
 from .git import GitWorkspace
 from .persistence import Store
 from .process_identity import classify_process, process_identity
@@ -227,6 +228,11 @@ def recover_orphaned_claims(
         if match is None or not dead(int(match.group(1))):
             continue
         task_id = str(claim["task_id"])
+        if any(e["task_id"] == task_id and validation_tree_unresolved(e) for e in store.running_executions()):
+            record_audit(store, "recovery.parallel_claim_protected_validation", {
+                "task_id": task_id, "claim_id": str(claim["id"]), "reason": "validation tree cleanup unconfirmed",
+            })
+            continue  # include claimless validators: a dead worker does not free their task
         running = [e for e in store.running_executions() if e["claim_id"] == claim["id"]]
         unknown = [
             e
@@ -817,11 +823,17 @@ class ParallelRunner:
     # -- interruption and cleanup ------------------------------------------------------------------------------------------
 
     def _abandon(self, store: Store, task_id: str, why: str) -> None:
-        """Kill this task's provider processes, fail its running executions and release its claims; keep committed work."""
+        """Reap provable provider ownership; retain unconfirmed validation trees/claims and committed work."""
         protected_claims: set[str] = set()
         unresolved_execution = False
         termination_results: dict[ProcessIdentity, bool] = {}
         for execution in [e for e in store.running_executions() if e["task_id"] == task_id]:
+            if validation_tree_unresolved(execution):
+                unresolved_execution = True
+                if execution["claim_id"]:
+                    protected_claims.add(str(execution["claim_id"]))
+                    self._protected_claims.add(str(execution["claim_id"]))
+                continue  # neither kill the validator parent nor release/discard its owned tree
             saved = store.execution_process_identity(str(execution["id"]))
             if any(not result and saved.matches(owner) for owner, result in termination_results.items()):
                 store.retain_execution_for_cleanup(str(execution["id"]), "PID-owned provider tree cleanup unconfirmed")
