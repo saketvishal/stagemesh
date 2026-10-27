@@ -1701,7 +1701,8 @@ def command_status(args: argparse.Namespace) -> int:
         f"blocked={report.blocked_task_count} "
         f"running={report.running_count} "
         f"stale={report.stale_execution_count} "
-        f"source_ready={report.source_ready_count}"
+        f"source_ready={report.source_ready_count} "
+        f"unresolved_validation={report.unresolved_validation_count}"
     )
     for reason, count in report.blocked_reason_buckets.items():
         print(f"blocked_bucket {reason}: {count}")
@@ -1808,6 +1809,7 @@ def _health_scope_fields(report) -> dict[str, object]:
         "historical_failed_execution_count": report.historical_failed_execution_count,
         "current_failed_execution_count": report.current_failed_execution_count,
         "stale_execution_count": report.stale_execution_count,
+        "unresolved_validation_count": report.unresolved_validation_count,
     }
 
 
@@ -2436,6 +2438,7 @@ def command_health(args: argparse.Namespace) -> int:
     print(f"failed_executions_historical: {report.historical_failed_execution_count}")
     print(f"failed_executions_current: {report.current_failed_execution_count}")
     print(f"stale_running_executions: {report.stale_execution_count}")
+    print(f"unresolved_validation_trees: {report.unresolved_validation_count}")
     print(f"unknown_executions: {report.unknown_execution_count}")
     print(f"queue_admission: {control['state']}")
     print(f"queue_active_executions: {len(control['active_executions'])}")

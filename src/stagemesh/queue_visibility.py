@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from .execution_ownership import recovery_identity_state, validation_tree_unresolved
 from .parallel import QUEUE_CONTROL_EVENT, queue_control_state
 from .persistence import Store
 from .process_identity import classify_process, process_identity
@@ -56,8 +57,14 @@ def queue_control_report(store: Store) -> dict[str, Any]:
     for execution in report["active_executions"]:
         pid = execution.get("pid")
         saved = store.execution_process_identity(execution["id"])
-        state = classify_process(saved, process_identity(pid))
-        executions.append({**execution, "process_state": state})
+        parent_state = classify_process(saved, process_identity(pid))
+        # queue_control_state supplies a snapshot of RUNNING execution rows.
+        owner = {**execution, "status": "RUNNING"}
+        state = recovery_identity_state(owner, parent_state)
+        executions.append({
+            **execution, "process_state": state, "parent_process_state": parent_state,
+            "cleanup_state": "UNCONFIRMED_VALIDATION_TREE" if validation_tree_unresolved(owner) else None,
+        })
     latest = report.get("latest") or {}
     report["active_executions"] = executions
     event_keys = ("state", "reason", "source", "terminate_running", "at", "created_at")
@@ -96,6 +103,8 @@ def format_queue_control(report: dict[str, Any], indent: str = "") -> list[str]:
         lines.append(
             f"{indent}  execution {execution['id']}: task {execution['task_id']} "
             f"{execution['kind']} pid {pid} process {execution['process_state']}"
+            + (f" parent {execution['parent_process_state']} cleanup {execution['cleanup_state']}"
+               if execution.get("cleanup_state") else "")
         )
     if executions:
         pids = ", ".join(str(pid) for pid in report["pids"]) or "none known"

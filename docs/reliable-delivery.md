@@ -266,7 +266,11 @@ admission and autonomy recovery hold the row, claims and workspace; even a polic
 that normally fences unknown implementations cannot replace validation ownership.
 Storage mutation backstops reject automatic orphan/fence operations. The operator
 status includes UNCONFIRMED_VALIDATION_TREE rather than treating parent death as
-successful cleanup.
+successful cleanup. Global health, operator text/JSON and the dashboard expose
+parent liveness separately from effective recovery ownership. Non-live validation
+trees count as unresolved and require review, rather than stale automatically
+recoverable executions. This read-only count does not change persisted UNKNOWN
+execution status totals; a live validator does not itself raise a cleanup alert.
 
 The deliberate safety tradeoff also holds legacy, prelaunch and static-only
 validation crashes: durable data cannot prove a child never started. After

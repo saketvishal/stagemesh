@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .domain import ExecutionStatus, Stage, TaskStatus
+from .execution_ownership import recovery_identity_state, validation_tree_unresolved
 from .persistence import Store
 from .process_identity import classify_process, process_identity
 from .scheduling import Scheduler
@@ -30,6 +31,7 @@ class HealthReport:
     current_failed_execution_count: int = 0
     stale_execution_count: int = 0
     current_problems: tuple[str, ...] = ()
+    unresolved_validation_count: int = 0
 
 
 def health(store: Store) -> HealthReport:
@@ -53,10 +55,15 @@ def health(store: Store) -> HealthReport:
     )
     backlog_state = "EMPTY" if not tasks else "ACTIVE"
     current_failed = _current_failed_execution_count(store)
-    stale = sum(
-        1
+    ownership = [
+        (execution, recovery_identity_state(execution, classify_process(
+            store.execution_process_identity(execution["id"]), process_identity(execution["pid"]),
+        )))
         for execution in running
-        if classify_process(store.execution_process_identity(execution["id"]), process_identity(execution["pid"])) == "DEAD"
+    ]
+    stale = sum(state == "DEAD" for _, state in ownership)
+    unresolved_validation = sum(
+        validation_tree_unresolved(execution) and state != "LIVE" for execution, state in ownership
     )
     problems = tuple(
         label
@@ -65,6 +72,7 @@ def health(store: Store) -> HealthReport:
             ("current_failed_executions", current_failed > 0),
             ("unknown_executions", unknown_execution_count > 0),
             ("stale_running_executions", stale > 0),
+            ("unresolved_validation_trees", unresolved_validation > 0),
         )
         if present
     )
@@ -86,6 +94,7 @@ def health(store: Store) -> HealthReport:
         historical_failed_execution_count=failed_execution_count,
         current_failed_execution_count=current_failed,
         stale_execution_count=stale,
+        unresolved_validation_count=unresolved_validation,
         current_problems=problems,
     )
 
