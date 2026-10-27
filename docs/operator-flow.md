@@ -1,5 +1,21 @@
 # Operator flow: recovering and running the backlog
 
+## Inspect current work without opening the ledger
+
+Use `stagemesh operator` for text, `stagemesh operator --json` for structured output, or
+`stagemesh dashboard --output dashboard.html` for the same report in a static page. Existing task, worker, queue and evidence
+fields remain available. These reports do not retry work, change task state or grant permission.
+
+Attention marks current failed tasks as `ACTION`; superseded failures and failures on DONE tasks remain `INFO` history.
+`failed_executions` retains its lifetime meaning. Recent Failures shows the latest ten failed executions with task, candidate,
+provider, reason and current/history scope. Recent Efficiency And Usage samples at most 100 records of each type: provider attempts,
+purpose, duration, validation checks run/reused, validation time and provider-reported usage. These samples are not lifetime totals,
+CPU utilization or a measured coding-throughput rate. Missing token receipts remain unknown; billing cost remains `UNKNOWN`.
+
+Recorded Pending Decisions lists current typed human-decision blocks and candidate-bound external delivery-permission blocks found
+in the latest 100 relevant events. Cleared or obsolete-candidate records are excluded. Approval coverage remains `UNKNOWN`: an absent
+record proves neither permission nor zero pending approvals. Only existing durable blockers are shown; this view creates no approval.
+
 The normal loop has four steps. Do not hand-run individual stages (`continue --task`, `advance-baseline`, `rebaseline-task`, manual
 PRs) unless `survivor-wave` reports a task as blocked and needs a decision.
 
@@ -129,3 +145,5 @@ Nothing is force-pushed, no gate is skipped and no test is weakened. A task bloc
 Rerunning `stagemesh run-window` is safe because its preflight automatically recovers executions whose process is provably dead; executions that are LIVE are waited for, and executions with an unknown process identity fail closed and print the exact `stagemesh recover-stale --task <id> --release-unknown --execution <id> --reason ...` command to run after the operator has checked they are dead.
 
 Nobody should open the SQLite ledger by hand.
+
+When a review provider stops with unconfirmed process-tree cleanup, its temporary candidate checkout is retained. The raised stop reason and the `review.workspace_retained` audit event include the exact retained path. Keep that directory until the process tree is verified gone; then use the existing explicit unknown-execution recovery command and remove the retained temporary directory. Completed reviews and stops with confirmed cleanup still remove their temporary checkout.

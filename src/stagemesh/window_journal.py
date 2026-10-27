@@ -12,6 +12,7 @@ from typing import Any
 
 from .audit import record_audit
 from .persistence import Store
+from .runtime_info import runtime_evidence
 
 STARTED, FINISHED, REFUSED = "window.started", "window.finished", "window.refused"
 TASK_CONTEXT = "window.task_context"
@@ -19,7 +20,7 @@ _EVENTS = (STARTED, FINISHED, REFUSED)
 
 
 def record_started(store: Store, window_id: str, details: dict[str, Any]) -> None:
-    record_audit(store, STARTED, {"window_id": window_id, **details})
+    record_audit(store, STARTED, {**details, "window_id": window_id, "runtime": runtime_evidence()})
 
 
 def record_finished(store: Store, window_id: str, details: dict[str, Any]) -> None:

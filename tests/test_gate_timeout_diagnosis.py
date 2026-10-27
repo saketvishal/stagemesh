@@ -49,17 +49,17 @@ def test_unreachable_service_in_the_timeout_output_is_infrastructure(tmp_path: P
     assert "validation_environment_unavailable" in events(store, "task.block_classified")[-1]["reason"]
 
 
-def test_empty_timeout_log_is_not_blamed_on_anything_and_a_repeat_stops_after_one_retry(tmp_path: Path) -> None:
+def test_empty_timeout_log_is_not_blamed_on_anything_and_stops_without_speculative_implementation(tmp_path: Path) -> None:
     executor, store = _run(tmp_path, "")
 
-    assert executor.calls == 2  # one bounded remediation attempt, then the equivalent failure stops the task
+    assert executor.calls == 1  # an incomplete gate with no cause evidence cannot authorize speculative implementation
     assert store.get_task(TASK)["status"] == TaskStatus.BLOCKED
     diagnosis = diagnose(store, TASK)
-    assert diagnosis.repeated and diagnosis.category == VALIDATION_GATE
+    assert not diagnosis.repeated and diagnosis.category == VALIDATION_GATE
     assert "not established" in diagnosis.summary
-    assert "not evidence of" in diagnosis.summary  # the disclaimer, not a guessed root cause
+    assert "does not establish" in diagnosis.recommendation  # no guessed environment fault or implementation defect
     assert diagnosis.failing_evidence[-1]["timeout_notes"][0].startswith("pure-unit:")
-    assert len(events(store, "task.remediation_queued")) == 1
+    assert len(events(store, "task.remediation_queued")) == 0
 
 
 def test_a_timeout_while_tests_are_running_keeps_ordinary_remediation(tmp_path: Path) -> None:

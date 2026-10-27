@@ -22,11 +22,11 @@ are rejected at construction time.
 | | |
 |---|---|
 | **Founder Hands-Off gate** | **NOT MET** |
-| Ten-task autonomy streak | **0 / 10** (no real task has been run under the supervisor yet) |
-| Capability readiness | **60%** (level model below; 3/3 requires proof on real tasks, which no capability has) |
+| Ten-task autonomy streak | **0 / 10** recorded (11 later local completions audited; clean streak remains unverified, see 2026-10-26 update) |
+| Capability readiness | **62%** (level model below; 3/3 requires proof on real tasks, which no capability has) |
 | Incident scenarios with permanent regression tests | **12 of 12** (A to L), 34 mapped tests, all passing |
 | First milestone (A, B, C, E/F) | implemented and passing end to end through the real coordinator |
-| Human escalations observed on real tasks | **0** (no real tasks yet) |
+| Human escalations observed on real tasks | **UNKNOWN** (operator attribution is incomplete; see 2026-10-26 update) |
 
 Readiness is computed from `CAPABILITY_LEVELS` in `src/stagemesh/autonomy/corpus.py`
 (`stagemesh autonomy readiness`). Levels: 0 absent, 1 deterministic policy with unit tests, 2 wired into the real lifecycle and
@@ -101,7 +101,7 @@ checkouts this one must never touch in `.stagemesh/isolation.json` (`{"forbidden
 | 2 | External workspace mutation | 2 | hooks in the executors; quarantine and restore; remote branch moves via fetch |
 | 3 | Ordinary main advancement | 2 | `SupervisedIntegrator` refreshes the candidate and returns the task to VALIDATE |
 | 4 | History rewrite detection | 2 | retargeted replacement with tree-equivalence proof and lineage |
-| 5 | PR dependency / stacked PR handling | 1 | policy, supervisor entry points and GitHub adapter; nothing schedules them yet |
+| 5 | PR dependency / stacked PR handling | 2 | `run-window` schedules eligible dependency work and delivery follow-through rechecks pending PRs |
 | 6 | CI diagnosis (candidate vs base) | 2 | gates integration when a `HostedCI` is supplied, and runs in `autonomy deliver` against hosted check runs |
 | 7 | Broken/fragile test detection | 1 | classification and remediation guard; no test harness emits observations yet |
 | 8 | Independent review lifecycle | 2 | scope policy wraps the reviewer adapter in the CLI |
@@ -138,8 +138,11 @@ Ordered by value for reaching the gate:
 
 1. **No real task has run under the supervisor.** Every claim above is proven on deterministic local fixtures and, for the GitHub
    boundary, on recorded and read-only live payloads. The ten-task streak is the only thing that can raise any capability to level 3.
-2. **No autonomous driver loop.** `continue` runs a task to a verified local DONE and `autonomy deliver` is one bounded publish/observe/judge pass;
-   nothing yet chains them, re-delivers on a schedule, evaluates dependencies continuously or selects the next task. (`finish_task` records the outcome.)
+2. **The executable driver exists but is not live-proven.** `run-window` now selects and advances multiple eligible tasks, continues
+   through guarded PR delivery/landing when explicitly authorized, and delivery follow-through rechecks pending PRs. The opt-in
+   Windows-local `stagemesh driver` supervisor adds single-instance scheduled ticks, durable crash checkpoints, bounded failed-tick
+   suspension and status/pause/resume/stop. Deterministic fixtures are not a real provider run, a real Task Scheduler round trip or a
+   ten-task streak; no persistent driver was installed while implementing this slice.
 3. **Hosted CI observation is on-demand.** `GitHubHostedCI` is used by `autonomy deliver` and verified read-only against live GitHub, but the
    integration guard of `continue` does not consult it. Check runs carry no logs, so baseline comparison is gate-level (`GATE_LEVEL` evidence, reported in the
    trace) and, by default (`baseline_requires_detail: true`), is not enough to call a candidate merge-ready: the policy asks for log-level base
@@ -147,7 +150,8 @@ Ordered by value for reaching the gate:
 4. **Test-observation convention has no producer.** Scenario G relies on `STAGEMESH_TEST_OBSERVATION` lines; no StageMesh test fixture emits them yet.
 5. **Destructive git requests are not intercepted.** `decide_git_operation` is policy only; StageMesh's own git calls are not routed through it.
 6. **Reruns cannot be requested.** A failure classified as infrastructure is retried only by waiting for a new observation; StageMesh cannot yet ask the host to rerun failed jobs (the bounded budget ends in a typed escalation).
-7. **`recover_unknown` runs only when a task needs implementation**; there is no periodic sweep of UNKNOWN reviews/validations.
+7. A scheduled driver tick runs `run-window` preflight across active executions and automatically recovers only identities proven DEAD.
+   UNKNOWN identities intentionally remain a typed operator inspection gate; there is no unsafe periodic release.
 8. Escalations are persisted and shown in the trace, but there is no push notification to the founder.
 9. `Coordinator.recover` and `recover-stale --release-unknown` remain available as manual operator tools and are outside the supervisor.
 10. **Providers that commit on their own fail closed.** StageMesh registers its own commits; a provider CLI that commits itself is treated as
@@ -155,6 +159,75 @@ Ordered by value for reaching the gate:
 11. **Refresh budget.** Supervised runs allow at least 5 automatic refreshes (`SUPERVISED_MIN_REFRESH_ATTEMPTS`); a ref that advances
     more often still ends in the typed `integration_stale_base` block and needs `retry-task`.
 12. **Supervisor settings are read from `.stagemesh/autonomy.json` only**; there is no `config.json` section or CLI flag yet.
+
+## Windows verification ledger (2026-10-23 and 2026-10-24)
+
+Labels: IMPLEMENTED (code exists), SIMULATED (fakes or Linux), LIVE_VERIFIED (real Windows, environment named), NOT_RUN.
+"Hosted Windows" is a disposable GitHub-hosted `windows-latest` runner (Python 3.11 and 3.13, a bootstrap venv and a plain
+editable venv; workflow `windows-triage.yml`, which runs only on `ci/windows-triage-*` branches and publishes junit and JSON
+evidence to `ci-evidence/<run_id>` branches). "Owner's PC" is the founder's Windows machine (Python 3.13, git 2.43.0.windows.1).
+
+| Claim | Status | Evidence |
+|---|---|---|
+| Ownership, autonomy and driver suites on a real Windows host | LIVE_VERIFIED (owner's PC) | ownership 84 passed, autonomy 67 passed, driver 19 passed and 1 failed (hard-timeout test, see below) |
+| Full suite on a real Windows host | LIVE_VERIFIED (owner's PC) | 2280 passed, 14 failed in 93 minutes; classified below; not re-run in full |
+| Task Scheduler registration from XML (logon trigger, repetition, StartWhenAvailable, battery-safe, IgnoreNew, execution limit) | LIVE_VERIFIED (hosted Windows) | `schtasks /Query /XML` round trip returned every setting, both Pythons |
+| `/Run` starts the tick; a second `/Run` while running starts nothing | LIVE_VERIFIED (hosted Windows) | `scheduler_started_the_task`, `overlap_prevented_ignore_new` |
+| `/End` and `ExecutionTimeLimit` end the task's own process only, never descendants | LIVE_VERIFIED (hosted Windows) | grandchild survived both; with a `cmd.exe` launcher the worker survived too, so the tick is now the task's direct process |
+| Temporary tasks always removed | LIVE_VERIFIED (hosted Windows) | `cleanup_verified remaining=[]` in every run |
+| `kill_process_tree` (taskkill /F /T) removes a 5-process venv tree | LIVE_VERIFIED (hosted Windows) | all four environments |
+| Hard timeout clears the durable child-owner record | LIVE_VERIFIED (hosted Windows) after a fix | defect: on a venv the parent compared its Popen identity (launcher stub) with the identity the wrapper recorded (real interpreter), so the record was never cleared and later ticks would report an orphaned owner. `clear_dead_child_owner` now clears a record whose process is proven dead. Fails before, passes after, in all four environments |
+| Full driver lifecycle through the real Task Scheduler with MOCK providers (install, scheduler-launched repeated ticks completing tasks with independent review, pause makes zero provider calls, resume continues, one run-window at a time, whole-tree kill then automatic recovery, stop, uninstall, no process or task left) | LIVE_VERIFIED (hosted Windows, py3.11 and py3.13, run 40121844078 on commit 9b12ac4, workflow `windows-triage.yml` job `lifecycle`) | `failures: []` in both; 5 mock tasks DONE once each; after the kill no mock provider process survived; the kill took out the tick, the driver child wrapper and the run-window together; the next scheduled tick audited `recovered_after_crash` and finished the next task; `schedule_exists: false` after stop; no `StageMesh` task remained. Mock providers only: no model, no network, no real provider |
+| Automatic recovery when wrapper and run-window are both proven dead | LIVE_VERIFIED (hosted Windows) and SIMULATED (unit) | owner record now names the child; no human `resume` needed after a tree kill or reboot-like loss; a dead wrapper with a live or unrecorded child still fails closed |
+| Logon trigger firing after a real sign-in, reboot, sleep catch-up and battery behavior on the owner's PC | NOT_RUN | the XML is registered and read back on hosted Windows; a reboot or sign-in cannot be exercised on a hosted runner |
+| Provider login-state and API-billing guard (`stagemesh provider-auth`, enforced by `driver install` for real providers) | IMPLEMENTED and SIMULATED (unit tests with fake CLIs) | classification of `claude auth status` and `codex login status`; billing variables reported by name only; `codex login status` output format is undocumented, so unrecognised output fails closed. LIVE_VERIFIED only after the native run reports it on the owner's PC |
+| Persistent sandbox installer (`install-handsoff.ps1`) and ten-task textkit sandbox | IMPLEMENTED (sandbox specs verified against reference solutions); installer LIVE_VERIFIED on the owner's PC (2026-10-24, commit 318b093): gates passed, task registered | see `docs/windows-driver-setup.md` |
+| Real coding-provider execution and cross-provider review | LIVE_VERIFIED for one task (SANDBOX-02: codex implemented, claude reviewed independently, DONE, integrated locally) | first live window also showed two defects, fixed in the sandbox config and `install-handsoff.ps1`: built-in `grok` and `agy` were eligible reviewers (outside the approved providers) and the Codex CLI default model `gpt-5.5` is rejected for ChatGPT sign-in; the installer now writes `routing.pools` limited to codex and claude and pins `-m gpt-5.6-terra` (parameter `-CodexModel`) |
+| Real GitHub lifecycle on a disposable repository | NOT_RUN | no repository created |
+| Ten-task streak | NOT VERIFIED (0 of 10 formally recorded) | 11 later local completions audited; attribution/runtime gaps remain; gate not met |
+
+### The 14 full-run failures, re-run on pre-driver main (726a74d) and the driver in four hosted environments
+
+| Class | Tests | Evidence |
+|---|---|---|
+| Demonstrated regression (fixed) | `test_hard_timeout_terminates_a_real_subprocess_tree` | fails only on the driver, original test unmodified; passes after the fix |
+| Demonstrated baseline defect (identical on main and driver) | review budget exhaustion recovery ladder, failed integration preserves candidate and worktree, python gate runtime and candidate src, continue step duration, task doctor no-progress path, both `test_queue_reconcile_*`, review clone failure message, noop after failed review | same failure on both trees in every environment; not caused by the driver; not root-caused here |
+| Demonstrated environment issue on the owner's PC | both `test_git_identity_policy` tests, `test_terminate_stop_reaps_provider_tree` child-cli case, `test_windows_interruption_cannot_inherit_source_readiness_marker` | pass on both trees in every hosted environment |
+| Unresolved | owner's-PC variant of the hard-timeout failure (sleeping grandchild alive 10 s after the kill) | does not reproduce on hosted Windows |
+
+Correction: an earlier reading counted the triage step's `success` conclusion as passing tests. That step is `continue-on-error`;
+the junit files are the evidence, and 10 of the 14 did fail there.
+
+## Local continuous driver evidence (2026-10-23)
+
+Implementation branch: `feat/local-continuous-driver`, based on `main` at `726a74de6054f6e0e2d1bb90b73ffbc764fd1fda` (`v0.4.0`).
+Implementation commit: `18d0eb2e7621bd93b64a1f968da970124b29806b`.
+
+Focused command:
+
+```powershell
+$env:PYTHONPATH='src'
+python -m pytest tests/test_continuous_driver.py tests/test_driver_acceptance.py tests/test_autonomy_corpus.py -q
+python -m pytest tests/test_bounded_execution.py tests/test_builtin_execution_ownership.py -q
+```
+
+Observed result: **16 driver lifecycle tests and 4 deterministic multi-task acceptance fixtures passed**. Covered: exact project-bound
+`run-window` command, three dependent tasks across simulated PR boundaries with one intentional first-attempt validation failure,
+parent-crash continuation and recovery with real subprocesses, pre-launch ownership, live/orphan process fail-closed behavior,
+idempotent durable work,
+workspace and owner-file preservation, real Windows hard-timeout process-tree termination, scheduler query failures, exact cadence,
+no-work `idle` rather than autonomy success, bounded failed-tick suspension, paused/stopped no-op behavior, project-owned reversible
+Task Scheduler commands and explicit provider-use acknowledgement. The shared execution ownership regression suite also passed
+**23 tests** after the process-tree change.
+
+The existing `test_run_window.py`, `test_autonomous_window.py` and `test_delivery_followup.py` milestone suite produced **143 passed**
+plus one Windows sandbox-only local Git-process failure; that exact test passed when rerun outside the sandbox, for **144/144 behavior
+tests passing**. Independent review initially found launch ownership, timeout cleanup, scheduler diagnostics and evidence-overclaim gaps;
+all were fixed, regression-tested and accepted on re-review.
+
+Acceptance status: **VERIFIED_COMPONENT** for deterministic local fixtures. **NOT_RUN** for real provider CLIs, real Windows Task
+Scheduler execution, hosted CI/PR landing and the real ten-task streak. No service/schedule was installed and no provider credit was
+consumed by this evidence.
 
 ## Baseline failures observed (deferred, deliberately not fixed here)
 
@@ -168,7 +241,7 @@ Ordered by value for reaching the gate:
 
 ## Human escalations observed
 
-None on real tasks. This section records every escalation raised during the streak: date, task, typed reason, the specific question,
+Historical escalation attribution is incomplete; no clean streak is certified. This section records every escalation raised during the streak: date, task, typed reason, the specific question,
 and the founder's answer. An escalation that is not one of the typed reasons, or that asks an operational question, is a defect.
 
 | Date | Task | Reason | Question | Answer |
@@ -184,3 +257,65 @@ the gate is met without ten consecutive clean rows.
 | # | Task | Date | Interventions | Verified DONE |
 |---|---|---|---|---|
 <!-- streak:end -->
+
+
+## Incident 2026-10-24: unauthorized provider dispatch (blocking safety incident)
+
+Facts from the sandbox ledger (read only): in the first live window, 2026-10-25 00:21 to 00:25 UTC, SANDBOX-01's review fell through
+from Codex to `grok` (3 runs, every answer `REVIEW_INCOMPLETE`) and `agy` (3 runs, empty or malformed answers, 9.6k to 9.8k input tokens
+each, 805 to 1,524 output tokens). Accounts used and whether any billing occurred are UNKNOWN: StageMesh does not record them.
+Root causes: (1) the sandbox config had no `routing.pools`, so every installed built-in CLI was a fallback; installing a CLI implicitly
+authorized it. (2) the sandbox ran the built-in `codex exec` with no `--model`, so Codex's own default (`gpt-5.5`) applied, which a ChatGPT
+sign-in rejects; the owner's working project pins `--model gpt-6-astra` with the full executable path and `-c features.code_mode_host=true`.
+Fixes: per-project `authorization.unattended_providers`, enforced at selection, at the two spawn sites (re-read at dispatch) and on the
+command itself (genuine CLI only: no relative or in-project executable, no wrapper, no custom name wrapping a real CLI), fail closed
+when unattended with no allowlist; unpinned Codex model blocks unattended start; installer and upgrade copy the owner's known-good Codex
+command. Evidence labels: authorization boundary IMPLEMENTED and SIMULATED (stand-in CLIs, Linux and hosted Windows); native Windows proof NOT_RUN
+until the pinned upgrade runs. SANDBOX-02 is kept as historical evidence and the new clean streak starts at the upgrade.
+
+
+## Mission verification update (2026-10-26)
+
+The recorded formal streak above remains unchanged. Read-only inspection of the existing owner-PC sandbox found **11** tasks
+reaching DONE after its 2026-10-25 safety-upgrade marker (SANDBOX-11, SANDBOX-01, SANDBOX-12 through SANDBOX-20). Each had
+exact-candidate passing validation, an invoked independent Codex/Claude review, passing local integration and candidate ancestry
+in sandbox main. Across six productive windows there were 28 provider calls (15 Codex, 13 Claude), zero Grok/AGY calls after the
+marker, and 2172.585 provider seconds. Eleven completions over the 3893.775-second productive interval is **10.17 tasks/hour**;
+this excludes idle time and establishes neither concurrent real coding nor hosted GitHub delivery. Tokens and billing cost are
+**UNKNOWN**, since all corresponding usage events report `usage.reported=false`.
+
+The current clean deployment, scheduled action and marker agree on source `6f90948550b7125fb45d2b570120644027975d7b`.
+Historical windows did not persist their runtime source, and an operator resume after the marker lacks founder-versus-agent
+attribution. Consequently these are verified local delivery observations, **not a certified clean ten-task streak**. No historical
+outcome or intervention was reset, invented or credited. The sanitized per-task audit is retained in the operator's local mission ledger.
+
+Source review also reproduced three remaining defects in that deployment: authorization could be revoked during workspace setup
+but the provider still spawned; login checks could inspect a different executable on PATH than the configured stage executable;
+and the scheduler parent could overwrite the wrapper's stronger child-ownership record. The candidate correction checks the exact
+prepared command again before both provider spawns, probes each configured stage executable, leaves postlaunch ownership publication
+to the wrapper, uses unique atomic temporary files, and preserves uncertain child ownership. Explicit unattended account/profile or
+config-source switches are refused; only the documented model and `features.code_mode_host`/`model_reasoning_effort` Codex config
+pins are accepted. This does **not** establish billing equivalence for ambient CLI configuration files.
+
+These corrections are source changes pending final-head CI, independent review and protected integration. They have not replaced
+the existing installed runtime or changed its schedule. Setup and stop/recovery commands are in [Windows driver setup](windows-driver-setup.md)
+and [continuous driver operations](continuous-driver.md). A new live worker run or persistent installation is separate evidence.
+
+New windows also persist `window.started.runtime`: the loaded package path, interpreter, process identity, and observed source
+commit/dirty state. Source checkouts must match the package's own tracked Git root; installed wheels use embedded build metadata.
+Missing or unverifiable provenance stays UNKNOWN. This is a start-time observation, not proof that editable source remained
+immutable for the whole window, and it does not reconstruct historical runtime evidence.
+
+A further interruption regression showed that a false or interrupted process-tree kill still erased the child wrapper's ownership.
+The correction retains the known run-window as the sole owner before attempting interruption cleanup. False/raised kill or failed
+follow-up wait leaves LIVE/ORPHANED ownership that cannot automatically authorize a new window; only confirmed tree kill plus
+completed wait releases it. Forty-five affected driver tests passed. Ordinary process completion is not asserted to prove that every
+descendant exited.
+
+The broader observation interval after the safety marker contained 27 blocked, six productive and 67 idle ticks. Across that
+64149.545-second interval, completion rate was **0.617 local tasks/hour**, compared with the productive-only rate above; exhausted
+inventory and blocked observations are not productive work. Recorded implementation/review/validation durations were 1495.023 /
+685.945 / 41.1 seconds respectively. Two review failures and one local integration failure were preserved alongside correction and
+successful later candidates. Provider seconds over the productive period were 55.8%; this is not CPU utilization. The founder has
+confirmed that the recorded October 25 resume was performed by an authorized agent. Historical per-window source evidence remains
+unverified independently of that clarified intervention attribution.

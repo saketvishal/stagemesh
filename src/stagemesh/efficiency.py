@@ -32,7 +32,7 @@ from .persistence import Store
 
 PROVIDER_CALL = "provider.call"
 STAGE_TRANSITION = "stage.transition"
-PURPOSES = ("diagnosis", "implementation", "remediation", "review")
+PURPOSES = ("diagnosis", "implementation", "remediation", "review", "research")
 BUDGET_EXHAUSTED = "task.budget_exhausted"
 
 _SPACE = re.compile(r"\s+")

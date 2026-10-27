@@ -445,3 +445,62 @@ def test_promoted_full_ui_quality_classified_as_broad_release_gate() -> None:
     assert "promoted-full-ui-quality" in required_plan.release_checks
     assert [gate.name for gate in scoped.gates] == ["focused-timeline-adapter", "spec-integrity"]
 
+
+
+@pytest.mark.parametrize("source", ["validation_plan.py", "validation.py", "review.py"])
+@pytest.mark.parametrize("declared", [None, DOCS_ONLY, CONFIG_OR_PROVIDER_COMMAND, LOCALIZED_CODE])
+def test_validation_components_reject_narrow_classification(source, declared) -> None:
+    path = f"src/stagemesh/{source}"
+    contract = ChangeContract(
+        objective="Change a validation boundary",
+        allowed_files=(path,),
+        validation_classification=declared,
+        required_tests=(
+            GateCommand("focused-tests", (sys.executable, "-m", "pytest", "tests/test_validation_plan.py")),
+            GateCommand("full pytest", (sys.executable, "-m", "pytest")),
+        ),
+        invariants=("review: preserve independent review", "python scripts/invariants.py"),
+    )
+
+    # Both pre-candidate scope and actual changed files must retain broader checks.
+    for changed in ((), (path,), (path.replace("/", "\\"), "docs/validation-components.md")):
+        plan = derive_validation_plan(contract, changed)
+        assert plan.classification == CORE_LIFECYCLE_OR_SCHEMA_SECURITY
+        assert plan.risk_level == "HIGH"
+        assert plan.allows_broad_validation
+        assert "full pytest" in plan.release_checks
+        scoped = planned_contract(contract, plan)
+        assert scoped.gates == contract.gates
+        assert scoped.invariants == contract.invariants
+
+
+def test_unknown_component_impact_retains_explicit_broader_contract() -> None:
+    contract = ChangeContract(
+        objective="Change with unaudited dependent impact",
+        allowed_files=("src/extension.py",),
+        validation_escalation_reasons=("unknown impact: dependent callers not audited",),
+        required_tests=(
+            GateCommand("focused-extension", (sys.executable, "-m", "pytest", "tests/test_extension.py")),
+            GateCommand("full pytest", (sys.executable, "-m", "pytest")),
+        ),
+        invariants=("review: preserve authorization", "python scripts/invariants.py"),
+    )
+
+    plan = derive_validation_plan(contract, ("src/extension.py",))
+    assert plan.allows_broad_validation
+    assert plan.to_dict()["escalation_reasons"] == ["unknown impact: dependent callers not audited"]
+    assert planned_contract(contract, plan).gates == contract.gates
+    assert planned_contract(contract, plan).invariants == contract.invariants
+    required = with_required_checks(contract, plan)
+    assert "full pytest" in required.release_checks
+    assert required.escalation_reasons == plan.escalation_reasons
+
+
+@pytest.mark.parametrize("path", ["src/customer/review.py", "src/stagemesh/review_helpers.py"])
+def test_component_map_does_not_classify_client_or_similarly_named_files(path) -> None:
+    contract = ChangeContract(objective="Localized change", allowed_files=(path,))
+
+    plan = derive_validation_plan(contract, (path,))
+
+    assert plan.classification == LOCALIZED_CODE
+    assert not plan.allows_broad_validation

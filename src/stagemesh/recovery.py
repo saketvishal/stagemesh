@@ -71,16 +71,56 @@ def _require_repairable(store: Store, task_id: str) -> Any:
 
 
 def _resume_at_validate(store: Store, task_id: str, task: Any) -> dict[str, Any]:
-    """After a repair: unblock a blocked task and, when a failed candidate is waiting in IMPLEMENT, send it back to be re-validated."""
+    """After a repair: unblock a blocked task and, when a candidate is waiting in IMPLEMENT, send it to the appropriate stage."""
     changes: dict[str, Any] = {"unblocked": False, "stage_reset": False}
     if task["status"] == TaskStatus.BLOCKED:
         changes["unblocked"] = store.unblock_task(task_id)
     current = store.get_task(task_id)
-    if current["stage"] == Stage.IMPLEMENT and store.latest_candidate(task_id) is not None:
-        store.advance_task(task_id, Stage.VALIDATE)
-        record_audit(store, "task.advance", {"task_id": task_id, "stage": Stage.VALIDATE, "reason": "operator repair: re-validate the existing candidate"})
+    cand = store.latest_candidate(task_id)
+    if current["stage"] == Stage.IMPLEMENT and cand is not None:
+        sha = str(cand["sha"])
+        bound = store.contract_binding(task_id, sha)
+        digest = str(bound["digest"]) if bound is not None and "digest" in bound.keys() else None
+        if digest and store.has_bound_evidence(task_id, sha, EvidenceKind.VALIDATION, digest, EvidenceStatus.PASSED):
+            target_stage = Stage.REVIEW
+            reason = "operator repair: resume validated candidate at review"
+        else:
+            target_stage = Stage.VALIDATE
+            reason = "operator repair: re-validate the existing candidate"
+        store.advance_task(task_id, target_stage)
+        record_audit(store, "task.advance", {"task_id": task_id, "stage": target_stage, "reason": reason})
         changes["stage_reset"] = True
     return changes
+
+
+def resume_task(store: Store, task_id: str) -> dict[str, Any]:
+    """Resume a stuck or blocked task at the earliest incomplete stage warranted by its candidate and bound evidence."""
+    task = _require_repairable(store, task_id)
+    unblocked = False
+    if task["status"] == TaskStatus.BLOCKED:
+        unblocked = store.unblock_task(task_id)
+    current = store.get_task(task_id)
+    cand = store.latest_candidate(task_id)
+    advanced_to: Stage | None = None
+    if cand is not None:
+        sha = str(cand["sha"])
+        bound = store.contract_binding(task_id, sha)
+        digest = str(bound["digest"]) if bound is not None and "digest" in bound.keys() else None
+        stage = Stage(current["stage"])
+        if digest and store.has_bound_evidence(task_id, sha, EvidenceKind.VALIDATION, digest, EvidenceStatus.PASSED):
+            if store.has_bound_evidence(task_id, sha, EvidenceKind.REVIEW, digest, EvidenceStatus.PASSED):
+                if stage in (Stage.IMPLEMENT, Stage.VALIDATE, Stage.REVIEW):
+                    store.advance_task(task_id, Stage.INTEGRATE)
+                    advanced_to = Stage.INTEGRATE
+            elif stage in (Stage.IMPLEMENT, Stage.VALIDATE):
+                store.advance_task(task_id, Stage.REVIEW)
+                advanced_to = Stage.REVIEW
+        elif stage == Stage.IMPLEMENT and cand["durable_handoff"]:
+            store.advance_task(task_id, Stage.VALIDATE)
+            advanced_to = Stage.VALIDATE
+    if advanced_to is not None:
+        record_audit(store, "task.advance", {"task_id": task_id, "stage": advanced_to, "reason": f"stage-specific resumption: resume at {advanced_to}"})
+    return {"unblocked": unblocked, "stage": store.get_task(task_id)["stage"]}
 
 
 def _revalidate(store: Store, project: Path, task_id: str) -> dict[str, Any]:

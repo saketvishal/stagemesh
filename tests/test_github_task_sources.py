@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from stagemesh.config import load_config
 from stagemesh.domain import EvidenceKind, EvidenceStatus, Stage, TaskStatus
 from stagemesh.github import GitHubClient
@@ -261,6 +263,150 @@ def test_sync_blocks_malformed_github_tasks_without_hiding_valid_work(tmp_path):
         missing = store.source_state("github", "11")
         assert contradictory["validation_errors"] == ["ready label conflicts with a blocked or deferred label"]
         assert missing["validation_errors"] == ["unknown dependency issue(s): #999"]
+    finally:
+        store.close()
+
+
+def test_sync_accepts_a_dependency_already_known_in_the_durable_ledger(tmp_path):
+    store = _store(tmp_path)
+    try:
+        dependency = store.upsert_task("landed prerequisite", source="github", source_id="248")
+        store.advance_task(dependency, Stage.DONE)
+
+        ids = sync_source(
+            store,
+            [
+                DiscoveredTask(
+                    "github",
+                    "249",
+                    "dependent work",
+                    labels=("stagemesh:ready",),
+                    dependencies=("248",),
+                )
+            ],
+        )
+
+        assert ids == ["249"]
+        assert store.get_task("249")["status"] == TaskStatus.OPEN
+        assert Scheduler(store).decision("249").reason == "eligible"
+        assert store.source_state("github", "249").get("validation_errors") is None
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize(
+    "state,payload",
+    [
+        ("OPEN", {"eligible": False, "objective_root": True}),
+        ("CLOSED", {"eligible": False}),
+    ],
+)
+def test_sync_blocks_cache_only_dependency_without_a_durable_task(tmp_path, state, payload):
+    store = _store(tmp_path)
+    try:
+        store.cache_source("github", "248", payload, state)
+
+        ids = sync_source(
+            store,
+            [DiscoveredTask("github", "249", "dependent work", labels=("stagemesh:ready",), dependencies=("248",))],
+        )
+
+        assert ids == []
+        assert store.get_task("248") is None  # Discovery or issue closure cannot invent a completed prerequisite.
+        assert store.get_task("249")["status"] == TaskStatus.BLOCKED
+        assert not Scheduler(store).decision("249").eligible
+        assert store.source_state("github", "249")["validation_errors"] == ["unknown dependency issue(s): #248"]
+    finally:
+        store.close()
+
+
+def test_sync_waits_for_a_known_unfinished_dependency_absent_from_the_current_scan(tmp_path):
+    store = _store(tmp_path)
+    try:
+        dependency = store.upsert_task("unfinished prerequisite", source="github", source_id="248")
+
+        ids = sync_source(
+            store,
+            [DiscoveredTask("github", "249", "dependent work", labels=("stagemesh:ready",), dependencies=("248",))],
+        )
+
+        assert ids == ["249"]
+        assert store.incomplete_dependencies("249") == [dependency]
+        assert Scheduler(store).decision("249").reason == "waiting for 248"
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize(
+    "prerequisite",
+    [
+        DiscoveredTask("github", "248", "objective", labels=("stagemesh:objective",)),
+        DiscoveredTask("github", "248", "closed prerequisite", eligible=False, state="CLOSED"),
+    ],
+)
+def test_sync_blocks_current_scan_dependency_that_will_not_have_a_task(tmp_path, prerequisite):
+    store = _store(tmp_path)
+    try:
+        ids = sync_source(
+            store,
+            [
+                DiscoveredTask("github", "249", "dependent work", labels=("stagemesh:ready",), dependencies=("248",)),
+                prerequisite,
+            ],
+        )
+
+        assert ids == []
+        assert store.get_task("248") is None
+        assert store.get_task("249")["status"] == TaskStatus.BLOCKED
+        assert not Scheduler(store).decision("249").eligible
+        assert store.source_state("github", "249")["validation_errors"] == ["unknown dependency issue(s): #248"]
+    finally:
+        store.close()
+
+
+def test_sync_links_a_runnable_forward_reference_before_admitting_its_child(tmp_path):
+    store = _store(tmp_path)
+    try:
+        ids = sync_source(
+            store,
+            [
+                DiscoveredTask("github", "249", "dependent work", labels=("stagemesh:ready",), dependencies=("248",)),
+                DiscoveredTask("github", "248", "runnable prerequisite", labels=("stagemesh:ready",)),
+            ],
+        )
+
+        assert ids == ["249", "248"]
+        assert store.incomplete_dependencies("249") == ["248"]
+        assert Scheduler(store).decision("249").reason == "waiting for 248"
+        assert Scheduler(store).decision("248").eligible
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("direct_execution", [False, True])
+def test_historical_objective_dependency_needs_a_task_or_explicit_direct_execution(tmp_path, direct_execution):
+    store = _store(tmp_path)
+    try:
+        store.save_objective("248", "historical objective", {"source": "github", "source_id": "248"})
+        labels = ("stagemesh:ready", "stagemesh:direct-execution") if direct_execution else ("stagemesh:ready",)
+
+        ids = sync_source(
+            store,
+            [
+                DiscoveredTask("github", "249", "dependent work", labels=("stagemesh:ready",), dependencies=("248",)),
+                DiscoveredTask("github", "248", "former objective", labels=labels),
+            ],
+        )
+
+        assert not Scheduler(store).decision("249").eligible
+        if direct_execution:
+            assert ids == ["249", "248"]
+            assert store.incomplete_dependencies("249") == ["248"]
+            assert Scheduler(store).decision("248").eligible
+        else:
+            assert ids == []
+            assert store.get_task("248") is None
+            assert store.source_state("github", "249")["validation_errors"] == ["unknown dependency issue(s): #248"]
     finally:
         store.close()
 

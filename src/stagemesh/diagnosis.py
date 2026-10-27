@@ -27,7 +27,7 @@ from typing import Any
 
 from .baseline import BaselineAnalysis, analyze_baseline, resolve_integration_ref
 from .domain import EvidenceKind
-from .gate_execution import NON_CODE_TIMEOUTS, TIMEOUT_SERVICE_UNAVAILABLE
+from .gate_execution import NON_CODE_TIMEOUTS, TIMEOUT_NO_OUTPUT, TIMEOUT_SERVICE_UNAVAILABLE
 from .git import GitError, GitWorkspace
 from .persistence import Store
 from .remediation import latest_candidate_findings
@@ -102,6 +102,7 @@ class Failure:
     environment_unavailable: bool = False
     diagnosis_required: bool = False  # a timeout whose evidence points away from the code (or proves nothing): diagnose before any retry
     timeout_notes: tuple[str, ...] = ()  # what the captured output supports about each timeout, never more
+    inconclusive_validation: bool = False
 
     def same_as(self, other: Failure) -> bool:
         if self.stage != other.stage or self.codes != other.codes or self.gates != other.gates:
@@ -143,6 +144,7 @@ class Diagnosis:
     baseline: dict[str, Any] | None = None
     environment_unavailable: bool = False
     diagnosis_required: bool = False
+    inconclusive_validation: bool = False
 
     @property
     def stops_remediation(self) -> bool:
@@ -150,6 +152,7 @@ class Diagnosis:
         return (
             self.environment_unavailable
             or self.diagnosis_required
+            or self.inconclusive_validation
             or self.category == STALE_BASELINE
             or (self.repeated and self.category in NON_CODE_CATEGORIES)
         )
@@ -160,6 +163,7 @@ class Diagnosis:
             "category": self.category,
             "environment_unavailable": self.environment_unavailable,
             "diagnosis_required": self.diagnosis_required,
+            "inconclusive_validation": self.inconclusive_validation,
             "stage": self.stage,
             "repeated": self.repeated,
             "repeat_count": self.repeat_count,
@@ -185,6 +189,7 @@ class Diagnosis:
             "category": self.category,
             "environment_unavailable": self.environment_unavailable,
             "diagnosis_required": self.diagnosis_required,
+            "inconclusive_validation": self.inconclusive_validation,
             "stage": self.stage,
             "repeated": self.repeated,
             "repeat_count": self.repeat_count,
@@ -250,6 +255,126 @@ class DiagnosisPolicy:
             raise ValueError(f"diagnosis dispatch must be one of: {', '.join(DISPATCH_MODES)}")
 
 
+TOOL_FAILURE_EVENT = "task.tool_failure_evidence"
+# Provider quota/auth failures keep their own semantics and never become tool evidence.
+_PROVIDER_REASONS = frozenset({"quota_rate_limit", "authentication_failure", "provider_unavailable", "transient_provider_failure"})
+# Ordered: the first matching kind wins, so specific causes precede generic ones.
+_TOOL_KINDS: tuple[tuple[str, re.Pattern[str], str], ...] = tuple(
+    (kind, re.compile(pattern, re.IGNORECASE), action)
+    for kind, pattern, action in (
+        ("browser_startup", r"browser executable doesn't exist|playwright install|browsertype\.launch|failed to launch (?:the )?browser|chrome(?:driver)? (?:failed|not reachable)|no usable sandbox",
+         "Provision the browser runtime for the gate (operator action); do not retry the implementation."),
+        ("permission", r"permission denied|\bEACCES\b|\bEPERM\b|access is denied|operation not permitted",
+         "Fix file or process permissions for the workspace (operator action)."),
+        ("cwd_path", r"no such file or directory|cannot find the path|\bENOENT\b|not a directory|winerror 3\b|working directory",
+         "Verify the command's cwd and referenced paths exist in the workspace."),
+        ("service_unavailable", r"connection refused|\bECONNREFUSED\b|could not connect to server|service unavailable|host unreachable",
+         "Start or restore the service the command depends on, then re-run."),
+        ("missing_dependency", r"modulenotfounderror|no module named|cannot find module|npm err!\s+missing script|no tests found|importerror",
+         "Install or declare the missing dependency or script (operator action)."),
+        ("missing_tool", r"command not found|is not recognized as|executable file not found|winerror 2\b|\bnot found\b",
+         "Install the missing tool or correct its name or PATH (operator action)."),
+        ("assertion_failure", r"assertionerror|\bassert\b|\d+ failed\b|expected .+ (?:to|but)|test failed",
+         "Inspect the failing assertion; this is a code defect, not an environment fault."),
+        ("transient", r"\bETIMEDOUT\b|\bECONNRESET\b|\b50[234]\b|socket hang up|temporary failure|try again",
+         "Transient fault; re-run manually if it persists (no automatic retry in this slice)."),
+    )
+)
+_TOOL_TIMEOUT_ACTION = "Raise the command's time budget or investigate the hang (operator action)."
+_EVIDENCE_SECRET = re.compile(
+    r"(?i)(bearer\s+)\S+|(\bgh[pousr]_|sk-|xai-)[A-Za-z0-9_\-]+|"
+    r"((?:token|secret|password|passwd|api[_-]?key|authorization)\s*[=:]\s*)\S+"
+)
+
+
+def _redact_evidence(text: str) -> str:
+    return _EVIDENCE_SECRET.sub(lambda m: (m.group(1) or m.group(3) or "") + "[redacted]", text)
+
+
+def tool_failure_evidence(
+    command: list[str] | str,
+    cwd: str | Path | None,
+    returncode: int | None,
+    stdout: str = "",
+    stderr: str = "",
+    *,
+    timed_out: bool = False,
+    reason: str | None = None,
+    max_chars: int = 600,
+) -> dict[str, Any] | None:
+    """Typed, redacted, bounded evidence for a failed tool command, or None when it is not a tool failure.
+
+    Provider quota/auth/availability reasons are rejected so they stay separate. Nothing here retries or installs.
+    """
+    if reason in _PROVIDER_REASONS:
+        return None
+    text = f"{stdout}\n{stderr}"
+    kind, action = "", ""
+    if timed_out:
+        kind, action = "timeout", _TOOL_TIMEOUT_ACTION
+    else:
+        for name, pattern, next_action in _TOOL_KINDS:
+            if pattern.search(text):
+                kind, action = name, next_action
+                break
+    if not kind:
+        return None
+    argv = command.split() if isinstance(command, str) else [str(part) for part in command]
+    shown = _redact_evidence(" ".join(argv))[:200]
+    lines = [line for line in _redact_evidence(text).splitlines() if line.strip()]
+    key = [line for line in lines if _KEY_LINE.search(line)] or lines
+    return {
+        "kind": kind,
+        "command": {"executable": Path(argv[0]).name if argv else "", "argc": len(argv), "text": shown},
+        "cwd": str(cwd) if cwd is not None else None,
+        "status": "timed_out" if timed_out else ("launch_failed" if returncode is None else f"exit {returncode}"),
+        "excerpt": "\n".join(line.strip()[:200] for line in key[-6:])[-max_chars:],
+        "next_action": action,
+    }
+
+
+# Setup is never run for these: permission needs an operator, assertions are code defects, timeouts are budget questions.
+_NO_SETUP_KINDS = frozenset({"permission", "assertion_failure", "timeout"})
+
+
+def tool_failure_signature(evidence: dict[str, Any]) -> str:
+    """Stable identity of a failure: kind, executable and cwd. Excerpts and timings are excluded so repeats match."""
+    command = evidence.get("command") if isinstance(evidence.get("command"), dict) else {}
+    return "|".join((str(evidence.get("kind") or ""), str(command.get("executable") or ""), str(evidence.get("cwd") or "")))
+
+
+def plan_tool_recovery(
+    evidence: dict[str, Any],
+    attempted: list[str] | tuple[str, ...] = (),
+    setup_actions: dict[str, list[str]] | None = None,
+) -> dict[str, Any]:
+    """Decide the single bounded response to tool failure evidence; this only plans and never runs anything.
+
+    ``attempted`` lists the recovery actions already taken for this exact signature. A transient failure earns one
+    retry; a kind with an explicitly configured setup action earns that argv once; everything else, and every repeat,
+    stops with the attempted recovery and the exact operator action. Only caller-configured argv ever runs, never one
+    derived from output, and permission failures never get one, so recovery cannot widen access or install anything.
+    """
+    kind = str(evidence.get("kind") or "")
+    configured = (setup_actions or {}).get(kind)
+    setup = [str(part) for part in configured] if configured and kind not in _NO_SETUP_KINDS else None
+    action, argv = "stop", None
+    if kind == "transient" and "retry" not in attempted:
+        action = "retry_once"
+    elif setup and "setup" not in attempted:
+        action, argv = "setup", setup
+    plan: dict[str, Any] = {
+        "action": action,
+        "signature": tool_failure_signature(evidence),
+        "attempted": list(attempted),
+    }
+    if argv is not None:
+        plan["setup_command"] = argv
+    if action == "stop":
+        plan["operator_action"] = str(evidence.get("next_action") or "Inspect the failure evidence (operator action).")
+    return plan
+
+
 def _loads(raw: object) -> dict[str, Any]:
     try:
         value = json.loads(str(raw))
@@ -262,18 +387,54 @@ def _gate_output(finding: dict[str, Any]) -> str:
     return f"{finding.get('stdout') or ''}\n{finding.get('stderr') or ''}"
 
 
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _visible(text: str) -> str:
+    """Drop terminal color so a launch exception can be matched as text."""
+    return _ANSI.sub("", text)
+
+
+def _assertion_captured(finding: dict[str, Any]) -> bool:
+    """A FAILED line or assertion names a code defect. Silence does not."""
+    text = _visible(_gate_output(finding))
+    return bool(
+        re.search(
+            r"(?im)(?:^\s*FAILED(?:\s|$)|^\s*AssertionError(?::|\s*$)|"
+            r"^\s*[A-Za-z_][\w.]*Error(?::|\s*$)|^Traceback \(most recent call last\):)",
+            text,
+        )
+    )
+
+
+def _inconclusive_timeout(finding: dict[str, Any]) -> bool:
+    """The gate ended at its budget without a completed result.
+
+    Missing assertion text does not prove an environment fault. A captured
+    assertion means the timeout still carries a code defect.
+    """
+    if finding.get("failure_kind") != "timeout":
+        return False
+    execution = finding.get("execution")
+    diagnosis = execution.get("diagnosis") if isinstance(execution, dict) else finding.get("diagnosis")
+    if isinstance(diagnosis, dict) and diagnosis.get("timeout_class"):
+        return diagnosis["timeout_class"] == TIMEOUT_NO_OUTPUT  # no output cannot justify another implementation pass
+    return not _assertion_captured(finding)
+
+
 def _unavailable_launch(finding: dict[str, Any]) -> bool:
     """Only established launch failures justify skipping the first code remediation.
 
     Timeouts, application imports and missing data files can be candidate bugs.
     For a nested command, require an uncaught OS launch exception in subprocess,
     not merely an environment-like phrase somewhere in test output.
+    Color codes around that exception are not a different failure.
     """
     if finding.get("failure_kind") == "environment":
         return True
     if finding.get("failure_kind") == "timeout":
         return False
-    stderr = str(finding.get("stderr") or "").strip()
+    stderr = _visible(str(finding.get("stderr") or "")).strip()
     last = stderr.splitlines()[-1] if stderr else ""
     return (
         bool(re.match(r"FileNotFoundError: \[(?:WinError 2|Errno 2)\]", last))
@@ -308,7 +469,12 @@ def _classify(stage: str, codes: set[str], gate_findings: list[dict[str, Any]]) 
     if "gate_failed" in codes:
         for finding in gate_findings:
             output = _gate_output(finding).casefold()
-            if _unavailable_launch(finding) or finding.get("failure_kind") in ("environment", "timeout") or finding.get("returncode") in (None, 126, 127) or any(hint in output for hint in _ENVIRONMENT_HINTS):
+            timeout = _gate_timeout_diagnosis(finding)
+            if timeout is not None and timeout.get("timeout_class") in NON_CODE_TIMEOUTS:
+                return VALIDATION_GATE
+            if _unavailable_launch(finding) or finding.get("failure_kind") == "environment" or finding.get("returncode") in (126, 127) or any(hint in output for hint in _ENVIRONMENT_HINTS):
+                return VALIDATION_GATE
+            if (finding.get("failure_kind") == "timeout" or finding.get("returncode") is None) and not _assertion_captured(finding):
                 return VALIDATION_GATE
         return IMPLEMENTATION_DEFECT
     if stage == EvidenceKind.REVIEW:
@@ -373,6 +539,7 @@ def _failures(store: Store, task_id: str) -> list[Failure]:
                 or TIMEOUT_SERVICE_UNAVAILABLE in timeout_classes,
                 diagnosis_required=any(name in NON_CODE_TIMEOUTS and name != TIMEOUT_SERVICE_UNAVAILABLE for name in timeout_classes),
                 timeout_notes=tuple(timeout_notes),
+                inconclusive_validation=bool(gate_findings) and all(_inconclusive_timeout(f) for f in gate_findings),
             )
         )
     return failures
@@ -589,6 +756,15 @@ def diagnose(
             "After provider availability/capacity or the task contract changes, run `stagemesh continue`; "
             "no manual provider choice, diagnostic detour, SQLite edit, or retry command is required for normal recovery."
         )
+    inconclusive = bool(latest and latest.inconclusive_validation and category == VALIDATION_GATE)
+    if inconclusive and latest is not None:
+        gates = ", ".join(latest.gates) or "the gate"
+        recommendation = (
+            f"Validation of candidate {latest.candidate_sha} is incomplete: {gates} timed out without a finished result. "
+            "The candidate is unchanged. Do not start another implementation or provider pass from this evidence. "
+            "Next diagnostic action: rerun that gate by itself and keep its bounded output. "
+            "A missing FAILED line does not establish an environment fault or an implementation defect."
+        )
     if category == REVIEW_FINDING and focus and focus.messages:
         recommendation += " Finding: " + focus.messages[0][:300]
     return Diagnosis(
@@ -609,6 +785,7 @@ def diagnose(
         baseline=baseline,
         environment_unavailable=bool(latest and latest.environment_unavailable and category == VALIDATION_GATE),
         diagnosis_required=bool(latest and latest.diagnosis_required and category == VALIDATION_GATE),
+        inconclusive_validation=inconclusive,
     )
 
 

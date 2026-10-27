@@ -7,18 +7,22 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Callable
+from concurrent.futures import Future
 from dataclasses import dataclass
 from pathlib import Path
 
 from .attribution import attribution_for_worker
+from .audit import record_audit
 from .contract_binding import ContractRejected, bind_task_contract
-from .domain import ExecutionKind, ExecutionStatus
+from .diagnosis import TOOL_FAILURE_EVENT, tool_failure_evidence
+from .domain import ExecutionKind, ExecutionStatus, ProcessIdentity
 from .git import GitWorkspace
 from .git_identity import provider_environment
 from .persistence import Store
 from .process_identity import classify_process, popen_identity, process_identity
 from .queue_control import OperatorStopRequested, QueueStopControl, current_provider_stop
-from .remediation import remediation_context
+from .remediation import remediation_context, tool_recovery_plan
 from .workspace_guard import EXTERNAL_WORKSPACE_MUTATION, WorkspaceMutation, owned_workspace
 from .workspaces import (
     NO_IMPLEMENTATION_CHANGE,
@@ -139,10 +143,14 @@ def popen_session_kwargs() -> dict[str, object]:
     return {} if sys.platform == "win32" else {"start_new_session": True}
 
 
-def kill_process_tree(proc: subprocess.Popen[str]) -> None:
+def kill_process_tree(proc: subprocess.Popen[str]) -> bool:
+    confirmed = False
     if sys.platform == "win32":
         try:
-            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True, check=False, timeout=5)
+            result = subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True, check=False, timeout=5
+            )
+            confirmed = result.returncode == 0
         except subprocess.TimeoutExpired:
             pass
     else:
@@ -150,25 +158,90 @@ def kill_process_tree(proc: subprocess.Popen[str]) -> None:
             group = os.getpgid(proc.pid)
             if group == proc.pid:
                 os.killpg(group, signal.SIGKILL)
+                confirmed = True
         except OSError:
             pass
     try:
         proc.kill()
     except OSError:
         pass
+    return confirmed
 
 
 _ACTIVE_PROVIDER_PROCESSES: set[subprocess.Popen[str]] = set()
+_ACTIVE_PROVIDER_SCOPES: dict[subprocess.Popen[str], tuple[Path, str] | None] = {}
+_PROVIDER_TERMINATIONS: dict[subprocess.Popen[str], Future[bool]] = {}
 _ACTIVE_LOCK = threading.Lock()
 
 
-def kill_active_provider_processes() -> int:
-    """Kill every provider process (implementation or review) this process is currently waiting on; returns how many."""
+def kill_active_provider_processes(
+    *, database: Path | None = None, task_ids: set[str] | None = None,
+    on_uncertain: Callable[[ProcessIdentity], None] | None = None,
+) -> int:
+    """Terminate registered providers, optionally scoped to one project and its active tasks.
+
+    Return the number of confirmed tree kills. Publish pending proof before signalling and persist uncertainty before
+    releasing the communicating owner. No-scope callers retain the process-wide cleanup interface.
+    """
+    selected_database = None if database is None else Path(database).resolve()
+    pending: list[tuple[subprocess.Popen[str], Future[bool], bool]] = []
     with _ACTIVE_LOCK:
-        running = [proc for proc in _ACTIVE_PROVIDER_PROCESSES if proc.poll() is None]
-    for proc in running:
-        kill_process_tree(proc)
-    return len(running)
+        for proc in _ACTIVE_PROVIDER_PROCESSES:
+            scope = _ACTIVE_PROVIDER_SCOPES.get(proc)
+            if selected_database is not None and (scope is None or scope[0] != selected_database):
+                continue
+            if task_ids is not None and (scope is None or scope[1] not in task_ids):
+                continue
+            existing = _PROVIDER_TERMINATIONS.get(proc)
+            if existing is not None:
+                if on_uncertain is not None and (not existing.done() or not existing.result()):
+                    pending.append((proc, existing, False))
+                continue
+            if proc.poll() is None:
+                proof: Future[bool] = Future()
+                _PROVIDER_TERMINATIONS[proc] = proof
+                pending.append((proc, proof, True))
+    confirmed_count = 0
+    ownership_failure = None
+    for proc, proof, terminate in pending:
+        confirmed = not terminate and proof.done() and proof.result()
+        try:
+            try:
+                identity = popen_identity(proc)
+            except Exception:  # noqa: BLE001 -- an identity failure must retain uncertainty, never permit signalling
+                identity = ProcessIdentity(proc.pid, None, None)
+            if terminate:
+                try:
+                    confirmed = identity.is_known and proc.poll() is None and bool(kill_process_tree(proc))
+                except Exception:  # noqa: BLE001 -- one termination error must not skip the remaining owned processes
+                    confirmed = False
+            if not confirmed and on_uncertain is not None:
+                try:
+                    on_uncertain(identity)
+                except Exception as exc:  # noqa: BLE001 -- publish failure for every target, then surface persistence failure
+                    ownership_failure = exc
+        finally:
+            if terminate:
+                proof.set_result(confirmed)
+        confirmed_count += int(confirmed and terminate)
+    if ownership_failure is not None:
+        raise OperatorStopRequested("provider cleanup ownership could not be persisted", cleanup_complete=False) from ownership_failure
+    return confirmed_count
+
+
+def retain_provider_cleanup(store: Store, task_ids: set[str], identity: ProcessIdentity) -> set[str]:
+    """Fence owned child executions and conservative parent-owned review rows before releasing a provider handle."""
+    retained: set[str] = set()
+    for execution in list(store.running_executions()):
+        if str(execution["task_id"]) not in task_ids:
+            continue
+        saved = store.execution_process_identity(str(execution["id"]))
+        child_matches = saved.pid == identity.pid and classify_process(saved, identity) != "DEAD"
+        parent_review = execution["kind"] == ExecutionKind.REVIEW and saved.pid == os.getpid()
+        if child_matches or parent_review:
+            store.retain_execution_for_cleanup(str(execution["id"]), "provider process-tree cleanup unconfirmed")
+            retained.add(str(execution["id"]))
+    return retained
 
 
 def communicate_bounded(proc: subprocess.Popen[str], input_text: str, timeout: float) -> tuple[str, str, bool]:
@@ -177,13 +250,30 @@ def communicate_bounded(proc: subprocess.Popen[str], input_text: str, timeout: f
     Every provider subprocess goes through here, so an interrupted run can find and kill all of them
     (see kill_active_provider_processes), not just the implementation ones that have a recorded pid.
     """
+    control = current_provider_stop()
+    database = getattr(getattr(control, "store", None), "db_path", None)
+    task_id = getattr(control, "task_id", None)
+    scope = None if database is None or task_id is None else (Path(database).resolve(), str(task_id))
     with _ACTIVE_LOCK:
         _ACTIVE_PROVIDER_PROCESSES.add(proc)
+        _ACTIVE_PROVIDER_SCOPES[proc] = scope
     try:
-        return _communicate_bounded(proc, input_text, timeout, current_provider_stop())
+        return _communicate_bounded(proc, input_text, timeout, control)
+    except OperatorStopRequested as exc:
+        if not exc.cleanup_complete and isinstance(control, QueueStopControl) and control.task_id is not None:
+            try:
+                retain_provider_cleanup(control.store, {str(control.task_id)}, ProcessIdentity(proc.pid, None, None))
+            except Exception as ownership_error:
+                raise OperatorStopRequested(
+                    "provider cleanup ownership could not be persisted", cleanup_complete=False,
+                    monitor_failed=exc.monitor_failed,
+                ) from ownership_error
+        raise
     finally:
         with _ACTIVE_LOCK:
             _ACTIVE_PROVIDER_PROCESSES.discard(proc)
+            _ACTIVE_PROVIDER_SCOPES.pop(proc, None)
+            _PROVIDER_TERMINATIONS.pop(proc, None)
 
 
 STOP_CLEANUP_SECONDS = 5.0
@@ -210,7 +300,7 @@ def _communicate_bounded(
     worker.start()
     deadline = time.monotonic() + timeout
     cleanup_deadline = None
-    timed_out, termination_attempted = False, False
+    timed_out, termination_attempted, termination_confirmed = False, False, False
     identity_unverified_reported = False
     monitor_failure, stop = None, None
     while True:
@@ -222,10 +312,21 @@ def _communicate_bounded(
         finished = done.is_set()
         if finished:
             worker.join(timeout=1)
-            if worker.is_alive() or failures or proc.poll() is None:
+            with _ACTIVE_LOCK:
+                external = _PROVIDER_TERMINATIONS.get(proc)
+                root_running = proc.poll() is None
+            external_confirmed = False
+            if external is not None:
+                try:
+                    external_confirmed = external.result(timeout=STOP_CLEANUP_SECONDS)
+                except TimeoutError:
+                    pass  # pending proof is uncertainty, never completion
+                root_running = proc.poll() is None
+            cleanup_unconfirmed = (termination_attempted or external is not None) and not (termination_confirmed or external_confirmed)
+            if worker.is_alive() or failures or root_running or cleanup_unconfirmed:
                 raise OperatorStopRequested(
                     "provider cleanup incomplete; execution ownership retained for recovery",
-                    cleanup_complete=False,
+                    cleanup_complete=False, monitor_failed=monitor_failure is not None,
                 )
             if monitor_failure is not None:
                 raise OperatorStopRequested(
@@ -245,7 +346,25 @@ def _communicate_bounded(
                     observed = popen_identity(proc)
                 if classify_process(identity, observed) == "LIVE":
                     termination_attempted = True
-                    kill_process_tree(proc)
+                    local_proof = None
+                    with _ACTIVE_LOCK:
+                        external_proof = _PROVIDER_TERMINATIONS.get(proc)
+                        if external_proof is None and proc in _ACTIVE_PROVIDER_PROCESSES:
+                            local_proof = Future()
+                            _PROVIDER_TERMINATIONS[proc] = local_proof
+                    if external_proof is None:
+                        try:
+                            termination_confirmed = kill_process_tree(proc)
+                        except Exception as exc:
+                            raise OperatorStopRequested(
+                                "provider cleanup failed: " + type(exc).__name__,
+                                cleanup_complete=False, monitor_failed=monitor_failure is not None,
+                            ) from exc
+                        finally:
+                            if local_proof is not None:
+                                local_proof.set_result(termination_confirmed)
+                    # An existing attempt owns signalling. Its shared proof is consumed at completion; a second
+                    # taskkill can race the first and turn confirmed cleanup into a spurious safety failure.
                     cleanup_deadline = time.monotonic() + STOP_CLEANUP_SECONDS
                     if stop and stop["terminate_running"] and monitor_failure is None:
                         try:
@@ -318,6 +437,11 @@ class SubprocessExecutor(Executor):
 
     def run(self, store: Store, task_id: str, claim_id: str | None, project: Path) -> ExecutionResult:
         import shutil
+
+        from . import provider_authorization
+
+        if provider_authorization.unattended():  # a bare command runner has no per-provider allowlist: never use it unattended
+            return ExecutionResult(ExecutionStatus.FAILED, failure_reason="provider_not_authorized: SubprocessExecutor is not available unattended")
         executable = self.command[0] if self.command else ""
         if not executable or not shutil.which(executable):
             return ExecutionResult(
@@ -336,6 +460,15 @@ class SubprocessExecutor(Executor):
             return ExecutionResult(ExecutionStatus.FAILED, failure_reason=EXTERNAL_WORKSPACE_MUTATION)
         except WorkspaceEnvironmentError as exc:
             return ExecutionResult(ExecutionStatus.FAILED, failure_reason=str(exc))
+
+    def _record_tool_evidence(self, store, task_id, execution_id, cwd, code, stdout, stderr, reason, timed_out) -> None:  # type: ignore[no-untyped-def]
+        evidence = tool_failure_evidence(
+            self.command, cwd, code, stdout, stderr, timed_out=timed_out, reason=None if timed_out else reason
+        )
+        if evidence is not None:
+            if hasattr(store, "audit_events"):
+                evidence["recovery"] = tool_recovery_plan(store, task_id, evidence)
+            record_audit(store, TOOL_FAILURE_EVENT, {"task_id": task_id, "execution_id": execution_id, "evidence": evidence})
 
     def _run_owned(self, store, task_id, claim_id, project, task, lease, build_prompt) -> ExecutionResult:  # type: ignore[no-untyped-def]
         run_path = lease.path
@@ -391,11 +524,13 @@ class SubprocessExecutor(Executor):
 
         if timed_out:
             call.finish("timeout", PROVIDER_TIMEOUT)
+            self._record_tool_evidence(store, task_id, execution_id, run_path, code, stdout, stderr, PROVIDER_TIMEOUT, True)
             store.finish_execution(execution_id, ExecutionStatus.FAILED, result=PROVIDER_TIMEOUT)
             return ExecutionResult(ExecutionStatus.FAILED, failure_reason=PROVIDER_TIMEOUT)
         if code != 0:
             is_cap, reason = classify_failure(code, stdout, stderr)
             call.finish("failed", reason)
+            self._record_tool_evidence(store, task_id, execution_id, run_path, code, stdout, stderr, reason, False)
             store.finish_execution(execution_id, ExecutionStatus.FAILED, result=reason)
             return ExecutionResult(
                 ExecutionStatus.FAILED,

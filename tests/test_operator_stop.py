@@ -480,7 +480,12 @@ def test_provider_without_own_process_group_cannot_kill_the_runner_group(monkeyp
     execution.kill_process_tree(Provider())
     assert killed == [123]
     monkeypatch.setattr(execution.os, "kill", lambda pid, signal: killed.append(pid))
-    _kill_pid(123)
+    from stagemesh import parallel
+    from stagemesh.domain import ProcessIdentity
+
+    identity = ProcessIdentity(123, 1.0, "boot")
+    monkeypatch.setattr(parallel, "process_identity", lambda _: identity)
+    assert _kill_pid(123, identity) is False  # root fallback is not tree confirmation
     assert killed == [123, 123]
 
 

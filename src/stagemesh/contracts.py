@@ -152,6 +152,9 @@ class GateResult:
     input_fingerprint: str | None = None  # complete-input fingerprint (see validation_reuse); None when it could not be computed
     reused_from: str | None = None  # "evidence:<id>:<gate>" for a prior PASSED result, "attempt:<gate>" for a duplicate in this attempt
 
+    wait_seconds: float = 0.0
+    execution_seconds: float = 0.0
+
     def provenance(self) -> dict[str, Any]:
         """The bounded, redacted execution record stored with validation evidence."""
         from .gate_execution import bounded_output
@@ -164,6 +167,8 @@ class GateResult:
             "executable_resolution": self.resolution,
             "cwd": self.cwd,
             "duration_seconds": self.duration_seconds,
+            "wait_seconds": self.wait_seconds,
+            "execution_seconds": self.execution_seconds,
             "diagnosis": self.diagnosis,
             "stdout_tail": stdout,
             "stderr_tail": stderr,
@@ -651,8 +656,41 @@ def candidate_workspace(project: Path, candidate_sha: str) -> Iterator[Path]:
             shutil.rmtree(temp_root, ignore_errors=True)
 
 
+def _run_gate_process(
+    command: list[str], cwd: Path, env: dict[str, str] | None, timeout: int
+) -> subprocess.CompletedProcess[str]:
+    """Run a gate and, on timeout, terminate only that gate's owned processes.
+
+    ``subprocess.run`` kills only the direct child. Descendants are reaped
+    after the saved process identity is checked, so a reused PID is not killed.
+    """
+    from .gate_process import spawn_gate_process, terminate_owned_gate
+
+    proc, identity = spawn_gate_process(command, cwd, env)
+    try:
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired as exc:
+            termination = terminate_owned_gate(proc, identity)
+            try:
+                stdout, stderr = proc.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                stdout, stderr = exc.stdout, exc.stderr
+            expired = subprocess.TimeoutExpired(command, timeout, output=stdout, stderr=stderr)
+            expired.stagemesh_note = termination.note  # type: ignore[attr-defined]
+            raise expired from exc
+        except BaseException:
+            terminate_owned_gate(proc, identity)
+            raise
+    finally:
+        if proc.poll() is None:
+            terminate_owned_gate(proc, identity)
+    return subprocess.CompletedProcess(command, proc.returncode if proc.returncode is not None else 1, stdout, stderr)
+
+
 def run_gate(project: Path, gate: GateCommand) -> GateResult:
     from .gate_execution import bounded_output, classify_timeout, resolve_gate_executable
+    from .validation_slot import validation_slot
 
     run_dir = project / gate.cwd if gate.cwd else project
     declared = tuple(gate.command)
@@ -675,6 +713,8 @@ def run_gate(project: Path, gate: GateCommand) -> GateResult:
             diagnosis={"timeout_class": None, "attribution": "environment", "explanation": resolution.detail, "progress": []},
         )
     started = time.monotonic()
+    waited = 0.0
+    ran = 0.0
     try:
         with ExitStack() as resources:
             # Provider sandboxes can create pytest temp roots unreadable by the
@@ -685,17 +725,15 @@ def run_gate(project: Path, gate: GateCommand) -> GateResult:
                     tempfile.TemporaryDirectory(prefix="stagemesh-gate-", ignore_cleanup_errors=True)
                 )
                 environment = {**(environment or os.environ), **dict.fromkeys(temp_keys, temp_root)}
-            result = subprocess.run(
-                command,
-                cwd=run_dir,
-                env=environment,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                capture_output=True,
-                check=False,
-                timeout=gate.timeout_seconds,
-            )
+            with validation_slot() as waited:
+                from .validation_slot import raise_if_validation_blocked
+
+                raise_if_validation_blocked()
+                started = time.monotonic()
+                try:
+                    result = _run_gate_process(command, run_dir, environment, gate.timeout_seconds)
+                finally:
+                    ran = time.monotonic() - started
     except OSError as exc:
         return GateResult(
             gate.name, "FAILED", declared, None, "", str(exc), "environment",
@@ -704,17 +742,19 @@ def run_gate(project: Path, gate: GateCommand) -> GateResult:
     except subprocess.TimeoutExpired as exc:
         out, err = _gate_output_text(exc.stdout), _gate_output_text(exc.stderr)
         diagnosis = classify_timeout(out, err)
+        cleanup_note = getattr(exc, "stagemesh_note", "process cleanup not established; no exit code")
         return GateResult(
             gate.name,
             "FAILED",
             declared,
             None,
             bounded_output(out, 4000)[0],
-            f"timed out after {gate.timeout_seconds}s\n{bounded_output(err, 4000)[0]}",
+            f"timed out after {gate.timeout_seconds}s; {cleanup_note}\nwaited {waited:.3f}s; ran {ran:.3f}s\n{bounded_output(err, 4000)[0]}",
             "timeout",
             duration_seconds=round(time.monotonic() - started, 3),
             diagnosis=diagnosis,
             output_truncated=len(out) > 4000 or len(err) > 4000,
+            wait_seconds=waited, execution_seconds=ran,
             **provenance,
         )
     return GateResult(
@@ -725,6 +765,7 @@ def run_gate(project: Path, gate: GateCommand) -> GateResult:
         _gate_output_text(result.stdout),
         _gate_output_text(result.stderr),
         duration_seconds=round(time.monotonic() - started, 3),
+        wait_seconds=waited, execution_seconds=ran,
         **provenance,
     )
 

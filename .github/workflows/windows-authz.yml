@@ -1,0 +1,55 @@
+name: Windows authorization
+
+# Fast evidence loop for the provider-authorization tests on hosted Windows. Runs only on ci/windows-authz-* branches.
+on:
+  push:
+    branches: ["ci/windows-authz-**"]
+
+jobs:
+  authorization:
+    name: provider authorization on Windows (py${{ matrix.python }})
+    runs-on: windows-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install -e ".[dev]"
+      - name: Unauthorized providers are never started (stand-in CLIs named codex, claude, grok, agy on PATH)
+        shell: pwsh
+        run: |
+          python -m pytest tests/test_provider_authorization.py tests/test_provider_authorization_e2e.py tests/test_provider_auth.py -q -p no:cacheprovider --junitxml=authorization-junit.xml
+          exit $LASTEXITCODE
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: authorization-evidence-py${{ matrix.python }}
+          path: authorization-junit.xml
+
+  collect:
+    name: collect evidence
+    needs: [authorization]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: evidence
+      - name: Publish evidence to a non-protected evidence branch
+        run: |
+          set -e
+          mkdir -p "$RUNNER_TEMP/out" && cp -r evidence/. "$RUNNER_TEMP/out/"
+          git checkout -q --orphan "evidence-${{ github.run_id }}"
+          git rm -rfq .
+          mkdir -p evidence && cp -r "$RUNNER_TEMP/out/." evidence/
+          git add evidence
+          git -c user.name="Vishal Singh" -c user.email="20689561+saketvishal@users.noreply.github.com" commit -qm "Authorization evidence for run ${{ github.run_id }} (source ${{ github.sha }})"
+          git push -q origin "HEAD:refs/heads/ci-evidence/${{ github.run_id }}"

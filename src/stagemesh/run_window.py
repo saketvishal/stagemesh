@@ -13,8 +13,9 @@
 * one operator report: what ran, what completed, which PRs (in merge order, including older wave PRs), what blocked and why, what
   stopped the window, claims and executions left, provider and ledger health, repo state, and the next command.
 
-By default it never merges. Automatic fast-forward mode develops a bounded batch
-in parallel, then lands its exact candidates serially after all workers exit.
+Coding and verification have separate process capacities. The survivor-wave
+engine continuously admits ready work and yields at bounded stage boundaries;
+automatic landing remains serialized after the current workers quiesce.
 """
 
 from __future__ import annotations
@@ -96,6 +97,7 @@ class Check:
 class WindowOptions:
     duration_seconds: float = 7200.0
     concurrency: int = 2
+    verification_concurrency: int = 2
     max_steps_per_task: int = 8
     max_tasks: int = 10
     max_continuations: int = 3  # extra runs a task gets after hitting the step cap, while each run still made progress
@@ -109,6 +111,8 @@ class WindowOptions:
     strict_live: bool = False
     allow_stale_runtime: bool = False
     tasks: list[str] | None = None  # None: pick every eligible task; a list restricts the window to exactly those
+    ci_mode: str = "immediate"
+    batch_ci: bool = False
     report_path: Path | None = None
     # Explicit authorization to arm ONE scheduled follow-up per delivery this window leaves pending (publication deferred, or a
     # published PR waiting for hosted checks). Its scope is exactly this window's own: publish if PRs are enabled, merge only if
@@ -116,6 +120,12 @@ class WindowOptions:
     follow_up: bool = False
     follow_up_interval_seconds: int = 600
     follow_up_ttl_seconds: int = 86400
+
+    def __post_init__(self) -> None:
+        if self.ci_mode == "batch":
+            self.batch_ci = True
+        elif self.batch_ci:
+            self.ci_mode = "batch"
 
 
 def resolve_merge_defaults(config: StageMeshConfig, args: Any) -> dict[str, Any]:
@@ -160,6 +170,9 @@ class WindowReport:
     readiness: dict[str, Any] | None = None
     open_wave_prs: list[dict[str, Any]] = field(default_factory=list)
     follow_ups: list[dict[str, Any]] = field(default_factory=list)  # deliveries left pending and how each is followed
+    ci_wait_seconds: float = 0.0
+    duplicate_runs_avoided: int = 0
+    batch_results: list[dict[str, Any]] = field(default_factory=list)
     next_command: str = ""
 
     @property
@@ -225,18 +238,24 @@ class WindowReport:
             "options": {
                 "duration_seconds": self.options.duration_seconds,
                 "concurrency": self.options.concurrency,
+                "verification_concurrency": self.options.verification_concurrency,
                 "max_steps_per_task": self.options.max_steps_per_task,
                 "max_tasks": self.options.max_tasks,
                 "integration_mode": self.options.integration_mode,
                 "open_prs": self.options.open_prs,
                 "strict_live": self.options.strict_live,
                 "auto_merge_ff": self.options.auto_merge_ff,
+                "ci_mode": self.options.ci_mode,
+                "batch_ci": self.options.batch_ci,
                 "required_checks": list(self.options.required_checks),
                 "merge_policy": self.options.merge_policy,
                 "check_app_id": self.options.check_app_id,
                 "follow_up": self.options.follow_up,
             },
             "follow_ups": self.follow_ups,
+            "ci_wait_seconds": self.ci_wait_seconds,
+            "duplicate_runs_avoided": self.duplicate_runs_avoided,
+            "batch_results": self.batch_results,
             "preflight": [check.to_dict() for check in self.preflight],
             "recovered": self.recovered,
             "selected": self.selected,
@@ -244,6 +263,7 @@ class WindowReport:
             "continued": self.continued,
             "not_selected": self.not_selected,
             "counts": self.counts(),
+            "capacity": [wave.capacity for wave in self.waves if wave.capacity],
             "orphan_events_before": None if first is None else first.orphan_events_before,
             "orphan_events_after": None if last is None else last.orphan_events_after,
             "main_moved": any(wave.main_moved for wave in self.waves) or bool(
@@ -702,7 +722,6 @@ def run_window(
     deadline = report.started_at + options.duration_seconds
     control = QueueStopControl(store)
     window_wall_start = time.time()  # ledger timestamps are wall-clock even when the window runs on an injected clock
-
     report.preflight, report.recovered = preflight(
         store, project, config, options, base_ref=base_ref, runtime=runtime, provider_check=provider_check, repo_state=hooks.repo_state,
         checkout_ref=checkout_ref,
@@ -890,6 +909,8 @@ def run_window(
                        f"`stagemesh delivery-unblock --task {record.task_id}`")
             report.stop_reason = "auto-merge stopped: " + why
             return False
+        if "task_id" not in merged:
+            merged["task_id"] = record.task_id
         report.merged_prs.append(merged)
         record.pr_state, record.ready_for_merge, record.landing = "MERGED", False, "fast_forward_merged"
         if on_merged is not None:
@@ -946,7 +967,7 @@ def run_window(
             if window_budget is not None:  # a wave boundary: nothing is running, nothing is interrupted
                 report.stop_reason = f"provider-call budget reached for this window ({window_budget.detail}; limit {window_budget.limit}); work is preserved"
                 break
-            room = options.concurrency if options.auto_merge_ff else options.concurrency * 2
+            room = options.max_tasks - len(attempted) + len(resume)
             # Fill the bounded wave with compatible work, not merely the first
             # N queue entries that the wave would then have to serialize.
             continuing, deferred = select_tasks(
@@ -954,6 +975,7 @@ def run_window(
                 project=project, compatible_with=[],
             )
             report.not_selected.update(deferred)
+
             if len(attempted) >= options.max_tasks and not continuing:
                 report.task_limit_reached = True
                 break
@@ -962,9 +984,9 @@ def run_window(
                     from .task_sources import LocalBacklogSource, sync_source, task_sources_from_config
                     backlog = project / ".stagemesh" / "backlog.json"
                     if backlog.is_file():
-                        sync_source(store, LocalBacklogSource(backlog).discover())
+                        sync_source(store, LocalBacklogSource(backlog).discover(), preserve_existing_dependencies=True)
                     for source in task_sources_from_config(config):
-                        sync_source(store, source.discover())
+                        sync_source(store, source.discover(), preserve_existing_dependencies=True)
                 except Exception:
                     pass
             fresh, skipped = (
@@ -1002,8 +1024,55 @@ def run_window(
                 entry = reenter_blocked_task(store, task_id, fingerprint)
                 if entry is not None:
                     report.reentered.append(entry)
-                    report.not_selected.pop(task_id, None)
+                report.not_selected.pop(task_id, None)
             before = {task_id: progress_state(store, task_id) for task_id in batch}
+
+            def admit_ready(*, fresh=fresh, batch=batch, before=before) -> list[str]:
+                remaining = options.max_tasks - len(attempted) - len(fresh)
+                if remaining <= 0:
+                    return []
+                added, reasons = select_tasks(
+                    store, attempted=attempted | set(resume) | set(fresh), limit=remaining,
+                    only=options.tasks, fingerprint=fingerprint, project=project,
+                )
+                report.not_selected.update(reasons)
+                if options.auto_merge_ff:
+                    # DONE on staging is not remote prerequisite delivery. Keep
+                    # those dependents for the next, safely landed frontier.
+                    safe = []
+                    for task_id in added:
+                        waiting = [str(row["depends_on_task_id"]) for row in store.conn.execute(
+                            "SELECT depends_on_task_id FROM task_dependencies WHERE task_id=?", (task_id,)
+                        ) if str(row["depends_on_task_id"]) in batch]
+                        if waiting:
+                            report.not_selected[task_id] = "waiting for prerequisite landing: " + ", ".join(waiting)
+                        else:
+                            safe.append(task_id)
+                    added = safe
+                for task_id in added:
+                    entry = reenter_blocked_task(store, task_id, fingerprint)
+                    if entry is not None:
+                        report.reentered.append(entry)
+                    report.not_selected.pop(task_id, None)
+                    before[task_id] = progress_state(store, task_id)
+                    record_task_context(
+                        store, report.window_id, task_id,
+                        {"integration_mode": options.integration_mode,
+                         "integration_ref": base_ref if local else staging_ref,
+                         "open_prs": options.open_prs, "resume_command": _resume_command(options)},
+                    )
+                fresh.extend(added)
+                batch.extend(added)
+                return added
+
+            def admission_problem() -> str | None:
+                verdict = check_window_budget(store, window_wall_start, BudgetPolicy.from_config(config.budgets))
+                if verdict is None:
+                    return None
+                return (f"provider-call budget reached for this window ({verdict.detail}; limit {verdict.limit}); "
+                        "work is preserved")
+
+
             wave = run_wave(
                 store,
                 batch,
@@ -1017,8 +1086,13 @@ def run_window(
                 staging_ref=None if local else staging_ref,
                 deadline=deadline,
                 clock=clock,
-                ordered_publication=options.auto_merge_ff,
+                ordered_publication=options.auto_merge_ff or options.batch_ci,
                 project=project,
+                verification_concurrency=options.verification_concurrency,
+                admit_tasks=admit_ready,
+                admission_problem=admission_problem,
+                ci_mode=options.ci_mode,
+                batch_ci=options.batch_ci,
             )
             attempted.update(fresh)
             report.selected.extend(task_id for task_id in batch if task_id not in report.selected)
@@ -1047,12 +1121,63 @@ def run_window(
                 except Exception as exc:
                     report.stop_reason = f"auto-merge stopped: cannot verify candidate order: {exc}"
                     break
-                for index, record in enumerate(ready):
+                if options.batch_ci and len(ready) > 1:
+                    combined = ready[-1]
+                    t0 = clock()
                     recovered_suffix = False
-                    if not land(record, ready[index:]):
-                        break
-                    if recovered_suffix:
-                        break
+                    landed_ok = land(combined, ready)
+                    ci_wait = max(0.0, clock() - t0)
+                    report.ci_wait_seconds += ci_wait
+                    if landed_ok:
+                        for intermediate in ready[:-1]:
+                            intermediate.pr_state = "MERGED"
+                            intermediate.ready_for_merge = False
+                            intermediate.landing = "fast_forward_merged"
+                            store.add_audit_event("window.fast_forward_merged", {
+                                "task_id": intermediate.task_id,
+                                "candidate_sha": intermediate.integrated_candidate,
+                                "combined_sha": combined.integrated_candidate,
+                                "batched": True,
+                                "pr": report.merged_prs[-1].get("pr") if report.merged_prs else None,
+                            })
+                            report.merged_prs.append({
+                                "merged": True,
+                                "task_id": intermediate.task_id,
+                                "batched": True,
+                                "candidate_sha": intermediate.integrated_candidate,
+                                "combined_sha": combined.integrated_candidate,
+                                "pr": report.merged_prs[-1].get("pr") if report.merged_prs else None,
+                            })
+                        duplicate_avoided = len(ready) - 1
+                        report.duplicate_runs_avoided += duplicate_avoided
+                        batch_entry = {
+                            "batch_id": f"batch-{int(wave.started_at)}",
+                            "task_ids": [r.task_id for r in ready],
+                            "combined_sha": combined.integrated_candidate,
+                            "duplicate_runs_avoided": duplicate_avoided,
+                            "ci_wait_seconds": ci_wait,
+                            "status": "merged",
+                        }
+                        report.batch_results.append(batch_entry)
+                        store.add_audit_event("batch.integrated", batch_entry)
+                    else:
+                        blocker = externally_blocked(store, combined.task_id)
+                        if blocker is not None:
+                            for intermediate in ready[:-1]:
+                                record_external_block(store, intermediate.task_id, intermediate.integrated_candidate,
+                                                      str(blocker.get("reason") or "batch landing permission denied"),
+                                                      str(blocker.get("needed") or "permission to merge this pull request"))
+                                intermediate.landing, intermediate.ready_for_merge = "externally_blocked", False
+                else:
+                    for index, record in enumerate(ready):
+                        recovered_suffix = False
+                        t0 = clock()
+                        landed = land(record, ready[index:])
+                        report.ci_wait_seconds += max(0.0, clock() - t0)
+                        if not landed:
+                            break
+                        if recovered_suffix:
+                            break
                 if report.stop_reason:
                     break
             if wave.time_limit_reached:
@@ -1080,6 +1205,11 @@ def _finish(
 ) -> WindowReport:
     QueueStopControl(store).complete_if_idle()
     report.finished_at = clock()
+    if not report.batch_results:
+        for wave in report.waves:
+            report.duplicate_runs_avoided += wave.duplicate_runs_avoided
+            report.ci_wait_seconds += wave.ci_wait_seconds
+            report.batch_results.extend(wave.batch_results)
     if report.stop_reason is None:
         report.stop_reason = report.no_progress_reason
     try:
@@ -1121,7 +1251,7 @@ def _finish(
 def format_window_report(report: WindowReport) -> str:
     verdict = "REFUSED TO START" if report.refused else "OK" if report.ok else "STOPPED"
     minutes = max(0.0, report.finished_at - report.started_at) / 60
-    lines = [f"run window {report.window_id}: {verdict} ({minutes:.1f} min of {report.options.duration_seconds / 60:.0f}, mode {report.options.integration_mode})"]
+    lines = [f"run window {report.window_id}: {verdict} ({minutes:.1f} min of {report.options.duration_seconds / 60:.0f}, mode {report.options.integration_mode}, ci-mode {report.options.ci_mode})"]
     if report.stop_reason:
         lines.append(f"  stopped by: {report.stop_reason}")
     elif report.time_limit_reached:
@@ -1134,6 +1264,11 @@ def format_window_report(report: WindowReport) -> str:
     lines += [f"  [{'ok' if c.ok else 'FAIL' if c.fatal else 'warn'}] {c.name}: {c.detail}" for c in report.preflight]
     if report.recovered:
         lines.append("recovered dead executions: " + ", ".join(f"{r['execution_id']} (task {r['task_id']}: {r['action']})" for r in report.recovered))
+    if report.waves:
+        coding_peak = max(wave.capacity.get("peak_coding", 0) for wave in report.waves)
+        verification_peak = max(wave.capacity.get("peak_verification", 0) for wave in report.waves)
+        lines.append(f"capacity: coding target {report.options.concurrency}, peak {coding_peak}; "
+                     f"verification limit {report.options.verification_concurrency}, peak {verification_peak}")
     counts = report.counts()
     lines.append(f"what ran: {len(report.tasks)} task(s)" + (" - " + ", ".join(f"{n} {k}" for k, n in sorted(counts.items())) if counts else ""))
     for task in report.tasks:
@@ -1166,6 +1301,13 @@ def format_window_report(report: WindowReport) -> str:
             lines.append(f"  follow-up for {entry.get('task_id', '?')}: {entry.get('state')}: {entry.get('reason', '')}")
     if report.merged_prs:
         lines.append("fast-forward merged: " + ", ".join("#" + str(item["pr"]) for item in report.merged_prs))
+    if report.batch_results:
+        lines.append(f"batched CI: {report.duplicate_runs_avoided} duplicate run(s) avoided; {report.ci_wait_seconds:.1f}s spent waiting for CI")
+        for batch in report.batch_results:
+            lines.append(
+                f"  batch {batch.get('batch_id', '-')}: {len(batch.get('task_ids', []))} task(s) "
+                f"({', '.join(batch.get('task_ids', []))}) combined candidate {str(batch.get('combined_sha', ''))[:7]} -> {batch.get('status', 'complete')}"
+            )
     if report.open_wave_prs:
         lines.append("open wave PRs, merge in this order (stacked: each branch carries the ones before it; normal merge commit):")
         lines += [f"  {i}. #{pr['number']} {pr.get('headRefName', '')}{' (this window)' if pr.get('opened_this_window') else ''}: {pr.get('title', '')} {pr.get('url', '')}" for i, pr in enumerate(report.open_wave_prs, 1)]

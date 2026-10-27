@@ -8,9 +8,10 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from .capacity import CapacityKind, CapacityRegistry
 from .concurrency import IntegrationLock, IntegrationLockTimeout
@@ -151,6 +152,26 @@ def run_provider_acceptance(store: Store, project: Path) -> ProviderAcceptanceRe
 
 
 def run_live_provider_smoke(
+    adapter,
+    *,
+    timeout_seconds: float | None = None,
+    keep_temp: bool = False,
+    should_stop: Callable[[], bool] = lambda: False,
+) -> LiveProviderSmokeResult:
+    """Run one configured provider against a throwaway repository, but only a provider the real project authorized.
+
+    The smoke project is a temp directory without the real project's allowlist, so an adapter that was built as authorized
+    carries that decision in; one built as denied stays denied (its own check fires inside execute/review_candidate).
+    """
+    from . import provider_authorization
+
+    if getattr(adapter, "denied", None):
+        return _run_live_provider_smoke(adapter, timeout_seconds=timeout_seconds, keep_temp=keep_temp, should_stop=should_stop)
+    with provider_authorization.pre_authorized([adapter.name]):
+        return _run_live_provider_smoke(adapter, timeout_seconds=timeout_seconds, keep_temp=keep_temp, should_stop=should_stop)
+
+
+def _run_live_provider_smoke(
     adapter,
     *,
     timeout_seconds: float | None = None,

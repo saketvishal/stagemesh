@@ -135,6 +135,75 @@ def _merging(data: dict[str, object], independent: bool) -> MergeConfig:
     return MergeConfig(str(mode), tuple(checks), app)
 
 
+ADVERSE_UNAVAILABLE_BEHAVIORS = ("hold",)  # fail closed: an unavailable adverse reviewer never yields a pass
+DEFAULT_BLOCKING_SEVERITIES = ("blocker", "critical", "error", "high")
+
+
+@dataclass(frozen=True)
+class AdverseReviewPolicy:
+    """Typed adverse-review policy. Defining it adds no gate; review evidence is validated against its digest."""
+
+    blocking_severities: tuple[str, ...] = DEFAULT_BLOCKING_SEVERITIES
+    unavailable_reviewer: str = "hold"
+
+    def digest(self) -> str:
+        canonical = json.dumps(
+            {"blocking_severities": sorted(self.blocking_severities), "unavailable_reviewer": self.unavailable_reviewer},
+            sort_keys=True, separators=(",", ":"),
+        )
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    def is_blocking(self, severity: object) -> bool:
+        return isinstance(severity, str) and severity.strip().casefold() in self.blocking_severities
+
+
+def _adverse_review_policy(data: dict[str, object]) -> AdverseReviewPolicy:
+    unknown = set(data) - {"blocking_severities", "unavailable_reviewer"}
+    if unknown:
+        raise ConfigValidationError(f"adverse_review has unsupported keys: {', '.join(sorted(unknown))}")
+    severities = data.get("blocking_severities", DEFAULT_BLOCKING_SEVERITIES)
+    if (not isinstance(severities, (list, tuple)) or not severities
+            or not all(isinstance(item, str) and item.strip() for item in severities)):
+        raise ConfigValidationError("adverse_review.blocking_severities must be a non-empty list of severity names")
+    behavior = data.get("unavailable_reviewer", "hold")
+    if behavior not in ADVERSE_UNAVAILABLE_BEHAVIORS:
+        raise ConfigValidationError(f"adverse_review.unavailable_reviewer must be one of {', '.join(ADVERSE_UNAVAILABLE_BEHAVIORS)}")
+    return AdverseReviewPolicy(tuple(sorted({item.strip().casefold() for item in severities})), behavior)
+
+
+def _require_approved_spec(data: dict[str, object]) -> bool:
+    """Opt-in planning gate; absent means the legacy policy (no pre-implementation approval required)."""
+    unknown = set(data) - {"require_approved_spec"}
+    if unknown:
+        raise ConfigValidationError(f"planning_gate has unsupported keys: {', '.join(sorted(unknown))}")
+    value = data.get("require_approved_spec", False)
+    if not isinstance(value, bool):
+        raise ConfigValidationError("planning_gate.require_approved_spec must be a boolean")
+    return value
+
+
+@dataclass(frozen=True)
+class ResearchConfig:
+    """Opt-in read-only researcher run before implementation. Absent config means no research stage."""
+
+    provider: str
+    command: str
+
+
+def _research_config(data: dict[str, object], known_providers: set[str]) -> ResearchConfig | None:
+    if not data:
+        return None
+    unknown = set(data) - {"provider", "command"}
+    if unknown:
+        raise ConfigValidationError(f"research has unsupported keys: {', '.join(sorted(unknown))}")
+    provider, command = _string(data.get("provider")), _string(data.get("command"))
+    if not provider or not command or not command.strip():
+        raise ConfigValidationError("research requires a provider and a read-only command")
+    if provider not in known_providers:
+        raise ConfigValidationError(f"research.provider references unknown provider: {provider}")
+    return ResearchConfig(provider, command)
+
+
 @dataclass(frozen=True)
 class StageMeshConfig:
     project: Path
@@ -161,6 +230,10 @@ class StageMeshConfig:
     diagnosis: DiagnosisConfig = field(default_factory=DiagnosisConfig)
     budgets: BudgetConfig = field(default_factory=BudgetConfig)
     merging: MergeConfig = field(default_factory=MergeConfig)
+    authorized_providers: tuple[str, ...] | None = None  # None: the project has not authorized any provider list
+    adverse_review: AdverseReviewPolicy = field(default_factory=AdverseReviewPolicy)
+    require_approved_spec: bool = False
+    research: ResearchConfig | None = None
 
 
 @dataclass(frozen=True)
@@ -179,7 +252,7 @@ def load_config(project: Path, config_path: Path | None = None) -> StageMeshConf
     source = "defaults"
     if path.exists():
         try:
-            loaded = json.loads(path.read_text(encoding="utf-8"))
+            loaded = json.loads(path.read_text(encoding="utf-8-sig"))
         except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
             raise ConfigValidationError("config file must be valid JSON") from exc
         if not isinstance(loaded, dict):
@@ -279,6 +352,10 @@ def load_config(project: Path, config_path: Path | None = None) -> StageMeshConf
         diagnosis=_diagnosis(_optional_mapping(data, "diagnosis"), known),
         merging=_merging(_optional_mapping(data, "merging"), require_review),
         budgets=_budgets(_optional_mapping(data, "budgets")),
+        authorized_providers=_authorization(_optional_mapping(data, "authorization"), known),
+        adverse_review=_adverse_review_policy(_optional_mapping(data, "adverse_review")),
+        require_approved_spec=_require_approved_spec(_optional_mapping(data, "planning_gate")),
+        research=_research_config(_optional_mapping(data, "research"), known),
     )
 
 
@@ -410,6 +487,24 @@ def _budgets(data: dict[str, object]) -> BudgetConfig:
             raise ConfigValidationError("budgets.max_equivalent_failures must be at least 2 (one failure is not a repeat) or 0 to disable")
         values[name] = value or None
     return BudgetConfig(**values)
+
+
+def _authorization(data: dict[str, object], known_providers: set[str]) -> tuple[str, ...] | None:
+    unknown = set(data) - {"unattended_providers"}
+    if unknown:
+        raise ConfigValidationError(f"authorization has unsupported keys: {', '.join(sorted(unknown))}")
+    if "unattended_providers" not in data:
+        return None
+    names = data["unattended_providers"]
+    if not isinstance(names, list) or not names or not all(isinstance(n, str) and n.strip() for n in names):
+        raise ConfigValidationError("authorization.unattended_providers must be a non-empty list of provider names")
+    cleaned = tuple(n.strip() for n in names)
+    if len(set(cleaned)) != len(cleaned):
+        raise ConfigValidationError("authorization.unattended_providers must not contain duplicates")
+    unlisted = [n for n in cleaned if n not in known_providers]
+    if unlisted:
+        raise ConfigValidationError(f"authorization.unattended_providers references unknown provider: {', '.join(unlisted)}")
+    return cleaned
 
 
 def _diagnosis(data: dict[str, object], known_providers: set[str]) -> DiagnosisConfig:

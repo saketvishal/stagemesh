@@ -135,6 +135,14 @@ def test_review_failure_is_remediated_automatically(tmp_path: Path) -> None:
     assert r.stop == "REFUSED:no_eligible_task" and m.integrated("T-1"), r.brief
     assert [mode for p, stage, _, mode in r.calls if stage == "review"] == ["fail", "pass"]
     assert len(r.implementers("T-1")) == 2
+    store = m.store()
+    try:
+        reviewed = store.conn.execute(
+            "SELECT DISTINCT candidate_sha FROM evidence WHERE task_id='T-1' AND kind='REVIEW'"
+        ).fetchall()
+        assert len(reviewed) == 2
+    finally:
+        store.close()
     r.assert_hands_off()
 
 
@@ -151,6 +159,14 @@ def test_complex_single_task_survives_provider_validation_review_and_reaches_don
     assert r.stop == "REFUSED:no_eligible_task" and m.integrated("T-1"), r.brief
     assert r.implementers("T-1")[:2] == ["codex", "claude"]
     assert [mode for provider, stage, _, mode in r.calls if provider == "grok" and stage == "review"] == ["fail", "pass"]
+    store = m.store()
+    try:
+        reviewed = store.conn.execute(
+            "SELECT DISTINCT candidate_sha FROM evidence WHERE task_id='T-1' AND kind='REVIEW'"
+        ).fetchall()
+        assert len(reviewed) == 2
+    finally:
+        store.close()
     owner_states = m.audit("task.owner_state")
     final = owner_states[-1]
     assert final["stage"] == "DONE"
@@ -307,6 +323,8 @@ def test_controlled_merge_window_lands_before_continuing_and_reports_policy(tmp_
     store, project, rig, hooks, options, config, kwargs = window(
         tmp_path, ["1", "2"], auto_merge_ff=True, merge_policy="stagemesh", check_app_id=15368,
         required_checks=("web",), concurrency=1)
+    # This policy case requires remote prerequisite landing; independent tasks may pipeline across stage slots.
+    store.add_dependency("2", "1")
     landed = []
     run_task = hooks.run_task
     def run(task, steps):

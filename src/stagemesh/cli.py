@@ -8,6 +8,7 @@ import re
 import shlex
 import sqlite3
 import sys
+import uuid
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -39,6 +40,7 @@ from .demo import DemoValidationError, create_demo_project
 from .diagnosis import DiagnosisPolicy, diagnose, format_findings, make_adapter_analyst
 from .efficiency import BudgetPolicy
 from .distributed import WorkQueue, WorkQueueError
+from .domain import TaskStatus
 from .e2e_acceptance import EndToEndAcceptanceValidationError, end_to_end_acceptance
 from .external_evidence import (
     ExternalEvidenceValidationError,
@@ -96,7 +98,7 @@ from .queue_reconcile import ReconcileOptions, reconcile_queue
 from .queue_run import QueueRunner
 from .queue_visibility import format_queue_control, queue_control_report
 from .contract_check import check_contract, format_report
-from .recovery import RecoveryRefusal, advance_baseline, format_doctor, rebaseline_task, rebind_contract, task_doctor
+from .recovery import RecoveryRefusal, advance_baseline, format_doctor, rebaseline_task, rebind_contract, resume_task, task_doctor
 from .redaction import redact_command_secrets, redact_url_credentials
 from .registry import (
     GlobalRegistry,
@@ -412,11 +414,15 @@ class _SetupError(Exception):
         self.code = code
 
 
-def _sync_all_sources(store: Store, project: Path, config, targeted_task_id: str | None) -> None:
+def _sync_all_sources(
+    store: Store, project: Path, config, targeted_task_id: str | None, *, preserve_existing_dependencies: bool = False,
+) -> None:
     backlog = project / ".stagemesh" / "backlog.json"
-    sync_source(store, _filter_targeted_tasks(LocalBacklogSource(backlog).discover(), targeted_task_id))
+    sync_source(store, _filter_targeted_tasks(LocalBacklogSource(backlog).discover(), targeted_task_id),
+                preserve_existing_dependencies=preserve_existing_dependencies)
     for source in task_sources_from_config(config):
-        sync_source(store, _filter_targeted_tasks(source.discover(), targeted_task_id))
+        sync_source(store, _filter_targeted_tasks(source.discover(), targeted_task_id),
+                    preserve_existing_dependencies=preserve_existing_dependencies)
 
 
 # Live provider acceptance in provider selection. Default queue runs only skip providers whose recorded live check failed; refusing
@@ -552,13 +558,21 @@ def _build_coordinator(
         review_eligible = [adapter_by_name[v.provider] for v in review_verdicts if v.eligible]
         chosen_provider = pool.order(store, IMPLEMENT, impl_eligible)[0][0].name if impl_eligible else "deferred"
         if staged:
-            reviewer = Reviewer(require_independent=require_independent_review, review_pool=pool)
+            reviewer = Reviewer(
+                require_independent=require_independent_review,
+                review_pool=pool,
+                adverse_policy=config.adverse_review,
+            )
             ordered_reviewers = [a.name for a in pool.order(store, REVIEW, review_eligible)[0]]
             chosen_review_provider = "dynamic-pool:" + ",".join(ordered_reviewers)
             independent_review_configured = True
         else:
             chosen_review_provider = "single-agent-deterministic-fallback"
-            reviewer = Reviewer(provider_name=chosen_review_provider, require_independent=require_independent_review)
+            reviewer = Reviewer(
+                provider_name=chosen_review_provider,
+                require_independent=require_independent_review,
+                adverse_policy=config.adverse_review,
+            )
         info_extra.update(
             selection_policy=config.provider_selection_policy,
             implementation_pool=list(pools[IMPLEMENT]),
@@ -616,6 +630,7 @@ def _build_coordinator(
         integrator=integrator,
         target=target,
         require_independent_review=require_independent_review,
+        adverse_policy=config.adverse_review if require_independent_review else None,
         diagnosis_policy=_diagnosis_policy(config, project, {} if getattr(args, "dry_run", False) else adapter_by_name),
         budget_policy=BudgetPolicy.from_config(config.budgets),
         guard=guard,
@@ -891,8 +906,9 @@ def command_run_window(args: argparse.Namespace) -> int:
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 2
-    if (args.concurrency is not None and args.concurrency < 1) or args.max_steps_per_task < 1 or args.max_tasks < 1:
-        print("--concurrency, --max-steps-per-task and --max-tasks must be at least 1", file=sys.stderr)
+    if ((args.concurrency is not None and args.concurrency < 1) or args.max_steps_per_task < 1
+            or args.max_tasks < 1 or getattr(args, "verification_concurrency", 2) < 1):
+        print("--concurrency, --verification-concurrency, --max-steps-per-task and --max-tasks must be at least 1", file=sys.stderr)
         return 2
     project = Path(args.project).resolve()
     if not args.plan and _ensure_default_github_task_source(project):
@@ -925,11 +941,14 @@ def command_run_window(args: argparse.Namespace) -> int:
     options = WindowOptions(
         duration_seconds=duration,
         **merge_defaults,
+        verification_concurrency=getattr(args, "verification_concurrency", 2),
         max_steps_per_task=args.max_steps_per_task,
         max_tasks=args.max_tasks,
         integration_mode=args.integration,
         open_prs=not args.no_pr,
         advance_baselines=not args.no_advance_baselines,
+        ci_mode=getattr(args, "ci_mode", "batch" if getattr(args, "batch_ci", False) else "immediate"),
+        batch_ci=getattr(args, "ci_mode", "") == "batch" or bool(getattr(args, "batch_ci", False)),
         strict_live=args.strict_live,
         allow_stale_runtime=args.allow_stale_runtime,
         tasks=parse_task_ids(args.tasks) if args.tasks else None,
@@ -947,7 +966,7 @@ def command_run_window(args: argparse.Namespace) -> int:
             persisted.close()
     store.migrate()
     try:
-        _sync_all_sources(store, project, config, None)
+        _sync_all_sources(store, project, config, None, preserve_existing_dependencies=True)
         staging_ref = None if local else STAGING_REF
         hooks = _wave_hooks(
             project, store, base_ref=base_ref, staging_ref=staging_ref, advance_ref=base_ref if local else STAGING_REF, local=local, no_pr=args.no_pr,
@@ -1112,6 +1131,286 @@ def command_follow_up(args: argparse.Namespace) -> int:
         store.close()
 
 
+def command_driver(args: argparse.Namespace) -> int:
+    """Driver subcommands run unattended: provider authorization fails closed for them and for every child they start."""
+    from . import provider_authorization
+
+    previous = os.environ.get(provider_authorization.UNATTENDED_ENV)
+    os.environ[provider_authorization.UNATTENDED_ENV] = "1"
+    try:
+        return _command_driver_logged(args)
+    finally:
+        if previous is None:
+            os.environ.pop(provider_authorization.UNATTENDED_ENV, None)
+        else:
+            os.environ[provider_authorization.UNATTENDED_ENV] = previous
+
+
+def _command_driver_logged(args: argparse.Namespace) -> int:
+    """Run a driver subcommand; `tick --log-file` appends all of its output to that file (the scheduled action has no shell)."""
+    import contextlib
+
+    log_file = getattr(args, "log_file", None)
+    if not log_file:
+        return _command_driver(args)
+    log_path = Path(log_file)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("a", encoding="utf-8", buffering=1) as handle, contextlib.redirect_stdout(handle), contextlib.redirect_stderr(handle):
+        try:
+            return _command_driver(args)
+        except Exception:  # noqa: BLE001 -- a scheduled action has no console; the log is the only place the failure can land
+            import traceback
+
+            traceback.print_exc(file=handle)
+            return 1
+
+
+def _real_provider_auth_blockers(project: Path) -> list[str]:
+    """Why real coding CLIs may not run unattended: API billing in the environment, or a non-subscription login. Empty when fine
+    or when no real CLI is configured (mock acceptance projects). Makes no model call."""
+    from . import provider_auth, provider_authorization
+    from .config import load_config as load_project_config
+    from .providers import RuntimeCommandAdapter, _mark_authorization, adapters_from_config
+
+    config = load_project_config(project)
+    adapters = adapters_from_config(config)
+    researchers = {
+        (adapter.research.name, adapter.research.command)
+        for adapter in adapters if adapter.research is not None and not adapter.denied and "code" in adapter.capabilities
+    }
+    research_adapters = _mark_authorization([RuntimeCommandAdapter(name, command) for name, command in researchers], config)
+    adapters += research_adapters
+    every_command = [command for adapter in adapters for command in adapter.all_commands()]
+    if not provider_auth.uses_real_providers(every_command):
+        return []
+    if config.authorized_providers is None:
+        return ["no explicit provider allowlist: add authorization.unattended_providers to .stagemesh/config.json (installing a CLI does not authorize it)"]
+    authorized = [adapter for adapter in adapters if not adapter.denied]
+    blockers = [f"{adapter.name}: {adapter.denied}" for adapter in adapters if adapter.denied and adapter.name in config.authorized_providers]
+    blockers += [f"research provider {adapter.name}: {adapter.denied}" for adapter in research_adapters if adapter.denied]
+    names = [name for name in config.authorized_providers if name in provider_auth.PROVIDERS]
+    unverifiable = [
+        f"{name}: billing mode cannot be verified without a model call, so it cannot be authorized for unattended use"
+        for name in config.authorized_providers
+        if name in ("codex", "claude", "grok", "agy") and name not in provider_auth.PROVIDERS
+    ]
+    blockers += unverifiable
+    for adapter in authorized:
+        if adapter.name == "codex":
+            for capability in ("code", "review"):
+                if adapter.name in config.authorized_providers and provider_authorization.pinned_model(adapter.command_for(capability)) is None:
+                    blockers.append(
+                        "codex model is not pinned: the CLI's default model depends on its version and sign-in and was rejected in the first live trial; "
+                        "set providers.codex.command with --model taken from a project where Codex works"
+                    )
+                    break
+    if not provider_auth.uses_real_providers([c for a in authorized for c in a.all_commands()]):
+        return blockers
+    executables = {}
+    for adapter in authorized:
+        if adapter.name in provider_auth.PROVIDERS:
+            executables[adapter.name] = tuple(dict.fromkeys((
+                *executables.get(adapter.name, ()),
+                *(adapter.command_for(capability)[0] for capability in ("code", "review") if capability in adapter.capabilities),
+            )))
+    report = provider_auth.check(names, executables=executables, require_installed=True)
+    return blockers + ([] if report["ok"] else [str(item) for item in report["blockers"]])
+
+
+def _stopped_config(project: Path):
+    """Mark the driver stopped. A missing or unreadable config is reported, not fatal: stop and uninstall must still remove the schedule."""
+    from . import continuous_driver
+
+    try:
+        return continuous_driver.set_state(project, "stopped")
+    except continuous_driver.DriverConfigError as exc:
+        print(f"driver warning: {exc}; removing the schedule anyway", file=sys.stderr)
+        return None
+
+
+def _command_driver(args: argparse.Namespace) -> int:
+    from dataclasses import asdict
+
+    from . import continuous_driver
+    from .driver_scheduler import DriverSchedulerError, default_driver_scheduler, driver_command
+    from .run_window import parse_duration
+
+    project = Path(args.project).resolve()
+    store = Store(db_path(project))
+    store.migrate()
+    scheduler = default_driver_scheduler(project)
+    try:
+        if args.driver_command == "install":
+            if not args.acknowledge_provider_use:
+                print(
+                    "refusing persistent startup without --acknowledge-provider-use; scheduled windows may invoke configured providers",
+                    file=sys.stderr,
+                )
+                return 2
+            if scheduler is None:
+                print("the local continuous driver currently supports Windows Task Scheduler only", file=sys.stderr)
+                return 2
+            blockers = _real_provider_auth_blockers(project)
+            if blockers:
+                print(
+                    "refusing persistent real-provider startup: "
+                    + "; ".join(blockers)
+                    + " (no model call was made; fix the login or the environment, then install again)",
+                    file=sys.stderr,
+                )
+                return 2
+            prepared = continuous_driver.DriverConfig(
+                project=str(project),
+                state="paused",
+                interval_seconds=int(parse_duration(args.interval)),
+                window_seconds=int(parse_duration(args.window_duration)),
+                concurrency=args.concurrency,
+                max_tasks=args.max_tasks,
+                max_steps_per_task=args.max_steps_per_task,
+                max_consecutive_failures=args.max_consecutive_failures,
+                auto_merge_ff=args.auto_merge_ff,
+                strict_live=args.strict_live,
+                integration=args.integration,
+            ).validate(project)
+            try:
+                previous = continuous_driver.load_config(project)
+            except continuous_driver.DriverConfigError:
+                previous = None
+            continuous_driver.save_config(project, prepared)
+            try:
+                handle = scheduler.ensure(
+                    driver_command(project),
+                    prepared.interval_seconds,
+                    continuous_driver.scheduler_limit_seconds(prepared),
+                )
+            except DriverSchedulerError:
+                if previous is not None:
+                    continuous_driver.save_config(project, previous)  # a failed install must not pause a working driver
+                raise  # with no previous driver the paused config stays: inert, and `driver resume` retries the schedule
+            config = continuous_driver.DriverConfig(**{**asdict(prepared), "state": "running"})
+            continuous_driver.install(store, project, config, handle)
+            payload = {"installed": True, "handle": handle, "config": asdict(config)}
+        elif args.driver_command == "tick":
+            blockers = _real_provider_auth_blockers(project)
+            if blockers:  # never fall back to metered billing: stop the driver loudly and keep every task as it was
+                detail = "provider authentication blocked: " + "; ".join(blockers)
+                tick_id = uuid.uuid4().hex
+                continuous_driver.record_audit(
+                    store, continuous_driver.TICK_FINISHED, {"tick_id": tick_id, "state": "blocked", "exit_code": None, "detail": detail}
+                )
+                payload = continuous_driver.DriverTick(tick_id, "blocked", None, None, detail).to_dict()
+            else:
+                payload = continuous_driver.run_tick(store, project).to_dict()
+        elif args.driver_command == "status":
+            config = continuous_driver.load_config(project)
+            exists = scheduler.exists(scheduler.handle) if scheduler is not None else None
+            payload = continuous_driver.status(store, project, schedule_exists=exists)
+            payload["config"] = asdict(config)
+        elif args.driver_command == "pause":
+            from .parallel import request_queue_control
+
+            continuous_driver.set_state(project, "paused")
+            request_queue_control(store, "paused", args.reason)
+            continuous_driver.record_state(store, "paused", args.reason)
+            payload = continuous_driver.status(
+                store,
+                project,
+                schedule_exists=scheduler.exists(scheduler.handle) if scheduler is not None else None,
+            )
+        elif args.driver_command == "resume":
+            from .parallel import request_queue_control
+
+            current = continuous_driver.load_config(project)
+            blockers = _real_provider_auth_blockers(project)
+            if blockers:
+                raise continuous_driver.DriverConfigError("provider authentication blocked: " + "; ".join(blockers))
+            child_state, _child_identity = continuous_driver.child_owner_state(project)
+            if child_state == "ORPHANED":
+                continuous_driver.release_orphaned_child(project)
+            elif child_state is not None:
+                raise continuous_driver.DriverConfigError(
+                    f"cannot resume while prior run-window process identity is {child_state}"
+                )
+            if scheduler is None:
+                raise continuous_driver.DriverConfigError(
+                    "Windows Task Scheduler is unavailable; the driver cannot resume persistently"
+                )
+            handle = scheduler.ensure(
+                driver_command(project), current.interval_seconds, continuous_driver.scheduler_limit_seconds(current)
+            )
+            config = continuous_driver.set_state(project, "running")
+            request_queue_control(store, "resumed", args.reason)
+            continuous_driver.record_state(store, "running", args.reason)
+            payload = continuous_driver.status(store, project, schedule_exists=scheduler.exists(handle))
+        elif args.driver_command == "stop":
+            from .parallel import request_queue_control
+
+            config = _stopped_config(project)  # an unreadable config must not keep the schedule alive
+            request_queue_control(
+                store,
+                "stopping",
+                args.reason,
+                terminate_running=args.terminate_running,
+            )
+            continuous_driver.record_state(store, "stopped", args.reason)
+            handle = scheduler.handle if scheduler is not None else None
+            if scheduler is not None and scheduler.exists(handle):
+                scheduler.remove(handle)
+                continuous_driver.record_descheduled(store, handle)
+            payload = {
+                **(
+                    continuous_driver.status(
+                        store,
+                        project,
+                        schedule_exists=False if scheduler is not None else None,
+                    )
+                    if config is not None
+                    else {"installed": False, "state": "stopped", "schedule_exists": False if scheduler is not None else None}
+                ),
+                "config": None if config is None else asdict(config),
+            }
+        else:
+            from .parallel import request_queue_control
+
+            config = _stopped_config(project)
+            request_queue_control(store, "stopping", args.reason, terminate_running=False)
+            continuous_driver.record_state(store, "stopped", args.reason)
+            handle = scheduler.handle if scheduler is not None else None
+            if scheduler is not None and scheduler.exists(handle):
+                scheduler.remove(handle)
+                continuous_driver.record_descheduled(store, handle)
+            try:
+                continuous_driver.remove_config(project)
+            except continuous_driver.DriverConfigError:
+                pass
+            payload = {
+                "installed": False,
+                "state": "uninstalled",
+                "schedule_exists": False if scheduler is not None else None,
+                "preserved": [
+                    str(project / ".stagemesh" / "stagemesh.sqlite3"),
+                    str(project / ".stagemesh" / "driver" / "driver.log"),
+                ],
+                "previous_config": None if config is None else asdict(config),
+            }
+    except (continuous_driver.DriverConfigError, DriverSchedulerError, ValueError) as exc:
+        print(f"driver error: {exc}", file=sys.stderr)
+        return 2
+    finally:
+        store.close()
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True, default=str))
+    elif args.driver_command == "tick":
+        print(f"driver tick: {payload['state']} - {payload['detail']}")
+    else:
+        print(f"local continuous driver: {payload.get('state', 'running')}")
+        if payload.get("handle"):
+            print(f"schedule: {payload['handle']}")
+        if payload.get("latest_tick"):
+            print(f"last tick: {payload['latest_tick']['state']} - {payload['latest_tick']['detail']}")
+    return 1 if payload.get("state") in {"blocked", "crashed", "timeout"} else 0
+
+
 def command_survivor_wave(args: argparse.Namespace) -> int:
     from .baseline import resolve_integration_ref
     from .runtime_freshness import check_runtime
@@ -1250,7 +1549,8 @@ def command_continue(args: argparse.Namespace) -> int:
     config = load_config(project)
     store = Store(db_path(project))
     store.migrate()
-    _sync_all_sources(store, project, config, targeted_task_id)
+    _sync_all_sources(store, project, config, targeted_task_id,
+                      preserve_existing_dependencies=bool(getattr(args, "integration_ref", None)))
     try:
         coord, info = _build_coordinator(args, project, config, store, target)
     except _SetupError as exc:
@@ -1272,6 +1572,7 @@ def command_continue(args: argparse.Namespace) -> int:
         count += progressed
         if args.once or progressed == 0:
             break
+    adverse_block = getattr(coord, "last_adverse_block", None)
     if args.json:
         print(
             json.dumps(
@@ -1284,13 +1585,21 @@ def command_continue(args: argparse.Namespace) -> int:
                     "integration_ref": integration_ref,
                     "targeted_mode": targeted_mode,
                     "targeted_task_id": str(targeted_task_id) if targeted_task_id is not None else None,
+                    **(
+                        {
+                            "stop_reason": "BLOCKED",
+                            "message": "adverse review gate refused integration: " + "; ".join(adverse_block),
+                        }
+                        if adverse_block
+                        else {}
+                    ),
                 },
                 indent=2,
                 sort_keys=True,
             )
         )
         store.close()
-        return 0
+        return 1 if adverse_block else 0
     print(f"progressed: {count}")
     print(f"provider: {chosen_provider}")
     print(f"review_provider: {chosen_review_provider}")
@@ -1300,6 +1609,9 @@ def command_continue(args: argparse.Namespace) -> int:
     print(f"targeted_mode: {targeted_mode}")
     print(f"targeted_task_id: {targeted_task_id}")
     store.close()
+    if adverse_block:
+        print("adverse review gate refused integration: " + "; ".join(adverse_block), file=sys.stderr)
+        return 1
     return 0
 
 
@@ -1465,10 +1777,11 @@ def command_retry_task(args: argparse.Namespace) -> int:
         print(f"task does not exist: {args.task}", file=sys.stderr)
         store.close()
         return 2
-    if not store.unblock_task(args.task):
+    if task["status"] != TaskStatus.BLOCKED:
         print(f"task is not blocked: {args.task} (status {task['status']})", file=sys.stderr)
         store.close()
         return 2
+    resume_task(store, args.task)
     task = store.get_task(args.task)
     if args.json:
         print(json.dumps({"task_id": args.task, "status": task["status"], "stage": task["stage"]}, sort_keys=True))
@@ -1497,7 +1810,8 @@ def command_run_ready(args: argparse.Namespace) -> int:
     config = load_config(project)
     store = Store(db_path(project))
     store.migrate()
-    _sync_all_sources(store, project, config, requested)
+    _sync_all_sources(store, project, config, requested,
+                      preserve_existing_dependencies=bool(getattr(args, "integration_ref", None)))
     info: dict[str, object] = {}
     provider_notice_index = 0
 
@@ -2852,6 +3166,59 @@ def command_backend(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_provider_authorization(args: argparse.Namespace) -> int:
+    """Show, without any model call, which providers may run unattended in this project and exactly what each would run."""
+    from . import provider_authorization
+    from .config import load_config as load_project_config
+    from .provider_pool import default_pools
+    from .providers import adapters_from_config
+
+    previous = os.environ.get(provider_authorization.UNATTENDED_ENV)
+    os.environ[provider_authorization.UNATTENDED_ENV] = "1"
+    try:
+        config = load_project_config(Path(args.project))
+        adapters = adapters_from_config(config)
+    finally:
+        if previous is None:
+            os.environ.pop(provider_authorization.UNATTENDED_ENV, None)
+        else:
+            os.environ[provider_authorization.UNATTENDED_ENV] = previous
+    providers = []
+    for adapter in adapters:
+        stages = {}
+        for capability in ("code", "review"):
+            command = adapter.command_for(capability)
+            stages[capability] = {"executable": command[0] if command else "", "model": provider_authorization.pinned_model(command)}
+        providers.append({"provider": adapter.name, "authorized": adapter.denied is None, "denied": adapter.denied, "stages": stages})
+    pools = default_pools([a.name for a in adapters], config.stage_routes, config.provider_pools)
+    usable = {stage: [n for n in names if next((p for p in providers if p["provider"] == n), {}).get("authorized")] for stage, names in pools.items()}
+    allow = config.authorized_providers
+    problems = []
+    if allow is None:
+        problems.append("no explicit provider allowlist")
+    else:
+        problems += [f"{p['provider']} is allowlisted but denied: {p['denied']}" for p in providers if p["provider"] in allow and p["denied"]]
+        problems += [f"{p['provider']} is authorized but not allowlisted" for p in providers if p["authorized"] and p["provider"] not in allow]
+    report = {"allowlist": list(allow) if allow is not None else None, "providers": providers, "unattended_pools": usable, "problems": problems, "ok": not problems, "model_calls_made": 0}
+    print(json.dumps(report, indent=2, sort_keys=True))
+    return 0 if report["ok"] else 1
+
+
+def command_provider_auth(args: argparse.Namespace) -> int:
+    """Report coding-CLI login state and API-billing environment variables. Makes no model call; prints no credential."""
+    from . import provider_auth
+
+    report = provider_auth.check(require_installed=bool(getattr(args, "require_installed", False)))
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        for state in report["providers"]:
+            print(f"{state['provider']}: installed={state['installed']} auth={state['auth_mode']} subscription={state['subscription']}")
+        print("api billing environment: " + (", ".join(report["api_billing_environment"]) or "none"))
+        print("ok" if report["ok"] else "BLOCKED: " + "; ".join(report["blockers"]))
+    return 0 if report["ok"] else 1
+
+
 def command_provider_acceptance(args: argparse.Namespace) -> int:
     project = Path(args.project).resolve()
     if getattr(args, "live", False) or getattr(args, "provider", None):
@@ -3477,7 +3844,8 @@ def build_parser() -> argparse.ArgumentParser:
         "merges only with explicit command or project opt-in (override with --pr-only), and keeps the normal preflight and stop rules.",
     )
     window.add_argument("--duration", default="45m", help="Time budget, e.g. 2h, 90m, 45s (default 45m). Running tasks finish; nothing new starts after it")
-    window.add_argument("--concurrency", type=int, default=None, help="Tasks running at once (PR-only default 2); automatic merging default 1")
+    window.add_argument("--concurrency", type=int, default=None, help="Coding processes to keep busy when independent work is ready (PR-only default 2; automatic merging default 1)")
+    window.add_argument("--verification-concurrency", type=int, default=2, help="Separate planning, validation, review and integration process capacity (default 2)")
     window.add_argument("--max-steps-per-task", type=int, default=8, help="Step budget for each task (default 8)")
     window.add_argument("--max-tasks", type=int, default=10, help="Most tasks to attempt in one window (default 10)")
     window.add_argument("--tasks", help="Restrict the window to these comma-separated task ids (default: every eligible task)")
@@ -3488,6 +3856,8 @@ def build_parser() -> argparse.ArgumentParser:
     merge_choice.add_argument("--auto-merge-ff", action="store_true", help="Opt in: parallel development, then serialized PR landing after named green hosted checks; fast-forward origin and local integration branch")
     window.add_argument("--required-checks", default="", help="Comma-separated hosted check names required by --auto-merge-ff; missing checks never count as green")
     window.add_argument("--no-pr", action="store_true", help="Do not open PRs (PR mode: finished work stays on the staging branch)")
+    window.add_argument("--ci-mode", choices=("immediate", "batch"), default="immediate", help="CI publishing mode: immediate (default: publish each task PR individually) or batch (combine compatible tasks and publish only the terminal candidate)")
+    window.add_argument("--batch-ci", action="store_true", default=False, help=argparse.SUPPRESS)
     window.add_argument("--no-advance-baselines", action="store_true", help="Do not advance stale baselines")
     window.add_argument("--strict-live", action="store_true", help="Release mode: refuse to start unless providers have fresh passing live acceptance results")
     window.add_argument("--allow-stale-runtime", action="store_true", help="Start even though the installed CLI is stale (development only; reported in the output)")
@@ -3516,6 +3886,53 @@ def build_parser() -> argparse.ArgumentParser:
     follow.add_argument("--reason", default="cancelled by the operator")
     follow.add_argument("--json", action="store_true")
     follow.set_defaults(func=command_follow_up)
+    driver = sub.add_parser(
+        "driver",
+        help="Opt-in Windows-local continuous run-window supervisor (install, status, pause, resume, stop, uninstall, tick)",
+    )
+    driver_sub = driver.add_subparsers(dest="driver_command", required=True)
+    driver_install = driver_sub.add_parser(
+        "install",
+        help="Explicitly install the reversible Windows Task Scheduler supervisor; does not run a window immediately",
+    )
+    driver_install.add_argument(
+        "--acknowledge-provider-use",
+        action="store_true",
+        help="Required acknowledgement that later scheduled ticks may invoke the already configured provider CLIs",
+    )
+    driver_install.add_argument("--interval", default="10m", help="Scheduler interval (default 10m)")
+    driver_install.add_argument("--window-duration", default="45m", help="Bound for each run-window tick (default 45m)")
+    driver_install.add_argument("--concurrency", type=int, default=2)
+    driver_install.add_argument("--max-tasks", type=int, default=10)
+    driver_install.add_argument("--max-steps-per-task", type=int, default=8)
+    driver_install.add_argument("--max-consecutive-failures", type=int, default=3)
+    driver_install.add_argument("--auto-merge-ff", action="store_true", help="Explicitly authorize the existing guarded merge policy")
+    driver_install.add_argument("--strict-live", action="store_true")
+    driver_install.add_argument(
+        "--integration",
+        choices=("pr", "local"),
+        default="pr",
+        help="'pr' (default) opens PRs; 'local' integrates into the project's local base branch and is for disposable acceptance projects only",
+    )
+    driver_install.add_argument("--json", action="store_true")
+    driver_install.set_defaults(func=command_driver)
+    for name, help_text in (
+        ("status", "Show durable state, scheduler presence, interrupted ticks and the last outcome"),
+        ("pause", "Pause new admissions; active work drains under existing queue policy"),
+        ("resume", "Resume admissions and recreate the exact project-owned schedule"),
+        ("stop", "Stop admissions and remove the project-owned schedule"),
+        ("uninstall", "Remove the project-owned schedule and driver config; preserve ledger and logs"),
+        ("tick", "Run one bounded, single-instance supervised run-window cycle"),
+    ):
+        command = driver_sub.add_parser(name, help=help_text)
+        command.add_argument("--json", action="store_true")
+        if name in {"pause", "resume", "stop", "uninstall"}:
+            command.add_argument("--reason", default=f"operator requested driver {name}")
+        if name == "stop":
+            command.add_argument("--terminate-running", action="store_true")
+        if name == "tick":
+            command.add_argument("--log-file", default=None, help="Append this tick's output to a file (used by the scheduled action)")
+        command.set_defaults(func=command_driver)
     efficiency = sub.add_parser(
         "efficiency",
         help="Provider attempts, equivalent-failure retries, checks run/reused, validation time and provider-reported usage (unknown is never zero)",
@@ -3749,6 +4166,16 @@ def build_parser() -> argparse.ArgumentParser:
     backend.add_argument("--migrate", action="store_true")
     backend.add_argument("--json", action="store_true")
     backend.set_defaults(func=command_backend)
+    provider_authorization_parser = sub.add_parser(
+        "provider-authorization", help="Show which providers may run unattended in this project and what each would run (no model call)"
+    )
+    provider_authorization_parser.set_defaults(func=command_provider_authorization)
+    provider_auth_parser = sub.add_parser(
+        "provider-auth", help="Check coding-CLI login state and API-billing variables without any model call"
+    )
+    provider_auth_parser.add_argument("--json", action="store_true")
+    provider_auth_parser.add_argument("--require-installed", action="store_true", help="Block unless both claude and codex are installed")
+    provider_auth_parser.set_defaults(func=command_provider_auth)
     provider_acceptance = sub.add_parser("provider-acceptance")
     provider_acceptance.add_argument("--provider", help="Configured provider name to exercise with --live")
     provider_acceptance.add_argument("--live", action="store_true", help="Run the provider against a temporary one-file fixture")

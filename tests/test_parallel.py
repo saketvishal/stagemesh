@@ -822,9 +822,13 @@ def test_review_providers_honour_shared_cooldown_and_cool_down_on_failure(tmp_pa
 
 
 def test_interrupt_kills_review_style_provider_processes_without_a_recorded_pid() -> None:
-    from stagemesh.execution import communicate_bounded, kill_active_provider_processes
+    from stagemesh.execution import (
+        communicate_bounded,
+        kill_active_provider_processes,
+        popen_session_kwargs,
+    )
 
-    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, **popen_session_kwargs())
     result: list[tuple] = []
     worker = threading.Thread(target=lambda: result.append(communicate_bounded(proc, "prompt", 120)))
     worker.start()

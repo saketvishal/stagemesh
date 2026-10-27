@@ -49,6 +49,7 @@ from .queue_control import OperatorStopRequested
 from .recovery import RecoveryRefusal, advance_baseline, rebaseline_task
 from .recovery_decision import (
     ENVIRONMENT_BLOCKED,
+    INCONCLUSIVE_VALIDATION,
     JUDGMENT_REQUIRED,
     REMEDIATION_EXHAUSTED,
     DecisionAdvisor,
@@ -68,7 +69,7 @@ from .remediation_recovery import (
     rounds,
     stalled_since_last_round,
 )
-from .review import Reviewer, independent_review_verified
+from .review import Reviewer, adverse_gate, independent_review_verified
 from .review_disposition import (
     UNRESOLVED_EVENT,
     AdverseSummary,
@@ -121,6 +122,7 @@ class Coordinator:
         max_integration_recoveries: int = DEFAULT_MAX_RECOVERIES,
         recovery_advisor: DecisionAdvisor | None = None,
         budget_policy: BudgetPolicy | None = None,
+        adverse_policy: Any | None = None,
     ):
         self.max_integration_recoveries = max_integration_recoveries
         self.recovery_advisor = recovery_advisor  # only consulted for contexts the deterministic rules leave ambiguous
@@ -137,6 +139,9 @@ class Coordinator:
         self.integrator = integrator or Integrator(require_independent_review=require_independent_review)
         self.remediation_policy = remediation_policy or RemediationPolicy()
         self.target = target
+        self.adverse_policy = adverse_policy
+        self.adverse_override: dict[str, str] | None = None
+        self.last_adverse_block: tuple[str, ...] | None = None
         self.outbound_sync = outbound_sync
         self.outbound_sources = outbound_sources
 
@@ -415,9 +420,70 @@ class Coordinator:
             if self.store.has_bound_evidence(task_id, sha, EvidenceKind.REVIEW, bound.digest, EvidenceStatus.FAILED):
                 return self._remediate_or_block(task_id, sha, Stage.REVIEW)
             if not self._review_satisfied(task_id, sha, bound.digest):
+                capacity_row = self.store.conn.execute(
+                    "SELECT payload FROM evidence WHERE task_id=? AND candidate_sha=? AND kind=? AND status=? ORDER BY rowid DESC LIMIT 1",
+                    (task_id, sha, EvidenceKind.REVIEW, EvidenceStatus.CAPACITY),
+                ).fetchone()
+                if capacity_row is not None:
+                    try:
+                        cap_payload = json.loads(capacity_row["payload"])
+                    except (TypeError, ValueError):
+                        cap_payload = {}
+                    failure_reason = cap_payload.get("review_infrastructure_failure") or "review_infrastructure_failure"
+                    if failure_reason in {
+                        "authentication_failure",
+                        "quota_exceeded",
+                        "quota_rate_limit",
+                        "provider_unavailable",
+                        "independent_review_unavailable",
+                        "provider_timeout",
+                    }:
+                        providers_text = ""
+                        if cap_payload.get("review_providers_considered"):
+                            providers_text = "; ".join(
+                                f"{c.get('provider')}: {c.get('reason')}"
+                                for c in cap_payload["review_providers_considered"]
+                            )
+                        reason_msg = f"review infrastructure failure on candidate {sha[:10]}: {failure_reason}"
+                        if providers_text:
+                            reason_msg += f" ({providers_text})"
+                        record_block(
+                            self.store,
+                            task_id,
+                            BlockKind.EXTERNAL_DEPENDENCY,
+                            reason_msg,
+                            stage=str(stage),
+                            candidate_sha=sha,
+                            runtime=runtime_fingerprint(self.project),
+                            detail={
+                                "review_infrastructure_failure": failure_reason,
+                                "providers_considered": cap_payload.get("review_providers_considered"),
+                            },
+                        )
+                        return 1
                 return 0  # review infrastructure failure or unsatisfied independence: stay in REVIEW, no remediation
             return 0
         if stage is Stage.INTEGRATE:
+            if self.adverse_policy is not None:
+                bound = contract_for_candidate(self.store, task_id, sha, self.project)
+                decision = adverse_gate(
+                    self.store,
+                    task_id,
+                    sha,
+                    bound.digest,
+                    self.adverse_policy,
+                    override=self.adverse_override,
+                )
+                if not decision.allowed:
+                    self.last_adverse_block = decision.reasons
+                    self.store.block_task(task_id)
+                    record_audit(
+                        self.store,
+                        "adverse_review.blocked",
+                        {"task_id": task_id, "reasons": list(decision.reasons)},
+                    )
+                    record_task_owner_state(self.store, task_id, "adverse_review_blocked", self.project)
+                    return 1
             if not self._workspace_intact(task_id, sha, "INTEGRATE:before_integration", require=(EvidenceKind.VALIDATION, EvidenceKind.REVIEW)):
                 return 1
             bound = contract_for_candidate(self.store, task_id, sha, self.project)
@@ -812,10 +878,10 @@ class Coordinator:
         if diagnosis is not None and self._auto_rebaseline(task_id, diagnosis):
             return 1
         if diagnosis is not None and diagnosis.stops_remediation and (
-            diagnosis.environment_unavailable or diagnosis.diagnosis_required or self.diagnosis_policy.stop_on_repeat
+            diagnosis.environment_unavailable or diagnosis.diagnosis_required or diagnosis.inconclusive_validation or self.diagnosis_policy.stop_on_repeat
         ):
-            # The same failure again (or one a provider cannot fix, like a stale baseline): another identical attempt would only repeat
-            # it. Record the diagnosis, then recover differently instead of stopping.
+            # The same failure again, a proven launch outage, or a gate that never finished.
+            # An unfinished gate is not a reason to implement again.
             record_audit(
                 self.store,
                 DIAGNOSIS_STOP_EVENT,
@@ -824,6 +890,7 @@ class Coordinator:
             reason = (
                 "validation_environment_unavailable" if diagnosis.environment_unavailable
                 else "gate_timeout_diagnosis_required" if diagnosis.diagnosis_required
+                else "validation_inconclusive" if diagnosis.inconclusive_validation
                 else "stale_baseline_diagnosed" if diagnosis.category == STALE_BASELINE
                 else "repeated_failure_diagnosed"
             )
@@ -916,6 +983,8 @@ class Coordinator:
         health = self._implementation_health(task_id)
         if needs_judgment is not None:
             category = JUDGMENT_REQUIRED
+        elif diagnosis is not None and diagnosis.inconclusive_validation:
+            category = INCONCLUSIVE_VALIDATION
         elif diagnosis is not None and diagnosis.category in {STALE_BASELINE, VALIDATION_GATE}:
             category = ENVIRONMENT_BLOCKED  # no provider attempt can fix a baseline that cannot advance or a gate that cannot run
         else:

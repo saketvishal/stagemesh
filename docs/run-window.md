@@ -6,7 +6,7 @@
 
 `stagemesh run-window` provides an unattended bounded work window in PR mode:
 - **Automatic task selection:** Automatically selects runnable tasks (`OPEN`, not `DONE`, eligible under the scheduler, not parked, not blocked, not waiting on dependencies or an objective root, with no active claim or running execution).
-- **Time-bounded operation:** Runs work within a bounded time duration. When the time budget expires, executing tasks finish within their step budget, but no new tasks are started (clean stop).
+- **Time-bounded operation:** When the time budget expires, executing stages finish, while queued tasks and later stages remain resumable. No new stage starts after the deadline.
 - **Safe PR integration:** Integrates finished work onto `wave/staging` and opens pull requests against `main` for completed tasks without moving local `main`.
 - **Never merges:** The command never merges PRs. Merging remains an explicit operator action.
 
@@ -23,13 +23,15 @@ up worktrees, closes no issues (only a PR merge does), and writes a report to `.
 
 | Option | Default | Description |
 | --- | --- | --- |
-| `--duration` | `45m` | Time budget for the window, e.g. `2h`, `90m`, `45s`, `1.5h`, or bare seconds. Running tasks finish within their step budget; nothing new starts after it. |
-| `--concurrency` | `2` | Number of tasks running concurrently. |
+| `--duration` | `45m` | Time budget, e.g. `2h`, `90m`, `45s` or `1.5h`. Running stages finish; no new stage starts after it. |
+| `--concurrency` | `2` | Coding-process capacity to keep occupied while independent coding work is ready. |
+| `--verification-concurrency` | `2` | Separate bounded process capacity for planning, validation, review and integration. |
 | `--max-steps-per-task` | `8` | Step budget for each task. Tasks reaching this cap remain `OPEN` and marked `resumable`. |
 | `--max-tasks` | `10` | Maximum number of tasks to attempt during the window. |
 | `--tasks` | All eligible | Comma-separated task IDs (e.g. `155,156`) to restrict the window to specific tasks instead of automatic selection. |
 | `--integration pr\|local` | `pr` | Integration mode: `pr` (default) lands work on `wave/staging`, opens PRs, and leaves local `main` untouched; `local` lands work directly on the integration branch (moving local `main`) without opening PRs. |
 | `--no-pr` | Off | In PR mode, do not open PRs for tasks reaching `DONE` (work remains on the staging branch). |
+| `--ci-mode batch\|immediate` | `immediate` | CI publishing strategy: `immediate` (default) publishes each completed task PR individually; `batch` combines compatible tasks into an integration batch and publishes only the terminal combined candidate to avoid redundant hosted CI runs. |
 | `--strict-live` | Off | Require fresh passing live acceptance results in preflight and in every child runner, for both implementation and review. Default windows still exclude providers with recorded live-check failures. |
 | `--allow-stale-runtime` | Off | Development bypass: allow starting even if the installed CLI runtime lacks commands present in source. |
 | `--plan` | Off | Read-only mode: run preflight checks and show which tasks would be picked or left alone without starting any work or recovering executions. |
@@ -39,6 +41,43 @@ up worktrees, closes no issues (only a PR merge does), and writes a report to `.
 | `--report` | Auto-generated | Path to write the JSON report (defaults to `.stagemesh/reports/run-window/<timestamp>.json`, created automatically). |
 
 ## Live Progress
+
+### Continuous coding capacity
+
+`--concurrency 5` gives coding its own five-process capacity. Planning,
+validation, review and integration use the separate verification capacity
+(default two), so a task moving to validation releases its coding slot.
+The existing worker engine dispatches one bounded lifecycle step per child
+process, retaining the task's total step budget, isolated worktree and evidence.
+It refills free coding slots and reconsiders newly ready dependencies after
+each completion, without waiting for an unrelated slow task or a fixed batch.
+
+The live stream and JSON report show coding/verification occupancy and coding
+idle reasons. A source shortage or a scope/exclusive-resource conflict is
+reported rather than bypassed. Protected paths, named resources, claims,
+provider eligibility, stop controls and exact-candidate validation/review
+remain enforced. Ownership persists across stage yields. Main landing still
+waits for workers to quiesce and uses the existing serialized integration path.
+The dispatcher starts no new lifecycle step after the window deadline. In
+automatic-merge mode, a downstream task waits for its prerequisite to land
+remotely; unrelated ready tasks can continue developing in parallel.
+
+Background source discovery, including resumed window children, adds newly declared dependencies while preserving registered
+prerequisites in the durable ledger. An omitted declaration cannot silently release a dependent after a window restart.
+Removing an obsolete prerequisite remains an explicit source reconciliation action, such as `stagemesh queue-reconcile --write`;
+the default source-sync API retains that reconciliation behavior.
+
+For five coding processes and two verification processes:
+
+```powershell
+stagemesh run-window --duration 2h --concurrency 5 --verification-concurrency 2 --max-tasks 100 --merge-policy stagemesh
+```
+
+These are process limits, so this example can run seven child processes at
+once. Five coders can be sustained only while five independent coding tasks
+and their required providers are available. Validation work does not count
+as a coder. A failed task releases its process slot while its evidence and
+resumable candidate are preserved.
 
 While the window runs, one line per event is written to stderr and flushed immediately, for example:
 
@@ -240,3 +279,19 @@ stops and retains the execution and claim for inspected recovery.
 When a PR was requested but publication fails or is stopped by a safety guard, verified work remains `INTEGRATE/OPEN` with its candidate and evidence intact. The next normal window can finish delivery through the existing integration path. An unchanged, already-integrated candidate reuses its passing evidence; a changed integration target still follows the existing promotion and verification rules.
 
 A publication retry reuses an existing open or merged PR only when its head and base match the verified candidate. Closed, conflicting, or ambiguous PRs are not recreated. A missing opener or publication failure is reported as a stopped window, not successful delivery. Explicit `--no-pr` and local integration retain their existing behavior. Main-movement, queue-control, and live or unknown ownership guards remain in force; retained ownership is never cleared to retry publication.
+
+
+## Configurable CI Publishing Modes (`--ci-mode`)
+
+StageMesh provides a configurable CI publishing strategy via `--ci-mode`:
+
+- **`--ci-mode immediate` (default):** Maintains standard single-task publishing. Each completed task opens its own PR individually and triggers hosted CI runs for each candidate.
+- **`--ci-mode batch`:** Combines compatible, independently implemented tasks within a wave into a bounded integration batch. Tasks run in isolated worktrees with conflict detection. When the wave finishes, only the terminal combined candidate is published to origin as a pull request. Intermediate completed candidates avoid opening redundant PRs and avoid triggering unnecessary hosted CI runs. Task-specific validation and independent review evidence are fully preserved for every candidate in the batch. If `--auto-merge-ff` is enabled, full required integration checks are run against the exact combined candidate before serial fast-forward landing. If any task in a batch fails, successful tasks remain intact on the staging ref and are handled independently without discarding verified work.
+
+### Example
+
+Run a 1-hour window with 5 concurrent workers in batch CI mode:
+
+```bash
+stagemesh run-window --duration 1h --concurrency 5 --ci-mode batch --auto-merge-ff --required-checks "linux,windows"
+```

@@ -29,14 +29,14 @@ def test_explicit_gate_executable_uses_gate_directory(tmp_path, monkeypatch, cwd
     expected = Path(os.path.normpath(target))
     monkeypatch.setattr("stagemesh.contracts.shutil.which", lambda command: None)
 
-    def launch(command, **kwargs):
+    def launch(command, cwd, env, timeout):
         assert Path(command[0]) == expected and Path(command[0]).is_absolute()
         assert command[1:] == ["-m", "pytest"]
-        assert kwargs["cwd"] == run_dir
-        assert not kwargs.get("shell", False)
+        assert cwd == run_dir
+        assert timeout > 0
         return CompletedProcess(command, 0, stdout="candidate-only", stderr="")
 
-    monkeypatch.setattr("stagemesh.contracts.subprocess.run", launch)
+    monkeypatch.setattr("stagemesh.contracts._run_gate_process", launch)
 
     result = run_gate(project, GateCommand("relative", [program, "-m", "pytest"], cwd=cwd))
 

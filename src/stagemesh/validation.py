@@ -3,11 +3,13 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 from .audit import record_audit
 from .contract_binding import contract_for_candidate
 from .contracts import (
     ContractError,
+    candidate_workspace,
     changed_files,
     declarative_invariants,
     evaluate_contract,
@@ -21,10 +23,38 @@ from .process_identity import owner_execution_fields
 from .remediation import finding_identity
 from .validation_reuse import GATE_REUSE_POLICY_VERSION, GateReuse, candidate_tree, load_prior_passes, select_files
 from .validation_plan import (
+    DOCS_ONLY,
     contract_with_browser_e2e_gates,
     derive_validation_plan,
     with_required_checks,
 )
+from .validation_services import (
+    ValidationServiceError, discover_validation_services, run_configured_evaluations,
+)
+from .e2e_evidence import (
+    E2EEvidenceManifest, E2EEvidenceValidationError, validate_e2e_evidence_manifest,
+)
+
+
+def record_e2e_evidence_in_validation(
+    payload: dict[str, Any],
+    manifest: E2EEvidenceManifest,
+    bound: Any,
+    *,
+    project: Path,
+    artifact_root: Path | None = None,
+) -> dict[str, Any]:
+    """Bind and validate an E2E evidence manifest into the validation evidence payload."""
+    validate_e2e_evidence_manifest(
+        manifest,
+        bound,
+        expected_candidate_sha=payload.get("candidate_sha") or bound.candidate_sha,
+        expected_service_fingerprint=discover_validation_services(project).fingerprint,
+        artifact_root=artifact_root,
+    )
+    payload["e2e_evidence"] = manifest.to_dict()
+    return payload
+
 
 
 def _integration_ref(project: Path) -> str | None:
@@ -38,7 +68,12 @@ def _integration_ref(project: Path) -> str | None:
 
 
 class Validator:
-    def validate(self, store: Store, task_id: str, candidate_sha: str, project: Path) -> EvidenceStatus:
+    def validate(
+        self, store: Store, task_id: str, candidate_sha: str, project: Path,
+        *, e2e_evidence: E2EEvidenceManifest | None = None,
+        artifact_root: Path | None = None,
+        prerequisite_manifest: dict[str, Any] | None = None,
+    ) -> EvidenceStatus:
         execution_id = store.start_execution(
             task_id=task_id,
             claim_id=None,
@@ -68,6 +103,8 @@ class Validator:
             exploratory = tuple(gate.name for gate in contract.gates if gate.name not in declared_names)
             plan = with_required_checks(contract, derive_validation_plan(contract, selected_files))
             gate_reuse = GateReuse(candidate_tree(project, candidate_sha), bound.digest, load_prior_passes(store, task_id))
+            services = discover_validation_services(project)
+            service_fingerprint = services.fingerprint
             evaluation = evaluate_contract(
                 project,
                 candidate_sha,
@@ -99,9 +136,88 @@ class Validator:
                             "message": "acceptance criteria require at least one executed validation gate",
                         }
                     )
+
+            manifest_load_error = False
+            if prerequisite_manifest is None:
+                spec_manifest_paths = [
+                    project / ".stagemesh" / "contracts" / f"{task_id}.spec_manifest.json",
+                    project / ".stagemesh" / "spec-manifest.json",
+                ]
+                for p in spec_manifest_paths:
+                    if p.is_file():
+                        try:
+                            prerequisite_manifest = json.loads(p.read_text(encoding="utf-8"))
+                            break
+                        except (OSError, ValueError) as exc:
+                            findings.append({
+                                "severity": "error",
+                                "code": "spec_manifest_load_failure",
+                                "message": f"cannot read prerequisite manifest from {p}: {exc}",
+                            })
+                            manifest_load_error = True
+                            break
+
+            is_spec_governed = bool(
+                contract.spec_refs
+                and any("openspec/" in r or "adapter.json" in r or r.startswith("specs/") for r in contract.spec_refs)
+            ) or any("openspec/" in f or f == "adapter.json" for f in inspected_files) or any(
+                "openspec/" in f or f == "adapter.json" for f in contract.allowed_files
+            )
+
+            if prerequisite_manifest is None and is_spec_governed and not manifest_load_error:
+                findings.append({
+                    "severity": "error",
+                    "code": "spec_manifest_missing",
+                    "message": "specification modification requires pinned adapter validation and prerequisite manifest",
+                })
+
+            spec_verdict = None
+            if prerequisite_manifest is not None:
+                from .spec_integrity import resolve_pinned_adapter, validate_prerequisite_manifest
+
+                if isinstance(prerequisite_manifest, dict):
+                    adapter_info = prerequisite_manifest.get("adapter", {})
+                else:
+                    adapter_info = {}
+                if isinstance(adapter_info, dict) and isinstance(prerequisite_manifest, dict):
+                    name = adapter_info.get("name")
+                    version = adapter_info.get("version")
+                    if isinstance(name, str) and isinstance(version, str):
+                        try:
+                            adapter = resolve_pinned_adapter(
+                                name,
+                                version,
+                                contract_path=adapter_info.get("contract_path")
+                                or prerequisite_manifest.get("contract_path")
+                                or "adapter.json",
+                            )
+                            with candidate_workspace(project, candidate_sha) as candidate_project:
+                                adapter.discover(candidate_project)
+                        except Exception as exc:
+                            findings.append({
+                                "severity": "error",
+                                "code": "spec_adapter_validation_failed",
+                                "message": f"pinned adapter validation failed: {exc}",
+                            })
+
+                spec_verdict = validate_prerequisite_manifest(
+                    prerequisite_manifest,
+                    allowed_files=contract.allowed_files,
+                    expected_candidate_revision=candidate_sha,
+                    expected_base_revision=bound.baseline_sha,
+                    expected_changed_files=inspected_files,
+                )
+                if not spec_verdict.ok:
+                    for err in spec_verdict.errors:
+                        findings.append({"severity": "error", "code": "spec_governance_failure", "message": err})
+                if spec_verdict.review_findings:
+                    for rf in spec_verdict.review_findings:
+                        findings.append({"severity": "warning", "code": "spec_semantic_overlap", "message": rf})
+
+            has_error_findings = any(f.get("severity") == "error" for f in findings)
             status = (
                 EvidenceStatus.PASSED
-                if evaluation.passed and len(findings) == len(evaluation.findings)
+                if evaluation.passed and not has_error_findings
                 else EvidenceStatus.FAILED
             )
             payload = {
@@ -147,6 +263,62 @@ class Validator:
                     for gate in evaluation.gates
                 ],
             }
+            if spec_verdict is not None:
+                payload["spec_governance"] = spec_verdict.to_dict()
+
+            evaluation_services = services
+            if plan.classification == DOCS_ONLY:
+                evaluation_services = replace(services, services=tuple(
+                    service for service in services.services if service.name not in services.conventional_services
+                ))
+            if any(s.kind in {"browser", "api"} for s in evaluation_services.services):
+                output_root = (artifact_root or project / ".stagemesh" / "artifacts" / "e2e") / execution_id
+                try:
+                    manifests, e2e_gates, e2e_findings = run_configured_evaluations(
+                        project, bound, evaluation_services, output_root,
+                    )
+                    payload["e2e_evaluations"] = manifests
+                    payload["e2e_artifact_root"] = str(output_root)
+                    payload["gates"].extend(e2e_gates)
+                    findings.extend(e2e_findings)
+                    if e2e_findings:
+                        status = EvidenceStatus.FAILED
+                except (ValidationServiceError, GitError, OSError, E2EEvidenceValidationError) as exc:
+                    from .remediation import bounded_failure_text
+
+                    status = EvidenceStatus.FAILED
+                    findings.append({"severity": "error", "code": "gate_failed",
+                                     "message": "configured E2E evaluation unavailable",
+                                     "failure_kind": "environment", "stderr": bounded_failure_text(exc)})
+            if e2e_evidence is not None:
+                try:
+                    validate_e2e_evidence_manifest(
+                        e2e_evidence, bound, expected_candidate_sha=candidate_sha,
+                        expected_service_fingerprint=service_fingerprint, artifact_root=artifact_root,
+                    )
+                    matching = [gate for gate in evaluation.gates if gate.command == e2e_evidence.command]
+                    expected_status = "PASSED" if e2e_evidence.result == "PASS" else "FAILED"
+                    if not matching or any(
+                        gate.status != expected_status or gate.returncode is None
+                        or (gate.returncode == 0) != (e2e_evidence.result == "PASS")
+                        for gate in matching
+                    ):
+                        raise E2EEvidenceValidationError("E2E command/result does not match executed gates")
+                    record_e2e_evidence_in_validation(
+                        payload, e2e_evidence, bound, project=project, artifact_root=artifact_root,
+                    )
+                    if e2e_evidence.result == "FAIL":
+                        status = EvidenceStatus.FAILED
+                except E2EEvidenceValidationError as exc:
+                    status = EvidenceStatus.FAILED
+                    findings.append({"severity": "error", "code": "invalid_e2e_evidence", "message": str(exc)})
+        except ValidationServiceError as exc:
+            from .remediation import bounded_failure_text
+
+            status = EvidenceStatus.FAILED
+            payload = {"validator": "contract", **(bound.evidence_payload() if bound else {}),
+                       "findings": [{"code": "gate_failed", "message": "invalid E2E prerequisites",
+                                     "failure_kind": "environment", "stderr": bounded_failure_text(exc)}]}
         except ContractError as exc:
             status = EvidenceStatus.FAILED
             payload = {"validator": "contract", **(bound.evidence_payload() if bound else {}),
@@ -163,6 +335,16 @@ class Validator:
                     message,
                 )
         elif status is EvidenceStatus.PASSED:
+            for item in payload.get("findings", []):
+                if item.get("severity") == "warning":
+                    message = str(item.get("message", "warning"))
+                    store.upsert_finding(
+                        finding_identity(candidate_sha, message, item.get("path")),
+                        task_id,
+                        candidate_sha,
+                        "warning",
+                        message,
+                    )
             # Only a fresh passed validation can supersede old parser errors.
             # Other validation/review findings remain open for actual remediation.
             for previous in store.conn.execute(

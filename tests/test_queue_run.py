@@ -21,7 +21,7 @@ from stagemesh.config import load_config
 from stagemesh.contracts import parse_contract
 from stagemesh.coordinator import Coordinator
 from stagemesh.domain import ExecutionKind, ExecutionStatus, Stage
-from stagemesh.execution import ExecutionResult, communicate_bounded
+from stagemesh.execution import ExecutionResult, communicate_bounded, popen_session_kwargs
 from stagemesh.git import GitWorkspace
 from stagemesh.parallel import (
     queue_control_state,
@@ -449,6 +449,7 @@ def test_stop_during_review_kills_tracked_provider_and_fails_execution(tmp_path:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
+                **popen_session_kwargs(),
             )
             holder["runner"].stop_admission("operator stop", terminate_running=True)
             communicate_bounded(proc, "prompt", 120)
@@ -470,7 +471,7 @@ def test_stop_during_review_kills_tracked_provider_and_fails_execution(tmp_path:
     runner = QueueRunner(rig.store, rig.project, make, concurrency=1, poll_seconds=0.05, interrupt_grace_seconds=5)
     holder["runner"] = runner
     summary = runner.run()
-    assert summary.stop_reason == "STOPPED"
+    assert summary.stop_reason == "STOPPED", summary.message
     assert outcomes(summary) == {"A": "STOPPED"}
     assert not rig.store.conn.execute("SELECT 1 FROM claims WHERE active=1").fetchall()
     assert not list(rig.store.running_executions())

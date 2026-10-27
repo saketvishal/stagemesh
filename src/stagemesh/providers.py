@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import dataclasses
 import filecmp
+import hashlib
 import json
 import os
 import shlex
@@ -10,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -20,7 +23,15 @@ from .capacity import CapacityKind, CapacityRegistry
 from .config import StageMeshConfig
 from .contract_binding import ContractRejected, bind_task_contract
 from .domain import ExecutionKind, ExecutionStatus
-from .efficiency import CallRecorder, extract_usage, note_call_usage
+from .efficiency import (
+    BUDGET_EXHAUSTED,
+    BudgetPolicy,
+    CallRecorder,
+    check_task_budget,
+    check_window_budget,
+    extract_usage,
+    note_call_usage,
+)
 from .execution import (
     PROVIDER_TIMEOUT,
     ExecutionResult,
@@ -34,9 +45,17 @@ from .focused_validation import focused_test_prompt
 from .git_identity import provider_environment
 from .persistence import Store
 from .process_identity import popen_identity
+from .queue_control import OperatorStopRequested
 from .redaction import redact_command_secrets
 from .remediation import remediation_context
-from .research_context import build_research_brief
+from .research_context import (
+    ResearchBlocked,
+    build_research_brief,
+    parse_research_report,
+    research_findings_prompt,
+    research_request,
+    source_snapshot,
+)
 from .workspace_guard import (
     EXTERNAL_WORKSPACE_MUTATION,
     WorkspaceLease,
@@ -151,6 +170,12 @@ def _complete_codex_executable(executable: str) -> str:
 
 
 @dataclass(frozen=True)
+class ResearchRole:
+    name: str
+    command: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class RuntimeCommandAdapter:
     """SDK adapter for command-line coding agents such as Codex, Claude, or Grok."""
 
@@ -162,6 +187,11 @@ class RuntimeCommandAdapter:
     # (one `name`), so a candidate it implemented is never reviewed by it, whichever command each stage runs.
     implement_command: tuple[str, ...] | None = None
     review_command: tuple[str, ...] | None = None
+    # Why this provider may not run in this project (set from the project's authorization when the adapter is built); selection skips it.
+    denied: str | None = None
+    allowed_at_build: tuple[str, ...] | None = None  # the allowlist this adapter was built under; still binds if the config later cannot be read
+    # Opt-in read-only research role run in the task workspace before this provider implements; None keeps the old behavior.
+    research: ResearchRole | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "name", _validate_name(self.name))
@@ -205,6 +235,9 @@ class RuntimeCommandAdapter:
         return CapacityKind.AVAILABLE if command and shutil.which(command[0]) else CapacityKind.UNKNOWN
 
     def execute(self, store: Store, task_id: str, claim_id: str | None, project: Path) -> ExecutionResult:
+        refused = _authorization_refusal(self, project, "code")
+        if refused:
+            return ExecutionResult(ExecutionStatus.FAILED, failure_reason=f"provider_not_authorized: {refused}")
         if self.check_stage_capacity("code") != CapacityKind.AVAILABLE:
             return ExecutionResult(ExecutionStatus.FAILED, capacity_failure=True, failure_reason="provider_unavailable")
         try:
@@ -225,12 +258,35 @@ class RuntimeCommandAdapter:
         task = store.get_task(task_id)
         remediation = remediation_context(store, task_id, project)
         purpose = "remediation" if remediation else "implementation"
+        research_text = ""
+        budget_problem = _provider_budget_refusal(store, task_id, project)
+        if budget_problem:
+            return ExecutionResult(ExecutionStatus.FAILED, failure_reason=budget_problem)
+        if self.research is not None:
+            try:
+                research_text = self._run_research(store, task_id, run_path, bound, project=project)
+            except ResearchBlocked as exc:
+                store.add_audit_event("research_stage", {"task_id": task_id, "researcher": self.research.name, "outcome": "blocked", "reason": exc.reason})
+                return ExecutionResult(ExecutionStatus.FAILED, failure_reason=str(exc))
+            budget_problem = _provider_budget_refusal(store, task_id, project)
+            if budget_problem:
+                return ExecutionResult(ExecutionStatus.FAILED, failure_reason=budget_problem)
         try:
-            task_prompt = _build_task_prompt(task_id, task, run_path, contract=bound.contract, remediation=remediation)
+            task_prompt = _build_task_prompt(
+                task_id, task, run_path, contract=bound.contract, remediation=remediation,
+                planning_project=project,
+                research_findings=research_text,
+            )
         except SkillPackError as exc:
             return ExecutionResult(ExecutionStatus.FAILED, failure_reason=f"skill_pack_unavailable: {exc}")
         command, provider_input = _command_and_input(self.command_for("code"), task_prompt)
         lease.check("before_agent")
+        refused = _authorization_refusal(self, project, "code", command=command)
+        if refused:
+            return ExecutionResult(ExecutionStatus.FAILED, failure_reason=f"provider_not_authorized: {refused}")
+        budget_problem = _provider_budget_refusal(store, task_id, project)
+        if budget_problem:
+            return ExecutionResult(ExecutionStatus.FAILED, failure_reason=budget_problem)
         try:
             proc = subprocess.Popen(
                 command,
@@ -319,14 +375,90 @@ class RuntimeCommandAdapter:
                 return ExecutionResult(ExecutionStatus.FAILED, failure_reason=EXTERNAL_WORKSPACE_MUTATION)
             raise
 
+    def _run_research(self, store: Store, task_id: str, run_path: Path, bound: object, *, project: Path | None = None) -> str:
+        """Run the read-only researcher; any failure raises ResearchBlocked so implementation never starts."""
+        role = self.research
+        authority = run_path if project is None else project
+        researcher = RuntimeCommandAdapter(role.name, role.command, allowed_at_build=self.allowed_at_build)
+        refused = _authorization_refusal(researcher, authority, "review")
+        if refused:
+            raise ResearchBlocked("provider_not_authorized", refused)
+        call = None
+        execution_id = None
+        cleanup_confirmed = False
+        outcome = ExecutionStatus.FAILED
+        failure = "research_interrupted"
+        try:
+            before = source_snapshot(run_path)
+            command, provider_input = _command_and_input(researcher.command_for("review"), research_request(bound))
+            refused = _authorization_refusal(researcher, authority, "review", command=command)
+            if refused:
+                raise ResearchBlocked("provider_not_authorized", refused)
+            budget_problem = _provider_budget_refusal(store, task_id, authority)
+            if budget_problem:
+                raise ResearchBlocked("budget_exhausted", budget_problem)
+            # An unknown prelaunch identity fails closed if the worker exits before it can publish its child identity.
+            execution_id = store.start_execution(
+                task_id=task_id, claim_id=None, kind=ExecutionKind.REVIEW, actor=role.name, candidate_sha=bound.baseline_sha,
+            )
+            try:
+                proc = subprocess.Popen(
+                    command, cwd=run_path, text=True, encoding="utf-8", errors="replace",
+                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    env=provider_environment(run_path), **popen_session_kwargs(),
+                )
+            except OSError as exc:
+                cleanup_confirmed = True  # Popen did not create a child
+                raise ResearchBlocked("research_failed", "researcher could not start") from exc
+            call = CallRecorder(store, task_id, "research", role.name)
+            identity = popen_identity(proc)
+            store.conn.execute(
+                "UPDATE executions SET pid=?, process_create_time=?, boot_id=?, executable=? WHERE id=? AND status='RUNNING'",
+                (identity.pid, identity.create_time, identity.boot_id, identity.executable, execution_id),
+            )
+            store.conn.commit()
+            stdout, stderr, timed_out = communicate_bounded(proc, provider_input, provider_timeout_seconds(self.timeout_seconds))
+            cleanup_confirmed = True
+            call.observe(stdout, stderr)
+            if source_snapshot(run_path) != before:
+                raise ResearchBlocked("research_mutated_source", "researcher changed the workspace")
+            if timed_out or proc.returncode != 0:
+                raise ResearchBlocked("research_failed", PROVIDER_TIMEOUT if timed_out else f"exit {proc.returncode}")
+            evidence = parse_research_report(_provider_text_response(stdout), run_path, bound)
+            outcome, failure = ExecutionStatus.SUCCEEDED, None
+        except ResearchBlocked as exc:
+            failure = exc.reason
+            raise
+        except (subprocess.CalledProcessError, OSError) as exc:
+            failure = "research_failed"
+            raise ResearchBlocked("research_failed", "could not snapshot the workspace") from exc
+        finally:
+            if call is not None:
+                call.finish("succeeded" if outcome == ExecutionStatus.SUCCEEDED else "failed", failure, candidate=bound.baseline_sha)
+            if execution_id is not None and cleanup_confirmed:
+                store.finish_execution(execution_id, outcome, result=failure)
+            elif execution_id is not None:
+                store.retain_execution_for_cleanup(execution_id, "research process cleanup could not be confirmed")
+        store.add_audit_event("research_stage", {
+            "task_id": task_id, "researcher": role.name, "outcome": "accepted",
+            "baseline_sha": evidence.baseline_sha, "contract_digest": evidence.contract_digest,
+            "inspected_paths": list(evidence.inspected_paths), "finding_count": len(evidence.findings),
+            "execution_id": execution_id, "report": dataclasses.asdict(evidence),
+        })
+        return research_findings_prompt(evidence)
+
     def run(self, store: Store, task_id: str, claim_id: str | None, project: Path) -> ExecutionResult:
         return self.execute(store, task_id, claim_id, project)
 
     def review_candidate(self, prompt: str, project: Path, candidate_sha: str) -> str:
+        refused = _authorization_refusal(self, project, "review")
+        if refused:
+            return _review_infrastructure_failure("provider_not_authorized", refused)
         if self.check_stage_capacity("review") != CapacityKind.AVAILABLE:
             return _review_infrastructure_failure("provider_unavailable")
         temp_dir = tempfile.mkdtemp(prefix="stagemesh-review-")
         review_path = Path(temp_dir) / "candidate"
+        cleanup_confirmed = True  # no provider owns the checkout until Popen succeeds
         try:
             setup_error = _prepare_review_checkout(Path(project), review_path, candidate_sha)
             if setup_error:
@@ -339,6 +471,10 @@ class RuntimeCommandAdapter:
             except SkillPackError as exc:
                 return _review_infrastructure_failure(f"skill_pack_unavailable: {exc}")
             command, provider_input = _command_and_input(self.command_for("review"), review_prompt, structured_review=True)
+            refused = _authorization_refusal(self, project, "review", command=command)
+            if refused:
+                return _review_infrastructure_failure("provider_not_authorized", refused)
+            cleanup_confirmed = False  # an interrupted Popen attempt may already have created a child
             try:
                 proc = subprocess.Popen(
                     command,
@@ -353,8 +489,13 @@ class RuntimeCommandAdapter:
                     **popen_session_kwargs(),
                 )
             except FileNotFoundError:
+                cleanup_confirmed = True  # construction failed without returning a child
                 return _review_infrastructure_failure("provider_unavailable")
+            except OSError:
+                cleanup_confirmed = True
+                raise
             stdout, stderr, timed_out = communicate_bounded(proc, provider_input, provider_timeout_seconds(self.timeout_seconds))
+            cleanup_confirmed = True
             note_call_usage(extract_usage(stdout, stderr))  # the caller records the call (it owns the store and the purpose)
             if timed_out:
                 return _review_infrastructure_failure(PROVIDER_TIMEOUT)
@@ -372,8 +513,22 @@ class RuntimeCommandAdapter:
                     return _review_infrastructure_failure(reason, output, retry_after)
                 return _review_infrastructure_failure(reason)
             return _provider_text_response(stdout)
+        except BaseException as exc:
+            if not cleanup_confirmed:
+                if isinstance(exc, OperatorStopRequested) and exc.cleanup_complete:
+                    cleanup_confirmed = True
+                else:
+                    # The caller persists this reason on its retained REVIEW execution. The path must survive for
+                    # recovery until an operator has verified the descendants are gone; root exit alone is insufficient.
+                    raise OperatorStopRequested(
+                        f"review provider cleanup unconfirmed; workspace retained at {review_path}",
+                        cleanup_complete=False, monitor_failed=getattr(exc, "monitor_failed", False),
+                        retained_workspace=str(review_path),
+                    ) from exc
+            raise
         finally:
-            _cleanup_review_workspace(Path(temp_dir))
+            if cleanup_confirmed:
+                _cleanup_review_workspace(Path(temp_dir))
 
 
 def _review_provider_environment(project: Path, review_path: Path) -> dict[str, str]:
@@ -563,6 +718,44 @@ def _bounded_process_output(result: subprocess.CompletedProcess[str]) -> str:
     return " ".join((result.stderr or result.stdout or "").split())[:MAX_EXECUTION_RESULT_CHARS]
 
 
+def _authorization_refusal(
+    adapter: RuntimeCommandAdapter, project: Path, capability: str, *, command: Sequence[str] | None = None
+) -> str | None:
+    """Last check before anything is spawned: the adapter's own flag, then the project's current authorization and the exact command."""
+    from . import provider_authorization
+
+    if adapter.denied:
+        return adapter.denied
+    return provider_authorization.refusal(
+        Path(project), adapter.name, adapter.command_for(capability) if command is None else command,
+        build_time_allowed=adapter.allowed_at_build,
+    )
+
+
+def _provider_budget_refusal(store: Store, task_id: str, project: Path) -> str | None:
+    """Every additional provider role spends from the same durable task and originating-window budgets."""
+    from .config import load_config
+    from .window_journal import STARTED, latest_task_context
+
+    policy = BudgetPolicy.from_config(load_config(project).budgets)
+    verdict = check_task_budget(store, task_id, policy)
+    context = latest_task_context(store, task_id)
+    if verdict is None and context is not None:
+        started = store.conn.execute(
+            "SELECT created_at FROM audit_events WHERE event_type=? AND json_extract(payload, '$.window_id')=? "
+            "ORDER BY created_at DESC, rowid DESC LIMIT 1", (STARTED, context.get("window_id")),
+        ).fetchone()
+        if started is not None:
+            verdict = check_window_budget(store, float(started["created_at"]), policy)
+    if verdict is None:
+        return None
+    store.add_audit_event(BUDGET_EXHAUSTED, {
+        "task_id": task_id, "budget": verdict.exceeded, "observed": verdict.observed, "limit": verdict.limit,
+    })
+    return (f"budget_exhausted ({verdict.exceeded}): {verdict.detail}; limit {verdict.limit}. "
+            "Provider dispatch stopped at a budget boundary; verified work is preserved for supervised recovery.")
+
+
 def _is_external_workspace_mutation(exc: Exception) -> bool:
     return getattr(exc, "code", None) == EXTERNAL_WORKSPACE_MUTATION
 
@@ -582,7 +775,7 @@ WRITE_CAPABLE_DEFAULT_COMMANDS = {
         "--allow 'Bash(git show*)' --allow 'Bash(git rev-parse*)' "
         "--allow 'Bash(python *)' --allow 'Bash(pytest *)' --allow 'Bash(ruff *)'"
     ),
-    "agy": "agy --mode accept-edits",
+    "agy": "agy --mode accept-edits --dangerously-skip-permissions --model gemini-3.8-flash-medium",
 }
 
 LEGACY_DEFAULT_COMMANDS = {
@@ -633,8 +826,30 @@ def adapters_from_config(config: StageMeshConfig) -> list[RuntimeCommandAdapter]
                 implement_command=_stage_command(adapter.name, spec.implement_command),
                 review_command=_stage_command(adapter.name, spec.review_command),
             )
+        if config.research is not None:
+            adapter = dataclasses.replace(
+                adapter, research=ResearchRole(config.research.provider, _stage_command(config.research.provider, config.research.command))
+            )
         resolved.append(adapter)
-    return resolved
+    return _mark_authorization(resolved, config)
+
+
+def _mark_authorization(adapters: list[RuntimeCommandAdapter], config: StageMeshConfig) -> list[RuntimeCommandAdapter]:
+    from dataclasses import replace
+
+    from . import provider_authorization
+
+    allowed = None if config.authorized_providers is None else set(config.authorized_providers)
+    mode = provider_authorization.unattended()
+    marked = []
+    for adapter in adapters:
+        reasons = [
+            provider_authorization.denial(adapter.name, command, allowed, unattended=mode, project=config.project)
+            for command in adapter.all_commands()
+        ]
+        reason = next((r for r in reasons if r), None)
+        marked.append(replace(adapter, denied=reason, allowed_at_build=config.authorized_providers))
+    return marked
 
 
 def stage_command_summary(adapter: RuntimeCommandAdapter) -> dict[str, dict[str, object]]:
@@ -725,6 +940,8 @@ def _build_task_prompt(
     project: Path | None = None,
     contract: object = None,
     remediation: dict[str, object] | None = None,
+    planning_project: Path | None = None,
+    research_findings: str = "",
 ) -> str:
     """Build the prompt string sent via stdin to a provider CLI.
 
@@ -755,11 +972,14 @@ def _build_task_prompt(
         except ContractError as exc:
             contract_text = f"\n\nChange contract is invalid and must be fixed before coding: {exc}\n"
     remediation_text = _remediation_prompt(remediation) if remediation else ""
+    if remediation and (planning_project or project) is not None and effective_contract is not None:
+        remediation_text += _approved_scope_prompt(planning_project or project, task_id, effective_contract)  # type: ignore[arg-type]
     return (
         f"StageMesh task: {title}\n\n"
         f"{contract_text}"
         f"{spec_text}"
         f"{research_text}"
+        f"{research_findings}"
         f"{remediation_text}"
         "Please implement the changes described above.\n\n"
         f"{SPEC_PLANNING_DISCIPLINE}"
@@ -824,6 +1044,18 @@ def _resolve_project_spec(project: Path, ref: str) -> Path | None:
     return target
 
 
+def _approved_scope_prompt(project: Path, task_id: str, contract: object) -> str:
+    """Remediation keeps the approved planning scope when approved, contract-current spec evidence exists."""
+    from .contracts import canonical_contract_json
+    from .spec_planning import approved_scope
+
+    digest = hashlib.sha256(canonical_contract_json(contract).encode("utf-8")).hexdigest()  # type: ignore[arg-type]
+    scope = approved_scope(project, str(task_id), digest)
+    if not scope:
+        return ""
+    return "\nApproved planning scope (stay within these paths while remediating):\n" + "\n".join(f"- {path}" for path in scope) + "\n"
+
+
 def _remediation_prompt(remediation: dict[str, object]) -> str:
     lines = [
         "",
@@ -834,6 +1066,25 @@ def _remediation_prompt(remediation: dict[str, object]) -> str:
     ]
     for finding in remediation["findings"][:50]:  # type: ignore[index]
         lines.append(f"- [{finding['severity']}] {finding['message']}")
+        if finding.get("stderr"):
+            lines.append(f"  stderr: {str(finding['stderr']).strip()[:500]}")
+        if finding.get("stdout"):
+            stdout_lines = [l for l in str(finding["stdout"]).splitlines() if l.strip()]
+            if stdout_lines:
+                lines.append("  stdout excerpt:\n    " + "\n    ".join(stdout_lines[-15:]))
+    failed_gates = remediation.get("failed_gates")
+    if isinstance(failed_gates, list) and failed_gates:
+        lines.extend(["", "Failing validation gates (command and failure output):"])
+        for gate in failed_gates[:5]:
+            lines.append(f"- Gate {gate.get('name')} (exit code {gate.get('returncode')} after {gate.get('duration_seconds')}s):")
+            if gate.get("command"):
+                lines.append(f"  command: {' '.join(str(c) for c in gate['command'])}")
+            if gate.get("stderr"):
+                lines.append(f"  stderr: {str(gate['stderr']).strip()[:500]}")
+            if gate.get("stdout"):
+                out_lines = [l for l in str(gate["stdout"]).splitlines() if l.strip()]
+                if out_lines:
+                    lines.append("  stdout excerpt:\n    " + "\n    ".join(out_lines[-15:]))
     failure_details = remediation.get("failure_details")
     if isinstance(failure_details, list) and failure_details:
         lines.extend(
