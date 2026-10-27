@@ -7,6 +7,7 @@ This module never selects, implements, validates, reviews, publishes or merges w
 from __future__ import annotations
 
 import json
+import math
 import os
 import subprocess
 import sys
@@ -145,14 +146,37 @@ def _retry_file_operation(operation: Callable[[], Any], *, attempts: int = 8, de
             time.sleep(delay * (attempt + 1))
 
 
+def cleanup_pending_path(project: Path) -> Path:
+    return child_owner_path(project).with_name("cleanup-pending.json")
+
+
+def begin_child_cleanup(project: Path, identity: ProcessIdentity) -> None:
+    """Fence automatic recovery before termination, independently of the wrapper's owner publications."""
+    try:
+        payload = json.loads(child_owner_path(project).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        payload = asdict(identity)
+    if not isinstance(payload, dict):
+        payload = asdict(identity)
+    _save_driver_record(cleanup_pending_path(project), payload)
+
+
+def finish_child_cleanup(project: Path) -> None:
+    """Called only after process-tree termination and the corresponding wait both completed."""
+    _retry_file_operation(lambda: cleanup_pending_path(project).unlink(missing_ok=True))
+
+
 def save_child_owner(project: Path, identity: ProcessIdentity, child: ProcessIdentity | None = None) -> Path:
     """Durable owner record. `child` is the run-window process under the wrapper, so a dead wrapper with a live child is not
     mistaken for a free project."""
-    path = child_owner_path(project)
-    path.parent.mkdir(parents=True, exist_ok=True)
     payload = asdict(identity)
     if child is not None:
         payload["child"] = asdict(child)
+    return _save_driver_record(child_owner_path(project), payload)
+
+
+def _save_driver_record(path: Path, payload: dict[str, Any]) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     temporary = Path(temporary_name)
     try:
@@ -169,35 +193,46 @@ def _unlink_owner(project: Path) -> None:
 
 
 def child_owner_state(project: Path) -> tuple[str | None, ProcessIdentity | None]:
-    path = child_owner_path(project)
+    owner = _recorded_child_state(child_owner_path(project))
+    pending = _recorded_child_state(cleanup_pending_path(project))
+    # A later wrapper publication may omit a child recorded by the cleanup fence. Check both observations.
+    for state in ("LIVE", "UNKNOWN"):
+        for observed in (owner, pending):
+            if observed[0] == state:
+                return observed
+    return owner if owner[0] is not None else pending
+
+
+def _recorded_identity(raw: Any) -> ProcessIdentity:
+    if not isinstance(raw, dict):
+        raise TypeError("invalid recorded process identity")
+    pid, created, boot, executable = (raw.get(key) for key in ("pid", "create_time", "boot_id", "executable"))
+    if (
+        isinstance(pid, bool) or not isinstance(pid, int) or not 0 < pid <= 0xFFFFFFFF
+        or isinstance(created, bool) or not isinstance(created, (int, float)) or not math.isfinite(created) or created < 0
+        or not isinstance(boot, str) or not boot
+        or (executable is not None and not isinstance(executable, str))
+    ):
+        raise ValueError("invalid recorded process identity")
+    return ProcessIdentity(pid, created, boot, executable)
+
+
+def _recorded_child_state(path: Path) -> tuple[str | None, ProcessIdentity | None]:
     if not path.is_file():
         return None, None
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
-        identity = ProcessIdentity(
-            pid=raw.get("pid"),
-            create_time=raw.get("create_time"),
-            boot_id=raw.get("boot_id"),
-            executable=raw.get("executable"),
-        )
-    except (AttributeError, OSError, TypeError, ValueError, json.JSONDecodeError):
+        identity = _recorded_identity(raw)
+        state = classify_process(identity, process_identity(identity.pid))
+    except (AttributeError, OSError, OverflowError, TypeError, ValueError, json.JSONDecodeError):
         return "UNKNOWN", None
-    state = classify_process(identity, process_identity(identity.pid))
     if state != "DEAD":
         return state, identity
-    recorded = raw.get("child")
-    if isinstance(recorded, dict):
+    if "child" in raw:
         try:
-            child = ProcessIdentity(
-                pid=recorded.get("pid"),
-                create_time=recorded.get("create_time"),
-                boot_id=recorded.get("boot_id"),
-                executable=recorded.get("executable"),
-            )
-            if isinstance(child.pid, bool) or not isinstance(child.pid, int):
-                return "UNKNOWN", identity
+            child = _recorded_identity(raw["child"])
             child_state = classify_process(child, process_identity(child.pid))
-        except (AttributeError, TypeError, ValueError, OSError):
+        except (AttributeError, OSError, OverflowError, TypeError, ValueError):
             return "UNKNOWN", identity
         if child_state != "DEAD":
             return child_state, identity  # the wrapper is gone but the run-window it started is not
@@ -220,6 +255,8 @@ def clear_dead_child_owner(project: Path) -> bool:
     wrote the record. Matching the two never succeeds there, and a hard-timeout kill left the record behind forever,
     blocking every later tick. After a confirmed tree kill the only question is whether the recorded process is dead.
     """
+    if cleanup_pending_path(project).exists():
+        return False
     state, _identity = child_owner_state(project)
     if state != "ORPHANED":
         return False
@@ -233,6 +270,8 @@ def child_owner_fully_dead(project: Path) -> bool:
     That is what a reboot, logoff or a hard kill of the whole tree leaves behind. With nothing known about the child (an
     older record, or a crash between writing the wrapper record and the child record) a human release stays required.
     """
+    if cleanup_pending_path(project).exists():
+        return False
     state, _identity = child_owner_state(project)
     if state != "ORPHANED":
         return False
@@ -251,21 +290,17 @@ def release_orphaned_child(project: Path) -> bool:
         raise DriverConfigError(
             f"cannot release prior run-window ownership while process identity is {state or 'UNKNOWN'}"
         )
-    return clear_child_owner(project, identity)
+    released = clear_child_owner(project, identity)
+    if released:
+        # Existing explicit `driver resume` semantics acknowledge orphan recovery; automatic ticks never do.
+        finish_child_cleanup(project)
+    return released
 
 
 def save_config(project: Path, config: DriverConfig) -> Path:
     project = Path(project).resolve()
     config.validate(project)
-    path = config_path(project)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(".json.tmp")
-    temporary.write_text(
-        json.dumps({"schema_version": SCHEMA_VERSION, **asdict(config)}, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-    temporary.replace(path)
-    return path
+    return _save_driver_record(config_path(project), {"schema_version": SCHEMA_VERSION, **asdict(config)})
 
 
 def load_config(project: Path) -> DriverConfig:
@@ -402,6 +437,7 @@ def _default_runner(argv: list[str], project: Path, timeout_seconds: float) -> i
     try:
         stdout, stderr = process.communicate(timeout=timeout_seconds)
     except subprocess.TimeoutExpired:
+        begin_child_cleanup(project, identity)
         tree_killed = kill_process_tree(process)
         wrapper_exited = False
         try:
@@ -410,6 +446,7 @@ def _default_runner(argv: list[str], project: Path, timeout_seconds: float) -> i
         except subprocess.TimeoutExpired:
             pass
         if tree_killed and wrapper_exited:
+            finish_child_cleanup(project)
             clear_child_owner(project, identity) or clear_dead_child_owner(project)
             clear_child_owner(project, launch_identity, allow_live=True)
         return 124
@@ -475,6 +512,10 @@ def run_tick(
     lock = IntegrationLock(project / ".stagemesh" / "driver" / "driver.lock", timeout_seconds=0.05)
     try:
         with lock.hold("continuous-driver"):
+            # A control command may have completed while this tick waited for the project lock.
+            config = load_config(project)
+            if config.state != "running":
+                return DriverTick(tick_id, config.state, None, None, f"driver is {config.state}")
             child_state, child_identity = child_owner_state(project)
             if child_state == "ORPHANED" and child_owner_fully_dead(project):
                 clear_dead_child_owner(project)  # reboot or tree kill: nothing recorded survives, run-window recovery takes over
@@ -535,6 +576,15 @@ def run_tick(
                     "report": str(report_path),
                 },
             )
+            # Ownership recovery and journaling can take time. Honor the latest control state at dispatch too.
+            config = load_config(project)
+            if config.state != "running":
+                detail = f"driver is {config.state}; window was not started"
+                record_audit(
+                    store, TICK_FINISHED,
+                    {"tick_id": tick_id, "state": config.state, "exit_code": None, "detail": detail},
+                )
+                return DriverTick(tick_id, config.state, None, None, detail, recovered)
             exit_code = runner(config.window_argv(project, report_path), project, config.window_seconds + TICK_HARD_TIMEOUT_MARGIN_SECONDS)
             report = _read_report(report_path)
             state, detail = _classify(exit_code, report)

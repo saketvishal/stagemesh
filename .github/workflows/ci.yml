@@ -30,6 +30,8 @@ jobs:
         run: .stagemesh\tooling\venv\Scripts\python.exe -m pytest -q tests/test_parallel.py tests/test_queue_run.py -k "stop or pause or interrupt"
       - name: Execution budgets and review ownership
         run: .stagemesh\tooling\venv\Scripts\python.exe -m pytest -q tests/test_bounded_execution.py tests/test_review_terminalization.py tests/test_builtin_execution_ownership.py
+      - name: Continuous driver control and recovery
+        run: .stagemesh\tooling\venv\Scripts\python.exe -m pytest -q tests/test_continuous_driver.py tests/test_driver_control_races.py tests/test_driver_cleanup_fence.py
       - name: Validation environment and fallback progress
         run: .stagemesh\tooling\venv\Scripts\python.exe -m pytest -q tests/test_diagnosis.py tests/test_run_window_progress.py
       - name: Reliable execution, validation and delivery
@@ -66,6 +68,8 @@ jobs:
         run: .stagemesh/tooling/venv/bin/python -m pytest -q tests/test_parallel.py tests/test_queue_run.py -k "stop or pause or interrupt"
       - name: Execution budgets and review ownership
         run: .stagemesh/tooling/venv/bin/python -m pytest -q tests/test_bounded_execution.py tests/test_review_terminalization.py tests/test_builtin_execution_ownership.py
+      - name: Continuous driver control and recovery
+        run: .stagemesh/tooling/venv/bin/python -m pytest -q tests/test_continuous_driver.py tests/test_driver_control_races.py tests/test_driver_cleanup_fence.py
       - name: Validation environment and fallback progress
         run: .stagemesh/tooling/venv/bin/python -m pytest -q tests/test_diagnosis.py tests/test_run_window_progress.py
       - name: Reliable execution, validation and delivery
