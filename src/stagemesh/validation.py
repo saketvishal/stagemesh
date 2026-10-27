@@ -314,7 +314,16 @@ class Validator:
                     status = EvidenceStatus.FAILED
                     findings.append({"severity": "error", "code": "invalid_e2e_evidence", "message": str(exc)})
         except OperatorStopRequested as exc:
-            if not exc.cleanup_complete:
+            if exc.cleanup_complete:
+                try:
+                    store.finish_execution(
+                        execution_id, ExecutionStatus.FAILED,
+                        result="stop_monitor_failed" if exc.monitor_failed else "operator_stop",
+                    )
+                except Exception as completion_error:
+                    exc.add_note("validation stop completion could not be persisted")
+                    raise exc from completion_error
+            else:
                 try:
                     store.retain_execution_for_cleanup(execution_id, "validation gate cleanup unconfirmed")
                 except Exception as ownership_error:  # preserve control flow when durable storage is unavailable
