@@ -131,13 +131,13 @@ def test_known_live_claimless_owner_is_not_replayed(tmp_path, monkeypatch):
         rig.store.close()
 
 
-def test_known_dead_claimless_owner_is_recovered_then_validation_runs(tmp_path, monkeypatch):
+def test_known_dead_claimless_review_owner_is_recovered_then_validation_runs(tmp_path, monkeypatch):
     from stagemesh import coordinator
 
     rig = _prepared(tmp_path)
     sha = rig.store.latest_candidate(TASK)["sha"]
-    held = rig.store.start_execution(task_id=TASK, claim_id=None, kind=ExecutionKind.VALIDATION,
-                                     candidate_sha=sha, actor="controlled-dead-validator", **owner_execution_fields())
+    held = rig.store.start_execution(task_id=TASK, claim_id=None, kind=ExecutionKind.REVIEW,
+                                     candidate_sha=sha, actor="controlled-dead-reviewer", **owner_execution_fields())
     monkeypatch.setattr(coordinator, "process_identity", lambda _pid: None)
     try:
         assert rig.coordinator.tick() == 1
@@ -146,6 +146,29 @@ def test_known_dead_claimless_owner_is_recovered_then_validation_runs(tmp_path, 
         assert rig.store.conn.execute("SELECT COUNT(*) FROM evidence WHERE status='PASSED'").fetchone()[0] == 1
     finally:
         rig.store.close()
+
+def test_dead_validation_parent_stays_owned_until_inspected_release(tmp_path, monkeypatch):
+    from stagemesh import coordinator, operator_actions
+    from stagemesh.operator_actions import release_unknown_execution
+
+    rig = _prepared(tmp_path)
+    sha = rig.store.latest_candidate(TASK)["sha"]
+    held = rig.store.start_execution(task_id=TASK, claim_id=None, kind=ExecutionKind.VALIDATION,
+                                     candidate_sha=sha, actor="controlled-dead-validator", **owner_execution_fields())
+    monkeypatch.setattr(coordinator, "process_identity", lambda _pid: None)
+    monkeypatch.setattr(operator_actions, "process_identity", lambda _pid: None)
+    try:
+        assert rig.coordinator.tick() == 0 and rig.stage == "VALIDATE"
+        assert rig.store.conn.execute("SELECT status FROM executions WHERE id=?", (held,)).fetchone()[0] == "RUNNING"
+        assert rig.store.conn.execute("SELECT COUNT(*) FROM evidence").fetchone()[0] == 0
+        action = release_unknown_execution(rig.store, TASK, held, "controlled fixture inspection: no child was launched")
+        assert action.action == "RELEASED_BY_OPERATOR"
+        assert rig.coordinator.tick() == 1 and rig.stage == "REVIEW"
+        assert rig.store.conn.execute("SELECT COUNT(*) FROM evidence WHERE status='PASSED'").fetchone()[0] == 1
+        assert rig.store.latest_candidate(TASK)["sha"] == sha
+    finally:
+        rig.store.close()
+
 
 
 def test_fenced_task_does_not_prevent_unrelated_task_progress(tmp_path, monkeypatch):

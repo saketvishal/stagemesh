@@ -34,8 +34,8 @@ def owner_identity() -> ProcessIdentity:
 def owner_execution_fields() -> dict[str, object]:
     """`Store.start_execution` keyword arguments that record this process as the owner of a built-in stage execution.
 
-    Built-in stages run inside the StageMesh process, not in a child. Without an owner, another runner cannot tell a live sibling's
-    stage from a crashed one, so recovery must be able to prove the owner dead before it fails the row.
+    The stage row records the StageMesh parent, which may itself launch child gates. Parent liveness identifies a live sibling;
+    parent death alone does not prove a validation child tree is gone. Recovery applies that additional ownership policy.
     """
     identity = owner_identity()
     return {

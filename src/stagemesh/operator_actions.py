@@ -10,6 +10,7 @@ from .audit import record_audit
 from .contract_binding import contract_for_candidate
 from .contracts import candidate_hygiene_findings, changed_files
 from .domain import EvidenceKind, EvidenceStatus, ExecutionKind, Stage, TaskStatus
+from .execution_ownership import recovery_identity_state, validation_tree_unresolved
 from .git import GitError, GitWorkspace
 from .lifecycle import evidence_allows_advance
 from .persistence import Store
@@ -27,7 +28,9 @@ def _age(now: float, created_at: float | None) -> float | None:
 
 
 def _process_state(store: Store, execution_id: str, pid: int | None) -> str:
-    return classify_process(store.execution_process_identity(execution_id), process_identity(pid))
+    execution = store.conn.execute("SELECT * FROM executions WHERE id=?", (execution_id,)).fetchone()
+    parent_state = classify_process(store.execution_process_identity(execution_id), process_identity(pid))
+    return recovery_identity_state(execution, parent_state)
 
 
 def task_details(store: Store, task_id: str, now: float | None = None) -> dict[str, Any]:
@@ -90,6 +93,7 @@ def task_details(store: Store, task_id: str, now: float | None = None) -> dict[s
             "claim_id": e["claim_id"],
             "age_seconds": _age(now, e["started_at"]),
             "process_state": _process_state(store, e["id"], e["pid"]),
+            **({"cleanup_state": "UNCONFIRMED_VALIDATION_TREE"} if validation_tree_unresolved(e) else {}),
         }
         for e in executions
     ]
@@ -167,30 +171,25 @@ def release_unknown_execution(store: Store, task_id: str, execution_id: str, rea
             f"execution {execution_id} is provably DEAD; use plain `recover-stale --task {task_id}` instead of the unknown-identity override"
         )
     kind = str(execution["kind"])
+    payload = {
+        "task_id": task_id, "execution_id": execution_id,
+        "previous_status": str(execution["status"]), "execution_kind": kind,
+        "task_stage": str(task["stage"]), "task_status": str(task["status"]),
+        "claim_id": execution["claim_id"], "pid": execution["pid"], "process_state": state,
+        "reason": reason, "operator": _operator(), "operator_action": "RELEASE_UNKNOWN_EXECUTION",
+    }
+    if validation_tree_unresolved(execution):
+        released = store.release_inspected_validation_execution(execution_id, task_id, payload)
+        action = "RELEASED_BY_OPERATOR" if released else "NOT_RECOVERABLE"
+        if not released:
+            record_audit(store, "recovery.operator_release_unknown", {**payload, "outcome": action})
+        return RecoveryAction(execution_id, kind, execution["pid"], state, action)
     if kind == ExecutionKind.IMPLEMENTATION and store.has_active_claim_for_execution(execution_id):
         released = store.recover_stale_execution_claim(execution_id, RELEASE_UNKNOWN_REASON)
     else:
         released = store.mark_orphan_running_execution_failed(execution_id, RELEASE_UNKNOWN_REASON)
     action = "RELEASED_BY_OPERATOR" if released else "NOT_RECOVERABLE"
-    record_audit(
-        store,
-        "recovery.operator_release_unknown",
-        {
-            "task_id": task_id,
-            "execution_id": execution_id,
-            "previous_status": str(execution["status"]),
-            "execution_kind": kind,
-            "task_stage": str(task["stage"]),
-            "task_status": str(task["status"]),
-            "claim_id": execution["claim_id"],
-            "pid": execution["pid"],
-            "process_state": state,
-            "reason": reason,
-            "operator": _operator(),
-            "operator_action": "RELEASE_UNKNOWN_EXECUTION",
-            "outcome": action,
-        },
-    )
+    record_audit(store, "recovery.operator_release_unknown", {**payload, "outcome": action})
     return RecoveryAction(execution_id, kind, execution["pid"], state, action)
 
 

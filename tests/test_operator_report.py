@@ -166,3 +166,62 @@ def test_operator_and_dashboard_are_read_only_and_render_new_sections(store):
     assert "<script>failure</script>" not in html
     assert {"Attention", "Tasks", "Workers", "External Evidence", "Provider Selections"} <= sections(report).keys()
     json.dumps({"summary": report.summary, "lines": report.lines, "sections": sections(report)})
+
+
+@pytest.mark.parametrize("kind", [ExecutionKind.VALIDATION, ExecutionKind.IMPLEMENTATION, ExecutionKind.REVIEW, ExecutionKind.INTEGRATION])
+@pytest.mark.parametrize("parent_state", ["LIVE", "DEAD", "UNKNOWN"])
+def test_validation_tree_ownership_is_distinct_from_parent_liveness(store, monkeypatch, kind, parent_state):
+    from stagemesh.observability import health
+
+    execution = store.start_execution(task_id="T1", claim_id=None, kind=kind, pid=12345)
+    monkeypatch.setattr("stagemesh.operator.classify_process", lambda *_: parent_state)
+    monkeypatch.setattr("stagemesh.observability.classify_process", lambda *_: parent_state)
+    before = [tuple(row) for row in store.conn.execute("SELECT * FROM executions")]
+    audits = store.conn.execute("SELECT COUNT(*) FROM audit_events").fetchone()[0]
+    pending = kind == ExecutionKind.VALIDATION
+    effective = "UNKNOWN" if pending and parent_state != "LIVE" else parent_state
+    report = operator_report(store)
+    row, = sections(report)["Active Executions"]
+    assert row["process_state"] == effective
+    assert row["parent_process_state"] == parent_state
+    assert row["stale"] is (effective == "DEAD")
+    assert row["cleanup_state"] == ("UNCONFIRMED_VALIDATION_TREE" if pending else None)
+    retained = int(pending and parent_state != "LIVE")
+    current = health(store)
+    assert current.unresolved_validation_count == retained
+    assert current.stale_execution_count == int(effective == "DEAD")
+    assert current.unknown_execution_count == 0  # durable UNKNOWN status is a separate metric
+    assert current.dead_validation_parent_count == int(pending and parent_state == "DEAD")
+    from stagemesh.run_ready import current_problems
+    assert current_problems(store) == (("stale_running_executions",) if parent_state == "DEAD" else ())
+    assert ("unresolved_validation_trees" in current.current_problems) is bool(retained)
+    attention = [row for row in sections(report)["Attention"] if row["kind"] == "unresolved_validation_trees"]
+    assert attention == ([{"kind": "unresolved_validation_trees", "count": 1, "status": "REVIEW"}] if retained else [])
+    assert f"unresolved_validation_trees={retained}" in report.lines
+    active_line, = [line for line in report.lines if line.startswith("active_execution ")]
+    assert f"process={effective}" in active_line and f"parent={parent_state}" in active_line
+    html = render_dashboard(store)
+    assert "parent_process_state" in html
+    assert ("UNCONFIRMED_VALIDATION_TREE" in html) is pending
+    assert [tuple(row) for row in store.conn.execute("SELECT * FROM executions")] == before
+    assert store.conn.execute("SELECT COUNT(*) FROM audit_events").fetchone()[0] == audits
+    assert store.conn.execute("SELECT status FROM executions WHERE id=?", (execution,)).fetchone()[0] == "RUNNING"
+
+
+def test_validation_hold_metric_does_not_rewrite_unknown_status_or_survive_completion(store, monkeypatch):
+    from stagemesh.observability import health
+
+    validation = store.start_execution(task_id="T1", claim_id=None, kind=ExecutionKind.VALIDATION)
+    unknown = store.start_execution(task_id="T1", claim_id=None, kind=ExecutionKind.IMPLEMENTATION)
+    store.finish_execution(unknown, ExecutionStatus.UNKNOWN)
+    monkeypatch.setattr("stagemesh.operator.classify_process", lambda *_: "DEAD")
+    monkeypatch.setattr("stagemesh.observability.classify_process", lambda *_: "DEAD")
+    report = operator_report(store)
+    assert {"kind": "unknown_executions", "count": 1, "status": "REVIEW"} in sections(report)["Attention"]
+    assert {"kind": "unresolved_validation_trees", "count": 1, "status": "REVIEW"} in sections(report)["Attention"]
+    assert health(store).unknown_execution_count == 1
+    assert not health(store).ok
+    store.finish_execution(validation, ExecutionStatus.SUCCEEDED)
+    assert health(store).unresolved_validation_count == 0
+    assert health(store).unknown_execution_count == 1
+    assert sections(operator_report(store))["Active Executions"] == []

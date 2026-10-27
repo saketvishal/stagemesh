@@ -465,3 +465,60 @@ def test_a_stop_honored_at_startup_keeps_its_own_reason_without_a_running_event(
     report = _history(store, ("stopping", "deploy freeze", "operator"), ("stopped", "queue admission stop completed", "runner"))
     store.close()
     assert report["stop_reason"] == "deploy freeze"
+
+
+def test_dead_validation_parent_has_consistent_held_ownership_on_operator_surfaces(tmp_path: Path) -> None:
+    project, ids = _project_with_executions(tmp_path)
+    store = _store(project)
+    held = _start(store, "T-2", ExecutionKind.VALIDATION, "DEAD")
+    before = [tuple(row) for row in store.conn.execute("SELECT * FROM executions ORDER BY id")]
+    audit_count = store.conn.execute("SELECT COUNT(*) FROM audit_events").fetchone()[0]
+    for command in ("status", "health", "queue-control", "operator", "dashboard"):
+        if command == "queue-control":
+            argv = (command, "status", "--json")
+        elif command == "dashboard":
+            argv = (command, "--output", str(project / "held-dashboard.html"), "--json")
+        else:
+            argv = (command, "--json")
+        code, out, _ = run_stagemesh_cli(project, *argv)
+        assert code == 0, (command, out)
+        data = json.loads(out)
+        if command in {"status", "health"}:
+            assert data["unresolved_validation_count"] == 2
+            assert data["stale_execution_count"] == 1  # implementation parent really is dead
+            assert data["unknown_execution_count"] == 0
+            assert "unresolved_validation_trees" in data["current_problems"]
+            control = data["queue_control"]
+        elif command == "queue-control":
+            control = data
+        elif command == "dashboard":
+            row = next(row for row in data["active_executions"] if row["id"] == held)
+            assert row["process_state"] == "UNKNOWN" and row["parent_process_state"] == "DEAD"
+            assert row["cleanup_state"] == "UNCONFIRMED_VALIDATION_TREE" and row["stale"] is False
+            assert data["summary"]["unresolved validation trees"] == "2"
+            assert "UNCONFIRMED_VALIDATION_TREE" in (project / "held-dashboard.html").read_text(encoding="utf-8")
+            continue
+        else:
+            active = next(section["rows"] for section in data["sections"] if section["name"] == "Active Executions")
+            row = next(row for row in active if row["id"] == held)
+            assert row["process_state"] == "UNKNOWN" and row["parent_process_state"] == "DEAD"
+            assert row["cleanup_state"] == "UNCONFIRMED_VALIDATION_TREE" and row["stale"] is False
+            continue
+        row = next(row for row in control["active_executions"] if row["id"] == held)
+        assert row["process_state"] == "UNKNOWN" and row["parent_process_state"] == "DEAD"
+        assert row["cleanup_state"] == "UNCONFIRMED_VALIDATION_TREE"
+        assert control["stale_execution_ids"] == [ids["DEAD"]]
+        assert held in control["unknown_execution_ids"]
+    for command in (("status",), ("health",), ("queue-control", "status")):
+        code, out, _ = run_stagemesh_cli(project, *command)
+        assert code == 0
+        assert f"execution {held}: task T-2 VALIDATION" in out
+        assert "process UNKNOWN parent DEAD cleanup UNCONFIRMED_VALIDATION_TREE" in out
+        assert f"stale (process gone): {ids['DEAD']}" in out
+        assert f"stale (process gone): {held}" not in out
+    # Mixed kinds must retain the cleanup column even when the first row is REVIEW.
+    from stagemesh.dashboard import render_dashboard
+    assert "UNCONFIRMED_VALIDATION_TREE" in render_dashboard(store)
+    assert [tuple(row) for row in store.conn.execute("SELECT * FROM executions ORDER BY id")] == before
+    assert store.conn.execute("SELECT COUNT(*) FROM audit_events").fetchone()[0] == audit_count
+    store.close()

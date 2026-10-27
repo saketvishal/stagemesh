@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from .block_kinds import BlockKind
 from .delivery_state import DELIVERY_UNBLOCKED, EXTERNALLY_BLOCKED
 from .efficiency import usage_totals
+from .execution_ownership import recovery_identity_state, validation_tree_unresolved
 from .external_evidence import external_evidence_records
 from .observability import health
 from .persistence import Store
@@ -57,6 +58,8 @@ def operator_report(store: Store) -> OperatorReport:
         attention_rows.append({"kind": "failed_execution_history", "count": historical_failures, "status": "INFO"})
     if h.unknown_execution_count:
         attention_rows.append({"kind": "unknown_executions", "count": h.unknown_execution_count, "status": "REVIEW"})
+    if h.unresolved_validation_count:
+        attention_rows.append({"kind": "unresolved_validation_trees", "count": h.unresolved_validation_count, "status": "REVIEW"})
     if pending_count:
         attention_rows.append({"kind": "recorded_pending_decisions", "count": pending_count, "status": "ACTION"})
     lines = [
@@ -69,6 +72,7 @@ def operator_report(store: Store) -> OperatorReport:
         f"current_failed_executions={h.current_failed_execution_count}",
         f"historical_failed_executions={historical_failures}",
         f"unknown_executions={h.unknown_execution_count}",
+        f"unresolved_validation_trees={h.unresolved_validation_count}",
         f"workers={len(workers)}",
         f"recent_source_events={len(events)}",
         f"retry_states={len(retries)}",
@@ -107,7 +111,9 @@ def operator_report(store: Store) -> OperatorReport:
             "active_execution "
             f"task={execution['task_id']} stage={execution['stage']} "
             f"provider={execution['provider']} pid={execution['pid_label']} "
-            f"process={execution['process_state']} stale={execution['stale']}"
+            f"process={execution['process_state']} stale={execution['stale']} "
+            f"parent={execution['parent_process_state']}"
+            + (f" cleanup={execution['cleanup_state']}" if execution["cleanup_state"] else "")
         )
     blocked_bucket_rows = tuple(
         {"reason": reason, "count": count}
@@ -315,10 +321,11 @@ def _active_execution_rows(store: Store) -> list[Mapping[str, object]]:
     rows: list[Mapping[str, object]] = []
     for execution in store.running_executions():
         pid = execution["pid"]
-        process_state = classify_process(
+        parent_state = classify_process(
             store.execution_process_identity(execution["id"]),
             process_identity(pid),
         )
+        process_state = recovery_identity_state(execution, parent_state)
         provider = execution["actor"] or "unknown"
         rows.append(
             {
@@ -329,6 +336,8 @@ def _active_execution_rows(store: Store) -> list[Mapping[str, object]]:
                 "pid": pid,
                 "pid_label": str(pid) if pid is not None else "no pid recorded",
                 "process_state": process_state,
+                "parent_process_state": parent_state,
+                "cleanup_state": "UNCONFIRMED_VALIDATION_TREE" if validation_tree_unresolved(execution) else None,
                 "stale": process_state == "DEAD",
             }
         )

@@ -17,6 +17,7 @@ from .domain import (
     Stage,
     TaskStatus,
 )
+from .execution_ownership import validation_tree_unresolved
 from .migrations import apply_migrations, current_schema_version, latest_schema_version
 
 SCHEMA_VERSION = latest_schema_version()
@@ -910,7 +911,7 @@ class Store:
                 "SELECT * FROM executions WHERE id=? AND status=?",
                 (execution_id, ExecutionStatus.RUNNING),
             ).fetchone()
-            if execution is None or execution["claim_id"] is None:
+            if execution is None or execution["claim_id"] is None or validation_tree_unresolved(execution):
                 return False
             claim = self.conn.execute(
                 "SELECT * FROM claims WHERE id=? AND task_id=? AND active=1",
@@ -961,7 +962,7 @@ class Store:
         now = time.time()
         with self.conn:
             execution = self.conn.execute("SELECT * FROM executions WHERE id=? AND status=?", (execution_id, ExecutionStatus.RUNNING)).fetchone()
-            if execution is None:
+            if execution is None or validation_tree_unresolved(execution):
                 return False
             self.conn.execute(
                 "UPDATE executions SET status=?, result=?, updated_at=? WHERE id=? AND status=?",
@@ -995,6 +996,8 @@ class Store:
             ).fetchone()
             if execution is None:
                 return False
+            if validation_tree_unresolved(execution):
+                return False
             task = self.conn.execute("SELECT * FROM tasks WHERE id=?", (execution["task_id"],)).fetchone()
             if task is None:
                 return False
@@ -1025,6 +1028,51 @@ class Store:
                 ),
             )
             return True
+
+    def release_inspected_validation_execution(
+        self, execution_id: str, task_id: str, operator_audit: dict[str, Any],
+    ) -> bool:
+        """Explicit inspected release: selected validation authority and full audit commit together.
+
+        The operator API first refuses a known-live parent and requires inspection.
+        Ordinary recovery must use the guarded orphan/fence methods, never this override.
+        """
+        from .redaction import redact_mapping
+
+        execution_id = _validate_text(execution_id, "execution id")
+        task_id = _validate_text(task_id, "task id")
+        audit = _validate_payload(operator_audit)
+        if (audit.get("task_id") != task_id or audit.get("execution_id") != execution_id
+                or audit.get("execution_kind") != ExecutionKind.VALIDATION
+                or audit.get("operator_action") != "RELEASE_UNKNOWN_EXECUTION"):
+            raise StoreValidationError("inspection audit does not match selected validation execution")
+        _validate_text(audit.get("reason"), "inspection reason", 2000)
+        _validate_text(audit.get("operator"), "inspection operator")
+        audit = redact_mapping({**audit, "outcome": "RELEASED_BY_OPERATOR"})
+        now = time.time()
+        with self.conn:
+            row = self.conn.execute(
+                "SELECT * FROM executions WHERE id=? AND task_id=?", (execution_id, task_id),
+            ).fetchone()
+            if not validation_tree_unresolved(row):
+                return False
+            changed = self.conn.execute(
+                "UPDATE executions SET status='FAILED', result='orphaned', updated_at=? "
+                "WHERE id=? AND task_id=? AND status='RUNNING' AND kind='VALIDATION'",
+                (now, execution_id, task_id),
+            ).rowcount
+            if changed != 1:
+                return False
+            self.conn.execute("INSERT INTO audit_events VALUES (?, ?, ?, ?)", (
+                str(uuid.uuid4()), "recovery.orphan_execution_failed",
+                json.dumps({"task_id": task_id, "execution_id": execution_id,
+                            "execution_kind": "VALIDATION", "claim_id": row["claim_id"],
+                            "reason": "OPERATOR_RELEASE_UNKNOWN_IDENTITY"}, sort_keys=True), now,
+            ))
+            self.conn.execute("INSERT INTO audit_events VALUES (?, ?, ?, ?)", (
+                str(uuid.uuid4()), "recovery.operator_release_unknown", json.dumps(audit, sort_keys=True), now,
+            ))
+        return True
 
     def running_executions(self) -> Iterable[sqlite3.Row]:
         return self.conn.execute("SELECT * FROM executions WHERE status=?", (ExecutionStatus.RUNNING,))
