@@ -677,21 +677,50 @@ def _run_gate_process(
         error.monitor_failed = any(getattr(cause, "monitor_failed", False) for cause in causes)
         return error
 
+    from .validation_slot import _stop_requested
+
+    def check_control() -> None:
+        try:
+            stopped = _stop_requested()
+        except Exception as monitor_error:
+            raise OperatorStopRequested(
+                "validation stop monitoring failed: " + type(monitor_error).__name__, monitor_failed=True,
+            ) from monitor_error
+        if stopped:
+            raise OperatorStopRequested("active validation gate cancelled by control request or deadline")
+
+    deadline = time.monotonic() + timeout
+    completed = False
     try:
-        stdout, stderr = proc.communicate(timeout=timeout)
+        while True:
+            check_control()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(command, timeout)
+            try:
+                stdout, stderr = proc.communicate(timeout=min(remaining, 0.1))
+            except subprocess.TimeoutExpired:
+                continue
+            completed = True  # ordinary root and pipe completion, before accepting output
+            check_control()
+            break
     except BaseException as exc:
+        if completed:
+            # A stop observed after ordinary completion still suppresses the verdict.
+            # No new termination attempt or detached-child guarantee is implied.
+            raise
         try:
             termination = terminate_owned_gate(proc, identity)
         except BaseException as cleanup_error:  # even interrupted cleanup must retain uncertain ownership
             raise unconfirmed(type(cleanup_error).__name__, exc, cleanup_error) from cleanup_error
         if not termination.cleanup_confirmed:
             raise unconfirmed(termination.note, exc) from exc
-        if not isinstance(exc, subprocess.TimeoutExpired):
-            raise
         try:
             stdout, stderr = proc.communicate(timeout=5)
         except BaseException as drain_error:
             raise unconfirmed("owned pipes did not drain after termination", exc, drain_error) from drain_error
+        if not isinstance(exc, subprocess.TimeoutExpired):
+            raise
         expired = subprocess.TimeoutExpired(command, timeout, output=stdout, stderr=stderr)
         expired.stagemesh_note = termination.note  # type: ignore[attr-defined]
         raise expired from exc

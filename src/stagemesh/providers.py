@@ -40,6 +40,7 @@ from .execution import (
     communicate_bounded,
     popen_session_kwargs,
     provider_timeout_seconds,
+    record_tool_failure,
 )
 from .focused_validation import focused_test_prompt
 from .git_identity import provider_environment
@@ -326,6 +327,8 @@ class RuntimeCommandAdapter:
             lease.after_agent()
             if timed_out:
                 call.finish("timeout", PROVIDER_TIMEOUT)
+                record_tool_failure(store, task_id, execution_id, configured_command, run_path,
+                                    proc.returncode, stdout, stderr, PROVIDER_TIMEOUT, True)
                 store.finish_execution(execution_id, ExecutionStatus.FAILED, result=PROVIDER_TIMEOUT)
                 return ExecutionResult(ExecutionStatus.FAILED, failure_reason=PROVIDER_TIMEOUT)
             if _missing_provider_tool_host(stderr):
@@ -339,6 +342,8 @@ class RuntimeCommandAdapter:
             if proc.returncode != 0:
                 is_cap, reason = classify_failure(proc.returncode, stdout, stderr)
                 call.finish("failed", reason)
+                record_tool_failure(store, task_id, execution_id, configured_command, run_path,
+                                    proc.returncode, stdout, stderr, reason, False)
                 store.finish_execution(execution_id, ExecutionStatus.FAILED, result=reason)
                 output, retry_after = capacity_evidence(stdout, stderr)  # the operator sees why, capacity failure or not
                 return ExecutionResult(

@@ -204,10 +204,53 @@ RUNNING execution and unknown cleanup fence; it records the gate identity and re
 and private gate TEMP directory. It emits no failed/passed validation verdict or remediation attempt from uncertain
 cleanup. A new run cannot recover this fence merely because the old parent exited. Confirmed ordinary failure and
 timeout still clean their temporary directories. This covers the observed gate tree and task ownership; it does not
-establish universal detached-child cleanup, responsive cancellation of an active gate, or a durable cross-project
+establish universal detached-child cleanup or a durable cross-project
 validation-slot fence after a parent crash.
 
 If cleanup ownership cannot be durably stored, the current run still propagates cleanup-incomplete control flow; restart protection is not qualified until that fence is successfully persisted. A detail-audit failure after retention does not erase the saved UNKNOWN fence or turn cleanup uncertainty into an ordinary failure verdict.
+
+## Active validation-gate control
+
+An active gate polls the existing scoped stop, cancellation and window-deadline
+controls while communicating, and checks them again before accepting output.
+A terminate-running stop is sticky for that run even if a resume follows. Pause
+and drain-only stop let the active gate finish; no next stage is authorized by
+that completion. The gate's own monotonic timeout budget is not reset by polls.
+
+Confirmed cancellation reaps the observed owned tree and drains its pipes, then
+propagates operator-stop control without validation verdict, findings or a
+remediation attempt. The validator terminalizes its execution with operator_stop
+(or stop_monitor_failed when monitoring failed), leaving the candidate available
+for a new run after resume. If cleanup cannot be confirmed, the existing UNKNOWN
+ownership fence and candidate/TEMP retention still block restart. A stop observed
+after ordinary root/pipe completion suppresses the verdict without a new signal;
+this does not add a universal detached-child guarantee. Storage unavailability
+still propagates the original control event; durable completion is not claimed.
+
+## Existing stage ownership at dispatch
+
+The coordinator rechecks persisted RUNNING executions after known-dead owner recovery and before advancing a task.
+An existing live or unknown execution, including a claimless cleanup fence, prevents another stage from starting.
+This also protects legacy `continue --once` and ownership published after parallel batch selection. A single-pass
+attempt with no work reports `REFUSED:active_execution`; unrelated tasks can still advance. Existing ownership,
+candidate evidence and stage remain unchanged. This recheck does not reserve an otherwise empty stage atomically
+against two simultaneous fresh callers; it is not a new global admission-lock guarantee.
+
+## Runtime command failure evidence
+
+The configured implementation runtime records the same typed, bounded, redacted
+`task.tool_failure_evidence` as the bare subprocess executor after communication
+and workspace ownership checks complete. Records identify the actual execution,
+owned working directory and configured stage command before prompt expansion.
+Expanded prompt-bearing arguments are not used as the command identity. Split or joined credential values and their echoed values are redacted before truncation. Ambiguous display-only string commands (malformed quotes or backslashes) conservatively hide identity/output; execution callers supply explicit argv. Provider
+quota, authentication, availability and transient-provider classifications retain
+their existing semantics and do not become tool-failure evidence. Unknown cleanup
+or workspace mutation does not publish an ordinary tool-failure record.
+
+Recovery recommendations remain unexecuted: no automatic replay, setup or install
+is added. A repeated signature after reopening the store stops with
+`execution_status=NOT_CONFIRMED` and an empty actual-attempt history. This does not
+satisfy the nested-tool recovery executor or live unattended-delivery acceptance.
 
 ## Runtime artifacts
 

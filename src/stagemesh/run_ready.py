@@ -1051,6 +1051,16 @@ def drive_task(
         except TargetSelectionError as exc:
             summary.stop_reason, summary.message = "TARGET_ERROR", str(exc)
             break
+        ownership_refusals = [
+            item for item in getattr(coordinator, "last_execution_refusals", []) if item["task_id"] == selected
+        ]
+        if ownership_refusals:
+            summary.stop_reason = "REFUSED:active_execution"
+            summary.message = "existing stage ownership was retained; no new stage work started"
+            summary.detail["active_execution_refusals"] = ownership_refusals
+            if not summary.steps:
+                summary.started = False
+            break
         step = {"step": number, "task_id": selected, "progressed": progressed, "previous": previous, "new": _snapshot(store, selected)}
         step["executions"] = [rec for rec in execution_timings(store, selected) if rec["started_at"] >= tick_started]
         step["duration_seconds"] = step_duration(step["executions"])
