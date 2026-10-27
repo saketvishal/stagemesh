@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -30,6 +31,7 @@ from .domain import EvidenceKind
 from .gate_execution import NON_CODE_TIMEOUTS, TIMEOUT_NO_OUTPUT, TIMEOUT_SERVICE_UNAVAILABLE
 from .git import GitError, GitWorkspace
 from .persistence import Store
+from .redaction import redact_command_secrets, redact_output, redact_text
 from .remediation import latest_candidate_findings
 
 CONTRACT_SCOPE = "contract_scope"
@@ -319,13 +321,36 @@ def tool_failure_evidence(
                 break
     if not kind:
         return None
-    argv = command.split() if isinstance(command, str) else [str(part) for part in command]
-    shown = _redact_evidence(" ".join(argv))[:200]
-    lines = [line for line in _redact_evidence(text).splitlines() if line.strip()]
+    parse_failed = False
+    try:
+        if isinstance(command, str) and "\\" in command:
+            raise ValueError("ambiguous backslash-bearing command display")
+        argv = shlex.split(command) if isinstance(command, str) else [str(part) for part in command]
+    except ValueError:
+        # Ambiguous display strings cannot establish exact credential boundaries.
+        # Real execution callers supply argv; do not guess Windows shell parsing.
+        argv, parse_failed = [], True
+    # Preserve argv boundaries for split credentials before any display truncation.
+    safe_command = redact_command_secrets(shlex.join(argv))
+    safe_argv = shlex.split(safe_command)
+    known_secrets = []
+    for original, safe in zip(argv, safe_argv, strict=True):
+        if original == safe:
+            continue
+        key, separator, value = original.partition("=")
+        # Joined options preserve their key; a separate value is entirely secret,
+        # even when it contains or ends with an equals sign.
+        known_secrets.append(value if separator and safe.startswith(key + "=") else original)
+    if parse_failed:
+        shown, safe_output = "[redacted: unparseable command]", "[redacted: unparseable command output]"
+    else:
+        shown = _redact_evidence(redact_output(safe_command))[:200]
+        safe_output = _redact_evidence(redact_output(redact_text(text, known_secrets)))
+    lines = [line for line in safe_output.splitlines() if line.strip()]
     key = [line for line in lines if _KEY_LINE.search(line)] or lines
     return {
         "kind": kind,
-        "command": {"executable": Path(argv[0]).name if argv else "", "argc": len(argv), "text": shown},
+        "command": {"executable": Path(argv[0]).name if argv else "", "argc": None if parse_failed else len(argv), "text": shown},
         "cwd": str(cwd) if cwd is not None else None,
         "status": "timed_out" if timed_out else ("launch_failed" if returncode is None else f"exit {returncode}"),
         "excerpt": "\n".join(line.strip()[:200] for line in key[-6:])[-max_chars:],

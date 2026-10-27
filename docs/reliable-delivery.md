@@ -209,6 +209,22 @@ validation-slot fence after a parent crash.
 
 If cleanup ownership cannot be durably stored, the current run still propagates cleanup-incomplete control flow; restart protection is not qualified until that fence is successfully persisted. A detail-audit failure after retention does not erase the saved UNKNOWN fence or turn cleanup uncertainty into an ordinary failure verdict.
 
+## Runtime command failure evidence
+
+The configured implementation runtime records the same typed, bounded, redacted
+`task.tool_failure_evidence` as the bare subprocess executor after communication
+and workspace ownership checks complete. Records identify the actual execution,
+owned working directory and configured stage command before prompt expansion.
+Expanded prompt-bearing arguments are not used as the command identity. Split or joined credential values and their echoed values are redacted before truncation. Ambiguous display-only string commands (malformed quotes or backslashes) conservatively hide identity/output; execution callers supply explicit argv. Provider
+quota, authentication, availability and transient-provider classifications retain
+their existing semantics and do not become tool-failure evidence. Unknown cleanup
+or workspace mutation does not publish an ordinary tool-failure record.
+
+Recovery recommendations remain unexecuted: no automatic replay, setup or install
+is added. A repeated signature after reopening the store stops with
+`execution_status=NOT_CONFIRMED` and an empty actual-attempt history. This does not
+satisfy the nested-tool recovery executor or live unattended-delivery acceptance.
+
 ## Runtime artifacts
 
 Build the versioned wheel from the reviewed commit, keep the previous wheel as the verified rollback, and install only when every
