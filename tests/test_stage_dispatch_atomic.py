@@ -374,7 +374,8 @@ def test_mixed_public_refusals_keep_per_task_causes_without_claiming_all_have_ex
     try:
         out=io.StringIO()
         with stage_dispatch_lock(rig.store.db_path,TASK).hold('controlled-dispatch'),contextlib.redirect_stdout(out):
-            code=cli.main(['--project',str(rig.project),'continue','--once','--json'])
+            # Exercise real dispatch/ownership without requiring any installed provider CLI.
+            code=cli.main(['--project',str(rig.project),'continue','--once','--json','--dry-run'])
         data=json.loads(out.getvalue())
         assert code==2 and data['progressed']==0 and data['stop_reason']=='REFUSED:stage_dispatch'
         assert 'existing stage ownership' not in data['message']
