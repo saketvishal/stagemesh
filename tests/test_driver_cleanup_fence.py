@@ -147,3 +147,22 @@ def test_wrapper_still_attempts_cleanup_when_owner_republication_fails(tmp_path:
     assert killed
     assert driver.cleanup_pending_path(tmp_path).is_file()
     assert not driver.child_owner_fully_dead(tmp_path)
+
+
+@pytest.mark.parametrize("record_path", [driver.child_owner_path, driver.cleanup_pending_path])
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize("field,value", [
+    ("pid", "invalid"), ("pid", True), ("pid", 0), ("pid", -1), ("pid", 10**400),
+    ("create_time", "invalid"), ("create_time", None), ("create_time", float("nan")), ("create_time", 10**400),
+    ("boot_id", None), ("boot_id", 42), ("executable", 42),
+])
+def test_malformed_recorded_identity_is_unknown_and_never_released(tmp_path: Path, record_path, nested, field, value):
+    path = record_path(tmp_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    malformed = {"pid": 999999999, "create_time": 1.0, "boot_id": "boot", field: value}
+    payload = {"pid": 999999998, "create_time": 1.0, "boot_id": "boot", "child": malformed} if nested else malformed
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    assert driver.child_owner_state(tmp_path)[0] == "UNKNOWN"
+    assert not driver.clear_dead_child_owner(tmp_path)
+    with pytest.raises(driver.DriverConfigError, match="UNKNOWN"):
+        driver.release_orphaned_child(tmp_path)

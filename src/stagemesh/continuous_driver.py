@@ -7,6 +7,7 @@ This module never selects, implements, validates, reviews, publishes or merges w
 from __future__ import annotations
 
 import json
+import math
 import os
 import subprocess
 import sys
@@ -202,35 +203,36 @@ def child_owner_state(project: Path) -> tuple[str | None, ProcessIdentity | None
     return owner if owner[0] is not None else pending
 
 
+def _recorded_identity(raw: Any) -> ProcessIdentity:
+    if not isinstance(raw, dict):
+        raise TypeError("invalid recorded process identity")
+    pid, created, boot, executable = (raw.get(key) for key in ("pid", "create_time", "boot_id", "executable"))
+    if (
+        isinstance(pid, bool) or not isinstance(pid, int) or not 0 < pid <= 0xFFFFFFFF
+        or isinstance(created, bool) or not isinstance(created, (int, float)) or not math.isfinite(created) or created < 0
+        or not isinstance(boot, str) or not boot
+        or (executable is not None and not isinstance(executable, str))
+    ):
+        raise ValueError("invalid recorded process identity")
+    return ProcessIdentity(pid, created, boot, executable)
+
+
 def _recorded_child_state(path: Path) -> tuple[str | None, ProcessIdentity | None]:
     if not path.is_file():
         return None, None
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
-        identity = ProcessIdentity(
-            pid=raw.get("pid"),
-            create_time=raw.get("create_time"),
-            boot_id=raw.get("boot_id"),
-            executable=raw.get("executable"),
-        )
-    except (AttributeError, OSError, TypeError, ValueError, json.JSONDecodeError):
+        identity = _recorded_identity(raw)
+        state = classify_process(identity, process_identity(identity.pid))
+    except (AttributeError, OSError, OverflowError, TypeError, ValueError, json.JSONDecodeError):
         return "UNKNOWN", None
-    state = classify_process(identity, process_identity(identity.pid))
     if state != "DEAD":
         return state, identity
-    recorded = raw.get("child")
-    if isinstance(recorded, dict):
+    if "child" in raw:
         try:
-            child = ProcessIdentity(
-                pid=recorded.get("pid"),
-                create_time=recorded.get("create_time"),
-                boot_id=recorded.get("boot_id"),
-                executable=recorded.get("executable"),
-            )
-            if isinstance(child.pid, bool) or not isinstance(child.pid, int):
-                return "UNKNOWN", identity
+            child = _recorded_identity(raw["child"])
             child_state = classify_process(child, process_identity(child.pid))
-        except (AttributeError, TypeError, ValueError, OSError):
+        except (AttributeError, OSError, OverflowError, TypeError, ValueError):
             return "UNKNOWN", identity
         if child_state != "DEAD":
             return child_state, identity  # the wrapper is gone but the run-window it started is not
