@@ -11,6 +11,9 @@ import json
 import sys
 from pathlib import Path
 
+from test_survivor_wave import Rig
+
+from stagemesh.capacity import CapacityKind
 from stagemesh.coordinator import Coordinator, TargetSelection
 from stagemesh.delivery_state import task_delivery
 from stagemesh.domain import EvidenceKind, EvidenceStatus, Stage, TaskStatus
@@ -19,12 +22,12 @@ from stagemesh.git import GitWorkspace
 from stagemesh.integration import Integrator
 from stagemesh.outbound_lifecycle import sync_outbound_outcomes
 from stagemesh.persistence import Store
+from stagemesh.provider_pool import REVIEW, ProviderLog, ProviderPool
 from stagemesh.review import Reviewer
+from stagemesh.review_identity import command_snapshot, note_review_identity
 from stagemesh.run_ready import RunSummary, drive_task, format_stop
 from stagemesh.survivor_wave import RunResult, run_wave
 from stagemesh.validation import Validator
-
-from test_survivor_wave import Rig
 
 TASK = "TASK-1"
 PY = sys.executable
@@ -37,9 +40,21 @@ class SequencedReviewer:
 
     def __init__(self, name: str, answers: list[str]):
         self.name, self.answers, self.calls = name, list(answers), 0
+        self.command = ("controlled-review", name)
+        self.capabilities = frozenset({"review"})
+
+    def command_for(self, _capability):
+        return self.command
+
+    def all_commands(self):
+        return (self.command,)
+
+    def check_stage_capacity(self, _capability):
+        return CapacityKind.AVAILABLE
 
     def review_candidate(self, prompt: str, project: Path, candidate_sha: str) -> str:
         self.calls += 1
+        note_review_identity(command_snapshot(self.name, self.command))
         return self.answers.pop(0) if self.answers else '{"decision":"PASS"}'
 
 
@@ -81,6 +96,7 @@ class Flow(Rig):
         )
         self.provider = provider
         self.reviewers = reviewers
+        self.normal_reviewer = SequencedReviewer("normal-review", [])
         super().__init__(project)
         self.prs: list[str] = []
         self.store = Store(project / ".stagemesh" / "stagemesh.sqlite3")
@@ -102,11 +118,16 @@ class Flow(Rig):
         store = self.worker_store()
         try:
             reviewer = next((r for r in self.reviewers if r.answers or r is self.reviewers[-1]), self.reviewers[-1])
+            pool = ProviderPool(
+                [self.normal_reviewer, reviewer], {REVIEW: (self.normal_reviewer.name, reviewer.name)},
+                require_independent=True, policy="priority",
+                priorities={self.normal_reviewer.name: 0, reviewer.name: 1}, log=ProviderLog(echo=False),
+            )
             coordinator = Coordinator(
                 store, self.project,
                 executor=SubprocessExecutor([PY, str(self.provider)], name="codex"),
                 validator=Validator(),
-                reviewer=Reviewer(adapter=reviewer, require_independent=True),
+                reviewer=Reviewer(review_pool=pool, require_independent=True, separate_roles=True),
                 integrator=Integrator(integration_ref=STAGING, require_independent_review=True),
                 require_independent_review=True,
                 target=TargetSelection(task_id),
@@ -153,8 +174,14 @@ def test_failure_to_delivery_with_accurate_state_at_every_step(tmp_path: Path) -
     report = run_wave(store, [TASK], flow.hooks(), max_steps=12, deadline=10.0, clock=lambda: clock[0], advance_baselines=False, unblock_blocked=False)
     record = report.tasks[0]
     assert claude.calls >= 2  # FAIL_WITH_FINDINGS on the first candidate, PASS on the remediated one
-    reviews = [(row["candidate_sha"], row["status"]) for row in store.conn.execute("SELECT candidate_sha, status FROM evidence WHERE kind='REVIEW' ORDER BY created_at, rowid")]
-    assert [status for _, status in reviews] == ["FAILED", "PASSED"] and reviews[0][0] != reviews[1][0]  # the pass is for a new candidate
+    review_rows = [(row["candidate_sha"], row["status"], json.loads(row["payload"])["review_role"])
+                   for row in store.conn.execute("SELECT candidate_sha,status,payload FROM evidence WHERE kind='REVIEW' ORDER BY created_at,rowid")]
+    assert len(review_rows) == 4
+    reviews = [(sha, status) for sha, status, role in review_rows if role == "adverse"]
+    assert [status for _, status in reviews] == ["FAILED", "PASSED"] and reviews[0][0] != reviews[1][0]  # the adverse pass is for a new candidate
+    normal = [(sha, status) for sha, status, role in review_rows if role == "normal"]
+    assert [status for _, status in normal] == ["PASSED", "PASSED"] and [sha for sha, _ in normal] == [sha for sha, _ in reviews]
+    assert flow.normal_reviewer.calls == 2  # both candidates earned their own normal role
     assert record.landing == "staged_not_published" and record.stop_reason == "PR_DELIVERY_PENDING" and record.resumable
     delivery = task_delivery(store, TASK)
     assert delivery.state == "DELIVERY_PENDING" and not delivery.complete and flow.prs == []

@@ -149,6 +149,42 @@ validation alone cannot rebut a reviewer). `waived_by_owner` is an explicit risk
 as independent evidence. The decision is written before the finding is closed, so an interrupted disposition is completed, not
 duplicated; adverse findings and dispositions are append-only.
 
+
+## Distinct normal and adverse review
+
+Staged execution with `require_independent_review` earns a normal review checkpoint, then a separate adverse review
+on a later coordinator tick. The task stays in REVIEW until both pass the prerequisite policy; the existing driver
+checks stop requests and task budgets between the two ticks. Each role dispatch and incomplete-answer retry also
+checks the shared configured task and originating-window budgets. Direct `Reviewer.review()` calls do not provide
+the driver's stop-request boundary. Normal findings require remediation. Adverse findings at configured blocking severities
+require remediation; actionable advisory findings stay in evidence. Missing, malformed or incomplete verdicts never
+become advisory passes. Custom severity names remain supported by the policy.
+
+Both roles must execute under distinct providers and configured command identities, independently of the implementer.
+Selection uses only the existing authorized provider pool, excludes actual fallback actors and their command aliases,
+and holds when another qualified reviewer is unavailable. This does not register or authorize another provider.
+Passed role evidence references separate successful REVIEW execution records and the exact candidate, contract and
+policy digest. A saved normal checkpoint can resume after reopening the database; it cannot stand in for adverse review.
+
+New real implementation candidates carry an audit receipt for the configured command and same-actor aliases frozen
+before prompt expansion, bound to their successful implementation execution. Review startup reports the actual winning
+provider's frozen command identity. Receipts contain provider names and command fingerprints, never raw command argv
+or prompts. Current configuration cannot reconstruct an older candidate's command provenance. Missing or conflicting
+historic receipts hold qualification; old single-role review evidence does not satisfy the distinct-role gate.
+This checks the configured provider/command independence policy, not universal semantic equivalence of different tools.
+No existing runtime task, frozen candidate, contract or provider authorization is rewritten by this source change.
+
+Each review fallback invocation is recorded and budget-checked individually. A provider that returns an incomplete answer or infrastructure failure spends an attempt before another configured reviewer can be tried; the outer review does not count the final attempt twice. Usage not reported by a provider remains unknown.
+
+
+
+Successful owned rebase, reattribution and reconstruction preserve the implementation identity through a typed
+candidate-derivation receipt. It points to the original successful execution and its original SHA, without inventing
+another provider execution. Missing, conflicting, cyclic or overlong provenance stays unavailable. Each replacement
+SHA must earn its own validation evidence and both review roles. The derivation itself copies no validation/review
+evidence; normal validation policy may reuse eligible machine checks, while both reviews execute for the new SHA.
+
+
 ## Effort accounting and budgets
 
 `provider.call` (task, candidate, provider, purpose `implementation`/`remediation`/`review`/`diagnosis`, outcome, normalized failure
@@ -157,8 +193,21 @@ executions and `validation_reuse` evidence. Usage the provider did not report is
 `input`/`output`/`cached_input` because the audit redactor masks any key containing the word for a credential. No prompts, provider
 output or client content is stored. Budgets (`budgets` in `.stagemesh/config.json`, defaults: 5 consecutive equivalent failures, above the bounded hands-off provider-exhaustion recovery, 30
 provider calls per task; optional per-window calls and reported-usage caps) come from the ledger, so they survive new windows and
-restarts, and are checked only **between** stages and waves; reaching one is a single typed `BLOCKED_RECOVERABLE_OPERATIONAL` blocker
+restarts, and are checked between stages and waves, with additional checks before staged pooled review attempts and fallbacks; reaching one is a single typed `BLOCKED_RECOVERABLE_OPERATIONAL` blocker
 (`budget_exhausted`) and a fresh start by the operator (`retry-task`) resets the task's counters. Budgets never skip validation or review.
+
+## Validation gate cleanup
+
+Validation-gate cleanup is confirmed separately from the root process exiting. Failed tree enumeration, identity,
+signal or reap/drain checks stop the current run with cleanup incomplete. The validator retains its claimless
+RUNNING execution and unknown cleanup fence; it records the gate identity and retains both the candidate checkout
+and private gate TEMP directory. It emits no failed/passed validation verdict or remediation attempt from uncertain
+cleanup. A new run cannot recover this fence merely because the old parent exited. Confirmed ordinary failure and
+timeout still clean their temporary directories. This covers the observed gate tree and task ownership; it does not
+establish universal detached-child cleanup, responsive cancellation of an active gate, or a durable cross-project
+validation-slot fence after a parent crash.
+
+If cleanup ownership cannot be durably stored, the current run still propagates cleanup-incomplete control flow; restart protection is not qualified until that fence is successfully persisted. A detail-audit failure after retention does not erase the saved UNKNOWN fence or turn cleanup uncertainty into an ordinary failure verdict.
 
 ## Runtime artifacts
 
