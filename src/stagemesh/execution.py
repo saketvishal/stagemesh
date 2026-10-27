@@ -346,13 +346,25 @@ def _communicate_bounded(
                     observed = popen_identity(proc)
                 if classify_process(identity, observed) == "LIVE":
                     termination_attempted = True
-                    try:
-                        termination_confirmed = kill_process_tree(proc)
-                    except Exception as exc:
-                        raise OperatorStopRequested(
-                            "provider cleanup failed: " + type(exc).__name__,
-                            cleanup_complete=False, monitor_failed=monitor_failure is not None,
-                        ) from exc
+                    local_proof = None
+                    with _ACTIVE_LOCK:
+                        external_proof = _PROVIDER_TERMINATIONS.get(proc)
+                        if external_proof is None and proc in _ACTIVE_PROVIDER_PROCESSES:
+                            local_proof = Future()
+                            _PROVIDER_TERMINATIONS[proc] = local_proof
+                    if external_proof is None:
+                        try:
+                            termination_confirmed = kill_process_tree(proc)
+                        except Exception as exc:
+                            raise OperatorStopRequested(
+                                "provider cleanup failed: " + type(exc).__name__,
+                                cleanup_complete=False, monitor_failed=monitor_failure is not None,
+                            ) from exc
+                        finally:
+                            if local_proof is not None:
+                                local_proof.set_result(termination_confirmed)
+                    # An existing attempt owns signalling. Its shared proof is consumed at completion; a second
+                    # taskkill can race the first and turn confirmed cleanup into a spurious safety failure.
                     cleanup_deadline = time.monotonic() + STOP_CLEANUP_SECONDS
                     if stop and stop["terminate_running"] and monitor_failure is None:
                         try:

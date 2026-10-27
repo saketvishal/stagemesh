@@ -471,7 +471,7 @@ def test_stop_during_review_kills_tracked_provider_and_fails_execution(tmp_path:
     runner = QueueRunner(rig.store, rig.project, make, concurrency=1, poll_seconds=0.05, interrupt_grace_seconds=5)
     holder["runner"] = runner
     summary = runner.run()
-    assert summary.stop_reason == "STOPPED"
+    assert summary.stop_reason == "STOPPED", summary.message
     assert outcomes(summary) == {"A": "STOPPED"}
     assert not rig.store.conn.execute("SELECT 1 FROM claims WHERE active=1").fetchall()
     assert not list(rig.store.running_executions())
