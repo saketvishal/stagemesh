@@ -1573,6 +1573,8 @@ def command_continue(args: argparse.Namespace) -> int:
         if args.once or progressed == 0:
             break
     adverse_block = getattr(coord, "last_adverse_block", None)
+    ownership_refusals = getattr(coord, "last_execution_refusals", [])
+    ownership_refused = bool(ownership_refusals) and count == 0
     if args.json:
         print(
             json.dumps(
@@ -1585,6 +1587,7 @@ def command_continue(args: argparse.Namespace) -> int:
                     "integration_ref": integration_ref,
                     "targeted_mode": targeted_mode,
                     "targeted_task_id": str(targeted_task_id) if targeted_task_id is not None else None,
+                    **({"active_execution_refusals": ownership_refusals} if ownership_refusals else {}),
                     **(
                         {
                             "stop_reason": "BLOCKED",
@@ -1593,13 +1596,16 @@ def command_continue(args: argparse.Namespace) -> int:
                         if adverse_block
                         else {}
                     ),
+                    **({"stop_reason": "REFUSED:active_execution",
+                        "message": "existing stage ownership was retained; no new work started"}
+                       if ownership_refused else {}),
                 },
                 indent=2,
                 sort_keys=True,
             )
         )
         store.close()
-        return 1 if adverse_block else 0
+        return 2 if ownership_refused else (1 if adverse_block else 0)
     print(f"progressed: {count}")
     print(f"provider: {chosen_provider}")
     print(f"review_provider: {chosen_review_provider}")
@@ -1609,6 +1615,9 @@ def command_continue(args: argparse.Namespace) -> int:
     print(f"targeted_mode: {targeted_mode}")
     print(f"targeted_task_id: {targeted_task_id}")
     store.close()
+    if ownership_refused:
+        print("continue refused: task has an existing live or unknown stage execution", file=sys.stderr)
+        return 2
     if adverse_block:
         print("adverse review gate refused integration: " + "; ".join(adverse_block), file=sys.stderr)
         return 1
