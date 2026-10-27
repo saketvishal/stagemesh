@@ -8,10 +8,11 @@ import pytest
 from stagemesh import run_ready
 from stagemesh.config import AdverseReviewPolicy
 from stagemesh.coordinator import Coordinator, TargetSelection
-from stagemesh.domain import EvidenceKind, EvidenceStatus, Stage
+from stagemesh.domain import EvidenceKind, EvidenceStatus, ExecutionKind, ExecutionStatus, Stage
 from stagemesh.persistence import Store
 from stagemesh.remediation import findings_to_verify, unresolved_findings
 from stagemesh.review import adverse_gate
+from stagemesh.review_identity import command_snapshot, record_implementation_identity
 
 TASK, OLD, NEW, DIGEST = "T-1", "a" * 40, "b" * 40, "c" * 64
 POLICY = AdverseReviewPolicy()
@@ -27,9 +28,33 @@ def _store(tmp_path) -> Store:
 
 
 def _review(store, sha=NEW, **overrides):
+    implementation = store.start_execution(task_id=TASK, claim_id=None, kind=ExecutionKind.IMPLEMENTATION, candidate_sha=sha, actor="codex")
+    store.finish_execution(implementation, ExecutionStatus.SUCCEEDED, sha)
+    implementer = command_snapshot("codex", ("codex", "exec"))
+    record_implementation_identity(store, TASK, sha, implementation, implementer)
+
+    def executed(role, provider, command):
+        execution = store.start_execution(task_id=TASK, claim_id=None, kind=ExecutionKind.REVIEW, candidate_sha=sha, actor=provider)
+        store.finish_execution(execution, ExecutionStatus.SUCCEEDED, sha)
+        identity = command_snapshot(provider, command)
+        return {**identity, "role": role, "command": "sha256:" + identity["command_digest"], "candidate_sha": sha,
+                "contract_hash": DIGEST, "policy_digest": POLICY.digest(), "verdict": "PASS", "findings": [],
+                "execution_id": execution, "executed": True}
+
+    normal = executed("normal", "grok", ("grok", "review"))
+    store.add_evidence(TASK, sha, EvidenceKind.REVIEW, EvidenceStatus.PASSED, {
+        "contract_hash": DIGEST, "review_role": "normal", "review_roles": {"normal": normal},
+        "review_provider": "grok", "implementer_provider": "codex", "independent_reviewer": True,
+        "review_execution_invoked": True, "adverse_review_gate": False, "adverse_policy_digest": POLICY.digest(),
+    })
+    provider = overrides.get("review_provider", "claude")
+    adverse = executed("adverse", provider, ("claude", "review"))
     payload = {
         "contract_hash": DIGEST, "adverse_review_gate": True, "independent_reviewer": True, "review_execution_invoked": True,
-        "implementer_provider": "codex", "review_provider": "claude", "adverse_policy_digest": POLICY.digest(), **overrides,
+        "implementer_provider": "codex", "review_provider": provider, "adverse_policy_digest": POLICY.digest(),
+        "review_role": "adverse", "review_roles": {"normal": normal, "adverse": adverse},
+        "implementer_command": "sha256:" + implementer["command_digest"], "implementer_execution_id": implementation, "implementer_origin_candidate": sha,
+        **overrides,
     }
     store.add_evidence(TASK, sha, EvidenceKind.REVIEW, EvidenceStatus.PASSED, payload)
 

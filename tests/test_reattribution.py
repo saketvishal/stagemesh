@@ -14,6 +14,7 @@ from stagemesh.domain import Stage
 from stagemesh.git_identity import attribution_offences
 from stagemesh.provider_pool import IMPLEMENT, REVIEW
 from stagemesh.reattribution import reattribute_range
+from stagemesh.review_identity import IMPLEMENTATION_DERIVATION, implementation_identity
 from stagemesh.serialized_integration import SerializedIntegrator
 
 OWNER = ("Repo Owner", "42+repoowner@users.noreply.github.com")
@@ -117,6 +118,8 @@ def test_a_legacy_worker_authored_candidate_is_reattributed_and_integrates_after
     monkeypatch.setattr(git_module, "identity_env_for", real_identity_env)
 
     first = rig.store.latest_candidate(TASK)["sha"]
+    frozen_identity = implementation_identity(rig.store, TASK, first)
+    assert frozen_identity is not None
     assert "claude+local-worker@stagemesh.invalid" in rig.git.run("log", "-1", "--format=%ae", first).stdout
 
     rig.tick(12)  # VALIDATE, REVIEW, INTEGRATE (re-attributed, back to VALIDATE), VALIDATE, REVIEW, INTEGRATE
@@ -130,3 +133,6 @@ def test_a_legacy_worker_authored_candidate_is_reattributed_and_integrates_after
     assert rig.ref("integration") == final
     events = [r["payload"] for r in rig.store.conn.execute("SELECT payload FROM audit_events WHERE event_type='integration.reattributed'")]
     assert len(events) == 1 and first in events[0] and final in events[0]
+    assert implementation_identity(rig.store, TASK, final) == frozen_identity
+    lineage = rig.store.conn.execute("SELECT payload FROM audit_events WHERE event_type=?", (IMPLEMENTATION_DERIVATION,)).fetchall()
+    assert len(lineage) == 1 and first in lineage[0]["payload"] and final in lineage[0]["payload"]

@@ -217,3 +217,17 @@ def test_corrupt_or_non_object_audit_payload_does_not_hide_known_failure(tmp_pat
         assert stopped["previous_recommendation_count"] == 1
     finally:
         store.close()
+
+
+@pytest.mark.parametrize("stderr,kind", [("ETIMEDOUT", "transient"), ("No module named 'x'", "missing_dependency")])
+@pytest.mark.parametrize("attempted", [["retry"], ["setup"], ["unknown"], ("retry", "setup")])
+def test_any_prior_action_stops_signature_even_with_configured_setup(
+    stderr: str, kind: str, attempted: list[str] | tuple[str, ...]
+) -> None:
+    evidence = _ev(stderr)
+    plan = plan_tool_recovery(evidence, attempted, {kind: ["configured-setup", "--local"]})
+    assert plan["action"] == "stop"
+    assert plan["attempted"] == list(attempted)
+    assert plan["signature"] == tool_failure_signature(evidence)
+    assert plan["operator_action"] == evidence["next_action"]
+    assert "setup_command" not in plan

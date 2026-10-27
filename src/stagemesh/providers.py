@@ -56,6 +56,7 @@ from .research_context import (
     research_request,
     source_snapshot,
 )
+from .review_identity import command_snapshot, note_review_identity, record_implementation_identity
 from .workspace_guard import (
     EXTERNAL_WORKSPACE_MUTATION,
     WorkspaceLease,
@@ -279,7 +280,9 @@ class RuntimeCommandAdapter:
             )
         except SkillPackError as exc:
             return ExecutionResult(ExecutionStatus.FAILED, failure_reason=f"skill_pack_unavailable: {exc}")
-        command, provider_input = _command_and_input(self.command_for("code"), task_prompt)
+        configured_command = self.command_for("code")
+        command_identity = command_snapshot(self.name, configured_command, self.all_commands())
+        command, provider_input = _command_and_input(configured_command, task_prompt)
         lease.check("before_agent")
         refused = _authorization_refusal(self, project, "code", command=command)
         if refused:
@@ -364,6 +367,7 @@ class RuntimeCommandAdapter:
                     provider_output=output or None,
                 )
             store.add_candidate(task_id, sha, self.name, durable_handoff=True)
+            record_implementation_identity(store, task_id, sha, execution_id, command_identity)
             lease.seal(sha)
             call.finish("succeeded", candidate=sha)
             store.finish_execution(execution_id, ExecutionStatus.SUCCEEDED, sha)
@@ -470,7 +474,9 @@ class RuntimeCommandAdapter:
                 review_prompt = prompt + skill_prompt(prompt, stage="review", project=review_path)
             except SkillPackError as exc:
                 return _review_infrastructure_failure(f"skill_pack_unavailable: {exc}")
-            command, provider_input = _command_and_input(self.command_for("review"), review_prompt, structured_review=True)
+            configured_command = self.command_for("review")
+            command_identity = command_snapshot(self.name, configured_command, self.all_commands())
+            command, provider_input = _command_and_input(configured_command, review_prompt, structured_review=True)
             refused = _authorization_refusal(self, project, "review", command=command)
             if refused:
                 return _review_infrastructure_failure("provider_not_authorized", refused)
@@ -494,6 +500,7 @@ class RuntimeCommandAdapter:
             except OSError:
                 cleanup_confirmed = True
                 raise
+            note_review_identity(command_identity)
             stdout, stderr, timed_out = communicate_bounded(proc, provider_input, provider_timeout_seconds(self.timeout_seconds))
             cleanup_confirmed = True
             note_call_usage(extract_usage(stdout, stderr))  # the caller records the call (it owns the store and the purpose)
