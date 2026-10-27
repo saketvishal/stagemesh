@@ -11,8 +11,8 @@ from pathlib import Path
 import pytest
 from stabilization_support import Matrix
 
-IMPL = ("codex", "claude")  # implementation pool; review is always done by grok unless a scenario says otherwise
-REVIEW = ("grok",)
+IMPL = ("codex", "claude")  # implementation pool; review actors are independent of both implementers
+REVIEW = ("grok", "review-adverse")
 
 
 @pytest.fixture(autouse=True)
@@ -31,7 +31,8 @@ def test_implementation_success(tmp_path: Path) -> None:
 
     assert r.code == 0 and r.data["stop_reason"] == "DONE", r.brief
     assert m.integrated("T-1")
-    assert r.calls == [("codex", "implement", "T-1", "ok"), ("grok", "review", "T-1", "pass")]
+    assert r.calls == [("codex", "implement", "T-1", "ok"), ("grok", "review", "T-1", "pass"), ("review-adverse", "review", "T-1", "pass")]
+    assert "review-adverse" not in r.implementers("T-1")
     r.assert_hands_off()
 
 
@@ -133,7 +134,7 @@ def test_review_failure_is_remediated_automatically(tmp_path: Path) -> None:
     r = m.drain()
 
     assert r.stop == "REFUSED:no_eligible_task" and m.integrated("T-1"), r.brief
-    assert [mode for p, stage, _, mode in r.calls if stage == "review"] == ["fail", "pass"]
+    assert [mode for p, stage, _, mode in r.calls if stage == "review"] == ["fail", "pass", "pass"]
     assert len(r.implementers("T-1")) == 2
     store = m.store()
     try:
@@ -152,7 +153,7 @@ def test_complex_single_task_survives_provider_validation_review_and_reaches_don
         "claude": {"implement": ["bad", "ok", "ok"]},
         "grok": {"review": ["fail", "pass"]},
     }
-    m = _matrix(tmp_path, ["T-1"], plan, implement_pool=("codex", "claude"), review_pool=("grok",))
+    m = _matrix(tmp_path, ["T-1"], plan, implement_pool=("codex", "claude"), review_pool=("grok", "review-adverse"))
 
     r = m.drain(max_runs=3)
 
@@ -180,7 +181,7 @@ def test_complex_single_task_survives_provider_validation_review_and_reaches_don
 
 def test_fallback_walks_quota_then_no_progress_then_success(tmp_path: Path) -> None:
     plan = {"codex": {"implement": "quota"}, "claude": {"implement": "noop"}}
-    m = _matrix(tmp_path, ["T-1"], plan, implement_pool=("codex", "claude", "grok"), review_pool=("codex",))
+    m = _matrix(tmp_path, ["T-1"], plan, implement_pool=("codex", "claude", "grok"), review_pool=("codex", "review-adverse"))
 
     r = m.drain()
 
@@ -340,5 +341,23 @@ def test_controlled_merge_window_lands_before_continuing_and_reports_policy(tmp_
         assert report.ok and rig.runs == landed == ["1", "2"]
         assert report.to_dict()["options"]["merge_policy"] == "stagemesh"
         assert not list(store.running_executions())
+    finally:
+        store.close()
+
+
+def test_single_required_reviewer_cannot_finish_distinct_role_gate(tmp_path: Path) -> None:
+    m = _matrix(tmp_path, ["T-1"], review_pool=("grok",))
+
+    r = m.continue_()
+
+    assert r.stop == "BLOCKED" and not m.integrated("T-1"), r.brief
+    assert m.task("T-1")["stage"] == "REVIEW"
+    assert r.calls == [("codex", "implement", "T-1", "ok"), ("grok", "review", "T-1", "pass")]
+    store = m.store()
+    try:
+        rows = store.conn.execute("SELECT payload FROM evidence WHERE task_id='T-1' AND kind='REVIEW'").fetchall()
+        payloads = [json.loads(row["payload"]) for row in rows]
+        assert any(p.get("review_role") == "normal" for p in payloads)
+        assert any(p.get("review_infrastructure_failure") == "independent_review_unavailable" for p in payloads)
     finally:
         store.close()

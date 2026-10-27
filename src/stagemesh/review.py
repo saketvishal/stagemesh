@@ -286,7 +286,8 @@ def _review_pair_verified(
         return False
     frozen = implementation_identity(store, task_id, candidate_sha)
     if (frozen is None or payload.get("implementer_command") != "sha256:" + frozen["command_digest"]
-            or payload.get("implementer_execution_id") not in frozen["execution_ids"]):
+            or payload.get("implementer_execution_id") not in frozen["execution_ids"]
+            or {"execution_id": payload.get("implementer_execution_id"), "candidate_sha": payload.get("implementer_origin_candidate")} not in frozen["origins"]):
         return False
     if any(set(item["alias_digests"]) & set(frozen["alias_digests"]) for item in roles.values()):
         return False
@@ -870,6 +871,7 @@ class Reviewer:
                 review_payload["review_role"] = role
                 review_payload["implementer_command"] = "sha256:" + frozen_implementer["command_digest"] if frozen_implementer else ""
                 review_payload["implementer_execution_id"] = frozen_implementer["execution_ids"][0] if frozen_implementer else None
+                review_payload["implementer_origin_candidate"] = frozen_implementer["origins"][0]["candidate_sha"] if frozen_implementer else None
                 digest = final_identity.get("command_digest", "") if final_identity else ""
                 review_payload["review_roles"] = {**(prior_roles or {}), role: {
                     "role": role, "provider": reviewer_provider, "command": "sha256:" + digest,

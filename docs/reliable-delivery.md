@@ -149,25 +149,6 @@ validation alone cannot rebut a reviewer). `waived_by_owner` is an explicit risk
 as independent evidence. The decision is written before the finding is closed, so an interrupted disposition is completed, not
 duplicated; adverse findings and dispositions are append-only.
 
-## Effort accounting and budgets
-
-`provider.call` (task, candidate, provider, purpose `implementation`/`remediation`/`review`/`diagnosis`, outcome, normalized failure
-class, duration, provider-reported usage) and `stage.transition` events feed `stagemesh efficiency` together with the existing
-executions and `validation_reuse` evidence. Usage the provider did not report is `null`/unknown and is never summed as zero; keys are
-`input`/`output`/`cached_input` because the audit redactor masks any key containing the word for a credential. No prompts, provider
-output or client content is stored. Budgets (`budgets` in `.stagemesh/config.json`, defaults: 5 consecutive equivalent failures, above the bounded hands-off provider-exhaustion recovery, 30
-provider calls per task; optional per-window calls and reported-usage caps) come from the ledger, so they survive new windows and
-restarts, and are checked only **between** stages and waves; reaching one is a single typed `BLOCKED_RECOVERABLE_OPERATIONAL` blocker
-(`budget_exhausted`) and a fresh start by the operator (`retry-task`) resets the task's counters. Budgets never skip validation or review.
-
-## Runtime artifacts
-
-Build the versioned wheel from the reviewed commit, keep the previous wheel as the verified rollback, and install only when every
-StageMesh execution, claim and window is idle (see `project-local-runtime.md`). Verify installed files against the exact reviewed
-wheel. If a prior repair is already in the shared runtime, reconcile instead of overwriting.
-
-Source synchronization publishes task eligibility only after dependency and retirement updates finish. A task shown as `source synchronization incomplete` cannot be admitted or claimed, including by a worker holding an earlier scheduling decision. An interrupted import keeps that task unavailable until an authoritative retry reconciles it; an empty scan or an unrelated source does not release it. Source writers for the same database serialize their publication phases. This protects partial imports; it does not establish freshness of remote snapshots fetched before the synchronization lock.
-
 
 ## Distinct normal and adverse review
 
@@ -194,3 +175,31 @@ This checks the configured provider/command independence policy, not universal s
 No existing runtime task, frozen candidate, contract or provider authorization is rewritten by this source change.
 
 Each review fallback invocation is recorded and budget-checked individually. A provider that returns an incomplete answer or infrastructure failure spends an attempt before another configured reviewer can be tried; the outer review does not count the final attempt twice. Usage not reported by a provider remains unknown.
+
+
+
+Successful owned rebase, reattribution and reconstruction preserve the implementation identity through a typed
+candidate-derivation receipt. It points to the original successful execution and its original SHA, without inventing
+another provider execution. Missing, conflicting, cyclic or overlong provenance stays unavailable. Each replacement
+SHA must earn its own validation evidence and both review roles. The derivation itself copies no validation/review
+evidence; normal validation policy may reuse eligible machine checks, while both reviews execute for the new SHA.
+
+
+## Effort accounting and budgets
+
+`provider.call` (task, candidate, provider, purpose `implementation`/`remediation`/`review`/`diagnosis`, outcome, normalized failure
+class, duration, provider-reported usage) and `stage.transition` events feed `stagemesh efficiency` together with the existing
+executions and `validation_reuse` evidence. Usage the provider did not report is `null`/unknown and is never summed as zero; keys are
+`input`/`output`/`cached_input` because the audit redactor masks any key containing the word for a credential. No prompts, provider
+output or client content is stored. Budgets (`budgets` in `.stagemesh/config.json`, defaults: 5 consecutive equivalent failures, above the bounded hands-off provider-exhaustion recovery, 30
+provider calls per task; optional per-window calls and reported-usage caps) come from the ledger, so they survive new windows and
+restarts, and are checked between stages and waves, with additional checks before staged pooled review attempts and fallbacks; reaching one is a single typed `BLOCKED_RECOVERABLE_OPERATIONAL` blocker
+(`budget_exhausted`) and a fresh start by the operator (`retry-task`) resets the task's counters. Budgets never skip validation or review.
+
+## Runtime artifacts
+
+Build the versioned wheel from the reviewed commit, keep the previous wheel as the verified rollback, and install only when every
+StageMesh execution, claim and window is idle (see `project-local-runtime.md`). Verify installed files against the exact reviewed
+wheel. If a prior repair is already in the shared runtime, reconcile instead of overwriting.
+
+Source synchronization publishes task eligibility only after dependency and retirement updates finish. A task shown as `source synchronization incomplete` cannot be admitted or claimed, including by a worker holding an earlier scheduling decision. An interrupted import keeps that task unavailable until an authoritative retry reconciles it; an empty scan or an unrelated source does not release it. Source writers for the same database serialize their publication phases. This protects partial imports; it does not establish freshness of remote snapshots fetched before the synchronization lock.

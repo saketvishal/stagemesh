@@ -16,6 +16,7 @@ from .git import GitError, GitWorkspace
 from .integration import Integrator, _attribution_findings
 from .persistence import Store
 from .reattribution import reattribute_range
+from .review_identity import record_implementation_derivation
 from .workspace_guard import owned_workspace
 
 REBASED_EVENT = "integration.rebased"
@@ -135,6 +136,7 @@ class SerializedIntegrator(Integrator):
                 producer = str(previous["produced_by"]) if previous is not None else "reattribution"
                 store.add_candidate(task_id, new_sha, producer, durable_handoff=True)
                 lease.seal(new_sha)
+                record_implementation_derivation(store, task_id, candidate_sha, new_sha, "reattribution")
         except (GitError, ContractError, OSError):
             return False
         store.bind_contract(task_id, new_sha, bound.baseline_sha, bound.version, bound.digest, bound.canonical_json)
@@ -210,7 +212,14 @@ class SerializedIntegrator(Integrator):
                 out_of_scope = [path for path in changed if not _matches(path, bound.contract.allowed_files)]
                 if out_of_scope:
                     return False, "task-owned delta reaches files outside the contract", out_of_scope[:10], "out_of_scope_delta"
-                patch = root.run("diff", "--binary", baseline, candidate_sha, encoding="utf-8").stdout
+                # Git patches are byte protocols; text-mode stdin can change LF to CRLF on Windows.
+                patch = subprocess.run(
+                    ["git", "-c", "core.longpaths=true", "diff", "--binary", baseline, candidate_sha],
+                    cwd=project, capture_output=True, check=False,
+                )
+                if patch.returncode != 0:
+                    detail = (patch.stderr or patch.stdout).decode("utf-8", errors="replace").strip()[-1000:]
+                    return False, detail or "could not read task-owned patch", [], "git_error"
                 with owned_workspace(store, project, task_id, ExecutionKind.INTEGRATION) as lease:
                     worktree = lease.path
                     git = GitWorkspace(worktree)
@@ -221,10 +230,7 @@ class SerializedIntegrator(Integrator):
                         result = subprocess.run(
                             ["git", "-c", "core.longpaths=true", "apply", "--index", "--3way"],
                             cwd=worktree,
-                            input=patch,
-                            text=True,
-                            encoding="utf-8",
-                            errors="replace",
+                            input=patch.stdout,
                             capture_output=True,
                             check=False,
                         )
@@ -234,7 +240,7 @@ class SerializedIntegrator(Integrator):
                             ]
                             git.run("reset", "--hard", tip, check=False)
                             lease.seal(tip)
-                            detail = (result.stderr or result.stdout).strip()[-1000:] or "patch did not apply"
+                            detail = (result.stderr or result.stdout).decode("utf-8", errors="replace").strip()[-1000:] or "patch did not apply"
                             return False, detail, conflicts[:10], "patch_conflict" if conflicts else "patch_failed"
                         reconstructed = git.commit_all(f"reconstruct {task_id} on current integration tip")
                     except (GitError, OSError) as exc:
@@ -250,6 +256,7 @@ class SerializedIntegrator(Integrator):
                     producer = str(previous["produced_by"]) if previous is not None else "reconstruction"
                     store.add_candidate(task_id, reconstructed, producer, durable_handoff=True)
                     lease.seal(reconstructed)
+                    record_implementation_derivation(store, task_id, candidate_sha, reconstructed, "reconstruction")
             except (GitError, ContractError, OSError) as exc:
                 return False, str(exc)[:300], [], "git_error"
             store.bind_contract(task_id, reconstructed, tip, bound.version, bound.digest, bound.canonical_json)
@@ -318,6 +325,7 @@ class SerializedIntegrator(Integrator):
                 producer = str(previous["produced_by"]) if previous is not None else "rebase"
                 store.add_candidate(task_id, rebased, producer, durable_handoff=True)
                 lease.seal(rebased)
+                record_implementation_derivation(store, task_id, candidate_sha, rebased, "rebase")
         except (GitError, ContractError, OSError) as exc:
             self._typed_failure = (REBASE_UNAVAILABLE, f"could not rebase candidate {candidate_sha} onto {tip}: {exc}")
             self._emit(task_id, REBASE_UNAVAILABLE, {"ref_tip": tip, "error": str(exc)[:200]})

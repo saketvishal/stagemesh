@@ -53,7 +53,7 @@ def _review(store, sha=NEW, **overrides):
         "contract_hash": DIGEST, "adverse_review_gate": True, "independent_reviewer": True, "review_execution_invoked": True,
         "implementer_provider": "codex", "review_provider": provider, "adverse_policy_digest": POLICY.digest(),
         "review_role": "adverse", "review_roles": {"normal": normal, "adverse": adverse},
-        "implementer_command": "sha256:" + implementer["command_digest"], "implementer_execution_id": implementation,
+        "implementer_command": "sha256:" + implementer["command_digest"], "implementer_execution_id": implementation, "implementer_origin_candidate": sha,
         **overrides,
     }
     store.add_evidence(TASK, sha, EvidenceKind.REVIEW, EvidenceStatus.PASSED, payload)

@@ -440,3 +440,160 @@ def test_each_fallback_is_counted_once_and_usage_does_not_leak(role_rig):
     assert [(c["provider"], c["outcome"]) for c in calls] == [("claude", "failed"), ("grok", "succeeded")]
     assert calls[0]["usage"]["input"] == 100 and calls[0]["usage"]["output"] == 10
     assert calls[1]["usage"]["reported"] is False and calls[1]["usage"]["input"] is None
+
+
+def test_two_mechanical_refreshes_keep_origin_but_need_new_validation_and_roles(tmp_path):
+    import sys
+
+    from test_provider_pool import TASK as POOL_TASK
+    from test_provider_pool import Rig
+
+    from stagemesh.review_identity import record_implementation_derivation
+    from stagemesh.validation import Validator
+
+    rig = Rig(tmp_path, {"codex": "ok", "claude": "ok", "grok": "ok"}, contract={
+        "objective": "change the task document", "allowed_files": ["docs/**"],
+        "required_tests": [{"name": "changed-document", "command": [sys.executable, "-c",
+            "from pathlib import Path; assert Path('docs/a.md').read_text().startswith('by ok')"]}],
+    })
+    store, project = rig.store, rig.project
+    policy = AdverseReviewPolicy()
+    reviewer = Reviewer(review_pool=rig.pool, require_independent=True, separate_roles=True, adverse_policy=policy)
+    try:
+        rig.tick(3)  # PLAN, actual implementation, actual validation
+        original = store.latest_candidate(POOL_TASK)["sha"]
+        bound = contract_for_candidate(store, POOL_TASK, original, project)
+
+        def review(sha):
+            return reviewer.review(store, POOL_TASK, sha, project)
+
+        def gate(sha):
+            return adverse_gate(store, POOL_TASK, sha, bound.digest, policy)
+
+        assert review(original) == review(original) == EvidenceStatus.PASSED
+        frozen = implementation_identity(store, POOL_TASK, original)
+        current = original
+        rig.git.run("checkout", "--detach", original)
+        for kind in ["reattribution", "reconstruction"]:
+            rig.git.run("commit", "--allow-empty", "-qm", "controlled mechanical replacement")
+            replacement = rig.git.head()
+            store.add_candidate(POOL_TASK, replacement, "codex", durable_handoff=True)
+            store.bind_contract(POOL_TASK, replacement, bound.baseline_sha, bound.version, bound.digest, bound.canonical_json)
+            assert record_implementation_derivation(store, POOL_TASK, current, replacement, kind)
+            assert implementation_identity(store, POOL_TASK, replacement) == frozen
+            assert not gate(replacement).allowed
+            assert not store.has_bound_evidence(POOL_TASK, replacement, EvidenceKind.VALIDATION, bound.digest)
+            assert not store.has_bound_evidence(POOL_TASK, replacement, EvidenceKind.REVIEW, bound.digest)
+            assert Validator().validate(store, POOL_TASK, replacement, project) == EvidenceStatus.PASSED
+            assert review(replacement) == EvidenceStatus.PASSED and not gate(replacement).allowed
+            assert review(replacement) == EvidenceStatus.PASSED and gate(replacement).allowed
+            current = replacement
+        assert store.conn.execute("SELECT COUNT(*) FROM executions WHERE kind='IMPLEMENTATION'").fetchone()[0] == 1
+        store.conn.execute("UPDATE executions SET status='RUNNING' WHERE id=?", (frozen["execution_ids"][0],))
+        store.conn.commit()
+        assert implementation_identity(store, POOL_TASK, current) is None and not gate(current).allowed
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("problem", ["cycle", "unknown_kind", "kind_not_string", "wrong_digest", "wrong_actor", "missing_origin"])
+def test_invalid_mechanical_lineage_is_unavailable(role_rig, problem):
+    from stagemesh.review_identity import IMPLEMENTATION_DERIVATION
+
+    _, store, original, _, _, _, _ = role_rig
+    digest = implementation_identity(store, TASK, original)["command_digest"]
+    derived = "a" * 40
+    store.add_candidate(TASK, derived, "grok" if problem == "wrong_actor" else "codex", durable_handoff=True)
+    payload = {"task_id": TASK, "from_candidate": original, "candidate_sha": derived, "kind": "rebase", "command_digest": digest}
+    if problem == "cycle":
+        other = "b" * 40
+        store.add_candidate(TASK, other, "codex", durable_handoff=True)
+        payload["from_candidate"] = other
+        store.add_audit_event(IMPLEMENTATION_DERIVATION, {**payload, "candidate_sha": other, "from_candidate": derived})
+    elif problem == "unknown_kind":
+        payload["kind"] = "provider_rewrite"
+    elif problem == "kind_not_string":
+        payload["kind"] = ["rebase"]
+    elif problem == "wrong_digest":
+        payload["command_digest"] = "0" * 64
+    elif problem == "missing_origin":
+        store.conn.execute("DELETE FROM audit_events WHERE event_type=?", (IMPLEMENTATION_IDENTITY,))
+        store.conn.commit()
+    store.add_audit_event(IMPLEMENTATION_DERIVATION, payload)
+    assert implementation_identity(store, TASK, derived) is None
+
+
+@pytest.mark.parametrize("shape", ["diamond", "overlong"])
+def test_duplicate_lineage_has_bounded_resolution_work(role_rig, shape):
+    from stagemesh.review_identity import IMPLEMENTATION_DERIVATION
+
+    _, store, original, _, _, _, _ = role_rig
+    frozen = implementation_identity(store, TASK, original)
+    previous = [original]
+    nodes = 1
+    for layer in range(20 if shape == "diamond" else 35):
+        current = []
+        for side in range(2 if shape == "diamond" else 1):
+            sha = f"{1000 + layer * 2 + side:040x}"
+            store.add_candidate(TASK, sha, "codex", durable_handoff=True)
+            nodes += 1
+            for parent in previous:
+                for _duplicate in range(2):
+                    store.add_audit_event(IMPLEMENTATION_DERIVATION, {
+                        "task_id": TASK, "from_candidate": parent, "candidate_sha": sha,
+                        "kind": "rebase", "command_digest": frozen["command_digest"],
+                    })
+            current.append(sha)
+        previous = current
+    queries = []
+    store.conn.set_trace_callback(lambda sql: queries.append(1) if sql.lstrip().upper().startswith("SELECT") else None)
+    try:
+        identity = implementation_identity(store, TASK, previous[0])
+    finally:
+        store.conn.set_trace_callback(None)
+    assert identity == (frozen if shape == "diamond" else None)
+    assert len(queries) <= 4 * nodes + 4  # query count bounds work; no wall-clock benchmark or provider calls
+
+
+@pytest.mark.parametrize("conflict", [False, True])
+def test_real_reconstruction_preserves_origin_only_after_success(tmp_path, conflict):
+    from test_provider_pool import TASK as POOL_TASK
+    from test_provider_pool import Rig
+
+    from stagemesh.concurrency import IntegrationLock
+    from stagemesh.review_identity import IMPLEMENTATION_DERIVATION
+    from stagemesh.serialized_integration import SerializedIntegrator
+
+    rig = Rig(tmp_path, {"codex": "ok", "claude": "ok", "grok": "ok"})
+    store = rig.store
+    try:
+        rig.git.run("checkout", "-b", "historical-baseline")
+        (rig.project / "historical.txt").write_text("side history\n", encoding="utf-8")
+        rig.git.run("add", "--", "historical.txt")
+        rig.git.run("commit", "-qm", "historical baseline")
+        rig.tick(3)  # actual implementation on side history and validation
+        original = store.latest_candidate(POOL_TASK)["sha"]
+        frozen = implementation_identity(store, POOL_TASK, original)
+        assert frozen is not None
+        rig.git.run("checkout", "integration")
+        (rig.project / ("docs/a.md" if conflict else "current.txt")).write_text("current tip\n", encoding="utf-8")
+        rig.git.run("add", "--", "docs/a.md" if conflict else "current.txt")
+        rig.git.run("commit", "-qm", "current integration tip")
+        tip = rig.git.head()
+        integrator = SerializedIntegrator("refs/heads/integration", True, IntegrationLock(rig.project / ".stagemesh/identity-integration.lock"))
+        outcome = integrator.reconstruct_onto_current_tip(store, POOL_TASK, original, rig.project)
+        applied = outcome[0]
+        lineage = store.conn.execute("SELECT payload FROM audit_events WHERE event_type=?", (IMPLEMENTATION_DERIVATION,)).fetchall()
+        assert applied is not conflict, outcome
+        assert rig.ref("integration") == tip  # reconstruction does not integrate anything
+        if conflict:
+            assert not lineage and store.latest_candidate(POOL_TASK)["sha"] == original
+        else:
+            replacement = store.latest_candidate(POOL_TASK)["sha"]
+            assert replacement != original and implementation_identity(store, POOL_TASK, replacement) == frozen
+            assert len(lineage) == 1
+            assert not store.conn.execute("SELECT 1 FROM evidence WHERE task_id=? AND candidate_sha=?", (POOL_TASK, replacement)).fetchone()
+            assert store.get_task(POOL_TASK)["stage"] == Stage.VALIDATE
+        assert store.conn.execute("SELECT COUNT(*) FROM executions WHERE kind='IMPLEMENTATION'").fetchone()[0] == 1
+    finally:
+        store.close()
