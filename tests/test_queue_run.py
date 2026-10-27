@@ -21,7 +21,7 @@ from stagemesh.config import load_config
 from stagemesh.contracts import parse_contract
 from stagemesh.coordinator import Coordinator
 from stagemesh.domain import ExecutionKind, ExecutionStatus, Stage
-from stagemesh.execution import ExecutionResult, communicate_bounded
+from stagemesh.execution import ExecutionResult, communicate_bounded, popen_session_kwargs
 from stagemesh.git import GitWorkspace
 from stagemesh.parallel import (
     queue_control_state,
@@ -449,6 +449,7 @@ def test_stop_during_review_kills_tracked_provider_and_fails_execution(tmp_path:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
+                **popen_session_kwargs(),
             )
             holder["runner"].stop_admission("operator stop", terminate_running=True)
             communicate_bounded(proc, "prompt", 120)
