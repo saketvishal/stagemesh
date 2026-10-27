@@ -427,6 +427,24 @@ class FakeExecutor(Executor):
             return ExecutionResult(ExecutionStatus.FAILED, failure_reason=str(exc))
 
 
+def record_tool_failure(
+    store: Store, task_id: str, execution_id: str, command: list[str] | tuple[str, ...],
+    cwd: Path, code: int | None, stdout: str, stderr: str, reason: str, timed_out: bool,
+) -> None:
+    """Record a confirmed command failure using its pre-prompt command identity.
+
+    Callers must establish process completion and workspace ownership first. This
+    records a recommendation only; it never retries, installs, or claims recovery ran.
+    """
+    evidence = tool_failure_evidence(
+        list(command), cwd, code, stdout, stderr, timed_out=timed_out, reason=None if timed_out else reason,
+    )
+    if evidence is not None:
+        if hasattr(store, "task_audit_events"):
+            evidence["recovery"] = tool_recovery_plan(store, task_id, evidence)
+        record_audit(store, TOOL_FAILURE_EVENT, {"task_id": task_id, "execution_id": execution_id, "evidence": evidence})
+
+
 class SubprocessExecutor(Executor):
     name = "subprocess"
 
@@ -463,13 +481,7 @@ class SubprocessExecutor(Executor):
             return ExecutionResult(ExecutionStatus.FAILED, failure_reason=str(exc))
 
     def _record_tool_evidence(self, store, task_id, execution_id, cwd, code, stdout, stderr, reason, timed_out) -> None:  # type: ignore[no-untyped-def]
-        evidence = tool_failure_evidence(
-            self.command, cwd, code, stdout, stderr, timed_out=timed_out, reason=None if timed_out else reason
-        )
-        if evidence is not None:
-            if hasattr(store, "task_audit_events"):
-                evidence["recovery"] = tool_recovery_plan(store, task_id, evidence)
-            record_audit(store, TOOL_FAILURE_EVENT, {"task_id": task_id, "execution_id": execution_id, "evidence": evidence})
+        record_tool_failure(store, task_id, execution_id, self.command, cwd, code, stdout, stderr, reason, timed_out)
 
     def _run_owned(self, store, task_id, claim_id, project, task, lease, build_prompt) -> ExecutionResult:  # type: ignore[no-untyped-def]
         run_path = lease.path
