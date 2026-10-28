@@ -35,7 +35,7 @@ Parameters map one-to-one onto `ActivityQuery`. All are optional.
 | --- | --- | --- |
 | `state` | `open` or `closed` | Exact match; anything else is `invalid_query` |
 | `task_id` | string | Non-empty, at most 200 characters |
-| `stage` | stage value | Must be a `Stage` value |
+| `stage` | stage value | One of `PLAN`, `IMPLEMENT`, `VALIDATE`, `REVIEW`, `INTEGRATE`, `DONE` (a `Stage` value) |
 | `provider` | string | Non-empty, at most 200 characters; selects executions only |
 | `since` | RFC 3339 timestamp with offset | Inclusive; a value without an offset is `invalid_query` |
 | `until` | RFC 3339 timestamp with offset | Exclusive; `since` must be earlier than `until` |
@@ -71,7 +71,8 @@ output and secrets. `result_code` is limited to a fixed outcome allowlist (`capa
 
 ### Filter interactions the UI must reflect
 
-- `provider` returns executions only; task and audit rows are not provider-attributed.
+- `provider` returns executions only; task and audit rows are not provider-attributed. The filter matches the raw stored
+  actor while the returned `provider` is sanitized, so a row whose `provider` is null (withheld) can still match a filter.
 - `state=open` or any `stage` excludes audit rows (audit events are history only, always closed).
 - `since`/`until` apply to `updated_at` for tasks, `started_at` for executions and `created_at` for audit events.
 
