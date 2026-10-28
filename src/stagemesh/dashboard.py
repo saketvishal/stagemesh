@@ -54,6 +54,7 @@ def summary_pairs(lines: tuple[str, ...]) -> tuple[tuple[str, str], ...]:
             "failed_executions",
             "unknown_executions",
             "unresolved_validation_trees",
+            "unresolved_process_trees",
             "workers",
             "recent_source_events",
             "retry_states",

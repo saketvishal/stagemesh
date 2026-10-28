@@ -15,12 +15,12 @@ import secrets
 import sqlite3
 from collections.abc import Callable, Mapping
 from dataclasses import asdict
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import unquote_to_bytes, urlsplit
 
 from . import __version__
 from .activity import ActivityEntry, ActivityPage, ActivityQuery, ActivityQueryError, query_activity
@@ -50,36 +50,77 @@ def _error(exc: ApiError) -> Response:
     return _json(exc.status, {"error": {"code": exc.code, "message": exc.message}})
 
 
+# Exactly RFC 3339 `date-time`: uppercase T and Z, extended format, mandatory offset, optional fraction of 1-9 digits.
+_RFC3339 = re.compile(
+    r"^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?(Z|[+-](\d{2}):(\d{2}))$"
+)
+_BAD_ESCAPE = re.compile(r"%(?![0-9A-Fa-f]{2})")
+_URL_SAFE = re.compile(r"^[!-~]*$")
+
+
+def _invalid(message: str) -> ApiError:
+    return ApiError(400, "invalid_query", message)
+
+
 def _timestamp(name: str, value: str) -> datetime:
+    """Parse the supported form `YYYY-MM-DDTHH:MM:SS[.f{1,9}](Z|+HH:MM|-HH:MM)`; anything else is rejected."""
+    match = _RFC3339.match(value)
+    if not match:
+        raise _invalid(f"{name} must be an RFC 3339 timestamp such as 2026-01-31T09:30:00Z or 2026-01-31T09:30:00%2B05:30")
+    year, month, day, hour, minute, second = (int(match.group(i)) for i in range(1, 7))
+    micro = int((match.group(7) or "").ljust(6, "0")[:6] or 0)
+    if match.group(8) == "Z":
+        offset = timedelta(0)
+    else:
+        off_h, off_m = int(match.group(9)), int(match.group(10))
+        if off_h > 23 or off_m > 59:
+            raise _invalid(f"{name} has an invalid UTC offset")
+        offset = timedelta(hours=off_h, minutes=off_m) * (-1 if match.group(8)[0] == "-" else 1)
     try:
-        parsed = datetime.fromisoformat(value)
+        return datetime(year, month, day, hour, minute, second, micro, tzinfo=timezone(offset))
     except ValueError:
-        raise ApiError(400, "invalid_query", f"{name} must be an RFC 3339 timestamp with an offset") from None
-    if parsed.tzinfo is None or parsed.utcoffset() is None:
-        raise ApiError(400, "invalid_query", f"{name} must include a UTC offset")
-    return parsed
+        raise _invalid(f"{name} is not a valid calendar time") from None
 
 
 def _integer(name: str, value: str) -> int:
     if not _INT.match(value):
-        raise ApiError(400, "invalid_query", f"{name} must be a non-negative integer")
+        raise _invalid(f"{name} must be a non-negative integer")
     return int(value)
+
+
+def _decode(component: str) -> str:
+    """Strict form decoding: malformed escapes and invalid UTF-8 are errors, never replaced."""
+    if _BAD_ESCAPE.search(component):
+        raise _invalid("malformed percent escape in query string")
+    try:
+        text = unquote_to_bytes(component.replace("+", " ")).decode("utf-8", errors="strict")
+    except UnicodeDecodeError:
+        raise _invalid("query string is not valid UTF-8") from None
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in text):
+        raise _invalid("query string contains control characters")
+    return text
 
 
 def parse_query(raw: str) -> ActivityQuery:
     if len(raw) > _MAX_QUERY_CHARS:
-        raise ApiError(400, "invalid_query", "query string is too long")
-    try:
-        pairs = parse_qs(raw, keep_blank_values=True, strict_parsing=bool(raw), max_num_fields=len(_PARAMS) + 1)
-    except ValueError:
-        raise ApiError(400, "invalid_query", "malformed query string") from None
-    unknown = sorted(set(pairs) - _PARAMS)
-    if unknown:
-        raise ApiError(400, "invalid_query", f"unknown parameter: {unknown[0][:40]}")
-    for name, values in pairs.items():
-        if len(values) != 1:
-            raise ApiError(400, "invalid_query", f"{name} must not be repeated")
-    one = {name: values[0] for name, values in pairs.items()}
+        raise _invalid("query string is too long")
+    if not _URL_SAFE.match(raw):
+        raise _invalid("query string must be percent-encoded ASCII")
+    one: dict[str, str] = {}
+    if raw:
+        segments = raw.split("&")
+        if len(segments) > len(_PARAMS) + 1:
+            raise _invalid("too many query parameters")
+        for segment in segments:
+            name, sep, value = segment.partition("=")
+            if not segment or not sep or not name:
+                raise _invalid("malformed query string")
+            name = _decode(name)
+            if name not in _PARAMS:
+                raise _invalid("unknown parameter")
+            if name in one:
+                raise _invalid(f"{name} must not be repeated")
+            one[name] = _decode(value)
     kwargs: dict[str, Any] = {}
     for name in ("state", "task_id", "stage", "provider"):
         if name in one:

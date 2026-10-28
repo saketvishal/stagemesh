@@ -148,3 +148,135 @@ def test_token_required_and_loopback_only(db):
 def test_parse_query_accepts_offset_timestamps():
     q = parse_query("since=2026-01-01T00:00:00%2B05:30&limit=5")
     assert q.since.utcoffset() == timedelta(hours=5, minutes=30) and q.limit == 5
+
+
+# --- strict query decoding over real HTTP (raw request targets, so no client normalisation) -------------------------
+
+
+def raw_get(base: str, target: str, token: str = TOKEN) -> tuple[int, dict]:
+    import http.client
+
+    host, port = base.removeprefix("http://").split(":")
+    conn = http.client.HTTPConnection(host, int(port), timeout=5)
+    try:
+        conn.request("GET", target, headers={"Authorization": f"Bearer {token}"})
+        resp = conn.getresponse()
+        return resp.status, json.loads(resp.read())
+    finally:
+        conn.close()
+
+
+@pytest.fixture(scope="module")
+def unicode_server(tmp_path_factory):
+    path = tmp_path_factory.mktemp("unicode") / "u.sqlite3"
+    store = Store(path)
+    store.migrate()
+    for i, task_id in enumerate(("café-1", "100%", "plain")):
+        store.conn.execute(
+            "INSERT INTO tasks (id, title, stage, status, source, created_at, updated_at) VALUES (?,?,?,?,?,?,?)",
+            (task_id, "t", "IMPLEMENT", "OPEN", "local", 1, (BASE + timedelta(minutes=i)).timestamp()),
+        )
+    store.conn.commit()
+    store.close()
+    httpd, _ = make_server(path, token=TOKEN)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{httpd.server_address[1]}"
+    httpd.shutdown()
+    httpd.server_close()
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "task_id=%FF",  # invalid UTF-8 must not become U+FFFD
+        "task_id=%C3",  # truncated multi-byte sequence
+        "task_id=%",  # dangling escape
+        "task_id=%zz",  # non-hex escape
+        "task_id=%2",  # short escape
+        "task_id=abc%",
+        "%FF=1",  # malformed escape in a parameter name
+        "task_id=%00",  # control character
+        "task_id=a%0Ab",
+        "since=20260101T000000Z",  # ISO 8601 basic format is not RFC 3339
+        "since=2026-01-01",  # date only
+        "since=2026-01-01T00:00:00",  # no offset
+        "since=2026-01-01t00:00:00z",  # lowercase designators
+        "since=2026-01-01%2000:00:00Z",  # space instead of T
+        "since=2026-01-01T00:00Z",  # no seconds
+        "since=2026-01-01T00:00:00+05:30",  # unencoded '+' decodes to a space
+        "since=2026-01-01T00:00:00%2B0530",  # offset without colon
+        "since=2026-01-01T24:00:00Z",
+        "since=2026-01-01T00:00:60Z",  # leap second not representable
+        "since=2026-02-30T00:00:00Z",
+        "since=2026-01-01T00:00:00%2B24:00",
+        "since=2026-01-01T00:00:00.Z",
+        "since=2026-01-01T00:00:00.1234567890Z",
+        "since=",
+        "task_id=a&&limit=1",  # empty segment
+        "limit=1&",
+        "task_id",  # no '='
+        "=x",
+        "task_id=a&task_id=b",
+        "task_id=a&%74ask_id=b",  # repeated after decoding the name
+        "provider=",
+        "bogus=1",
+        "café=1".encode().decode("latin-1"),  # raw non-ASCII must be percent-encoded
+        "task_id=" + "a" * 3000,
+    ],
+)
+def test_malformed_queries_are_rejected_over_http(unicode_server, query):
+    status, body = raw_get(unicode_server, "/api/v1/activity?" + query) if query.isascii() else _raw_bytes(unicode_server, query)
+    assert status == 400 and body["error"]["code"] == "invalid_query"
+    assert "entries" not in body
+    dumped = json.dumps(body)
+    assert query not in dumped and "caf" not in dumped and "aaaa" not in dumped  # no echo of request values
+
+
+def _raw_bytes(base: str, query: str) -> tuple[int, dict]:
+    import socket
+
+    host, port = base.removeprefix("http://").split(":")
+    with socket.create_connection((host, int(port)), timeout=5) as sock:
+        request = f"GET /api/v1/activity?{query} HTTP/1.1\r\nHost: {host}:{port}\r\nAuthorization: Bearer {TOKEN}\r\nConnection: close\r\n\r\n"
+        sock.sendall(request.encode("latin-1"))
+        data = b""
+        while chunk := sock.recv(65536):
+            data += chunk
+    head, _, payload = data.partition(b"\r\n\r\n")
+    return int(head.split()[1]), json.loads(payload)
+
+
+def test_raw_invalid_utf8_bytes_in_target_are_rejected(unicode_server):
+    status, body = _raw_bytes(unicode_server, "task_id=ÿ")
+    assert status == 400 and body["error"]["code"] == "invalid_query"
+
+
+@pytest.mark.parametrize(
+    "query,expected",
+    [
+        ("task_id=caf%C3%A9-1", ["café-1"]),  # valid encoded Unicode
+        ("task_id=100%25", ["100%"]),  # valid encoded percent
+        ("task_id=plain&limit=5&offset=0", ["plain"]),
+        ("task_id=plain&since=2026-01-01T00:00:00Z", ["plain"]),
+        ("task_id=plain&since=2026-01-01T05:30:00%2B05:30", ["plain"]),  # plus offset, same instant as 00:00Z
+        ("task_id=plain&since=2025-12-31T18:30:00-05:30", ["plain"]),
+        ("task_id=plain&since=2026-01-01T00:00:00.000Z&until=2026-01-01T00:05:00.123456789Z", ["plain"]),
+        ("task_id=plain&since=2026-01-01T00:03:00Z", []),  # task updated at 00:02 is before the window
+        ("task_id=plain&until=2026-01-01T00:02:00Z", []),  # until is exclusive
+    ],
+)
+def test_valid_encodings_and_timestamp_forms_still_work(unicode_server, query, expected):
+    status, body = raw_get(unicode_server, "/api/v1/activity?" + query)
+    assert status == 200
+    assert [e["id"] for e in body["entries"] if e["kind"] == "task"] == expected
+
+
+def test_decoded_blank_and_literal_plus_follow_form_rules(unicode_server):
+    # '+' is a space in form decoding, so it can never smuggle an offset
+    status, _ = raw_get(unicode_server, "/api/v1/activity?task_id=a+b")
+    assert status == 200  # a task id containing a space is a valid (empty) match, not an error
+    assert raw_get(unicode_server, "/api/v1/activity?task_id=")[0] == 400
+
+
+def test_credential_is_checked_before_query_parsing(unicode_server):
+    assert raw_get(unicode_server, "/api/v1/activity?task_id=%FF", token="wrong")[0] == 401  # auth is checked first

@@ -8,16 +8,13 @@ import re
 import shlex
 import sqlite3
 import sys
-import uuid
 import threading
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import __version__
-from .profile import load_profile
-from .profile_default import ensure_profile, is_placeholder
-from .runtime_info import format_runtime, runtime_info
 from .acceptance import AcceptanceValidationError, local_acceptance_report
 from .acceptance_matrix import AcceptanceMatrixValidationError, acceptance_matrix
 from .audit import AuditValidationError, export_audit_jsonl
@@ -27,21 +24,27 @@ from .autonomy.isolation import check_isolation
 from .autonomy.review_adapter import supervise_reviewer
 from .autonomy.supervisor import Supervisor
 from .autonomy.wiring import SUPERVISED_MIN_REFRESH_ATTEMPTS, load_settings
+from .blocked_recovery import can_auto_retry
 from .capacity import CapacityKind, CapacityRegistry, CapacityValidationError
 from .ci import CIValidationError, broken_future_feature_gate, default_gates
 from .ci_wait import decide_ci_wait
 from .completion_audit import CompletionAuditValidationError, completion_audit
 from .concurrency import IntegrationLock, ProviderLimiter
 from .config import BALANCED_PROVIDER_POOLS, ConfigValidationError, load_config
-from .config_migration import config_path_for, plan_provider_stage_command_migration, write_provider_stage_command_migration
+from .config_migration import (
+    config_path_for,
+    plan_provider_stage_command_migration,
+    write_provider_stage_command_migration,
+)
+from .contract_check import check_contract, format_report
 from .coordinator import Coordinator, TargetSelection, TargetSelectionError
 from .dashboard import dashboard_summary, render_dashboard
 from .demo import DemoValidationError, create_demo_project
 from .diagnosis import DiagnosisPolicy, diagnose, format_findings, make_adapter_analyst
-from .efficiency import BudgetPolicy
 from .distributed import WorkQueue, WorkQueueError
 from .domain import TaskStatus
 from .e2e_acceptance import EndToEndAcceptanceValidationError, end_to_end_acceptance
+from .efficiency import BudgetPolicy
 from .external_evidence import (
     ExternalEvidenceValidationError,
     external_evidence_records,
@@ -49,8 +52,6 @@ from .external_evidence import (
 )
 from .final_report import FinalReportValidationError, candidate_sha, render_final_report
 from .git import GitWorkspace
-from .blocked_recovery import can_auto_retry
-from .provider_cooldown import active_cooldowns, clear_cooldown, format_cooldowns
 from .git_identity import identity_report
 from .github import GitHubClient, UrlLibGitHubTransport, detect_github_repository
 from .github_acceptance import run_github_acceptance
@@ -76,6 +77,8 @@ from .persistence import Store, StoreValidationError
 from .persistence_backends import probe_backend
 from .postgres_store import PostgresStore, PostgresUnavailable, postgres_schema_contract
 from .process_identity import current_process_identity
+from .profile import load_profile
+from .profile_default import ensure_profile, is_placeholder
 from .provider_acceptance import (
     _latest_live_acceptance_payload,
     live_acceptance_status,
@@ -84,6 +87,7 @@ from .provider_acceptance import (
     run_live_provider_smoke,
     run_provider_acceptance,
 )
+from .provider_cooldown import active_cooldowns, clear_cooldown, format_cooldowns
 from .provider_pool import (
     IMPLEMENT,
     REVIEW,
@@ -97,8 +101,15 @@ from .providers import ProviderValidationError, adapters_from_config, stage_comm
 from .queue_reconcile import ReconcileOptions, reconcile_queue
 from .queue_run import QueueRunner
 from .queue_visibility import format_queue_control, queue_control_report
-from .contract_check import check_contract, format_report
-from .recovery import RecoveryRefusal, advance_baseline, format_doctor, rebaseline_task, rebind_contract, resume_task, task_doctor
+from .recovery import (
+    RecoveryRefusal,
+    advance_baseline,
+    format_doctor,
+    rebaseline_task,
+    rebind_contract,
+    resume_task,
+    task_doctor,
+)
 from .redaction import redact_command_secrets, redact_url_credentials
 from .registry import (
     GlobalRegistry,
@@ -112,9 +123,10 @@ from .retry import RetryRegistry, RetryValidationError
 from .review import Reviewer
 from .routing import RoutingMode
 from .run_ready import RunSummary, format_excerpt, format_step_update, format_stop, run_ready
-from .stage_dispatch import stage_dispatch_refusal
+from .runtime_info import format_runtime, runtime_info
 from .security import SecurityBoundaryError, WorkspaceBoundary
 from .serialized_integration import SerializedIntegrator
+from .stage_dispatch import stage_dispatch_refusal
 from .task_sources import (
     GitHubOutboundSync,
     LocalBacklogSource,
@@ -1074,7 +1086,14 @@ def command_efficiency(args: argparse.Namespace) -> int:
 def command_follow_up(args: argparse.Namespace) -> int:
     import subprocess
 
-    from .delivery_followup import GhHosting, cancel_follow_up, rearm_follow_up, repository_of, run_follow_up, validated_resume_argv
+    from .delivery_followup import (
+        GhHosting,
+        cancel_follow_up,
+        rearm_follow_up,
+        repository_of,
+        run_follow_up,
+        validated_resume_argv,
+    )
     from .follow_through import active_follow_ups, follow_up_record
     from .followup_scheduler import default_scheduler
 
@@ -1416,7 +1435,14 @@ def _command_driver(args: argparse.Namespace) -> int:
 def command_survivor_wave(args: argparse.Namespace) -> int:
     from .baseline import resolve_integration_ref
     from .runtime_freshness import check_runtime
-    from .survivor_wave import INTEGRATION_LOCAL, STAGING_REF, format_report, parse_task_ids, prepare_staging_ref, run_wave
+    from .survivor_wave import (
+        INTEGRATION_LOCAL,
+        STAGING_REF,
+        format_report,
+        parse_task_ids,
+        prepare_staging_ref,
+        run_wave,
+    )
 
     task_ids = parse_task_ids(args.tasks)
     if not task_ids:
@@ -1706,7 +1732,8 @@ def command_status(args: argparse.Namespace) -> int:
         f"running={report.running_count} "
         f"stale={report.stale_execution_count} "
         f"source_ready={report.source_ready_count} "
-        f"unresolved_validation={report.unresolved_validation_count}"
+        f"unresolved_validation={report.unresolved_validation_count} "
+        f"unresolved_process_trees={report.unresolved_process_tree_count}"
     )
     for reason, count in report.blocked_reason_buckets.items():
         print(f"blocked_bucket {reason}: {count}")
@@ -1814,6 +1841,7 @@ def _health_scope_fields(report) -> dict[str, object]:
         "current_failed_execution_count": report.current_failed_execution_count,
         "stale_execution_count": report.stale_execution_count,
         "unresolved_validation_count": report.unresolved_validation_count,
+        "unresolved_process_tree_count": report.unresolved_process_tree_count,
     }
 
 
@@ -2443,6 +2471,7 @@ def command_health(args: argparse.Namespace) -> int:
     print(f"failed_executions_current: {report.current_failed_execution_count}")
     print(f"stale_running_executions: {report.stale_execution_count}")
     print(f"unresolved_validation_trees: {report.unresolved_validation_count}")
+    print(f"unresolved_process_trees: {report.unresolved_process_tree_count}")
     print(f"unknown_executions: {report.unknown_execution_count}")
     print(f"queue_admission: {control['state']}")
     print(f"queue_active_executions: {len(control['active_executions'])}")

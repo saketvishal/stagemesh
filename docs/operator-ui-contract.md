@@ -39,10 +39,20 @@ Parameters map one-to-one onto `ActivityQuery`. All are optional.
 | `task_id` | string | Non-empty, at most 200 characters |
 | `stage` | stage value | One of `PLAN`, `IMPLEMENT`, `VALIDATE`, `REVIEW`, `INTEGRATE`, `DONE` (a `Stage` value) |
 | `provider` | string | Non-empty, at most 200 characters; selects executions only |
-| `since` | RFC 3339 timestamp with offset | Inclusive; a value without an offset is `invalid_query` |
-| `until` | RFC 3339 timestamp with offset | Exclusive; `since` must be earlier than `until` |
+| `since` | RFC 3339 timestamp | Inclusive; see "Timestamp form" |
+| `until` | RFC 3339 timestamp | Exclusive; `since` must be earlier than `until` |
 | `limit` | integer | 1 to 200, default 50 |
 | `offset` | integer | 0 to 999 (must be below the scan cap of 1000) |
+
+Timestamp form: exactly `YYYY-MM-DDTHH:MM:SS[.f]Z` or `YYYY-MM-DDTHH:MM:SS[.f]+HH:MM` / `-HH:MM`, where `.f` is 1 to 9
+fraction digits. `T` and `Z` are uppercase, the extended (hyphen and colon) form is required, and so is an offset. Date-only
+values, ISO 8601 basic format (`20260101T000000Z`), lowercase designators, a space in place of `T`, offsets without a colon and
+leap seconds are `invalid_query`. A `+` offset must be sent as `%2B`; a literal `+` is a space under form decoding.
+
+Query-string decoding is strict. The raw query must be percent-encoded ASCII. A `%` not followed by two hex digits, a decoded
+value that is not valid UTF-8 (`%FF`), and control characters (`%00`) are `invalid_query`; invalid bytes are never replaced with
+U+FFFD. Valid percent-encoded Unicode (`caf%C3%A9`) and a literal percent (`100%25`) decode normally. Empty segments, a segment
+without `=`, unknown names and repeated names (compared after decoding) are rejected, and error messages never echo values.
 
 Time zones: the server compares instants and returns UTC. The UI converts the operator's local day, week or custom range to
 absolute offset-bearing `since`/`until` before calling, so "Today" is the operator's local midnight to midnight, not UTC's.

@@ -10,7 +10,12 @@ from .audit import record_audit
 from .contract_binding import contract_for_candidate
 from .contracts import candidate_hygiene_findings, changed_files
 from .domain import EvidenceKind, EvidenceStatus, ExecutionKind, Stage, TaskStatus
-from .execution_ownership import recovery_identity_state, validation_tree_unresolved
+from .execution_ownership import (
+    execution_tree_unresolved,
+    recovery_identity_state,
+    tree_cleanup_state,
+    validation_tree_unresolved,
+)
 from .git import GitError, GitWorkspace
 from .lifecycle import evidence_allows_advance
 from .persistence import Store
@@ -29,7 +34,8 @@ def _age(now: float, created_at: float | None) -> float | None:
 
 def _process_state(store: Store, execution_id: str, pid: int | None) -> str:
     execution = store.conn.execute("SELECT * FROM executions WHERE id=?", (execution_id,)).fetchone()
-    parent_state = classify_process(store.execution_process_identity(execution_id), process_identity(pid))
+    saved = store.execution_process_identity(execution_id)
+    parent_state = classify_process(saved, process_identity(saved.pid))
     return recovery_identity_state(execution, parent_state)
 
 
@@ -93,7 +99,7 @@ def task_details(store: Store, task_id: str, now: float | None = None) -> dict[s
             "claim_id": e["claim_id"],
             "age_seconds": _age(now, e["started_at"]),
             "process_state": _process_state(store, e["id"], e["pid"]),
-            **({"cleanup_state": "UNCONFIRMED_VALIDATION_TREE"} if validation_tree_unresolved(e) else {}),
+            **({"cleanup_state": tree_cleanup_state(e)} if execution_tree_unresolved(e) else {}),
         }
         for e in executions
     ]
@@ -178,8 +184,14 @@ def release_unknown_execution(store: Store, task_id: str, execution_id: str, rea
         "claim_id": execution["claim_id"], "pid": execution["pid"], "process_state": state,
         "reason": reason, "operator": _operator(), "operator_action": "RELEASE_UNKNOWN_EXECUTION",
     }
-    if validation_tree_unresolved(execution):
-        released = store.release_inspected_validation_execution(execution_id, task_id, payload)
+    if execution_tree_unresolved(execution):
+        payload["process_tree_scope"] = execution["process_tree_scope"]
+        payload["process_identity"] = {
+            key: execution[key] for key in ("pid", "process_create_time", "boot_id", "executable")
+        }
+        release = (store.release_inspected_validation_execution if validation_tree_unresolved(execution)
+                   else store.release_inspected_execution_tree)
+        released = release(execution_id, task_id, payload)
         action = "RELEASED_BY_OPERATOR" if released else "NOT_RECOVERABLE"
         if not released:
             record_audit(store, "recovery.operator_release_unknown", {**payload, "outcome": action})
