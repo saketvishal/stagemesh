@@ -7,14 +7,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .audit import record_audit
 from .auto_plan import AutoPlanError, create_contract, refresh_stale_generated_contract
 from .blocked_recovery import auto_retry_blocked_provider_failures, exhaustion_message
-from .audit import record_audit
 from .config import AdverseReviewPolicy, ConfigValidationError, TaskSelectionConfig, load_config
 from .contract_binding import contract_for_candidate
 from .contract_check import contract_section_sizes
 from .contract_feasibility import check_contract_feasibility
-from .delivery_state import task_delivery
 from .contracts import (
     ContractError,
     bind_contract,
@@ -24,6 +23,7 @@ from .contracts import (
     task_contract_path,
 )
 from .coordinator import Coordinator, TargetSelection, TargetSelectionError
+from .delivery_state import task_delivery
 from .diagnosis import format_findings
 from .domain import EvidenceKind, ExecutionKind, Stage, TaskStatus
 from .efficiency import BUDGET_EXHAUSTED, BudgetPolicy, block_reason, check_task_budget
@@ -33,17 +33,23 @@ from .observability import health
 from .operator_actions import recover_stale, task_details
 from .persistence import MAX_CANONICAL_CONTRACT_CHARS, Store
 from .queue_control import OperatorStopRequested, QueueStopControl, provider_stop_scope
-from .review import adverse_gate
 from .recovery import (
     auto_rebaseline_blocked_stale_baselines,
     auto_rebind_blocked_missing_validation_gates,
     auto_reintegrate_blocked_runtime_failures,
     auto_revalidate_blocked_validation_gates,
 )
+from .review import adverse_gate
 from .scheduling import Scheduler
-from .stage_dispatch import stage_dispatch_refusal
-from .step_progress import STEP_CAP_STALL_LIMIT, ProgressState, progress_state, record_step_cap, unproductive_step_caps
 from .spec_planning import evaluate_planning_gate, load_planning_artifacts
+from .stage_dispatch import stage_dispatch_refusal
+from .step_progress import (
+    STEP_CAP_STALL_LIMIT,
+    ProgressState,
+    progress_state,
+    record_step_cap,
+    unproductive_step_caps,
+)
 from .task_selection import Candidate, Selection, SelectionRefusal, contract_state, select_next_task
 from .timing import execution_timings, format_duration, step_duration
 from .workspace_guard import EXTERNAL_WORKSPACE_MUTATION
@@ -102,8 +108,8 @@ def current_problems(store: Store) -> tuple[str, ...]:
     # policy: unknown parent identity alone does not stop unrelated work, while
     # a provably dead parent remains a global stale-parent hazard.
     problems = tuple(problem for problem in report.current_problems
-                     if problem not in _IGNORED_PROBLEMS and problem != "unresolved_validation_trees")
-    if report.dead_validation_parent_count and "stale_running_executions" not in problems:
+                     if problem not in _IGNORED_PROBLEMS and problem not in {"unresolved_validation_trees", "unresolved_process_trees"})
+    if (report.dead_validation_parent_count or report.dead_process_tree_root_count) and "stale_running_executions" not in problems:
         problems += ("stale_running_executions",)
     return problems
 
@@ -135,6 +141,7 @@ def _recover_detached_builtin_executions(store: Store, task_id: str, *, include_
     """Terminalize built-in stage executions that have no owner identity (rows written before owners were recorded).
 
     Validation may own child gates: neither an ownerless row nor a dead parent proves tree cleanup, so its durable fence stays.
+    Explicit subprocess-tree authority is preserved by the Store backstop; it is never inferred from configurable actors.
     Legacy ownerless review/integration rows retain their existing recovery for the one task this caller is about to drive
     (`include_unidentified`), never in a sweep across tasks where they may belong to a live sibling runner.
     """

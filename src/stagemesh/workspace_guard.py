@@ -30,6 +30,7 @@ from typing import Any
 
 from .audit import record_audit
 from .domain import EvidenceKind, EvidenceStatus, ExecutionStatus, ProcessIdentity
+from .execution_ownership import execution_tree_unresolved, process_tree_scope
 from .git import GitError, GitWorkspace
 from .persistence import Store
 from .process_identity import classify_process, process_identity
@@ -661,6 +662,15 @@ def _anchor_sha(store: Store, task_id: str) -> str | None:
 def acquire_workspace(store: Store, project: Path, task_id: str, kind: str, *, claim_id: str | None = None) -> WorkspaceLease:
     """Create or reuse the task's worktree, take its exclusive lease and prove it is exactly what the last authorized execution sealed."""
     root = Path(project).resolve()
+    held = [row for row in store.running_executions() if row["task_id"] == task_id
+            and process_tree_scope(row) is not None and execution_tree_unresolved(row)]
+    if held:
+        raise _mutation(
+            store, task_id=task_id, stage=f"{kind}:acquire", reason="workspace_owned_by_another_execution",
+            workspace=root, expected_sha=None, observed_sha=None,
+            execution_id=str(held[0]["id"]), claim_id=claim_id,
+            detail="subprocess tree cleanup is unconfirmed; workspace takeover refused",
+        )
     GitWorkspace(root).init_if_needed()  # as prepare_task_workspace does first: the project may not exist yet, and the config read below needs it
     existed = (task_workspace(root, task_id) / ".git").exists()
     path = prepare_task_workspace(root, task_id)

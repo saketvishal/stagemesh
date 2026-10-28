@@ -25,7 +25,7 @@ from . import __version__
 from .config import ConfigValidationError, load_config
 from .contracts import task_contract_path
 from .domain import EvidenceKind, Stage, TaskStatus
-from .execution_ownership import recovery_identity_state, validation_tree_unresolved
+from .execution_ownership import recovery_identity_state, tree_cleanup_state
 from .git import GitError, GitWorkspace
 from .observability import health
 from .operator_actions import task_details
@@ -348,7 +348,7 @@ def _active_executions(store: Store, now: float) -> list[dict[str, Any]]:
                 "age_seconds": round(now - row["started_at"], 3),
                 "process_state": state,
                 "parent_process_state": parent_state,
-                "cleanup_state": "UNCONFIRMED_VALIDATION_TREE" if validation_tree_unresolved(row) else None,
+                "cleanup_state": tree_cleanup_state(row),
             }
         )
     return out[:MAX_ROWS]
@@ -382,6 +382,7 @@ def _queue_control(store: Store, tasks: list[Any], dirty: list[str], now: float)
             "unknown_executions": report.unknown_execution_count,
             "stale_executions": report.stale_execution_count,
             "unresolved_validation_trees": report.unresolved_validation_count,
+            "unresolved_process_trees": report.unresolved_process_tree_count,
         },
         "work_packets": {
             "by_status": packet_status,
@@ -438,6 +439,11 @@ def _next_action(tasks: list[dict[str, Any]], queue: dict[str, Any], active: lis
     def action(command: str | None, reason: str) -> dict[str, Any]:
         return {"command": command, "reason": reason, "advisory": True}
 
+    if queue.get("health", {}).get("unresolved_process_trees", 0) or any(
+        e.get("cleanup_state") in {"UNCONFIRMED_RESEARCH_TREE", "UNCONFIRMED_PROCESS_TREE"} and e["process_state"] != "LIVE"
+        for e in active
+    ):
+        return action(None, "an unfinished researcher/process tree requires inspection of surviving processes and retained work; only after inspection use recover-stale --release-unknown with the exact --execution and a reason")
     if queue.get("health", {}).get("unresolved_validation_trees", 0) or any(e.get("cleanup_state") == "UNCONFIRMED_VALIDATION_TREE" and e["process_state"] != "LIVE" for e in active):
         return action(None, "an unfinished validation tree requires inspection of surviving processes and retained work; only after inspection use recover-stale --release-unknown with the exact --execution and a reason")
     dead = [e for e in active if e["process_state"] == "DEAD"]
