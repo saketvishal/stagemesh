@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .audit import record_audit
-from .auto_plan import AutoPlanError, create_contract, refresh_stale_generated_contract
+from .auto_plan import AutoPlanError, create_contract, refresh_stale_generated_contract, task_labels
 from .blocked_recovery import auto_retry_blocked_provider_failures, exhaustion_message
 from .config import AdverseReviewPolicy, ConfigValidationError, TaskSelectionConfig, load_config
 from .contract_binding import contract_for_candidate
@@ -50,7 +50,7 @@ from .step_progress import (
     record_step_cap,
     unproductive_step_caps,
 )
-from .task_selection import Candidate, Selection, SelectionRefusal, contract_state, select_next_task
+from .task_selection import Candidate, Selection, SelectionRefusal, contract_state, has_exact_label, select_next_task
 from .timing import execution_timings, format_duration, step_duration
 from .workspace_guard import EXTERNAL_WORKSPACE_MUTATION
 from .workspaces import task_workspace, worktree_root
@@ -193,6 +193,15 @@ def choose_task(
     """--task bypasses ranking only; objective-root/history safety still applies."""
     if requested is not None:
         _require_runnable_task(store, requested)
+        if policy.required_label:
+            task = store.get_task(requested)
+            if task is None or not has_exact_label(task_labels(store, task), policy.required_label):
+                raise RunReadyRefusal(
+                    "label_selector_conflict",
+                    f"task {requested} does not carry the active label selector {policy.required_label!r}; "
+                    "--task cannot bypass --label",
+                    task_id=requested,
+                )
         return Selection("explicit", requested, "explicit --task (selection policy bypassed)")
     try:
         return select_next_task(store, project, policy, auto_plan=auto_plan, chooser=chooser)

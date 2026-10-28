@@ -11,7 +11,7 @@ import sys
 import threading
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from . import __version__
@@ -30,7 +30,7 @@ from .ci import CIValidationError, broken_future_feature_gate, default_gates
 from .ci_wait import decide_ci_wait
 from .completion_audit import CompletionAuditValidationError, completion_audit
 from .concurrency import IntegrationLock, ProviderLimiter
-from .config import BALANCED_PROVIDER_POOLS, ConfigValidationError, load_config
+from .config import BALANCED_PROVIDER_POOLS, ConfigValidationError, StageMeshConfig, TaskSelectionConfig, load_config
 from .config_migration import (
     config_path_for,
     plan_provider_stage_command_migration,
@@ -1544,7 +1544,25 @@ def command_handoff_export(args: argparse.Namespace) -> int:
     return 0
 
 
+def _label_selector(args: argparse.Namespace) -> tuple[str | None, str | None]:
+    """The operator's exact-label run selector and an error message when it is unusable."""
+    raw = getattr(args, "label", None)
+    if raw is None:
+        return None, None
+    label = raw.strip()
+    return (label or None), (None if label else "--label must not be empty")
+
+
+def _selection_policy(config: StageMeshConfig, args: argparse.Namespace) -> TaskSelectionConfig:
+    label, _ = _label_selector(args)
+    return replace(config.task_selection, required_label=label) if label else config.task_selection
+
+
 def command_continue(args: argparse.Namespace) -> int:
+    label, label_error = _label_selector(args)
+    if label_error or (label and getattr(args, "once", False)):
+        print(label_error or "--label selects the supervised or --parallel task flow and cannot be combined with --once", file=sys.stderr)
+        return 2
     parallel = getattr(args, "parallel", None)
     if parallel is not None:
         if parallel < 1:
@@ -1907,7 +1925,7 @@ def command_run_ready(args: argparse.Namespace) -> int:
             summary = run_ready(
                 store, project, make_coordinator, task_id=requested, max_steps=getattr(args, "max_steps", 50), on_step=on_step, on_start=on_start,
                 auto_plan=not getattr(args, "no_auto_plan", False),
-                policy=config.task_selection,
+                policy=_selection_policy(config, args),
                 chooser=_interactive_chooser if getattr(args, "choose", False) else None,
                 worktree_root_path=config.runtime.worktree_root if config.runtime else None,
                 no_auto_retry=held_for_retry,
@@ -2026,6 +2044,10 @@ QUEUE_RESUME_WARNING = (
 
 
 def command_queue_run(args: argparse.Namespace) -> int:
+    _, label_error = _label_selector(args)
+    if label_error:
+        print(label_error, file=sys.stderr)
+        return 2
     if not getattr(args, "legacy_unsafe", False):
         print(QUEUE_RUN_REFUSAL, file=sys.stderr)
         return 2
@@ -2129,7 +2151,7 @@ def command_run_parallel(args: argparse.Namespace, *, queue: bool = False) -> in
         project,
         make_coordinator,
         concurrency=args.parallel,
-        policy=config.task_selection,
+        policy=_selection_policy(config, args),
         auto_plan=not getattr(args, "no_auto_plan", False),
         max_steps=getattr(args, "max_steps", 50),
         limiter=limiter,
@@ -2142,6 +2164,9 @@ def command_run_parallel(args: argparse.Namespace, *, queue: bool = False) -> in
             else {}
         ),
     )
+    selector, _ = _label_selector(args)
+    if selector:
+        runner.summary.focus = {**(runner.summary.focus or {}), "label": selector}
     wiring.on_integration_event = lambda task_id, event, detail: runner.note(task_id, event, **detail)
     emit(
         "run",
@@ -2158,7 +2183,7 @@ def command_run_parallel(args: argparse.Namespace, *, queue: bool = False) -> in
                         "active focus: "
                         + ", ".join(f"{key}={value!r}" for key, value in runner.summary.focus.items())
                     ]
-                    if queue and runner.summary.focus
+                    if runner.summary.focus
                     else []
                 ),
                 *format_cooldowns(active_cooldowns(store, config.provider_failure_cooldown_seconds)),
@@ -4035,6 +4060,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Only admit OPEN tasks whose title, labels, source metadata or task metadata match this text",
     )
     queue_cmd.add_argument(
+        "--label",
+        help="Only admit OPEN tasks that carry exactly this task-source label (case-insensitive exact match, never title text); out-of-label work is never a fallback",
+    )
+    queue_cmd.add_argument(
         "--sprint",
         help="Only admit OPEN tasks whose title, labels, source metadata or task metadata match this sprint/week name",
     )
@@ -4092,6 +4121,10 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         metavar="N",
         help="Run up to N independent eligible tasks at once, each in its own worktree, with serialized integration",
+    )
+    cont.add_argument(
+        "--label",
+        help="Only admit OPEN tasks that carry exactly this task-source label (case-insensitive exact match); --task cannot bypass it",
     )
     cont.add_argument("--json", action="store_true")
     cont.add_argument("--verbose", action="store_true", help="Show provider selection and setup trace lines")

@@ -109,6 +109,15 @@ def _excluded(labels: tuple[str, ...], excluded: tuple[str, ...]) -> str | None:
     return next((label for label in excluded if label.casefold() in folded), None)
 
 
+def label_selector_reason(label: str) -> str:
+    return f"outside label selector {label!r}"
+
+
+def has_exact_label(labels: tuple[str, ...], wanted: str) -> bool:
+    """GitHub label identity is case-insensitive and exact; titles, bodies and substrings never match."""
+    return wanted.strip().casefold() in {label.casefold() for label in labels}
+
+
 POOL_EXHAUSTION_MARKERS = (
     "all_implementation_providers_no_progress",
     "all_implementation_providers_exhausted",
@@ -241,6 +250,10 @@ def _collect(
         task_id = str(task["id"])
         if task["status"] != TaskStatus.OPEN or task["stage"] == Stage.DONE:
             continue
+        labels = task_labels(store, task)
+        if policy.required_label and not has_exact_label(labels, policy.required_label):
+            skipped.append({"task_id": task_id, "reason": label_selector_reason(policy.required_label)})
+            continue
         objective_reason = objective_root_reason(store, task)
         if objective_reason is not None:
             skipped.append({"task_id": task_id, "reason": objective_reason})
@@ -249,7 +262,6 @@ def _collect(
         if not decision.eligible:
             skipped.append({"task_id": task_id, "reason": decision.reason})
             continue
-        labels = task_labels(store, task)
         blocked_by = _excluded(labels, policy.excluded_labels)
         if blocked_by is not None:
             skipped.append({"task_id": task_id, "reason": f"excluded label {blocked_by}"})
@@ -286,6 +298,7 @@ def _policy_info(policy: TaskSelectionConfig) -> dict[str, Any]:
     return {
         "auto_select": policy.auto_select,
         "order": ["priority_label", "preferred_label", "valid_contract", policy.tie_breaker],
+        **({"required_label": policy.required_label} if policy.required_label else {}),
         "priority_labels": list(policy.priority_labels),
         "tie_breaker": policy.tie_breaker,
     }
@@ -402,4 +415,9 @@ def _why_better(best: Candidate, other: Candidate, policy: TaskSelectionConfig) 
 def _skipped_text(skipped: list[dict[str, str]]) -> str:
     if not skipped:
         return ""
-    return " (skipped: " + "; ".join(f"{s['task_id']}: {s['reason']}" for s in skipped[:10]) + ")"
+    outside = [s for s in skipped if s["reason"].startswith("outside label selector")]
+    inside = [s for s in skipped if s not in outside]  # in-label reasons first so they are not buried by unrelated backlog
+    text = " (skipped: " + "; ".join(f"{s['task_id']}: {s['reason']}" for s in inside[:10]) + ")" if inside else ""
+    if outside:
+        text += f" ({len(outside)} open task(s) {outside[0]['reason']}; no unlabelled fallback)"
+    return text

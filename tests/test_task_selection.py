@@ -303,3 +303,63 @@ def test_task_selection_config_is_validated(tmp_path: Path, bad: dict) -> None:
     (tmp_path / ".stagemesh" / "config.json").write_text(json.dumps({"task_selection": bad}), encoding="utf-8")
     with pytest.raises(ConfigValidationError):
         load_config(tmp_path)
+
+
+def test_label_selector_admits_only_exact_label_matches(tmp_path: Path) -> None:
+    project = _project(
+        tmp_path,
+        ["T-1", "T-2", "T-3", "T-4"],
+        labels={
+            "T-1": ["jjse-demo"],
+            "T-2": ["jjse-pilot"],
+            "T-3": ["JJSE-Demo"],
+            "T-4": ["jjse-demo-extra", "priority:p0"],
+        },
+    )
+    code, result = _continue(project, "--label", "jjse-demo")
+    assert code == 0 and result["task_id"] == "T-1"
+    reasons = {s["task_id"]: s["reason"] for s in result["selection"]["skipped"]}
+    assert reasons["T-2"] == "outside label selector 'jjse-demo'"
+    assert reasons["T-4"] == "outside label selector 'jjse-demo'"  # substring and higher priority never qualify
+    assert "T-3" not in reasons  # GitHub label identity is case-insensitive
+
+
+def test_label_selector_never_falls_back_to_unlabelled_work(tmp_path: Path) -> None:
+    project = _project(tmp_path, ["T-1", "T-2"], labels={"T-1": ["other"], "T-2": []})
+    code, result = _continue(project, "--label", "jjse-demo")
+    assert code == 2 and result["stop_reason"] == "REFUSED:no_eligible_task"
+    assert "2 open task(s) outside label selector 'jjse-demo'" in result["message"]
+
+
+def test_label_selector_keeps_deferred_matching_tasks_unclaimable(tmp_path: Path) -> None:
+    project = _project(tmp_path, ["T-1", "T-2"], labels={"T-1": ["jjse-demo", "stagemesh:deferred"], "T-2": ["x"]})
+    code, result = _continue(project, "--label", "jjse-demo")
+    assert code == 2 and result["stop_reason"] == "REFUSED:no_eligible_task"
+    assert "T-1: excluded label stagemesh:deferred" in result["message"]
+
+
+def test_label_selector_applies_to_batch_ranking_and_explicit_task(tmp_path: Path) -> None:
+    from stagemesh.run_ready import RunReadyRefusal
+    from stagemesh.task_selection import rank_batch_candidates
+
+    project = _project(tmp_path, ["T-1", "T-2"], labels={"T-1": ["jjse-demo"], "T-2": []})
+    store = _synced(project)
+    policy = TaskSelectionConfig(required_label="jjse-demo")
+    ranked, skipped, info = rank_batch_candidates(store, project, policy)
+    assert [c.task_id for c in ranked] == ["T-1"]
+    assert {"task_id": "T-2", "reason": "outside label selector 'jjse-demo'"} in skipped
+    assert info["required_label"] == "jjse-demo"
+    with pytest.raises(RunReadyRefusal) as conflict:
+        choose_task(store, project, "T-2", policy, True, None)
+    assert conflict.value.reason == "label_selector_conflict"
+    assert choose_task(store, project, "T-1", policy, True, None).task_id == "T-1"
+    store.close()
+
+
+def test_label_selector_rejects_empty_and_once(tmp_path: Path) -> None:
+    project = _project(tmp_path, ["T-1"])
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        assert cli_module.main(["--project", str(project), "continue", "--label", " "]) == 2
+        assert cli_module.main(["--project", str(project), "continue", "--label", "x", "--once"]) == 2
+    assert "must not be empty" in err.getvalue() and "cannot be combined with --once" in err.getvalue()
