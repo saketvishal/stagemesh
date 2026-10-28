@@ -79,3 +79,31 @@ def test_ui_covers_contract_states_and_filters():
     for marker in ('role="status"', "<caption", 'lang="en"'):
         assert marker in html, marker
     assert 'aria-live="polite"' in html
+
+
+def test_built_wheel_ships_the_ui_shell(tmp_path: Path):
+    import sys
+    import zipfile
+
+    root = Path(__file__).resolve().parents[1]
+    sys.path.insert(0, str(root))
+    try:
+        import build_backend
+
+        name = build_backend.build_wheel(str(tmp_path))
+    finally:
+        sys.path.remove(str(root))
+    with zipfile.ZipFile(tmp_path / name) as wheel:
+        names = set(wheel.namelist())
+        record = wheel.read(next(n for n in names if n.endswith("RECORD"))).decode()
+    for asset in ("index.html", "app.js", "app.css"):
+        assert f"stagemesh/ui/{asset}" in names, asset
+        assert f"stagemesh/ui/{asset}," in record, asset
+    assert not any("__pycache__" in n and "/ui/" in n for n in names)
+
+
+def test_ui_preserves_focus_and_loaded_range_on_refresh():
+    js = (UI / "app.js").read_text(encoding="utf-8")
+    assert "dataset.key" in js and ".focus()" in js  # focused row control restored after re-render
+    assert "loadedPages" in js and "const refresh = () => load(false, loadedPages)" in js
+    assert 'tabindex="-1"' in (UI / "index.html").read_text(encoding="utf-8")

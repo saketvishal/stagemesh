@@ -17,6 +17,7 @@
   let lastGood = null;
   let timer = null;
   let generation = 0;
+  let loadedPages = 1;
 
   function setMessage(text, level) {
     const el = $("message");
@@ -66,16 +67,25 @@
     return body;
   }
 
-  async function load(append) {
+  // `pages` > 1 re-fetches the already loaded range, so a refresh does not discard "Load more" rows.
+  async function load(append, pages) {
     const mine = ++generation;
     if (!token) { setMessage("No access token. Open the URL printed by `stagemesh serve`.", "error"); return; }
-    if (!append) setMessage("Loading…");
+    if (!append && !pages) setMessage("Loading…");
     try {
-      const page = await api("/api/v1/activity?" + queryString(append ? nextOffset : 0));
-      if (mine !== generation) return; // a newer request superseded this one
-      if (!append) rows = new Map();
-      for (const e of page.entries) rows.set(e.kind + ":" + e.id, e);
+      let fresh = append ? rows : new Map();
+      let offset = append ? nextOffset : 0;
+      let page;
+      let remaining = pages || 1;
+      do {
+        page = await api("/api/v1/activity?" + queryString(offset));
+        if (mine !== generation) return; // a newer request superseded this one
+        for (const e of page.entries) fresh.set(e.kind + ":" + e.id, e);
+        offset = page.next_offset;
+      } while (--remaining > 0 && offset !== null);
+      rows = fresh;
       nextOffset = page.next_offset;
+      loadedPages = append ? loadedPages + 1 : Math.max(1, pages || 1);
       lastGood = new Date();
       render(page);
     } catch (err) {
@@ -85,6 +95,8 @@
       if (err.status === 401 || err.status === 403) { rows = new Map(); renderRows(); }
     }
   }
+
+  const refresh = () => load(false, loadedPages);
 
   function cmp(a, b) {
     const x = a[sort.key], y = b[sort.key];
@@ -103,6 +115,7 @@
 
   function renderRows() {
     const body = $("rows");
+    const focused = document.activeElement && document.activeElement.dataset ? document.activeElement.dataset.key : null;
     body.replaceChildren();
     for (const e of [...rows.values()].sort(cmp)) {
       const tr = body.insertRow();
@@ -113,6 +126,7 @@
       if (e.task_id) {
         const b = document.createElement("button");
         b.type = "button"; b.textContent = e.task_id; b.title = "Show only this task";
+        b.dataset.key = e.kind + ":" + e.id;
         b.addEventListener("click", () => { $("task").value = e.task_id; load(false); });
         td.replaceChildren(b);
       } else td.textContent = "—";
@@ -120,11 +134,18 @@
       cell(tr, e.title || [e.execution_kind, e.event_type, e.result_code, e.candidate_sha && e.candidate_sha.slice(0, 12)].filter(Boolean).join(" "));
       cell(tr, e.id);
     }
+    // Rebuilding rows must not drop keyboard focus (auto-refresh runs every few seconds).
+    if (focused) {
+      const again = [...body.querySelectorAll("button")].find((b) => b.dataset.key === focused);
+      if (again) again.focus();
+    }
   }
 
   function render(page) {
     renderRows();
+    const moreHadFocus = document.activeElement === $("more");
     $("more").hidden = nextOffset === null;
+    if (moreHadFocus && nextOffset === null) $("table").focus(); // the button vanished; keep focus in the page
     $("count").textContent = rows.size + " loaded of " + page.total + (page.truncated ? "+" : "");
     $("freshness").textContent = "updated " + lastGood.toLocaleTimeString();
     if (page.truncated) setMessage("Older records were excluded by the retention cap; narrow the time range for a complete view.", "warn");
@@ -154,7 +175,7 @@
 
   function schedule() {
     clearInterval(timer);
-    if ($("auto").checked) timer = setInterval(() => { if (!document.hidden) load(false); }, POLL_MS);
+    if ($("auto").checked) timer = setInterval(() => { if (!document.hidden) refresh(); }, POLL_MS);
   }
 
   buildHead();
@@ -164,14 +185,14 @@
     load(false);
   });
   for (const id of ["task", "provider"]) $(id).addEventListener("change", () => load(false));
-  $("refresh").addEventListener("click", () => load(false));
+  $("refresh").addEventListener("click", refresh);
   $("more").addEventListener("click", () => load(true));
   $("auto").addEventListener("change", schedule);
   document.addEventListener("keydown", (e) => {
     const typing = /^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement.tagName);
     if (e.ctrlKey || e.metaKey || e.altKey || typing) return;
     if (e.key === "/") { e.preventDefault(); $("task").focus(); }
-    else if (e.key === "r") load(false);
+    else if (e.key === "r") refresh();
   });
   api("/api/v1/health").then((h) => { $("version").textContent = "v" + h.version; }, () => {});
   load(false);
