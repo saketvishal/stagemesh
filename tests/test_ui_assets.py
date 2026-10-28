@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from stagemesh.api_server import make_server
+from stagemesh.api_server import UI_ASSETS, make_server
 from stagemesh.persistence import Store
 
 UI = Path(__file__).resolve().parents[1] / "src" / "stagemesh" / "ui"
@@ -102,11 +102,96 @@ def test_built_wheel_ships_the_ui_shell(tmp_path: Path):
     assert not any("__pycache__" in n and "/ui/" in n for n in names)
 
 
-def test_ui_preserves_focus_and_loaded_range_on_refresh():
-    js = (UI / "app.js").read_text(encoding="utf-8")
-    assert "dataset.key" in js and ".focus()" in js  # focused row control restored after re-render
-    assert "loadedPages" in js and "const refresh = () => load(false, loadedPages)" in js
-    assert 'tabindex="-1"' in (UI / "index.html").read_text(encoding="utf-8")
+CANARIES = ("extra.js", "extra.css", "notes.html", "app.js.map", "secret.txt", "dependency.js", "driver.js", "vendor/lib.js")
+
+
+def _canary_site(tmp_path: Path) -> Path:
+    site = tmp_path / "canary-site"
+    (site / "vendor").mkdir(parents=True)
+    for name in UI_ASSETS:
+        (site / name).write_bytes((UI / name).read_bytes())
+    for name in CANARIES:
+        (site / name).write_text("CANARY-" + name, encoding="utf-8")
+    return site
+
+
+def test_production_ui_directory_contains_exactly_the_named_assets():
+    assert sorted(p.name for p in UI.iterdir() if p.name != "__pycache__") == sorted(UI_ASSETS)
+    import build_backend
+
+    assert tuple(build_backend.UI_ASSETS) == tuple(UI_ASSETS)
+
+
+def test_server_serves_only_the_named_assets_even_when_other_files_exist(tmp_path: Path):
+    site = _canary_site(tmp_path)
+    store = Store(tmp_path / "c.sqlite3")
+    store.migrate()
+    store.close()
+    httpd, _ = make_server(tmp_path / "c.sqlite3", token="tok", static_dir=site)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        base = f"http://127.0.0.1:{httpd.server_address[1]}"
+        for name in UI_ASSETS:
+            assert fetch(f"{base}/{name}")[0] == 200, name
+        assert fetch(f"{base}/")[0] == 200
+        for name in CANARIES:
+            status, body, _ = fetch(f"{base}/{name}")
+            assert status == 404 and b"CANARY" not in body, name
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_wheel_build_excludes_files_that_are_not_declared_assets(tmp_path: Path):
+    import importlib.util
+    import shutil
+    import zipfile
+
+    root = Path(__file__).resolve().parents[1]
+    tree = tmp_path / "tree"
+    shutil.copytree(root / "src", tree / "src", ignore=shutil.ignore_patterns("__pycache__"))
+    shutil.copyfile(root / "build_backend.py", tree / "build_backend.py")
+    for name in CANARIES:
+        target = tree / "src" / "stagemesh" / "ui" / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("CANARY-" + name, encoding="utf-8")
+    spec = importlib.util.spec_from_file_location("canary_build_backend", tree / "build_backend.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    out = tmp_path / "out"
+    out.mkdir()
+    wheel_name = module.build_wheel(str(out))
+    with zipfile.ZipFile(out / wheel_name) as wheel:
+        names = set(wheel.namelist())
+        record = wheel.read(next(n for n in names if n.endswith("RECORD"))).decode()
+    shipped = sorted(n for n in names if n.startswith("stagemesh/ui/"))
+    assert shipped == sorted(f"stagemesh/ui/{name}" for name in UI_ASSETS)
+    assert not [n for n in names if "CANARY" in wheel_text(wheel_name, out, n)]
+    assert "extra.js" not in record and "secret.txt" not in record
+
+
+def wheel_text(wheel_name: str, out: Path, member: str) -> str:
+    import zipfile
+
+    with zipfile.ZipFile(out / wheel_name) as wheel:
+        return wheel.read(member).decode("utf-8", errors="ignore")
+
+
+def test_build_fails_if_a_declared_asset_is_missing(tmp_path: Path):
+    import importlib.util
+    import shutil
+
+    root = Path(__file__).resolve().parents[1]
+    tree = tmp_path / "tree"
+    shutil.copytree(root / "src", tree / "src", ignore=shutil.ignore_patterns("__pycache__"))
+    shutil.copyfile(root / "build_backend.py", tree / "build_backend.py")
+    (tree / "src" / "stagemesh" / "ui" / "app.css").unlink()
+    spec = importlib.util.spec_from_file_location("missing_build_backend", tree / "build_backend.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    (tmp_path / "out").mkdir()
+    with pytest.raises(FileNotFoundError, match="app.css"):
+        module.build_wheel(str(tmp_path / "out"))
 
 
 def test_ci_runs_the_ui_asset_and_browser_modules_on_both_platforms():

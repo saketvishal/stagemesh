@@ -9,6 +9,7 @@ import zipfile
 from pathlib import Path
 
 NAME = "stagemesh"
+UI_ASSETS = ("index.html", "app.js", "app.css")  # keep equal to stagemesh.api_server.UI_ASSETS (tested)
 VERSION = "0.4.0"
 DIST_INFO = f"{NAME}-{VERSION}.dist-info"
 
@@ -93,10 +94,13 @@ def build_wheel(wheel_directory, config_settings=None, metadata_directory=None):
             records.append((arcname, data))
         # Offline skills, their companions, provenance, and licenses belong to
         # the independently installed runtime, not the host/source checkout.
-        # The operator UI is dependency-free static assets served by `stagemesh serve`.
+        missing_ui = [name for name in UI_ASSETS if not (root / "src" / "stagemesh" / "ui" / name).is_file()]
+        if missing_ui:
+            raise FileNotFoundError(f"operator UI assets missing from the source tree: {', '.join(missing_ui)}")
+        # The operator UI is exactly these static assets served by `stagemesh serve`; nothing else in ui/ ships.
         asset_paths = [
             *sorted((root / "src" / "stagemesh" / "skill_packs").rglob("*")),
-            *sorted((root / "src" / "stagemesh" / "ui").rglob("*")),
+            *(root / "src" / "stagemesh" / "ui" / name for name in UI_ASSETS),
         ]
         for path in asset_paths:
             if not path.is_file() or "__pycache__" in path.parts or path.suffix == ".py":

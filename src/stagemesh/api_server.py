@@ -30,6 +30,8 @@ LOOPBACK = "127.0.0.1"
 _PARAMS = frozenset({"state", "task_id", "stage", "provider", "since", "until", "limit", "offset"})
 _INT = re.compile(r"^[0-9]{1,9}$")
 _MAX_QUERY_CHARS = 2048
+# The complete production shell. Packaging (build_backend.UI_ASSETS) and serving both use exactly this list.
+UI_ASSETS = ("index.html", "app.js", "app.css")
 _STATIC_TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8"}
 
 Response = tuple[int, bytes, dict[str, str]]
@@ -233,7 +235,7 @@ class ActivityApi:
         if self.static_dir is None:
             raise ApiError(404, "not_found", "unknown route")
         name = "index.html" if path == "/" else path.lstrip("/")
-        if "/" in name or "\\" in name or Path(name).suffix not in _STATIC_TYPES:
+        if name not in UI_ASSETS:
             raise ApiError(404, "not_found", "unknown route")
         file = self.static_dir / name
         if not file.is_file():
@@ -251,8 +253,9 @@ def make_server(
     token: str | None = None,
     port: int = 0,
     static_dir: Path | None = None,
+    api_class: type[ActivityApi] = ActivityApi,
 ) -> tuple[HTTPServer, ActivityApi]:
-    api = ActivityApi(db_path, token or secrets.token_urlsafe(32), static_dir)
+    api = api_class(db_path, token or secrets.token_urlsafe(32), static_dir)
     handler = _handler(api)
     server = HTTPServer((LOOPBACK, port), handler)
     api.bind(server.server_address[1])

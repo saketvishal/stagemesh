@@ -11,6 +11,7 @@
     ["status", "Status"], ["provider", "Provider"], ["title", "Title / detail"], ["id", "Id"],
   ];
   const POLL_MS = 10000;
+  const MAX_PAGES = 10; // 1000 retained rows / 100 per page
   let rows = new Map(); // "kind:id" -> entry, de-duplicated across pages
   let nextOffset = null;
   let sort = { key: "at", dir: -1 };
@@ -18,6 +19,8 @@
   let timer = null;
   let generation = 0;
   let loadedPages = 1;
+  let wantedPages = 1;
+  let inflight = false;
 
   function setMessage(text, level) {
     const el = $("message");
@@ -67,36 +70,50 @@
     return body;
   }
 
-  // `pages` > 1 re-fetches the already loaded range, so a refresh does not discard "Load more" rows.
-  async function load(append, pages) {
+  // The operator's request is a page range (`wantedPages`), not an event. "Load more" raises it immediately, and every
+  // fetch (initial, refresh, poll) re-reads pages 1..wantedPages, so an accepted Load more cannot be lost to a refresh.
+  async function loadRange(quiet) {
     const mine = ++generation;
     if (!token) { setMessage("No access token. Open the URL printed by `stagemesh serve`.", "error"); return; }
-    if (!append && !pages) setMessage("Loading…");
+    inflight = true;
+    if (!quiet) setMessage("Loading…");
+    const target = wantedPages;
     try {
-      let fresh = append ? rows : new Map();
-      let offset = append ? nextOffset : 0;
+      const fresh = new Map();
+      let offset = 0;
       let page;
-      let remaining = pages || 1;
+      let fetched = 0;
       do {
         page = await api("/api/v1/activity?" + queryString(offset));
-        if (mine !== generation) return; // a newer request superseded this one
+        if (mine !== generation) return; // a newer request for the same range superseded this one
         for (const e of page.entries) fresh.set(e.kind + ":" + e.id, e);
         offset = page.next_offset;
-      } while (--remaining > 0 && offset !== null);
+        fetched += 1;
+      } while (fetched < target && offset !== null);
       rows = fresh;
       nextOffset = page.next_offset;
-      loadedPages = append ? loadedPages + 1 : Math.max(1, pages || 1);
+      loadedPages = fetched;
+      wantedPages = fetched;
       lastGood = new Date();
+      inflight = false;
       render(page);
     } catch (err) {
       if (mine !== generation) return;
+      inflight = false;
+      wantedPages = loadedPages; // keep the last good range; a failed Load more leaves no phantom request
       const stale = lastGood ? " Showing data from " + lastGood.toLocaleTimeString() + " (stale)." : "";
       setMessage("Could not load activity: " + err.message + "." + stale, err.status === 400 ? "error" : "warn");
       if (err.status === 401 || err.status === 403) { rows = new Map(); renderRows(); }
     }
   }
 
-  const refresh = () => load(false, loadedPages);
+  const refresh = () => loadRange(false);
+  const reload = () => { wantedPages = 1; loadRange(false); }; // a changed filter starts again from page one
+  const loadMore = () => {
+    if (nextOffset === null) return;
+    wantedPages = Math.min(wantedPages + 1, MAX_PAGES);
+    loadRange(false);
+  };
 
   function cmp(a, b) {
     const x = a[sort.key], y = b[sort.key];
@@ -127,7 +144,7 @@
         const b = document.createElement("button");
         b.type = "button"; b.textContent = e.task_id; b.title = "Show only this task";
         b.dataset.key = e.kind + ":" + e.id;
-        b.addEventListener("click", () => { $("task").value = e.task_id; load(false); });
+        b.addEventListener("click", () => { $("task").value = e.task_id; reload(); });
         td.replaceChildren(b);
       } else td.textContent = "—";
       cell(tr, e.stage); cell(tr, e.status); cell(tr, e.provider);
@@ -138,6 +155,7 @@
     if (focused) {
       const again = [...body.querySelectorAll("button")].find((b) => b.dataset.key === focused);
       if (again) again.focus();
+      else $("table").focus(); // the focused row is gone from the new result: fall back to a predictable target
     }
   }
 
@@ -175,18 +193,18 @@
 
   function schedule() {
     clearInterval(timer);
-    if ($("auto").checked) timer = setInterval(() => { if (!document.hidden) refresh(); }, POLL_MS);
+    if ($("auto").checked) timer = setInterval(() => { if (!document.hidden && !inflight) loadRange(true); }, POLL_MS);
   }
 
   buildHead();
   $("filters").addEventListener("submit", (e) => e.preventDefault());
   for (const id of ["period", "since", "until", "state", "stage"]) $(id).addEventListener("change", () => {
     for (const el of document.querySelectorAll(".custom")) el.hidden = $("period").value !== "custom";
-    load(false);
+    reload();
   });
-  for (const id of ["task", "provider"]) $(id).addEventListener("change", () => load(false));
+  for (const id of ["task", "provider"]) $(id).addEventListener("change", reload);
   $("refresh").addEventListener("click", refresh);
-  $("more").addEventListener("click", () => load(true));
+  $("more").addEventListener("click", loadMore);
   $("auto").addEventListener("change", schedule);
   document.addEventListener("keydown", (e) => {
     const typing = /^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement.tagName);
@@ -195,6 +213,6 @@
     else if (e.key === "r") refresh();
   });
   api("/api/v1/health").then((h) => { $("version").textContent = "v" + h.version; }, () => {});
-  load(false);
+  loadRange(false);
   schedule();
 })();
