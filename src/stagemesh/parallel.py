@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from .audit import record_audit
+from .auto_plan import outside_label_selector
 from .blocked_recovery import auto_retry_blocked_provider_failures, exhaustion_message
 from .concurrency import IntegrationLockTimeout, ProviderLimiter, contract_conflict
 from .config import RuntimeConfig, TaskSelectionConfig, load_config
@@ -661,6 +662,8 @@ class ParallelRunner:
             task_id = candidate.task_id
             if task_id in attempted or task_id in running or len(chosen) >= free:
                 continue
+            if outside_label_selector(self.store, self.store.get_task(task_id), self.policy.required_label):
+                continue  # the source cache changed after ranking: no auto-planning, contract write or stage work for it
             plan_info: dict[str, Any] = {"occurred": False, "reused_existing": False, "events": []}
             try:
                 _ensure_contract(self.store, self.project, task_id, self.auto_plan, plan_info, lambda m, i=plan_info: i["events"].append(m))

@@ -1057,3 +1057,35 @@ def test_serial_label_selector_is_enforced_at_stage_admission_after_selection(tm
     assert not executor.worktrees, summary.to_dict()
     assert summary.stop_reason != "DONE"
     assert rig.store.get_task("A")["stage"] == Stage.PLAN
+
+
+def test_label_removed_after_ranking_blocks_auto_planning_for_a_no_contract_task(tmp_path: Path, monkeypatch) -> None:
+    import stagemesh.parallel as parallel_module
+    from stagemesh.config import TaskSelectionConfig
+
+    rig = Rig(tmp_path, ["A"], labels={"A": ["jjse-demo"]})
+    contract = rig.project / ".stagemesh" / "contracts" / "A.json"
+    contract.unlink()  # forces the auto-planning path
+    executor = ScriptedExecutor(rig.files)
+    planner_calls: list[str] = []
+    original_ensure = parallel_module._ensure_contract
+    original_rank = parallel_module.rank_batch_candidates
+
+    def ensure(store, project, task_id, *args, **kwargs):
+        planner_calls.append(task_id)
+        return original_ensure(store, project, task_id, *args, **kwargs)
+
+    def rank(*args, **kwargs):
+        result = original_rank(*args, **kwargs)
+        _drop_cached_label(rig, "A", "jjse-demo")  # a second source sync lands between ranking and contract planning
+        return result
+
+    monkeypatch.setattr("stagemesh.task_selection.contract_state", lambda *a, **k: "needs_auto_plan")  # plannable, so it is a ranked candidate
+    monkeypatch.setattr(parallel_module, "_ensure_contract", ensure)
+    monkeypatch.setattr(parallel_module, "rank_batch_candidates", rank)
+
+    summary = queue(rig, executor, policy=TaskSelectionConfig(required_label="jjse-demo")).run()
+
+    assert planner_calls == [], "out-of-label task must not reach auto-planning"
+    assert not contract.exists() and not executor.worktrees
+    assert rig.store.get_task("A")["stage"] == Stage.PLAN and not summary.tasks
