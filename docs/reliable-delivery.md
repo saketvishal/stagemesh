@@ -351,3 +351,40 @@ Changing the working directory after opening a relative Store path cannot select
 another lock. Only a verified empty `main` filename takes memory behavior;
 missing, malformed or failed identity lookup refuses dispatch, never silently
 becomes an unlocked memory operation.
+
+
+## Research subprocess ownership across launch loss
+
+The optional research role remains a REVIEW execution. New executions commit
+explicit process_tree_scope=research/v1 and the initiating parent identity in
+the same durable RUNNING row before Popen. Publishing the child identity does
+not remove that authority. Cleanup-incomplete retention preserves the scope;
+only confirmed owner completion or an explicitly inspected release ends it.
+Actor names and provider output are not ownership authority.
+
+Automatic orphan recovery, claim expiry/replacement, autonomy fencing and
+workspace takeover refuse this held task. A missing or dead recorded root
+does not prove that its descendants stopped. Known-live roots stay LIVE;
+other scoped roots remain UNKNOWN for recovery. Status, health, dashboard,
+queue and handoff expose the unconfirmed research/process-tree hold. Unknown
+non-null scope versions also hold rather than guessing their cleanup contract.
+As before, unknown identity alone is task-local; a provably dead root remains
+a global stale-root admission hazard.
+
+After inspecting surviving processes and retained work, the existing
+recover-stale --release-unknown action requires the exact task/execution and
+a nonempty inspection reason. It refuses live roots and binds its inspected
+identity snapshot to the atomic row/audit update, refusing a parent-to-child
+identity change during inspection. Releasing a claimless research row does
+not release an unrelated implementation claim: that claim retains its existing
+provenance/expiry rules. No immediate replacement is implied before that
+independent claim can safely be acquired.
+
+Migration 5 adds the nullable scope without rewriting legacy execution kinds,
+actors or results. Concurrent v4 upgrades and an interrupted column/version
+publication are serialized and idempotent. NULL legacy REVIEW rows retain
+their prior behavior: pre-upgrade researchers cannot be reliably reconstructed
+from configurable actor names or missing process data. That historical ambiguity
+is UNQUALIFIED; upgrades must not assume an older anonymous row proves no child
+survives. This change does not discover or reap arbitrary surviving processes,
+activate schedules, promote a runtime, or establish live unattended acceptance.

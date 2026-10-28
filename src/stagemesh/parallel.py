@@ -31,7 +31,13 @@ from .contracts import ChangeContract, ContractError, parse_contract, task_contr
 from .coordinator import Coordinator, TargetSelection, TargetSelectionError
 from .domain import ProcessIdentity, Stage
 from .execution import kill_active_provider_processes, retain_provider_cleanup
-from .execution_ownership import validation_tree_unresolved
+from .execution_ownership import (
+    execution_tree_unresolved,
+    process_tree_scope,
+    recovery_identity_state,
+    tree_cleanup_state,
+    validation_tree_unresolved,
+)
 from .git import GitWorkspace
 from .persistence import Store
 from .process_identity import classify_process, process_identity
@@ -84,6 +90,7 @@ def _active_execution_rows(store: Store) -> list[dict[str, Any]]:
             "kind": str(row["kind"]),
             "pid": row["pid"],
             "candidate_sha": row["candidate_sha"],
+            "process_tree_scope": process_tree_scope(row),
         }
         for row in store.running_executions()
     ]
@@ -228,9 +235,12 @@ def recover_orphaned_claims(
         if match is None or not dead(int(match.group(1))):
             continue
         task_id = str(claim["task_id"])
-        if any(e["task_id"] == task_id and validation_tree_unresolved(e) for e in store.running_executions()):
-            record_audit(store, "recovery.parallel_claim_protected_validation", {
-                "task_id": task_id, "claim_id": str(claim["id"]), "reason": "validation tree cleanup unconfirmed",
+        held = [e for e in store.running_executions() if e["task_id"] == task_id and execution_tree_unresolved(e)]
+        if held:
+            validation = any(validation_tree_unresolved(e) for e in held)
+            record_audit(store, "recovery.parallel_claim_protected_validation" if validation else "recovery.parallel_claim_protected_tree", {
+                "task_id": task_id, "claim_id": str(claim["id"]),
+                "reason": "validation tree cleanup unconfirmed" if validation else "process tree cleanup unconfirmed",
             })
             continue  # include claimless validators: a dead worker does not free their task
         running = [e for e in store.running_executions() if e["claim_id"] == claim["id"]]
@@ -828,7 +838,7 @@ class ParallelRunner:
         unresolved_execution = False
         termination_results: dict[ProcessIdentity, bool] = {}
         for execution in [e for e in store.running_executions() if e["task_id"] == task_id]:
-            if validation_tree_unresolved(execution):
+            if execution_tree_unresolved(execution):
                 unresolved_execution = True
                 if execution["claim_id"]:
                     protected_claims.add(str(execution["claim_id"]))
@@ -984,7 +994,10 @@ class ParallelRunner:
                     "claim_id": execution["claim_id"],
                     "kind": str(execution["kind"]),
                     "pid": execution["pid"],
-                    "process_state": state,
+                    "process_state": recovery_identity_state(execution, state),
+                    "parent_process_state": state,
+                    "process_tree_scope": process_tree_scope(execution),
+                    "cleanup_state": tree_cleanup_state(execution),
                 }
             )
         return rows

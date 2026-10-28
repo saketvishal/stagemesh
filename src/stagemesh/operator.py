@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from .block_kinds import BlockKind
 from .delivery_state import DELIVERY_UNBLOCKED, EXTERNALLY_BLOCKED
 from .efficiency import usage_totals
-from .execution_ownership import recovery_identity_state, validation_tree_unresolved
+from .execution_ownership import recovery_identity_state, tree_cleanup_state
 from .external_evidence import external_evidence_records
 from .observability import health
 from .persistence import Store
@@ -60,6 +60,8 @@ def operator_report(store: Store) -> OperatorReport:
         attention_rows.append({"kind": "unknown_executions", "count": h.unknown_execution_count, "status": "REVIEW"})
     if h.unresolved_validation_count:
         attention_rows.append({"kind": "unresolved_validation_trees", "count": h.unresolved_validation_count, "status": "REVIEW"})
+    if h.unresolved_process_tree_count:
+        attention_rows.append({"kind": "unresolved_process_trees", "count": h.unresolved_process_tree_count, "status": "REVIEW"})
     if pending_count:
         attention_rows.append({"kind": "recorded_pending_decisions", "count": pending_count, "status": "ACTION"})
     lines = [
@@ -73,6 +75,7 @@ def operator_report(store: Store) -> OperatorReport:
         f"historical_failed_executions={historical_failures}",
         f"unknown_executions={h.unknown_execution_count}",
         f"unresolved_validation_trees={h.unresolved_validation_count}",
+        f"unresolved_process_trees={h.unresolved_process_tree_count}",
         f"workers={len(workers)}",
         f"recent_source_events={len(events)}",
         f"retry_states={len(retries)}",
@@ -337,7 +340,7 @@ def _active_execution_rows(store: Store) -> list[Mapping[str, object]]:
                 "pid_label": str(pid) if pid is not None else "no pid recorded",
                 "process_state": process_state,
                 "parent_process_state": parent_state,
-                "cleanup_state": "UNCONFIRMED_VALIDATION_TREE" if validation_tree_unresolved(execution) else None,
+                "cleanup_state": tree_cleanup_state(execution),
                 "stale": process_state == "DEAD",
             }
         )

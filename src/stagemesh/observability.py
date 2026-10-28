@@ -6,7 +6,12 @@ from dataclasses import dataclass
 from typing import Any
 
 from .domain import ExecutionStatus, Stage, TaskStatus
-from .execution_ownership import recovery_identity_state, validation_tree_unresolved
+from .execution_ownership import (
+    execution_tree_unresolved,
+    process_tree_scope,
+    recovery_identity_state,
+    validation_tree_unresolved,
+)
 from .persistence import Store
 from .process_identity import classify_process, process_identity
 from .scheduling import Scheduler
@@ -33,6 +38,8 @@ class HealthReport:
     current_problems: tuple[str, ...] = ()
     unresolved_validation_count: int = 0
     dead_validation_parent_count: int = 0
+    unresolved_process_tree_count: int = 0
+    dead_process_tree_root_count: int = 0
 
 
 def health(store: Store) -> HealthReport:
@@ -69,6 +76,10 @@ def health(store: Store) -> HealthReport:
     unresolved_validation = sum(
         validation_tree_unresolved(execution) and state != "LIVE" for execution, state in ownership
     )
+    unresolved_scoped = sum(
+        execution_tree_unresolved(execution) and process_tree_scope(execution) is not None and state != "LIVE"
+        for execution, state in ownership
+    )
     problems = tuple(
         label
         for label, present in (
@@ -77,6 +88,7 @@ def health(store: Store) -> HealthReport:
             ("unknown_executions", unknown_execution_count > 0),
             ("stale_running_executions", stale > 0),
             ("unresolved_validation_trees", unresolved_validation > 0),
+            ("unresolved_process_trees", unresolved_scoped > 0),
         )
         if present
     )
@@ -100,6 +112,11 @@ def health(store: Store) -> HealthReport:
         stale_execution_count=stale,
         unresolved_validation_count=unresolved_validation,
         dead_validation_parent_count=dead_validation_parent,
+        unresolved_process_tree_count=unresolved_scoped,
+        dead_process_tree_root_count=sum(
+            execution_tree_unresolved(execution) and process_tree_scope(execution) is not None and state == "DEAD"
+            for execution, state in ownership
+        ),
         current_problems=problems,
     )
 
