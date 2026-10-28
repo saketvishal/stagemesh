@@ -114,6 +114,11 @@ never include query values, paths, store details or secrets.
 | 503 | `store_unavailable` | Store missing, locked or mid-migration | Show a retryable state, keep last good data marked stale |
 | 500 | `internal` | Unexpected failure | Show a generic error; never display a partial page |
 
+The client pauses automatic refresh after 400, 401 or 403 and shows the unchecked auto-refresh control.
+Corrected filters or an explicit refresh can request data again; a successful request does not silently re-enable polling.
+The operator may explicitly enable auto-refresh again after correction. Network errors and 503 remain retryable, retaining
+the last good data marked stale and the existing auto-refresh choice.
+
 Each state needs distinct UI: loading, empty (valid query, no rows), truncated, stale (last good data after a failed refresh,
 visibly marked and timestamped) and error.
 

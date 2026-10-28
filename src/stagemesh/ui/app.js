@@ -103,6 +103,10 @@
       wantedPages = loadedPages; // keep the last good range; a failed Load more leaves no phantom request
       const stale = lastGood ? " Showing data from " + lastGood.toLocaleTimeString() + " (stale)." : "";
       setMessage("Could not load activity: " + err.message + "." + stale, err.status === 400 ? "error" : "warn");
+      if ([400, 401, 403].includes(err.status)) {
+        $("auto").checked = false;
+        schedule(); // terminal request/access errors require an explicit correction and polling opt-in
+      }
       if (err.status === 401 || err.status === 403) { rows = new Map(); renderRows(); }
     }
   }
