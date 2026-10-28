@@ -9,7 +9,6 @@ from pathlib import Path
 from .attribution import GitAttribution
 from .git_identity import identity_env_for, sanitize_commit_message, stage_mesh_commit_env_for
 
-
 _TRANSIENT_RETRIES = 4
 
 # Subcommands that create commits (and so need an author/committer). Their identity is supplied per command through the environment
@@ -108,7 +107,7 @@ class GitWorkspace:
     def init_if_needed(self) -> None:
         self.path.mkdir(parents=True, exist_ok=True)
         if not (self.path / ".git").exists():
-            self.run("init")  # no identity is written: commits resolve it per command (git_identity)
+            self.run("init", encoding="utf-8")  # git reports the new repository path as UTF-8; identity resolves at commit
 
     def commit_all(self, message: str, attribution: GitAttribution | None = None) -> str:
         """Commit everything as the project identity (the repository owner), never as the provider that produced the change.
