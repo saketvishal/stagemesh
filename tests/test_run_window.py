@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 import pytest
+from stabilization_support import _brief_text
 from test_survivor_wave import Rig, make_store
 
 import stagemesh.cli as cli_module
@@ -163,12 +164,14 @@ def test_window_starts_five_compatible_workers_and_later_runs_deferred_tasks(tmp
             if task_id in {"2", "3", "5"} and active & {"2", "3", "5"}:
                 overlaps.append(task_id)
             active.add(task_id)
-        if task_id in first:
-            barrier.wait(timeout=10)
-        result = rig.finish_done(task_id)
-        with lock:
-            active.remove(task_id)
-        return result
+        try:
+            if task_id in first:
+                barrier.wait(timeout=10)
+            return rig.finish_done(task_id)
+        finally:
+            # A failed worker has exited too; retain its actual error in the report.
+            with lock:
+                active.remove(task_id)
 
     store, project, rig, hooks, options, config, kwargs = window(
         tmp_path, ids, {t: work for t in ids}, concurrency=5, max_tasks=7,
@@ -184,7 +187,14 @@ def test_window_starts_five_compatible_workers_and_later_runs_deferred_tasks(tmp
 
     report = rw.run_window(store, project, config, options, hooks, base_ref="refs/heads/main",
                            merge_pr=land if automatic else None, **kwargs)
-    assert report.ok, report.stop_reason
+    # A string avoids pytest's truncated dictionary representation hiding the worker error.
+    details = json.dumps({
+        "stop_reason": report.stop_reason,
+        "tasks": [{"task_id": t.task_id, "outcome": t.outcome, "stop_reason": t.stop_reason,
+                   "reason": _brief_text(t.reason)} for t in report.tasks[:10]],
+    })
+    assert report.ok, details
+    assert all(t.outcome == "done" for t in report.tasks), details
     assert set(rig.runs[:5]) == first
     assert set(rig.runs) == set(ids)
     assert not overlaps and not active

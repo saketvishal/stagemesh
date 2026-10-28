@@ -41,6 +41,7 @@ from .recovery import (
     auto_revalidate_blocked_validation_gates,
 )
 from .scheduling import Scheduler
+from .stage_dispatch import stage_dispatch_refusal
 from .step_progress import STEP_CAP_STALL_LIMIT, ProgressState, progress_state, record_step_cap, unproductive_step_caps
 from .spec_planning import evaluate_planning_gate, load_planning_artifacts
 from .task_selection import Candidate, Selection, SelectionRefusal, contract_state, select_next_task
@@ -1062,8 +1063,7 @@ def drive_task(
             item for item in getattr(coordinator, "last_execution_refusals", []) if item["task_id"] == selected
         ]
         if ownership_refusals:
-            summary.stop_reason = "REFUSED:active_execution"
-            summary.message = "existing stage ownership was retained; no new stage work started"
+            summary.stop_reason, summary.message = stage_dispatch_refusal(ownership_refusals)
             summary.detail["active_execution_refusals"] = ownership_refusals
             if not summary.steps:
                 summary.started = False

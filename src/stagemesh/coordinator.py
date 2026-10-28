@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 
 import json
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -10,6 +11,7 @@ from typing import Any
 from .audit import record_audit
 from .baseline import resolve_integration_ref
 from .block_kinds import BlockKind, block_kind_for, record_block, runtime_fingerprint
+from .concurrency import IntegrationLockTimeout
 from .contract_binding import contract_for_candidate
 from .contracts import _matches, task_contract_path
 from .efficiency import BudgetPolicy, record_provider_call, take_call_usage
@@ -79,6 +81,7 @@ from .review_disposition import (
     unresolved_adverse_review_findings,
 )
 from .scheduling import Scheduler
+from .stage_dispatch import connected_dispatch_database, stage_dispatch_lock
 from .task_completion import record_task_owner_state
 from .task_selection import contract_state
 from .validation import Validator
@@ -226,8 +229,40 @@ class Coordinator:
         return self.target is None or self.target.task_id == task_id
 
     def _advance_task(self, task_id: str) -> int:
+        entered = False
+        try:
+            admission = nullcontext()
+            database = connected_dispatch_database(self.store.conn)
+            if database is not None:
+                admission = stage_dispatch_lock(database, task_id).hold(f"stage:{task_id}")
+            with admission:
+                entered = True
+                return self._advance_task_owned(task_id)
+        except (IntegrationLockTimeout, OSError):
+            if entered:
+                raise  # a stage's own integration timeout is not an admission refusal
+            if not hasattr(self, "last_execution_refusals"):
+                self.last_execution_refusals = []
+            self.last_execution_refusals.append({
+                "task_id": task_id, "execution_ids": [], "kinds": [],
+                "reason_code": "stage_dispatch_unavailable",
+                "reason": "task stage dispatch lock is unavailable; not starting another stage",
+            })
+            return 0
+
+    def _advance_task_owned(self, task_id: str) -> int:
         task = self.store.get_task(task_id)
         if task is None:
+            return 0
+        decision = Scheduler(self.store).decision(task_id)
+        if not decision.eligible:
+            if not hasattr(self, "last_execution_refusals"):
+                self.last_execution_refusals = []
+            self.last_execution_refusals.append({
+                "task_id": task_id, "execution_ids": [], "kinds": [],
+                "reason_code": "stage_dispatch_ineligible",
+                "reason": f"task is no longer eligible at stage dispatch: {decision.reason}",
+            })
             return 0
         # Selection can precede another connection's ownership publication.
         # Recovery has already removed only owners proven dead; never start a

@@ -10,15 +10,19 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import re
 import shlex
+import sqlite3
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import stagemesh.cli as cli_module
+from stagemesh.diagnosis import _redact_evidence
 from stagemesh.git import GitWorkspace
 from stagemesh.persistence import Store
+from stagemesh.redaction import redact_output
 
 PROVIDERS = ("codex", "claude", "grok")  # original implementation/exhaustion topology stays fixed
 
@@ -89,6 +93,72 @@ def gate(task_id: str) -> list[str]:
     return [sys.executable, "-c", code]
 
 
+_CREDENTIAL_FIELD = re.compile(
+    r"(?i)\b(?:token|secret|password|passwd|authorization|api[_-]?key)\w*[\"']?\s*(?:[=:]|\s+)|\bBearer\s+"
+)
+
+
+def _brief_text(value: object, limit: int = 400) -> str:
+    # Unknown quote/escape boundaries are not permission to reveal a credential
+    # suffix. Keep only the prefix before that field; redact before clipping.
+    raw = str(value)
+    credential = _CREDENTIAL_FIELD.search(raw)
+    if credential:
+        raw = raw[:credential.start()] + "[redacted credential-bearing remainder]"
+    shown = _redact_evidence(redact_output(raw))
+    return shown if len(shown) <= limit else shown[:limit - 14] + "...[truncated]"
+
+
+def _failure_diagnostics(project: Path) -> str:
+    """A bounded read-only snapshot, not a recovery action or a complete trace."""
+    database = project / ".stagemesh" / "stagemesh.sqlite3"
+    events = (
+        "provider.failure", "provider.workspace_integrity_failure", "provider.workspace_quarantined",
+        "task.implementation_unsuccessful", "task.tool_failure_evidence",
+    )
+    fields = {"task_id", "execution_id", "provider", "executor", "stage", "reason", "result_status",
+              "execution_status", "provider_output", "classification", "message", "error"}
+    try:
+        if not database.is_file():
+            return "UNAVAILABLE: database_missing"
+        # Store() would create a missing database and is unsuitable for failure reporting.
+        with contextlib.closing(sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True)) as db:
+            db.row_factory = sqlite3.Row
+            executions = [
+                {key: (_brief_text(value) if isinstance(value, str) else value
+                       if isinstance(value, (int, float, bool, type(None))) else "UNSUPPORTED")
+                 for key, value in dict(row).items()}
+                for row in db.execute(
+                    "SELECT id,task_id,kind,actor,status,result FROM executions ORDER BY started_at DESC,rowid DESC LIMIT 6"
+                )
+            ]
+            audit = []
+            for row in db.execute(
+                "SELECT event_type,substr(payload,1,16000) AS payload FROM audit_events "
+                "WHERE event_type IN (?,?,?,?,?) ORDER BY created_at DESC,rowid DESC LIMIT 8", events,
+            ):
+                try:
+                    payload = json.loads(row["payload"])
+                    if not isinstance(payload, dict):
+                        raise TypeError("non-object audit payload")
+                except (ValueError, TypeError, RecursionError):
+                    audit.append({"event": row["event_type"], "payload": "UNPARSEABLE"})
+                    continue
+                selected = {key: _brief_text(value) for key, value in payload.items()
+                            if key in fields and isinstance(value, (str, int, float, bool, type(None)))}
+                evidence = payload.get("evidence")
+                if isinstance(evidence, dict):
+                    selected["evidence"] = {key: _brief_text(evidence[key]) for key in ("kind", "status", "excerpt")
+                                            if key in evidence and isinstance(evidence[key], (str, int))}
+                audit.append({"event": row["event_type"], **selected})
+        return "sample: latest6executions/latest8relevant-events; " + _brief_text(
+            json.dumps({"audit": audit, "executions": executions}, sort_keys=True), 6000,
+        )
+    except (sqlite3.Error, OSError) as exc:
+        # Do not replace the original assertion with a reporting exception or leak its path.
+        return "UNAVAILABLE: " + type(exc).__name__
+
+
 @dataclass
 class Result:
     code: int
@@ -96,6 +166,8 @@ class Result:
     stderr: str
     project: Path
     calls: list[tuple[str, str, str, str]] = field(default_factory=list)  # (provider, stage, task, mode)
+
+    diagnostics: str = ""  # Captured at return, before later runs can replace evidence.
 
     def implementers(self, task_id: str) -> list[str]:
         return [p for p, stage, task, _ in self.calls if stage == "implement" and task == task_id]
@@ -110,9 +182,12 @@ class Result:
 
     @property
     def brief(self) -> str:
-        return (
-            f"code={self.code} stop={self.stop} task={self.data.get('task_id')} message={self.data.get('message')!r} "
-            f"stderr={self.stderr.strip()!r} calls={self.calls}"
+        return _brief_text(
+            f"code={self.code} stop={_brief_text(self.stop, 80)} task={_brief_text(self.data.get('task_id'), 80)} "
+            f"message={_brief_text(self.data.get('message'), 500)!r} "
+            f"stderr={_brief_text(self.stderr.strip(), 500)!r} "
+            f"calls={_brief_text([tuple(_brief_text(part, 100) for part in call) for call in self.calls[-10:]], 1500)} (latest10/{len(self.calls)}) "
+            f"diagnostics={self.diagnostics}", 10000,
         )
 
     def assert_hands_off(self) -> None:
@@ -229,4 +304,4 @@ class Matrix:
         calls = []
         if self.calls_path.exists():
             calls = [tuple(line.split()[:4]) for line in self.calls_path.read_text(encoding="utf-8").splitlines()]
-        return Result(code, data, err.getvalue(), self.project, calls)  # type: ignore[arg-type]
+        return Result(code, data, err.getvalue(), self.project, calls, _failure_diagnostics(self.project))  # type: ignore[arg-type]
