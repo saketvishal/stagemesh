@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from .audit import record_audit
+from .auto_plan import outside_label_selector
 from .blocked_recovery import auto_retry_blocked_provider_failures, exhaustion_message
 from .concurrency import IntegrationLockTimeout, ProviderLimiter, contract_conflict
 from .config import RuntimeConfig, TaskSelectionConfig, load_config
@@ -634,11 +635,12 @@ class ParallelRunner:
             task = self.store.get_task(current_id)
             if task is not None and task["stage"] in (Stage.VALIDATE, Stage.REVIEW, Stage.INTEGRATE):
                 return []
-        summary.recovered.extend(auto_rebaseline_blocked_stale_baselines(self.store, self.project, limit=free))
-        summary.recovered.extend(auto_rebind_blocked_missing_validation_gates(self.store, self.project, limit=free))
-        summary.recovered.extend(auto_revalidate_blocked_validation_gates(self.store, self.project, limit=free))
-        summary.recovered.extend(auto_reintegrate_blocked_runtime_failures(self.store, self.project, limit=free))
-        retried = auto_retry_blocked_provider_failures(self.store, self.project, limit=free, exclude=attempted)
+        label = self.policy.required_label
+        summary.recovered.extend(auto_rebaseline_blocked_stale_baselines(self.store, self.project, limit=free, required_label=label))
+        summary.recovered.extend(auto_rebind_blocked_missing_validation_gates(self.store, self.project, limit=free, required_label=label))
+        summary.recovered.extend(auto_revalidate_blocked_validation_gates(self.store, self.project, limit=free, required_label=label))
+        summary.recovered.extend(auto_reintegrate_blocked_runtime_failures(self.store, self.project, limit=free, required_label=label))
+        retried = auto_retry_blocked_provider_failures(self.store, self.project, limit=free, exclude=attempted, required_label=label)
         summary.recovered.extend(retried)
         for entry in retried:
             self._say(entry["task_id"], f"automatic recovery: {entry['message']}")
@@ -660,6 +662,8 @@ class ParallelRunner:
             task_id = candidate.task_id
             if task_id in attempted or task_id in running or len(chosen) >= free:
                 continue
+            if outside_label_selector(self.store, self.store.get_task(task_id), self.policy.required_label):
+                continue  # the source cache changed after ranking: no auto-planning, contract write or stage work for it
             plan_info: dict[str, Any] = {"occurred": False, "reused_existing": False, "events": []}
             try:
                 _ensure_contract(self.store, self.project, task_id, self.auto_plan, plan_info, lambda m, i=plan_info: i["events"].append(m))
@@ -779,6 +783,7 @@ class ParallelRunner:
         try:
             try:
                 coordinator = self.make_coordinator(TargetSelection(task_id), store, task_id)
+                coordinator.required_label = self.policy.required_label
                 coordinator.validate_target()
             except TargetSelectionError as exc:
                 summary.started, summary.stop_reason, summary.message = False, "REFUSED:target_not_runnable", str(exc)

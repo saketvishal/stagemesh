@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .audit import record_audit
-from .auto_plan import AutoPlanError, create_contract, refresh_stale_generated_contract
+from .auto_plan import AutoPlanError, create_contract, outside_label_selector, refresh_stale_generated_contract, task_labels
 from .blocked_recovery import auto_retry_blocked_provider_failures, exhaustion_message
 from .config import AdverseReviewPolicy, ConfigValidationError, TaskSelectionConfig, load_config
 from .contract_binding import contract_for_candidate
@@ -50,7 +50,7 @@ from .step_progress import (
     record_step_cap,
     unproductive_step_caps,
 )
-from .task_selection import Candidate, Selection, SelectionRefusal, contract_state, select_next_task
+from .task_selection import Candidate, Selection, SelectionRefusal, contract_state, has_exact_label, select_next_task
 from .timing import execution_timings, format_duration, step_duration
 from .workspace_guard import EXTERNAL_WORKSPACE_MUTATION
 from .workspaces import task_workspace, worktree_root
@@ -193,6 +193,20 @@ def choose_task(
     """--task bypasses ranking only; objective-root/history safety still applies."""
     if requested is not None:
         _require_runnable_task(store, requested)
+        if policy.required_label:
+            task = store.get_task(requested)
+            if task is None or not has_exact_label(task_labels(store, task), policy.required_label):
+                raise RunReadyRefusal(
+                    "label_selector_conflict",
+                    f"task {requested} does not carry the active label selector {policy.required_label!r}; "
+                    "--task cannot bypass --label",
+                    task_id=requested,
+                )
+        if policy.required_label:
+            return Selection(
+                "explicit", requested, f"explicit --task (ranking bypassed; label selector {policy.required_label!r} verified)",
+                policy={"required_label": policy.required_label},
+            )
         return Selection("explicit", requested, "explicit --task (selection policy bypassed)")
     try:
         return select_next_task(store, project, policy, auto_plan=auto_plan, chooser=chooser)
@@ -203,7 +217,9 @@ def choose_task(
 def _log_selection(selection: Selection, log: Callable[[str], None] | None) -> None:
     if log is None:
         return
-    log(f"task selection ({selection.mode}): task {selection.task_id} - {selection.reason}")
+    selector = selection.policy.get("required_label")
+    suffix = f" [active label selector: {selector!r}]" if selector else ""
+    log(f"task selection ({selection.mode}): task {selection.task_id} - {selection.reason}{suffix}")
     if selection.mode in {"auto", "chosen"}:
         for rank, candidate in enumerate(selection.candidates[:5], start=1):
             log(f"  candidate {rank}: task {candidate['task_id']} ({candidate['priority'] or 'no priority'}, contract {candidate['contract']})")
@@ -895,11 +911,12 @@ def run_ready(
 
     try:
         recovered.extend(_recover_all_dead(store))  # provably dead claims/executions only; live/unknown are never touched
-        recovered.extend(auto_rebaseline_blocked_stale_baselines(store, project, task_id=task_id))
-        recovered.extend(auto_rebind_blocked_missing_validation_gates(store, project, task_id=task_id))
-        recovered.extend(auto_revalidate_blocked_validation_gates(store, project, task_id=task_id))
-        recovered.extend(auto_reintegrate_blocked_runtime_failures(store, project, task_id=task_id))
-        recovered.extend(auto_retry_blocked_provider_failures(store, project, task_id=task_id, exclude=no_auto_retry))
+        label = policy.required_label if policy is not None else None
+        recovered.extend(auto_rebaseline_blocked_stale_baselines(store, project, task_id=task_id, required_label=label))
+        recovered.extend(auto_rebind_blocked_missing_validation_gates(store, project, task_id=task_id, required_label=label))
+        recovered.extend(auto_revalidate_blocked_validation_gates(store, project, task_id=task_id, required_label=label))
+        recovered.extend(auto_reintegrate_blocked_runtime_failures(store, project, task_id=task_id, required_label=label))
+        recovered.extend(auto_retry_blocked_provider_failures(store, project, task_id=task_id, exclude=no_auto_retry, required_label=label))
         selection = choose_task(store, project, task_id, policy or TaskSelectionConfig(), auto_plan, chooser)
         selection_info.update(selection.to_dict())
         _log_selection(selection, on_start)
@@ -910,6 +927,12 @@ def run_ready(
                 "task_blocked",
                 exhaustion_message(store, selected)
                 or f"task {selected} is BLOCKED; inspect diagnosis and use retry-task after remediation",
+                task_id=selected,
+            )
+        if policy is not None and policy.required_label and outside_label_selector(store, store.get_task(selected), policy.required_label):
+            raise RunReadyRefusal(  # the source cache changed after selection: refuse before any auto-planning or stage work
+                "label_selector_conflict",
+                f"task {selected} no longer carries the active label selector {policy.required_label!r}; nothing was started",
                 task_id=selected,
             )
         _ensure_contract(store, project, selected, auto_plan, plan_info, note)
@@ -941,6 +964,7 @@ def run_ready(
     summary = RunSummary(True, "UNSET", task_id=selected, recovered=recovered, auto_plan=plan_info, selection=selection_info)
     try:
         coordinator = make_coordinator(TargetSelection(selected))
+        coordinator.required_label = policy.required_label if policy is not None else None
         coordinator.validate_target()
     except TargetSelectionError as exc:
         summary.started, summary.stop_reason, summary.message = False, "REFUSED:target_not_runnable", str(exc)

@@ -177,6 +177,13 @@ def task_labels(store: Store, task: Any) -> tuple[str, ...]:
     return tuple(labels) if isinstance(labels, list) else ()
 
 
+def outside_label_selector(store: Store, task: Any, required_label: str | None) -> bool:
+    """True when an operator --label selector is active and the task does not carry exactly that label (case-insensitive)."""
+    if not required_label:
+        return False
+    return required_label.strip().casefold() not in {str(label).casefold() for label in task_labels(store, task)}
+
+
 def task_text(store: Store, task_id: str) -> tuple[str, str]:
     task = store.get_task(task_id)
     if task is None:

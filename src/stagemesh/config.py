@@ -44,6 +44,7 @@ class TaskSelectionConfig:
     preferred_labels: tuple[str, ...] = ("stagemesh:prep", "prep", "governance", "readiness")  # best first
     excluded_labels: tuple[str, ...] = ("stagemesh:blocked", "stagemesh:deferred")
     tie_breaker: str = "issue_number"
+    required_label: str | None = None  # operator run selector (--label): only tasks carrying exactly this label are admitted; never read from config files
 
 
 @dataclass(frozen=True)

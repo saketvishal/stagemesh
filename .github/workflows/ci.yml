@@ -46,6 +46,8 @@ jobs:
 
       - name: Operator activity contract and read-only API
         run: .stagemesh\tooling\venv\Scripts\python.exe -m pytest -q tests/test_operator_ui_contract.py tests/test_activity.py tests/test_api_server.py tests/test_ui_assets.py tests/test_ui_browser_behavior.py
+      - name: Exact-label selector and scoped automatic recovery
+        run: .stagemesh\tooling\venv\Scripts\python.exe -m pytest -q tests/test_task_selection.py tests/test_label_selector_admission.py tests/test_queue_run.py::test_parallel_label_selector_is_enforced_at_stage_admission_after_selection tests/test_queue_run.py::test_serial_label_selector_is_enforced_at_stage_admission_after_selection tests/test_queue_run.py::test_label_removed_after_ranking_blocks_auto_planning_for_a_no_contract_task tests/test_queue_run.py::test_queue_label_selector_runs_only_in_label_and_never_recovers_out_of_label_blocked_tasks tests/test_blocked_recovery.py::test_label_selector_scopes_automatic_recovery_to_in_label_tasks tests/test_blocked_recovery.py::test_serial_run_ready_with_label_selector_does_not_recover_out_of_label_blocked_task
 
   linux:
     runs-on: ubuntu-latest
@@ -83,3 +85,5 @@ jobs:
         run: .stagemesh/tooling/venv/bin/python -m pytest -q tests/test_research_stage.py tests/test_research_tree_recovery.py tests/test_research_crash_ownership.py tests/test_execution_timing.py tests/test_research_cleanup_ownership.py tests/test_spec_planning_gate.py tests/test_adverse_review_gate.py tests/test_distinct_review_roles.py tests/test_adverse_review_policy.py tests/test_e2e_remediation.py tests/test_tool_failure_recovery.py tests/test_tool_failure_evidence.py tests/test_runtime_tool_evidence.py tests/test_spec_governance_gate.py tests/test_batched_ci.py tests/test_security_evidence_boundaries.py
       - name: Operator activity contract and read-only API
         run: .stagemesh/tooling/venv/bin/python -m pytest -q tests/test_operator_ui_contract.py tests/test_activity.py tests/test_api_server.py tests/test_ui_assets.py tests/test_ui_browser_behavior.py
+      - name: Exact-label selector and scoped automatic recovery
+        run: .stagemesh/tooling/venv/bin/python -m pytest -q tests/test_task_selection.py tests/test_label_selector_admission.py tests/test_queue_run.py::test_parallel_label_selector_is_enforced_at_stage_admission_after_selection tests/test_queue_run.py::test_serial_label_selector_is_enforced_at_stage_admission_after_selection tests/test_queue_run.py::test_label_removed_after_ranking_blocks_auto_planning_for_a_no_contract_task tests/test_queue_run.py::test_queue_label_selector_runs_only_in_label_and_never_recovers_out_of_label_blocked_tasks tests/test_blocked_recovery.py::test_label_selector_scopes_automatic_recovery_to_in_label_tasks tests/test_blocked_recovery.py::test_serial_run_ready_with_label_selector_does_not_recover_out_of_label_blocked_task

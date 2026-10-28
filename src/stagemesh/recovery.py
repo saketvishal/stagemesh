@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from .audit import record_audit
+from .auto_plan import outside_label_selector
 from .baseline import BaselineAnalysis, analyze_baseline, resolve_integration_ref
 from .contract_binding import contract_for_candidate
 from .contracts import (
@@ -512,6 +513,7 @@ def auto_rebaseline_blocked_stale_baselines(
     integration_ref: str | None = None,
     task_id: str | None = None,
     limit: int = 1,
+    required_label: str | None = None,
 ) -> list[dict[str, Any]]:
     """Recover blocked stale-baseline tasks without requiring an operator command."""
     ref = integration_ref or resolve_integration_ref(project)
@@ -521,6 +523,8 @@ def auto_rebaseline_blocked_stale_baselines(
     for task in store.tasks():
         current_id = str(task["id"])
         if task_id is not None and current_id != task_id:
+            continue
+        if outside_label_selector(store, task, required_label):
             continue
         if task["status"] != TaskStatus.BLOCKED:
             continue
@@ -555,6 +559,7 @@ def auto_rebind_blocked_missing_validation_gates(
     *,
     task_id: str | None = None,
     limit: int = 1,
+    required_label: str | None = None,
 ) -> list[dict[str, Any]]:
     """Recover blocked tasks when a stale frozen contract has no executable validation gate.
 
@@ -568,6 +573,8 @@ def auto_rebind_blocked_missing_validation_gates(
     for task in store.tasks():
         current_id = str(task["id"])
         if task_id is not None and current_id != task_id:
+            continue
+        if outside_label_selector(store, task, required_label):
             continue
         if task["status"] != TaskStatus.BLOCKED:
             continue
@@ -620,6 +627,7 @@ def auto_revalidate_blocked_validation_gates(
     *,
     task_id: str | None = None,
     limit: int = 1,
+    required_label: str | None = None,
 ) -> list[dict[str, Any]]:
     """Re-run a blocked validation candidate once after an environment/gate setup failure.
 
@@ -633,6 +641,8 @@ def auto_revalidate_blocked_validation_gates(
     for task in store.tasks():
         current_id = str(task["id"])
         if task_id is not None and current_id != task_id:
+            continue
+        if outside_label_selector(store, task, required_label):
             continue
         if task["status"] != TaskStatus.BLOCKED or task["stage"] != Stage.VALIDATE:
             continue
@@ -695,7 +705,7 @@ def _auto_revalidation_already_tried(
 
 
 def auto_reintegrate_blocked_runtime_failures(
-    store: Store, project: Path, *, task_id: str | None = None, limit: int = 1,
+    store: Store, project: Path, *, task_id: str | None = None, limit: int = 1, required_label: str | None = None,
 ) -> list[dict[str, Any]]:
     """Retry an unavailable integration runtime once, preserving the exact reviewed candidate.
 
@@ -708,6 +718,8 @@ def auto_reintegrate_blocked_runtime_failures(
     for task in store.tasks():
         current_id = str(task["id"])
         if task_id is not None and current_id != task_id:
+            continue
+        if outside_label_selector(store, task, required_label):
             continue
         if task["status"] != TaskStatus.BLOCKED or task["stage"] != Stage.INTEGRATE:
             continue
