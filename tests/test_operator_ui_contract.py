@@ -68,3 +68,11 @@ def test_documented_invalid_queries_fail_closed(query):
 def test_documented_valid_boundaries_pass():
     validate_query(ActivityQuery(limit=activity.MAX_LIMIT, offset=activity.MAX_SCAN - 1))
     validate_query(ActivityQuery(state="open", stage="IMPLEMENT", since=datetime(2026, 1, 1, tzinfo=UTC)))
+
+
+def test_ci_runs_the_activity_contract_modules_on_both_platforms():
+    workflow = (Path(__file__).resolve().parents[1] / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    windows, _, linux = workflow.partition("\n  linux:")
+    for module in ("test_operator_ui_contract.py", "test_activity.py"):
+        assert module in windows, f"windows job omits {module}"
+        assert module in linux, f"linux job omits {module}"
