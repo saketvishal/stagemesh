@@ -18,7 +18,11 @@ from ..audit import record_audit
 from ..baseline import resolve_integration_ref
 from ..contract_binding import contract_for_candidate
 from ..domain import EvidenceKind, EvidenceStatus, Stage
-from ..execution_ownership import validation_tree_unresolved
+from ..execution_ownership import (
+    execution_tree_unresolved,
+    tree_description,
+    validation_tree_unresolved,
+)
 from ..git import GitError
 from ..persistence import Store
 from ..process_identity import classify_process, process_identity
@@ -1012,12 +1016,12 @@ class Supervisor:
         saved = self.store.execution_process_identity(execution_id)
         state = classify_process(saved, process_identity(saved.pid))
         execution = self.store.conn.execute("SELECT * FROM executions WHERE id=?", (execution_id,)).fetchone()
-        if validation_tree_unresolved(execution):
+        if execution_tree_unresolved(execution):
             return AutonomyDecision(
                 Condition.EXECUTION_IDENTITY_LIVE if state == "LIVE" else Condition.EXECUTION_IDENTITY_UNKNOWN,
-                "validation-tree-ownership/v1", Action.WAIT if state == "LIVE" else Action.HOLD_FAIL_CLOSED,
+                ("validation-tree-ownership/v1" if validation_tree_unresolved(execution) else "process-tree-ownership/v1"), Action.WAIT if state == "LIVE" else Action.HOLD_FAIL_CLOSED,
                 task_id, observed={"execution": execution_id, "parent_identity": state},
-                detail={"reason": "validation tree cleanup unconfirmed", "automatic_replacement_allowed": False},
+                detail={"reason": tree_description(execution) + " cleanup unconfirmed", "automatic_replacement_allowed": False},
             )
         return decide_execution_recovery(task_id, execution_id, state, age_seconds=age_seconds, policy=self.recovery_policy)
 
@@ -1045,8 +1049,8 @@ class Supervisor:
     def _fence(self, task_id: str, execution_id: str) -> dict[str, object]:
         """Preserve the old worktree untouched, release the claim without declaring death, continue on a new worktree generation."""
         execution = self.store.conn.execute("SELECT * FROM executions WHERE id=?", (execution_id,)).fetchone()
-        if validation_tree_unresolved(execution):
-            raise ValueError("validation tree cleanup unconfirmed; replacement refused")
+        if execution_tree_unresolved(execution):
+            raise ValueError(tree_description(execution) + " cleanup unconfirmed; replacement refused")
         key = _task_key(task_id)
         old_path = task_workspace(self.project, task_id)
         preserved: str | None = None

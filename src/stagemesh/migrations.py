@@ -51,6 +51,11 @@ MIGRATIONS = [
         ALTER TABLE executions ADD COLUMN result TEXT;
         """,
     ),
+    Migration(
+        5,
+        "explicit subprocess tree authority",
+        "ALTER TABLE executions ADD COLUMN process_tree_scope TEXT;",
+    ),
 ]
 
 
@@ -63,6 +68,10 @@ def apply_migrations(conn: sqlite3.Connection) -> int:
     current = current_schema_version(conn)
     for migration in MIGRATIONS:
         if migration.version <= current:
+            continue
+        if migration.version == 5:
+            _apply_tree_scope_migration(conn, migration)
+            current = current_schema_version(conn)
             continue
         conn.executescript(migration.sql)
         now = time.time()
@@ -101,3 +110,22 @@ def _repair_legacy_task_baselines(conn: sqlite3.Connection) -> None:
         ALTER TABLE task_baselines_new RENAME TO task_baselines;
         """
     )
+
+
+def _apply_tree_scope_migration(conn: sqlite3.Connection, migration: Migration) -> None:
+    """Serialize v4 upgrades and recover an interrupted column/version publication."""
+    conn.commit()
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        if current_schema_version(conn) < migration.version:
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(executions)")}
+            if "process_tree_scope" not in columns:
+                conn.execute(migration.sql)
+            now = time.time()
+            conn.execute("INSERT OR IGNORE INTO schema_migrations VALUES (?, ?)", (migration.version, now))
+            conn.execute("INSERT OR IGNORE INTO migration_audit VALUES (?, ?, ?)",
+                         (migration.version, migration.name, now))
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
