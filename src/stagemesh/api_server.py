@@ -52,7 +52,8 @@ def _error(exc: ApiError) -> Response:
 
 # Exactly RFC 3339 `date-time`: uppercase T and Z, extended format, mandatory offset, optional fraction of 1-9 digits.
 _RFC3339 = re.compile(
-    r"^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?(Z|[+-](\d{2}):(\d{2}))$"
+    r"([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})(?:\.([0-9]{1,9}))?(Z|[+-]([0-9]{2}):([0-9]{2}))",
+    re.ASCII,
 )
 _BAD_ESCAPE = re.compile(r"%(?![0-9A-Fa-f]{2})")
 _URL_SAFE = re.compile(r"^[!-~]*$")
@@ -64,7 +65,7 @@ def _invalid(message: str) -> ApiError:
 
 def _timestamp(name: str, value: str) -> datetime:
     """Parse the supported form `YYYY-MM-DDTHH:MM:SS[.f{1,9}](Z|+HH:MM|-HH:MM)`; anything else is rejected."""
-    match = _RFC3339.match(value)
+    match = _RFC3339.fullmatch(value)
     if not match:
         raise _invalid(f"{name} must be an RFC 3339 timestamp such as 2026-01-31T09:30:00Z or 2026-01-31T09:30:00%2B05:30")
     year, month, day, hour, minute, second = (int(match.group(i)) for i in range(1, 7))
