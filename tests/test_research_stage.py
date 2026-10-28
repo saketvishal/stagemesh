@@ -13,7 +13,12 @@ import pytest
 from stagemesh.config import ConfigValidationError, load_config
 from stagemesh.contracts import BoundChangeContract, ChangeContract, canonical_contract_json
 from stagemesh.persistence import Store
-from stagemesh.providers import ResearchRole, RuntimeCommandAdapter, _build_task_prompt, adapters_from_config
+from stagemesh.providers import (
+    ResearchRole,
+    RuntimeCommandAdapter,
+    _build_task_prompt,
+    adapters_from_config,
+)
 from stagemesh.research_context import ResearchBlocked
 
 RESEARCHER = r'''
@@ -192,7 +197,8 @@ def test_research_retains_running_execution_when_cleanup_cannot_be_confirmed(rig
     def start(argv, *args, **kwargs):
         if argv[0] == sys.executable:
             pending = store.conn.execute("SELECT * FROM executions WHERE task_id='t1'").fetchone()
-            assert pending["status"] == "RUNNING" and pending["pid"] is None
+            assert pending["status"] == "RUNNING" and pending["pid"] is not None
+            assert pending["process_tree_scope"] == "research/v1"
             return object()
         return original(argv, *args, **kwargs)
 

@@ -17,7 +17,7 @@ from .domain import (
     Stage,
     TaskStatus,
 )
-from .execution_ownership import validation_tree_unresolved
+from .execution_ownership import RESEARCH_PROCESS_TREE, execution_tree_unresolved
 from .migrations import apply_migrations, current_schema_version, latest_schema_version
 
 SCHEMA_VERSION = latest_schema_version()
@@ -310,6 +310,10 @@ class Store:
 
             if not Scheduler(self).decision(task_id).eligible:
                 return None
+            if any(execution_tree_unresolved(row) for row in self.conn.execute(
+                "SELECT * FROM executions WHERE task_id=? AND status='RUNNING'", (task_id,),
+            )):
+                return None  # do not expire a claim or admit over unconfirmed children
             self.conn.execute(
                 "UPDATE claims SET active=0 WHERE task_id=? AND active=1 AND lease_expires_at < ?",
                 (task_id, now),
@@ -341,17 +345,22 @@ class Store:
         executable: str | None = None,
         candidate_sha: str | None = None,
         actor: str | None = None,
+        process_tree_scope: str | None = None,
     ) -> str:
         task_id = _validate_text(task_id, "task id")
         claim_id = _validate_optional_text(claim_id, "claim id")
         kind = _validate_enum(kind, ExecutionKind, "execution kind")
         actor = _validate_optional_text(actor, "execution actor")
         candidate_sha = _validate_optional_text(candidate_sha, "candidate sha")
+        if process_tree_scope is not None and (
+            process_tree_scope != RESEARCH_PROCESS_TREE or kind != ExecutionKind.REVIEW
+        ):
+            raise StoreValidationError("unsupported execution process tree scope")
         execution_id = str(uuid.uuid4())
         now = time.time()
         self.conn.execute(
             "INSERT INTO executions(id, task_id, claim_id, kind, status, pid, process_create_time, boot_id, "
-            "executable, candidate_sha, started_at, updated_at, actor) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "executable, candidate_sha, started_at, updated_at, actor, process_tree_scope) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 execution_id,
                 task_id,
@@ -366,6 +375,7 @@ class Store:
                 now,
                 now,
                 actor,
+                process_tree_scope,
             ),
         )
         self.conn.commit()
@@ -911,7 +921,7 @@ class Store:
                 "SELECT * FROM executions WHERE id=? AND status=?",
                 (execution_id, ExecutionStatus.RUNNING),
             ).fetchone()
-            if execution is None or execution["claim_id"] is None or validation_tree_unresolved(execution):
+            if execution is None or execution["claim_id"] is None or execution_tree_unresolved(execution):
                 return False
             claim = self.conn.execute(
                 "SELECT * FROM claims WHERE id=? AND task_id=? AND active=1",
@@ -962,7 +972,7 @@ class Store:
         now = time.time()
         with self.conn:
             execution = self.conn.execute("SELECT * FROM executions WHERE id=? AND status=?", (execution_id, ExecutionStatus.RUNNING)).fetchone()
-            if execution is None or validation_tree_unresolved(execution):
+            if execution is None or execution_tree_unresolved(execution):
                 return False
             self.conn.execute(
                 "UPDATE executions SET status=?, result=?, updated_at=? WHERE id=? AND status=?",
@@ -996,7 +1006,7 @@ class Store:
             ).fetchone()
             if execution is None:
                 return False
-            if validation_tree_unresolved(execution):
+            if execution_tree_unresolved(execution):
                 return False
             task = self.conn.execute("SELECT * FROM tasks WHERE id=?", (execution["task_id"],)).fetchone()
             if task is None:
@@ -1032,7 +1042,14 @@ class Store:
     def release_inspected_validation_execution(
         self, execution_id: str, task_id: str, operator_audit: dict[str, Any],
     ) -> bool:
-        """Explicit inspected release: selected validation authority and full audit commit together.
+        if operator_audit.get("execution_kind") != ExecutionKind.VALIDATION:
+            raise StoreValidationError("inspection audit does not match selected validation execution")
+        return self.release_inspected_execution_tree(execution_id, task_id, operator_audit)
+
+    def release_inspected_execution_tree(
+        self, execution_id: str, task_id: str, operator_audit: dict[str, Any],
+    ) -> bool:
+        """Explicit inspected release: selected tree/identity and full audit commit together.
 
         The operator API first refuses a known-live parent and requires inspection.
         Ordinary recovery must use the guarded orphan/fence methods, never this override.
@@ -1043,30 +1060,49 @@ class Store:
         task_id = _validate_text(task_id, "task id")
         audit = _validate_payload(operator_audit)
         if (audit.get("task_id") != task_id or audit.get("execution_id") != execution_id
-                or audit.get("execution_kind") != ExecutionKind.VALIDATION
+                or audit.get("execution_kind") not in {str(kind) for kind in ExecutionKind}
                 or audit.get("operator_action") != "RELEASE_UNKNOWN_EXECUTION"):
             raise StoreValidationError("inspection audit does not match selected validation execution")
         _validate_text(audit.get("reason"), "inspection reason", 2000)
         _validate_text(audit.get("operator"), "inspection operator")
+        expected_identity = audit.get("process_identity")
         audit = redact_mapping({**audit, "outcome": "RELEASED_BY_OPERATOR"})
         now = time.time()
         with self.conn:
+            # Hold the writer lock across reinspection and mutation: a new child
+            # identity cannot publish between this comparison and terminalization.
+            self.conn.execute("UPDATE executions SET updated_at=updated_at WHERE id=? AND task_id=?",
+                              (execution_id, task_id))
             row = self.conn.execute(
                 "SELECT * FROM executions WHERE id=? AND task_id=?", (execution_id, task_id),
             ).fetchone()
-            if not validation_tree_unresolved(row):
+            if not execution_tree_unresolved(row):
                 return False
+            if (str(row["kind"]) != audit.get("execution_kind")
+                    or row["process_tree_scope"] != audit.get("process_tree_scope")):
+                raise StoreValidationError("inspection audit does not match selected execution tree")
+            keys = ("pid", "process_create_time", "boot_id", "executable")
+            if row["process_tree_scope"] is not None and not isinstance(expected_identity, dict):
+                raise StoreValidationError("inspection requires the selected process identity snapshot")
+            if expected_identity is not None and expected_identity != {key: row[key] for key in keys}:
+                return False
+            if row["process_tree_scope"] is not None:
+                from .process_identity import classify_process, process_identity
+
+                saved = ProcessIdentity(row["pid"], row["process_create_time"], row["boot_id"], row["executable"])
+                if classify_process(saved, process_identity(saved.pid)) == "LIVE":
+                    return False
             changed = self.conn.execute(
                 "UPDATE executions SET status='FAILED', result='orphaned', updated_at=? "
-                "WHERE id=? AND task_id=? AND status='RUNNING' AND kind='VALIDATION'",
-                (now, execution_id, task_id),
+                "WHERE id=? AND task_id=? AND status='RUNNING' AND kind=? AND process_tree_scope IS ?",
+                (now, execution_id, task_id, row["kind"], row["process_tree_scope"]),
             ).rowcount
             if changed != 1:
                 return False
             self.conn.execute("INSERT INTO audit_events VALUES (?, ?, ?, ?)", (
                 str(uuid.uuid4()), "recovery.orphan_execution_failed",
                 json.dumps({"task_id": task_id, "execution_id": execution_id,
-                            "execution_kind": "VALIDATION", "claim_id": row["claim_id"],
+                            "execution_kind": str(row["kind"]), "claim_id": row["claim_id"],
                             "reason": "OPERATOR_RELEASE_UNKNOWN_IDENTITY"}, sort_keys=True), now,
             ))
             self.conn.execute("INSERT INTO audit_events VALUES (?, ?, ?, ?)", (

@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-import time
-
 import json
+import time
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,7 +13,6 @@ from .block_kinds import BlockKind, block_kind_for, record_block, runtime_finger
 from .concurrency import IntegrationLockTimeout
 from .contract_binding import contract_for_candidate
 from .contracts import _matches, task_contract_path
-from .efficiency import BudgetPolicy, record_provider_call, take_call_usage
 from .diagnosis import (
     CONTRACT_SCOPE,
     DIAGNOSIS_EVENT,
@@ -28,8 +26,9 @@ from .diagnosis import (
     normalize,
 )
 from .domain import EvidenceKind, EvidenceStatus, ExecutionKind, ExecutionStatus, Stage, TaskStatus
+from .efficiency import BudgetPolicy, record_provider_call, take_call_usage
 from .execution import Executor, FakeExecutor
-from .execution_ownership import validation_tree_unresolved
+from .execution_ownership import execution_tree_unresolved
 from .git import GitWorkspace
 from .integration import Integrator
 from .integration_recovery import (
@@ -76,8 +75,8 @@ from .review import Reviewer, adverse_gate, independent_review_verified
 from .review_disposition import (
     UNRESOLVED_EVENT,
     AdverseSummary,
-    reconcile_withdrawals,
     recheck_review_authorized,
+    reconcile_withdrawals,
     unresolved_adverse_review_findings,
 )
 from .scheduling import Scheduler
@@ -153,7 +152,7 @@ class Coordinator:
         for execution in self.store.running_executions():
             if not self._target_allows(str(execution["task_id"])):
                 continue
-            if validation_tree_unresolved(execution):
+            if execution_tree_unresolved(execution):
                 continue  # parent death or a DONE task does not establish child-tree cleanup
             task = self.store.get_task(str(execution["task_id"]))
             if task is not None and (task["status"] == TaskStatus.DONE or task["stage"] == Stage.DONE):

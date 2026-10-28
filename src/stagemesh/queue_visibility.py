@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from .execution_ownership import recovery_identity_state, validation_tree_unresolved
+from .execution_ownership import recovery_identity_state, tree_cleanup_state
 from .parallel import QUEUE_CONTROL_EVENT, queue_control_state
 from .persistence import Store
 from .process_identity import classify_process, process_identity
@@ -63,7 +63,7 @@ def queue_control_report(store: Store) -> dict[str, Any]:
         state = recovery_identity_state(owner, parent_state)
         executions.append({
             **execution, "process_state": state, "parent_process_state": parent_state,
-            "cleanup_state": "UNCONFIRMED_VALIDATION_TREE" if validation_tree_unresolved(owner) else None,
+            "cleanup_state": tree_cleanup_state(owner),
         })
     latest = report.get("latest") or {}
     report["active_executions"] = executions

@@ -42,10 +42,11 @@ from .execution import (
     provider_timeout_seconds,
     record_tool_failure,
 )
+from .execution_ownership import RESEARCH_PROCESS_TREE
 from .focused_validation import focused_test_prompt
 from .git_identity import provider_environment
 from .persistence import Store
-from .process_identity import popen_identity
+from .process_identity import owner_execution_fields, popen_identity
 from .queue_control import OperatorStopRequested
 from .redaction import redact_command_secrets
 from .remediation import remediation_context
@@ -406,9 +407,10 @@ class RuntimeCommandAdapter:
             budget_problem = _provider_budget_refusal(store, task_id, authority)
             if budget_problem:
                 raise ResearchBlocked("budget_exhausted", budget_problem)
-            # An unknown prelaunch identity fails closed if the worker exits before it can publish its child identity.
+            # Parent identity and durable tree scope commit before launch; a live parent cannot be inspected away.
             execution_id = store.start_execution(
                 task_id=task_id, claim_id=None, kind=ExecutionKind.REVIEW, actor=role.name, candidate_sha=bound.baseline_sha,
+                process_tree_scope=RESEARCH_PROCESS_TREE, **owner_execution_fields(),
             )
             try:
                 proc = subprocess.Popen(
