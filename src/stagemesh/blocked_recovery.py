@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from .audit import record_audit
+from .auto_plan import outside_label_selector
 from .autonomy.gitfacts import GitFacts
 from .diagnosis import PROVIDER_NO_PROGRESS, _last_reset
 from .domain import Stage, TaskStatus
@@ -80,6 +81,7 @@ def auto_retry_blocked_provider_failures(
     limit: int = 1,
     max_retries: int = DEFAULT_MAX_AUTO_RETRIES,
     exclude: frozenset[str] | set[str] = frozenset(),
+    required_label: str | None = None,
 ) -> list[dict[str, Any]]:
     """Unblock tasks stopped by provider no-progress or workspace tampering, within a per-task budget. Returns report entries.
 
@@ -93,7 +95,7 @@ def auto_retry_blocked_provider_failures(
         current = str(task["id"])
         if task_id is not None and current != task_id:
             continue
-        if current in exclude:
+        if current in exclude or outside_label_selector(store, task, required_label):
             continue
         if task["status"] != TaskStatus.BLOCKED or task["stage"] != Stage.IMPLEMENT:
             continue

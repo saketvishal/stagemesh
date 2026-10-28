@@ -275,3 +275,19 @@ def test_a_retried_integration_that_rebases_the_candidate_is_not_blocked_by_the_
     assert not rig.store.conn.execute("SELECT 1 FROM audit_events WHERE event_type='task.remediation_exhausted'").fetchone()
     rig.tick(6)
     assert rig.stage == Stage.DONE  # re-validated, re-reviewed on the rebased SHA and integrated
+
+
+def test_label_selector_scopes_automatic_recovery_to_in_label_tasks(tmp_path: Path, monkeypatch) -> None:
+    import stagemesh.auto_plan as auto_plan
+
+    rig = ParallelRig(tmp_path, ["A", "B"])
+    for task_id in ("A", "B"):
+        _advance_to(rig.store, task_id, Stage.IMPLEMENT)
+        _block_no_progress(rig.store, task_id)
+    monkeypatch.setattr(auto_plan, "task_labels", lambda store, task: ("JJSE-Demo",) if task["id"] == "A" else ("other",))
+
+    recovered = auto_retry_blocked_provider_failures(rig.store, rig.project, limit=5, required_label="jjse-demo")
+
+    assert [e["task_id"] for e in recovered] == ["A"]
+    assert rig.store.get_task("A")["status"] == TaskStatus.OPEN
+    assert rig.store.get_task("B")["status"] == TaskStatus.BLOCKED  # out-of-label work is never re-opened
