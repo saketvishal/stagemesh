@@ -1,8 +1,9 @@
 # Operator UI contract: shared read-only activity API
 
-Design only (parent objective #135, activity history objective #134, this slice #354). Nothing here is implemented: there is no
-server, no UI, no new dependency and no schema change. It specifies how one desktop/web UI reads the activity projection that
-already exists in `src/stagemesh/activity.py` (`query_activity`), and lists the decisions needed before building it.
+Parent objectives #135 (operator UI) and #134 (activity history). The server in `src/stagemesh/api_server.py`
+(`stagemesh serve`, #446) implements this contract over the activity projection in `src/stagemesh/activity.py`
+(`query_activity`). The UI, desktop launcher and installer are tracked as #448, #449 and #451. The contract needs no
+dependency and no schema change.
 
 ## Principles
 
@@ -25,8 +26,8 @@ talks to a loopback server it starts or attaches to; the browser talks to the sa
 | `GET /api/v1/activity` | One page of activity entries, newest first |
 | `GET /api/v1/health` | Authenticated liveness and `version`, so a shell can detect an incompatible server |
 
-A single route is enough for the first UI slice. Task drill-down is `GET /api/v1/activity?task_id=<id>`, which the projection
-already supports. A health/version route is listed under Decisions rather than assumed.
+Task drill-down is `GET /api/v1/activity?task_id=<id>`, which the projection already supports. `health` takes no
+parameters and returns `{"status": "ok", "version": ...}` so a shell can detect an incompatible server.
 
 ### Query parameters
 
@@ -140,16 +141,28 @@ The projection is the first slice, not the whole objective. A UI built on v1 can
 (only existing audit event types), status counts, opened-versus-completed series, or source-issue state. These need projection
 work, not UI workarounds; the UI must not infer them from current state.
 
-## Decisions needed before implementing #135
+## Architecture decisions
 
-1. Server home: a new `stagemesh` subcommand, or a route in an existing process. Needs the process-lifetime and locking story
-   against the runner, since reads must not contend with or mutate the coordinator.
-2. Desktop shell choice (Tauri or equivalent) and how it receives the launch credential.
-3. Remote hosting: authentication scheme, TLS and who may read which project. Until decided, loopback only.
-4. Live updates: keep polling, or add server-sent events. Either must stay read-only.
-5. Snapshot cursor to remove boundary repeats and skips, versus accepting client de-duplication.
-6. Multi-project scope: one server per store, or a server that aggregates stores (changes the auth and error model).
-7. Projection additions required by #134 (see gaps), and whether they extend `ActivityEntry` before or after contract v1.
-8. A health/version route for the desktop shell to detect an incompatible server.
-9. Dependency policy: the project has no runtime dependencies today; the server should use the standard library, and the UI
-   build toolchain must stay outside the Python package.
+Resolved from the existing architecture (standard-library Python, SQLite in WAL mode, no runtime dependencies, one
+project store per `.stagemesh` directory). Each is reversible except the remote-hosting item, which stays open.
+
+1. **Server home: a separate `stagemesh serve` process.** It opens the database read-only per request, so it never
+   contends with or mutates the coordinator; WAL lets readers run beside the runner. Embedding it in the runner would couple
+   UI availability to run-window lifetime. Implemented (#446).
+2. **Desktop shell: the same web UI in a chromeless browser app window** (Edge or Chrome `--app` on Windows, system browser
+   fallback), launched by `stagemesh ui` (#449). Tauri or another native shell would add a Rust toolchain and signing for no
+   functional gain over a loopback page; the contract is shell-agnostic, so one can be added later. The launcher passes the
+   token in the URL fragment.
+3. **Remote hosting: OPEN, needs a human decision.** Authentication scheme, TLS and per-project authorization are security
+   decisions with no precedent in the repository. Until made, the server binds loopback only and has no option to bind elsewhere.
+4. **Live updates: polling in v1.** It needs no long-lived connections in a single-threaded server. Server-sent events can be
+   added later as a new route without changing this one.
+5. **Pagination: offset plus client de-duplication by `(kind, id)`.** The retained window is capped at 1000 rows, so a
+   snapshot cursor adds state for little gain. `truncated` already tells the operator when to narrow the range.
+6. **Multi-project: one server per project store.** A project switcher launches or selects a server per project through the
+   existing project registry, so no server aggregates stores and the auth and error model stays per project.
+7. **Projection growth:** additive optional fields (status counts, project, period semantics: #450) stay within
+   `stagemesh.activity/1`; clients must ignore unknown fields. A removed or re-typed field requires `/api/v2`.
+8. **Health and version route:** `GET /api/v1/health`. Implemented (#446).
+9. **Dependencies: none.** The server is standard library; the UI is dependency-free HTML, CSS and JavaScript shipped as
+   package data (#448), so no Node toolchain is needed to build or install StageMesh.

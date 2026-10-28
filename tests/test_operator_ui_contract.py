@@ -41,7 +41,11 @@ def test_documents_the_complete_outcome_allowlist_and_stages():
 def test_read_only_and_fail_closed_posture_is_stated():
     for phrase in ("`GET` only", "fail closed", "loopback", "Bearer", "DNS", "`invalid_query`", "`store_unavailable`"):
         assert phrase in DOC, phrase
-    assert "## Decisions needed before implementing #135" in DOC
+    assert "## Architecture decisions" in DOC
+    assert "Remote hosting: OPEN" in DOC.replace("**", "")
+    for stale in ("Design only", "Nothing here is implemented", "Decisions needed before"):
+        assert stale not in DOC, stale
+    assert "`GET /api/v1/health`" in DOC
     assert "## Known gaps against #134" in DOC
 
 
