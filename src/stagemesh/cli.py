@@ -4061,7 +4061,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     queue_cmd.add_argument(
         "--label",
-        help="Only admit OPEN tasks that carry exactly this task-source label (case-insensitive exact match, never title text); out-of-label work is never a fallback",
+        help="Only admit OPEN tasks that carry exactly this task-source label (case-insensitive exact match, never title text); out-of-label work is never a fallback, admitted, or automatically recovered. Safety housekeeping (dead claim/execution cleanup, worktree sweeps) stays global (releases provably dead ownership only) and never admits or runs out-of-label work",
     )
     queue_cmd.add_argument(
         "--sprint",
@@ -4124,7 +4124,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     cont.add_argument(
         "--label",
-        help="Only admit OPEN tasks that carry exactly this task-source label (case-insensitive exact match); --task cannot bypass it",
+        help="Only admit OPEN tasks that carry exactly this task-source label (case-insensitive exact match); --task cannot bypass it; automatic blocked-task recovery is limited to labelled tasks",
     )
     cont.add_argument("--json", action="store_true")
     cont.add_argument("--verbose", action="store_true", help="Show provider selection and setup trace lines")

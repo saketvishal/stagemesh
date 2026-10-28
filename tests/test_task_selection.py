@@ -363,3 +363,23 @@ def test_label_selector_rejects_empty_and_once(tmp_path: Path) -> None:
         assert cli_module.main(["--project", str(project), "continue", "--label", " "]) == 2
         assert cli_module.main(["--project", str(project), "continue", "--label", "x", "--once"]) == 2
     assert "must not be empty" in err.getvalue() and "cannot be combined with --once" in err.getvalue()
+
+
+def test_serial_run_reports_the_effective_label_selector_for_auto_and_explicit_task(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    project = _project(tmp_path, ["T-1", "T-2"], labels={"T-1": ["jjse-demo"], "T-2": []})
+
+    code, auto = _continue(project, "--label", "jjse-demo")
+    assert code == 0 and auto["selection"]["policy"]["required_label"] == "jjse-demo"
+
+    project = _project(tmp_path / "e", ["T-1", "T-2"], labels={"T-1": ["jjse-demo"], "T-2": []})
+    code, explicit = _continue(project, "--label", "jjse-demo", "--task", "T-1")
+    assert code == 0 and explicit["selection"]["mode"] == "explicit"
+    assert explicit["selection"]["policy"] == {"required_label": "jjse-demo"}
+
+    code, conflict = _continue(project, "--label", "jjse-demo", "--task", "T-2")
+    assert code != 0 and conflict["stop_reason"] == "REFUSED:label_selector_conflict"
+
+    text_project = _project(tmp_path / "t", ["T-1"], labels={"T-1": ["jjse-demo"]})
+    assert cli_module.main(["--project", str(text_project), "continue", "--dry-run", "--label", "jjse-demo"]) == 0
+    captured = capsys.readouterr()
+    assert "active label selector: 'jjse-demo'" in captured.out + captured.err

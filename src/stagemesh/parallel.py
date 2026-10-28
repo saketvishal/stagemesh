@@ -780,6 +780,7 @@ class ParallelRunner:
         try:
             try:
                 coordinator = self.make_coordinator(TargetSelection(task_id), store, task_id)
+                coordinator.required_label = self.policy.required_label
                 coordinator.validate_target()
             except TargetSelectionError as exc:
                 summary.started, summary.stop_reason, summary.message = False, "REFUSED:target_not_runnable", str(exc)

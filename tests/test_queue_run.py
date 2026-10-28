@@ -974,3 +974,86 @@ def test_a_deferred_task_is_not_admission_checked_until_its_blocker_has_finished
 def test_operator_flow_docs_point_production_work_at_run_window() -> None:
     text = (Path(__file__).resolve().parents[1] / "docs" / "operator-flow.md").read_text(encoding="utf-8")
     assert "Production operation: use `run-window`" in text and "--legacy-unsafe" in text
+
+
+def test_queue_label_selector_runs_only_in_label_and_never_recovers_out_of_label_blocked_tasks(tmp_path: Path) -> None:
+    from stagemesh.audit import record_audit
+    from stagemesh.config import TaskSelectionConfig
+
+    rig = Rig(tmp_path, ["A", "B", "C"], labels={"A": ["jjse-demo"], "B": ["other"], "C": []})
+    rig.store.advance_task("B", Stage.IMPLEMENT)
+    rig.store.block_task("B")
+    record_audit(rig.store, "task.diagnosis_stop", {"task_id": "B", "category": "provider_no_progress", "stage": "IMPLEMENT", "remediation_attempts": 0})
+    record_audit(rig.store, "task.remediation_exhausted", {"task_id": "B", "stage": "IMPLEMENT", "reason": "repeated_failure_diagnosed"})
+    executor = ScriptedExecutor(rig.files)
+
+    summary = queue(rig, executor, policy=TaskSelectionConfig(required_label="jjse-demo")).run()
+
+    assert outcomes(summary) == {"A": "DONE"}, summary.to_dict()
+    assert set(executor.worktrees) == {"A"}
+    assert rig.store.get_task("B")["status"] == "BLOCKED" and rig.store.get_task("C")["status"] == "OPEN"
+    assert not summary.recovered
+
+
+def _drop_cached_label(rig: Rig, task_id: str, label: str) -> None:
+    """A separate source sync (second connection) removes the label after selection but before stage dispatch."""
+    from stagemesh.persistence import Store as _Store
+
+    other = _Store(rig.project / ".stagemesh" / "stagemesh.sqlite3")
+    try:
+        task = other.get_task(task_id)
+        row = other.conn.execute("SELECT state FROM source_cache WHERE source=? AND source_id=?", (task["source"], task["source_id"])).fetchone()
+        state = json.loads(row["state"])
+        state["labels"] = [item for item in state.get("labels", []) if item.casefold() != label.casefold()]
+        other.conn.execute(
+            "UPDATE source_cache SET state=? WHERE source=? AND source_id=?", (json.dumps(state), task["source"], task["source_id"])
+        )
+        other.conn.commit()
+    finally:
+        other.close()
+
+
+def test_parallel_label_selector_is_enforced_at_stage_admission_after_selection(tmp_path: Path) -> None:
+    from stagemesh.config import TaskSelectionConfig
+
+    rig = Rig(tmp_path, ["A"], labels={"A": ["jjse-demo"]})
+    executor = ScriptedExecutor(rig.files)
+    runner = queue(rig, executor, policy=TaskSelectionConfig(required_label="jjse-demo"))
+    original = runner.make_coordinator
+
+    def make(target, store, task_id):
+        coordinator = original(target, store, task_id)
+        _drop_cached_label(rig, task_id, "jjse-demo")  # selection has passed; the task no longer matches
+        return coordinator
+
+    runner.make_coordinator = make
+
+    summary = runner.run()
+
+    assert not executor.worktrees, "no provider/stage may start for a task that no longer carries the selector label"
+    assert rig.store.get_task("A")["stage"] == Stage.PLAN and rig.store.get_task("A")["status"] == "OPEN"
+    assert summary.stop_reason != "DONE" or not summary.tasks or all(
+        t.summary is None or t.summary.stop_reason != "DONE" for t in summary.tasks
+    )
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+def test_serial_label_selector_is_enforced_at_stage_admission_after_selection(tmp_path: Path, explicit: bool) -> None:
+    from stagemesh.config import TaskSelectionConfig
+    from stagemesh.run_ready import run_ready
+
+    rig = Rig(tmp_path, ["A"], labels={"A": ["jjse-demo"]})
+    executor = ScriptedExecutor(rig.files)
+
+    def make(target):
+        _drop_cached_label(rig, target.task_id, "jjse-demo")
+        return Coordinator(rig.store, rig.project, executor=executor, target=target)
+
+    summary = run_ready(
+        rig.store, rig.project, make, task_id="A" if explicit else None, max_steps=5, auto_plan=False,
+        policy=TaskSelectionConfig(required_label="jjse-demo"),
+    )
+
+    assert not executor.worktrees, summary.to_dict()
+    assert summary.stop_reason != "DONE"
+    assert rig.store.get_task("A")["stage"] == Stage.PLAN

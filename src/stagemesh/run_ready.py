@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .audit import record_audit
-from .auto_plan import AutoPlanError, create_contract, refresh_stale_generated_contract, task_labels
+from .auto_plan import AutoPlanError, create_contract, outside_label_selector, refresh_stale_generated_contract, task_labels
 from .blocked_recovery import auto_retry_blocked_provider_failures, exhaustion_message
 from .config import AdverseReviewPolicy, ConfigValidationError, TaskSelectionConfig, load_config
 from .contract_binding import contract_for_candidate
@@ -202,6 +202,11 @@ def choose_task(
                     "--task cannot bypass --label",
                     task_id=requested,
                 )
+        if policy.required_label:
+            return Selection(
+                "explicit", requested, f"explicit --task (ranking bypassed; label selector {policy.required_label!r} verified)",
+                policy={"required_label": policy.required_label},
+            )
         return Selection("explicit", requested, "explicit --task (selection policy bypassed)")
     try:
         return select_next_task(store, project, policy, auto_plan=auto_plan, chooser=chooser)
@@ -212,7 +217,9 @@ def choose_task(
 def _log_selection(selection: Selection, log: Callable[[str], None] | None) -> None:
     if log is None:
         return
-    log(f"task selection ({selection.mode}): task {selection.task_id} - {selection.reason}")
+    selector = selection.policy.get("required_label")
+    suffix = f" [active label selector: {selector!r}]" if selector else ""
+    log(f"task selection ({selection.mode}): task {selection.task_id} - {selection.reason}{suffix}")
     if selection.mode in {"auto", "chosen"}:
         for rank, candidate in enumerate(selection.candidates[:5], start=1):
             log(f"  candidate {rank}: task {candidate['task_id']} ({candidate['priority'] or 'no priority'}, contract {candidate['contract']})")
@@ -922,6 +929,12 @@ def run_ready(
                 or f"task {selected} is BLOCKED; inspect diagnosis and use retry-task after remediation",
                 task_id=selected,
             )
+        if policy is not None and policy.required_label and outside_label_selector(store, store.get_task(selected), policy.required_label):
+            raise RunReadyRefusal(  # the source cache changed after selection: refuse before any auto-planning or stage work
+                "label_selector_conflict",
+                f"task {selected} no longer carries the active label selector {policy.required_label!r}; nothing was started",
+                task_id=selected,
+            )
         _ensure_contract(store, project, selected, auto_plan, plan_info, note)
         _enforce_planning_gate(store, project, selected, planning_gate)
         if any(row["task_id"] == selected for row in store.running_executions()):
@@ -951,6 +964,7 @@ def run_ready(
     summary = RunSummary(True, "UNSET", task_id=selected, recovered=recovered, auto_plan=plan_info, selection=selection_info)
     try:
         coordinator = make_coordinator(TargetSelection(selected))
+        coordinator.required_label = policy.required_label if policy is not None else None
         coordinator.validate_target()
     except TargetSelectionError as exc:
         summary.started, summary.stop_reason, summary.message = False, "REFUSED:target_not_runnable", str(exc)
