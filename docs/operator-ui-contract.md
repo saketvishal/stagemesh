@@ -23,6 +23,7 @@ talks to a loopback server it starts or attaches to; the browser talks to the sa
 | Method and path | Purpose |
 | --- | --- |
 | `GET /api/v1/activity` | One page of activity entries, newest first |
+| `GET /api/v1/health` | Authenticated liveness and `version`, so a shell can detect an incompatible server |
 
 A single route is enough for the first UI slice. Task drill-down is `GET /api/v1/activity?task_id=<id>`, which the projection
 already supports. A health/version route is listed under Decisions rather than assumed.
@@ -96,6 +97,7 @@ never include query values, paths, store details or secrets.
 | 400 | `invalid_query` | Any `ActivityQueryError`, unknown parameter, repeated parameter | Show the message; do not retry |
 | 401 | `unauthenticated` | Missing or wrong credential | Re-authenticate; render no data |
 | 403 | `forbidden` | Disallowed origin or host | Stop; render no data |
+| 404 | `not_found` | Unknown route | Programming error; surface it |
 | 405 | `method_not_allowed` | Any method other than `GET` | Programming error; surface it |
 | 503 | `store_unavailable` | Store missing, locked or mid-migration | Show a retryable state, keep last good data marked stale |
 | 500 | `internal` | Unexpected failure | Show a generic error; never display a partial page |
@@ -111,7 +113,9 @@ The projection exposes task titles, provider names, candidate SHAs and audit eve
   bearer credential (`Authorization: Bearer ...`) that the desktop shell receives from the process that started the server and
   never writes to disk, logs or the URL. Reject any request whose `Host` is not the exact loopback host and port (DNS
   rebinding) and any `Origin` other than the app's own; send no permissive CORS headers.
-- Browser against the same local server: the same credential, handed to the page by the launcher, not typed into a URL.
+- Browser against the same local server: the same credential, handed to the page in the launch URL's fragment
+  (`/#token=...`). Fragments are never sent to the server or written to access logs; the page reads it, keeps it in memory
+  only and removes it from the address bar. The static shell itself carries no data and needs no credential.
 - Remote hosting: not specified. Binding beyond loopback is refused until the Decisions below are made. It must not be enabled
   by a flag that merely changes the bind address.
 - Credentials and the store path never appear in error bodies, logs or the response.
