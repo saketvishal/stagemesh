@@ -2539,6 +2539,29 @@ def command_operator(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_serve(args: argparse.Namespace) -> int:
+    from .api_server import make_server
+
+    project = Path(args.project).resolve()
+    ui_dir = Path(__file__).parent / "ui"
+    server, api = make_server(db_path(project), port=args.port, static_dir=ui_dir if ui_dir.is_dir() else None)
+    port = server.server_address[1]
+    # The token rides in the URL fragment: browsers never send it to the server or write it to logs.
+    url = f"http://127.0.0.1:{port}/#token={api.token}"
+    if args.json:
+        print(json.dumps({"url": url, "port": port, "token": api.token}), flush=True)
+    else:
+        print(f"StageMesh operator API on http://127.0.0.1:{port}/ (read-only, loopback only)", flush=True)
+        print(f"Open: {url}", flush=True)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+    return 0
+
+
 def command_dashboard(args: argparse.Namespace) -> int:
     project = Path(args.project).resolve()
     store = Store(db_path(project))
@@ -4258,6 +4281,10 @@ def build_parser() -> argparse.ArgumentParser:
     operator = sub.add_parser("operator")
     operator.add_argument("--json", action="store_true")
     operator.set_defaults(func=command_operator)
+    serve = sub.add_parser("serve", help="serve the read-only operator API on loopback")
+    serve.add_argument("--port", type=int, default=0, help="loopback port (default: ephemeral)")
+    serve.add_argument("--json", action="store_true")
+    serve.set_defaults(func=command_serve)
     dashboard = sub.add_parser("dashboard")
     dashboard.add_argument("--output", default="stagemesh-dashboard.html")
     dashboard.add_argument("--json", action="store_true")

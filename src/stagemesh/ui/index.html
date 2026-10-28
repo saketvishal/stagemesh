@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>StageMesh activity</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<a class="skip" href="#table">Skip to activity table</a>
+<header>
+  <h1>StageMesh activity</h1>
+  <span id="version" class="muted"></span>
+  <span id="freshness" class="muted" role="status"></span>
+</header>
+<form id="filters" aria-label="Activity filters">
+  <label>Period
+    <select id="period">
+      <option value="all">All time</option>
+      <option value="today">Today</option>
+      <option value="yesterday">Yesterday</option>
+      <option value="7d">Last 7 days</option>
+      <option value="30d">Last 30 days</option>
+      <option value="custom">Custom range</option>
+    </select>
+  </label>
+  <label class="custom" hidden>From <input id="since" type="datetime-local"></label>
+  <label class="custom" hidden>To <input id="until" type="datetime-local"></label>
+  <label>State
+    <select id="state"><option value="">All</option><option value="open">Open</option><option value="closed">Closed</option></select>
+  </label>
+  <label>Stage
+    <select id="stage"><option value="">All</option>
+      <option>PLAN</option><option>IMPLEMENT</option><option>VALIDATE</option><option>REVIEW</option><option>INTEGRATE</option><option>DONE</option>
+    </select>
+  </label>
+  <label>Task <input id="task" type="search" maxlength="200" placeholder="task id (press / to focus)"></label>
+  <label>Provider <input id="provider" type="search" maxlength="200"></label>
+  <button type="button" id="refresh">Refresh (r)</button>
+  <label class="inline"><input id="auto" type="checkbox" checked> Auto-refresh</label>
+</form>
+<p id="message" role="status" aria-live="polite"></p>
+<table id="table" tabindex="-1">
+  <caption class="sr">Activity, newest first. Select a column header to sort the loaded rows.</caption>
+  <thead><tr id="head"></tr></thead>
+  <tbody id="rows"></tbody>
+</table>
+<p><button type="button" id="more" hidden>Load more</button> <span id="count" class="muted"></span></p>
+<script src="/app.js"></script>
+</body>
+</html>
