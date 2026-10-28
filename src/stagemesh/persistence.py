@@ -1062,7 +1062,7 @@ class Store:
         if (audit.get("task_id") != task_id or audit.get("execution_id") != execution_id
                 or audit.get("execution_kind") not in {str(kind) for kind in ExecutionKind}
                 or audit.get("operator_action") != "RELEASE_UNKNOWN_EXECUTION"):
-            raise StoreValidationError("inspection audit does not match selected validation execution")
+            raise StoreValidationError("inspection audit does not match selected execution tree")
         _validate_text(audit.get("reason"), "inspection reason", 2000)
         _validate_text(audit.get("operator"), "inspection operator")
         expected_identity = audit.get("process_identity")

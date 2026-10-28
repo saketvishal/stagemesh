@@ -1,4 +1,4 @@
-"""Recovery authority for an unfinished validation tree, separate from parent liveness."""
+"""Recovery authority for unfinished subprocess trees, separate from root liveness."""
 from __future__ import annotations
 
 import sqlite3

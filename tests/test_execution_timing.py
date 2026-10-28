@@ -240,7 +240,26 @@ def test_continue_step_output_and_json_show_execution_duration(tmp_path: Path, c
     project = _project(tmp_path, ["T-1"])
     assert cli_module.main(["--project", str(project), "continue", "--dry-run", "--task", "T-1"]) == 0
     human = capsys.readouterr().out
-    assert any(line.startswith("  duration: ") and line.endswith("s") for line in human.splitlines())
+    recorded = Store(project / ".stagemesh" / "stagemesh.sqlite3")
+    try:
+        records = execution_timings(recorded, "T-1")
+    finally:
+        recorded.close()
+    assert records and any(rec["duration_seconds"] > 0 for rec in records)
+    results = {}
+    current_stage = None
+    for line in human.splitlines():
+        number, separator, rest = line.partition("] ")
+        if separator and number.startswith("[") and number[1:].isdigit():
+            current_stage = rest.split()[0]
+        if current_stage and line.strip().startswith("result: "):
+            results[current_stage] = line.strip().removeprefix("result: ")
+    for rec in records:
+        assert rec["result"] == "passed" and rec["duration_seconds"] >= 0
+        result = results[rec["stage"]]
+        assert result.startswith("succeeded" if rec["stage"] == "IMPLEMENT" else "passed")
+        assert result.endswith(f" in {format_duration(rec['duration_seconds'])}")
+
 
     project = _project(tmp_path / "json", ["T-1"])
     assert cli_module.main(["--project", str(project), "run-ready", "--dry-run", "--json"]) == 0

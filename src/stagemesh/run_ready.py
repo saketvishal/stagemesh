@@ -141,6 +141,7 @@ def _recover_detached_builtin_executions(store: Store, task_id: str, *, include_
     """Terminalize built-in stage executions that have no owner identity (rows written before owners were recorded).
 
     Validation may own child gates: neither an ownerless row nor a dead parent proves tree cleanup, so its durable fence stays.
+    Explicit subprocess-tree authority is preserved by the Store backstop; it is never inferred from configurable actors.
     Legacy ownerless review/integration rows retain their existing recovery for the one task this caller is about to drive
     (`include_unidentified`), never in a sweep across tasks where they may belong to a live sibling runner.
     """
