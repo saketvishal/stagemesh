@@ -93,7 +93,12 @@ def build_wheel(wheel_directory, config_settings=None, metadata_directory=None):
             records.append((arcname, data))
         # Offline skills, their companions, provenance, and licenses belong to
         # the independently installed runtime, not the host/source checkout.
-        for path in sorted((root / "src" / "stagemesh" / "skill_packs").rglob("*")):
+        # The operator UI is dependency-free static assets served by `stagemesh serve`.
+        asset_paths = [
+            *sorted((root / "src" / "stagemesh" / "skill_packs").rglob("*")),
+            *sorted((root / "src" / "stagemesh" / "ui").rglob("*")),
+        ]
+        for path in asset_paths:
             if not path.is_file() or "__pycache__" in path.parts or path.suffix == ".py":
                 continue
             arcname = path.relative_to(root / "src").as_posix()
