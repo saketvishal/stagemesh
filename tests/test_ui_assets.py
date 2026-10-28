@@ -107,3 +107,10 @@ def test_ui_preserves_focus_and_loaded_range_on_refresh():
     assert "dataset.key" in js and ".focus()" in js  # focused row control restored after re-render
     assert "loadedPages" in js and "const refresh = () => load(false, loadedPages)" in js
     assert 'tabindex="-1"' in (UI / "index.html").read_text(encoding="utf-8")
+
+
+def test_ci_runs_the_ui_asset_and_browser_modules_on_both_platforms():
+    workflow = (Path(__file__).resolve().parents[1] / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    windows, _, linux = workflow.partition("\n  linux:")
+    for module in ("test_ui_assets.py", "test_ui_browser_behavior.py"):
+        assert module in windows and module in linux, module
