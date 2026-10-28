@@ -102,24 +102,31 @@ def test_built_wheel_ships_the_ui_shell(tmp_path: Path):
     assert not any("__pycache__" in n and "/ui/" in n for n in names)
 
 
-CANARIES = ("extra.js", "extra.css", "notes.html", "app.js.map", "secret.txt", "dependency.js", "driver.js", "vendor/lib.js")
+CANARIES = (
+    "extra.js", "extra.css", "canary.css", "notes.html", "app.js.map", "secret.txt", "dependency.js", "driver.js",
+    "vendor/lib.js", "node_modules/private.js",
+)
 
 
 def _canary_site(tmp_path: Path) -> Path:
     site = tmp_path / "canary-site"
-    (site / "vendor").mkdir(parents=True)
+    site.mkdir()
     for name in UI_ASSETS:
         (site / name).write_bytes((UI / name).read_bytes())
     for name in CANARIES:
-        (site / name).write_text("CANARY-" + name, encoding="utf-8")
+        (site / name).parent.mkdir(parents=True, exist_ok=True)
+        (site / name).write_text("PRIVATE-TEST-CANARY " + name, encoding="utf-8")
     return site
 
 
 def test_production_ui_directory_contains_exactly_the_named_assets():
     assert sorted(p.name for p in UI.iterdir() if p.name != "__pycache__") == sorted(UI_ASSETS)
-    import build_backend
+    import importlib.util
 
-    assert tuple(build_backend.UI_ASSETS) == tuple(UI_ASSETS)
+    spec = importlib.util.spec_from_file_location("ui_assets_build_backend", Path(__file__).resolve().parents[1] / "build_backend.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert tuple(module.UI_ASSETS) == tuple(UI_ASSETS)
 
 
 def test_server_serves_only_the_named_assets_even_when_other_files_exist(tmp_path: Path):
@@ -137,6 +144,7 @@ def test_server_serves_only_the_named_assets_even_when_other_files_exist(tmp_pat
         for name in CANARIES:
             status, body, _ = fetch(f"{base}/{name}")
             assert status == 404 and b"CANARY" not in body, name
+            assert fetch(f"{base}/{name}", {"Authorization": "Bearer tok"})[0] == 404, name  # auth does not unlock them
     finally:
         httpd.shutdown()
         httpd.server_close()

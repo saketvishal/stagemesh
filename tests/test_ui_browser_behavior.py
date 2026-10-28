@@ -116,6 +116,25 @@ DRIVER = r"""
       out.log = control.log;
     },
 
+    // Only the first second-page request is withheld, so the refresh's own second-page request completes first and the
+    // withheld (now stale) append is released afterwards. Adapted from an independent native probe.
+    async pendingOnce() {
+      await until(() => rows() === 100, "first page");
+      $("auto").checked = false; $("auto").dispatchEvent(new Event("change"));
+      let used = false;
+      control.hold = (u) => { if (u.includes("offset=100") && !used) { used = true; return true; } return false; };
+      $("more").focus(); $("more").click();
+      await until(() => control.held.length >= 1, "second page withheld");
+      $("refresh").dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await until(() => rows() === 130, "refresh completes the range itself");
+      out.rowsBeforeRelease = rows();
+      release();
+      await sleep(300); // the stale append resolves late and must not change the result
+      out.rows = rows();
+      out.moreHidden = $("more").hidden;
+      out.log = control.log;
+    },
+
     // An automatic poll arrives while the accepted append is withheld.
     async pendingPoll() {
       await until(() => rows() === 100, "first page");
@@ -177,6 +196,21 @@ DRIVER = r"""
       out.focusIsTable = document.activeElement === $("table");
       out.activeTag = document.activeElement.tagName;
       out.tableFocusable = $("table").tabIndex === -1;
+    },
+
+    // The focused row is on the second page and is absent from the next response.
+    async vanishSecondPage() {
+      await until(() => rows() === 100, "first page");
+      $("more").click();
+      await until(() => rows() === 130, "second page");
+      const btn = [...document.querySelectorAll("#rows button")].find((b) => b.dataset.key === "task:task-120");
+      control.dropKey = btn.dataset.key;
+      btn.focus();
+      out.focusedBefore = document.activeElement === btn;
+      $("refresh").click();
+      await until(() => !btn.isConnected, "rows rebuilt");
+      out.rowsAfter = rows();
+      out.focusIsTable = document.activeElement === $("table");
     },
   };
 
@@ -287,6 +321,17 @@ def test_accepted_load_more_survives_a_refresh_while_its_response_is_withheld(fi
     result = run_scenario(fixture_base, "pending", tmp_path)
     assert result["heldBeforeRefresh"] >= 1 and result["rowsWhileHeld"] == 100  # the real second page was withheld
     assert result["rows"] == 130 and result["rowsLater"] == 130 and result["moreHidden"] is True
+
+
+def test_stale_withheld_append_released_after_the_refresh_completed_changes_nothing(fixture_base, tmp_path: Path):
+    result = run_scenario(fixture_base, "pendingOnce", tmp_path)
+    assert result["rowsBeforeRelease"] == 130 and result["rows"] == 130 and result["moreHidden"] is True
+    assert sum(1 for entry in result["log"] if entry.startswith("held")) == 1
+
+
+def test_focus_falls_back_to_the_table_when_a_second_page_row_disappears(fixture_base, tmp_path: Path):
+    result = run_scenario(fixture_base, "vanishSecondPage", tmp_path)
+    assert result["focusedBefore"] is True and result["rowsAfter"] == 129 and result["focusIsTable"] is True
 
 
 def test_accepted_load_more_survives_an_automatic_poll_while_its_response_is_withheld(fixture_base, tmp_path: Path):
