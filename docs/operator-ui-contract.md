@@ -45,7 +45,7 @@ Parameters map one-to-one onto `ActivityQuery`. All are optional.
 | `offset` | integer | 0 to 999 (must be below the scan cap of 1000) |
 
 Timestamp form: exactly `YYYY-MM-DDTHH:MM:SS[.f]Z` or `YYYY-MM-DDTHH:MM:SS[.f]+HH:MM` / `-HH:MM`, where `.f` is 1 to 9
-fraction digits. `T` and `Z` are uppercase, the extended (hyphen and colon) form is required, and so is an offset. Date-only
+fraction digits. Digits are ASCII `0`-`9` only (Unicode digits such as Arabic-Indic are rejected, also in `limit` and `offset`). `T` and `Z` are uppercase, the extended (hyphen and colon) form is required, and so is an offset. Date-only
 values, ISO 8601 basic format (`20260101T000000Z`), lowercase designators, a space in place of `T`, offsets without a colon and
 leap seconds are `invalid_query`. A `+` offset must be sent as `%2B`; a literal `+` is a space under form decoding.
 

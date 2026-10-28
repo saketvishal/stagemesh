@@ -211,6 +211,12 @@ def unicode_server(tmp_path_factory):
         "since=2026-01-01T00:00:00%2B24:00",
         "since=2026-01-01T00:00:00.Z",
         "since=2026-01-01T00:00:00.1234567890Z",
+        "since=%D9%A2%D9%A0%D9%A2%D9%A6-01-01T00:00:00Z",  # Arabic-Indic digits for the year
+        "since=2026-%EF%BC%90%EF%BC%91-01T00:00:00Z",  # fullwidth digits for the month
+        "since=2026-01-01T00:00:00.%D9%A5Z",  # non-ASCII fraction digit
+        "since=2026-01-01T00:00:00Z%0A",  # trailing newline must not satisfy the pattern
+        "limit=%D9%A5",  # non-ASCII digit in an integer
+        "offset=%EF%BC%91",
         "since=",
         "task_id=a&&limit=1",  # empty segment
         "limit=1&",
