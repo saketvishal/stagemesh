@@ -32,7 +32,8 @@ def test_documents_the_complete_outcome_allowlist_and_stages():
     for code in activity._SAFE_RESULTS:
         assert f"`{code}`" in DOC, code
     assert "`Stage` value" in DOC
-    assert {s.value for s in Stage} >= {"PLAN", "IMPLEMENT"}
+    for stage in Stage:
+        assert f"`{stage.value}`" in DOC, stage.value
     for kind in ("task", "execution", "audit"):
         assert f"`{kind}`" in DOC
 
