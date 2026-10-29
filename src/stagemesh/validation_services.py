@@ -6,9 +6,8 @@ import hashlib
 import json
 import os
 import re
-import shutil
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any
 
 from .config import StageMeshConfig
@@ -120,7 +119,7 @@ def discover_validation_services(
             raise ValidationServiceError("invalid validation service configuration: " + str(exc)) from exc
 
     # Discover API or backend service conventions if pyproject.toml or package.json defines them
-    package_json = root / "package.json"
+    package_json = _inside(root, "package.json")
     if package_json.is_file():
         try:
             pkg_data = json.loads(package_json.read_bytes())
@@ -157,18 +156,19 @@ def discover_validation_services(
         except (OSError, ValueError, UnicodeError) as exc:
             raise ValidationServiceError("invalid package.json service discovery") from exc
 
-    # Explicit npm commands also depend on the selected package script definition.
+    # Explicit npm commands also depend on package metadata, including lifecycle hooks.
     from dataclasses import replace
     for index, service in enumerate(services):
         _validate_service(service)
         script_name = _npm_script_name(service.command)
         if script_name is None:
             continue
-        package = _inside(root, service.cwd or ".") / "package.json"
+        package = _inside(root, (Path(service.cwd or ".") / "package.json").as_posix())
         if not package.is_file():
             raise ValidationServiceError("npm script service has no package.json")
         try:
-            pkg_data = json.loads(package.read_bytes())
+            package_bytes = package.read_bytes()
+            pkg_data = json.loads(package_bytes)
             if not isinstance(pkg_data, dict):
                 raise ValidationServiceError("package.json root must be an object")
             scripts = pkg_data.get("scripts", {})
@@ -178,6 +178,12 @@ def discover_validation_services(
         if not isinstance(script, str) or not script:
             raise ValidationServiceError(f"npm script {script_name} is not defined")
         services[index] = replace(service, script_definition=script)
+        # npm may execute pre/post hooks and read other package settings. Bind the
+        # whole selected metadata file, not only the named script's body. Keep raw
+        # metadata (which may contain credentials) out of the persisted manifest.
+        package_identity = json.dumps(pkg_data, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        config_digest += hashlib.sha256(package_identity).hexdigest()
+        config_digest += _npm_configuration_digest(root, _inside(root, service.cwd or "."))
     environment = {key: os.environ.get(key) for s in services for key in s.env_keys}
     config_digest += hashlib.sha256(json.dumps(environment, sort_keys=True).encode()).hexdigest()
     services_tuple = tuple(sorted(services, key=lambda s: s.name))
@@ -186,15 +192,62 @@ def discover_validation_services(
 
 
 def _npm_script_name(command: tuple[str, ...]) -> str | None:
-    """The script token in `npm run <script> [-- extra]`, not only a three-item command."""
-    if len(command) < 3 or command[0] != "npm" or command[1] != "run":
+    """Identify supported npm script calls without guessing a selected package."""
+    if not command or PureWindowsPath(command[0]).name.casefold() not in {
+        "npm", "npm.cmd", "npm.exe", "npm.bat",
+    }:
         return None
-    for token in command[2:]:
-        if token == "--":
+    # Tokens following -- belong to the script, not npm's package selection.
+    end = command.index("--") if "--" in command else len(command)
+    tokens = command[1:end]
+    positional = [token for token in tokens if not token.startswith("-")]
+    run_verbs = {"run", "run-script", "rum", "urn"}
+    lifecycle = {"test": "test", "t": "test", "tst": "test", "start": "start", "stop": "stop", "restart": "restart"}
+    verbs = run_verbs | lifecycle.keys()
+    if not any(token in verbs for token in positional):
+        return None  # Not a package-script invocation (for example npm exec).
+    safe_options = {"--silent", "--if-present", "--ignore-scripts", "--foreground-scripts"}
+    if positional[0] not in verbs or any(token.startswith("-") and token not in safe_options for token in tokens):
+        raise ValidationServiceError("unsupported npm script options; use explicit service cwd and pass script arguments after --")
+    if positional[0] in lifecycle:
+        return lifecycle[positional[0]]
+    if len(positional) < 2:
+        raise ValidationServiceError("npm evaluation requires a named script in service cwd")
+    return positional[1]
+
+
+def _npm_configuration_digest(root: Path, package_dir: Path) -> str:
+    """Bind local/inherited npm settings; refuse selectors we cannot attribute."""
+    selectors = {"prefix", "workspace", "workspaces", "include-workspace-root", "global",
+                 "location", "userconfig", "globalconfig", "dry-run"}
+    environment = {key: value for key, value in os.environ.items() if key.casefold().startswith("npm_config_")}
+    if any(key[11:].casefold().replace("_", "-") in selectors for key in environment):
+        raise ValidationServiceError("npm configuration selects an unsupported target or mode; use explicit service cwd without npm selectors")
+    digest = hashlib.sha256(json.dumps(environment, sort_keys=True).encode("utf-8"))
+    # A nested package can inherit project-local npm configuration. Never read
+    # user/global config or follow a project config symlink outside the candidate.
+    directory = package_dir
+    while True:
+        config = _inside(root, (directory / ".npmrc").relative_to(root).as_posix())
+        if config.is_file():
+            try:
+                raw = config.read_bytes()
+                lines = raw.decode("utf-8-sig").splitlines()
+            except (OSError, UnicodeError) as exc:
+                raise ValidationServiceError("cannot read local npm configuration") from exc
+            for line in lines:
+                key = line.split("=", 1)[0].strip()
+                if key and not key.startswith(("#", ";")) and any(char in key for char in "\"'\\"):
+                    raise ValidationServiceError("quoted or escaped local npm keys are unsupported; use explicit service cwd without npm selectors")
+                match = re.match(r"\s*([^#;=\s]+)\s*(?:=|$)", line)
+                if match and match[1].casefold().removesuffix("[]").replace("_", "-") in selectors:
+                    raise ValidationServiceError("local npm configuration selects an unsupported target or mode; use explicit service cwd without npm selectors")
+            digest.update((directory.relative_to(root).as_posix() + "\0").encode("utf-8"))
+            digest.update(hashlib.sha256("\n".join(lines).encode("utf-8")).digest())
+        if directory == root:
             break
-        if token and not token.startswith("-"):
-            return token
-    return None
+        directory = directory.parent
+    return digest.hexdigest()
 
 
 def _inside(root: Path, relative: str) -> Path:
@@ -251,9 +304,9 @@ def run_configured_evaluations(
     if not selected:
         return evaluations, gates, findings
     with candidate_workspace(project, bound.candidate_sha) as checkout:
-        if discover_validation_services(checkout, config_project=project).fingerprint != manifest.fingerprint:
-            raise ValidationServiceError("service configuration changed from the candidate")
         for index, service in enumerate(selected):
+            if discover_validation_services(checkout, config_project=project).fingerprint != manifest.fingerprint:
+                raise ValidationServiceError("service configuration changed from the candidate")
             name = "e2e:" + service.name
             run_dir = _inside(checkout, service.cwd or ".")
             missing_env = [key for key in service.env_keys if not os.environ.get(key)]
@@ -264,6 +317,8 @@ def run_configured_evaluations(
             result = run_gate(checkout, GateCommand(
                 name, list(service.command), timeout_seconds=service.timeout_seconds, cwd=service.cwd,
             ))
+            if discover_validation_services(checkout, config_project=project).fingerprint != manifest.fingerprint:
+                raise ValidationServiceError("service configuration changed during evaluation in the candidate checkout")
             secrets = tuple(os.environ.get(key, "") for key in service.env_keys)
             stdout = bounded_failure_text(result.stdout, secrets=secrets)
             stderr = bounded_failure_text(result.stderr, secrets=secrets)
@@ -319,6 +374,8 @@ def run_configured_evaluations(
             # Executed identity stays bound by the service fingerprint; persist no command credentials.
             evidence["command"] = command
             evaluations.append(evidence)
+        if discover_validation_services(checkout, config_project=project).fingerprint != manifest.fingerprint:
+            raise ValidationServiceError("service configuration changed during evaluation in the candidate checkout")
     if discover_validation_services(project).fingerprint != manifest.fingerprint:
         raise ValidationServiceError("service configuration changed during evaluation")
     return evaluations, gates, findings
