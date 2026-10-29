@@ -2,6 +2,6 @@
 
 from .hands_off_recovery import apply_provider_no_progress_recovery_patch
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 apply_provider_no_progress_recovery_patch()
