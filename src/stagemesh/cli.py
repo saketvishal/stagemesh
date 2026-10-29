@@ -859,7 +859,7 @@ def command_advance_baseline(args: argparse.Namespace) -> int:
 
 
 def _wave_hooks(project: Path, store: Store, *, base_ref: str, staging_ref: str | None, advance_ref: str, local: bool, no_pr: bool,
-                live_acceptance: str = LIVE_ACCEPTANCE_SKIP_FAILED):
+                live_acceptance: str = LIVE_ACCEPTANCE_SKIP_FAILED, scope_id: str | None = None):
     """The real hooks (child `continue` runs, baseline advance, PR opening, repo census, per-task safety checks) for a wave or window."""
     from .autonomy.gitfacts import GitFacts
     from .recovery import advance_baseline as advance_task_baseline
@@ -881,7 +881,7 @@ def _wave_hooks(project: Path, store: Store, *, base_ref: str, staging_ref: str 
         )
 
     return WaveHooks(
-        run_task=subprocess_task_runner(project, integration_ref=staging_ref, live_acceptance=live_acceptance),
+        run_task=subprocess_task_runner(project, integration_ref=staging_ref, live_acceptance=live_acceptance, scope_id=scope_id),
         advance_baseline=advance,
         open_pr=None if no_pr or local else git_gh_pr_opener(project, base=base_ref.removeprefix("refs/heads/")),
         target_sha=lambda: facts.resolve(advance_ref),
@@ -892,7 +892,7 @@ def _wave_hooks(project: Path, store: Store, *, base_ref: str, staging_ref: str 
         leftover=store_leftover(store),
         retarget=lambda ref: _wave_hooks(
             project, store, base_ref=base_ref, staging_ref=ref, advance_ref=ref,
-            local=local, no_pr=no_pr, live_acceptance=live_acceptance,
+            local=local, no_pr=no_pr, live_acceptance=live_acceptance, scope_id=scope_id,
         ),
     )
 
@@ -925,7 +925,7 @@ def command_run_window(args: argparse.Namespace) -> int:
         print("--concurrency, --verification-concurrency, --max-steps-per-task and --max-tasks must be at least 1", file=sys.stderr)
         return 2
     project = Path(args.project).resolve()
-    if not args.plan and _ensure_default_github_task_source(project):
+    if not args.plan and not (getattr(args, "label", None) is not None or getattr(args, "resume_scope", None)) and _ensure_default_github_task_source(project):
         print("migrated config: added GitHub task source for stagemesh:ready issues", file=sys.stderr)
     config = load_config(project)
     missing_source = _missing_github_task_source_check(config, project)
@@ -980,11 +980,20 @@ def command_run_window(args: argparse.Namespace) -> int:
             persisted.close()
     store.migrate()
     try:
-        _sync_all_sources(store, project, config, None, preserve_existing_dependencies=True)
+        try:
+            scope = _prepare_selection_scope(store, project, config, args)
+        except _SetupError as exc:
+            return exc.code
+        if scope is None:
+            _sync_all_sources(store, project, config, None, preserve_existing_dependencies=True)
+        else:
+            options.required_label = scope.label
+            options.scope_id = scope.id
         staging_ref = None if local else STAGING_REF
         hooks = _wave_hooks(
             project, store, base_ref=base_ref, staging_ref=staging_ref, advance_ref=base_ref if local else STAGING_REF, local=local, no_pr=args.no_pr,
             live_acceptance=LIVE_ACCEPTANCE_REQUIRED if options.strict_live else LIVE_ACCEPTANCE_SKIP_FAILED,
+            scope_id=options.scope_id,
         )
         merger = None
         merger_error = None
@@ -1013,6 +1022,7 @@ def command_run_window(args: argparse.Namespace) -> int:
                 "preflight": [c.to_dict() for c in checks],
                 "would_run": picked,
                 "left_alone": skipped,
+                **({"scope": args.scope_report} if scope is not None else {}),
                 "ok": all(c.ok or not c.fatal for c in checks),
             }
             if args.json:
@@ -1544,6 +1554,13 @@ def command_handoff_export(args: argparse.Namespace) -> int:
     return 0
 
 
+class _SingleLabelAction(argparse.Action):
+    def __call__(self, parser, namespace, values, option_string=None):
+        if getattr(namespace, self.dest, None) is not None:
+            parser.error("--label accepts one label; repeated labels have no implicit ANY/ALL semantics")
+        setattr(namespace, self.dest, values)
+
+
 def _label_selector(args: argparse.Namespace) -> tuple[str | None, str | None]:
     """The operator's exact-label run selector and an error message when it is unusable."""
     raw = getattr(args, "label", None)
@@ -1556,6 +1573,37 @@ def _label_selector(args: argparse.Namespace) -> tuple[str | None, str | None]:
 def _selection_policy(config: StageMeshConfig, args: argparse.Namespace) -> TaskSelectionConfig:
     label, _ = _label_selector(args)
     return replace(config.task_selection, required_label=label) if label else config.task_selection
+
+
+def _prepare_selection_scope(store, project, config, args, *, task_id=None):
+    from .selection_scope import ScopeError, attach, refresh, resolve_scope, preview
+
+    try:
+        if (getattr(args, "label", None) is not None or getattr(args, "resume_scope", None)) and (
+                getattr(args, "focus", None) or getattr(args, "sprint", None) or getattr(args, "once", False)):
+            raise ScopeError("saved label scope cannot be combined with --focus, --sprint or --once")
+        scope = resolve_scope(store, label=getattr(args, "label", None), resume=getattr(args, "resume_scope", None),
+            clear=getattr(args, "clear_label", False), task_id=task_id, preview=getattr(args, "plan", False))
+        if scope is not None:
+            if getattr(args, "focus", None) or getattr(args, "sprint", None) or getattr(args, "once", False):
+                raise ScopeError("saved label scope cannot be combined with --focus, --sprint or --once")
+            args.label = scope.label
+            args.resume_scope = scope.id
+            attach(store, project, config, scope)
+            if not getattr(args, "plan", False):
+                from .run_ready import _recover_all_dead
+                _recover_all_dead(store)
+            refresh(store)
+            args.scope_report = preview(store, project, _selection_policy(config, args))
+            if not getattr(args, "json", False):
+                print("active scope: " + json.dumps(args.scope_report, sort_keys=True), file=sys.stderr)
+        return scope
+    except ScopeError as exc:
+        if getattr(args, "json", False):
+            print(json.dumps({"refused": True, "stop_reason": "REFUSED:selection_scope", "message": str(exc)}))
+        else:
+            print(str(exc), file=sys.stderr)
+        raise _SetupError(2) from exc
 
 
 def command_continue(args: argparse.Namespace) -> int:
@@ -1598,6 +1646,7 @@ def command_continue(args: argparse.Namespace) -> int:
     _sync_all_sources(store, project, config, targeted_task_id,
                       preserve_existing_dependencies=bool(getattr(args, "integration_ref", None)))
     try:
+        _prepare_selection_scope(store, project, config, args, task_id=targeted_task_id)
         coord, info = _build_coordinator(args, project, config, store, target)
     except _SetupError as exc:
         store.close()
@@ -1772,8 +1821,21 @@ def command_plan(args: argparse.Namespace) -> int:
     payload = json.loads(raw_payload)
     store = Store(db_path(project))
     store.migrate()
+    provenance = None
+    if getattr(args, "resume_scope", None) or getattr(args, "source_objective", None):
+        from .selection_scope import ScopeError, authorize_children
+        try:
+            if not getattr(args, "resume_scope", None) or not getattr(args, "source_objective", None):
+                raise ScopeError("scoped objective planning requires --resume-scope and --source-objective")
+            scope = _prepare_selection_scope(store, project, load_config(project), args)
+            provenance = authorize_children(store, scope, args.source_objective, objective.tasks)
+        except (ScopeError, _SetupError) as exc:
+            store.close()
+            if isinstance(exc, ScopeError):
+                print(str(exc), file=sys.stderr)
+            return 2
     store.save_objective(objective.id, objective.title, payload)
-    planner.write_backlog(objective, payload, runtime_dir(project) / "backlog.json")
+    planner.write_backlog(objective, payload, runtime_dir(project) / "backlog.json", selection_scope=provenance)
     sync_source(store, LocalBacklogSource(runtime_dir(project) / "backlog.json").discover())
     store.close()
     if args.json:
@@ -1872,8 +1934,14 @@ def command_run_ready(args: argparse.Namespace) -> int:
     config = load_config(project)
     store = Store(db_path(project))
     store.migrate()
-    _sync_all_sources(store, project, config, requested,
-                      preserve_existing_dependencies=bool(getattr(args, "integration_ref", None)))
+    try:
+        scope = _prepare_selection_scope(store, project, config, args, task_id=requested)
+        if scope is None:
+            _sync_all_sources(store, project, config, requested,
+                              preserve_existing_dependencies=bool(getattr(args, "integration_ref", None)))
+    except _SetupError as exc:
+        store.close()
+        return exc.code
     info: dict[str, object] = {}
     provider_notice_index = 0
 
@@ -1974,6 +2042,9 @@ def command_run_ready(args: argparse.Namespace) -> int:
     except _SetupError as exc:
         store.close()
         return exc.code
+    if scope is not None:
+        from .selection_scope import preview
+        summary.detail["scope"] = preview(store, project, _selection_policy(config, args))
     store.close()
     info["provider_events"] = provider_log.lines
     return _report_run_ready(summary, info, as_json=args.json)
@@ -2090,7 +2161,13 @@ def command_run_parallel(args: argparse.Namespace, *, queue: bool = False) -> in
     config = load_config(project)
     store = Store(db_path(project))
     store.migrate()
-    _sync_all_sources(store, project, config, None)
+    try:
+        scope = _prepare_selection_scope(store, project, config, args)
+        if scope is None:
+            _sync_all_sources(store, project, config, None)
+    except _SetupError as exc:
+        store.close()
+        return exc.code
     gate: dict[str, object] | None = None
     if queue:
         from .queue_run import preflight
@@ -2129,6 +2206,9 @@ def command_run_parallel(args: argparse.Namespace, *, queue: bool = False) -> in
     queue_live_acceptance = _live_acceptance_mode(args, queue=queue)
 
     def make_coordinator(target: TargetSelection, task_store: Store, task_id: str) -> Coordinator:
+        if scope is not None:
+            from .selection_scope import attach
+            attach(task_store, project, config, scope)
         try:
             coord, details = _build_coordinator(
                 args,
@@ -2191,6 +2271,9 @@ def command_run_parallel(args: argparse.Namespace, *, queue: bool = False) -> in
         ),
     )
     summary = runner.run()
+    if scope is not None:
+        from .selection_scope import preview
+        summary.focus = {**(summary.focus or {}), **preview(store, project, _selection_policy(config, args))}
     store.close()
     return _report_parallel(summary, info, as_json=args.json, preflight=gate)
 
@@ -3937,6 +4020,9 @@ def build_parser() -> argparse.ArgumentParser:
         description="Safe by default: plain `stagemesh run-window` runs in PR mode for 45m with concurrency 2 and 8 steps per task, "
         "merges only with explicit command or project opt-in (override with --pr-only), and keeps the normal preflight and stop rules.",
     )
+    window.add_argument("--label", action=_SingleLabelAction, help="Exact source label required for new admissions; saved in the reported scope")
+    window.add_argument("--resume-scope", help="Resume this saved scope, retaining its label")
+    window.add_argument("--clear-label", action="store_true", help="Explicitly clear the resumed scope's label (audited)")
     window.add_argument("--duration", default="45m", help="Time budget, e.g. 2h, 90m, 45s (default 45m). Running tasks finish; nothing new starts after it")
     window.add_argument("--concurrency", type=int, default=None, help="Coding processes to keep busy when independent work is ready (PR-only default 2; automatic merging default 1)")
     window.add_argument("--verification-concurrency", type=int, default=2, help="Separate planning, validation, review and integration process capacity (default 2)")
@@ -4084,6 +4170,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     queue_cmd.add_argument(
         "--label",
+        action=_SingleLabelAction,
         help="Only admit OPEN tasks that carry exactly this task-source label (case-insensitive exact match, never title text); out-of-label work is never a fallback, admitted, or automatically recovered. Safety housekeeping (dead claim/execution cleanup, worktree sweeps) stays global (releases provably dead ownership only) and never admits or runs out-of-label work",
     )
     queue_cmd.add_argument(
@@ -4102,6 +4189,8 @@ def build_parser() -> argparse.ArgumentParser:
     queue_cmd.add_argument("--provider", help="Provider name to use for implementation (e.g. claude, codex)")
     queue_cmd.add_argument("--dry-run", action="store_true", help="Use FakeExecutor instead of a real provider")
     queue_cmd.set_defaults(func=command_queue_run)
+    queue_cmd.add_argument("--resume-scope", help="Resume the saved scope")
+    queue_cmd.add_argument("--clear-label", action="store_true")
     queue_control = sub.add_parser("queue-control", help="Pause, resume, stop or inspect queue admission")
     queue_control_sub = queue_control.add_subparsers(dest="queue_control_command", required=True)
     queue_pause = queue_control_sub.add_parser("pause", help="Pause new queue admissions; running tasks continue")
@@ -4147,6 +4236,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     cont.add_argument(
         "--label",
+        action=_SingleLabelAction,
         help="Only admit OPEN tasks that carry exactly this task-source label (case-insensitive exact match); --task cannot bypass it; automatic blocked-task recovery is limited to labelled tasks",
     )
     cont.add_argument("--json", action="store_true")
@@ -4158,6 +4248,8 @@ def build_parser() -> argparse.ArgumentParser:
     cont.add_argument("--integration-ref", dest="integration_ref", help=argparse.SUPPRESS)  # survivor-wave PR mode: land on the staging ref
     cont.add_argument("--live-acceptance", choices=(LIVE_ACCEPTANCE_SKIP_FAILED, LIVE_ACCEPTANCE_REQUIRED), help=argparse.SUPPRESS)
     cont.set_defaults(func=command_continue)
+    cont.add_argument("--resume-scope", help="Resume a saved scope without widening its label")
+    cont.add_argument("--clear-label", action="store_true", help="Explicitly clear --resume-scope's label")
     status = sub.add_parser("status")
     status.add_argument("--json", action="store_true")
     status.set_defaults(func=command_status)
@@ -4171,6 +4263,8 @@ def build_parser() -> argparse.ArgumentParser:
     plan.add_argument("file")
     plan.add_argument("--json", action="store_true")
     plan.set_defaults(func=command_plan)
+    plan.add_argument("--resume-scope", help="Bind generated children to this saved label scope")
+    plan.add_argument("--source-objective", help="Verified GitHub parent issue ID for scoped children")
     cooldown = sub.add_parser("cooldown", help="Show or clear providers StageMesh is resting after quota/auth/rate/no-progress failures")
     cooldown_sub = cooldown.add_subparsers(dest="cooldown_command")
     cooldown_list = cooldown_sub.add_parser("list", help="Show active provider cooldowns (default)")
@@ -4205,6 +4299,9 @@ def build_parser() -> argparse.ArgumentParser:
     run_ready_cmd.add_argument("--json", action="store_true")
     run_ready_cmd.add_argument("--verbose", action="store_true", help="Show provider selection and setup trace lines")
     run_ready_cmd.set_defaults(func=command_run_ready)
+    run_ready_cmd.add_argument("--label", action=_SingleLabelAction, help="Exact source label required for new admissions")
+    run_ready_cmd.add_argument("--resume-scope", help="Resume the saved scope")
+    run_ready_cmd.add_argument("--clear-label", action="store_true")
     smoke_cmd = sub.add_parser(
         "project-smoke", help="Check this project's profile is safe and usable by this StageMesh version (no implementation runs)"
     )

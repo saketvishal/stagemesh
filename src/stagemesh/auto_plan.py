@@ -179,6 +179,19 @@ def task_labels(store: Store, task: Any) -> tuple[str, ...]:
 
 def outside_label_selector(store: Store, task: Any, required_label: str | None) -> bool:
     """True when an operator --label selector is active and the task does not carry exactly that label (case-insensitive)."""
+    from .selection_scope import drains_candidate, task_problem
+
+    scope = getattr(store, "selection_scope", None)
+    if task is None:
+        return bool(required_label or scope)
+    if scope is None and task is not None and cached_state(store, task).get("selection_scope") is not None:
+        return True  # generated scoped children cannot escape via a fresh unfiltered runner
+    if scope is not None:
+        problem = task_problem(store, task)
+        if problem:
+            return True
+        if drains_candidate(store, task, scope):
+            return False
     if not required_label:
         return False
     return required_label.strip().casefold() not in {str(label).casefold() for label in task_labels(store, task)}

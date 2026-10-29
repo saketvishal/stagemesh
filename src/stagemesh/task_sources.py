@@ -41,6 +41,7 @@ class DiscoveredTask:
     body: str = ""
     created_at: str = ""
     eligibility_reason: str = ""
+    selection_scope: dict | None = None
 
 
 class LocalBacklogSource:
@@ -106,6 +107,7 @@ class LocalBacklogSource:
                     dependencies=tuple(dependencies),
                     body=_description(item),
                     labels=_local_labels(item),
+                    selection_scope=item.get("selection_scope"),
                 )
             )
         return discovered
@@ -396,6 +398,8 @@ def _sync_source(store: Store, tasks: list[DiscoveredTask], *, preserve_existing
         source_objective = is_github and source_issue_is_objective(task.labels)
         historical_objective = is_github and not direct_execution and _objective_exists(store, task.source_id)
         cached: dict[str, object] = {"eligible": source_eligible, "state": state}
+        if task.selection_scope is not None:
+            cached["selection_scope"] = task.selection_scope
         if task.eligibility_reason:
             cached["eligibility_reason"] = task.eligibility_reason
         if validation_errors:

@@ -290,7 +290,7 @@ class Store:
         task_id = _validate_text(task_id, "task id")
         return self.conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
 
-    def acquire_claim(self, task_id: str, worker_id: str, lease_seconds: float = 300) -> str | None:
+    def acquire_claim(self, task_id: str, worker_id: str, lease_seconds: float = 300, *, admission_check=None) -> str | None:
         task_id = _validate_text(task_id, "task id")
         worker_id = _validate_text(worker_id, "worker id")
         task = self.get_task(task_id)
@@ -309,6 +309,8 @@ class Store:
             from .scheduling import Scheduler
 
             if not Scheduler(self).decision(task_id).eligible:
+                return None
+            if admission_check is not None and not admission_check():
                 return None
             if any(execution_tree_unresolved(row) for row in self.conn.execute(
                 "SELECT * FROM executions WHERE task_id=? AND status='RUNNING'", (task_id,),

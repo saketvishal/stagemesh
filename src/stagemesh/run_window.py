@@ -66,6 +66,7 @@ from .survivor_wave import (
     skip_reason,
 )
 from .task_selection import contract_state
+from .auto_plan import outside_label_selector
 from .window_journal import record_finished, record_refused, record_started, record_task_context
 
 EXIT_OK, EXIT_STOPPED, EXIT_REFUSED, EXIT_REPORT = 0, 1, 2, 3
@@ -111,6 +112,8 @@ class WindowOptions:
     strict_live: bool = False
     allow_stale_runtime: bool = False
     tasks: list[str] | None = None  # None: pick every eligible task; a list restricts the window to exactly those
+    required_label: str | None = None
+    scope_id: str | None = None
     ci_mode: str = "immediate"
     batch_ci: bool = False
     report_path: Path | None = None
@@ -174,6 +177,7 @@ class WindowReport:
     duplicate_runs_avoided: int = 0
     batch_results: list[dict[str, Any]] = field(default_factory=list)
     next_command: str = ""
+    scope: dict[str, Any] | None = None
 
     @property
     def tasks(self) -> list[Any]:
@@ -226,6 +230,7 @@ class WindowReport:
         first, last = (self.waves[0], self.waves[-1]) if self.waves else (None, None)
         return {
             "window_id": self.window_id,
+            "scope": self.scope,
             "ok": self.ok,
             "exit_code": self.exit_code,
             "refused": self.refused,
@@ -236,6 +241,8 @@ class WindowReport:
             "started_at": self.started_at,
             "finished_at": self.finished_at,
             "options": {
+                "required_label": self.options.required_label,
+                "scope_id": self.options.scope_id,
                 "duration_seconds": self.options.duration_seconds,
                 "concurrency": self.options.concurrency,
                 "verification_concurrency": self.options.verification_concurrency,
@@ -290,7 +297,7 @@ def _task_sort_key(task_id: str) -> tuple[int, int, str]:
 
 def select_tasks(
     store: Store, *, attempted: set[str], limit: int, only: list[str] | None = None, fingerprint: str | None = None,
-    project: Path | None = None, compatible_with: list[str] | None = None,
+    project: Path | None = None, compatible_with: list[str] | None = None, required_label: str | None = None,
 ) -> tuple[list[str], dict[str, str]]:
     """Up to `limit` runnable tasks (oldest first) and why the others were left alone.
 
@@ -340,6 +347,10 @@ def select_tasks(
             continue
         if task["status"] == TaskStatus.DONE or task["stage"] == Stage.DONE:
             continue  # finished work is not news
+        if outside_label_selector(store, task, required_label):
+            from .selection_scope import task_problem
+            skipped[task_id] = task_problem(store, task) or f"outside label selector {required_label!r}"
+            continue
         if task["status"] == TaskStatus.BLOCKED:
             external = scheduler.decision(task_id).reason  # "blocked" unless the work itself is gone (source closed, objective root, ...)
             if external != "blocked":
@@ -657,6 +668,10 @@ def _resume_argv(options: WindowOptions) -> list[str]:
     ]
     if options.tasks:
         argv.extend(("--tasks", ",".join(options.tasks)))
+    if options.scope_id and options.scope_id != "preview":
+        argv.extend(("--resume-scope", options.scope_id))
+    elif options.required_label:
+        argv.extend(("--label", options.required_label))
     if not options.open_prs:
         argv.append("--no-pr")
     if not options.advance_baselines:
@@ -726,6 +741,29 @@ def run_window(
         store, project, config, options, base_ref=base_ref, runtime=runtime, provider_check=provider_check, repo_state=hooks.repo_state,
         checkout_ref=checkout_ref,
     )
+    attached_scope = getattr(store, "selection_scope", None)
+    if attached_scope is not None:
+        mismatch = ((options.scope_id is not None and options.scope_id != attached_scope.id)
+            or (options.required_label is not None
+                and options.required_label.casefold() != (attached_scope.label or "").casefold()))
+        if mismatch:
+            report.preflight.append(Check("selection_scope", False, "requested scope differs from the Store's attached scope; nothing started"))
+        else:
+            options.scope_id, options.required_label = attached_scope.id, attached_scope.label
+    if (options.required_label or options.scope_id) and not getattr(store, "selection_scope", None):
+        from .selection_scope import ScopeError, attach, refresh, resolve_scope
+        try:
+            scope = resolve_scope(store, label=options.required_label, resume=options.scope_id)
+            attach(store, project, config, scope)
+            refresh(store)
+            options.required_label, options.scope_id = scope.label, scope.id
+        except ScopeError as exc:
+            report.preflight.append(Check("selection_scope", False, str(exc)))
+    if options.required_label and options.tasks:
+        conflicts = [task_id for task_id in options.tasks if store.get_task(task_id) is None
+            or outside_label_selector(store, store.get_task(task_id), options.required_label)]
+        report.preflight.append(Check("label_selector", not conflicts,
+            "explicit tasks match scope" if not conflicts else "explicit task conflicts with label scope: " + ", ".join(conflicts)))
     if options.auto_merge_ff and merge_pr is None:
         report.preflight.append(Check("merge_adapter", False, merge_setup_error or "no fast-forward merge adapter configured"))
     pending_records: list[TaskRecord] = []
@@ -748,6 +786,9 @@ def run_window(
                     for record in active_landing_recovery["records"]
                 ):
                     raise RuntimeError("active landing recovery is outside selected tasks")
+                if any(outside_label_selector(store, store.get_task(record["task_id"]), options.required_label)
+                       for record in active_landing_recovery["records"]):
+                    raise RuntimeError("active landing recovery is outside selected label scope")
                 pending = []  # only the precisely journaled recovery owns these PRs
             if callable(getattr(merge_pr, "pending_records", None)):
                 for record in ([] if active_landing_recovery else merge_pr.pending_records()):
@@ -776,6 +817,7 @@ def run_window(
             sha = str(candidate["sha"])
             owned = bool(task["status"] == TaskStatus.DONE and task["stage"] == Stage.DONE
                          and (options.tasks is None or task_id in options.tasks)
+                         and not outside_label_selector(store, task, options.required_label)
                          and pr.get("url") and all(store.has_evidence(task_id, sha, kind) for kind in
                              (EvidenceKind.VALIDATION, EvidenceKind.REVIEW, EvidenceKind.INTEGRATION)))
             if not owned:
@@ -804,7 +846,7 @@ def run_window(
             report.preflight.append(Check("staging", False, str(exc), fix="merge or delete the old wave/staging branch, then rerun"))
     # Refresh only after every non-provider admission check has passed. Plans and
     # diagnostics use preflight alone and never spend provider calls.
-    if provider_check is provider_pool_check and all(
+    if (not options.scope_id or planned_selection(store, options, project)[0]) and provider_check is provider_pool_check and all(
         check.name == "providers" or check.ok or not check.fatal for check in report.preflight
     ):
         from .provider_acceptance import refresh_expired_quota_checks
@@ -829,7 +871,8 @@ def run_window(
     record_started(
         store,
         report.window_id,
-        {"mode": options.integration_mode, "duration_seconds": options.duration_seconds, "concurrency": options.concurrency, "max_steps": options.max_steps_per_task},
+        {"mode": options.integration_mode, "duration_seconds": options.duration_seconds, "concurrency": options.concurrency, "max_steps": options.max_steps_per_task,
+         "scope_id": options.scope_id, "required_label": options.required_label},
     )
     attempted: set[str] = set()
     fingerprint = runtime_fingerprint(project)
@@ -957,6 +1000,12 @@ def run_window(
             report.merged_prs[-1]["resumed"] = True
             attempted.add(pending_record.task_id)
         while report.stop_reason is None:
+            from .selection_scope import ScopeError, refresh
+            try:
+                refresh(store)
+            except ScopeError as exc:
+                report.stop_reason = str(exc)
+                break
             if control.blocks_admission():
                 report.stop_reason = "queue admission " + control.state_label()
                 break
@@ -972,14 +1021,14 @@ def run_window(
             # N queue entries that the wave would then have to serialize.
             continuing, deferred = select_tasks(
                 store, attempted=set(), limit=room, only=list(resume), fingerprint=fingerprint,
-                project=project, compatible_with=[],
+                project=project, compatible_with=[], required_label=options.required_label,
             )
             report.not_selected.update(deferred)
 
             if len(attempted) >= options.max_tasks and not continuing:
                 report.task_limit_reached = True
                 break
-            if room - len(continuing) > 0:
+            if room - len(continuing) > 0 and not getattr(store, "selection_scope", None):
                 try:
                     from .task_sources import LocalBacklogSource, sync_source, task_sources_from_config
                     backlog = project / ".stagemesh" / "backlog.json"
@@ -998,6 +1047,7 @@ def run_window(
                     fingerprint=fingerprint,
                     project=project,
                     compatible_with=continuing,
+                    required_label=options.required_label,
                 )
                 if len(attempted) < options.max_tasks and room - len(continuing) > 0
                 else ([], {})
@@ -1007,6 +1057,8 @@ def run_window(
             if not batch:
                 break
             for task_id in batch:
+                from .selection_scope import record_task
+                record_task(store, task_id)
                 record_task_context(
                     store,
                     report.window_id,
@@ -1028,12 +1080,17 @@ def run_window(
             before = {task_id: progress_state(store, task_id) for task_id in batch}
 
             def admit_ready(*, fresh=fresh, batch=batch, before=before) -> list[str]:
+                try:
+                    refresh(store)
+                except ScopeError as exc:
+                    report.stop_reason = str(exc)
+                    return []
                 remaining = options.max_tasks - len(attempted) - len(fresh)
                 if remaining <= 0:
                     return []
                 added, reasons = select_tasks(
                     store, attempted=attempted | set(resume) | set(fresh), limit=remaining,
-                    only=options.tasks, fingerprint=fingerprint, project=project,
+                    only=options.tasks, fingerprint=fingerprint, project=project, required_label=options.required_label,
                 )
                 report.not_selected.update(reasons)
                 if options.auto_merge_ff:
@@ -1050,6 +1107,7 @@ def run_window(
                             safe.append(task_id)
                     added = safe
                 for task_id in added:
+                    record_task(store, task_id)
                     entry = reenter_blocked_task(store, task_id, fingerprint)
                     if entry is not None:
                         report.reentered.append(entry)
@@ -1066,6 +1124,8 @@ def run_window(
                 return added
 
             def admission_problem() -> str | None:
+                if report.stop_reason:
+                    return report.stop_reason
                 verdict = check_window_budget(store, window_wall_start, BudgetPolicy.from_config(config.budgets))
                 if verdict is None:
                     return None
@@ -1222,6 +1282,8 @@ def _finish(
         {**pr, "opened_this_window": pr.get("url") in mine} for pr in prs  # already in stack (merge) order
     ]
     report.next_command = next_command(report)
+    from .selection_scope import preview
+    report.scope = preview(store, project, replace(config.task_selection, required_label=report.options.required_label))
     path = report.options.report_path
     if path is not None:
         try:
@@ -1252,6 +1314,8 @@ def format_window_report(report: WindowReport) -> str:
     verdict = "REFUSED TO START" if report.refused else "OK" if report.ok else "STOPPED"
     minutes = max(0.0, report.finished_at - report.started_at) / 60
     lines = [f"run window {report.window_id}: {verdict} ({minutes:.1f} min of {report.options.duration_seconds / 60:.0f}, mode {report.options.integration_mode}, ci-mode {report.options.ci_mode})"]
+    if report.scope:
+        lines.append("scope: " + json.dumps(report.scope, sort_keys=True))
     if report.stop_reason:
         lines.append(f"  stopped by: {report.stop_reason}")
     elif report.time_limit_reached:
@@ -1346,7 +1410,7 @@ def format_window_report(report: WindowReport) -> str:
 def planned_selection(store: Store, options: WindowOptions, project: Path | None = None) -> tuple[list[str], dict[str, str]]:
     """What a window would pick right now (`run-window --plan`): the same selection, nothing started."""
     fingerprint = None if project is None else runtime_fingerprint(project)
-    return select_tasks(store, attempted=set(), limit=options.max_tasks, only=options.tasks, fingerprint=fingerprint, project=project)
+    return select_tasks(store, attempted=set(), limit=options.max_tasks, only=options.tasks, fingerprint=fingerprint, project=project, required_label=options.required_label)
 
 
 __all__ = [

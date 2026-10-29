@@ -252,6 +252,24 @@ class Coordinator:
             return 0
 
     def _advance_task_owned(self, task_id: str) -> int:
+        from .selection_scope import ScopeError, refresh, record_task, drains_candidate
+        from .auto_plan import task_labels
+
+        try:
+            before_refresh = self.store.get_task(task_id)
+            scope = getattr(self.store, "selection_scope", None)
+            # A committed revocation since selection wins over this attempt.
+            # Do not erase another source publisher's negative evidence by
+            # refreshing from a potentially older remote response first.
+            if (before_refresh is not None and self.required_label
+                    and self.required_label.casefold() not in {x.casefold() for x in task_labels(self.store, before_refresh)}
+                    and not (scope and drains_candidate(self.store, before_refresh, scope))):
+                raise ScopeError("label removed after selection; stage admission refused")
+            refresh(self.store)
+        except ScopeError as exc:
+            self.last_execution_refusals = [{"task_id": task_id, "execution_ids": [], "kinds": [],
+                "reason_code": "stage_dispatch_ineligible", "reason": str(exc)}]
+            return 0
         task = self.store.get_task(task_id)
         if task is None:
             return 0
@@ -301,6 +319,7 @@ class Coordinator:
             })
             return 0
         stage = Stage(task["stage"])
+        record_task(self.store, task_id)
         if self.store.task_contract(task_id) is not None or task_contract_path(self.project, task_id) is not None:
             state = contract_state(self.store, self.project, task_id, auto_plan=False)
             if state != "valid":
@@ -319,7 +338,10 @@ class Coordinator:
             if self._provider_stalled(task_id):
                 return 1
             worker_id = self.worker_id
-            claim_id = self.store.acquire_claim(task_id, worker_id)
+            claim_id = (self.store.acquire_claim(task_id, worker_id,
+                admission_check=lambda: not outside_label_selector(self.store, self.store.get_task(task_id), self.required_label))
+                if self.required_label or getattr(self.store, "selection_scope", None)
+                else self.store.acquire_claim(task_id, worker_id))
             if claim_id is None:
                 return 0
             record_audit(
@@ -403,6 +425,8 @@ class Coordinator:
                 )
                 return 0
             if result.status is ExecutionStatus.SUCCEEDED and result.candidate_sha and result.durable_handoff:
+                from .selection_scope import record_candidate
+                record_candidate(self.store, task_id, result.candidate_sha)
                 if self.guard is not None:
                     self.guard.candidate_committed(task_id, result.candidate_sha)  # StageMesh's own commit is registered, not inferred
                 self.store.advance_task(task_id, Stage.VALIDATE)

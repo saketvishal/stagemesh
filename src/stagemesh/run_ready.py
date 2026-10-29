@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .audit import record_audit
-from .auto_plan import AutoPlanError, create_contract, outside_label_selector, refresh_stale_generated_contract, task_labels
+from .auto_plan import AutoPlanError, create_contract, outside_label_selector, refresh_stale_generated_contract
 from .blocked_recovery import auto_retry_blocked_provider_failures, exhaustion_message
 from .config import AdverseReviewPolicy, ConfigValidationError, TaskSelectionConfig, load_config
 from .contract_binding import contract_for_candidate
@@ -50,7 +50,7 @@ from .step_progress import (
     record_step_cap,
     unproductive_step_caps,
 )
-from .task_selection import Candidate, Selection, SelectionRefusal, contract_state, has_exact_label, select_next_task
+from .task_selection import Candidate, Selection, SelectionRefusal, contract_state, select_next_task
 from .timing import execution_timings, format_duration, step_duration
 from .workspace_guard import EXTERNAL_WORKSPACE_MUTATION
 from .workspaces import task_workspace, worktree_root
@@ -193,15 +193,14 @@ def choose_task(
     """--task bypasses ranking only; objective-root/history safety still applies."""
     if requested is not None:
         _require_runnable_task(store, requested)
-        if policy.required_label:
-            task = store.get_task(requested)
-            if task is None or not has_exact_label(task_labels(store, task), policy.required_label):
-                raise RunReadyRefusal(
-                    "label_selector_conflict",
-                    f"task {requested} does not carry the active label selector {policy.required_label!r}; "
-                    "--task cannot bypass --label",
-                    task_id=requested,
-                )
+        task = store.get_task(requested)
+        if task is None or outside_label_selector(store, task, policy.required_label):
+            raise RunReadyRefusal(
+                "label_selector_conflict",
+                f"task {requested} does not carry the active label selector {policy.required_label!r}; "
+                "--task cannot bypass --label or inherited child scope",
+                task_id=requested,
+            )
         if policy.required_label:
             return Selection(
                 "explicit", requested, f"explicit --task (ranking bypassed; label selector {policy.required_label!r} verified)",
@@ -910,7 +909,12 @@ def run_ready(
             on_start(message)
 
     try:
-        recovered.extend(_recover_all_dead(store))  # provably dead claims/executions only; live/unknown are never touched
+        recovered.extend(_recover_all_dead(store))  # housekeeping stays global; fresh scope gates admissions only
+        from .selection_scope import ScopeError, refresh
+        try:
+            refresh(store)
+        except ScopeError as exc:
+            raise RunReadyRefusal("scope_source_unavailable", str(exc)) from exc
         label = policy.required_label if policy is not None else None
         recovered.extend(auto_rebaseline_blocked_stale_baselines(store, project, task_id=task_id, required_label=label))
         recovered.extend(auto_rebind_blocked_missing_validation_gates(store, project, task_id=task_id, required_label=label))
@@ -929,10 +933,10 @@ def run_ready(
                 or f"task {selected} is BLOCKED; inspect diagnosis and use retry-task after remediation",
                 task_id=selected,
             )
-        if policy is not None and policy.required_label and outside_label_selector(store, store.get_task(selected), policy.required_label):
+        if outside_label_selector(store, store.get_task(selected), policy.required_label if policy is not None else None):
             raise RunReadyRefusal(  # the source cache changed after selection: refuse before any auto-planning or stage work
                 "label_selector_conflict",
-                f"task {selected} no longer carries the active label selector {policy.required_label!r}; nothing was started",
+                f"task {selected} conflicts with the active or inherited label scope; nothing was started",
                 task_id=selected,
             )
         _ensure_contract(store, project, selected, auto_plan, plan_info, note)

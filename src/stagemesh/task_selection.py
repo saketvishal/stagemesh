@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from .auto_plan import cached_state as _cached_state
-from .auto_plan import plannable, task_labels
+from .auto_plan import plannable, task_labels, outside_label_selector
 from .config import TaskSelectionConfig
 from .contracts import (
     ContractError,
@@ -251,8 +251,9 @@ def _collect(
         if task["status"] != TaskStatus.OPEN or task["stage"] == Stage.DONE:
             continue
         labels = task_labels(store, task)
-        if policy.required_label and not has_exact_label(labels, policy.required_label):
-            skipped.append({"task_id": task_id, "reason": label_selector_reason(policy.required_label)})
+        if outside_label_selector(store, task, policy.required_label):
+            from .selection_scope import task_problem
+            skipped.append({"task_id": task_id, "reason": task_problem(store, task) or label_selector_reason(policy.required_label)})
             continue
         objective_reason = objective_root_reason(store, task)
         if objective_reason is not None:

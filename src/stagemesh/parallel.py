@@ -628,6 +628,13 @@ class ParallelRunner:
             ]
 
     def _select_batch(self, summary: ParallelSummary, free: int, running: list[str], attempted: set[str]) -> list[str]:
+        from .selection_scope import ScopeError, refresh
+        try:
+            refresh(self.store)
+        except ScopeError as exc:
+            summary.skipped = [{"task_id": "*", "reason": str(exc)}]
+            self._say("run", str(exc))
+            return []
         # Give candidates already in the validation/review/integration pipeline priority over
         # fresh admissions. Otherwise short new tasks can repeatedly advance the ref while an
         # older candidate revalidates, exhausting its bounded rebase budget through starvation.

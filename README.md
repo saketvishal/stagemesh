@@ -130,6 +130,9 @@ provider while preserving independent review.
 
 ## Choosing the next task
 
+Use [exact-label work scopes](docs/label-scope.md) to restrict a run, persist its
+selector across restarts, and bind planned children without broadening admission.
+
 Plain `stagemesh continue` runs the only eligible task, or ranks several and runs the best one. `--task <id>` bypasses ranking and
 is how a stale task is retried; `--choose` asks on the terminal. Ranking (best first): priority label, preferred label
 (`stagemesh:prep`, `prep`, `governance`, `readiness`), valid contract over one needing auto-planning, then issue number. Tasks with an
