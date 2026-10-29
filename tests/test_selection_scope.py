@@ -326,7 +326,8 @@ def test_later_refresh_failure_never_reports_fresh(rig, monkeypatch):
 
 
 @pytest.mark.parametrize("fail_after_first", [False, True])
-def test_real_window_selection_topup_and_refresh_failure(tmp_path, monkeypatch, fail_after_first):
+@pytest.mark.parametrize("attach_context", [False, True])
+def test_real_window_selection_topup_and_refresh_failure(tmp_path, monkeypatch, fail_after_first, attach_context):
     from test_run_window import window, FRESH
     import stagemesh.run_window as rw
     monkeypatch.setattr("stagemesh.config.detect_github_repository", lambda p: None)
@@ -339,8 +340,9 @@ def test_real_window_selection_topup_and_refresh_failure(tmp_path, monkeypatch, 
             item["labels"] = ["other" if item["id"] == "B" else "focus"]
         path.write_text(json.dumps(payload))
         scope = resolve_scope(store, label="focus")
-        attach(store, project, config, scope)
-        refresh(store)
+        if attach_context:
+            attach(store, project, config, scope)
+            refresh(store)
         options.scope_id, options.required_label = scope.id, scope.label
         original = hooks.run_task
         def run(task_id, max_steps):
@@ -361,5 +363,32 @@ def test_real_window_selection_topup_and_refresh_failure(tmp_path, monkeypatch, 
         else:
             assert hooks_rig.runs == ["A", "C"]
         assert report.to_dict()["options"]["scope_id"] == scope.id
+    finally:
+        store.close()
+
+
+def test_window_rejects_mismatched_attached_scope_even_with_candidate_grant(tmp_path, monkeypatch):
+    from test_run_window import window, FRESH
+    import stagemesh.run_window as rw
+    monkeypatch.setattr("stagemesh.config.detect_github_repository", lambda p: None)
+    monkeypatch.setattr("stagemesh.readiness.check_runtime", lambda p: FRESH)
+    store, project, hooks_rig, hooks, options, config, kwargs = window(tmp_path, ["A"], concurrency=1)
+    try:
+        path = project / ".stagemesh/backlog.json"
+        payload = json.loads(path.read_text())
+        payload["tasks"][0]["labels"] = ["focus"]
+        path.write_text(json.dumps(payload))
+        scope = resolve_scope(store, label="focus")
+        attach(store, project, config, scope)
+        refresh(store)
+        store.add_candidate("A", "a" * 40, "test", True)
+        record_candidate(store, "A", "a" * 40)
+        store.advance_task("A", Stage.VALIDATE)
+        other = resolve_scope(store, label="other")
+        options.scope_id, options.required_label = other.id, other.label
+        report = rw.run_window(store, project, config, options, hooks, base_ref="refs/heads/main",
+            staging_ref="refs/heads/wave/staging", **kwargs)
+        assert report.refused and "attached scope" in report.stop_reason
+        assert hooks_rig.runs == [] and store.selection_scope == scope
     finally:
         store.close()

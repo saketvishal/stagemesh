@@ -741,6 +741,15 @@ def run_window(
         store, project, config, options, base_ref=base_ref, runtime=runtime, provider_check=provider_check, repo_state=hooks.repo_state,
         checkout_ref=checkout_ref,
     )
+    attached_scope = getattr(store, "selection_scope", None)
+    if attached_scope is not None:
+        mismatch = ((options.scope_id is not None and options.scope_id != attached_scope.id)
+            or (options.required_label is not None
+                and options.required_label.casefold() != (attached_scope.label or "").casefold()))
+        if mismatch:
+            report.preflight.append(Check("selection_scope", False, "requested scope differs from the Store's attached scope; nothing started"))
+        else:
+            options.scope_id, options.required_label = attached_scope.id, attached_scope.label
     if (options.required_label or options.scope_id) and not getattr(store, "selection_scope", None):
         from .selection_scope import ScopeError, attach, refresh, resolve_scope
         try:
