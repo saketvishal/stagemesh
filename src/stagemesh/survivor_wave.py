@@ -964,6 +964,7 @@ def format_report(report: WaveReport) -> str:
 def subprocess_task_runner(
     project: Path, *, python: str | None = None, integration_ref: str | None = None,
     live_acceptance: str | None = None, scope_id: str | None = None,
+    providers: tuple[str, ...] = (),
 ) -> Callable[[str, int], RunResult]:
     """Run `continue --task N --json` in a child process, so each task gets its own connection and process identity.
 
@@ -980,6 +981,8 @@ def subprocess_task_runner(
             argv += ["--resume-scope", scope_id]
         if live_acceptance is not None:
             argv += ["--live-acceptance", live_acceptance]
+        if providers:
+            argv += ["--providers", ",".join(providers)]
         from .validation_slot import window_deadline_for_subprocess
 
         env = os.environ.copy()

@@ -861,8 +861,64 @@ def command_advance_baseline(args: argparse.Namespace) -> int:
     return _repair_command(args, run)
 
 
+def _runtime_provider_selection(
+    config: StageMeshConfig, raw: str | None
+) -> tuple[StageMeshConfig, tuple[str, ...]]:
+    """Apply a run-scoped provider subset without changing the project configuration."""
+    if raw is None:
+        return config, ()
+    requested_raw = [name.strip() for name in raw.split(",") if name.strip()]
+    if not requested_raw:
+        raise ConfigValidationError("--providers requires at least one comma-separated provider name")
+
+    adapters = adapters_from_config(config)
+    adapter_names = {adapter.name.casefold(): adapter.name for adapter in adapters}
+    unknown = [name for name in requested_raw if name.casefold() not in adapter_names]
+    if unknown:
+        raise ConfigValidationError(
+            "--providers references provider(s) that are not configured: " + ", ".join(dict.fromkeys(unknown))
+        )
+    requested = tuple(dict.fromkeys(adapter_names[name.casefold()] for name in requested_raw))
+    stage_caps = {IMPLEMENT: "code", REVIEW: "review"}
+    capable = {
+        stage: {adapter.name for adapter in adapters if capability in adapter.capabilities}
+        for stage, capability in stage_caps.items()
+    }
+    priorities = {
+        name: spec.priority for name, spec in config.provider_specs.items() if spec.priority is not None
+    }
+    effective = default_pools(
+        sorted(adapter.name for adapter in adapters),
+        config.stage_routes,
+        config.provider_pools,
+        config.single_agent_provider,
+        config.routing_mode,
+        capable=capable,
+        priorities=priorities,
+    )
+    enabled = set(effective[IMPLEMENT]) | set(effective[REVIEW])
+    disabled = [name for name in requested if name not in enabled]
+    if disabled:
+        raise ConfigValidationError(
+            "--providers can only select globally enabled providers; enable first in routing.pools: "
+            + ", ".join(disabled)
+        )
+    selected = set(requested)
+    pools = {
+        stage: tuple(name for name in effective[stage] if name in selected)
+        for stage in (IMPLEMENT, REVIEW)
+    }
+    empty = [stage for stage in (IMPLEMENT, REVIEW) if not pools[stage]]
+    if empty:
+        raise ConfigValidationError(
+            "--providers leaves no capable provider in the " + "/".join(empty) + " pool"
+        )
+    return replace(config, provider_pools=pools), requested
+
+
 def _wave_hooks(project: Path, store: Store, *, base_ref: str, staging_ref: str | None, advance_ref: str, local: bool, no_pr: bool,
-                live_acceptance: str = LIVE_ACCEPTANCE_SKIP_FAILED, scope_id: str | None = None):
+                live_acceptance: str = LIVE_ACCEPTANCE_SKIP_FAILED, scope_id: str | None = None,
+                providers: tuple[str, ...] = ()):
     """The real hooks (child `continue` runs, baseline advance, PR opening, repo census, per-task safety checks) for a wave or window."""
     from .autonomy.gitfacts import GitFacts
     from .recovery import advance_baseline as advance_task_baseline
@@ -884,7 +940,9 @@ def _wave_hooks(project: Path, store: Store, *, base_ref: str, staging_ref: str 
         )
 
     return WaveHooks(
-        run_task=subprocess_task_runner(project, integration_ref=staging_ref, live_acceptance=live_acceptance, scope_id=scope_id),
+        run_task=subprocess_task_runner(
+            project, integration_ref=staging_ref, live_acceptance=live_acceptance, scope_id=scope_id, providers=providers
+        ),
         advance_baseline=advance,
         open_pr=None if no_pr or local else git_gh_pr_opener(project, base=base_ref.removeprefix("refs/heads/")),
         target_sha=lambda: facts.resolve(advance_ref),
@@ -895,7 +953,7 @@ def _wave_hooks(project: Path, store: Store, *, base_ref: str, staging_ref: str 
         leftover=store_leftover(store),
         retarget=lambda ref: _wave_hooks(
             project, store, base_ref=base_ref, staging_ref=ref, advance_ref=ref,
-            local=local, no_pr=no_pr, live_acceptance=live_acceptance, scope_id=scope_id,
+            local=local, no_pr=no_pr, live_acceptance=live_acceptance, scope_id=scope_id, providers=providers,
         ),
     )
 
@@ -931,6 +989,11 @@ def command_run_window(args: argparse.Namespace) -> int:
     if not args.plan and not (getattr(args, "label", None) is not None or getattr(args, "resume_scope", None)) and _ensure_default_github_task_source(project):
         print("migrated config: added GitHub task source for stagemesh:ready issues", file=sys.stderr)
     config = load_config(project)
+    try:
+        config, runtime_providers = _runtime_provider_selection(config, getattr(args, "providers", None))
+    except ConfigValidationError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
     missing_source = _missing_github_task_source_check(config, project)
     if missing_source is not None:
         payload = {"preflight": [missing_source], "would_run": [], "left_alone": {}, "ok": False}
@@ -973,6 +1036,7 @@ def command_run_window(args: argparse.Namespace) -> int:
         follow_up=args.follow_up,
         follow_up_interval_seconds=int(parse_duration(args.follow_up_interval)),
         follow_up_ttl_seconds=int(parse_duration(args.follow_up_ttl)),
+        providers=runtime_providers,
     )
     store = Store(Path(":memory:") if args.plan else db_path(project))
     if args.plan and db_path(project).exists():
@@ -996,7 +1060,7 @@ def command_run_window(args: argparse.Namespace) -> int:
         hooks = _wave_hooks(
             project, store, base_ref=base_ref, staging_ref=staging_ref, advance_ref=base_ref if local else STAGING_REF, local=local, no_pr=args.no_pr,
             live_acceptance=LIVE_ACCEPTANCE_REQUIRED if options.strict_live else LIVE_ACCEPTANCE_SKIP_FAILED,
-            scope_id=options.scope_id,
+            scope_id=options.scope_id, providers=options.providers,
         )
         merger = None
         merger_error = None
@@ -1025,6 +1089,11 @@ def command_run_window(args: argparse.Namespace) -> int:
                 "preflight": [c.to_dict() for c in checks],
                 "would_run": picked,
                 "left_alone": skipped,
+                "provider_selection": {
+                    "requested": list(options.providers),
+                    "implementation_pool": list(config.provider_pools.get(IMPLEMENT, ())),
+                    "review_pool": list(config.provider_pools.get(REVIEW, ())),
+                },
                 **({"scope": args.scope_report} if scope is not None else {}),
                 "ok": all(c.ok or not c.fatal for c in checks),
             }
@@ -1791,6 +1860,11 @@ def command_continue(args: argparse.Namespace) -> int:
         return command_run_ready(args)  # default: supervise one task to completion; --once keeps the single tick
     target = TargetSelection(str(targeted_task_id)) if targeted_task_id is not None else None
     config = load_config(project)
+    try:
+        config, _ = _runtime_provider_selection(config, getattr(args, "providers", None))
+    except ConfigValidationError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
     store = Store(db_path(project))
     store.migrate()
     _sync_all_sources(store, project, config, targeted_task_id,
@@ -2082,6 +2156,11 @@ def command_run_ready(args: argparse.Namespace) -> int:
         print("target task id must not be empty", file=sys.stderr)
         return 2
     config = load_config(project)
+    try:
+        config, _ = _runtime_provider_selection(config, getattr(args, "providers", None))
+    except ConfigValidationError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
     store = Store(db_path(project))
     store.migrate()
     try:
@@ -4179,6 +4258,10 @@ def build_parser() -> argparse.ArgumentParser:
     window.add_argument("--max-steps-per-task", type=int, default=8, help="Step budget for each task (default 8)")
     window.add_argument("--max-tasks", type=int, default=10, help="Most tasks to attempt in one window (default 10)")
     window.add_argument("--tasks", help="Restrict the window to these comma-separated task ids (default: every eligible task)")
+    window.add_argument(
+        "--providers", "--agents", dest="providers", metavar="NAMES",
+        help="Use only this comma-separated subset of globally enabled coding agents for this run (for example: agy,codex); does not change project configuration",
+    )
     window.add_argument("--integration", choices=("pr", "local"), default="pr", help="pr (default, recommended unattended): work goes to wave/staging and PRs, local main stays put")
     merge_choice = window.add_mutually_exclusive_group()
     merge_choice.add_argument("--pr-only", action="store_true", help="Open PRs for manual merging; overrides the project automatic-merge default")
@@ -4411,6 +4494,7 @@ def build_parser() -> argparse.ArgumentParser:
     cont.add_argument("--task-id", dest="task", help=argparse.SUPPRESS)
     cont.add_argument("--integration-ref", dest="integration_ref", help=argparse.SUPPRESS)  # survivor-wave PR mode: land on the staging ref
     cont.add_argument("--live-acceptance", choices=(LIVE_ACCEPTANCE_SKIP_FAILED, LIVE_ACCEPTANCE_REQUIRED), help=argparse.SUPPRESS)
+    cont.add_argument("--providers", help=argparse.SUPPRESS)
     cont.set_defaults(func=command_continue)
     cont.add_argument("--resume-scope", help="Resume a saved scope without widening its label")
     cont.add_argument("--clear-label", action="store_true", help="Explicitly clear --resume-scope's label")
@@ -4457,6 +4541,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_ready_cmd.add_argument("--task", help="Run this task id instead of the single eligible OPEN task")
     run_ready_cmd.add_argument("--max-steps", type=int, default=50)
     run_ready_cmd.add_argument("--provider", help="Provider name to use for implementation")
+    run_ready_cmd.add_argument("--providers", help=argparse.SUPPRESS)
     run_ready_cmd.add_argument("--dry-run", action="store_true", help="Use FakeExecutor instead of a real provider")
     run_ready_cmd.add_argument("--choose", "--interactive", dest="choose", action="store_true", help="Pick among eligible tasks interactively")
     run_ready_cmd.add_argument("--no-auto-plan", action="store_true", help="Refuse instead of generating a missing change contract")
