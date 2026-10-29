@@ -112,6 +112,7 @@ class WindowOptions:
     strict_live: bool = False
     allow_stale_runtime: bool = False
     tasks: list[str] | None = None  # None: pick every eligible task; a list restricts the window to exactly those
+    providers: tuple[str, ...] = ()  # empty: project pools; otherwise this run's selected enabled-provider subset
     required_label: str | None = None
     scope_id: str | None = None
     ci_mode: str = "immediate"
@@ -248,6 +249,7 @@ class WindowReport:
                 "verification_concurrency": self.options.verification_concurrency,
                 "max_steps_per_task": self.options.max_steps_per_task,
                 "max_tasks": self.options.max_tasks,
+                "providers": list(self.options.providers),
                 "integration_mode": self.options.integration_mode,
                 "open_prs": self.options.open_prs,
                 "strict_live": self.options.strict_live,
@@ -507,7 +509,10 @@ def provider_pool_check(store: Store, config: StageMeshConfig, *, strict_live: b
     if not ok:
         return Check("providers", False, message, fix="stagemesh capacity")
     cooling = [v.provider for v in impl + review if not v.eligible and "cooldown" in v.reason]
-    detail = "implementation and independent review are both available"
+    detail = (
+        "implementation and independent review are both available; "
+        f"IMPLEMENT pool: {', '.join(pools[IMPLEMENT])}; REVIEW pool: {', '.join(pools[REVIEW])}"
+    )
     if cooling:
         detail += f"; cooling down (the others carry the work): {', '.join(sorted(set(cooling)))}"
     return Check("providers", True, detail)
@@ -668,6 +673,8 @@ def _resume_argv(options: WindowOptions) -> list[str]:
     ]
     if options.tasks:
         argv.extend(("--tasks", ",".join(options.tasks)))
+    if options.providers:
+        argv.extend(("--providers", ",".join(options.providers)))
     if options.scope_id and options.scope_id != "preview":
         argv.extend(("--resume-scope", options.scope_id))
     elif options.required_label:
