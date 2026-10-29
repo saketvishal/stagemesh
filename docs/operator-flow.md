@@ -6,6 +6,11 @@ Use `stagemesh operator` for text, `stagemesh operator --json` for structured ou
 `stagemesh dashboard --output dashboard.html` for the same report in a static page. Existing task, worker, queue and evidence
 fields remain available. These reports do not retry work, change task state or grant permission.
 
+For bounded event history, use `stagemesh activity`. It reads the SQLite store in read-only mode and supports text or `--json`
+output plus `--state`, `--task`, `--stage`, `--provider`, `--since`/`--until`, `--last 7d`,
+`--period today|yesterday|week|month`, `--limit` and `--offset`. Explicit instants require a UTC offset. Named periods use local
+calendar boundaries and convert them to absolute UTC instants before querying; they do not change task or execution state.
+
 Attention marks current failed tasks as `ACTION`; superseded failures and failures on DONE tasks remain `INFO` history.
 `failed_executions` retains its lifetime meaning. Recent Failures shows the latest ten failed executions with task, candidate,
 provider, reason and current/history scope. Recent Efficiency And Usage samples at most 100 records of each type: provider attempts,

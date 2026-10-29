@@ -12,11 +12,14 @@ import threading
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
+from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 from . import __version__
 from .acceptance import AcceptanceValidationError, local_acceptance_report
 from .acceptance_matrix import AcceptanceMatrixValidationError, acceptance_matrix
+from .activity import ActivityEntry, ActivityPage, ActivityQuery, ActivityQueryError, query_activity
 from .audit import AuditValidationError, export_audit_jsonl
 from .autonomy.cli import register_autonomy_commands
 from .autonomy.integration import SupervisedIntegrator
@@ -42,7 +45,7 @@ from .dashboard import dashboard_summary, render_dashboard
 from .demo import DemoValidationError, create_demo_project
 from .diagnosis import DiagnosisPolicy, diagnose, format_findings, make_adapter_analyst
 from .distributed import WorkQueue, WorkQueueError
-from .domain import TaskStatus
+from .domain import Stage, TaskStatus
 from .e2e_acceptance import EndToEndAcceptanceValidationError, end_to_end_acceptance
 from .efficiency import BudgetPolicy
 from .external_evidence import (
@@ -1074,6 +1077,153 @@ def command_run_window(args: argparse.Namespace) -> int:
     if report.report_error:
         print(f"report not written: {report.report_error}", file=sys.stderr)
     return report.exit_code
+
+
+def _activity_instant(value: str, field: str) -> datetime:
+    raw = value.strip()
+    if raw.endswith(("Z", "z")):
+        raw = raw[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError as exc:
+        raise ActivityQueryError(f"activity {field} must be an ISO-8601 instant with a UTC offset") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ActivityQueryError(f"activity {field} must include a UTC offset")
+    try:
+        return parsed.astimezone(UTC)
+    except (OverflowError, ValueError) as exc:
+        raise ActivityQueryError(f"activity {field} is outside the supported UTC range") from exc
+
+
+def _activity_period_bounds(period: str, now: datetime | None = None) -> tuple[datetime, datetime]:
+    """Return a half-open UTC range from local calendar boundaries.
+
+    Production boundaries let the operating system localize each midnight so a
+    daylight-saving transition is not flattened to the current offset. Passing an
+    aware ``now`` keeps the helper deterministic for tests and callers with an
+    explicit zone.
+    """
+    if now is not None and (now.tzinfo is None or now.utcoffset() is None):
+        raise ActivityQueryError("activity period clock must be timezone-aware")
+    local_now = now if now is not None else datetime.now().astimezone()
+    today = local_now.date()
+    if period == "today":
+        start_day, end_day = today, today + timedelta(days=1)
+    elif period == "yesterday":
+        start_day, end_day = today - timedelta(days=1), today
+    elif period == "week":
+        start_day = today - timedelta(days=today.weekday())
+        end_day = start_day + timedelta(days=7)
+    elif period == "month":
+        start_day = date(today.year, today.month, 1)
+        end_day = date(today.year + (1 if today.month == 12 else 0), 1 if today.month == 12 else today.month + 1, 1)
+    else:
+        raise ActivityQueryError("activity period must be one of: today, yesterday, week, month")
+
+    def boundary(day: date) -> datetime:
+        if now is None:
+            localized = datetime.combine(day, time.min).astimezone()
+        else:
+            localized = datetime.combine(day, time.min, tzinfo=local_now.tzinfo)
+        return localized.astimezone(UTC)
+
+    return boundary(start_day), boundary(end_day)
+
+
+def _activity_range(args: argparse.Namespace) -> tuple[datetime | None, datetime | None]:
+    explicit = bool(args.since or args.until)
+    selected = int(explicit) + int(bool(args.last)) + int(bool(args.period))
+    if selected > 1:
+        raise ActivityQueryError("use only one activity time selector: --since/--until, --last, or --period")
+    if args.period:
+        return _activity_period_bounds(args.period)
+    if args.last:
+        match = re.fullmatch(r"([1-9][0-9]*)[dD]", args.last.strip())
+        if match is None:
+            raise ActivityQueryError("activity --last must look like Nd, for example 7d")
+        raw_days = match.group(1)
+        if len(raw_days) > 5 or (len(raw_days) == 5 and raw_days > "36500"):
+            raise ActivityQueryError("activity --last cannot exceed 36500d")
+        days = int(raw_days)
+        until = datetime.now(UTC)
+        return until - timedelta(days=days), until
+    return (
+        _activity_instant(args.since, "since") if args.since else None,
+        _activity_instant(args.until, "until") if args.until else None,
+    )
+
+
+def _activity_entry_text(entry: ActivityEntry) -> str:
+    timestamp = entry.at.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    fields = [
+        timestamp,
+        entry.kind,
+        entry.state,
+        f"id={entry.id}",
+        f"task={entry.task_id or '-'}",
+        f"stage={entry.stage or '-'}",
+        f"status={entry.status or '-'}",
+        f"provider={entry.provider or '-'}",
+    ]
+    detail = entry.title or entry.event_type or entry.result_code
+    if detail:
+        fields.append(detail)
+    rendered = " ".join(fields)
+    return "".join(char if char.isprintable() else f"\\u{ord(char):04x}" for char in rendered)
+
+
+def _format_activity_page(page: ActivityPage) -> str:
+    if not page.entries:
+        return f"activity: no matching entries (total={page.total}, offset={page.offset})"
+    lines = [(
+        f"activity: showing {len(page.entries)} of {page.total} "
+        f"(offset={page.offset}, limit={page.limit}, time_basis={page.time_basis})"
+    )]
+    lines.extend(_activity_entry_text(entry) for entry in page.entries)
+    if page.next_offset is not None:
+        lines.append(f"next: rerun with --offset {page.next_offset}")
+    if page.truncated:
+        lines.append("warning: retained activity was truncated by the bounded scan")
+    return "\n".join(lines)
+
+
+def command_activity(args: argparse.Namespace) -> int:
+    from .api_server import serialize_page
+
+    project = Path(args.project).resolve()
+    activity_db = db_path(project)
+    if not activity_db.is_file():
+        print("activity error: activity store does not exist; run stagemesh init first", file=sys.stderr)
+        return 2
+    try:
+        since, until = _activity_range(args)
+        query = ActivityQuery(
+            state=args.state,
+            task_id=args.task_id,
+            stage=args.stage,
+            provider=args.provider,
+            since=since,
+            until=until,
+            limit=args.limit,
+            offset=args.offset,
+        )
+        connection = sqlite3.connect(f"{activity_db.as_uri()}?mode=ro", uri=True)
+        connection.row_factory = sqlite3.Row
+        try:
+            page = query_activity(SimpleNamespace(conn=connection), query)  # type: ignore[arg-type]
+        finally:
+            connection.close()
+    except ActivityQueryError as exc:
+        print(f"activity error: {exc}", file=sys.stderr)
+        return 2
+    except (OSError, sqlite3.Error):
+        print("activity error: activity store is unavailable", file=sys.stderr)
+        return 2
+    if args.json:
+        print(json.dumps(serialize_page(page, version=2), indent=2, sort_keys=True))
+    else:
+        print(_format_activity_page(page))
+    return 0
 
 
 def command_efficiency(args: argparse.Namespace) -> int:
@@ -4113,6 +4263,20 @@ def build_parser() -> argparse.ArgumentParser:
         if name == "tick":
             command.add_argument("--log-file", default=None, help="Append this tick's output to a file (used by the scheduled action)")
         command.set_defaults(func=command_driver)
+    activity = sub.add_parser("activity", help="Read bounded task, execution and audit activity without changing project state")
+    activity.add_argument("--state", choices=("open", "closed"))
+    activity.add_argument("--task", dest="task_id")
+    activity.add_argument("--stage", choices=tuple(stage.value for stage in Stage))
+    activity.add_argument("--provider")
+    activity.add_argument("--since", metavar="ISO8601", help="Inclusive instant with a UTC offset")
+    activity.add_argument("--until", metavar="ISO8601", help="Exclusive instant with a UTC offset")
+    activity.add_argument("--last", metavar="Nd", help="Activity in the last N 24-hour days, for example 7d")
+    activity.add_argument("--period", choices=("today", "yesterday", "week", "month"))
+    activity.add_argument("--limit", type=int, default=50)
+    activity.add_argument("--offset", type=int, default=0)
+    activity.add_argument("--json", action="store_true")
+    activity.set_defaults(func=command_activity)
+
     efficiency = sub.add_parser(
         "efficiency",
         help="Provider attempts, equivalent-failure retries, checks run/reused, validation time and provider-reported usage (unknown is never zero)",
