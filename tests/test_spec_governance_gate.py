@@ -417,6 +417,43 @@ def test_missing_affected_ids_and_dependencies_validated_against_declared_record
     assert any("nonexistent" in err for err in verdict.errors)
 
 
+@pytest.mark.parametrize("dependencies", [[{}], ["valid", 7], "not-a-list"])
+def test_malformed_dependencies_fail_closed_in_preflight(dependencies) -> None:
+    manifest = valid_manifest()
+    manifest["owners"][0]["dependencies"] = dependencies
+    report = check_contract_text(
+        json.dumps(
+            {
+                "objective": "governed",
+                "explicit": True,
+                "spec_refs": ["openspec/specs/auth/spec.md"],
+                "required_tests": [{"name": "unit", "command": ["pytest", "-q"]}],
+            }
+        ),
+        prerequisite_manifest=manifest,
+    )
+    assert not report["ok"]
+    assert any("dependenc" in error for error in report["errors"])
+
+
+@pytest.mark.parametrize("unmapped_files", [[{}], ["valid.py", 7], "not-a-list", [""]])
+def test_malformed_unmapped_files_fail_closed_in_preflight(unmapped_files) -> None:
+    manifest = valid_manifest(unmapped_files=unmapped_files)
+    report = check_contract_text(
+        json.dumps(
+            {
+                "objective": "governed",
+                "explicit": True,
+                "spec_refs": ["openspec/specs/auth/spec.md"],
+                "required_tests": [{"name": "unit", "command": ["pytest", "-q"]}],
+            }
+        ),
+        prerequisite_manifest=manifest,
+    )
+    assert not report["ok"]
+    assert any("unmapped_files" in error for error in report["errors"])
+
+
 def test_validator_binds_candidate_base_and_diff(tmp_path: Path, monkeypatch) -> None:
     # Finding 2: Validator must compare candidate_revision, base_revision, and changed_files
     project = tmp_path / "project"
@@ -458,7 +495,7 @@ def test_validator_binds_candidate_base_and_diff(tmp_path: Path, monkeypatch) ->
 
     @contextmanager
     def exact_candidate(_project: Path, sha: str):
-        assert sha == cand_sha
+        assert sha in {base_sha, cand_sha}
         yield candidate_root
 
     monkeypatch.setattr("stagemesh.validation.candidate_workspace", exact_candidate)
@@ -478,6 +515,7 @@ def test_validator_binds_candidate_base_and_diff(tmp_path: Path, monkeypatch) ->
             base_revision=base_sha,
             candidate_revision="stale-candidate-sha",
             changed_files=["app.py"],
+            owners=[], requirements=[], unmapped_files=["app.py"],
         )
         status1 = Validator().validate(store, task_id, cand_sha, project, prerequisite_manifest=stale_cand)
         assert status1 is EvidenceStatus.FAILED
@@ -487,6 +525,7 @@ def test_validator_binds_candidate_base_and_diff(tmp_path: Path, monkeypatch) ->
             base_revision="stale-base-sha",
             candidate_revision=cand_sha,
             changed_files=["app.py"],
+            owners=[], requirements=[], unmapped_files=["app.py"],
         )
         status2 = Validator().validate(store, task_id, cand_sha, project, prerequisite_manifest=stale_base)
         assert status2 is EvidenceStatus.FAILED
@@ -496,6 +535,7 @@ def test_validator_binds_candidate_base_and_diff(tmp_path: Path, monkeypatch) ->
             base_revision=base_sha,
             candidate_revision=cand_sha,
             changed_files=["unrelated.py"],
+            owners=[], requirements=[], unmapped_files=["unrelated.py"],
         )
         status3 = Validator().validate(store, task_id, cand_sha, project, prerequisite_manifest=stale_diff)
         assert status3 is EvidenceStatus.FAILED
@@ -505,6 +545,7 @@ def test_validator_binds_candidate_base_and_diff(tmp_path: Path, monkeypatch) ->
             base_revision=base_sha,
             candidate_revision=cand_sha,
             changed_files=["app.py"],
+            owners=[], requirements=[], unmapped_files=["app.py"],
         )
         status4 = Validator().validate(store, task_id, cand_sha, project, prerequisite_manifest=correct)
         assert status4 is EvidenceStatus.PASSED
@@ -577,7 +618,7 @@ def test_validator_enforces_spec_governance_before_review(tmp_path: Path) -> Non
             candidate_revision=sha,
             base_revision=base_sha,
             changed_files=["app.py"],
-            owners=[{"id": "", "path": "openspec/specs/auth/spec.md", "status": "active"}],
+            owners=[], requirements=[], unmapped_files=["app.py"], validation_status="failed",
         )
         status = Validator().validate(
             store, task_id, sha, project, prerequisite_manifest=bad_manifest
@@ -596,7 +637,7 @@ def test_validator_enforces_spec_governance_before_review(tmp_path: Path) -> Non
             candidate_revision=sha,
             base_revision=base_sha,
             changed_files=["app.py"],
-            unmapped_files=["unmapped_audit.log"],
+            owners=[], requirements=[], unmapped_files=["app.py"],
         )
         status_ok = Validator().validate(
             store, task_id, sha, project, prerequisite_manifest=ok_manifest
@@ -611,6 +652,85 @@ def test_validator_enforces_spec_governance_before_review(tmp_path: Path) -> Non
         assert any(
             f.get("code") == "spec_semantic_overlap" and f.get("severity") == "warning"
             for f in payload_ok["findings"]
+        )
+    finally:
+        store.close()
+
+
+def test_validator_rejects_manifest_that_disagrees_with_pinned_adapter_snapshot(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    git = GitWorkspace(project)
+    git.init_if_needed()
+    git.run("config", "user.email", "test@example.invalid")
+    git.run("config", "user.name", "Test Owner")
+    (project / ".gitignore").write_text(".stagemesh/\n", encoding="utf-8")
+    spec = project / "openspec" / "specs" / "actual" / "spec.md"
+    spec.parent.mkdir(parents=True)
+    spec.write_text("### Requirement: Actual\nOriginal.\n", encoding="utf-8")
+    (project / "test_app.py").write_text("def test_ok(): pass\n", encoding="utf-8")
+    base_sha = git.commit_all("baseline")
+
+    store = Store(project / ".stagemesh/state.sqlite3")
+    store.migrate()
+    task_id = store.upsert_task("Update actual requirement", source_id="TASK-GOV-BIND")
+    contract_dir = project / ".stagemesh/contracts"
+    contract_dir.mkdir(parents=True)
+    contract = {
+        "objective": "Update actual requirement",
+        "allowed_files": ["openspec/specs/actual/spec.md"],
+        "spec_refs": ["openspec/specs/actual/spec.md"],
+        "required_tests": [
+            {"name": "unit", "command": [sys.executable, "-m", "pytest", "-q", "test_app.py"]}
+        ],
+    }
+    (contract_dir / f"{task_id}.json").write_text(json.dumps(contract), encoding="utf-8")
+    spec.write_text("### Requirement: Actual\nUpdated.\n", encoding="utf-8")
+    candidate_sha = git.commit_all("implementation")
+    store.add_candidate(task_id, candidate_sha, "implementer", True)
+
+    fabricated = valid_manifest(
+        base_revision=base_sha,
+        candidate_revision=candidate_sha,
+        changed_files=["openspec/specs/actual/spec.md"],
+        owners=[
+            {
+                "id": "fabricated-owner",
+                "path": "specs/fabricated.md",
+                "status": "active",
+                "canonical": True,
+                "dependencies": [],
+                "requirements": [
+                    {"id": "fabricated-requirement", "text": "Fabricated.", "dependencies": []}
+                ],
+            }
+        ],
+        requirements=[
+            {
+                "requirement_id": "fabricated-requirement",
+                "owner_id": "fabricated-owner",
+                "path": "specs/fabricated.md",
+                "change": "modified",
+            }
+        ],
+    )
+    try:
+        status = Validator().validate(
+            store, task_id, candidate_sha, project, prerequisite_manifest=fabricated
+        )
+        assert status is EvidenceStatus.FAILED
+        row = store.conn.execute(
+            "SELECT payload FROM evidence WHERE task_id=? AND candidate_sha=? AND kind='VALIDATION' "
+            "ORDER BY created_at DESC, rowid DESC LIMIT 1",
+            (task_id, candidate_sha),
+        ).fetchone()
+        payload = json.loads(row["payload"])
+        assert any(
+            finding.get("code") == "spec_governance_failure"
+            and "discovered" in finding.get("message", "")
+            for finding in payload["findings"]
         )
     finally:
         store.close()

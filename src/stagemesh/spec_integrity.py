@@ -83,6 +83,35 @@ def _same_revision(recorded: Any, expected: str) -> bool:
     return isinstance(recorded, str) and recorded == expected
 
 
+def _dependency_values(value: Any, label: str, errors: list[str]) -> tuple[str, ...]:
+    if not isinstance(value, (list, tuple)):
+        errors.append(f"{label} dependencies must be a list")
+        return ()
+    result: list[str] = []
+    for index, dependency in enumerate(value):
+        if not isinstance(dependency, str) or not dependency.strip():
+            errors.append(f"{label} dependency #{index} must be a non-empty string")
+        else:
+            result.append(dependency)
+    return tuple(result)
+
+
+def _path_values(value: Any, label: str, errors: list[str]) -> tuple[str, ...]:
+    if not isinstance(value, (list, tuple)):
+        errors.append(f"{label} must be a list of paths")
+        return ()
+    result: list[str] = []
+    for index, path in enumerate(value):
+        if not isinstance(path, str) or not path.strip():
+            errors.append(f"{label} path #{index} must be a non-empty string")
+            continue
+        try:
+            result.append(local_path(path))
+        except SpecAdapterError as exc:
+            errors.append(f"{label} path #{index} is invalid: {exc}")
+    return tuple(result)
+
+
 def validate_prerequisite_manifest(
     manifest: Any,
     *,
@@ -194,6 +223,7 @@ def validate_prerequisite_manifest(
     known_owner_ids: set[str] = set()
     owner_statuses: dict[str, str] = {}
     owner_requirements: dict[str, set[str]] = {}
+    record_dependencies: dict[int, tuple[str, ...]] = {}
     active_ids: set[str] = set()
     archived_markers = ("/archive/", "changes/archive", "openspec/changes/archive")
 
@@ -240,6 +270,7 @@ def validate_prerequisite_manifest(
                 active_ids.add(oid)
 
         known_owner_ids.add(oid)
+        record_dependencies[id(owner)] = _dependency_values(owner.get("dependencies", []), f"owner '{oid}'", errors)
         req_set: set[str] = set()
         owner_requirements[oid] = req_set
 
@@ -259,6 +290,9 @@ def validate_prerequisite_manifest(
                     req_set.add(rid)
                     if status == "active" and canonical is not False:
                         active_ids.add(rid)
+                record_dependencies[id(req)] = _dependency_values(
+                    req.get("dependencies", []), f"requirement '{rid}' in owner '{oid}'", errors
+                )
 
     # Validate active dependencies against declared active IDs
     for owner in owners:
@@ -268,25 +302,21 @@ def validate_prerequisite_manifest(
         status = owner.get("status")
         canonical = owner.get("canonical")
         if status == "active" and canonical is not False:
-            deps = owner.get("dependencies", [])
-            if isinstance(deps, (list, tuple)):
-                for dep in sorted(set(deps)):
-                    if dep not in active_ids:
-                        errors.append(
-                            f"missing affected reference: active owner '{oid}' has unresolved dependency '{dep}'"
-                        )
+            for dep in sorted(set(record_dependencies.get(id(owner), ()))):
+                if dep not in active_ids:
+                    errors.append(
+                        f"missing affected reference: active owner '{oid}' has unresolved dependency '{dep}'"
+                    )
             reqs = owner.get("requirements", [])
             if isinstance(reqs, list):
                 for req in reqs:
                     if isinstance(req, dict):
                         rid = req.get("id")
-                        rdeps = req.get("dependencies", [])
-                        if isinstance(rdeps, (list, tuple)):
-                            for dep in sorted(set(rdeps)):
-                                if dep not in active_ids:
-                                    errors.append(
-                                        f"missing affected reference: requirement '{rid}' in owner '{oid}' has unresolved dependency '{dep}'"
-                                    )
+                        for dep in sorted(set(record_dependencies.get(id(req), ()))):
+                            if dep not in active_ids:
+                                errors.append(
+                                    f"missing affected reference: requirement '{rid}' in owner '{oid}' has unresolved dependency '{dep}'"
+                                )
 
     # Requirements changes check against declared records
     req_changes = manifest.get("requirements", [])
@@ -321,8 +351,8 @@ def validate_prerequisite_manifest(
                         errors.append(msg)
 
     # Ambiguous semantic overlap is a review finding, NOT a deterministic error
-    unmapped = manifest.get("unmapped_files", [])
-    if isinstance(unmapped, (list, tuple)) and unmapped:
+    unmapped = _path_values(manifest.get("unmapped_files", []), "unmapped_files", errors)
+    if unmapped:
         review_findings.append(f"ambiguous semantic overlap: unmapped files modified ({', '.join(sorted(unmapped))})")
     if manifest.get("semantic_overlap"):
         review_findings.append(f"ambiguous semantic overlap: {manifest.get('semantic_overlap')}")
@@ -333,6 +363,46 @@ def validate_prerequisite_manifest(
         review_findings=tuple(review_findings),
         manifest=manifest,
     )
+
+
+def validate_manifest_discovery(
+    manifest: dict[str, Any],
+    before: SpecSnapshot,
+    after: SpecSnapshot,
+    changed_files: tuple[str, ...] | list[str],
+    *,
+    base_revision: str,
+    candidate_revision: str,
+) -> tuple[str, ...]:
+    """Bind caller-supplied structural claims to the configured adapter's exact snapshots."""
+    expected = structural_impact_manifest(
+        before,
+        after,
+        changed_files,
+        base_revision=base_revision,
+        candidate_revision=candidate_revision,
+    )
+    errors: list[str] = []
+    adapter = manifest.get("adapter")
+    adapter_identity = (
+        {"name": adapter.get("name"), "version": adapter.get("version")}
+        if isinstance(adapter, dict)
+        else adapter
+    )
+    if adapter_identity != expected["adapter"]:
+        errors.append("manifest adapter does not match configured adapter discovery")
+    for field in (
+        "base_revision",
+        "candidate_revision",
+        "changed_files",
+        "owners",
+        "requirements",
+        "unmapped_files",
+        "unresolved_references",
+    ):
+        if manifest.get(field) != expected[field]:
+            errors.append(f"manifest {field} does not match pinned adapter discovered snapshots")
+    return tuple(errors)
 
 
 def spec_governance_gate(

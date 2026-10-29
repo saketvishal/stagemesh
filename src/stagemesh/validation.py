@@ -174,8 +174,13 @@ class Validator:
 
             spec_verdict = None
             if prerequisite_manifest is not None:
-                from .spec_integrity import resolve_pinned_adapter, validate_prerequisite_manifest
+                from .spec_integrity import (
+                    resolve_pinned_adapter,
+                    validate_manifest_discovery,
+                    validate_prerequisite_manifest,
+                )
 
+                discovery_errors: tuple[str, ...] = ()
                 if isinstance(prerequisite_manifest, dict):
                     adapter_info = prerequisite_manifest.get("adapter", {})
                 else:
@@ -192,8 +197,18 @@ class Validator:
                                 or prerequisite_manifest.get("contract_path")
                                 or "adapter.json",
                             )
+                            with candidate_workspace(project, bound.baseline_sha) as baseline_project:
+                                before_snapshot = adapter.discover(baseline_project)
                             with candidate_workspace(project, candidate_sha) as candidate_project:
-                                adapter.discover(candidate_project)
+                                after_snapshot = adapter.discover(candidate_project)
+                            discovery_errors = validate_manifest_discovery(
+                                prerequisite_manifest,
+                                before_snapshot,
+                                after_snapshot,
+                                inspected_files,
+                                base_revision=bound.baseline_sha,
+                                candidate_revision=candidate_sha,
+                            )
                         except Exception as exc:
                             findings.append({
                                 "severity": "error",
@@ -208,6 +223,12 @@ class Validator:
                     expected_base_revision=bound.baseline_sha,
                     expected_changed_files=inspected_files,
                 )
+                if discovery_errors:
+                    spec_verdict = replace(
+                        spec_verdict,
+                        ok=False,
+                        errors=spec_verdict.errors + discovery_errors,
+                    )
                 if not spec_verdict.ok:
                     for err in spec_verdict.errors:
                         findings.append({"severity": "error", "code": "spec_governance_failure", "message": err})
