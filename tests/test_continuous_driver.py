@@ -429,6 +429,29 @@ def test_hard_timeout_terminates_a_real_subprocess_tree(project: Path, monkeypat
     assert not child_owner_path(project).exists()
 
 
+def test_confirmed_tree_kill_waits_for_delayed_child_reaping(project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from stagemesh.domain import ProcessIdentity
+
+    wrapper = ProcessIdentity(2**22 + 111, 1.0, "boot", "python")
+    child = ProcessIdentity(2**22 + 222, 2.0, "boot", "python")
+    continuous_driver.save_child_owner(project, wrapper, child)
+    observations = 0
+
+    def observed(pid: int):
+        nonlocal observations
+        if pid == wrapper.pid:
+            return None
+        observations += 1
+        return child if observations < 3 else None
+
+    monkeypatch.setattr(continuous_driver, "process_identity", observed)
+    monkeypatch.setattr(continuous_driver.time, "sleep", lambda _seconds: None)
+
+    assert continuous_driver._wait_to_clear_dead_child_owner(project, timeout_seconds=1)
+    assert observations == 3
+    assert not child_owner_path(project).exists()
+
+
 def test_driver_scheduler_is_project_owned_idempotent_and_reversible(project: Path) -> None:
     calls: list[list[str]] = []
     scheduled = False
