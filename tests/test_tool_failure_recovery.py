@@ -1,23 +1,51 @@
 from __future__ import annotations
 
 import json
+import sys
+from pathlib import Path
 
 import pytest
 
+import stagemesh.providers as providers_module
 from stagemesh.diagnosis import (
     TOOL_FAILURE_EVENT,
+    TOOL_RECOVERY_EVENT,
     plan_tool_recovery,
     tool_failure_evidence,
     tool_failure_signature,
 )
 from stagemesh.execution import SubprocessExecutor
-from stagemesh.remediation import tool_recovery_plan
+from stagemesh.git import GitWorkspace
+from stagemesh.persistence import Store
+from stagemesh.providers import RuntimeCommandAdapter
+from stagemesh.remediation import ToolRecoveryRefused, execute_tool_recovery, tool_recovery_plan
 
 
 def _ev(stderr: str, cwd: str = "/w") -> dict:
     ev = tool_failure_evidence(["tool", "run"], cwd, 1, "", stderr)
     assert ev is not None
     return ev
+
+
+def _runtime_project(tmp_path: Path) -> tuple[Path, Store, str]:
+    project = tmp_path / "repo"
+    project.mkdir()
+    git = GitWorkspace(project)
+    git.init_if_needed()
+    git.run("config", "user.email", "test@example.invalid")
+    git.run("config", "user.name", "StageMesh Test")
+    (project / "docs").mkdir()
+    (project / "docs" / "base.md").write_text("base\n", encoding="utf-8")
+    git.commit_all("base")
+    runtime = project / ".stagemesh"
+    (runtime / "contracts").mkdir(parents=True)
+    store = Store(runtime / "state.sqlite3")
+    store.migrate()
+    task_id = store.upsert_task("recover tool failure", source_id="RECOVERY-TASK")
+    (runtime / "contracts" / f"{task_id}.json").write_text(
+        json.dumps({"objective": "recover", "allowed_files": ["docs/**"]}), encoding="utf-8"
+    )
+    return project, store, task_id
 
 
 class _Store:
@@ -56,6 +84,12 @@ def test_only_explicitly_configured_setup_runs_once() -> None:
 
 def test_permission_failures_ignore_configured_setup() -> None:
     plan = plan_tool_recovery(_ev("EACCES: permission denied"), setup_actions={"permission": ["chmod", "-R", "777", "."]})
+    assert plan["action"] == "stop" and "setup_command" not in plan
+
+
+@pytest.mark.parametrize("configured", [[""], ["tool", 7], "tool --setup"])
+def test_malformed_setup_configuration_fails_closed(configured) -> None:
+    plan = plan_tool_recovery(_ev("No module named 'x'"), setup_actions={"missing_dependency": configured})
     assert plan["action"] == "stop" and "setup_command" not in plan
 
 
@@ -231,3 +265,366 @@ def test_any_prior_action_stops_signature_even_with_configured_setup(
     assert plan["signature"] == tool_failure_signature(evidence)
     assert plan["operator_action"] == evidence["next_action"]
     assert "setup_command" not in plan
+
+
+def test_recovery_executor_invokes_transient_retry_once_and_records_receipt() -> None:
+    store = _Store()
+    evidence = _ev("ETIMEDOUT")
+    calls: list[str] = []
+    plan = tool_recovery_plan(store, "t1", evidence)
+
+    receipt = execute_tool_recovery(
+        store, "t1", "e1", evidence, plan, retry=lambda: not calls.append("retry")
+    )
+
+    assert calls == ["retry"]
+    assert receipt["attempted"] == ["retry"] and receipt["execution_status"] == "SUCCEEDED"
+    assert [row["event_type"] for row in store.rows] == [TOOL_RECOVERY_EVENT, TOOL_RECOVERY_EVENT]
+    stopped = execute_tool_recovery(
+        store, "t1", "e2", evidence, plan, retry=lambda: not calls.append("second")
+    )
+    assert calls == ["retry"]
+    assert stopped["action"] == "stop" and stopped["attempted"] == ["retry"]
+
+
+def test_recovery_executor_runs_only_the_configured_setup_argv() -> None:
+    store = _Store()
+    evidence = _ev("No module named 'x'")
+    configured = {"missing_dependency": ["project-setup", "--local"]}
+    observed: list[tuple[str, ...]] = []
+    plan = tool_recovery_plan(store, "t1", evidence, configured)
+
+    receipt = execute_tool_recovery(
+        store,
+        "t1",
+        "e1",
+        evidence,
+        plan,
+        run_setup=lambda argv: not observed.append(argv),
+        setup_actions=configured,
+    )
+
+    assert observed == [("project-setup", "--local")]
+    assert receipt["attempted"] == ["setup"] and receipt["execution_status"] == "SUCCEEDED"
+
+
+def test_recovery_executor_never_invokes_for_permission_or_unrelated_task_receipts() -> None:
+    store = _Store()
+    permission = _ev("EACCES: permission denied")
+    calls: list[str] = []
+    refused = execute_tool_recovery(
+        store,
+        "t1",
+        "e1",
+        permission,
+        tool_recovery_plan(store, "t1", permission, {"permission": ["unsafe"]}),
+        run_setup=lambda _argv: not calls.append("unsafe"),
+        setup_actions={"permission": ["unsafe"]},
+    )
+    assert refused["action"] == "stop" and not calls
+
+    other = _ev("ETIMEDOUT")
+    store.add_audit_event(TOOL_RECOVERY_EVENT, {
+        "task_id": "other", "execution_id": "other-e", "signature": tool_failure_signature(other),
+        "action": "retry", "status": "STARTED",
+    })
+    own = execute_tool_recovery(
+        store, "t1", "e2", other, tool_recovery_plan(store, "t1", other),
+        retry=lambda: not calls.append("own"),
+    )
+    assert calls == ["own"] and own["execution_status"] == "SUCCEEDED"
+
+
+def test_started_or_failed_recovery_consumes_the_single_action_budget() -> None:
+    store = _Store()
+    evidence = _ev("ETIMEDOUT")
+    plan = tool_recovery_plan(store, "t1", evidence)
+    with pytest.raises(RuntimeError, match="boom"):
+        execute_tool_recovery(
+            store, "t1", "e1", evidence, plan, retry=lambda: (_ for _ in ()).throw(RuntimeError("boom"))
+        )
+    stopped = tool_recovery_plan(store, "t1", evidence)
+    assert stopped["action"] == "stop" and stopped["attempted"] == ["retry"]
+
+
+def test_prelaunch_refusal_is_durable_but_does_not_consume_recovery_allowance() -> None:
+    store = _Store()
+    evidence = _ev("ETIMEDOUT")
+    plan = tool_recovery_plan(store, "t1", evidence)
+    store.add_audit_event(TOOL_FAILURE_EVENT, {
+        "task_id": "t1", "execution_id": "e1", "evidence": {**evidence, "recovery": plan},
+    })
+
+    result = execute_tool_recovery(
+        store,
+        "t1",
+        "e1",
+        evidence,
+        plan,
+        retry=lambda: (_ for _ in ()).throw(ToolRecoveryRefused("budget_exhausted")),
+    )
+
+    assert result["execution_status"] == "REFUSED"
+    assert result["attempted"] == [] and result["failure"] == "budget_exhausted"
+    assert tool_recovery_plan(store, "t1", evidence)["action"] == "retry_once"
+    receipts = [json.loads(row["payload"]) for row in store.rows if row["event_type"] == TOOL_RECOVERY_EVENT]
+    assert [receipt["status"] for receipt in receipts] == ["STARTED", "REFUSED"]
+
+
+@pytest.mark.parametrize(
+    "evidence,forged",
+    [
+        (_ev("EACCES: permission denied"), {"action": "retry_once"}),
+        (_ev("No module named 'x'"), {"action": "setup", "setup_command": ["not-configured"]}),
+    ],
+)
+def test_recovery_executor_rejects_forged_policy_plans(evidence, forged) -> None:
+    store = _Store()
+    calls: list[str] = []
+    forged = {**forged, "signature": tool_failure_signature(evidence)}
+    result = execute_tool_recovery(
+        store,
+        "t1",
+        "e1",
+        evidence,
+        forged,
+        retry=lambda: not calls.append("retry"),
+        run_setup=lambda _argv: not calls.append("setup"),
+    )
+    assert result["action"] == "stop" and not calls
+
+
+def test_subprocess_executor_performs_one_transient_retry_and_persists_candidate(tmp_path: Path) -> None:
+    project, store, task_id = _runtime_project(tmp_path)
+    counter = tmp_path / "attempts.txt"
+    script = tmp_path / "transient_provider.py"
+    script.write_text(
+        "import pathlib, sys\n"
+        f"counter = pathlib.Path({str(counter)!r})\n"
+        "attempt = int(counter.read_text()) + 1 if counter.exists() else 1\n"
+        "counter.write_text(str(attempt))\n"
+        "sys.stdin.read()\n"
+        "if attempt == 1:\n"
+        "    print('request failed: ETIMEDOUT', file=sys.stderr)\n"
+        "    raise SystemExit(1)\n"
+        "pathlib.Path('docs/recovered.md').write_text('ok\\n')\n",
+        encoding="utf-8",
+    )
+    try:
+        result = SubprocessExecutor([sys.executable, str(script)], name="test-provider").run(
+            store, task_id, None, project
+        )
+        assert result.status.value == "SUCCEEDED"
+        assert counter.read_text() == "2"
+        rows = store.task_audit_events(TOOL_RECOVERY_EVENT, task_id)
+        receipts = [json.loads(row["payload"]) for row in rows]
+        assert [receipt["status"] for receipt in receipts] == ["STARTED", "SUCCEEDED"]
+        assert {receipt["action"] for receipt in receipts} == {"retry"}
+        assert [row["status"] for row in store.conn.execute(
+            "SELECT status FROM executions WHERE task_id=? ORDER BY rowid", (task_id,)
+        )] == ["FAILED", "SUCCEEDED"]
+    finally:
+        store.close()
+
+
+def test_subprocess_executor_runs_configured_setup_once_then_verifies_original_command(tmp_path: Path) -> None:
+    project, store, task_id = _runtime_project(tmp_path)
+    marker = tmp_path / "setup-ready.txt"
+    counter = tmp_path / "setup-attempts.txt"
+    script = tmp_path / "setup_provider.py"
+    script.write_text(
+        "import pathlib, sys\n"
+        f"counter = pathlib.Path({str(counter)!r})\n"
+        "counter.write_text(str(int(counter.read_text()) + 1 if counter.exists() else 1))\n"
+        "sys.stdin.read()\n"
+        f"ready = pathlib.Path({str(marker)!r})\n"
+        "if not ready.exists():\n"
+        "    print(\"No module named 'x'\", file=sys.stderr)\n"
+        "    raise SystemExit(1)\n"
+        "pathlib.Path('docs/recovered.md').write_text('setup ok\\n')\n",
+        encoding="utf-8",
+    )
+    setup = [sys.executable, "-c", f"from pathlib import Path; Path({str(marker)!r}).write_text('ready')"]
+    executor = SubprocessExecutor(
+        [sys.executable, str(script)],
+        name="test-provider",
+        recovery_setup_actions={"missing_dependency": setup},
+    )
+    try:
+        result = executor.run(store, task_id, None, project)
+        assert result.status.value == "SUCCEEDED"
+        assert counter.read_text() == "2" and marker.read_text() == "ready"
+        receipts = [json.loads(row["payload"]) for row in store.task_audit_events(TOOL_RECOVERY_EVENT, task_id)]
+        assert [receipt["status"] for receipt in receipts] == ["STARTED", "SUCCEEDED"]
+        assert {receipt["action"] for receipt in receipts} == {"setup"}
+        setup_rows = list(store.conn.execute(
+            "SELECT actor, status FROM executions WHERE task_id=? AND actor LIKE '%:tool-recovery-setup'", (task_id,)
+        ))
+        assert [(row["actor"], row["status"]) for row in setup_rows] == [
+            ("test-provider:tool-recovery-setup", "SUCCEEDED")
+        ]
+    finally:
+        store.close()
+
+
+def test_runtime_command_adapter_performs_one_transient_retry(tmp_path: Path) -> None:
+    project, store, task_id = _runtime_project(tmp_path)
+    counter = tmp_path / "runtime-attempts.txt"
+    script = tmp_path / "runtime_provider.py"
+    script.write_text(
+        "import pathlib, sys\n"
+        f"counter = pathlib.Path({str(counter)!r})\n"
+        "attempt = int(counter.read_text()) + 1 if counter.exists() else 1\n"
+        "counter.write_text(str(attempt))\n"
+        "sys.stdin.read()\n"
+        "if attempt == 1:\n"
+        "    print('request failed: ETIMEDOUT', file=sys.stderr)\n"
+        "    raise SystemExit(1)\n"
+        "pathlib.Path('docs/runtime-recovered.md').write_text('ok\\n')\n",
+        encoding="utf-8",
+    )
+    try:
+        result = RuntimeCommandAdapter("test-provider", (sys.executable, str(script))).execute(
+            store, task_id, None, project
+        )
+        assert result.status.value == "SUCCEEDED" and counter.read_text() == "2"
+        receipts = [json.loads(row["payload"]) for row in store.task_audit_events(TOOL_RECOVERY_EVENT, task_id)]
+        assert [receipt["status"] for receipt in receipts] == ["STARTED", "SUCCEEDED"]
+        assert {receipt["action"] for receipt in receipts} == {"retry"}
+    finally:
+        store.close()
+
+
+def test_runtime_command_adapter_runs_configured_setup_then_verifies_original_command(tmp_path: Path) -> None:
+    project, store, task_id = _runtime_project(tmp_path)
+    marker = tmp_path / "runtime-setup-ready.txt"
+    counter = tmp_path / "runtime-setup-attempts.txt"
+    script = tmp_path / "runtime_setup_provider.py"
+    script.write_text(
+        "import pathlib, sys\n"
+        f"counter = pathlib.Path({str(counter)!r})\n"
+        "counter.write_text(str(int(counter.read_text()) + 1 if counter.exists() else 1))\n"
+        "sys.stdin.read()\n"
+        f"ready = pathlib.Path({str(marker)!r})\n"
+        "if not ready.exists():\n"
+        "    print(\"No module named 'x'\", file=sys.stderr)\n"
+        "    raise SystemExit(1)\n"
+        "pathlib.Path('docs/runtime-setup-recovered.md').write_text('setup ok\\n')\n",
+        encoding="utf-8",
+    )
+    setup = (sys.executable, "-c", f"from pathlib import Path; Path({str(marker)!r}).write_text('ready')")
+    try:
+        result = RuntimeCommandAdapter(
+            "test-provider",
+            (sys.executable, str(script)),
+            recovery_setup_actions=(("missing_dependency", setup),),
+        ).execute(store, task_id, None, project)
+        assert result.status.value == "SUCCEEDED"
+        assert counter.read_text() == "2" and marker.read_text() == "ready"
+        receipts = [json.loads(row["payload"]) for row in store.task_audit_events(TOOL_RECOVERY_EVENT, task_id)]
+        assert [receipt["status"] for receipt in receipts] == ["STARTED", "SUCCEEDED"]
+        assert {receipt["action"] for receipt in receipts} == {"setup"}
+        setup_rows = list(store.conn.execute(
+            "SELECT actor, status FROM executions WHERE task_id=? AND actor LIKE '%:tool-recovery-setup'", (task_id,)
+        ))
+        assert [(row["actor"], row["status"]) for row in setup_rows] == [
+            ("test-provider:tool-recovery-setup", "SUCCEEDED")
+        ]
+    finally:
+        store.close()
+
+
+def test_runtime_command_adapter_closes_exact_execution_when_communication_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project, store, task_id = _runtime_project(tmp_path)
+    script = tmp_path / "runtime_transport_failure.py"
+    script.write_text("import sys\nsys.stdin.read()\n", encoding="utf-8")
+
+    def raise_after_process_exit(proc, input_text: str, _timeout: int):  # type: ignore[no-untyped-def]
+        proc.communicate(input_text, timeout=10)
+        raise RuntimeError("transport failed after launch")
+
+    monkeypatch.setattr(providers_module, "communicate_bounded", raise_after_process_exit)
+    try:
+        with pytest.raises(RuntimeError, match="transport failed"):
+            RuntimeCommandAdapter("test-provider", (sys.executable, str(script))).execute(
+                store, task_id, None, project
+            )
+        rows = list(store.conn.execute(
+            "SELECT status, result FROM executions WHERE task_id=? ORDER BY rowid", (task_id,)
+        ))
+        assert rows and all(row["status"] == "FAILED" for row in rows)
+        assert "transport failed" in str(rows[-1]["result"])
+    finally:
+        store.close()
+
+
+def test_runtime_setup_exception_closes_setup_execution_and_recovery_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project, store, task_id = _runtime_project(tmp_path)
+    script = tmp_path / "runtime_setup_transport_failure.py"
+    script.write_text(
+        "import sys\nsys.stdin.read()\nprint(\"No module named 'x'\", file=sys.stderr)\nraise SystemExit(1)\n",
+        encoding="utf-8",
+    )
+    setup = (sys.executable, "-c", "pass")
+    real_communicate = providers_module.communicate_bounded
+    calls = 0
+
+    def fail_during_setup(proc, input_text: str, timeout: int):  # type: ignore[no-untyped-def]
+        nonlocal calls
+        calls += 1
+        result = real_communicate(proc, input_text, timeout)
+        if calls == 2:
+            raise RuntimeError("setup transport failed")
+        return result
+
+    monkeypatch.setattr(providers_module, "communicate_bounded", fail_during_setup)
+    try:
+        with pytest.raises(RuntimeError, match="setup transport failed"):
+            RuntimeCommandAdapter(
+                "test-provider",
+                (sys.executable, str(script)),
+                recovery_setup_actions=(("missing_dependency", setup),),
+            ).execute(store, task_id, None, project)
+        rows = list(store.conn.execute(
+            "SELECT actor, status, result FROM executions WHERE task_id=? ORDER BY rowid", (task_id,)
+        ))
+        assert rows and all(row["status"] == "FAILED" for row in rows)
+        assert rows[-1]["actor"] == "test-provider:tool-recovery-setup"
+        assert "setup transport failed" in str(rows[-1]["result"])
+        receipts = [json.loads(row["payload"]) for row in store.task_audit_events(TOOL_RECOVERY_EVENT, task_id)]
+        assert [receipt["status"] for receipt in receipts] == ["STARTED", "FAILED"]
+    finally:
+        store.close()
+
+
+def test_recovery_refuses_second_provider_call_at_task_budget_boundary(tmp_path: Path) -> None:
+    project, store, task_id = _runtime_project(tmp_path)
+    (project / ".stagemesh" / "config.json").write_text(
+        json.dumps({"budgets": {"max_provider_calls_per_task": 1}}), encoding="utf-8"
+    )
+    counter = tmp_path / "budget-attempts.txt"
+    script = tmp_path / "budget_provider.py"
+    script.write_text(
+        "import pathlib, sys\n"
+        f"counter = pathlib.Path({str(counter)!r})\n"
+        "counter.write_text(str(int(counter.read_text()) + 1 if counter.exists() else 1))\n"
+        "sys.stdin.read()\n"
+        "print('request failed: ETIMEDOUT', file=sys.stderr)\n"
+        "raise SystemExit(1)\n",
+        encoding="utf-8",
+    )
+    try:
+        result = RuntimeCommandAdapter("test-provider", (sys.executable, str(script))).execute(
+            store, task_id, None, project
+        )
+        assert result.status.value == "FAILED" and counter.read_text() == "1"
+        assert len(list(store.conn.execute(
+            "SELECT 1 FROM audit_events WHERE event_type='task.budget_exhausted'"
+        ))) == 1
+        assert list(store.task_audit_events(TOOL_RECOVERY_EVENT, task_id)) == []
+    finally:
+        store.close()

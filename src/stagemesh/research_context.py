@@ -30,6 +30,11 @@ SKIP_DIRS = {
     "node_modules",
 }
 
+# Ignored client files can still be source/runtime inputs and must remain immutable
+# during research. Only dependency, cache, and generated-output trees are excluded;
+# .stagemesh is intentionally included because its config/contracts affect authority.
+SNAPSHOT_IGNORED_SKIP_DIRS = (SKIP_DIRS - {".stagemesh"}) | {".tox", ".venv", "venv"}
+
 
 def build_research_brief(project: Path | None, contract: ChangeContract | None) -> str:
     """Return a scoped, deterministic pre-edit research brief for a provider prompt.
@@ -363,7 +368,8 @@ def research_findings_prompt(evidence: ResearchEvidence) -> str:
 
 
 def source_snapshot(root: Path) -> str:
-    """Digest of HEAD, the status, and the content of every changed or untracked file."""
+    """Digest tracked, untracked, and relevant ignored workspace content."""
+    import os
     import subprocess
 
     def git(*args: str) -> bytes:
@@ -372,9 +378,44 @@ def source_snapshot(root: Path) -> str:
     head = git("rev-parse", "HEAD")
     status = git("status", "--porcelain=v1", "-z", "-uall")
     digest = hashlib.sha256(head + b"\0" + status)
-    for entry in status.split(b"\0"):
-        if len(entry) > 3:
-            target = root / entry[3:].decode("utf-8", "surrogateescape")
-            if target.is_file():
-                digest.update(target.read_bytes())
+    # HEAD plus status binds unchanged tracked files. Hash only tracked paths whose
+    # working/index content differs, all ordinary untracked files, and relevant
+    # ignored files so large repositories do not reread every committed blob.
+    ordinary = b"".join((
+        git("diff", "--name-only", "-z", "--no-ext-diff"),
+        git("diff", "--cached", "--name-only", "-z", "--no-ext-diff"),
+        git("ls-files", "-z", "--others", "--exclude-standard"),
+    ))
+    ignored = git("ls-files", "-z", "--others", "--ignored", "--exclude-standard")
+    paths: dict[bytes, bool] = {
+        raw: False for raw in ordinary.split(b"\0") if raw
+    }
+    # Lowercase `ls-files -v` tags are assume-unchanged; `S`/`s` are
+    # skip-worktree. Both can hide content changes from status and diff, so hash
+    # those tracked paths explicitly (including a MISSING marker for sparse files).
+    for entry in git("ls-files", "-v", "-z").split(b"\0"):
+        if len(entry) > 2 and entry[1:2] == b" ":
+            tag, raw = entry[:1], entry[2:]
+            if tag == b"S" or tag.islower():
+                paths.setdefault(raw, False)
+    for raw in ignored.split(b"\0"):
+        if raw:
+            paths.setdefault(raw, True)
+    for raw, is_ignored in sorted(paths.items()):
+        relative = raw.decode("utf-8", "surrogateescape")
+        if is_ignored and any(part in SNAPSHOT_IGNORED_SKIP_DIRS for part in Path(relative).parts):
+            continue
+        target = root / relative
+        digest.update(b"I" if is_ignored else b"S")
+        digest.update(b"\0" + raw + b"\0")
+        if target.is_symlink():
+            digest.update(b"L\0" + os.fsencode(os.readlink(target)))
+            continue
+        if not target.is_file():
+            digest.update(b"MISSING")
+            continue
+        digest.update(b"F\0")
+        with target.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
     return digest.hexdigest()
