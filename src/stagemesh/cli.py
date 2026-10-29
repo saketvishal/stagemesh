@@ -1022,7 +1022,7 @@ def command_run_window(args: argparse.Namespace) -> int:
                 "preflight": [c.to_dict() for c in checks],
                 "would_run": picked,
                 "left_alone": skipped,
-                "scope": getattr(args, "scope_report", None),
+                **({"scope": args.scope_report} if scope is not None else {}),
                 "ok": all(c.ok or not c.fatal for c in checks),
             }
             if args.json:
