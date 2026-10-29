@@ -25,6 +25,7 @@ import re
 import threading
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from .audit import record_audit
@@ -420,3 +421,30 @@ def format_efficiency(report: dict[str, Any]) -> list[str]:
             + ("" if task["seconds_to_merge"] is None else f", {task['seconds_to_merge']:.0f}s to merge")
         )
     return lines
+
+
+def provider_budget_refusal(store: Store, task_id: str, project: Path) -> str | None:
+    """Refuse another provider/recovery call when its durable task or window budget is exhausted."""
+    from .config import load_config
+    from .window_journal import STARTED, latest_task_context
+
+    policy = BudgetPolicy.from_config(load_config(project).budgets)
+    verdict = check_task_budget(store, task_id, policy)
+    context = latest_task_context(store, task_id)
+    if verdict is None and context is not None:
+        started = store.conn.execute(
+            "SELECT created_at FROM audit_events WHERE event_type=? AND json_extract(payload, '$.window_id')=? "
+            "ORDER BY created_at DESC, rowid DESC LIMIT 1",
+            (STARTED, context.get("window_id")),
+        ).fetchone()
+        if started is not None:
+            verdict = check_window_budget(store, float(started["created_at"]), policy)
+    if verdict is None:
+        return None
+    store.add_audit_event(BUDGET_EXHAUSTED, {
+        "task_id": task_id, "budget": verdict.exceeded, "observed": verdict.observed, "limit": verdict.limit,
+    })
+    return (
+        f"budget_exhausted ({verdict.exceeded}): {verdict.detail}; limit {verdict.limit}. "
+        "Provider dispatch stopped at a budget boundary; verified work is preserved for supervised recovery."
+    )
