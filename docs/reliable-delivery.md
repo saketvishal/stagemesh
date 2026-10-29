@@ -365,6 +365,15 @@ becomes an unlocked memory operation.
 
 ## Research subprocess ownership across launch loss
 
+The optional read-only research role snapshots the workspace before launch and
+again after confirmed process completion. The digest binds HEAD, index/worktree
+status, changed and untracked content, and relevant ignored files such as local
+configuration or runtime inputs. Tracked paths hidden by Git's assume-unchanged
+or skip-worktree index flags are hashed explicitly. Dependency, cache, and generated-output trees
+(`.venv`, `venv`, `.tox`, `node_modules`, cache directories, and `dist`) are
+explicitly excluded; ignored `.stagemesh` authority files are not. Any covered
+change blocks implementation as `research_mutated_source`.
+
 The optional research role remains a REVIEW execution. New executions commit
 explicit process_tree_scope=research/v1 and the initiating parent identity in
 the same durable RUNNING row before Popen. Publishing the child identity does
