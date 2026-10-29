@@ -94,8 +94,9 @@ def drains_candidate(store, task, scope):
     candidate = store.latest_candidate(task["id"])
     if candidate is None:
         return False
-    granted = {value.get("candidate_sha") for _, value in _events(store, "selection.candidate")
-        if value.get("scope_id") == scope.id and value.get("task_id") == task["id"]}
+    grants = [value for _, value in _events(store, "selection.candidate")
+        if value.get("scope_id") == scope.id and value.get("task_id") == task["id"]]
+    granted = {value.get("candidate_sha") for value in grants}
     if candidate["sha"] in granted:
         return True
     # Reuse the independently validated mechanical provenance chain. This
@@ -103,7 +104,9 @@ def drains_candidate(store, task, scope):
     from .review_identity import implementation_identity
     identity = implementation_identity(store, task["id"], candidate["sha"])
     origins = identity.get("origins", []) if identity else []
-    return bool(origins) and all(origin["candidate_sha"] in granted for origin in origins)
+    admitted_origins = {(origin["execution_id"], origin["candidate_sha"]) for grant in grants for origin in grant.get("origins", [])}
+    return bool(origins) and all(origin["candidate_sha"] in granted
+        or (origin["execution_id"], origin["candidate_sha"]) in admitted_origins for origin in origins)
 
 
 def task_problem(store, task):
@@ -200,8 +203,14 @@ def parent_problem(store, scope, source_objective, *, drain=False):
     config = store.selection_config
     if labels & {x.casefold() for x in config.task_selection.excluded_labels}:
         return "objective parent excluded by task selection policy"
+    from .objective_roots import source_issue_is_objective
+    from .task_sources import READY_LABEL
+    planning_root = parent.get("objective_root") is True and source_issue_is_objective(tuple(labels))
     for source in config.task_sources:
-        if source.kind == "github" and (not {x.casefold() for x in source.labels}.issubset(labels)
+        required = {x.casefold() for x in source.labels}
+        if planning_root:
+            required.discard(READY_LABEL)  # roots may be planned, never dispatched as implementation tasks
+        if source.kind == "github" and (not required.issubset(labels)
                 or labels & {x.casefold() for x in source.excluded_labels}):
             return "objective parent excluded by configured source policy"
     if not parent.get("eligible") and parent.get("eligibility_reason") != "source objective root":
@@ -253,7 +262,10 @@ def record_task(store, task_id):
 def record_candidate(store, task_id, sha):
     scope = getattr(store, "selection_scope", None)
     if scope:
-        record_audit(store, "selection.candidate", {**scope.to_dict(), "task_id": task_id, "candidate_sha": sha})
+        from .review_identity import implementation_identity
+        identity = implementation_identity(store, task_id, sha)
+        record_audit(store, "selection.candidate", {**scope.to_dict(), "task_id": task_id, "candidate_sha": sha,
+            "origins": identity.get("origins", []) if identity else []})
 
 
 def preview(store, project, policy):

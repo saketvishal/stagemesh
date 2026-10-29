@@ -741,6 +741,15 @@ def run_window(
         store, project, config, options, base_ref=base_ref, runtime=runtime, provider_check=provider_check, repo_state=hooks.repo_state,
         checkout_ref=checkout_ref,
     )
+    if (options.required_label or options.scope_id) and not getattr(store, "selection_scope", None):
+        from .selection_scope import ScopeError, attach, refresh, resolve_scope
+        try:
+            scope = resolve_scope(store, label=options.required_label, resume=options.scope_id)
+            attach(store, project, config, scope)
+            refresh(store)
+            options.required_label, options.scope_id = scope.label, scope.id
+        except ScopeError as exc:
+            report.preflight.append(Check("selection_scope", False, str(exc)))
     if options.required_label and options.tasks:
         conflicts = [task_id for task_id in options.tasks if store.get_task(task_id) is None
             or outside_label_selector(store, store.get_task(task_id), options.required_label)]
@@ -1039,6 +1048,8 @@ def run_window(
             if not batch:
                 break
             for task_id in batch:
+                from .selection_scope import record_task
+                record_task(store, task_id)
                 record_task_context(
                     store,
                     report.window_id,
@@ -1087,6 +1098,7 @@ def run_window(
                             safe.append(task_id)
                     added = safe
                 for task_id in added:
+                    record_task(store, task_id)
                     entry = reenter_blocked_task(store, task_id, fingerprint)
                     if entry is not None:
                         report.reentered.append(entry)

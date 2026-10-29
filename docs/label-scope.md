@@ -78,6 +78,11 @@ current parent authority as well as each child's ordinary gates. Planner JSON
 alone cannot grant scope. Unscoped planning retains its existing behavior;
 generated scoped children cannot escape through an unfiltered runner.
 
+A confirmed objective root does not need the standard `stagemesh:ready`
+implementation label to authorize planning. Ready-plus-objective conflicts remain
+invalid, roots remain non-executable, and every other required/excluded source
+label still applies. Ordinary implementation issues receive no such exception.
+
 No command above enables a schedule or changes an installed runtime. Use
 `--pr-only` to retain manual merge approval; saved label scope conveys no merge,
 provider-account or scheduling permission.

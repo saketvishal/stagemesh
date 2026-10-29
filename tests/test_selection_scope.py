@@ -163,6 +163,46 @@ def test_trusted_mechanical_lineage_drains_but_does_not_transfer_evidence(rig):
     assert not store.has_evidence("A", b, EvidenceKind.REVIEW)
 
 
+def test_admitted_derived_candidate_preserves_its_verified_origins(rig):
+    from stagemesh.review_identity import command_snapshot, record_implementation_identity, record_implementation_derivation
+    from stagemesh.domain import ExecutionKind, ExecutionStatus
+    store, _, _, scope = rig
+    a, b, c = "a" * 40, "b" * 40, "c" * 40
+    store.add_candidate("A", a, "test", True)
+    execution = store.start_execution(task_id="A", claim_id=None, kind=ExecutionKind.IMPLEMENTATION, candidate_sha=a, actor="test")
+    store.finish_execution(execution, ExecutionStatus.SUCCEEDED, a)
+    record_implementation_identity(store, "A", a, execution, command_snapshot("test", ["fixture-tool"]))
+    store.add_candidate("A", b, "test", True)
+    assert record_implementation_derivation(store, "A", a, b, "rebase")
+    store.advance_task("A", Stage.VALIDATE)
+    record_task(store, "A")  # the first scope admission is B, not implementation A
+    store.add_candidate("A", c, "test", True)
+    assert record_implementation_derivation(store, "A", b, c, "reattribution")
+    task = store.get_task("A")
+    state = store.source_state(task["source"], task["source_id"])
+    state["labels"] = []
+    store.cache_source(task["source"], task["source_id"], state, "OPEN")
+    assert not outside_label_selector(store, task, "focus")
+
+
+def test_explicit_unfiltered_child_is_refused_before_planning(rig, monkeypatch):
+    import importlib
+    module = importlib.import_module("stagemesh.run_ready")
+    from stagemesh.config import TaskSelectionConfig
+    store, project, _, scope = rig
+    task = store.get_task("A")
+    state = store.source_state(task["source"], task["source_id"])
+    state["selection_scope"] = {"scope_id": scope.id, "source_objective": "90"}
+    store.cache_source(task["source"], task["source_id"], state, "OPEN")
+    other = Store(store.db_path)  # deliberately no scope attached, as a fresh unfiltered entry point
+    monkeypatch.setattr(module, "_ensure_contract", lambda *a, **k: pytest.fail("unscoped child reached planning"))
+    try:
+        result = module.run_ready(other, project, lambda *a: pytest.fail("coordinator started"), task_id="A", policy=TaskSelectionConfig())
+        assert result.stop_reason == "REFUSED:label_selector_conflict"
+    finally:
+        other.close()
+
+
 def test_objective_children_are_bound_by_operator_not_planner_labels(rig):
     from stagemesh.objectives import ObjectivePlanner
     from stagemesh.selection_scope import authorize_children
@@ -202,6 +242,33 @@ def test_parent_safety_gates_cannot_be_bypassed_by_child_planning(rig, override)
     store.selection_seen.add(("github", "90"))
     with pytest.raises(ScopeError):
         authorize_children(store, scope, "90", ["CHILD"])
+
+
+@pytest.mark.parametrize("labels,required,excluded,allowed", [
+    (["focus", "type:objective"], ["stagemesh:ready"], [], True),
+    (["focus", "type:objective", "stagemesh:ready"], ["stagemesh:ready"], [], False),
+    (["focus"], ["stagemesh:ready"], [], False),
+    (["focus", "type:objective"], ["stagemesh:ready", "approved"], [], False),
+    (["focus", "type:objective", "hold"], ["stagemesh:ready"], ["hold"], False),
+])
+def test_real_github_objective_planning_preserves_source_policy(rig, monkeypatch, labels, required, excluded, allowed):
+    from stagemesh.config import GitHubConfig, TaskSourceConfig
+    from stagemesh.task_sources import _github_issue_to_task
+    from stagemesh.selection_scope import authorize_children
+    store, project, config, scope = rig
+    source = _github_issue_to_task({"number": 90, "title": "objective", "state": "open", "labels": [{"name": x} for x in labels]})
+    monkeypatch.setattr("stagemesh.task_sources.GitHubApiIssueSource.discover", lambda self: ([source], "OK", None))
+    monkeypatch.setattr("stagemesh.selection_scope.label_catalog", lambda self: set(labels))
+    config = replace(config, github=GitHubConfig(owner="fixture", repo="fixture"),
+        task_sources=(TaskSourceConfig("github", "github", labels=tuple(required), excluded_labels=tuple(excluded)),))
+    attach(store, project, config, scope)
+    refresh(store)
+    if allowed:
+        assert authorize_children(store, scope, "90", ["CHILD"])["scope_id"] == scope.id
+        assert store.get_task("90") is None  # root remains non-dispatchable
+    else:
+        with pytest.raises(ScopeError):
+            authorize_children(store, scope, "90", ["CHILD"])
 
 
 def test_diagnostics_keep_objective_roots_and_report_unknown_vs_empty(rig, monkeypatch):
