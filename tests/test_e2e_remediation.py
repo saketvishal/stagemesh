@@ -171,3 +171,69 @@ def test_service_change_during_evaluation_cannot_pass(evaluation):
     store.add_task_remediation(task, "VALIDATE", sha)
     context = remediation_context(store, task, project)
     assert context["findings"][0]["stderr"] == finding["stderr"]
+
+
+@pytest.mark.parametrize("change", [None, "before", "during", "candidate_package", "candidate_config"])
+def test_npm_cmd_metadata_is_checked_against_candidate_and_after_evaluation(evaluation, monkeypatch, change):
+    from stagemesh.contracts import GateResult
+
+    project, store, task, _, configure, _ = evaluation
+    package = project / "package.json"
+    scripts = {"evaluate": "node evaluate.js", "preevaluate": "node prepare.js"}
+    package.write_text(json.dumps({"scripts": scripts}), encoding="utf-8")
+    workspace = GitWorkspace(project)
+    workspace.run("add", "package.json")
+    workspace.run("commit", "-m", "evaluation metadata baseline")
+    (project / "app.py").write_text("VALUE = 3\n")
+    workspace.run("add", "app.py")
+    workspace.run("commit", "-m", "evaluated candidate")
+    sha = workspace.run("rev-parse", "HEAD").stdout.strip()
+    store.add_candidate(task, sha, "test", True)
+    configure(command=["npm.cmd", "run", "evaluate"])
+    if change in {"candidate_package", "candidate_config"}:
+        config_path = project / ".stagemesh" / "config.json"
+        config = json.loads(config_path.read_text())
+        config["validation_services"].append({**config["validation_services"][0], "name": "flow2"})
+        config_path.write_text(json.dumps(config))
+    calls = []
+
+    def change_hook():
+        package.write_text(json.dumps({"scripts": {**scripts, "preevaluate": "node changed.js"}}))
+
+    def simulated_evaluation(checkout, gate):
+        calls.append(gate.name)
+        assert checkout != project
+        assert json.loads((checkout / "package.json").read_text())["scripts"] == scripts
+        if change == "during":
+            change_hook()
+        elif change == "candidate_package":
+            (checkout / "package.json").write_text(json.dumps({"scripts": {**scripts, "preevaluate": "node changed.js"}}))
+        elif change == "candidate_config":
+            (checkout / ".npmrc").write_text("registry=https://changed.invalid")
+        return GateResult(gate.name, "PASSED", tuple(gate.command), 0)
+
+    monkeypatch.setattr("stagemesh.validation_services.run_gate", simulated_evaluation)
+    if change == "before":
+        change_hook()
+    status = Validator().validate(store, task, sha, project)
+    assert not list(store.running_executions())
+    payload = json.loads(store.conn.execute("SELECT payload FROM evidence ORDER BY rowid DESC LIMIT 1").fetchone()[0])
+    assert calls == ([] if change == "before" else ["e2e:flow"])
+    if change is None:
+        assert status is EvidenceStatus.PASSED
+        assert payload["e2e_evaluations"][0]["candidate_sha"] == sha
+    else:
+        assert status is EvidenceStatus.FAILED
+        finding = next(f for f in payload["findings"] if f.get("code") == "gate_failed")
+        assert finding["failure_kind"] == "environment"
+        assert "service configuration changed" in finding["stderr"]
+        assert "e2e_evaluations" not in payload
+        store.add_task_remediation(task, "VALIDATE", sha)
+        assert "service configuration changed" in json.dumps(remediation_context(store, task, project))
+
+
+def test_host_npm_global_prefix_preserves_docs_only_validation_selection(tmp_path, monkeypatch):
+    from test_validation_selection_reuse import test_unrelated_historical_ui_work_does_not_broaden_automatic_selection
+
+    monkeypatch.setenv("NPM_CONFIG_PREFIX", str(tmp_path / "global-npm-install"))
+    test_unrelated_historical_ui_work_does_not_broaden_automatic_selection(tmp_path)

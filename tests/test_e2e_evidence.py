@@ -12,13 +12,11 @@ from stagemesh.contracts import BoundChangeContract, ChangeContract, canonical_c
 from stagemesh.validation_services import (
     ConfiguredService,
     ValidationServiceError,
-    ValidationServicesManifest,
     compute_service_fingerprint,
     discover_validation_services,
 )
 from stagemesh.e2e_evidence import (
     ArtifactReference,
-    E2EEvidenceManifest,
     E2EEvidenceValidationError,
     build_artifact_reference,
     build_e2e_evidence,
@@ -391,7 +389,9 @@ def test_script_definition_changes_service_identity(test_env, script):
     assert before.fingerprint != after.fingerprint
 
 
-def test_npm_run_with_extra_arguments_binds_the_script_body(test_env):
+@pytest.mark.parametrize("executable", ["npm", "npm.cmd", "NPM.CMD", r"C:\Program Files\nodejs\npm.cmd", "/usr/local/bin/npm"])
+@pytest.mark.parametrize("verb", ["run", "run-script", "rum", "urn"])
+def test_npm_run_with_extra_arguments_binds_the_script_body(test_env, executable, verb):
     project, _, _, _, _ = test_env
     (project / "package.json").write_text(json.dumps({"scripts": {"e2e": "playwright test"}}))
     config = project / ".stagemesh" / "config.json"
@@ -399,7 +399,7 @@ def test_npm_run_with_extra_arguments_binds_the_script_body(test_env):
     config.write_text(json.dumps({
         "validation_services": [{
             "name": "browser", "kind": "browser",
-            "command": ["npm", "run", "e2e", "--", "--project=chromium"],
+            "command": [executable, verb, "e2e", "--", "--project=chromium"],
         }]
     }))
     bound = discover_validation_services(project)
@@ -407,6 +407,193 @@ def test_npm_run_with_extra_arguments_binds_the_script_body(test_env):
     (project / "package.json").write_text(json.dumps({"scripts": {"e2e": "echo skipped"}}))
     changed = discover_validation_services(project)
     assert changed.fingerprint != bound.fingerprint
+
+
+@pytest.mark.parametrize("hook", ["preevaluate", "postevaluate"])
+@pytest.mark.parametrize("executable", ["npm", "npm.cmd"])
+def test_npm_lifecycle_hook_changes_reject_previous_passing_evidence(test_env, api_manifest, hook, executable):
+    project, artifact_root, bound, _, _ = test_env
+    package = project / "package.json"
+    scripts = {"evaluate": "node evaluate.js", hook: "node prepare.js"}
+    package.write_text(json.dumps({"scripts": scripts}), encoding="utf-8")
+    config = project / ".stagemesh" / "config.json"
+    config.parent.mkdir(exist_ok=True)
+    command = (executable, "run", "evaluate")
+    config.write_text(json.dumps({"validation_services": [{
+        "name": "api", "kind": "api", "command": list(command),
+    }]}), encoding="utf-8")
+    before = discover_validation_services(project)
+    evidence = replace(api_manifest, service_fingerprint=before.fingerprint, command=command)
+    record_e2e_evidence_in_validation({}, evidence, bound, project=project, artifact_root=artifact_root)
+    scripts[hook] = "node different-service.js"
+    package.write_text(json.dumps({"scripts": scripts}), encoding="utf-8")
+    payload = {"candidate_sha": bound.candidate_sha}
+    with pytest.raises(E2EEvidenceValidationError, match="service fingerprint mismatch"):
+        record_e2e_evidence_in_validation(payload, evidence, bound, project=project, artifact_root=artifact_root)
+    assert "e2e_evidence" not in payload
+
+
+@pytest.mark.parametrize("arguments", [
+    ["run", "evaluate", "--prefix", "nested"],
+    ["--prefix=nested", "run", "evaluate"],
+    ["run", "evaluate", "--workspace=nested"],
+    ["run", "evaluate", "-w", "nested"],
+    ["run", "evaluate", "--workspaces"],
+    ["run", "evaluate", "--pref=nested"],
+    ["run", "evaluate", "--dry-run"],
+])
+def test_npm_package_selection_cannot_silently_bind_another_package(test_env, arguments):
+    project, _, _, _, _ = test_env
+    (project / "package.json").write_text(json.dumps({"scripts": {"evaluate": "node root.js"}}))
+    nested = project / "nested"
+    nested.mkdir()
+    (nested / "package.json").write_text(json.dumps({"scripts": {"evaluate": "node other.js"}}))
+    config = project / ".stagemesh" / "config.json"
+    config.parent.mkdir(exist_ok=True)
+    config.write_text(json.dumps({"validation_services": [{
+        "name": "api", "kind": "api", "command": ["npm.cmd", *arguments],
+    }]}))
+    with pytest.raises(ValidationServiceError, match="service cwd"):
+        discover_validation_services(project)
+
+
+def test_npm_explicit_cwd_binds_nested_package_and_preserves_forwarded_arguments(test_env):
+    project, _, _, _, _ = test_env
+    nested = project / "nested"
+    nested.mkdir()
+    package = nested / "package.json"
+    package.write_text(json.dumps({"scripts": {"evaluate": "node evaluate.js"}}))
+    config = project / ".stagemesh" / "config.json"
+    config.parent.mkdir(exist_ok=True)
+    command = ["npm.cmd", "--silent", "run-script", "evaluate", "--", "--prefix", "app-value"]
+    config.write_text(json.dumps({"validation_services": [{
+        "name": "api", "kind": "api", "cwd": "nested", "command": command,
+    }]}))
+    before = discover_validation_services(project)
+    assert before.services[0].script_definition == "node evaluate.js"
+    assert list(before.services[0].command) == command
+    package.write_text(json.dumps({"scripts": {"evaluate": "node changed.js"}}))
+    assert before.fingerprint != discover_validation_services(project).fingerprint
+
+
+@pytest.mark.parametrize("verb,script", [("test", "test"), ("t", "test"), ("tst", "test"), ("start", "start"), ("stop", "stop"), ("restart", "restart")])
+def test_npm_lifecycle_alias_binds_the_selected_script(test_env, verb, script):
+    project, _, _, _, _ = test_env
+    package = project / "package.json"
+    package.write_text(json.dumps({"scripts": {script: "node first.js"}}))
+    config = project / ".stagemesh" / "config.json"
+    config.parent.mkdir(exist_ok=True)
+    config.write_text(json.dumps({"validation_services": [{
+        "name": "api", "kind": "api", "command": ["npm.cmd", verb],
+    }]}))
+    before = discover_validation_services(project)
+    assert before.services[0].script_definition == "node first.js"
+    package.write_text(json.dumps({"scripts": {script: "node second.js"}}))
+    assert before.fingerprint != discover_validation_services(project).fingerprint
+
+
+@pytest.fixture
+def configured_npm_project(test_env):
+    project, _, _, _, _ = test_env
+    nested = project / "nested"
+    nested.mkdir()
+    (nested / "package.json").write_text(json.dumps({"scripts": {"evaluate": "node evaluate.js"}}))
+    config = project / ".stagemesh" / "config.json"
+    config.parent.mkdir(exist_ok=True)
+    config.write_text(json.dumps({"validation_services": [{
+        "name": "api", "kind": "api", "cwd": "nested", "command": ["npm.cmd", "run", "evaluate"],
+    }]}))
+    return project
+
+
+@pytest.mark.parametrize("key", ["NPM_CONFIG_WORKSPACE", "npm_config_workspaces", "npm_config_userconfig", "npm_config_dry_run"])
+def test_npm_environment_selection_fails_closed_without_disclosing_values(configured_npm_project, monkeypatch, key):
+    monkeypatch.setenv(key, "private-selector-canary")
+    with pytest.raises(ValidationServiceError, match="service cwd") as failure:
+        discover_validation_services(configured_npm_project)
+    assert "private-selector-canary" not in str(failure.value)
+
+
+@pytest.mark.parametrize("directory", [".", "nested"])
+@pytest.mark.parametrize("setting", [
+    "workspace[]=private-selector-canary", "dry-run=true",
+    '"workspace"=private-selector-canary', '"prefix"=private-selector-canary',
+    r'"pre\u0066ix"=private-selector-canary',
+])
+def test_npm_local_configuration_selection_fails_closed(configured_npm_project, directory, setting):
+    (configured_npm_project / directory / ".npmrc").write_text(setting)
+    with pytest.raises(ValidationServiceError, match="service cwd") as failure:
+        discover_validation_services(configured_npm_project)
+    assert "private-selector-canary" not in str(failure.value)
+
+
+def test_npm_local_and_environment_settings_bind_without_exporting_values(configured_npm_project, monkeypatch):
+    config = configured_npm_project / ".npmrc"
+    config.write_text("//registry.npmjs.org/:_authToken=private-config-canary")
+    before = discover_validation_services(configured_npm_project)
+    assert "private-config-canary" not in json.dumps(before.to_dict())
+    config.write_text("//registry.npmjs.org/:_authToken=changed-config-canary")
+    changed = discover_validation_services(configured_npm_project)
+    assert before.fingerprint != changed.fingerprint
+    monkeypatch.setenv("NPM_CONFIG_REGISTRY", "https://private-registry-canary.invalid")
+    environment_changed = discover_validation_services(configured_npm_project)
+    assert changed.fingerprint != environment_changed.fingerprint
+    assert "private-registry-canary" not in json.dumps(environment_changed.to_dict())
+
+
+@pytest.mark.parametrize("origin", ["environment", "local_config"])
+def test_npm_global_install_prefix_is_hashed_without_retargeting_evaluation(configured_npm_project, monkeypatch, origin):
+    project = configured_npm_project
+    before = discover_validation_services(project)
+    if origin == "environment":
+        monkeypatch.setenv("NPM_CONFIG_PREFIX", str(project / "global-install"))
+    else:
+        (project / ".npmrc").write_text("prefix=global-install")
+    after = discover_validation_services(project)
+    assert after.services == before.services
+    assert after.services[0].script_definition == "node evaluate.js"
+    assert after.fingerprint != before.fingerprint
+
+
+@pytest.mark.parametrize("relative", ["package.json", "nested/package.json", "nested/.npmrc"])
+def test_npm_metadata_symlink_cannot_escape_candidate(configured_npm_project, relative):
+    project = configured_npm_project
+    external = project.parent / "outside-config"
+    external.write_text('{"scripts":{"evaluate":"private-outside-canary"}}')
+    target = project / relative
+    target.unlink(missing_ok=True)
+    try:
+        target.symlink_to(external)
+    except OSError:
+        pytest.skip("host cannot create symlinks")
+    with pytest.raises(ValidationServiceError, match="escapes the candidate"):
+        discover_validation_services(project)
+
+
+def test_npm_metadata_fingerprint_is_stable_across_git_line_endings(configured_npm_project):
+    package = configured_npm_project / "nested" / "package.json"
+    content = json.loads(package.read_text())
+    config = configured_npm_project / ".npmrc"
+    package.write_bytes(json.dumps(content, indent=2).replace("\n", "\r\n").encode())
+    config.write_bytes(b"audit=false\r\nfund=false\r\n")
+    before = discover_validation_services(configured_npm_project)
+    package.write_bytes(json.dumps(content, indent=2).encode())
+    config.write_bytes(b"audit=false\nfund=false\n")
+    assert before.fingerprint == discover_validation_services(configured_npm_project).fingerprint
+
+
+def test_npm_in_candidate_metadata_symlink_keeps_execution_cwd_configuration(configured_npm_project):
+    project = configured_npm_project
+    shared = project / "shared-package.json"
+    target = project / "nested" / "package.json"
+    target.rename(shared)
+    try:
+        target.symlink_to(shared)
+    except OSError:
+        pytest.skip("host cannot create symlinks")
+    (project / "nested" / ".npmrc").write_text("workspace=other")
+    with pytest.raises(ValidationServiceError, match="service cwd"):
+        discover_validation_services(project)
 
 
 @pytest.mark.parametrize("contents", ["{", "[]", "null", "1"])
