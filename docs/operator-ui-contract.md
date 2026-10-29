@@ -2,7 +2,7 @@
 
 Parent objectives #135 (operator UI) and #134 (activity history). The server in `src/stagemesh/api_server.py`
 (`stagemesh serve`, #446) implements this contract over the activity projection in `src/stagemesh/activity.py`
-(`query_activity`). The UI and desktop launcher are implemented by #448 and #449; the installer remains tracked as #451. The contract needs no
+(`query_activity`). The UI, desktop launcher and per-user Windows installer are implemented by #448, #449 and #451. The contract needs no
 dependency and no schema change.
 
 ## Principles
