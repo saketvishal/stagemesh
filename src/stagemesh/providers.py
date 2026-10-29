@@ -24,13 +24,10 @@ from .config import StageMeshConfig
 from .contract_binding import ContractRejected, bind_task_contract
 from .domain import ExecutionKind, ExecutionStatus
 from .efficiency import (
-    BUDGET_EXHAUSTED,
-    BudgetPolicy,
     CallRecorder,
-    check_task_budget,
-    check_window_budget,
     extract_usage,
     note_call_usage,
+    provider_budget_refusal,
 )
 from .execution import (
     PROVIDER_TIMEOUT,
@@ -49,7 +46,7 @@ from .persistence import Store
 from .process_identity import owner_execution_fields, popen_identity
 from .queue_control import OperatorStopRequested
 from .redaction import redact_command_secrets
-from .remediation import remediation_context
+from .remediation import ToolRecoveryRefused, execute_tool_recovery, remediation_context
 from .research_context import (
     ResearchBlocked,
     build_research_brief,
@@ -195,6 +192,7 @@ class RuntimeCommandAdapter:
     allowed_at_build: tuple[str, ...] | None = None  # the allowlist this adapter was built under; still binds if the config later cannot be read
     # Opt-in read-only research role run in the task workspace before this provider implements; None keeps the old behavior.
     research: ResearchRole | None = None
+    recovery_setup_actions: tuple[tuple[str, tuple[str, ...]], ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "name", _validate_name(self.name))
@@ -204,6 +202,10 @@ class RuntimeCommandAdapter:
             value = getattr(self, field_name)
             if value is not None:
                 object.__setattr__(self, field_name, _validate_command(value))
+        recovery_actions = tuple(
+            (str(kind), _validate_command(command)) for kind, command in self.recovery_setup_actions
+        )
+        object.__setattr__(self, "recovery_setup_actions", recovery_actions)
 
     def command_for(self, capability: str) -> tuple[str, ...]:
         """The command this provider runs for a stage: "code" (implementation) or "review"; anything else uses the default."""
@@ -225,7 +227,18 @@ class RuntimeCommandAdapter:
         return cmd
 
     def all_commands(self) -> tuple[tuple[str, ...], ...]:
-        return tuple(dict.fromkeys(c for c in (self.command_for("code"), self.command_for("review"), self.command, self.implement_command, self.review_command) if c is not None))
+        return tuple(dict.fromkeys(c for c in (
+            self.command_for("code"), self.command_for("review"), self.command,
+            self.implement_command, self.review_command,
+        ) if c is not None))
+
+    def authorization_commands(self) -> tuple[tuple[str, ...], ...]:
+        """Every command StageMesh may spawn for this provider, including non-identity recovery setup."""
+        recovery = tuple(command for _kind, command in self.recovery_setup_actions)
+        return tuple(dict.fromkeys((*self.all_commands(), *recovery)))
+
+    def recovery_actions(self) -> dict[str, list[str]]:
+        return {kind: list(command) for kind, command in self.recovery_setup_actions}
 
     def check_capacity(self) -> str:
         cmd = self.command_for("code") if "code" in self.capabilities else self.command
@@ -292,67 +305,170 @@ class RuntimeCommandAdapter:
         budget_problem = _provider_budget_refusal(store, task_id, project)
         if budget_problem:
             return ExecutionResult(ExecutionStatus.FAILED, failure_reason=budget_problem)
-        try:
-            proc = subprocess.Popen(
-                command,
-                cwd=run_path,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                env=provider_environment(run_path),
-                **popen_session_kwargs(),
-            )
-        except FileNotFoundError as exc:
-            is_cap, reason = classify_failure(1, exc=exc)
-            return ExecutionResult(ExecutionStatus.FAILED, capacity_failure=is_cap, failure_reason=reason)
-        identity = popen_identity(proc)
-        execution_id = store.start_execution(
-            task_id=task_id,
-            claim_id=claim_id,
-            kind=ExecutionKind.IMPLEMENTATION,
-            actor=self.name,
-            pid=identity.pid,
-            process_create_time=identity.create_time,
-            boot_id=identity.boot_id,
-            executable=identity.executable,
-        )
-        lease.bind_execution(execution_id)
-        call = CallRecorder(store, task_id, purpose, self.name)
-
-        try:
-            stdout, stderr, timed_out = communicate_bounded(proc, provider_input, provider_timeout_seconds(self.timeout_seconds))
-            call.observe(stdout, stderr)
-            lease.after_agent()
-            if timed_out:
-                call.finish("timeout", PROVIDER_TIMEOUT)
-                record_tool_failure(store, task_id, execution_id, configured_command, run_path,
-                                    proc.returncode, stdout, stderr, PROVIDER_TIMEOUT, True)
-                store.finish_execution(execution_id, ExecutionStatus.FAILED, result=PROVIDER_TIMEOUT)
-                return ExecutionResult(ExecutionStatus.FAILED, failure_reason=PROVIDER_TIMEOUT)
-            if _missing_provider_tool_host(stderr):
-                call.finish("failed", "provider_unavailable")
-                store.finish_execution(execution_id, ExecutionStatus.FAILED, result="provider_unavailable")
-                output, _ = capacity_evidence("", stderr)
-                return ExecutionResult(
-                    ExecutionStatus.FAILED, capacity_failure=True,
-                    failure_reason="provider_unavailable", provider_output=output,
+        def launch_attempt():  # type: ignore[no-untyped-def]
+            try:
+                attempt_proc = subprocess.Popen(
+                    command, cwd=run_path, text=True, encoding="utf-8", errors="replace",
+                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    env=provider_environment(run_path), **popen_session_kwargs(),
                 )
-            if proc.returncode != 0:
-                is_cap, reason = classify_failure(proc.returncode, stdout, stderr)
-                call.finish("failed", reason)
-                record_tool_failure(store, task_id, execution_id, configured_command, run_path,
-                                    proc.returncode, stdout, stderr, reason, False)
+            except FileNotFoundError as exc:
+                is_capacity, launch_reason = classify_failure(1, exc=exc)
+                return None, ExecutionResult(
+                    ExecutionStatus.FAILED, capacity_failure=is_capacity, failure_reason=launch_reason
+                )
+            identity = popen_identity(attempt_proc)
+            attempt_execution_id = store.start_execution(
+                task_id=task_id, claim_id=claim_id, kind=ExecutionKind.IMPLEMENTATION, actor=self.name,
+                pid=identity.pid, process_create_time=identity.create_time, boot_id=identity.boot_id,
+                executable=identity.executable,
+            )
+            lease.bind_execution(attempt_execution_id)
+            attempt_call = CallRecorder(store, task_id, purpose, self.name)
+            try:
+                out, err, attempt_timed_out = communicate_bounded(
+                    attempt_proc, provider_input, provider_timeout_seconds(self.timeout_seconds)
+                )
+                attempt_call.observe(out, err)
+                lease.after_agent()
+            except Exception as exc:
+                failure = _execution_result(exc)
+                attempt_call.finish("failed", failure)
+                store.finish_execution(attempt_execution_id, ExecutionStatus.FAILED, result=failure)
+                raise
+            return (
+                attempt_proc, attempt_execution_id, attempt_call, out, err, attempt_timed_out,
+                attempt_proc.returncode,
+            ), None
+
+        attempt, launch_failure = launch_attempt()
+        if launch_failure is not None:
+            return launch_failure
+        assert attempt is not None
+        retried = False
+        try:
+            while True:
+                _proc, execution_id, call, stdout, stderr, timed_out, code = attempt
+                if not timed_out and _missing_provider_tool_host(stderr):
+                    call.finish("failed", "provider_unavailable")
+                    store.finish_execution(execution_id, ExecutionStatus.FAILED, result="provider_unavailable")
+                    output, _ = capacity_evidence("", stderr)
+                    return ExecutionResult(
+                        ExecutionStatus.FAILED, capacity_failure=True,
+                        failure_reason="provider_unavailable", provider_output=output,
+                    )
+                if not timed_out and code == 0:
+                    break
+                if timed_out:
+                    is_cap, reason = False, PROVIDER_TIMEOUT
+                    call.finish("timeout", reason)
+                else:
+                    is_cap, reason = classify_failure(code, stdout, stderr)
+                    call.finish("failed", reason)
+                evidence = record_tool_failure(
+                    store, task_id, execution_id, configured_command, run_path,
+                    code, stdout, stderr, reason, timed_out, self.recovery_actions(),
+                )
                 store.finish_execution(execution_id, ExecutionStatus.FAILED, result=reason)
-                output, retry_after = capacity_evidence(stdout, stderr)  # the operator sees why, capacity failure or not
+                plan = evidence.get("recovery") if isinstance(evidence, dict) else None
+                if not retried and isinstance(plan, dict) and plan.get("action") in {"retry_once", "setup"}:
+                    if budget_refusal := _provider_budget_refusal(store, task_id, project):
+                        return ExecutionResult(ExecutionStatus.FAILED, failure_reason=budget_refusal)
+                    recovery_command: Sequence[str] = command
+                    if plan.get("action") == "setup":
+                        raw_setup = plan.get("setup_command")
+                        if isinstance(raw_setup, list) and all(isinstance(part, str) for part in raw_setup):
+                            recovery_command = raw_setup
+                    refused_recovery = _authorization_refusal(
+                        self, project, "code", command=recovery_command
+                    )
+                    if refused_recovery:
+                        return ExecutionResult(
+                            ExecutionStatus.FAILED,
+                            failure_reason=f"provider_not_authorized: {refused_recovery}",
+                        )
+                    next_attempt: list[object] = []
+                    next_failure: list[ExecutionResult] = []
+
+                    def launch_verified(
+                        next_attempt: list[object] = next_attempt,
+                        next_failure: list[ExecutionResult] = next_failure,
+                    ) -> bool:
+                        if budget_refusal := _provider_budget_refusal(store, task_id, project):
+                            raise ToolRecoveryRefused(budget_refusal)
+                        refused_retry = _authorization_refusal(self, project, "code", command=command)
+                        if refused_retry:
+                            raise ToolRecoveryRefused(f"provider_not_authorized: {refused_retry}")
+                        launched, failed = launch_attempt()
+                        if failed is not None:
+                            next_failure.append(failed)
+                            return False
+                        assert launched is not None
+                        next_attempt.append(launched)
+                        return not bool(launched[5]) and launched[6] == 0
+
+                    if plan.get("action") == "retry_once":
+                        recovery = execute_tool_recovery(
+                            store, task_id, execution_id, evidence, plan, retry=launch_verified,
+                            setup_actions=self.recovery_actions(),
+                        )
+                    else:
+                        def run_setup(argv: tuple[str, ...]) -> bool:
+                            if budget_refusal := _provider_budget_refusal(store, task_id, project):
+                                raise ToolRecoveryRefused(budget_refusal)
+                            refused_setup = _authorization_refusal(self, project, "code", command=argv)
+                            if refused_setup:
+                                raise ToolRecoveryRefused(f"provider_not_authorized: {refused_setup}")
+                            try:
+                                setup_proc = subprocess.Popen(
+                                    argv, cwd=run_path, text=True, encoding="utf-8", errors="replace",
+                                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                    env=provider_environment(run_path), **popen_session_kwargs(),
+                                )
+                            except OSError:
+                                return False
+                            setup_identity = popen_identity(setup_proc)
+                            setup_execution_id = store.start_execution(
+                                task_id=task_id, claim_id=claim_id, kind=ExecutionKind.IMPLEMENTATION,
+                                actor=f"{self.name}:tool-recovery-setup", pid=setup_identity.pid,
+                                process_create_time=setup_identity.create_time, boot_id=setup_identity.boot_id,
+                                executable=setup_identity.executable,
+                            )
+                            lease.bind_execution(setup_execution_id)
+                            try:
+                                _out, _err, setup_timed_out = communicate_bounded(
+                                    setup_proc, "", provider_timeout_seconds(self.timeout_seconds)
+                                )
+                                lease.after_agent()
+                            except Exception as exc:
+                                store.finish_execution(
+                                    setup_execution_id, ExecutionStatus.FAILED, result=_execution_result(exc)
+                                )
+                                raise
+                            setup_ok = not setup_timed_out and setup_proc.returncode == 0
+                            store.finish_execution(
+                                setup_execution_id,
+                                ExecutionStatus.SUCCEEDED if setup_ok else ExecutionStatus.FAILED,
+                                result="tool_recovery_setup_succeeded" if setup_ok else "tool_recovery_setup_failed",
+                            )
+                            return setup_ok and launch_verified()
+
+                        recovery = execute_tool_recovery(
+                            store, task_id, execution_id, evidence, plan, run_setup=run_setup,
+                            setup_actions=self.recovery_actions(),
+                        )
+                    retried = True
+                    if next_failure:
+                        return next_failure[0]
+                    if next_attempt:
+                        attempt = next_attempt[0]  # type: ignore[assignment]
+                        continue
+                    if recovery.get("execution_status") == "FAILED":
+                        return ExecutionResult(ExecutionStatus.FAILED, failure_reason=reason)
+                output, retry_after = capacity_evidence(stdout, stderr)
                 return ExecutionResult(
-                    ExecutionStatus.FAILED,
-                    capacity_failure=is_cap,
-                    failure_reason=reason,
-                    provider_output=output,
-                    retry_after=retry_after,
+                    ExecutionStatus.FAILED, capacity_failure=is_cap, failure_reason=reason,
+                    provider_output=output, retry_after=retry_after,
                 )
             sha = commit_implementation_candidate(
                 store,
@@ -747,27 +863,7 @@ def _authorization_refusal(
 
 
 def _provider_budget_refusal(store: Store, task_id: str, project: Path) -> str | None:
-    """Every additional provider role spends from the same durable task and originating-window budgets."""
-    from .config import load_config
-    from .window_journal import STARTED, latest_task_context
-
-    policy = BudgetPolicy.from_config(load_config(project).budgets)
-    verdict = check_task_budget(store, task_id, policy)
-    context = latest_task_context(store, task_id)
-    if verdict is None and context is not None:
-        started = store.conn.execute(
-            "SELECT created_at FROM audit_events WHERE event_type=? AND json_extract(payload, '$.window_id')=? "
-            "ORDER BY created_at DESC, rowid DESC LIMIT 1", (STARTED, context.get("window_id")),
-        ).fetchone()
-        if started is not None:
-            verdict = check_window_budget(store, float(started["created_at"]), policy)
-    if verdict is None:
-        return None
-    store.add_audit_event(BUDGET_EXHAUSTED, {
-        "task_id": task_id, "budget": verdict.exceeded, "observed": verdict.observed, "limit": verdict.limit,
-    })
-    return (f"budget_exhausted ({verdict.exceeded}): {verdict.detail}; limit {verdict.limit}. "
-            "Provider dispatch stopped at a budget boundary; verified work is preserved for supervised recovery.")
+    return provider_budget_refusal(store, task_id, project)
 
 
 def _is_external_workspace_mutation(exc: Exception) -> bool:
@@ -839,6 +935,10 @@ def adapters_from_config(config: StageMeshConfig) -> list[RuntimeCommandAdapter]
                 adapter.timeout_seconds,
                 implement_command=_stage_command(adapter.name, spec.implement_command),
                 review_command=_stage_command(adapter.name, spec.review_command),
+                recovery_setup_actions=tuple(
+                    (kind, _stage_command(adapter.name, command) or ())
+                    for kind, command in spec.recovery_setup_actions
+                ),
             )
         if config.research is not None:
             adapter = dataclasses.replace(
@@ -859,7 +959,7 @@ def _mark_authorization(adapters: list[RuntimeCommandAdapter], config: StageMesh
     for adapter in adapters:
         reasons = [
             provider_authorization.denial(adapter.name, command, allowed, unattended=mode, project=config.project)
-            for command in adapter.all_commands()
+            for command in adapter.authorization_commands()
         ]
         reason = next((r for r in reasons if r), None)
         marked.append(replace(adapter, denied=reason, allowed_at_build=config.authorized_providers))
