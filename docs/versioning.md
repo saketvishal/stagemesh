@@ -1,29 +1,41 @@
 # Versioning and stable installs
 
-StageMesh uses git tags as reinstallable stable package points. The current known-good stable line is:
+StageMesh uses annotated Git tags and published GitHub releases as reinstallable
+package points. Version 0.5.0 introduces the operator activity API/dashboard and
+label-scoped execution, alongside ownership, recovery and admission fixes since
+0.4.0. See [the 0.5.0 release notes](releases/0.5.0.md) for scope and limits.
+
+A version bump or an unpublished draft does not establish a published release.
+After the `v0.5.0` release is published, verify the attached wheel against its
+`SHA256SUMS` and provenance manifest. Alternatively, pin the annotated tag:
 
 ```powershell
-python -m pip install "stagemesh @ git+https://github.com/saketvishal/stagemesh.git@v0.3.0"
+python -m pip install "stagemesh @ git+https://github.com/saketvishal/stagemesh.git@v0.5.0"
 ```
-
-Use that tag when a project needs the last proven operating version. For example, a product repository can refresh its project-local StageMesh runtime from the stable tag instead of from `main`.
-
-Development on `main` moves to the next dev version after a stable tag is cut. That keeps experimental or in-progress StageMesh work from looking like the same package as the known-good release.
 
 Current lines:
 
-- `v0.3.0`: release point for generic focused-reading and relevant-test defaults. Stable publication requires the reviewed annotated tag and GitHub release.
-- `v0.2.2`: previous stable rollback release for execution ownership, launch-failure diagnosis and accurate fallback progress.
-- `v0.2.1`: previous stable rollback release, including candidate-environment and guarded delivery fixes.
-- `v0.1.0`: historical fallback tag at the post-task-266 operating baseline.
-- `main`: `0.3.0` release point; start the next development change at `0.3.1.dev0`. Existing clients stay on their installed version until explicitly updated while idle.
+- `0.5.0`: release line for operator visibility, scoped selection and reliability.
+- `v0.4.0`: previous published release and retained rollback package.
+- `v0.3.0`: focused-reading and relevant-test defaults.
+- `v0.2.2` and `v0.2.1`: historical rollback releases.
+- `v0.1.0`: historical fallback at the post-task-266 baseline.
+- After publishing 0.5.0, start the next development change at `0.5.1.dev0`.
 
 Release rule:
 
-1. Cut an annotated tag from a clean, proven `main`.
-2. Push the tag.
-3. Before starting new development, bump `main` to the next `.dev0` version.
-4. Refresh project-local runtimes from a tag when stability matters, or from `main` when testing new StageMesh features.
+1. Align `pyproject.toml`, `src/stagemesh/__init__.py` and `build_backend.py`.
+2. Independently review the exact candidate and pass required Windows/Linux and
+   attribution checks before normal integration into protected `main`.
+3. Verify the actual merged source, build assets from its clean checkout and
+   record source provenance and checksums. Cut and push an annotated tag from
+   that proven `main`, then publish the GitHub release with those assets.
+4. Before starting new development, bump `main` to the next `.dev0` version.
+5. Update a project-local runtime only with separate authorization while its
+   owning processes, windows, executions and claims are idle. Publishing a
+   release does not update installations, activate schedules or clear uncertain
+   process ownership. Keep the previous verified wheel for rollback; inspect
+   persisted-state compatibility before downgrading and preserve state backups.
 
 ## Version 0.3.0: focused defaults in every repository
 
