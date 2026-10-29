@@ -414,6 +414,25 @@ def test_child_runner_preserves_live_acceptance_policy(tmp_path: Path, monkeypat
     assert child_args.live_acceptance == mode
 
 
+def test_child_runner_preserves_run_scoped_provider_subset(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import subprocess as sp
+
+    from stagemesh import survivor_wave
+
+    seen = []
+
+    def fake_run(argv, **kwargs):
+        seen.append(argv)
+        return sp.CompletedProcess(argv, 0, json.dumps({"stop_reason": "DONE"}), "")
+
+    monkeypatch.setattr(survivor_wave.subprocess, "run", fake_run)
+    runner = survivor_wave.subprocess_task_runner(tmp_path, providers=("agy", "codex"))
+
+    assert runner("generic-task", 2).stop_reason == "DONE"
+    child_args = cli_module.build_parser().parse_args(seen[0][3:])
+    assert child_args.providers == "agy,codex"
+
+
 def test_survivor_wave_command_reports_skips_without_running_anything(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     store, project = make_store(tmp_path, ["T-1"])
     store.advance_task("T-1", Stage.DONE)
