@@ -41,12 +41,14 @@ Before `--`, supported npm options are `--silent`, `--if-present`,
 `--ignore-scripts`, and `--foreground-scripts`. Other options fail closed.
 Package/workspace selection and dry-run modes are also refused when supplied by
 inherited npm environment settings or project-local `.npmrc`. This includes
-`prefix`, `workspace(s)`, `include-workspace-root`, `global`, `location`,
+`workspace(s)`, `include-workspace-root`, `global`, `location`,
 `userconfig`, and `globalconfig`. Use explicit service `cwd` instead of selecting
 another package through these settings. Tokens after `--` are passed unchanged
 to the script. Quoted/escaped local npm configuration keys are rejected rather
 than partially interpreting npm's INI syntax; metadata symlinks cannot escape
-the candidate checkout. These distinctions follow
+the candidate checkout. Command-line `--prefix` is refused, while the environment
+or local-config `prefix` setting is hashed and allowed: it controls npm's global
+installation location, not the package selected for a local script. These distinctions follow
 [npm's script and workspace semantics](https://docs.npmjs.com/cli/v10/commands/npm-run-script/).
 
 A changed package hook or supported configuration input invalidates old passing

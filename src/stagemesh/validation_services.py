@@ -218,7 +218,9 @@ def _npm_script_name(command: tuple[str, ...]) -> str | None:
 
 def _npm_configuration_digest(root: Path, package_dir: Path) -> str:
     """Bind local/inherited npm settings; refuse selectors we cannot attribute."""
-    selectors = {"prefix", "workspace", "workspaces", "include-workspace-root", "global",
+    # Only CLI --prefix selects npm's local package. The inherited/file prefix
+    # sets the global installation prefix and is common on Windows CI hosts.
+    selectors = {"workspace", "workspaces", "include-workspace-root", "global",
                  "location", "userconfig", "globalconfig", "dry-run"}
     environment = {key: value for key, value in os.environ.items() if key.casefold().startswith("npm_config_")}
     if any(key[11:].casefold().replace("_", "-") in selectors for key in environment):

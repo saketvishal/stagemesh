@@ -506,7 +506,7 @@ def configured_npm_project(test_env):
     return project
 
 
-@pytest.mark.parametrize("key", ["npm_config_prefix", "NPM_CONFIG_WORKSPACE", "npm_config_workspaces", "npm_config_userconfig", "npm_config_dry_run"])
+@pytest.mark.parametrize("key", ["NPM_CONFIG_WORKSPACE", "npm_config_workspaces", "npm_config_userconfig", "npm_config_dry_run"])
 def test_npm_environment_selection_fails_closed_without_disclosing_values(configured_npm_project, monkeypatch, key):
     monkeypatch.setenv(key, "private-selector-canary")
     with pytest.raises(ValidationServiceError, match="service cwd") as failure:
@@ -516,7 +516,7 @@ def test_npm_environment_selection_fails_closed_without_disclosing_values(config
 
 @pytest.mark.parametrize("directory", [".", "nested"])
 @pytest.mark.parametrize("setting", [
-    "workspace[]=private-selector-canary", "prefix=private-selector-canary", "dry-run=true",
+    "workspace[]=private-selector-canary", "dry-run=true",
     '"workspace"=private-selector-canary', '"prefix"=private-selector-canary',
     r'"pre\u0066ix"=private-selector-canary',
 ])
@@ -539,6 +539,20 @@ def test_npm_local_and_environment_settings_bind_without_exporting_values(config
     environment_changed = discover_validation_services(configured_npm_project)
     assert changed.fingerprint != environment_changed.fingerprint
     assert "private-registry-canary" not in json.dumps(environment_changed.to_dict())
+
+
+@pytest.mark.parametrize("origin", ["environment", "local_config"])
+def test_npm_global_install_prefix_is_hashed_without_retargeting_evaluation(configured_npm_project, monkeypatch, origin):
+    project = configured_npm_project
+    before = discover_validation_services(project)
+    if origin == "environment":
+        monkeypatch.setenv("NPM_CONFIG_PREFIX", str(project / "global-install"))
+    else:
+        (project / ".npmrc").write_text("prefix=global-install")
+    after = discover_validation_services(project)
+    assert after.services == before.services
+    assert after.services[0].script_definition == "node evaluate.js"
+    assert after.fingerprint != before.fingerprint
 
 
 @pytest.mark.parametrize("relative", ["package.json", "nested/package.json", "nested/.npmrc"])

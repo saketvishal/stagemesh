@@ -230,3 +230,10 @@ def test_npm_cmd_metadata_is_checked_against_candidate_and_after_evaluation(eval
         assert "e2e_evaluations" not in payload
         store.add_task_remediation(task, "VALIDATE", sha)
         assert "service configuration changed" in json.dumps(remediation_context(store, task, project))
+
+
+def test_host_npm_global_prefix_preserves_docs_only_validation_selection(tmp_path, monkeypatch):
+    from test_validation_selection_reuse import test_unrelated_historical_ui_work_does_not_broaden_automatic_selection
+
+    monkeypatch.setenv("NPM_CONFIG_PREFIX", str(tmp_path / "global-npm-install"))
+    test_unrelated_historical_ui_work_does_not_broaden_automatic_selection(tmp_path)
