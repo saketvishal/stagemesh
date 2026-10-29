@@ -5,7 +5,9 @@ import json
 import os
 import re
 import time
+import uuid
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -226,19 +228,34 @@ def _validate_optional_text(value: str | None, field: str, max_length: int = 200
     return _validate_text(value, field, max_length)
 
 
+class ToolRecoveryRefused(RuntimeError):
+    """A recovery gate changed after planning, before any recovery command launched."""
+
+
 def tool_recovery_plan(
     store: Store, task_id: str, evidence: dict[str, object], setup_actions: dict[str, list[str]] | None = None
 ) -> dict[str, object]:
     """Recommend recovery without treating a recorded plan as an executed action.
 
-    The recorder has no retry/setup executor or execution receipt. A repeated failure therefore stops for an
-    operator to verify execution, rather than claiming an attempt or advancing an unexecuted retry to setup.
+    Only an execution-aware caller can act on this plan. Once that caller records a recovery receipt, a repeated
+    signature stops rather than advancing from retry to setup or claiming another attempt.
     """
-    import json
-
-    from .diagnosis import TOOL_FAILURE_EVENT, plan_tool_recovery, tool_failure_signature
+    from .diagnosis import (
+        TOOL_FAILURE_EVENT,
+        TOOL_RECOVERY_EVENT,
+        plan_tool_recovery,
+        tool_failure_signature,
+    )
 
     signature = tool_failure_signature(evidence)
+    attempted, execution_status, refused_executions = _tool_recovery_attempts(
+        store, task_id, signature, TOOL_RECOVERY_EVENT
+    )
+    if attempted:
+        return {
+            **plan_tool_recovery(evidence, attempted, setup_actions=setup_actions),
+            "execution_status": execution_status,
+        }
     recommendations: deque[str] = deque(maxlen=20)
     recommendation_count = 0
     for row in store.task_audit_events(TOOL_FAILURE_EVENT, task_id):
@@ -252,6 +269,8 @@ def tool_recovery_plan(
             continue
         prior = payload.get("evidence")
         if payload.get("task_id") != task_id or not isinstance(prior, dict) or tool_failure_signature(prior) != signature:
+            continue
+        if str(payload.get("execution_id") or "") in refused_executions:
             continue
         recovery = prior.get("recovery")
         action = recovery.get("action") if isinstance(recovery, dict) else None
@@ -272,3 +291,142 @@ def tool_recovery_plan(
             ),
         }
     return {**plan_tool_recovery(evidence, setup_actions=setup_actions), "execution_status": "NOT_CONFIRMED"}
+
+
+def _tool_recovery_attempts(
+    store: Store, task_id: str, signature: str, event_type: str
+) -> tuple[list[str], str, set[str]]:
+    attempts: dict[str, tuple[str, str, str]] = {}
+    execution_status = "NOT_CONFIRMED"
+    for row in store.task_audit_events(event_type, task_id):
+        try:
+            payload = json.loads(row["payload"])
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(payload, dict) or payload.get("task_id") != task_id or payload.get("signature") != signature:
+            continue
+        action = payload.get("action")
+        if action in ("retry", "setup"):
+            row_id = row["id"] if "id" in row else len(attempts)
+            attempt_id = str(payload.get("attempt_id") or row_id)
+            execution_status = str(payload.get("status") or "UNKNOWN")
+            attempts[attempt_id] = (
+                str(action), execution_status, str(payload.get("execution_id") or "")
+            )
+    refused_executions = {
+        execution_id for _action, status, execution_id in attempts.values()
+        if status == "REFUSED" and execution_id
+    }
+    return (
+        [action for action, status, _execution_id in attempts.values() if status != "REFUSED"],
+        execution_status,
+        refused_executions,
+    )
+
+
+def execute_tool_recovery(
+    store: Store,
+    task_id: str,
+    execution_id: str,
+    evidence: dict[str, object],
+    plan: dict[str, object],
+    *,
+    retry: Callable[[], bool] | None = None,
+    run_setup: Callable[[tuple[str, ...]], bool] | None = None,
+    setup_actions: dict[str, list[str]] | None = None,
+) -> dict[str, object]:
+    """Execute one pre-authorized recovery action and durably account for it before invocation."""
+    from .audit import record_audit
+    from .diagnosis import TOOL_RECOVERY_EVENT, plan_tool_recovery, tool_failure_signature
+
+    signature = tool_failure_signature(evidence)
+    attempted, execution_status, _refused_executions = _tool_recovery_attempts(
+        store, task_id, signature, TOOL_RECOVERY_EVENT
+    )
+    if attempted:
+        from .diagnosis import plan_tool_recovery
+
+        return {
+            **plan_tool_recovery(evidence, attempted, setup_actions=setup_actions),
+            "execution_status": execution_status,
+        }
+    authorized = plan_tool_recovery(evidence, (), setup_actions=setup_actions)
+    if (
+        plan.get("signature") != signature
+        or plan.get("action") != authorized.get("action")
+        or plan.get("setup_command") != authorized.get("setup_command")
+    ):
+        return {
+            **authorized,
+            "action": "stop",
+            "operator_action": "Recovery plan is stale or does not match the recorded failure; inspect before retrying.",
+        }
+
+    action = str(plan.get("action") or "")
+    callback: Callable[[], bool] | None = retry
+    attempted = "retry"
+    setup_command: tuple[str, ...] = ()
+    if action == "setup":
+        raw = plan.get("setup_command")
+        if not isinstance(raw, list) or not raw or not all(isinstance(part, str) and part for part in raw):
+            return {**plan, "action": "stop", "operator_action": "Configured setup command is invalid."}
+        setup_command = tuple(raw)
+        callback = (lambda: bool(run_setup(setup_command))) if run_setup is not None else None
+        attempted = "setup"
+    elif action != "retry_once":
+        return plan
+    if callback is None:
+        return {**plan, "execution_status": "NOT_CONFIRMED"}
+
+    attempt_id = str(uuid.uuid4())
+    started = {
+        "task_id": task_id,
+        "execution_id": execution_id,
+        "signature": signature,
+        "attempt_id": attempt_id,
+        "action": attempted,
+        "status": "STARTED",
+    }
+    recovery_event_id = record_audit(store, TOOL_RECOVERY_EVENT, started)
+    try:
+        succeeded = bool(callback())
+        status = "SUCCEEDED" if succeeded else "FAILED"
+        failure = None
+    except ToolRecoveryRefused as exc:
+        status = "REFUSED"
+        failure = str(exc)
+        record_audit(store, TOOL_RECOVERY_EVENT, {
+            **started,
+            "status": status,
+            "recovery_event_id": recovery_event_id,
+            "failure": failure,
+        })
+        return {
+            **plan,
+            "attempted": [],
+            "execution_status": status,
+            "recovery_event_id": recovery_event_id,
+            "failure": failure,
+        }
+    except Exception as exc:  # record before preserving the caller's original safety/error semantics
+        status = "FAILED"
+        failure = type(exc).__name__
+        record_audit(store, TOOL_RECOVERY_EVENT, {
+            **started,
+            "status": status,
+            "recovery_event_id": recovery_event_id,
+            "failure": failure,
+        })
+        raise
+    record_audit(store, TOOL_RECOVERY_EVENT, {
+        **started, "status": status, "recovery_event_id": recovery_event_id, "failure": failure,
+    })
+    result = {
+        **plan,
+        "attempted": [attempted],
+        "execution_status": status,
+        "recovery_event_id": recovery_event_id,
+    }
+    if failure:
+        result["failure"] = failure
+    return result

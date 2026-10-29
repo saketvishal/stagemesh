@@ -52,7 +52,9 @@ def test_runtime_persists_failure_after_confirmed_process_end(tmp_path, monkeypa
         result = adapter.run(rig.store, TASK, None, rig.project)
         assert result.status == ExecutionStatus.FAILED
         events = _events(rig.store)
-        assert len(events) == 1 and events[0]["evidence"]["kind"] == kind
+        expected_attempts = 2 if kind == "transient" else 1
+        assert len(events) == expected_attempts
+        assert all(event["evidence"]["kind"] == kind for event in events)
         event = events[0]
         execution = rig.store.conn.execute("SELECT * FROM executions WHERE id=?", (event["execution_id"],)).fetchone()
         assert execution["status"] == "FAILED" and execution["actor"] == "controlled"
@@ -62,7 +64,12 @@ def test_runtime_persists_failure_after_confirmed_process_end(tmp_path, monkeypa
         assert "PROMPT_CONTENT_CANARY" not in json.dumps(event) and "ghp_FIXTURESECRET" not in json.dumps(event)
         assert len(evidence["excerpt"]) <= 600 and evidence["next_action"]
         assert evidence["recovery"]["attempted"] == []
-        assert marker.read_text() == "call\n"
+        if kind == "transient":
+            repeated = events[-1]["evidence"]["recovery"]
+            assert repeated["action"] == "stop"
+            assert repeated["attempted"] == ["retry"]
+            assert repeated["execution_status"] == "FAILED"
+        assert marker.read_text() == "call\n" * expected_attempts
         assert rig.store.latest_candidate(TASK) is None
         path = rig.store.db_path
         rig.store.close()
@@ -108,7 +115,7 @@ def test_runtime_unknown_cleanup_cannot_publish_tool_failure(tmp_path, monkeypat
         rig.store.close()
 
 
-def test_runtime_repeated_signature_after_reopen_does_not_claim_recovery_ran(tmp_path, monkeypatch):
+def test_runtime_repeated_signature_after_reopen_does_not_repeat_recovery(tmp_path, monkeypatch):
     rig, adapter, marker = _runtime(tmp_path, monkeypatch, "ETIMEDOUT temporary failure")
     # Verify the stage-specific configured command, not a default or expanded prompt.
     adapter = replace(adapter, command=("never-launch-this-default",), implement_command=adapter.command)
@@ -123,15 +130,14 @@ def test_runtime_repeated_signature_after_reopen_does_not_claim_recovery_ran(tmp
         rig.store = Store(path)
         adapter.run(rig.store, TASK, None, rig.project)  # explicit second caller, no automatic replay
         events = _events(rig.store)
-        assert len(events) == 2
+        assert len(events) == 3
         repeated = events[-1]["evidence"]
         assert repeated["recovery"]["action"] == "stop"
-        assert repeated["recovery"]["execution_status"] == "NOT_CONFIRMED"
-        assert repeated["recovery"]["attempted"] == []
-        assert repeated["recovery"]["previous_recommendation_count"] == 1
+        assert repeated["recovery"]["execution_status"] == "FAILED"
+        assert repeated["recovery"]["attempted"] == ["retry"]
         assert repeated["command"] == first["command"] and "never-launch-this-default" not in json.dumps(repeated)
-        assert marker.read_text() == "call\ncall\n"
-        assert rig.store.conn.execute("SELECT COUNT(*) FROM executions").fetchone()[0] == 2
+        assert marker.read_text() == "call\ncall\ncall\n"
+        assert rig.store.conn.execute("SELECT COUNT(*) FROM executions").fetchone()[0] == 3
         assert rig.store.latest_candidate(TASK) is None
     finally:
         rig.store.close()

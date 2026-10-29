@@ -69,6 +69,7 @@ class ProviderSpec:
     # The provider stays ONE logical provider (same name, same independence), it just runs a different command for that stage.
     implement_command: str | None = None
     review_command: str | None = None
+    recovery_setup_actions: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -388,7 +389,8 @@ def _parse_providers(data: dict[str, object]) -> tuple[dict[str, str], dict[str,
             raise ConfigValidationError("provider names must be non-empty strings without whitespace")
         if isinstance(value, dict):
             unknown = set(value) - {
-                "command", "capabilities", "priority", "weight", "max_concurrency", "implement_command", "review_command", "commands"
+                "command", "capabilities", "priority", "weight", "max_concurrency", "implement_command", "review_command",
+                "commands", "recovery_setup_actions",
             }
             if unknown:
                 raise ConfigValidationError(f"provider {name} has unsupported keys: {', '.join(sorted(unknown))}")
@@ -404,6 +406,7 @@ def _parse_providers(data: dict[str, object]) -> tuple[dict[str, str], dict[str,
                 priority=_provider_int(name, "priority", value.get("priority"), minimum=0),
                 weight=_provider_int(name, "weight", value.get("weight"), minimum=1),
                 max_concurrency=_provider_int(name, "max_concurrency", value.get("max_concurrency"), minimum=1),
+                recovery_setup_actions=_recovery_setup_actions(name, value.get("recovery_setup_actions")),
             )
         else:
             command = _string(value)
@@ -411,6 +414,23 @@ def _parse_providers(data: dict[str, object]) -> tuple[dict[str, str], dict[str,
             raise ConfigValidationError(f"provider command for {name} must be a non-empty string")
         commands[name] = command
     return commands, specs
+
+
+def _recovery_setup_actions(name: str, value: object) -> tuple[tuple[str, str], ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, dict):
+        raise ConfigValidationError(f"provider {name} recovery_setup_actions must be an object")
+    actions: list[tuple[str, str]] = []
+    for raw_kind, raw_command in value.items():
+        kind = _string(raw_kind)
+        command = _string(raw_command)
+        if not kind or any(char.isspace() for char in kind):
+            raise ConfigValidationError(f"provider {name} recovery setup kinds must be non-empty names without whitespace")
+        if not command or not command.strip():
+            raise ConfigValidationError(f"provider {name} recovery setup command for {kind} must be non-empty")
+        actions.append((kind, command))
+    return tuple(sorted(actions))
 
 
 def _stage_commands(name: str, value: dict[str, object], capabilities: frozenset[str]) -> dict[str, str]:
