@@ -59,7 +59,7 @@ class ObjectivePlanner:
                     raise ObjectiveValidationError(f"unknown dependency: {dependency}")
         return Objective(objective_id, title, tuple(task_ids))
 
-    def write_backlog(self, objective: Objective, source_payload: dict[str, Any], path: Path) -> None:
+    def write_backlog(self, objective: Objective, source_payload: dict[str, Any], path: Path, *, selection_scope: dict | None = None) -> None:
         if not isinstance(objective, Objective):
             raise ObjectiveValidationError("objective must be parsed before backlog writing")
         if not isinstance(source_payload, dict):
@@ -94,6 +94,7 @@ class ObjectivePlanner:
                     "eligible": eligible,
                     "state": state.strip(),
                     "dependencies": dependencies,
+                    **({"labels": [selection_scope["label"]], "selection_scope": selection_scope} if selection_scope else {}),
                 }
             )
         path.parent.mkdir(parents=True, exist_ok=True)

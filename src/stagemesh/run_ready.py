@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .audit import record_audit
-from .auto_plan import AutoPlanError, create_contract, outside_label_selector, refresh_stale_generated_contract, task_labels
+from .auto_plan import AutoPlanError, create_contract, outside_label_selector, refresh_stale_generated_contract
 from .blocked_recovery import auto_retry_blocked_provider_failures, exhaustion_message
 from .config import AdverseReviewPolicy, ConfigValidationError, TaskSelectionConfig, load_config
 from .contract_binding import contract_for_candidate
@@ -50,7 +50,7 @@ from .step_progress import (
     record_step_cap,
     unproductive_step_caps,
 )
-from .task_selection import Candidate, Selection, SelectionRefusal, contract_state, has_exact_label, select_next_task
+from .task_selection import Candidate, Selection, SelectionRefusal, contract_state, select_next_task
 from .timing import execution_timings, format_duration, step_duration
 from .workspace_guard import EXTERNAL_WORKSPACE_MUTATION
 from .workspaces import task_workspace, worktree_root
@@ -193,9 +193,9 @@ def choose_task(
     """--task bypasses ranking only; objective-root/history safety still applies."""
     if requested is not None:
         _require_runnable_task(store, requested)
-        if policy.required_label:
+        if policy.required_label or getattr(store, "selection_scope", None):
             task = store.get_task(requested)
-            if task is None or not has_exact_label(task_labels(store, task), policy.required_label):
+            if task is None or outside_label_selector(store, task, policy.required_label):
                 raise RunReadyRefusal(
                     "label_selector_conflict",
                     f"task {requested} does not carry the active label selector {policy.required_label!r}; "
@@ -910,7 +910,12 @@ def run_ready(
             on_start(message)
 
     try:
-        recovered.extend(_recover_all_dead(store))  # provably dead claims/executions only; live/unknown are never touched
+        recovered.extend(_recover_all_dead(store))  # housekeeping stays global; fresh scope gates admissions only
+        from .selection_scope import ScopeError, refresh
+        try:
+            refresh(store)
+        except ScopeError as exc:
+            raise RunReadyRefusal("scope_source_unavailable", str(exc)) from exc
         label = policy.required_label if policy is not None else None
         recovered.extend(auto_rebaseline_blocked_stale_baselines(store, project, task_id=task_id, required_label=label))
         recovered.extend(auto_rebind_blocked_missing_validation_gates(store, project, task_id=task_id, required_label=label))
