@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field as dataclass_field
 from datetime import UTC, datetime
 from typing import Any, Literal
 
@@ -20,8 +20,10 @@ from .redaction import redact_url_credentials
 
 ActivityKind = Literal["task", "execution", "audit"]
 ActivityState = Literal["open", "closed"]
+TimeBasis = Literal["activity", "opened", "updated", "completed"]
 
 STATES: tuple[str, ...] = ("open", "closed")
+TIME_BASES: tuple[str, ...] = ("activity", "opened", "updated", "completed")
 DEFAULT_LIMIT = 50
 MAX_LIMIT = 200
 MAX_SCAN = 1000  # retained rows per source and across the combined projection
@@ -53,6 +55,8 @@ class ActivityQuery:
     until: datetime | None = None  # exclusive, timezone-aware
     limit: int = DEFAULT_LIMIT
     offset: int = 0
+    project: str | None = None
+    time_basis: TimeBasis = "activity"  # preserves the original mixed-source timestamps
 
 
 @dataclass(frozen=True)
@@ -70,6 +74,7 @@ class ActivityEntry:
     event_type: str | None = None
     candidate_sha: str | None = None
     result_code: str | None = None
+    project: str | None = None  # present recorded task attribution, not historical membership
 
 
 @dataclass(frozen=True)
@@ -80,6 +85,8 @@ class ActivityPage:
     offset: int
     next_offset: int | None
     truncated: bool  # a source or combined cap excluded records; `total` may undercount
+    time_basis: TimeBasis = "activity"
+    status_counts: dict[str, dict[str, int]] = dataclass_field(default_factory=dict)
 
 
 def validate_query(query: ActivityQuery) -> ActivityQuery:
@@ -87,9 +94,11 @@ def validate_query(query: ActivityQuery) -> ActivityQuery:
         raise ActivityQueryError("activity query must be an ActivityQuery")
     if query.state is not None and query.state not in STATES:
         raise ActivityQueryError(f"activity state must be one of: {', '.join(STATES)}")
+    if query.time_basis not in TIME_BASES:
+        raise ActivityQueryError(f"activity time_basis must be one of: {', '.join(TIME_BASES)}")
     if query.stage is not None and query.stage not in {stage.value for stage in Stage}:
         raise ActivityQueryError(f"activity stage must be one of: {', '.join(stage.value for stage in Stage)}")
-    for field, value in (("task_id", query.task_id), ("provider", query.provider)):
+    for field, value in (("task_id", query.task_id), ("provider", query.provider), ("project", query.project)):
         if value is not None and (not isinstance(value, str) or not value.strip() or len(value) > 200):
             raise ActivityQueryError(f"activity {field} must be a non-empty string of 200 characters or fewer")
     for field, value in (("since", query.since), ("until", query.until)):
@@ -116,10 +125,11 @@ def query_activity(store: Store, query: ActivityQuery | None = None) -> Activity
     truncated = False
     # Task and audit rows carry no provider; a provider filter selects executions only.
     sources = []
-    if query.provider is None:
+    if query.provider is None and query.time_basis != "completed":
         sources.append(_task_entries)
     sources.append(_execution_entries)
-    if query.provider is None and query.state != "open" and query.stage is None:
+    if (query.provider is None and query.state != "open" and query.time_basis != "opened"
+            and (query.stage is None or (query.time_basis == "completed" and query.stage == Stage.DONE.value))):
         sources.append(_audit_entries)
     for source in sources:
         found, cut = source(store, query)
@@ -137,7 +147,23 @@ def query_activity(store: Store, query: ActivityQuery | None = None) -> Activity
         offset=query.offset,
         next_offset=end if end < len(entries) else None,
         truncated=truncated,
+        time_basis=query.time_basis,
+        status_counts=_status_counts(entries),
     )
+
+
+def _status_counts(entries: list[ActivityEntry]) -> dict[str, dict[str, int]]:
+    """Count retained matching rows before pagination, never blend attempts/events into tasks."""
+    counts = {
+        "task": {**{status.value: 0 for status in TaskStatus}, "UNKNOWN": 0},
+        "execution": {status.value: 0 for status in ExecutionStatus},
+        "audit": {"DONE": 0, "EVENT": 0},
+    }
+    for entry in entries:
+        group = counts[entry.kind]
+        status = entry.status if entry.status in group else ("EVENT" if entry.kind == "audit" else "UNKNOWN")
+        group[status] += 1
+    return counts
 
 
 def _time_clause(column: str, query: ActivityQuery, params: list[Any]) -> list[str]:
@@ -161,7 +187,11 @@ def _at(value: float) -> datetime:
 
 def _task_entries(store: Store, query: ActivityQuery) -> tuple[list[ActivityEntry], bool]:
     params: list[Any] = []
-    clauses = _time_clause("updated_at", query, params)
+    column = "created_at" if query.time_basis == "opened" else "updated_at"
+    clauses = _time_clause(column, query, params)
+    if query.project is not None:
+        clauses.append("project = ?")
+        params.append(query.project)
     if query.task_id is not None:
         clauses.append("id = ?")
         params.append(query.task_id)
@@ -175,20 +205,21 @@ def _task_entries(store: Store, query: ActivityQuery) -> tuple[list[ActivityEntr
         clauses.append("status = ?")
         params.append(TaskStatus.DONE.value)
     rows = store.conn.execute(
-        f"SELECT id, title, stage, status, updated_at FROM tasks{_where(clauses)} "
-        "ORDER BY updated_at DESC, id LIMIT ?",
+        f"SELECT id, title, stage, status, project, {column} AS at FROM tasks{_where(clauses)} "
+        f"ORDER BY {column} DESC, id LIMIT ?",
         (*params, MAX_SCAN + 1),
     ).fetchall()
     entries = [
         ActivityEntry(
             kind="task",
             id=row["id"],
-            at=_at(row["updated_at"]),
+            at=_at(row["at"]),
             state="closed" if row["status"] == TaskStatus.DONE.value else "open",
             task_id=row["id"],
             stage=row["stage"],
             status=row["status"],
             title=_safe_title(row["title"]),
+            project=_safe_project(row["project"]),
         )
         for row in rows[:MAX_SCAN]
     ]
@@ -197,7 +228,15 @@ def _task_entries(store: Store, query: ActivityQuery) -> tuple[list[ActivityEntr
 
 def _execution_entries(store: Store, query: ActivityQuery) -> tuple[list[ActivityEntry], bool]:
     params: list[Any] = []
-    clauses = _time_clause("e.started_at", query, params)
+    column = "e.updated_at" if query.time_basis in {"updated", "completed"} else "e.started_at"
+    clauses = _time_clause(column, query, params)
+    if query.time_basis == "completed":
+        # UNKNOWN can retain a live provider: it is not proof of terminalization.
+        clauses.append("e.status IN (?, ?)")
+        params.extend((ExecutionStatus.SUCCEEDED.value, ExecutionStatus.FAILED.value))
+    if query.project is not None:
+        clauses.append("t.project = ?")
+        params.append(query.project)
     if query.task_id is not None:
         clauses.append("e.task_id = ?")
         params.append(query.task_id)
@@ -214,16 +253,16 @@ def _execution_entries(store: Store, query: ActivityQuery) -> tuple[list[Activit
         clauses.append("e.status != ?")
         params.append(ExecutionStatus.RUNNING.value)
     rows = store.conn.execute(
-        "SELECT e.id, e.task_id, e.kind, e.status, e.actor, e.candidate_sha, e.result, e.started_at, t.stage "
+        f"SELECT e.id, e.task_id, e.kind, e.status, e.actor, e.candidate_sha, e.result, {column} AS at, t.stage, t.project "
         f"FROM executions e JOIN tasks t ON t.id = e.task_id{_where(clauses)} "
-        "ORDER BY e.started_at DESC, e.id LIMIT ?",
+        f"ORDER BY {column} DESC, e.id LIMIT ?",
         (*params, MAX_SCAN + 1),
     ).fetchall()
     entries = [
         ActivityEntry(
             kind="execution",
             id=row["id"],
-            at=_at(row["started_at"]),
+            at=_at(row["at"]),
             state="open" if row["status"] == ExecutionStatus.RUNNING.value else "closed",
             task_id=row["task_id"],
             stage=row["stage"],
@@ -232,6 +271,7 @@ def _execution_entries(store: Store, query: ActivityQuery) -> tuple[list[Activit
             execution_kind=row["kind"],
             candidate_sha=row["candidate_sha"] if row["candidate_sha"] and _SAFE_SHA.match(row["candidate_sha"]) else None,
             result_code=row["result"] if row["result"] in _SAFE_RESULTS else None,
+            project=_safe_project(row["project"]),
         )
         for row in rows[:MAX_SCAN]
     ]
@@ -241,17 +281,30 @@ def _execution_entries(store: Store, query: ActivityQuery) -> tuple[list[Activit
 def _audit_entries(store: Store, query: ActivityQuery) -> tuple[list[ActivityEntry], bool]:
     """Audit events are history only (always closed); only the event type and task id are exposed."""
     params: list[Any] = []
-    clauses = _time_clause("created_at", query, params)
+    clauses = _time_clause("a.created_at", query, params)
+    task_id_sql = _audit_text("task_id")
+    if query.task_id is not None:
+        clauses.append(f"{task_id_sql} = ?")
+        params.append(query.task_id)
+    if query.project is not None:
+        clauses.append("t.project = ?")
+        params.append(query.project)
+    completed = query.time_basis == "completed"
+    if completed:
+        prior_stages = [stage.value for stage in Stage if stage is not Stage.DONE]
+        clauses.extend(("a.event_type = ?", f"{_audit_text('to')} = ?",
+                        f"{_audit_text('from')} IN ({','.join('?' for _ in prior_stages)})",
+                        f"length({task_id_sql}) > 0"))
+        params.extend(("stage.transition", Stage.DONE.value, *prior_stages))
     rows = store.conn.execute(
-        f"SELECT id, event_type, payload, created_at FROM audit_events{_where(clauses)} "
-        "ORDER BY created_at DESC, id LIMIT ?",
+        "SELECT a.id, a.event_type, a.payload, a.created_at, t.project FROM audit_events a "
+        f"LEFT JOIN tasks t ON t.id = {task_id_sql}{_where(clauses)} "
+        "ORDER BY a.created_at DESC, a.id LIMIT ?",
         (*params, MAX_SCAN + 1),
     ).fetchall()
     entries = []
     for row in rows[:MAX_SCAN]:
         task_id = _payload_task_id(row["payload"])
-        if query.task_id is not None and task_id != query.task_id:
-            continue
         entries.append(
             ActivityEntry(
                 kind="audit",
@@ -260,9 +313,24 @@ def _audit_entries(store: Store, query: ActivityQuery) -> tuple[list[ActivityEnt
                 state="closed",
                 task_id=task_id,
                 event_type=row["event_type"] if _SAFE_CODE.match(row["event_type"]) else None,
+                stage=Stage.DONE.value if completed else None,
+                status=TaskStatus.DONE.value if completed else None,
+                project=_safe_project(row["project"]),
             )
         )
     return entries, len(rows) > MAX_SCAN
+
+
+def _audit_text(name: Literal["task_id", "from", "to"]) -> str:
+    # SQL identifiers/JSON paths are fixed by the caller, values remain parameters.
+    # Guard malformed JSON and non-text payload fields before joining/filtering.
+    return (f"CASE WHEN json_valid(a.payload) THEN CASE WHEN json_type(a.payload, '$.{name}') = 'text' "
+            f"AND length(json_extract(a.payload, '$.{name}')) <= 200 "
+            f"THEN json_extract(a.payload, '$.{name}') END END")
+
+
+def _safe_project(project: object) -> str | None:
+    return _safe_title(project) if isinstance(project, str) and project.strip() else None
 
 
 def _payload_task_id(payload: str) -> str | None:

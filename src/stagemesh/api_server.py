@@ -26,8 +26,10 @@ from . import __version__
 from .activity import ActivityEntry, ActivityPage, ActivityQuery, ActivityQueryError, query_activity
 
 CONTRACT = "stagemesh.activity/1"
+CONTRACT_V2 = "stagemesh.activity/2"
 LOOPBACK = "127.0.0.1"
 _PARAMS = frozenset({"state", "task_id", "stage", "provider", "since", "until", "limit", "offset"})
+_PARAMS_V2 = _PARAMS | {"project", "time_basis"}
 _INT = re.compile(r"^[0-9]{1,9}$")
 _MAX_QUERY_CHARS = 2048
 # The complete production shell. Packaging (build_backend.UI_ASSETS) and serving both use exactly this list.
@@ -43,13 +45,13 @@ class ApiError(Exception):
         self.status, self.code, self.message = status, code, message
 
 
-def _json(status: int, body: Mapping[str, Any]) -> Response:
-    payload = json.dumps({"contract": CONTRACT, **body}, separators=(",", ":")).encode()
+def _json(status: int, body: Mapping[str, Any], contract: str = CONTRACT) -> Response:
+    payload = json.dumps({"contract": contract, **body}, separators=(",", ":")).encode()
     return status, payload, {"Content-Type": "application/json; charset=utf-8"}
 
 
-def _error(exc: ApiError) -> Response:
-    return _json(exc.status, {"error": {"code": exc.code, "message": exc.message}})
+def _error(exc: ApiError, contract: str = CONTRACT) -> Response:
+    return _json(exc.status, {"error": {"code": exc.code, "message": exc.message}}, contract)
 
 
 # Exactly RFC 3339 `date-time`: uppercase T and Z, extended format, mandatory offset, optional fraction of 1-9 digits.
@@ -104,7 +106,8 @@ def _decode(component: str) -> str:
     return text
 
 
-def parse_query(raw: str) -> ActivityQuery:
+def parse_query(raw: str, *, version: int = 1) -> ActivityQuery:
+    allowed = _PARAMS_V2 if version == 2 else _PARAMS
     if len(raw) > _MAX_QUERY_CHARS:
         raise _invalid("query string is too long")
     if not _URL_SAFE.match(raw):
@@ -112,20 +115,20 @@ def parse_query(raw: str) -> ActivityQuery:
     one: dict[str, str] = {}
     if raw:
         segments = raw.split("&")
-        if len(segments) > len(_PARAMS) + 1:
+        if len(segments) > len(allowed) + 1:
             raise _invalid("too many query parameters")
         for segment in segments:
             name, sep, value = segment.partition("=")
             if not segment or not sep or not name:
                 raise _invalid("malformed query string")
             name = _decode(name)
-            if name not in _PARAMS:
+            if name not in allowed:
                 raise _invalid("unknown parameter")
             if name in one:
                 raise _invalid(f"{name} must not be repeated")
             one[name] = _decode(value)
     kwargs: dict[str, Any] = {}
-    for name in ("state", "task_id", "stage", "provider"):
+    for name in ("state", "task_id", "stage", "provider", "project", "time_basis"):
         if name in one:
             kwargs[name] = one[name]
     for name in ("since", "until"):
@@ -137,21 +140,26 @@ def parse_query(raw: str) -> ActivityQuery:
     return ActivityQuery(**kwargs)
 
 
-def _entry(entry: ActivityEntry) -> dict[str, Any]:
+def _entry(entry: ActivityEntry, *, version: int = 1) -> dict[str, Any]:
     data = asdict(entry)
     data["at"] = entry.at.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+    if version == 1:
+        data.pop("project")
     return data
 
 
-def serialize_page(page: ActivityPage) -> dict[str, Any]:
-    return {
-        "entries": [_entry(entry) for entry in page.entries],
+def serialize_page(page: ActivityPage, *, version: int = 1) -> dict[str, Any]:
+    body = {
+        "entries": [_entry(entry, version=version) for entry in page.entries],
         "total": page.total,
         "limit": page.limit,
         "offset": page.offset,
         "next_offset": page.next_offset,
         "truncated": page.truncated,
     }
+    if version == 2:
+        body.update(time_basis=page.time_basis, status_counts=page.status_counts)
+    return body
 
 
 class ActivityApi:
@@ -170,16 +178,19 @@ class ActivityApi:
         self.allowed_hosts = frozenset(hosts)
 
     def handle(self, method: str, target: str, headers: Mapping[str, str]) -> Response:
+        contract = CONTRACT
         try:
+            if urlsplit(target).path.startswith("/api/v2/"):
+                contract = CONTRACT_V2
             status, body, extra = self._route(method, target, headers)
         except ApiError as exc:
-            status, body, extra = _error(exc)
+            status, body, extra = _error(exc, contract)
         except ActivityQueryError as exc:
-            status, body, extra = _error(ApiError(400, "invalid_query", str(exc)))
+            status, body, extra = _error(ApiError(400, "invalid_query", str(exc)), contract)
         except (sqlite3.Error, OSError):
-            status, body, extra = _error(ApiError(503, "store_unavailable", "activity store is unavailable"))
+            status, body, extra = _error(ApiError(503, "store_unavailable", "activity store is unavailable"), contract)
         except Exception:  # noqa: BLE001 - never leak internals
-            status, body, extra = _error(ApiError(500, "internal", "internal error"))
+            status, body, extra = _error(ApiError(500, "internal", "internal error"), contract)
         extra.update({"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer"})
         return status, body, extra
 
@@ -197,21 +208,23 @@ class ActivityApi:
             raise ApiError(400, "invalid_query", "request body is not allowed")
         parts = urlsplit(target)
         path = parts.path
+        version = 2 if path.startswith("/api/v2/") else 1
+        contract = CONTRACT_V2 if version == 2 else CONTRACT
         if not path.startswith("/api/"):
             return self._static(path)  # the shell carries no data, so it needs no credential
         self._authenticate(lowered.get("authorization", ""))
-        if path == "/api/v1/health":
+        if path in {"/api/v1/health", "/api/v2/health"}:
             if parts.query:
                 raise ApiError(400, "invalid_query", "health takes no parameters")
-            return _json(200, {"status": "ok", "version": __version__})
-        if path == "/api/v1/activity":
-            query = parse_query(parts.query)
+            return _json(200, {"status": "ok", "version": __version__}, contract)
+        if path in {"/api/v1/activity", "/api/v2/activity"}:
+            query = parse_query(parts.query, version=version)
             store = self._open()
             try:
                 page = query_activity(store, query)  # type: ignore[arg-type]
             finally:
                 store.conn.close()
-            return _json(200, serialize_page(page))
+            return _json(200, serialize_page(page, version=version), contract)
         raise ApiError(404, "not_found", "unknown route")
 
     def _authenticate(self, header: str) -> None:

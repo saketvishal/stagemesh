@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from stagemesh.activity import MAX_LIMIT
-from stagemesh.api_server import make_server, parse_query
+from stagemesh.api_server import ActivityApi, make_server, parse_query
 from stagemesh.persistence import Store
 
 TOKEN = "test-token"
@@ -63,6 +63,78 @@ def test_valid_page_matches_contract(server):
     assert body["next_offset"] is None and body["truncated"] is False
     assert headers["Cache-Control"] == "no-store"
     assert "Access-Control-Allow-Origin" not in headers
+
+
+def _direct_v2(db, target="/api/v2/activity", *, method="GET", headers=None):
+    api = ActivityApi(db, TOKEN)
+    api.bind(12345)
+    defaults = {"Host": "127.0.0.1:12345", "Authorization": f"Bearer {TOKEN}"}
+    status, raw, extra = api.handle(method, target, defaults if headers is None else headers)
+    return status, json.loads(raw), extra
+
+
+def test_v2_project_time_basis_and_counts_leave_v1_response_unchanged(db):
+    store = Store(db)
+    store.conn.execute("UPDATE tasks SET project='team/alpha' WHERE id='t0'")
+    store.conn.commit()
+    store.close()
+    before = db.read_bytes()
+    status, body, _ = _direct_v2(db, "/api/v2/activity?project=team%2Falpha&time_basis=updated&limit=1")
+    assert status == 200 and body["contract"] == "stagemesh.activity/2"
+    assert body["time_basis"] == "updated" and body["status_counts"]["task"]["OPEN"] == 1
+    assert len(body["entries"]) == 1 and body["entries"][0]["project"] == "team/alpha"
+    _, legacy, _ = _direct_v2(db, "/api/v1/activity?limit=1")
+    assert legacy["contract"] == "stagemesh.activity/1"
+    assert set(legacy) == {"contract", "entries", "total", "limit", "offset", "next_offset", "truncated"}
+    assert "project" not in legacy["entries"][0]
+    assert _direct_v2(db, "/api/v1/activity?project=team%2Falpha")[0] == 400
+    assert _direct_v2(db, "/api/v1/activity?time_basis=completed")[0] == 400
+    assert db.read_bytes() == before
+
+
+@pytest.mark.parametrize("query", ["project=", "project=" + "x" * 201, "time_basis=finished",
+    "time_basis=opened&time_basis=updated", "project=one&%70roject=two", "project=%FF", "project=%00",
+    "time_basis=completed&since=2026-01-02T00:00:00Z&until=2026-01-01T00:00:00Z"])
+def test_v2_invalid_filters_use_v2_error_envelope(db, query):
+    status, body, _ = _direct_v2(db, "/api/v2/activity?" + query)
+    assert status == 400 and body["contract"] == "stagemesh.activity/2"
+    assert body["error"]["code"] == "invalid_query" and "entries" not in body
+
+
+@pytest.mark.parametrize("path,method,headers,expected", [
+    ("/api/v2/activity", "GET", {"Host": "127.0.0.1:12345"}, 401),
+    ("/api/v2/activity", "GET", {"Host": "attacker.invalid"}, 403),
+    ("/api/v2/activity", "POST", None, 405),
+    ("/api/v2/nope", "GET", None, 404),
+    ("/api/v2/health?unexpected=1", "GET", None, 400),
+])
+def test_v2_auth_and_route_errors_remain_read_only(db, path, method, headers, expected):
+    before = db.read_bytes()
+    status, body, extra = _direct_v2(db, path, method=method, headers=headers)
+    assert status == expected and body["contract"] == "stagemesh.activity/2"
+    assert extra["Cache-Control"] == "no-store" and "Access-Control-Allow-Origin" not in extra
+    assert db.read_bytes() == before
+
+
+def test_v2_health_and_unavailable_internal_errors(db, tmp_path, monkeypatch):
+    status, body, _ = _direct_v2(db, "/api/v2/health")
+    assert status == 200 and body["contract"] == "stagemesh.activity/2" and body["status"] == "ok"
+    status, body, _ = _direct_v2(tmp_path / "missing.sqlite3")
+    assert status == 503 and body["contract"] == "stagemesh.activity/2"
+    def broken(*args):
+        raise RuntimeError("private database path and secret")
+    monkeypatch.setattr("stagemesh.api_server.query_activity", broken)
+    status, body, _ = _direct_v2(db)
+    assert status == 500 and body["contract"] == "stagemesh.activity/2"
+    assert "private" not in repr(body) and "secret" not in repr(body)
+
+
+def test_v2_completion_query_runs_over_real_http(server):
+    base, _ = server
+    # The legacy DONE task has no recorded completion event: do not invent one.
+    status, body, _ = get(base, "/api/v2/activity?time_basis=completed&stage=DONE&state=closed")
+    assert status == 200 and body["contract"] == "stagemesh.activity/2"
+    assert body["entries"] == [] and body["status_counts"]["task"]["DONE"] == 0
 
 
 def test_pagination_walks_without_overlap(server):
