@@ -659,7 +659,33 @@ def test_cli_defaults_to_a_safe_45_minute_pr_mode_window() -> None:
 
     assert (args.duration, args.concurrency, args.max_steps_per_task, args.integration) == ("45m", None, 8, "pr")
     assert args.plan is False and args.no_pr is False and args.allow_stale_runtime is False and args.strict_live is False
-    assert args.report is None and args.tasks is None
+    assert args.report is None and args.tasks is None and args.providers is None
+
+
+def test_cli_accepts_a_run_scoped_enabled_provider_subset(tmp_path: Path) -> None:
+    store, project = make_store(tmp_path, ["1"])
+    store.close()
+    config, selected = cli_module._runtime_provider_selection(
+        cli_module.load_config(project), "AGY,codex,agy"
+    )
+
+    assert selected == ("agy", "codex")
+    assert config.provider_pools["IMPLEMENT"] == ("codex", "agy")
+    assert config.provider_pools["REVIEW"] == ("codex", "agy")
+    assert cli_module.build_parser().parse_args(["run-window", "--agents", "agy,codex"]).providers == "agy,codex"
+
+
+def test_runtime_provider_subset_rejects_unknown_or_globally_disabled_agents(tmp_path: Path) -> None:
+    from dataclasses import replace
+
+    store, project = make_store(tmp_path, ["1"])
+    store.close()
+    config = cli_module.load_config(project)
+    with pytest.raises(cli_module.ConfigValidationError, match="not configured"):
+        cli_module._runtime_provider_selection(config, "missing")
+    disabled = replace(config, provider_pools={"IMPLEMENT": ("codex",), "REVIEW": ("codex",)})
+    with pytest.raises(cli_module.ConfigValidationError, match="globally enabled"):
+        cli_module._runtime_provider_selection(disabled, "agy")
 
 
 def test_cli_concurrency_overrides_only_concurrency() -> None:
@@ -718,7 +744,7 @@ def test_cli_plan_is_read_only_and_shows_the_selection(tmp_path: Path, capsys: p
     code = cli_module.main(["--project", str(project), "run-window", "--plan", "--json", "--report", str(tmp_path / "plan.json")])
 
     data = json.loads(capsys.readouterr().out)
-    assert set(data) == {"preflight", "would_run", "left_alone", "ok"}
+    assert set(data) == {"preflight", "would_run", "left_alone", "provider_selection", "ok"}
     assert data["would_run"] == ["1", "2"]
     assert code in (0, 2)  # 2 when this machine has no usable provider setup; the selection is shown either way
     again = Store_open(project)
