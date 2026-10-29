@@ -258,6 +258,7 @@ class DiagnosisPolicy:
 
 
 TOOL_FAILURE_EVENT = "task.tool_failure_evidence"
+TOOL_RECOVERY_EVENT = "task.tool_recovery_execution"
 # Provider quota/auth failures keep their own semantics and never become tool evidence.
 _PROVIDER_REASONS = frozenset({"quota_rate_limit", "authentication_failure", "provider_unavailable", "transient_provider_failure"})
 # Ordered: the first matching kind wins, so specific causes precede generic ones.
@@ -382,7 +383,14 @@ def plan_tool_recovery(
     """
     kind = str(evidence.get("kind") or "")
     configured = (setup_actions or {}).get(kind)
-    setup = [str(part) for part in configured] if configured and kind not in _NO_SETUP_KINDS else None
+    setup = (
+        list(configured)
+        if isinstance(configured, (list, tuple))
+        and configured
+        and all(isinstance(part, str) and part for part in configured)
+        and kind not in _NO_SETUP_KINDS
+        else None
+    )
     action, argv = "stop", None
     # One recovery action per signature, not one attempt of each action kind.
     # Unknown prior actions also consume the allowance until an operator verifies them.

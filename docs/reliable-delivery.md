@@ -248,10 +248,17 @@ quota, authentication, availability and transient-provider classifications retai
 their existing semantics and do not become tool-failure evidence. Unknown cleanup
 or workspace mutation does not publish an ordinary tool-failure record.
 
-Recovery recommendations remain unexecuted: no automatic replay, setup or install
-is added. A repeated signature after reopening the store stops with
-`execution_status=NOT_CONFIRMED` and an empty actual-attempt history. This does not
-satisfy the nested-tool recovery executor or live unattended-delivery acceptance.
+The subprocess executor and configured implementation runtime can execute exactly
+one policy-authorized recovery action: one transient retry, or one explicitly
+configured setup command followed by one verification of the original command.
+They record a durable `STARTED` receipt before invoking the action and a terminal
+receipt afterward; a crash after `STARTED` consumes the allowance. Task and failure
+signature scope, provider authorization, and task/window budgets are rechecked at
+the recovery boundary. A changed pre-launch gate is recorded as `REFUSED` with its
+reason and does not consume the action because no recovery command ran. Setup commands come only from project provider configuration,
+never provider output. This covers StageMesh-visible provider process failures; it
+does not prove recovery for nested tools that the provider process does not expose,
+or live unattended-delivery acceptance.
 
 ## Validation ownership after parent loss
 
@@ -304,15 +311,18 @@ wheel. If a prior repair is already in the shared runtime, reconcile instead of 
 Source synchronization publishes task eligibility only after dependency and retirement updates finish. A task shown as `source synchronization incomplete` cannot be admitted or claimed, including by a worker holding an earlier scheduling decision. An interrupted import keeps that task unavailable until an authoritative retry reconciles it; an empty scan or an unrelated source does not release it. Source writers for the same database serialize their publication phases. This protects partial imports; it does not establish freshness of remote snapshots fetched before the synchronization lock.
 
 
-Tool-failure recovery records are recommendations. The subprocess failure recorder does not execute the proposed
-retry or setup command, so its `attempted` list stays empty and `execution_status` is `NOT_CONFIRMED`. A matching
-failure in the task-scoped audit history stops and reports the latest 20 `previous_recommendations` and their total count for operator verification;
-recording an unexecuted retry never authorizes progression to setup. Actual configured recovery execution remains
-separate unfinished work. No setup command is derived from provider output or run by this accounting path.
+Tool-failure evidence still contains a deterministic recommendation, but only the
+execution-aware subprocess and configured-runtime callers may act on it. They
+re-derive the recommendation, reject stale or forged plans, persist `STARTED`
+before invoking one retry or configured setup, and persist `SUCCEEDED` or `FAILED`
+afterward. A matching task/signature receipt stops another action; a retry cannot
+advance to setup. Permission, assertion, timeout-policy, authentication, quota and
+provider-unavailable failures retain their existing fail-closed behavior. No setup
+command is derived from provider output.
 
 Recovery history is streamed for the exact task and event type before signatures are compared. Unrelated events or other signatures cannot evict an earlier stop decision through a global recent-events limit. The full audit remains authoritative; the recovery summary is bounded.
 
-When an execution-aware caller supplies attempted actions for an exact failure signature, the planner allows only one recovery action in total. A prior retry, setup or unknown action stops with that history and the exact operator action; configuring setup cannot chain another action after a retry. The initial retry/configured-setup paths remain recommendations, not execution receipts.
+When an execution-aware caller supplies attempted actions for an exact failure signature, the planner allows only one recovery action in total. A prior retry, setup or unknown action stops with that history and the exact operator action; configuring setup cannot chain another action after a retry. Callers without an executor still receive a recommendation with `execution_status=NOT_CONFIRMED` and cannot claim recovery.
 
 
 ## Coordinator dispatch before execution publication

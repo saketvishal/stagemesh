@@ -99,6 +99,36 @@ def test_a_provider_with_only_command_behaves_exactly_as_before(project: Path) -
         assert sources == {"IMPLEMENT": "default", "REVIEW": "default"}
 
 
+def test_configured_recovery_setup_actions_are_parsed_and_authorized(project: Path) -> None:
+    adapter = adapter_for(
+        project,
+        {"p": {
+            "command": "tool --x",
+            "recovery_setup_actions": {"missing_dependency": "python -m pip check"},
+        }},
+        "p",
+    )
+
+    assert adapter.recovery_actions() == {"missing_dependency": ["python", "-m", "pip", "check"]}
+    assert ("python", "-m", "pip", "check") in adapter.authorization_commands()
+    assert ("python", "-m", "pip", "check") not in adapter.all_commands()
+
+
+@pytest.mark.parametrize(
+    ("configured", "message"),
+    [
+        (["python -m pip check"], "must be an object"),
+        ({"missing dependency": "python -m pip check"}, "kinds must be non-empty names without whitespace"),
+        ({"missing_dependency": " "}, "command for missing_dependency must be non-empty"),
+    ],
+)
+def test_malformed_recovery_setup_actions_fail_closed(project: Path, configured: object, message: str) -> None:
+    write_config(project, {"providers": {"p": {"command": "tool", "recovery_setup_actions": configured}}})
+
+    with pytest.raises(ConfigValidationError, match=message):
+        load_config(project)
+
+
 def test_review_command_and_commands_object_are_equivalent_ways_to_set_a_stage_command(project: Path) -> None:
     flat = adapter_for(project, {"p": {"command": "write-tool", "review_command": "read-tool --plan"}}, "p")
     grouped = adapter_for(project, {"p": {"command": "write-tool", "commands": {"REVIEW": "read-tool --plan"}}}, "p")
@@ -220,6 +250,24 @@ def test_two_providers_sharing_a_stage_command_are_not_independent(tmp_path: Pat
     verdicts = {v.provider: v for v in rig.pool.evaluate(rig.store, REVIEW, TASK, implementer="a")}
 
     assert verdicts["b"].eligible is False and "not_independent" in verdicts["b"].reason
+
+
+def test_shared_recovery_setup_command_does_not_collapse_provider_independence(tmp_path: Path) -> None:
+    rig = Rig(tmp_path, {"a": "ok", "b": "ok"}, pools={IMPLEMENT: ("a",), REVIEW: ("b",)})
+    setup = (("missing_dependency", (sys.executable, "-m", "pip", "check")),)
+    for name in ("a", "b"):
+        original = rig.pool.adapters[name]
+        rig.pool.adapters[name] = RuntimeCommandAdapter(
+            name,
+            original.command,
+            implement_command=original.implement_command,
+            review_command=original.review_command,
+            recovery_setup_actions=setup,
+        )
+
+    verdicts = {v.provider: v for v in rig.pool.evaluate(rig.store, REVIEW, TASK, implementer="a")}
+
+    assert verdicts["b"].eligible is True
 
 
 # --- operator visibility -----------------------------------------------------------------------------------------------------------
