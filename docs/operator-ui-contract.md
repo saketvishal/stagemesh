@@ -149,12 +149,91 @@ Requirements for the later UI, so the contract is sufficient for them:
 Workflows the single route supports: see what is open (`state=open`); see what finished in a window (`state=closed` with
 `since`/`until`); follow one task (`task_id`); see one provider's executions (`provider`); page back through history.
 
+## Version 2: recorded periods, projects and status counts
+
+`GET /api/v2/activity` and `GET /api/v2/health` use contract `stagemesh.activity/2`,
+including every error envelope. They retain the same authentication, loopback,
+strict query decoding, read-only database connection and pagination bounds.
+The existing `/api/v1` routes and shipped dashboard keep their original parameters,
+response fields and timestamp behavior. V1 rejects the two new query parameters;
+it does not silently ignore them. No dashboard, CLI or launcher change is required.
+
+V2 accepts every V1 parameter plus:
+
+| Parameter | Type | Rule |
+| --- | --- | --- |
+| `project` | string | Exact stored `tasks.project`; non-empty, at most 200 characters |
+| `time_basis` | `activity`, `opened`, `updated`, `completed` | Selects the timestamp used for `since`/`until`, ordering and entry `at`; default `activity` |
+
+The time window remains inclusive at `since` and exclusive at `until`, comparing
+absolute timezone-aware instants. The meaning of each mode is explicit:
+
+| `time_basis` | Task rows | Execution rows | Audit rows |
+| --- | --- | --- | --- |
+| `activity` | `updated_at` | `started_at` | `created_at` (the original mixed feed) |
+| `opened` | `created_at` | `started_at` | Excluded; a generic audit event is not a work opening |
+| `updated` | `updated_at` | `updated_at` | `created_at` (recorded events) |
+| `completed` | Excluded: there is no task completion column | `updated_at` for SUCCEEDED/FAILED only | Actual `stage.transition` events with a valid non-DONE `from`, `to=DONE` and a task identifier |
+
+Execution completion means **recorded terminalization**, not proof of OS process
+exit or successful task delivery. UNKNOWN executions remain visible in ordinary
+status counts but never qualify as completed: a recovery fence can retain an
+unknown live provider. Failed attempts remain FAILED, not successful tasks.
+
+Task completion occurrences remain audit entries with their own audit `id`,
+`task_id`, recorded `at`, `stage=DONE`, `status=DONE` and `state=closed`. A reopened
+task can have multiple completion occurrences in different periods; none rewrites
+the task's present state or invents a historical task row. A legacy DONE task with
+no recorded transition has no completion timestamp. In completed mode, `stage=DONE`
+and `state=closed` include these events; other stages or `state=open` exclude them.
+The `provider` filter continues to select executions only.
+
+Every V2 entry adds nullable `project`, taken from the associated task's **current
+recorded attribution**, not historical project membership. Unattributed tasks,
+global audits and audits whose task is missing remain null. No project is guessed
+from an audit payload's project field, a repository URL, or the database path.
+Filtering matches the stored value exactly; displayed project text is bounded and
+credential-redacted like titles. This is a filter within one store, not cross-store
+aggregation or an authorization boundary. Task/project/event/time predicates apply
+before each source's retention cap, so unrelated rows do not crowd out matches.
+
+V2 adds `time_basis` and `status_counts` to the page response. For example:
+
+```json
+{
+  "contract": "stagemesh.activity/2",
+  "time_basis": "completed",
+  "entries": [],
+  "total": 0,
+  "limit": 50,
+  "offset": 0,
+  "next_offset": null,
+  "truncated": false,
+  "status_counts": {
+    "task": {"OPEN": 0, "CLAIMED": 0, "BLOCKED": 0, "DONE": 0, "UNKNOWN": 0},
+    "execution": {"RUNNING": 0, "SUCCEEDED": 0, "FAILED": 0, "UNKNOWN": 0},
+    "audit": {"DONE": 0, "EVENT": 0}
+  }
+}
+```
+
+Counts cover **retained matching rows before pagination** and therefore do not
+change with `limit`/`offset` for an unchanged store. They honor every filter.
+Task rows, execution attempts and audit occurrences have separate groups; never
+sum them as a count of tasks delivered. Audit DONE counts completion occurrences
+in completed mode; EVENT counts other feed events. Unrecognized task/execution
+statuses use the fixed UNKNOWN count bucket, not a new free-text key. If
+`truncated=true`, both counts and `total` are lower bounds and the client must
+say so. They are not complete all-time statistics. No history is synthesized.
+
 ## Known gaps against #134
 
-The projection is the first slice, not the whole objective. A UI built on v1 cannot yet show: a project/repository filter,
-"created/opened" or "completed" period semantics (tasks expose only `updated_at`), reopen/retry or source-sync transitions
-(only existing audit event types), status counts, opened-versus-completed series, or source-issue state. These need projection
-work, not UI workarounds; the UI must not infer them from current state.
+V2 supplies recorded project filtering, status counts and opened/updated/completed
+period semantics (#450). The existing V1 dashboard has not adopted them. Full
+reopen/retry/source-sync history, active-at-any-point intervals, opened-versus-completed
+series, rework classification, source-issue state and cross-store aggregation remain
+outside this slice. Missing historical events cannot be reconstructed from current
+task state. The parent objective is not complete merely because this projection is.
 
 ## Architecture decisions
 
@@ -176,8 +255,9 @@ project store per `.stagemesh` directory). Each is reversible except the remote-
    snapshot cursor adds state for little gain. `truncated` already tells the operator when to narrow the range.
 6. **Multi-project: one server per project store.** A project switcher launches or selects a server per project through the
    existing project registry, so no server aggregates stores and the auth and error model stays per project.
-7. **Projection growth:** additive optional fields (status counts, project, period semantics: #450) stay within
-   `stagemesh.activity/1`; clients must ignore unknown fields. A removed or re-typed field requires `/api/v2`.
+7. **Projection growth:** #450 introduces `/api/v2` and `stagemesh.activity/2` for explicit period semantics,
+   recorded project attribution and partitioned counts. `/api/v1` remains an unchanged compatibility adapter
+   for the shipped dashboard; a client adopts V2 explicitly. No database migration is involved.
 8. **Health and version route:** `GET /api/v1/health`. Implemented (#446).
 9. **Dependencies: none.** The server is standard library; the UI is dependency-free HTML, CSS and JavaScript shipped as
    package data (#448), so no Node toolchain is needed to build or install StageMesh.
