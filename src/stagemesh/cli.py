@@ -2820,6 +2820,45 @@ def command_serve(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_ui(args: argparse.Namespace) -> int:
+    from .api_server import make_server
+    from .ui_launcher import UiLaunchError, launch_ui
+
+    project = Path(args.project).resolve()
+    ui_dir = Path(__file__).parent / "ui"
+    if not 0 <= args.port <= 65535:
+        print("ui error: port must be between 0 and 65535", file=sys.stderr)
+        return 2
+    server, api = make_server(db_path(project), port=args.port, static_dir=ui_dir if ui_dir.is_dir() else None)
+    port = server.server_address[1]
+    base_url = f"http://127.0.0.1:{port}/"
+    launch_url = f"{base_url}#token={api.token}"
+    try:
+        launched = launch_ui(launch_url)
+    except UiLaunchError as exc:
+        server.server_close()
+        print(f"ui error: {exc}", file=sys.stderr)
+        return 2
+    if args.json:
+        print(
+            json.dumps(
+                {"url": base_url, "port": port, "launch_method": launched.method, "executable": launched.executable},
+                indent=2,
+                sort_keys=True,
+            ),
+            flush=True,
+        )
+    else:
+        print(f"StageMesh UI opened at {base_url} ({launched.method}); press Ctrl+C to stop", flush=True)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+    return 0
+
+
 def command_dashboard(args: argparse.Namespace) -> int:
     project = Path(args.project).resolve()
     store = Store(db_path(project))
@@ -4579,6 +4618,10 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--port", type=int, default=0, help="loopback port (default: ephemeral)")
     serve.add_argument("--json", action="store_true")
     serve.set_defaults(func=command_serve)
+    ui = sub.add_parser("ui", help="open the read-only dashboard in a browser app window")
+    ui.add_argument("--port", type=int, default=0, help="loopback port (default: ephemeral)")
+    ui.add_argument("--json", action="store_true")
+    ui.set_defaults(func=command_ui)
     dashboard = sub.add_parser("dashboard")
     dashboard.add_argument("--output", default="stagemesh-dashboard.html")
     dashboard.add_argument("--json", action="store_true")

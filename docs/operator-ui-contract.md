@@ -2,7 +2,7 @@
 
 Parent objectives #135 (operator UI) and #134 (activity history). The server in `src/stagemesh/api_server.py`
 (`stagemesh serve`, #446) implements this contract over the activity projection in `src/stagemesh/activity.py`
-(`query_activity`). The UI, desktop launcher and installer are tracked as #448, #449 and #451. The contract needs no
+(`query_activity`). The UI and desktop launcher are implemented by #448 and #449; the installer remains tracked as #451. The contract needs no
 dependency and no schema change.
 
 ## Principles
@@ -246,7 +246,7 @@ project store per `.stagemesh` directory). Each is reversible except the remote-
 2. **Desktop shell: the same web UI in a chromeless browser app window** (Edge or Chrome `--app` on Windows, system browser
    fallback), launched by `stagemesh ui` (#449). Tauri or another native shell would add a Rust toolchain and signing for no
    functional gain over a loopback page; the contract is shell-agnostic, so one can be added later. The launcher passes the
-   token in the URL fragment.
+   token in the URL fragment, never prints it, and the client immediately removes the fragment after reading it into memory.
 3. **Remote hosting: OPEN, needs a human decision.** Authentication scheme, TLS and per-project authorization are security
    decisions with no precedent in the repository. Until made, the server binds loopback only and has no option to bind elsewhere.
 4. **Live updates: polling in v1.** It needs no long-lived connections in a single-threaded server. Server-sent events can be
