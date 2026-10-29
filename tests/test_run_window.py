@@ -673,6 +673,7 @@ def test_cli_accepts_a_run_scoped_enabled_provider_subset(tmp_path: Path) -> Non
     assert config.provider_pools["IMPLEMENT"] == ("codex", "agy")
     assert config.provider_pools["REVIEW"] == ("codex", "agy")
     assert cli_module.build_parser().parse_args(["run-window", "--agents", "agy,codex"]).providers == "agy,codex"
+    assert cli_module.build_parser().parse_args(["run-ready", "--providers", "agy,codex"]).providers == "agy,codex"
 
 
 def test_runtime_provider_subset_rejects_unknown_or_globally_disabled_agents(tmp_path: Path) -> None:

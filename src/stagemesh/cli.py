@@ -4377,6 +4377,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_ready_cmd.add_argument("--task", help="Run this task id instead of the single eligible OPEN task")
     run_ready_cmd.add_argument("--max-steps", type=int, default=50)
     run_ready_cmd.add_argument("--provider", help="Provider name to use for implementation")
+    run_ready_cmd.add_argument("--providers", help=argparse.SUPPRESS)
     run_ready_cmd.add_argument("--dry-run", action="store_true", help="Use FakeExecutor instead of a real provider")
     run_ready_cmd.add_argument("--choose", "--interactive", dest="choose", action="store_true", help="Pick among eligible tasks interactively")
     run_ready_cmd.add_argument("--no-auto-plan", action="store_true", help="Refuse instead of generating a missing change contract")
