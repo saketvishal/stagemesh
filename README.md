@@ -114,6 +114,13 @@ that stage only. Independence is judged by provider name (and any command in com
 reviewed by `claude`, whichever command each stage runs. `command` may be omitted only when every stage the provider serves has its own.
 `stagemesh capacity`, `config` and `doctor` show which command runs for each stage and whether it is the default or an override.
 
+An implementation provider may also declare an exact, opt-in setup command for a
+classified tool failure, for example `"recovery_setup_actions":
+{"missing_dependency": "python -m pip check"}`. StageMesh never derives setup from
+provider output: it executes at most one configured setup and one verification of
+the original command, with durable receipts and fresh authorization and budget
+checks. Providers without this field retain the default fail-closed behavior.
+
 ```json
 { "providers": { "claude": { "command": "claude -p --permission-mode acceptEdits",
                              "review_command": "claude -p --allowedTools Read Grep Glob" } } }
